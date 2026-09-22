@@ -55,10 +55,13 @@ supply all others; validation fails closed.
 An active Agent needs a PAO-started Worker. Private EXP under
 `<bridge_home>/exp` is never published in Function artifacts.
 
-The open Tool wildcard grants permission, not capability. Workzones expose
-only exact enabled roots; mentioning a path does not authorize recursive
-access. Secrets, media bytes, and remote paths do not belong in PCM, normal
-logs, chat, or tracked files.
+The open Tool wildcard grants permission, not capability. Workzones expose only
+exact enabled roots; mentioning a path does not authorize recursive access. HER
+v2 checks explicit current-request paths against the frozen roots before a
+Provider stage and asks for clarification when one is outside. Tool admission
+must reject an outside target lexically before resolving or touching it, then
+check canonical containment for authorized targets. Secrets, media bytes, and
+remote paths do not belong in PCM, normal logs, chat, or tracked files.
 
 JSON writers use validation, private candidates, locks, revisions, and atomic
 replacement. Display fallback is read-only. On conflict, read fresh state and
@@ -122,6 +125,9 @@ publishes the original answer. Eligible terminal text includes Direct answers,
 required clarifications, ordinary work results, and reviewed Finalisation
 reports. Progress/acknowledgement text, rich output, stop notices, and
 deterministic technical or safety fallbacks are intentionally not rewritten.
+Fixed-session Style capture supports both `initial_turn` and `turn`. When the
+feature is enabled, each eligible terminal result leaves a checked, skipped, or
+degraded receipt; initialisation failure may not survive only as a hidden log.
 Credentials come from `TYPESAFE_API_KEY` or the instance-local
 `typesafe_api_key` secret; never place them in tracked config.
 
@@ -151,11 +157,14 @@ typed stop, and degraded intent cannot complete a request without native repair.
 Capture request, response prefix, parsing, Tool effects, recovery, terminal
 state, and receipt in one I/O chain. Keep restricted
 originals separate from safe projections; partial or unread evidence is not
-empty. `/stop` preserves interruption evidence; `/retry`, `/resend`, and
-`/steer` retain their distinct contracts. Recovery never duplicates a Cron Run,
-replays completed effects, restores revoked authority, or reconciles a live
-fixed-session owner. CLI terminal events bound drain; open handles cannot keep
-Runs busy. Unknown effects remain fail-closed. See
+empty. `/stop` preserves interruption evidence and uses the Agent command path;
+if its Worker control lane is unresponsive, PAO fences that IPC and switches the
+Agent route to a qualified replacement so the Worker slot is released. A
+kernel-blocked old process may linger without retaining routing authority.
+`/retry`, `/resend`, and `/steer` retain their distinct contracts. Recovery
+never duplicates a Cron Run, replays completed effects, restores revoked
+authority, or reconciles a live fixed-session owner. CLI terminal events bound
+drain; open handles cannot keep Runs busy. Unknown effects remain fail-closed. See
 [HER v2](HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md).
 
 ## TUI, Workbench, and media

@@ -124,6 +124,14 @@ declaration still replaces the absent-value default, and a backend row with
 permission only; Engine support, Workzone roots, device availability,
 stage-specific policy, and per-invocation authority remain independent gates.
 
+An explicit absolute path in the current request is checked against the frozen
+Workspace/Workzone snapshot before HER v2 enters Direct or Triage Provider work.
+An outside path becomes a visible `CONFIRMATION_REQUIRED` Triage decision; it is
+not probed. Tool path admission independently performs lexical containment before
+any target resolution or metadata access, then retains the canonical symlink
+escape check for already-authorized targets. URLs and slash-command tokens are
+not filesystem requests.
+
 ## 3. Non-responsibilities
 
 PAO does not own:
@@ -337,12 +345,34 @@ Commands are connector entry points into domain contracts.
 | `/handoff` | Session continuity operation | PCM assembles the continuity payload |
 | `/clear` | Coordinate Session/media/Engine cleanup | Connector media and selected Engine participate |
 | `/jobs`, `/loop`, `/bg` | Job and outer orchestration lifecycle | Connector renders status |
-| `/stop`, `/steer` | Outer cancellation, fencing, and new-Run/Turn coordination | Selected Engine terminates its internal work |
+| `/stop`, `/steer` | Outer cancellation, fencing, Worker release, and new-Run/Turn coordination | Selected Engine terminates its internal work |
 | `/debug on|off` | Instance-level automatic terminal-failure forwarding preference | HChat transports one diagnosis assignment; the Connector renders status |
 
 HER-specific effort, Habit, Meditation, provider, and model settings reach HER
 through a Connector/PAO control surface, but their internal meaning remains
 HER-owned.
+
+`/stop` first uses the selected Agent's normal command path so its Engine can
+record and terminate the active Turn. If that Worker's control lane does not
+respond within the bounded stop window, PAO fences and detaches the old IPC,
+reconciles the interrupted Run, switches the Agent route to a qualified
+replacement Worker, and completes the stop receipt there. A kernel task stuck in
+uninterruptible I/O may remain physically present until the kernel releases it;
+it no longer owns the Agent route or prevents new work. Telegram may trigger this
+emergency release only for the configured authorized sender.
+
+### HASHI2 Workzone and stop-control correction (2026-09-22)
+
+- **Approval:** the current user approved these PAO/HER v2 Function changes on
+  branch `exp-herv2j` for HASHI2; no protected-Core migration was authorized.
+- **Implementation:** request-path preflight is before HER Provider stages, Tool
+  admission is zero-touch for outside targets, and unresponsive `/stop` replaces
+  the Worker while preserving the Agent route.
+- **Offline verification:** focused Workzone, HER v2, command, and Function Worker
+  suites pass. The final protected-Core and shared-runtime gates are attached to
+  the implementation checkpoint.
+- **Live verification:** pending a separately authorized HASHI2 Function
+  replacement; source state alone is not live proof.
 
 Automatic debug reporting is deliberately a one-way PAO delivery convenience,
 not a diagnostic lifecycle. `/debug on <agent@instance> <journal>` persists the

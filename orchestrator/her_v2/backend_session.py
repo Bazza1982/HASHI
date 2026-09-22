@@ -132,6 +132,19 @@ class HerBackendSessionCoordinator:
             )
         return dict(payload)
 
+    @classmethod
+    def current_user_message(cls, value: str) -> str:
+        """Return the authoritative current request from either envelope shape."""
+
+        payload = cls.decode(value) or {}
+        for key in ("turn", "initial_turn"):
+            turn = payload.get(key)
+            if isinstance(turn, Mapping):
+                message = str(turn.get("user_message") or "")
+                if message:
+                    return message
+        return ""
+
     @staticmethod
     def _section_map(
         sections: Sequence[Mapping[str, Any]],

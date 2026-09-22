@@ -1352,6 +1352,27 @@ class FunctionWorkerHost:
             raise FunctionWorkerStateError(
                 f"Agent {self.agent_name!r} is not accepting requests (phase={self.phase})"
             )
+        if method == "runtime.stop_recovered":
+            from telegram import Update
+            from orchestrator import runtime_control
+
+            update_payload = params.get("update")
+            if not isinstance(update_payload, Mapping):
+                raise FunctionWorkerStateError(
+                    "runtime.stop_recovered requires an update object"
+                )
+            update = Update.de_json(dict(update_payload), runtime.app.bot)
+            await runtime_control.cmd_stop(
+                runtime,
+                update,
+                SimpleNamespace(
+                    args=[],
+                    source_channel="telegram",
+                    forced_worker_release=True,
+                ),
+            )
+            await self.emit_metadata()
+            return True
         if method == "runtime.enqueue_request":
             content = params.get("request_content")
             request_metadata = params.get("request_metadata")

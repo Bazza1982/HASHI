@@ -28,6 +28,7 @@ from orchestrator.process_execution import (
     resolve_shell_invocation,
     terminate_windows_process_tree,
 )
+from orchestrator.workzone import path_is_within_roots_lexically
 from tools.workbench_client import request_workbench_json, workbench_endpoint
 
 # ---------------------------------------------------------------------------
@@ -61,13 +62,20 @@ def _resolve_path(
     - Relative paths are resolved from workspace_dir.
     Raises ValueError if the resolved path escapes access_root.
     """
-    p = Path(raw_path)
-    if not p.is_absolute():
-        p = (workspace_dir / p).resolve()
-    else:
-        p = p.resolve()
-
     access_roots = _access_roots(access_root)
+    candidate = Path(raw_path).expanduser()
+    if not candidate.is_absolute():
+        candidate = workspace_dir / candidate
+    candidate = Path(os.path.abspath(os.path.normpath(os.fspath(candidate))))
+    if not path_is_within_roots_lexically(candidate, access_roots):
+        rendered = ", ".join(str(root) for root in access_roots)
+        raise ValueError(
+            f"Path '{candidate}' is outside the allowed access scopes [{rendered}]"
+        )
+
+    # Only an already-authorized lexical target may reach the filesystem.  The
+    # second check retains canonical symlink-escape protection.
+    p = candidate.resolve()
     if not any(p == root or p.is_relative_to(root) for root in access_roots):
         rendered = ", ".join(str(root) for root in access_roots)
         raise ValueError(

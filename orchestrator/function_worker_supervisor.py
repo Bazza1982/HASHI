@@ -50,6 +50,7 @@ WORKER_REQUEST_TIMEOUT_SECONDS = 180.0
 WORKER_SHUTDOWN_TIMEOUT_SECONDS = 30.0
 WORKER_DRAIN_TIMEOUT_SECONDS = 120.0
 WORKER_RECOVERY_ATTEMPTS = 3
+STOP_WORKER_RESPONSE_TIMEOUT_SECONDS = 2.0
 QUALIFIED_GENERATION_CACHE_SCHEMA_VERSION = 1
 TELEGRAM_STATUS_WARNING_DEBOUNCE_SECONDS = 0.5
 TELEGRAM_STATUS_WARNING_COOLDOWN_SECONDS = 30.0
@@ -57,6 +58,27 @@ TELEGRAM_STATUS_WARNING_COOLDOWN_SECONDS = 30.0
 
 class FunctionWorkerError(RuntimeError):
     """A Function Worker could not be prepared, switched, or recovered."""
+
+
+def _slash_command_name(text: object) -> str:
+    token = str(text or "").strip().split(maxsplit=1)[0]
+    if not token.startswith("/"):
+        return ""
+    return token[1:].split("@", 1)[0].casefold()
+
+
+def _authorized_telegram_stop(kernel: Any, update: Mapping[str, Any]) -> bool:
+    message = update.get("message") or update.get("edited_message")
+    if not isinstance(message, Mapping) or _slash_command_name(message.get("text")) != "stop":
+        return False
+    sender = message.get("from") or message.get("from_user")
+    if not isinstance(sender, Mapping):
+        return False
+    expected = getattr(getattr(kernel, "global_cfg", None), "authorized_id", None)
+    try:
+        return int(sender.get("id")) == int(expected)
+    except (TypeError, ValueError):
+        return False
 
 
 def _manifest_receipt_from_dict(value: Mapping[str, Any]) -> CandidateProbeReceipt:
@@ -553,6 +575,25 @@ class FunctionWorkerClient:
             monitor.cancel()
             await asyncio.gather(monitor, return_exceptions=True)
 
+    async def detach_unresponsive(self) -> None:
+        """Fence an unresponsive Worker without waiting on an unkillable syscall."""
+
+        self.expected_exit = True
+        if self.process.is_alive():
+            try:
+                self.process.terminate()
+            except (OSError, ProcessLookupError):
+                pass
+            if self.process.is_alive() and hasattr(self.process, "kill"):
+                try:
+                    self.process.kill()
+                except (OSError, ProcessLookupError):
+                    pass
+        # Closing the old IPC releases every caller immediately.  The existing
+        # monitor remains alive solely to reap the child if the kernel later
+        # releases an uninterruptible I/O wait.
+        await self.peer.close()
+
 
 class AgentRuntimeHandle:
     """Stable Core object whose active Worker target changes atomically."""
@@ -739,6 +780,18 @@ class AgentRuntimeHandle:
                 self._condition.notify_all()
                 raise
 
+    async def begin_forced_cutover(
+        self,
+        expected: FunctionWorkerClient,
+    ) -> bool:
+        """Close new routing without waiting for a stuck route to drain."""
+
+        async with self._condition:
+            if self._cutover or self._client is not expected:
+                return False
+            self._cutover = True
+            return True
+
     async def commit_cutover(
         self,
         client: FunctionWorkerClient,
@@ -860,6 +913,13 @@ class AgentRuntimeHandle:
         )
 
     async def deliver_telegram_update(self, update: Mapping[str, Any]) -> bool:
+        if _authorized_telegram_stop(self.kernel, update):
+            return bool(
+                await self._route_stop_command(
+                    "runtime.telegram_update",
+                    {"update": dict(update)},
+                )
+            )
         return bool(
             await self._route(
                 "runtime.telegram_update",
@@ -1022,16 +1082,29 @@ class AgentRuntimeHandle:
         chat_id: int | str | None = None,
         session_metadata: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        result = await self._route(
-            "runtime.slash",
-            {
-                "text": text,
-                "source_channel": source_channel,
-                "chat_id": chat_id,
-                "session_metadata": dict(session_metadata or {}),
-            },
+        params = {
+            "text": text,
+            "source_channel": source_channel,
+            "chat_id": chat_id,
+            "session_metadata": dict(session_metadata or {}),
+        }
+        result = (
+            await self._route_stop_command("runtime.slash", params)
+            if _slash_command_name(text) == "stop"
+            else await self._route("runtime.slash", params)
         )
         return None if result is None else dict(result)
+
+    async def _route_stop_command(
+        self,
+        method: str,
+        params: Mapping[str, Any],
+    ) -> Any:
+        supervisor = getattr(self._client, "supervisor", None)
+        release = getattr(supervisor, "stop_and_release_worker", None)
+        if not callable(release):
+            return await self._route(method, params)
+        return await release(self, method=method, params=params)
 
     async def poll_request_activity(
         self,
@@ -1541,6 +1614,96 @@ class FunctionWorkerSupervisor:
                 and not getattr(self.kernel, "_handoff_draining", False)
                 and not getattr(self.kernel, "_connector_activation_pending", False)):
             reconcile()
+
+    async def stop_and_release_worker(
+        self,
+        handle: AgentRuntimeHandle,
+        *,
+        method: str,
+        params: Mapping[str, Any],
+    ) -> Any:
+        """Stop normally, or replace an unresponsive Worker behind the route."""
+
+        failed = handle.client
+        try:
+            return await asyncio.wait_for(
+                failed.call(
+                    method,
+                    params,
+                    timeout=STOP_WORKER_RESPONSE_TIMEOUT_SECONDS,
+                ),
+                timeout=STOP_WORKER_RESPONSE_TIMEOUT_SECONDS,
+            )
+        except (TimeoutError, FunctionWorkerDisconnected, BrokenPipeError, OSError) as exc:
+            bridge_logger.warning(
+                "Agent stop control did not respond; releasing Worker: "
+                "agent=%s pid=%s error=%s",
+                handle.name,
+                failed.pid,
+                type(exc).__name__,
+            )
+
+        if not await handle.begin_forced_cutover(failed):
+            return await handle._route(method, params)
+
+        candidate: FunctionWorkerClient | None = None
+        try:
+            await failed.detach_unresponsive()
+            capability_broker = getattr(self.kernel, "capability_broker", None)
+            if capability_broker is not None:
+                capability_broker.cancel_agent(
+                    handle.name,
+                    reason="user-stop-worker-release",
+                )
+            await handle.fail_outstanding(
+                "The active request was stopped and its Worker was released."
+            )
+            try:
+                await self.reconcile_interrupted_session_runs(
+                    handle.name,
+                    lifecycle_reason="user-stop-worker-release",
+                )
+            except Exception as exc:
+                bridge_logger.warning(
+                    "%s: stop-time Session reconciliation warning: %s",
+                    handle.name,
+                    type(exc).__name__,
+                )
+            candidate = await self.prepare_worker(
+                handle.name,
+                failed.generation,
+                generation_root=failed.generation_root,
+            )
+            metadata = await self.activate_new_worker(candidate)
+            await handle.commit_cutover(candidate, metadata)
+        except BaseException:
+            if candidate is not None and handle.client is not candidate:
+                await candidate.shutdown(force=True)
+            await handle.abort_cutover()
+            await handle.close_route(
+                f"Function Worker {handle.name!r} could not be released after /stop"
+            )
+            raise
+
+        await self.broadcast_topology()
+        self.publish_generation_state()
+        bridge_logger.info(
+            "Agent stop released Worker: agent=%s old_pid=%s new_pid=%s generation=%s",
+            handle.name,
+            failed.pid,
+            candidate.pid,
+            candidate.generation_id,
+        )
+
+        resumed_params = dict(params)
+        resumed_method = method
+        if method == "runtime.telegram_update":
+            resumed_method = "runtime.stop_recovered"
+        elif method == "runtime.slash":
+            metadata = dict(resumed_params.get("session_metadata") or {})
+            metadata["forced_worker_release"] = True
+            resumed_params["session_metadata"] = metadata
+        return await candidate.call(resumed_method, resumed_params)
 
     async def prepare_worker(
         self,

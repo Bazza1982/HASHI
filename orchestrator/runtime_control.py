@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import Any
 
@@ -424,11 +425,19 @@ async def cmd_stop(runtime: Any, update: Any, context: Any) -> None:
             ),
         )
         return
-    busy = bool(active_meta) or bool(
+    session_metadata = getattr(update, "session_metadata", None)
+    forced_worker_release = bool(
+        getattr(context, "forced_worker_release", False)
+        or (
+            isinstance(session_metadata, Mapping)
+            and session_metadata.get("forced_worker_release") is True
+        )
+    )
+    busy = forced_worker_release or bool(active_meta) or bool(
         getattr(runtime, "is_generating", False) and not session_id
     )
     interrupted_task = None
-    if busy:
+    if busy and not forced_worker_release:
         interrupted_task = runtime_retry.remember_interrupted_task(
             runtime,
             active_meta,
@@ -436,7 +445,7 @@ async def cmd_stop(runtime: Any, update: Any, context: Any) -> None:
             reason="user_stop",
         )
         mark_user_interrupt(runtime, "user_stop", request_meta=active_meta)
-    if busy:
+    if busy and not forced_worker_release:
         try:
             from orchestrator.context_compaction import cancel_runtime_compaction
 

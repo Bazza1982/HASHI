@@ -74,6 +74,7 @@ from .models import (
     TerminalState,
     ToolEvidenceReceipt,
     TriageClassification,
+    TriageDecision,
     TurnResult,
     parse_effort,
     terminal_lifecycle,
@@ -298,9 +299,15 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         skills_catalogue: Sequence[Mapping[str, Any]] | None = None,
         capability_cache_path: Path | str | None = None,
         final_style: Any | None = None,
+        final_style_unavailable_reason: str = "",
+        workzone_preflight: Any | None = None,
     ) -> None:
         self.config = config
         self.final_style = final_style
+        self.final_style_unavailable_reason = str(
+            final_style_unavailable_reason or ""
+        )
+        self.workzone_preflight = workzone_preflight
         self.provider = provider
         self.ledger_store = ledger_store
         self.audit_log = audit_log
@@ -726,6 +733,65 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         )
         state.ledger.add_log_ref(ref)
         self.ledger_store.save(state.ledger)
+
+        preflight = self.workzone_preflight
+        if bool(getattr(preflight, "blocked", False)):
+            outside_paths = tuple(getattr(preflight, "outside_paths", ()) or ())
+            clarification = str(getattr(preflight, "clarification", "") or "")
+            ref = self._audit(
+                state,
+                stage=Stage.TRIAGE.value,
+                role="strategist",
+                event="workzone_scope_blocked",
+                event_id=f"{state.ledger.turn_id}:triage:workzone-scope",
+                payload={
+                    "outside_paths": list(outside_paths),
+                    "decision": TriageClassification.CONFIRMATION_REQUIRED.value,
+                    "tool_invocation_started": False,
+                },
+            )
+            state.ledger.add_log_ref(ref)
+            self._record_triage(
+                state,
+                TriageDecision(
+                    classification=TriageClassification.CONFIRMATION_REQUIRED,
+                    real_goal=state.goal,
+                    clarification=clarification,
+                ),
+            )
+            state.progress.record(
+                "classification",
+                TriageClassification.CONFIRMATION_REQUIRED.value,
+            )
+            (
+                clarification,
+                provenance,
+                detail,
+            ) = await self._render_required_clarification(
+                state,
+                text=clarification,
+                event_id=f"{state.ledger.turn_id}:clarification",
+            )
+            clarification = await self._final_style_text(state, clarification)
+            await self._deliver(
+                state,
+                kind="clarification",
+                text=clarification,
+                event_id=f"{state.ledger.turn_id}:clarification",
+                required=True,
+                provenance=provenance,
+                detail=detail,
+            )
+            await self._transition(
+                state,
+                LifecycleState.PENDING_USER_INPUT,
+                terminal_reason="workzone_scope_clarification",
+            )
+            return self._result(
+                state,
+                terminal=TerminalState.PENDING_USER_INPUT,
+                text=clarification,
+            )
 
         text_only_turn = not state.attachment_manifest
         if state.effort is Effort.ZERO:
@@ -1356,7 +1422,36 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
 
     async def _final_style_text(self, state: _TurnState, text: str, *, content=()) -> str:
         """Optional presentation only: no stages, lifecycle changes or commentary."""
-        if self.final_style is None or state.style_finalisation_done or content:
+        if state.style_finalisation_done:
+            return text
+        if content:
+            if self.config.style_finalisation.enabled:
+                state.style_finalisation_done = True
+                self._audit(
+                    state,
+                    stage="style_finalisation",
+                    role="style_editor",
+                    event="style_skipped",
+                    event_id=f"{state.ledger.turn_id}:style:skipped",
+                    payload={"reason": "style_rich_content"},
+                )
+            return text
+        if self.final_style is None:
+            if not self.config.style_finalisation.enabled:
+                return text
+            state.style_finalisation_done = True
+            self._audit(
+                state,
+                stage="style_finalisation",
+                role="style_editor",
+                event="style_degraded",
+                event_id=f"{state.ledger.turn_id}:style:degraded",
+                payload={
+                    "phase": "initialization",
+                    "error_type": self.final_style_unavailable_reason
+                    or "Unavailable",
+                },
+            )
             return text
         state.style_finalisation_done = True
         return await state.control.run_cancellable(

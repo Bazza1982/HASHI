@@ -74,11 +74,13 @@ No new dependency is added to Core or to the repository's runtime lock files.
 
 The fixed HER session supplies typed, accepted PCM sections: permanent `[sys]`,
 instance-global `/sys`, Agent-local `/sys`, and presentation Persona. The actual
-current user request is kept separately. History, memories and the answer draft
-are not promoted into system policy. The same immutable snapshot is used for both
-calls; changes made while execution runs do not change the editor's instructions.
-For non-fixed compatibility calls, sources are read once from configured PCM and
-active `/sys` managers. A failed snapshot skips the optional editor.
+current user request is kept separately and is read from either the fixed
+`initial_turn` or `turn` envelope. History, memories and the answer draft are not
+promoted into system policy. The same immutable snapshot is used for both calls;
+changes made while execution runs do not change the editor's instructions. For
+non-fixed compatibility calls, sources are read once from configured PCM and
+active `/sys` managers. A failed snapshot preserves the original answer and
+publishes a `style_degraded` receipt instead of disappearing into a warning.
 
 The original execution record remains unchanged. The selected final text is used
 for **both delivery and TurnResult**, so the conversation does not remember a
@@ -93,12 +95,18 @@ required clarifications, and the high-effort Review/Finalisation report. The
 pass still runs at most once per turn. Provisional acknowledgements and progress
 commentary are not terminal text and are not edited. Native voice/rich output,
 deterministic technical errors, stop notices, and runtime-authored safety
-fallbacks remain exact and are intentionally excluded.
+fallbacks remain exact and are intentionally excluded. When the feature is
+enabled, a rich terminal result records `style_skipped` rather than silently
+bypassing the gate.
 
 ## Observability and basic tests
 
 Internal events: `style_checked`, `style_rewritten`, `style_degraded`,
-`style_skipped`, with instruction snapshot hash and selected rewrite target.
+`style_skipped`; once initialisation has a snapshot, events also carry its hash
+and selected rewrite target.
+Every eligible terminal text on an enabled Turn must publish at least one terminal
+style outcome: checked, skipped, or degraded. Initialisation failure is a degraded
+outcome; oversized, empty, and rich terminal output are explicit skipped outcomes.
 Per-call usage stays in the existing meter under `style_check` and `style_rewrite`.
 Unavailable usage/pricing is not reported as free. API credentials and response
 bodies are not added to these style-decision events.
@@ -173,3 +181,16 @@ Isolated Python 3.12 runner, full focused module (including UI): `21 passed`.
 - **Adoption:** source and offline verification are separate from the running
   HASHI2 Function generation. Live adoption requires separately authorised
   Function replacement.
+
+## HASHI2 final-style receipt hardening — 2026-09-22
+
+- **Approval:** the current user approved the `exp-herv2j` correction for both
+  fixed-envelope shapes and mandatory Style outcome evidence on HASHI2.
+- **Implementation:** fixed-session capture accepts `initial_turn` and `turn`;
+  initialisation failure records `style_degraded`; every enabled eligible final
+  records checked, skipped, or degraded, including an explicit rich-output skip.
+- **Offline verification:** focused Style, Workzone, adapter, and fixed-session
+  regressions pass. Protected-Core and broader runtime gates are recorded at the
+  implementation checkpoint.
+- **Live verification:** not yet performed. Source completion does not authorize
+  or prove Function-generation adoption on running Arale.

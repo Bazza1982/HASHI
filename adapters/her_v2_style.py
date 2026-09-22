@@ -36,8 +36,9 @@ def capture_style_context(adapter: Any, original_prompt: str, fixed_turn: Any) -
                 sources.append({"authority": value["authority"],
                                 "source": str(value.get("key") or ""),
                                 "text": str(value.get("text") or "")})
-        envelope = HerBackendSessionCoordinator.decode(original_prompt) or {}
-        current_request = str((envelope.get("turn") or {}).get("user_message") or "")
+        current_request = HerBackendSessionCoordinator.current_user_message(
+            original_prompt
+        )
         if not current_request:
             raise ValueError("style current request unavailable")
     else:

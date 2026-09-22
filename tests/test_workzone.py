@@ -8,15 +8,18 @@ import pytest
 from orchestrator import workzone as workzone_module
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
 from orchestrator.workzone import (
+    access_roots_for_workzone_snapshot_lexically,
     access_root_for_workzone,
     access_roots_for_workzones,
     build_workzone_prompt,
     clear_workzone,
     load_workzone,
     normalize_workzone_state,
+    preflight_request_paths,
     resolve_workzone_input,
     save_workzone,
 )
+from tools.builtins import _resolve_path
 from tools.registry import ToolRegistry
 from tools.schemas import ALL_TOOL_NAMES
 
@@ -67,6 +70,113 @@ def test_workzone_uses_zone_as_access_root_when_outside_scope(tmp_path: Path):
     zone.mkdir()
 
     assert access_root_for_workzone(project, zone) == zone.resolve()
+
+
+def test_request_path_preflight_blocks_an_explicit_outside_location(tmp_path: Path):
+    allowed = tmp_path / "allowed"
+    outside = tmp_path / "outside" / "project"
+    allowed.mkdir()
+
+    decision = preflight_request_paths(
+        f"Inspect `{outside}` and fix the project.",
+        access_roots=(allowed,),
+        workspace_dir=allowed,
+    )
+
+    assert decision.blocked is True
+    assert decision.outside_paths == (str(outside),)
+    assert "outside this Session's Workspace/Workzones" in decision.clarification
+
+
+def test_request_path_preflight_allows_locations_inside_an_exact_root(tmp_path: Path):
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+
+    decision = preflight_request_paths(
+        f"Inspect `{allowed / 'project'}`.",
+        access_roots=(allowed,),
+        workspace_dir=allowed,
+    )
+
+    assert decision.blocked is False
+    assert decision.outside_paths == ()
+
+
+@pytest.mark.parametrize(
+    "input_text",
+    [
+        "Explain `/stop` and why it releases the Worker.",
+        "Review https://example.com/outside/path before answering.",
+    ],
+)
+def test_request_path_preflight_does_not_treat_commands_or_urls_as_paths(
+    tmp_path: Path,
+    input_text: str,
+):
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+
+    decision = preflight_request_paths(
+        input_text,
+        access_roots=(allowed,),
+        workspace_dir=allowed,
+    )
+
+    assert decision.requested_paths == ()
+    assert decision.blocked is False
+
+
+def test_preflight_projects_frozen_workzone_roots_without_filesystem_access(
+    tmp_path: Path,
+    monkeypatch,
+):
+    workspace = tmp_path / "workspace"
+    allowed = tmp_path / "allowed"
+    state = {
+        "slots": [
+            {
+                "slot_id": "main",
+                "path": str(allowed),
+                "enabled": True,
+                "available": True,
+            }
+        ]
+    }
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("preflight touched the filesystem")
+
+    monkeypatch.setattr(Path, "resolve", forbidden)
+    monkeypatch.setattr(Path, "is_dir", forbidden)
+
+    assert access_roots_for_workzone_snapshot_lexically(
+        workspace,
+        state,
+        workspace_dir=workspace,
+    ) == (allowed,)
+
+
+def test_tool_scope_rejects_outside_path_before_resolving_it(
+    tmp_path: Path, monkeypatch
+):
+    allowed = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    allowed.mkdir()
+    original_resolve = Path.resolve
+    resolved = []
+
+    def guarded_resolve(path, *args, **kwargs):
+        resolved.append(path)
+        if path == outside:
+            raise AssertionError("outside target reached the filesystem resolver")
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", guarded_resolve)
+
+    with pytest.raises(ValueError, match="outside the allowed access scopes"):
+        _resolve_path(str(outside), allowed, allowed)
+
+    assert outside not in resolved
 
 
 def test_workzone_rejects_file_paths(tmp_path: Path):

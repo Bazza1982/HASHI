@@ -19,7 +19,14 @@ from orchestrator.her_v2.interfaces import (
     StageInvocationError,
     TurnStopped,
 )
-from orchestrator.her_v2.models import Effort, Route, Stage, StageResponse, TerminalState
+from orchestrator.her_v2.models import (
+    Effort,
+    Route,
+    Stage,
+    StageResponse,
+    TerminalState,
+    TriageClassification,
+)
 from orchestrator.her_v2.runtime_configuration import (
     apply_her_v2_runtime_configuration, resolve_her_v2_configuration,
 )
@@ -257,17 +264,114 @@ async def test_deterministic_finalisation_error_is_not_style_rewritten(tmp_path)
 
 @pytest.mark.asyncio
 async def test_guard_prevents_second_pass_and_skips_rich_output(tmp_path):
+    from orchestrator.her_v2.config import HERv2Config
+
     runtime = _runtime(tmp_path, ScriptedProvider({}))
     gate, check, rewrite, _ = _pass()
     runtime.final_style = gate
+    raw = _raw_config()
+    raw["style_finalisation"] = {"enabled": True}
+    runtime.config = HERv2Config.from_mapping(raw)
     from orchestrator.her_v2.interfaces import TurnControl
-    state = SimpleNamespace(style_finalisation_done=False, ledger=SimpleNamespace(turn_id="turn"),
-                            control=TurnControl("turn"))
+    state = SimpleNamespace(
+        style_finalisation_done=False,
+        ledger=SimpleNamespace(turn_id="turn", plan_id=None),
+        request_ref="hashi-request:rich",
+        control=TurnControl("turn"),
+    )
     assert await runtime._final_style_text(state, "Audio", content=({"type": "audio"},)) == "Audio"
+    assert state.style_finalisation_done is True
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "her-v2" / "audit.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert [row["event"] for row in rows if row["event"].startswith("style_")] == [
+        "style_skipped"
+    ]
+    assert rows[-1]["payload"] == {"reason": "style_rich_content"}
+
+    state = SimpleNamespace(
+        style_finalisation_done=False,
+        ledger=SimpleNamespace(turn_id="turn-2", plan_id=None),
+        request_ref="hashi-request:text",
+        control=TurnControl("turn-2"),
+    )
     first = await runtime._final_style_text(state, "Original")
     assert await runtime._final_style_text(state, first) == first
     check.assert_awaited_once()
     rewrite.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_enabled_style_records_initialisation_degradation_for_eligible_final(
+    tmp_path,
+):
+    from orchestrator.her_v2.config import HERv2Config
+
+    raw = _raw_config()
+    raw["style_finalisation"] = {"enabled": True}
+    provider = ScriptedProvider(
+        {Stage.DIRECT: [StageResponse(text="Original final response.")]}
+    )
+    runtime = _runtime(
+        tmp_path,
+        provider,
+        config=HERv2Config.from_mapping(raw),
+    )
+    runtime.final_style_unavailable_reason = "ValueError"
+
+    result = await runtime.run_turn("Complete the task.", "style-init", effort=Effort.ZERO)
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "her-v2" / "audit.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    outcomes = [
+        row for row in rows if row["event"] in {
+            "style_checked", "style_skipped", "style_degraded"
+        }
+    ]
+    assert len(outcomes) == 1
+    assert outcomes[0]["event"] == "style_degraded"
+    assert outcomes[0]["payload"] == {
+        "phase": "initialization",
+        "error_type": "ValueError",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("effort", [Effort.ZERO, Effort.LOW])
+async def test_outside_workzone_is_clarified_before_any_provider_stage(
+    tmp_path, effort
+):
+    from orchestrator.workzone import preflight_request_paths
+
+    allowed = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    allowed.mkdir()
+    provider = ScriptedProvider({})
+    runtime = _runtime(tmp_path, provider)
+    runtime.workzone_preflight = preflight_request_paths(
+        f"Inspect `{outside}`.",
+        access_roots=(allowed,),
+        workspace_dir=allowed,
+    )
+
+    result = await runtime.run_turn(
+        f"Inspect `{outside}`.",
+        f"workzone-{effort.value}",
+        effort=effort,
+    )
+
+    assert result.terminal_state is TerminalState.PENDING_USER_INPUT
+    assert result.classification is TriageClassification.CONFIRMATION_REQUIRED
+    assert "outside this Session's Workspace/Workzones" in result.text
+    assert provider.requests == []
 
 
 def _raw_config():
@@ -293,13 +397,19 @@ def test_setting_roundtrip_preserves_route_targets_and_rejects_string_bool():
         resolve_her_v2_configuration(raw, {"style_finalisation_enabled": "false"})
 
 
-def test_snapshot_uses_typed_sys_and_persona_but_not_history():
+@pytest.mark.parametrize("turn_key", ["initial_turn", "turn"])
+def test_snapshot_uses_typed_sys_and_persona_but_not_history(turn_key):
     pcm = {str(i): {"key": str(i), "authority": auth, "text": auth}
            for i, auth in enumerate(("permanent_system", "global_system", "local_system", "persona", "history", "memory"))}
     coordinator = SimpleNamespace(store=SimpleNamespace(session=lambda _: {"pcm_revision": 3, "pcm": pcm}))
     adapter = SimpleNamespace(_session_coordinator=coordinator)
     turn = SimpleNamespace(session_id="session", pcm_revision=3)
-    encoded = HerBackendSessionCoordinator.encode({"protocol": "hashi.her-fixed-backend.v1", "turn": {"user_message": "This request"}})
+    encoded = HerBackendSessionCoordinator.encode(
+        {
+            "protocol": "hashi.her-fixed-backend.v1",
+            turn_key: {"user_message": "This request"},
+        }
+    )
     snapshot = capture_style_context(adapter, encoded, turn)
     assert snapshot["current_request"] == "This request"
     assert {s["authority"] for s in snapshot["instruction_sources"]} == {

@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from orchestrator import runtime_control, runtime_retry
+from orchestrator import runtime_control, runtime_retry, ui_language
 from orchestrator.runtime_command_binding import BOT_COMMAND_BINDINGS, COMMAND_BINDINGS
 
 
@@ -350,6 +350,50 @@ async def test_cmd_stop_persists_active_task_before_killing_backend(tmp_path):
     assert saved.prompt == "Research common illnesses and write a detailed report"
     assert "send “continue”" in replies[0]
     assert runtime._user_interrupt["reason"] == "user_stop"
+
+
+@pytest.mark.asyncio
+async def test_cmd_stop_after_forced_worker_release_does_not_interrupt_replacement(
+    tmp_path,
+):
+    replies: list[str] = []
+    shutdown = AsyncMock()
+
+    async def _reply(_update, text, **_kwargs):
+        replies.append(text)
+
+    runtime = SimpleNamespace(
+        name="ajiao",
+        workspace_dir=tmp_path,
+        logger=SimpleNamespace(warning=lambda *a, **k: None),
+        config=SimpleNamespace(active_backend="her-v2", engine="her-v2"),
+        queue=asyncio.Queue(),
+        backend_manager=SimpleNamespace(
+            current_backend=SimpleNamespace(shutdown=shutdown)
+        ),
+        current_request_meta=None,
+        last_prompt=None,
+        is_generating=False,
+        _is_authorized_user=lambda _uid: True,
+        _reply_text=_reply,
+    )
+    message = SimpleNamespace(text="/stop", chat=SimpleNamespace(id=42))
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=1),
+        effective_chat=SimpleNamespace(id=42),
+        effective_message=message,
+        message=message,
+    )
+
+    await runtime_control.cmd_stop(
+        runtime,
+        update,
+        SimpleNamespace(args=[], forced_worker_release=True),
+    )
+
+    shutdown.assert_not_awaited()
+    assert not hasattr(runtime, "_user_interrupt")
+    assert replies == [ui_language.tr("control.stop.stopped", count=0)]
 
 
 @pytest.mark.asyncio

@@ -125,7 +125,10 @@ class FinalStylePass:
     async def render(self, draft: str, turn_id: str) -> str:
         from .interfaces import ProviderFailureCode, StageInvocationError, TurnStopped
 
-        if not self.config.enabled or not draft.strip():
+        if not self.config.enabled:
+            return draft
+        if not draft.strip():
+            self.observe("skipped", {"reason": "style_draft_empty"}, turn_id)
             return draft
         state = {**self.context, "draft_response": draft}
         # Do not silently truncate instructions or an answer into a different task.

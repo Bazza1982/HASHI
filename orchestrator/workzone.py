@@ -4,7 +4,8 @@ import json
 import logging
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,29 @@ logger = logging.getLogger("Bridge.Workzone")
 
 _WINDOWS_DRIVE_RE = re.compile(r"^([A-Za-z]):[\\/](.*)$")
 _WSL_UNC_RE = re.compile(r"^\\\\(?:wsl\$|wsl\.localhost)\\[^\\]+\\(.*)$", re.IGNORECASE)
+_URI_RE = re.compile(r"\b[a-z][a-z0-9+.-]*://\S+", re.IGNORECASE)
+_QUOTED_PATH_RE = re.compile(
+    r"(?P<quote>[`\"'])(?P<path>(?:[A-Za-z]:[\\/]|\\\\|/)[^`\"'\r\n]+?)(?P=quote)"
+)
+_BARE_WINDOWS_PATH_RE = re.compile(r"(?<![\w])([A-Za-z]:[\\/][^\s`\"'<>]+)")
+_BARE_UNC_PATH_RE = re.compile(r"(?<![\w])(\\\\[^\s`\"'<>]+)")
+_BARE_POSIX_PATH_RE = re.compile(r"(?<![\w:/])(/[^\s`\"'<>]+)")
+_SLASH_COMMAND_TOKEN_RE = re.compile(
+    r"^/[A-Za-z][A-Za-z0-9_-]*(?:@[A-Za-z0-9_]+)?$"
+)
+
+
+@dataclass(frozen=True)
+class WorkzonePathPreflight:
+    """Filesystem-free request admission result for explicit absolute paths."""
+
+    requested_paths: tuple[str, ...] = ()
+    outside_paths: tuple[str, ...] = ()
+    clarification: str = ""
+
+    @property
+    def blocked(self) -> bool:
+        return bool(self.outside_paths)
 
 
 def state_path(workspace_dir: Path) -> Path:
@@ -57,6 +81,143 @@ def _normalize_workzone_input(raw_path: str) -> Path:
         if unc_match:
             return Path("/") / unc_match.group(1).replace("\\", "/")
     return Path(raw.replace("\\", "/")).expanduser()
+
+
+def _lexical_path_key(path: str | Path) -> str:
+    value = os.path.abspath(os.path.normpath(os.fspath(path)))
+    if os.name == "nt" or re.match(r"^/mnt/[A-Za-z](?:/|$)", value):
+        return value.casefold()
+    return value
+
+
+def path_is_within_roots_lexically(
+    path: str | Path,
+    roots: Sequence[str | Path],
+) -> bool:
+    """Check containment without resolving, statting, or following the target."""
+
+    candidate = _lexical_path_key(path)
+    for root in roots:
+        root_key = _lexical_path_key(root)
+        try:
+            if os.path.commonpath((candidate, root_key)) == root_key:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _explicit_request_paths(request: str) -> tuple[str, ...]:
+    text = _URI_RE.sub("", str(request or ""))
+    values: list[str] = []
+    for match in _QUOTED_PATH_RE.finditer(text):
+        values.append(match.group("path"))
+    for pattern in (
+        _BARE_WINDOWS_PATH_RE,
+        _BARE_UNC_PATH_RE,
+        _BARE_POSIX_PATH_RE,
+    ):
+        values.extend(match.group(1) for match in pattern.finditer(text))
+    result: list[str] = []
+    for value in values:
+        cleaned = str(value).strip().rstrip(".,;:!?)]}")
+        # A HASHI command mentioned in prose (for example `/stop`) is not a
+        # request to traverse a one-component POSIX filesystem location.
+        if (
+            not cleaned
+            or cleaned in result
+            or _SLASH_COMMAND_TOKEN_RE.fullmatch(cleaned)
+        ):
+            continue
+        candidate = _normalize_workzone_input(cleaned)
+        if candidate.is_absolute():
+            result.append(cleaned)
+    return tuple(result)
+
+
+def preflight_request_paths(
+    request: str,
+    *,
+    access_roots: Sequence[str | Path],
+    workspace_dir: str | Path,
+) -> WorkzonePathPreflight:
+    """Reject explicit out-of-scope request paths before HER or a Tool runs."""
+
+    roots = tuple(access_roots) or (workspace_dir,)
+    requested = _explicit_request_paths(request)
+    outside = tuple(
+        raw
+        for raw in requested
+        if not path_is_within_roots_lexically(
+            _normalize_workzone_input(raw),
+            roots,
+        )
+    )
+    clarification = ""
+    if outside:
+        clarification = (
+            "I can't work in the requested location because it is outside this "
+            "Session's Workspace/Workzones. Please add that location as a Workzone, "
+            "or tell me which existing Workspace/Workzone to use."
+        )
+    return WorkzonePathPreflight(
+        requested_paths=requested,
+        outside_paths=outside,
+        clarification=clarification,
+    )
+
+
+def access_roots_for_workzone_snapshot_lexically(
+    default_access_root: str | Path,
+    state: Mapping[str, Any] | None,
+    *,
+    workspace_dir: str | Path,
+) -> tuple[Path, ...]:
+    """Project frozen Workzone roots without touching any configured path."""
+
+    slots = []
+    for raw in (state or {}).get("slots") or ():
+        if not isinstance(raw, Mapping):
+            continue
+        path_text = str(raw.get("path") or "").strip()
+        if not path_text or not bool(raw.get("enabled")):
+            continue
+        slots.append(
+            {
+                "slot_id": str(raw.get("slot_id") or "").strip().casefold(),
+                "path": path_text,
+                # Admission snapshots carry this frozen fact.  Older snapshots
+                # without it retain their configured grant until the Tool gate
+                # performs its canonical containment check.
+                "available": raw.get("available") is not False,
+            }
+        )
+
+    def lexical_path(value: str | Path) -> Path:
+        normalized = _normalize_workzone_input(os.fspath(value))
+        return Path(os.path.abspath(os.path.normpath(os.fspath(normalized))))
+
+    if not slots:
+        return (lexical_path(default_access_root),)
+
+    roots: list[Path] = []
+    usable_main = any(
+        item["slot_id"] == "main" and item["available"] for item in slots
+    )
+    if not usable_main:
+        roots.append(lexical_path(workspace_dir))
+    for item in slots:
+        if not item["available"]:
+            continue
+        root = lexical_path(item["path"])
+        if all(
+            _lexical_path_key(root) != _lexical_path_key(existing)
+            for existing in roots
+        ):
+            roots.append(root)
+    if not roots:
+        roots.append(lexical_path(workspace_dir))
+    return tuple(roots)
 
 
 def resolve_workzone_input(raw_path: str, project_root: Path, workspace_dir: Path) -> Path:

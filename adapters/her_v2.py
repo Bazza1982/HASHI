@@ -745,6 +745,38 @@ class HERv2Adapter(BaseBackend):
             return dict(current)
         return {}
 
+    def _workzone_request_preflight(
+        self,
+        original_prompt: str,
+        request_meta: Mapping[str, Any],
+    ) -> Any:
+        """Freeze a no-target-I/O scope decision before any HER Provider stage."""
+
+        from orchestrator.workzone import (
+            access_roots_for_workzone_snapshot_lexically,
+            preflight_request_paths,
+        )
+
+        current_request = HerBackendSessionCoordinator.current_user_message(
+            original_prompt
+        )
+        if not current_request:
+            current_request = str(original_prompt or "")
+        snapshot = request_meta.get("workzone_snapshot")
+        if not isinstance(snapshot, Mapping):
+            extra = self.config.extra if isinstance(self.config.extra, Mapping) else {}
+            snapshot = extra.get("workzone_state")
+        roots = access_roots_for_workzone_snapshot_lexically(
+            self.config.resolve_access_root(),
+            snapshot if isinstance(snapshot, Mapping) else None,
+            workspace_dir=self.config.workspace_dir,
+        )
+        return preflight_request_paths(
+            current_request,
+            access_roots=roots,
+            workspace_dir=self.config.workspace_dir,
+        )
+
     def _schedule_execution_stage_compaction(self, request_id: str) -> bool:
         runtime = self._runtime_context()
         if runtime is None:
@@ -1614,6 +1646,13 @@ class HERv2Adapter(BaseBackend):
                         separators=(",", ":"),
                     )
                 )
+        # Fixed envelopes must first pass their typed protocol admission.  Only
+        # then inspect the accepted current request, still before constructing
+        # a Provider or entering any HER stage.
+        workzone_preflight = self._workzone_request_preflight(
+            style_original_prompt,
+            request_meta,
+        )
         request_ref = f"hashi-request:{request_id}"
         wip_journal = self._wip_journal_for_request(request_meta)
         prior_wip_summary = (
@@ -1915,6 +1954,7 @@ class HERv2Adapter(BaseBackend):
         if habit_context_suppressed(self._runtime_context()):
             habit_advisor = None
         final_style = None
+        final_style_unavailable_reason = ""
         if runtime_config.style_finalisation.enabled:
             try:
                 from adapters.her_v2_style import capture_style_context, make_final_style_pass
@@ -1926,10 +1966,13 @@ class HERv2Adapter(BaseBackend):
                 )
             except Exception as exc:
                 # Snapshot/configuration failure degrades only this optional editor.
+                final_style_unavailable_reason = type(exc).__name__
                 self.logger.warning("Style finalisation unavailable: %s", type(exc).__name__)
         runtime = HERv2Runtime(
             config=runtime_config,
             final_style=final_style,
+            final_style_unavailable_reason=final_style_unavailable_reason,
+            workzone_preflight=workzone_preflight,
             provider=execution_provider,
             ledger_store=self._ledger_store,
             audit_log=self._audit_log,

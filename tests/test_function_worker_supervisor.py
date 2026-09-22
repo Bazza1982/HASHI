@@ -8,6 +8,7 @@ import multiprocessing
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -429,6 +430,185 @@ async def test_core_proxy_routes_external_stop_through_worker_control_protocol()
             "session_metadata": {"session_surface": "workbench"},
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_stop_replaces_an_unresponsive_worker_without_waiting_for_stuck_route(
+    monkeypatch,
+):
+    class UnresponsiveClient(_Client):
+        async def call(self, method, params=None, **_kwargs):
+            self.calls.append(method)
+            if method == "runtime.slash":
+                await asyncio.Event().wait()
+            return {"ok": True}
+
+    kernel = _Kernel()
+    old = UnresponsiveClient("alpha", 101)
+    handle = _handle(kernel, old)
+    kernel.runtimes.append(handle)
+    supervisor = FunctionWorkerSupervisor(kernel)
+    old.supervisor = supervisor
+    detached = []
+
+    async def detach_unresponsive():
+        detached.append(old.pid)
+
+    old.detach_unresponsive = detach_unresponsive
+    observed = {}
+
+    def replacement_response(method, params):
+        observed["method"] = method
+        observed["params"] = dict(params or {})
+        return {"ok": True, "command": "stop", "messages": []}
+
+    replacement = _Client("alpha", 202, responder=replacement_response)
+    replacement.supervisor = supervisor
+    monkeypatch.setattr(
+        "orchestrator.function_worker_supervisor.STOP_WORKER_RESPONSE_TIMEOUT_SECONDS",
+        0.01,
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "prepare_worker",
+        lambda *args, **kwargs: asyncio.sleep(0, result=replacement),
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "activate_new_worker",
+        lambda _client: asyncio.sleep(0, result=_metadata("alpha", 202)),
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "reconcile_interrupted_session_runs",
+        lambda *args, **kwargs: asyncio.sleep(0, result=[]),
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "broadcast_topology",
+        lambda: asyncio.sleep(0),
+    )
+    monkeypatch.setattr(supervisor, "publish_generation_state", lambda: None)
+    # Emulate an unrelated route awaiting an uninterruptible syscall. Emergency
+    # stop must not wait for this counter to drain before switching the pointer.
+    handle._route_inflight = 1
+
+    result = await handle.execute_slash_command(
+        "/stop",
+        source_channel="workbench_api",
+        chat_id=7,
+        session_metadata={"session_surface": "workbench"},
+    )
+
+    assert result == {"ok": True, "command": "stop", "messages": []}
+    assert handle.client is replacement
+    assert handle.worker_pid == 202
+    assert detached == [101]
+    assert handle._cutover is False
+    assert observed["method"] == "runtime.slash"
+    assert observed["params"]["session_metadata"]["forced_worker_release"] is True
+
+
+@pytest.mark.asyncio
+async def test_telegram_stop_releases_worker_only_for_the_authorized_sender(monkeypatch):
+    class UnresponsiveClient(_Client):
+        async def call(self, method, params=None, **_kwargs):
+            self.calls.append(method)
+            if method == "runtime.telegram_update":
+                await asyncio.Event().wait()
+            return True
+
+    kernel = _Kernel()
+    kernel.global_cfg = SimpleNamespace(authorized_id=7)
+    old = UnresponsiveClient("alpha", 101)
+    handle = _handle(kernel, old)
+    kernel.runtimes.append(handle)
+    supervisor = FunctionWorkerSupervisor(kernel)
+    old.supervisor = supervisor
+    old.detach_unresponsive = lambda: asyncio.sleep(0)
+    observed = {}
+
+    def replacement_response(method, params):
+        observed["method"] = method
+        observed["params"] = dict(params or {})
+        return True
+
+    replacement = _Client("alpha", 202, responder=replacement_response)
+    replacement.supervisor = supervisor
+    monkeypatch.setattr(
+        "orchestrator.function_worker_supervisor.STOP_WORKER_RESPONSE_TIMEOUT_SECONDS",
+        0.01,
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "prepare_worker",
+        lambda *args, **kwargs: asyncio.sleep(0, result=replacement),
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "activate_new_worker",
+        lambda _client: asyncio.sleep(0, result=_metadata("alpha", 202)),
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "reconcile_interrupted_session_runs",
+        lambda *args, **kwargs: asyncio.sleep(0, result=[]),
+    )
+    monkeypatch.setattr(supervisor, "broadcast_topology", lambda: asyncio.sleep(0))
+    monkeypatch.setattr(supervisor, "publish_generation_state", lambda: None)
+
+    authorized = {
+        "update_id": 1,
+        "message": {"message_id": 2, "text": "/stop", "from": {"id": 7}},
+    }
+    assert await handle.deliver_telegram_update(authorized) is True
+    assert handle.client is replacement
+    assert observed == {"method": "runtime.stop_recovered", "params": {"update": authorized}}
+
+    other = _Client("beta", 303)
+    other_handle = _handle(kernel, other)
+    other.supervisor = supervisor
+    unauthorized = {
+        "update_id": 3,
+        "message": {"message_id": 4, "text": "/stop", "from": {"id": 9}},
+    }
+    assert await other_handle.deliver_telegram_update(unauthorized) is True
+    assert other.calls == ["runtime.telegram_update"]
+
+
+@pytest.mark.asyncio
+async def test_replacement_worker_completes_recovered_telegram_stop(monkeypatch):
+    from telegram import Update
+    from orchestrator import runtime_control
+
+    stop = AsyncMock()
+    update = SimpleNamespace(effective_user=SimpleNamespace(id=7))
+    monkeypatch.setattr(
+        Update,
+        "de_json",
+        staticmethod(lambda _payload, _bot: update),
+    )
+    monkeypatch.setattr(runtime_control, "cmd_stop", stop)
+
+    host = FunctionWorkerHost.__new__(FunctionWorkerHost)
+    host.runtime = SimpleNamespace(app=SimpleNamespace(bot=object()))
+    host.phase = "ACTIVE"
+    host.accepting = True
+    host.agent_name = "alpha"
+    host.emit_metadata = AsyncMock()
+
+    result = await host.handle_request(
+        "runtime.stop_recovered",
+        {"update": {"update_id": 1}},
+    )
+
+    assert result is True
+    stop.assert_awaited_once()
+    args = stop.await_args.args
+    assert args[0] is host.runtime
+    assert args[1] is update
+    assert args[2].forced_worker_release is True
+    host.emit_metadata.assert_awaited_once()
 
 
 @pytest.mark.asyncio
