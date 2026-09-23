@@ -379,9 +379,10 @@ class UsageReceipt:
             return "local_zero"
         if "unknown" in sources:
             return "unknown"
-        if sources == {"provider"}:
+        billable_sources = sources - {"local_zero"}
+        if billable_sources == {"provider"}:
             return "provider"
-        if "openrouter_reference" in sources:
+        if "openrouter_reference" in billable_sources:
             return "openrouter_reference"
         return "pricing_table"
 

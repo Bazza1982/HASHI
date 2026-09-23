@@ -134,8 +134,10 @@ def test_free_jev_line_does_not_poison_paid_model_meter_tail():
 
     assert receipt.cost_usd == pytest.approx(0.012)
     assert receipt.unknown_cost_requests == 0
+    assert receipt.dominant_cost_source() == "provider"
     tail = format_cost_tail(receipt, locale="zh-CN")
     assert "成本未知" not in tail
+    assert "≈" not in tail.splitlines()[0]
     assert "DeepSeek + TypeSafe/Jev" in tail
 
 
