@@ -97,6 +97,44 @@ async def execute_hashi_scheduler_tool(
                     "authorization": "explicit_user_authorization",
                 },
             )
+        elif tool_name == "hashi_scheduler_create":
+            payload = dict(args)
+            payload["requested_by"] = "hashi_tool_gateway"
+            status, payload = await _request_json(
+                "POST",
+                f"{base_url}/api/agents/{encoded_agent}/scheduler/jobs",
+                payload=payload,
+            )
+        elif tool_name == "hashi_scheduler_update":
+            job_id = str(args.get("job_id") or "").strip()
+            if not job_id:
+                return "Error: hashi_scheduler_update requires job_id"
+            payload = dict(args)
+            payload.pop("job_id", None)
+            payload["requested_by"] = "hashi_tool_gateway"
+            status, payload = await _request_json(
+                "PATCH",
+                f"{base_url}/api/agents/{encoded_agent}/scheduler/jobs/{quote(job_id, safe='')}",
+                payload=payload,
+            )
+        elif tool_name == "hashi_scheduler_delete":
+            if args.get("authorization") != "explicit_user_authorization":
+                return (
+                    "Error: hashi_scheduler_delete requires explicit authorization for "
+                    "this exact task"
+                )
+            job_id = str(args.get("job_id") or "").strip()
+            if not job_id:
+                return "Error: hashi_scheduler_delete requires job_id"
+            status, payload = await _request_json(
+                "DELETE",
+                f"{base_url}/api/agents/{encoded_agent}/scheduler/jobs/{quote(job_id, safe='')}",
+                payload={
+                    "kind": str(args.get("kind") or "").strip().lower(),
+                    "requested_by": "hashi_tool_gateway",
+                    "authorization": "explicit_user_authorization",
+                },
+            )
         else:
             return f"Error: unsupported HASHI Scheduler tool '{tool_name}'"
     except (aiohttp.ClientError, asyncio.TimeoutError) as exc:

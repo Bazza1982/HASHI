@@ -1992,10 +1992,192 @@ HASHI_SCHEDULER_TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "hashi_scheduler_create",
+            "description": (
+                "Create one cron, heartbeat, or idle nudge owned by the current Agent. "
+                "Use enqueue_prompt only. For cron provide schedule; for heartbeat "
+                "provide interval_seconds; for nudge provide interval_minutes and "
+                "exit_condition. Do not edit tasks.json directly."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "enum": ["cron", "heartbeat", "nudge"]},
+                    "task_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "schedule": {"type": "string", "description": "Cron expression for a fixed wall-clock task."},
+                    "timezone": {"type": "string", "description": "IANA timezone for cron, default UTC."},
+                    "interval_seconds": {"type": "integer", "minimum": 1},
+                    "interval_minutes": {"type": "integer", "minimum": 1},
+                    "prompt": {"type": "string", "minLength": 1},
+                    "note": {"type": "string"},
+                    "exit_condition": {"type": "string", "description": "Completion condition for a nudge."},
+                    "max_nudges": {"type": "integer", "minimum": 0, "description": "0 means unlimited."},
+                    "loop_max": {"type": "integer", "minimum": 0, "description": "Optional hard cap for loop-style cron/heartbeat tasks."},
+                    "enabled": {"type": "boolean", "description": "Whether to start enabled. Default true."},
+                },
+                "required": ["kind"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "hashi_scheduler_update",
+            "description": (
+                "Update one cron, heartbeat, or nudge owned by the current Agent. "
+                "Only the supplied fields change; ownership is checked by HASHI."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "enum": ["cron", "heartbeat", "nudge"]},
+                    "job_id": {"type": "string", "minLength": 1},
+                    "enabled": {"type": "boolean"},
+                    "schedule": {"type": "string"},
+                    "timezone": {"type": "string"},
+                    "interval_seconds": {"type": "integer", "minimum": 1},
+                    "prompt": {"type": "string", "minLength": 1},
+                    "note": {"type": "string"},
+                    "exit_condition": {"type": "string"},
+                    "max_nudges": {"type": "integer", "minimum": 0},
+                    "loop_max": {"type": "integer", "minimum": 0},
+                },
+                "required": ["kind", "job_id"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "hashi_scheduler_delete",
+            "description": (
+                "Delete one cron, heartbeat, or nudge owned by the current Agent. "
+                "Call only after the user explicitly requests deleting that task."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "enum": ["cron", "heartbeat", "nudge"]},
+                    "job_id": {"type": "string", "minLength": 1},
+                    "authorization": {
+                        "type": "string",
+                        "enum": ["explicit_user_authorization"],
+                        "description": "Required when the current user explicitly authorized this deletion.",
+                    },
+                },
+                "required": ["kind", "job_id", "authorization"],
+                "additionalProperties": False,
+            },
+        },
+    },
+]
+
+HASHI_SUPERLOOP_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "hashi_superloop_list",
+            "description": "List Superloops owned by the current Agent.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "include_deleted": {"type": "boolean", "description": "Include soft-deleted loops."},
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "hashi_superloop_get",
+            "description": "Read one Superloop and its owned task, issue, and wait state.",
+            "parameters": {
+                "type": "object",
+                "properties": {"loop_id": {"type": "string", "minLength": 1}},
+                "required": ["loop_id"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "hashi_superloop_create",
+            "description": "Create and start an Agent-owned Superloop from a goal.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "goal": {"type": "string", "minLength": 1},
+                    "task_title": {"type": "string"},
+                },
+                "required": ["goal"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "hashi_superloop_update",
+            "description": (
+                "Manage an owned Superloop. Actions: pause, resume, next, closeout, "
+                "task_add, issue_add, or wait_add."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "loop_id": {"type": "string", "minLength": 1},
+                    "action": {
+                        "type": "string",
+                        "enum": ["pause", "resume", "next", "closeout", "task_add", "issue_add", "wait_add"],
+                    },
+                    "mode": {"type": "string", "enum": ["drain", "immediate"]},
+                    "title": {"type": "string"},
+                    "depends_on": {"type": "array", "items": {"type": "string"}},
+                    "severity": {"type": "string", "enum": ["low", "medium", "high", "critical"]},
+                    "related_task_ids": {"type": "array", "items": {"type": "string"}},
+                    "kind": {"type": "string"},
+                    "deadline": {"type": "string"},
+                    "details": {"type": "object"},
+                },
+                "required": ["loop_id", "action"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "hashi_superloop_delete",
+            "description": (
+                "Delete an owned Superloop. The loop is retained as a deleted audit record "
+                "and will no longer advance. Call only after explicit user authorization."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "loop_id": {"type": "string", "minLength": 1},
+                    "authorization": {
+                        "type": "string",
+                        "enum": ["explicit_user_authorization"],
+                    },
+                },
+                "required": ["loop_id", "authorization"],
+                "additionalProperties": False,
+            },
+        },
+    },
 ]
 
 TOOL_SCHEMAS.extend(BACKGROUND_JOB_TOOL_SCHEMAS)
 TOOL_SCHEMAS.extend(HASHI_SCHEDULER_TOOL_SCHEMAS)
+TOOL_SCHEMAS.extend(HASHI_SUPERLOOP_TOOL_SCHEMAS)
 TOOL_SCHEMAS.extend(WINDOWS_USE_TOOL_SCHEMAS)
 TOOL_SCHEMAS.extend(DESKTOP_TOOL_SCHEMAS)
 

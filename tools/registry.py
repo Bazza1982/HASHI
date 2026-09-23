@@ -42,6 +42,16 @@ TOOL_TIERS: dict[str, list[str]] = {
         "hashi_scheduler_status",
         "hashi_scheduler_run_history",
         "hashi_scheduler_rerun",
+        "hashi_scheduler_create",
+        "hashi_scheduler_update",
+        "hashi_scheduler_delete",
+    ],
+    "superloop": [
+        "hashi_superloop_list",
+        "hashi_superloop_get",
+        "hashi_superloop_create",
+        "hashi_superloop_update",
+        "hashi_superloop_delete",
     ],
     "browser": [
         "browser_session", "browser_active_tab", "browser_get_media_state",
@@ -82,6 +92,8 @@ READ_ONLY_TOOL_NAMES = frozenset(
         "hashi_scheduler_list",
         "hashi_scheduler_run_history",
         "hashi_scheduler_status",
+        "hashi_superloop_list",
+        "hashi_superloop_get",
         "media_read",
         "memory_search",
         "log_query",
@@ -1456,6 +1468,15 @@ class ToolRegistry:
             from tools.hashi_scheduler import execute_hashi_scheduler_tool
 
             return await execute_hashi_scheduler_tool(
+                tool_name,
+                arguments,
+                audit_context=self._effective_audit_context(),
+            )
+
+        if tool_name.startswith("hashi_superloop_"):
+            from tools.hashi_superloop import execute_hashi_superloop_tool
+
+            return await execute_hashi_superloop_tool(
                 tool_name,
                 arguments,
                 audit_context=self._effective_audit_context(),

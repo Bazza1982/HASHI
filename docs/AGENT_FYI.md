@@ -152,6 +152,15 @@ control stages remain private, and the final response stays authoritative.
 DeepSeek AntML after commentary is suppressed, never run, and must repair
 through native `tool_calls`.
 
+HER v2 Agents manage their own recurring work through typed Scheduler tools:
+`hashi_scheduler_create`, `hashi_scheduler_update`, and
+`hashi_scheduler_delete` cover Cron, Heartbeat, and Nudge jobs.  Superloop
+operations use the corresponding `hashi_superloop_*` tools.  The Workbench API
+binds every read and write to the current Agent; deletion requires explicit
+authorization, and agents must never edit `tasks.json` or Superloop files
+directly.  The typed paths are Functions-layer behavior; live adoption still
+requires the normal Worker/Function rollout check.
+
 Validate a Tool batch before effects. Malformed batches execute zero calls;
 completed calls never replay. Repair preserves Provider fields, identity,
 finish/error, and retry count. Continuation is not retry, prose “stop” is not a
