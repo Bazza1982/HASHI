@@ -540,6 +540,8 @@ _PROVIDER_DISPLAY_NAMES = {
     "hashi": "HASHI API",
     "deepseek-api": "DeepSeek",
     "deepseek": "DeepSeek",
+    "typesafe-api": "TypeSafe/Jev",
+    "typesafe": "TypeSafe/Jev",
     "openrouter-api": "OpenRouter",
     "openrouter": "OpenRouter",
     "codex-cli": "Codex CLI",

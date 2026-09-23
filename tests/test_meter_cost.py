@@ -94,6 +94,51 @@ def test_local_engine_is_zero_cost(tmp_path: Path):
     assert receipt.dominant_cost_source() == "local_zero"
 
 
+def test_typesafe_jev_is_free_and_does_not_become_unknown(tmp_path: Path):
+    receipt = record_usage(
+        tmp_path,
+        model="jev-latest",
+        backend="typesafe-api",
+        input_tokens=100,
+        output_tokens=50,
+        cost_usd=None,
+    )
+
+    assert receipt.cost_usd == 0.0
+    assert receipt.unknown_cost_requests == 0
+    assert receipt.has_local_only
+    assert receipt.dominant_cost_source() == "local_zero"
+
+
+def test_free_jev_line_does_not_poison_paid_model_meter_tail():
+    receipt = UsageReceipt(
+        line_items=[
+            PerCallUsageLineItem(
+                engine="deepseek-api",
+                model="deepseek-v4-flash",
+                input_tokens=1_000,
+                output_tokens=100,
+                cost_usd=0.012,
+                cost_source="provider",
+            ),
+            PerCallUsageLineItem(
+                engine="typesafe-api",
+                model="jev-latest",
+                input_tokens=100,
+                output_tokens=20,
+                cost_usd=0.0,
+                cost_source="local_zero",
+            ),
+        ]
+    )
+
+    assert receipt.cost_usd == pytest.approx(0.012)
+    assert receipt.unknown_cost_requests == 0
+    tail = format_cost_tail(receipt, locale="zh-CN")
+    assert "成本未知" not in tail
+    assert "DeepSeek + TypeSafe/Jev" in tail
+
+
 def test_provider_cost_is_preserved(tmp_path: Path):
     receipt = record_usage(
         tmp_path,
@@ -219,6 +264,14 @@ def test_estimated_reasoning_defaults_to_separate_tokens():
 def test_resolve_cost_source_zero_vs_none():
     assert resolve_cost_source(cost_usd=0.0, model="x", engine="claude") == (0.0, "provider")
     assert resolve_cost_source(cost_usd=None, model="unknown-x", engine="claude") == (None, "unknown")
+    assert resolve_cost_source(cost_usd=None, model="jev-latest", engine="typesafe-api") == (
+        0.0,
+        "local_zero",
+    )
+    assert resolve_cost_source(cost_usd=0.01, model="jev-latest", engine="typesafe-api") == (
+        0.01,
+        "provider",
+    )
 
 
 def test_model_has_pricing():
@@ -312,6 +365,41 @@ def test_her_stage_provider_preserves_deepseek_cache_and_call_latency():
     assert item.prompt_cache_miss_tokens == 200
     assert item.provider_call_latency_ms == 321.987
     assert item.cost_usd == pytest.approx(0.000058)
+
+
+def test_her_stage_provider_marks_typesafe_call_as_free():
+    provider = object.__new__(HashiStageProvider)
+    provider.usage_line_items = []
+    response = BackendResponse(
+        text="done",
+        duration_ms=1,
+        usage=TokenUsage(input_tokens=100, output_tokens=20),
+        stream_metadata={
+            "meter": {
+                "provider_calls": [
+                    {
+                        "input": 100,
+                        "output": 20,
+                        "token_source": "provider",
+                        "cost_usd": 0.0,
+                    }
+                ]
+            }
+        },
+    )
+
+    provider._record_usage_line_item(
+        request_id="request-jev",
+        phase="route_judgment",
+        engine="typesafe-api",
+        model="jev-latest",
+        response=response,
+    )
+
+    assert len(provider.usage_line_items) == 1
+    item = provider.usage_line_items[0]
+    assert item.cost_usd == 0.0
+    assert item.cost_source == "local_zero"
 
 
 def test_her_stage_provider_keeps_codex_cache_when_no_call_meter_exists():

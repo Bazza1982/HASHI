@@ -112,6 +112,7 @@ class TypeSafeRouteJudge:
                                 "model": model,
                                 "input": usage.input_tokens if usage else 0,
                                 "output": usage.output_tokens if usage else 0,
+                                "cost_usd": 0.0,
                                 "token_source": "provider" if usage else "unknown",
                                 "status": status,
                                 "provider_call_latency_ms": elapsed,

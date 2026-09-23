@@ -190,12 +190,22 @@ LOCAL_ENGINE_MARKERS = (
     "koboldcpp",
 )
 
+FREE_ENGINE_MARKERS = (
+    "typesafe-api",
+    "typesafe",
+)
+
 
 def _is_local_engine(engine: str) -> bool:
     normalized = " ".join(str(engine or "").split()).casefold()
     if not normalized:
         return False
     return any(marker in normalized for marker in LOCAL_ENGINE_MARKERS)
+
+
+def _is_free_engine(engine: str) -> bool:
+    normalized = " ".join(str(engine or "").split()).casefold()
+    return normalized in FREE_ENGINE_MARKERS
 
 
 def _static_model_has_pricing(model: str) -> bool:
@@ -241,9 +251,13 @@ def resolve_cost_source(
     cost means "unknown" and is never conflated with a genuine ``0.0``.
     """
     if cost_usd is not None:
+        if _is_free_engine(engine) and float(cost_usd) == 0.0:
+            return float(cost_usd), "local_zero"
         if _is_local_engine(engine):
             return float(cost_usd), "local_zero"
         return float(cost_usd), "provider"
+    if _is_free_engine(engine):
+        return 0.0, "local_zero"
     if _is_local_engine(engine):
         return 0.0, "local_zero"
     # Legacy classification has no usage dimensions or revision return value;
@@ -274,9 +288,13 @@ def resolve_usage_cost(
     """
 
     if cost_usd is not None:
+        if _is_free_engine(engine) and float(cost_usd) == 0.0:
+            return float(cost_usd), "local_zero", "unknown"
         if _is_local_engine(engine):
             return float(cost_usd), "local_zero", "unknown"
         return float(cost_usd), "provider", "unknown"
+    if _is_free_engine(engine):
+        return 0.0, "local_zero", "unknown"
     if _is_local_engine(engine):
         return 0.0, "local_zero", "unknown"
 
