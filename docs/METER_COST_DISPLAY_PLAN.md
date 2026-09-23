@@ -226,3 +226,17 @@ revision）。2026-09-15，HASHI1 的 Lily 已通过 `/reboot min` 单独采用�
 
 ---
 _更新时间：2026-09-15 · v2.5 OpenRouter-only 价目来源与 fallback 分调用计价_
+
+## 11. TypeSafe/Jev 免费调用与 HER v2 卡片复核（2026-09-24）
+
+### 决策
+
+TypeSafe/Jev 当前不收费。计量必须把它记为明确的零成本调用，而不是未知成本；未知成本不能污染同一回合中其他模型的已知费用小计。计量展示将 provider 标记为 `TypeSafe/Jev`。
+
+### 实现
+
+HER v2 的 route judgment 与 style check 物理调用现在写入明确的 `cost_usd: 0.0`。`token_tracker` 对 `typesafe-api` 的无价格调用采用零成本分类，并保留未来 provider 报告非零价格时的 provider 优先级。HASHI2 Functions 修复提交为 `d2022c35`（分支 `exp-herv2j`）。
+
+### 运行验证
+
+此前 HER v2 routing card 未出现，是请求开始时 `herv2` 展示偏好为关闭；打开后同一运行实例已记录 response、meter-cost 与 herv2-card 三条发送回执。源码修复后未执行 `/reboot` 或 `/restart`，因此新的计量逻辑仍需下一次允许的 Function 热采用后再做运行态确认。

@@ -144,6 +144,11 @@ Use current metadata for context, price, effort, and modality. Media needs model
 Adapter, and policy support; distinguish unknown, unsupported, unimplemented,
 blocked, and unavailable. Provider cost wins; catalogue cost is estimated and
 unknown is not zero. Only OpenRouter's public schedule auto-sources network prices.
+TypeSafe/Jev is currently a free Function call: meter it as explicit zero cost
+and display it as `TypeSafe/Jev`, so it cannot turn another model's known
+subtotal into unknown. If a provider later reports a non-zero amount, that
+reported amount remains authoritative. Source changes and live adoption remain
+separate facts.
 
 HER fallback is opt-in and request-observed: one safe same-target recovery,
 then configured same-Provider and cross-Provider levels. Never downgrade Pro.
