@@ -235,7 +235,7 @@ TypeSafe/Jev 当前不收费。计量必须把它记为明确的零成本调用�
 
 ### 实现
 
-HER v2 的 route judgment 与 style check 物理调用现在写入明确的 `cost_usd: 0.0`。`token_tracker` 对 `typesafe-api` 的无价格调用采用零成本分类，并保留未来 provider 报告非零价格时的 provider 优先级。HASHI2 Functions 修复提交为 `d2022c35`（分支 `exp-herv2j`）。
+HER v2 的 route judgment 与 style check 物理调用现在写入明确的 `cost_usd: 0.0`。`token_tracker` 对 `typesafe-api` 的无价格调用采用零成本分类，并保留未来 provider 报告非零价格时的 provider 优先级；混合回合的计量汇总会忽略零成本阶段，不会把已知的 provider 金额降级为估算。HASHI2 Functions 修复提交为 `d2022c35`、`5664a299`（分支 `exp-herv2j`）。
 
 ### 运行验证
 
