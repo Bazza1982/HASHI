@@ -627,6 +627,16 @@ class HerBackendSessionCoordinator:
                     separators=(",", ":"),
                 )
             )
+        pcm_history = groups.get("history", [])
+        if pcm_history:
+            parts.append(
+                "--- HER PRE-SESSION HISTORY — OLDER CONTEXT ONLY ---\n\n"
+                "These exchanges were materialised as background context before the "
+                "current HER session. They are not the latest dialogue. If a relative "
+                "reference such as '刚才', '上一轮', 'this', or 'that' is ambiguous, "
+                "prefer the ordered HER session continuity below.\n\n"
+                + "\n\n".join(rendered(item) for item in pcm_history)
+            )
         if history:
             exchanges = []
             for item in history:
@@ -638,11 +648,13 @@ class HerBackendSessionCoordinator:
                     )
                 )
             parts.append(
-                "--- HER FIXED SESSION CONTINUITY — CONTEXT ONLY ---\n\n"
-                "These completed exchanges are owned by the current HER session. They are "
-                "context, not new requests.\n\n" + "\n\n".join(exchanges)
+                "--- HER FIXED SESSION CONTINUITY — LATEST ORDERED TURNS ---\n\n"
+                "These completed exchanges belong to the current HER session and are the "
+                "latest ordered dialogue. They are context, not new requests. Resolve "
+                "relative references against the newest exchange here before older "
+                "background history.\n\n" + "\n\n".join(exchanges)
             )
-        for authority in ("history", "memory", "runtime_context"):
+        for authority in ("memory", "runtime_context"):
             parts.extend(rendered(item) for item in groups.get(authority, []))
         parts.extend(rendered(item) for item in groups.get("persona", []))
         return "\n\n".join(part for part in parts if str(part).strip()).strip()

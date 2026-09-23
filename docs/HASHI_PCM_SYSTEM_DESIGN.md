@@ -321,6 +321,13 @@ at an applicable bootstrap, rebase, or explicit continuation event such as
 cross-Session Context or `/handoff`. Engine Adapters that do not yet support the
 same delta contract must declare their full-projection behaviour explicitly.
 
+For HER v2, the bootstrap exchanges remain bounded older background context in
+the fixed Engine Session. The durable HER Turn sequence is the latest ordered
+dialogue after bootstrap. Fixed-session presentation must label and place the
+bootstrap context before the current HER continuity so relative references such
+as “刚才” and “上一轮” resolve against the newest HER Turn rather than an older
+bootstrap exchange.
+
 #### Passive retrieval: stateless or per-turn Engine invocations
 
 When an Engine Adapter has no durable Engine Session, PCM sends the current user
@@ -499,6 +506,7 @@ The following decisions were accepted on 26 August 2026. They are normative and 
 | PCM-DEC-005 | Central BGE-M3 raw-memory search is scoped to the current HASHI instance and Agent by default. | `memory_sync` permits ingestion but does not grant cross-Agent read access. Shared knowledge is delivered through the curated Wiki. Searching another Agent’s raw consolidated records requires explicit user authorisation, an auditable purpose and provenance-preserving results. `/wiki` never exposes the underlying raw cross-Agent memory store. |
 | PCM-DEC-006 | Unfinished work is transient Context, not Agent Memory. HER v2's canonical Engine Session control plane owns durable recovery evidence; the former WIP Journal is shadow compatibility evidence only. | Interrupted work is reconstructed from canonical typed Turn, Tool, side-effect, and checkpoint evidence. Later HER Turns receive quoted recovery Context with visible uncertainty where required. Provider requests and raw assembled envelopes are excluded. `/compact` operates on settled Session history. Memory+ is not responsible for crash recovery. |
 | PCM-DEC-007 | Natural-language referents are resolved by the Engine from the current user message and chronologically ordered Conversation history, not by PAO/PCM hard binding. | Preserve ordinary user text verbatim, including bare choices such as `3` and words such as `continue`. Out-of-session results may enter Context only as timestamped, read-only user-assistant history. Do not infer a reply target from prose, rewrite the current request, synthesize option wording, or create Connector reply controls. Explicit typed slash/control operations retain their own contracts. |
+| PCM-DEC-008 | In a persistent HER session, bootstrap history is older background context; the durable HER Turn sequence is the latest ordered dialogue after bootstrap. | Preserve bootstrap exchanges for context, but label and present them before the current HER continuity. Resolve relative references such as “刚才” and “上一轮” against the newest HER Turn, never against a retained bootstrap exchange. |
 
 The WIP Journal remains temporarily as a bounded shadow/legacy compatibility
 projection while canonical HER recovery is validated. It must not be re-ingested

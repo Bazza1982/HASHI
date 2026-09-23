@@ -272,6 +272,46 @@ def test_incremental_pcm_omission_retains_initial_only_sections(tmp_path):
     assert "pre-session exchange" in second.materialized_prompt
 
 
+def test_fixed_session_separates_older_pcm_history_from_latest_turns(tmp_path):
+    coordinator = HerBackendSessionCoordinator(tmp_path / "state")
+    initial_sections = _sections() + [
+        {
+            "key": "recent_exchange:7",
+            "title": "RECENT COMPLETED EXCHANGE",
+            "text": "Old LAN_share instruction from before this HER session.",
+            "authority": "history",
+            "rank": 4,
+            "protected": False,
+            "metadata": {"sequence": 7},
+            "order": 3,
+        }
+    ]
+    first_transport, _audit = _prepare(
+        coordinator,
+        request_id="turn-1",
+        message="The current Workzone question",
+        sections=initial_sections,
+    )
+    first = coordinator.accept(first_transport)
+    coordinator.complete(first, assistant_text="Latest Workzone explanation")
+
+    second_transport, _audit = _prepare(
+        coordinator,
+        request_id="turn-2",
+        message="Please explain that again",
+    )
+    second = coordinator.accept(second_transport)
+    prompt = second.materialized_prompt
+
+    assert "HER PRE-SESSION HISTORY — OLDER CONTEXT ONLY" in prompt
+    assert prompt.index("Old LAN_share instruction") < prompt.index(
+        "HER FIXED SESSION CONTINUITY"
+    )
+    assert prompt.index("HER FIXED SESSION CONTINUITY") < prompt.index(
+        "Latest Workzone explanation"
+    )
+
+
 def test_incremental_pcm_sends_non_text_typed_field_changes(tmp_path):
     coordinator = HerBackendSessionCoordinator(tmp_path / "state")
     first_transport, _audit = _prepare(

@@ -74,7 +74,9 @@ ask for a fresh action; never blindly retry or restore stale bytes. See
 Qualify “Session”: PAO owns the HASHI Conversation Session, Messages, and Runs;
 the selected Engine owns its Engine Session and Turns; Provider context is
 rebuildable; frontend history is a disposable projection. Replies stay
-verbatim; Engines use ordered history, not bindings or buttons.
+verbatim; Engines use ordered history, not bindings or buttons. In a persistent
+HER session, bootstrap history is older background context and the current HER
+Turn continuity is the latest ordered dialogue.
 
 External frontends atomically stage advertised attachments into one ordered
 Message/Run; required failure rejects it, never creates per-file Turns.
