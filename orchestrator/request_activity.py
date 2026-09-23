@@ -14,9 +14,13 @@ import re
 import threading
 import time
 from collections import OrderedDict
-from typing import Any
+from typing import Any, Callable, Mapping
 
-from adapters.stream_events import legacy_delivery_class
+from adapters.stream_events import (
+    DELIVERY_ANSWER_PREVIEW,
+    DELIVERY_FINAL,
+    legacy_delivery_class,
+)
 
 
 _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
@@ -68,6 +72,9 @@ class RequestActivityStore:
         self.max_events_per_request = max(32, min(int(max_events_per_request), 1_024))
         self._lock = threading.RLock()
         self._requests: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._presentation_settings_by_request: dict[
+            str, Callable[[], Mapping[str, Any]]
+        ] = {}
 
     def _prune_unlocked(self) -> None:
         while len(self._requests) > self.max_requests:
@@ -82,6 +89,7 @@ class RequestActivityStore:
             if removable is None:
                 return
             self._requests.pop(removable, None)
+            self._presentation_settings_by_request.pop(removable, None)
 
     def _ensure_unlocked(
         self,
@@ -113,6 +121,41 @@ class RequestActivityStore:
         else:
             self._requests.move_to_end(safe_id)
         return record
+
+    def bind_presentation_settings(
+        self,
+        request_id: str,
+        probe: Callable[[], Mapping[str, Any]],
+    ) -> None:
+        """Bind live presentation switches to one request's activity stream."""
+
+        if not callable(probe):
+            raise TypeError("presentation settings probe must be callable")
+        safe_id = _safe_text(request_id, limit=160).strip()
+        if not safe_id:
+            raise ValueError("presentation settings require a request id")
+        with self._lock:
+            self._presentation_settings_by_request[safe_id] = probe
+
+    def _settings_for_request_unlocked(
+        self,
+        request_id: str,
+    ) -> Mapping[str, Any]:
+        probe = self._presentation_settings_by_request.get(str(request_id or ""))
+        if not callable(probe):
+            probe = getattr(self, "presentation_settings", None)
+        if not callable(probe):
+            return {}
+        try:
+            settings = probe()
+        except Exception as exc:  # display telemetry must remain best effort
+            self.logger.warning(
+                "Request activity presentation settings failed for %s (%s)",
+                _safe_text(request_id, limit=160),
+                type(exc).__name__,
+            )
+            return {}
+        return settings if isinstance(settings, Mapping) else {}
 
     def _append_unlocked(
         self,
@@ -261,17 +304,51 @@ class RequestActivityStore:
                 owner = str(getattr(event, "delivery_class", "") or "")
                 if not owner and not str(getattr(event, "origin", "")).startswith("her_v2"):
                     owner = legacy_delivery_class(kind)
-                channel = {"reasoning": "thinking", "user_commentary": "commentary",
-                           "technical": "verbose", "control": "control"}.get(owner)
-                probe = getattr(self, "presentation_settings", None)
-                settings = probe() if callable(probe) else {}
-                enabled = bool(channel and (settings.get(channel if channel != "thinking" else "think", False)
-                               if channel != "control" else getattr(event, "required", False)))
+                channel = {
+                    "reasoning": "thinking",
+                    "user_commentary": "commentary",
+                    "technical": "verbose",
+                    "control": "control",
+                    DELIVERY_ANSWER_PREVIEW: "answer",
+                }.get(owner)
+                settings = self._settings_for_request_unlocked(request_id)
+                if owner == DELIVERY_ANSWER_PREVIEW:
+                    # Answer previews are a Workbench-only ephemeral lane.  A
+                    # local frontend opts in through the typed presentation
+                    # settings; Telegram never receives this owner.
+                    enabled = bool(settings.get("answer_preview", False))
+                elif owner == DELIVERY_FINAL and bool(
+                    settings.get("answer_preview", False)
+                ):
+                    # The final event is the authoritative replacement point
+                    # for the ephemeral preview.  It remains deferred by the
+                    # HER router for ordinary transport delivery.
+                    channel = "answer"
+                    enabled = True
+                else:
+                    enabled = bool(
+                        channel
+                        and (
+                            settings.get(
+                                channel if channel != "thinking" else "think", False
+                            )
+                            if channel != "control"
+                            else getattr(event, "required", False)
+                        )
+                    )
                 if channel == "commentary" and bool(getattr(event, "required", False)):
                     enabled = True
                 projected = record["events"][-1]
                 projected.update(delivery_class=owner, presentation_channel=channel or "internal",
                                  presentation_enabled=enabled)
+                if channel == "answer":
+                    projected.update(
+                        answer_state=(
+                            "complete" if owner == DELIVERY_FINAL else "delta"
+                        ),
+                        answer_authoritative=owner == DELIVERY_FINAL,
+                        answer_ephemeral=owner != DELIVERY_FINAL,
+                    )
                 if enabled and channel == "thinking" and getattr(event, "raw_delta", ""):
                     projected["raw_delta"] = _safe_text(event.raw_delta, limit=8_000)
                     projected["body_truncated"] = len(str(event.raw_delta)) > 8_000
@@ -317,6 +394,7 @@ class RequestActivityStore:
                 timestamp=now,
             )
             record["completed_at"] = event["timestamp"]
+            self._presentation_settings_by_request.pop(str(request_id or ""), None)
 
     def poll(self, request_id: str, *, after_sequence: int = 0, limit: int = 100) -> dict[str, Any]:
         after = max(0, int(after_sequence))

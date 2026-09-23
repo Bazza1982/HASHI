@@ -6,6 +6,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from adapters.stream_events import (
+    DELIVERY_ANSWER_PREVIEW,
+    DELIVERY_FINAL,
+    KIND_ANSWER_PREVIEW,
+)
 from orchestrator.request_activity import RequestActivityStore
 from orchestrator.session_store import SessionStore
 from orchestrator.workbench_api import WorkbenchApiServer
@@ -165,6 +170,70 @@ def test_request_activity_covers_display_kinds_and_rejects_duplicate_unknown_and
         "completed",
     ]
     assert store.poll("req-unknown")["error_code"] == "request_activity_not_found"
+
+
+def test_request_activity_projects_workbench_answer_preview_and_final_replacement() -> None:
+    store = RequestActivityStore()
+    store.presentation_settings = lambda: {"answer_preview": True}
+    store.start("req-answer")
+    store.publish_stream(
+        "req-answer",
+        SimpleNamespace(
+            kind=KIND_ANSWER_PREVIEW,
+            summary="partial answer",
+            event_id="answer-preview-1",
+            delivery_class=DELIVERY_ANSWER_PREVIEW,
+        ),
+    )
+    store.publish_stream(
+        "req-answer",
+        SimpleNamespace(
+            kind="final",
+            summary="complete answer",
+            event_id="answer-final",
+            delivery_class=DELIVERY_FINAL,
+        ),
+    )
+
+    events = store.poll("req-answer")["events"]
+    preview, final = events[-2:]
+    assert preview["presentation_channel"] == "answer"
+    assert preview["presentation_enabled"] is True
+    assert preview["answer_state"] == "delta"
+    assert preview["answer_authoritative"] is False
+    assert preview["answer_ephemeral"] is True
+    assert final["presentation_channel"] == "answer"
+    assert final["presentation_enabled"] is True
+    assert final["answer_state"] == "complete"
+    assert final["answer_authoritative"] is True
+    assert final["answer_ephemeral"] is False
+
+
+def test_request_activity_keeps_answer_preview_eligibility_request_scoped() -> None:
+    store = RequestActivityStore()
+    store.start("req-workbench")
+    store.start("req-telegram")
+    store.bind_presentation_settings(
+        "req-workbench", lambda: {"answer_preview": True}
+    )
+    store.bind_presentation_settings(
+        "req-telegram", lambda: {"answer_preview": False}
+    )
+    for request_id in ("req-workbench", "req-telegram"):
+        store.publish_stream(
+            request_id,
+            SimpleNamespace(
+                kind=KIND_ANSWER_PREVIEW,
+                summary="partial",
+                event_id=f"{request_id}:preview",
+                delivery_class=DELIVERY_ANSWER_PREVIEW,
+            ),
+        )
+
+    workbench_event = store.poll("req-workbench")["events"][-1]
+    telegram_event = store.poll("req-telegram")["events"][-1]
+    assert workbench_event["presentation_enabled"] is True
+    assert telegram_event["presentation_enabled"] is False
 
 
 @pytest.mark.asyncio

@@ -174,6 +174,13 @@ class _CanonicalStreamAuditBatch:
     def capture(self, event: Any) -> None:
         if self.store is None:
             return
+        # Workbench answer previews are deliberately ephemeral.  The final
+        # response remains the sole authoritative audit/history record; a
+        # partial preview must not be retained as provider evidence.
+        from adapters.stream_events import KIND_ANSWER_PREVIEW
+
+        if str(getattr(event, "kind", "") or "") == KIND_ANSWER_PREVIEW:
+            return
         self._require_healthy()
         now_monotonic = time.monotonic()
         if self._started_monotonic is None:
@@ -1994,7 +2001,7 @@ def wrap_her_persona_stream(
     activity_store=None,
 ):
     """Create the sole HER presentation router after audit/activity persistence."""
-    from adapters.stream_events import KIND_ACKNOWLEDGEMENT
+    from adapters.stream_events import KIND_ACKNOWLEDGEMENT, KIND_ANSWER_PREVIEW
     from orchestrator.her_message_router import HERMessageRouter
 
     normalized_backend = canonical_backend_engine(backend_name).lower()
@@ -2327,7 +2334,10 @@ def wrap_her_persona_stream(
                 ),
                 reason=suppression_reason,
             )
-        if audit_collector is not None:
+        if (
+            audit_collector is not None
+            and getattr(event, "kind", "") != KIND_ANSWER_PREVIEW
+        ):
             try:
                 await audit_collector.record(event)
             except Exception as exc:
@@ -2716,11 +2726,27 @@ async def setup_interactive_feedback(
     activity_store = getattr(runtime, "request_activity", None)
 
     if activity_store is not None:
-        activity_store.presentation_settings = lambda: {
+        presentation_settings = lambda: {
             "think": bool(getattr(runtime, "_think", False)),
             "commentary": bool(getattr(runtime, "_commentary", True)),
             "verbose": bool(getattr(runtime, "_verbose", False)),
+            # Workbench receives the bounded HER answer-preview lane even when
+            # Telegram mirroring is disabled.  Other surfaces retain the
+            # existing activity projection and never see provider text.
+            "answer_preview": (
+                str(getattr(item, "session_surface", "") or "")
+                .strip()
+                .casefold()
+                == "workbench"
+                and not bool(getattr(item, "silent", False))
+            ),
         }
+        activity_store.presentation_settings = presentation_settings
+        bind_presentation_settings = getattr(
+            activity_store, "bind_presentation_settings", None
+        )
+        if callable(bind_presentation_settings):
+            bind_presentation_settings(item.request_id, presentation_settings)
 
     stream_callback = wrap_her_persona_stream(
         runtime,

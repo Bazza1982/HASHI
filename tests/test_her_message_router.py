@@ -5,12 +5,14 @@ from types import SimpleNamespace
 import pytest
 
 from adapters.stream_events import (
+    DELIVERY_ANSWER_PREVIEW,
     DELIVERY_CONTROL,
     DELIVERY_FINAL,
     DELIVERY_REASONING,
     DELIVERY_TECHNICAL,
     DELIVERY_USER_COMMENTARY,
     KIND_ACKNOWLEDGEMENT,
+    KIND_ANSWER_PREVIEW,
     KIND_COMMENTARY,
     KIND_PROGRESS,
     KIND_THINKING,
@@ -399,3 +401,29 @@ async def test_persistence_failure_does_not_block_direct_presentation():
     await router.route(event)
 
     assert presented == [event.event_id]
+
+
+@pytest.mark.asyncio
+async def test_answer_preview_is_persisted_but_never_sent_to_transport():
+    presented = []
+    persisted = []
+    router = HERMessageRouter(
+        request_id="req-preview",
+        logger=SimpleNamespace(
+            info=lambda _message: None, warning=lambda _message: None
+        ),
+        commentary_presenter=lambda event: presented.append(event.event_id),
+        persist_event=lambda event: persisted.append(event.event_id),
+    )
+    event = _event(
+        DELIVERY_ANSWER_PREVIEW,
+        "req-preview:answer:1",
+        kind=KIND_ANSWER_PREVIEW,
+        summary="partial answer",
+    )
+
+    accepted = await router.route(event)
+
+    assert accepted is False
+    assert persisted == [event.event_id]
+    assert presented == []

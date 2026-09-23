@@ -146,6 +146,9 @@ effects, and meter every physical call.
 Tool-enabled HER Direct and Primary Execution may propose interim commentary,
 but only typed Persona-packaged output is user-facing; raw or packaging-failed
 provider text and provider progress from other stages stay internal.
+Workbench may receive only HER's typed, ephemeral `answer_preview` lane after
+stage visibility checks; the raw `text_delta` protocol and all structured
+control stages remain private, and the final response stays authoritative.
 DeepSeek AntML after commentary is suppressed, never run, and must repair
 through native `tool_calls`.
 
