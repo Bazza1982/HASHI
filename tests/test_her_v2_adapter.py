@@ -2700,14 +2700,12 @@ async def test_strategy_receives_complete_policy_and_minimal_turn_prompt():
         "DIRECT_RESPONSE",
         "SIMPLE_TASK",
         "COMPLEX_TASK",
-        "HIGH_VOLUME_TASK",
         "CONFIRMATION_REQUIRED",
     ):
         assert classification in backend.sys_prompt
     for decision_boundary in (
         "A bounded and straightforward execution step is required",
         "multiple dependent steps, discovery, comparison, validation",
-        "substantial execution volume or many independent items",
         "goal, target, scope, required choice, or authority is materially unclear",
     ):
         assert decision_boundary in backend.sys_prompt
@@ -2767,7 +2765,7 @@ async def test_json_repair_uses_isolated_specialist_prompt_and_no_tools():
             "required_schema": {
                 "classification": (
                     "DIRECT_RESPONSE | SIMPLE_TASK | COMPLEX_TASK | "
-                    "HIGH_VOLUME_TASK | CONFIRMATION_REQUIRED"
+                    "CONFIRMATION_REQUIRED"
                 ),
                 "real_goal": "resolved operative goal or null",
                 "relevant_habits": [],

@@ -703,9 +703,11 @@ def _immediate_response_system_prompt(
     source: her_persona.HERPersonaPackagingSource,
     *,
     goal: str,
+    initial_response_only: bool = False,
 ) -> str:
     return render_immediate_response_system_prompt(
         goal=goal,
+        initial_response_only=initial_response_only,
         guidance=source.guidance,
         display_name=source.display_name,
         usable=source.usable,
@@ -3921,7 +3923,11 @@ class HashiStageProvider(StageProvider):
                 )
                 if request.stage is Stage.IMMEDIATE_RESPONSE:
                     system_prompt = _immediate_response_system_prompt(
-                        source, goal=request.goal
+                        source,
+                        goal=request.goal,
+                        initial_response_only=bool(
+                            request.context.get("initial_response_only")
+                        ),
                     )
                 elif primary_direct or primary_execution:
                     definitions_getter = getattr(

@@ -24,6 +24,9 @@ class TriageClassification(StrEnum):
     DIRECT_RESPONSE = "DIRECT_RESPONSE"
     SIMPLE_TASK = "SIMPLE_TASK"
     COMPLEX_TASK = "COMPLEX_TASK"
+    # Retained only so old persisted ledgers and replay envelopes remain
+    # readable.  New routing never offers this category; JEV maps the former
+    # high-volume case into COMPLEX_TASK because multi-agent routing is retired.
     HIGH_VOLUME_TASK = "HIGH_VOLUME_TASK"
     CONFIRMATION_REQUIRED = "CONFIRMATION_REQUIRED"
 
@@ -32,6 +35,8 @@ WORK_CLASSIFICATIONS = frozenset(
     {
         TriageClassification.SIMPLE_TASK,
         TriageClassification.COMPLEX_TASK,
+        # Legacy persisted/replay turns may still carry HIGH_VOLUME_TASK.  New
+        # JEV routing never emits it and maps that former path to COMPLEX_TASK.
         TriageClassification.HIGH_VOLUME_TASK,
     }
 )

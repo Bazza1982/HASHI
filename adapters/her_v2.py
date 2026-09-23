@@ -27,6 +27,7 @@ from adapters.her_v2_provider import (
     _provider_exception_error,
     _UnboundedToolRegistry,
 )
+from adapters.her_v2_route import TypeSafeRouteJudge
 from adapters.stream_events import StreamCallback
 from orchestrator.her_v2.audit import AuditPersistenceError, DurableAuditLog
 from orchestrator.her_v2.backend_session import (
@@ -1784,6 +1785,12 @@ class HERv2Adapter(BaseBackend):
                         for profile in (turn_config.profile_for_route(route),)
                     },
                     "style_finalisation_enabled": turn_config.style_finalisation.enabled,
+                    "route_judgment": {
+                        "enabled": turn_config.route_judgment.enabled,
+                        "serial_initial_response": (
+                            turn_config.route_judgment.serial_initial_response
+                        ),
+                    },
                     "voice_origin_active": bool(turn_config.voice_origin_active),
                 }
                 frozen_route = self._session_coordinator.store.freeze_turn_routing(
@@ -1968,8 +1975,20 @@ class HERv2Adapter(BaseBackend):
                 # Snapshot/configuration failure degrades only this optional editor.
                 final_style_unavailable_reason = type(exc).__name__
                 self.logger.warning("Style finalisation unavailable: %s", type(exc).__name__)
+        route_judgment = None
+        if runtime_config.route_judgment.enabled:
+            try:
+                route_judgment = TypeSafeRouteJudge(
+                    provider=provider,
+                    config=runtime_config.route_judgment,
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    "HER v2 route judgment unavailable: %s", type(exc).__name__
+                )
         runtime = HERv2Runtime(
             config=runtime_config,
+            route_judgment=route_judgment,
             final_style=final_style,
             final_style_unavailable_reason=final_style_unavailable_reason,
             workzone_preflight=workzone_preflight,

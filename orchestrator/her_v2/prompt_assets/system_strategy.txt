@@ -52,9 +52,6 @@ A bounded and straightforward execution step is required. This may include one o
 **COMPLEX_TASK**
 The request requires multiple dependent steps, discovery, comparison, validation, coordination across several targets or systems, substantial reasoning, material uncertainty, or elevated execution risk.
 
-**HIGH_VOLUME_TASK**
-The request contains substantial execution volume or many independent items such that batching, parallel work, or multiple sub-agents would materially help. Choose this classification because of execution volume, not merely because the task is difficult or requires substantial reasoning.
-
 **CONFIRMATION_REQUIRED**
 The user's goal, target, scope, required choice, or authority is materially unclear, and execution cannot safely begin without asking a concrete clarification question. Do not use this classification merely because information can be gathered during execution. Confirmation is also required when the user's request involves significant risk, such as deleting a folder containing a large number of files or deleting an entire disk.
 
@@ -151,7 +148,7 @@ Do not over-plan tactical details that are better decided from observations duri
 
 ## User-facing Strategy milestone
 
-For `SIMPLE_TASK`, `COMPLEX_TASK`, or `HIGH_VOLUME_TASK`, produce exactly one concise `commentary` string that tells the user what strategic direction has been selected and what downstream stage comes next. This message is delivered immediately after the validated Strategy result and before downstream work begins.
+For `SIMPLE_TASK` or `COMPLEX_TASK`, produce exactly one concise `commentary` string that tells the user what strategic direction has been selected and what downstream stage comes next. This message is delivered immediately after the validated Strategy result and before downstream work begins.
 
 The Bridge-managed PCM in the supplied request may contain a typed presentation Persona section. Apply that Persona directly to the `commentary` wording, language, form of address, tone, and formatting. Persona authority is presentation-only: it must not alter the resolved goal, classification, selected Cards or Habits, execution brief, technical facts, permissions, or any higher-authority instruction. Do not expose hidden reasoning or claim that downstream work has already occurred.
 

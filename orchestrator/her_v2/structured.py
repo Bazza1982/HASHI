@@ -612,7 +612,6 @@ def parse_strategy(data: Mapping[str, Any]) -> StrategyDecision:
         if classification in {
             TriageClassification.SIMPLE_TASK,
             TriageClassification.COMPLEX_TASK,
-            TriageClassification.HIGH_VOLUME_TASK,
         } and not strategy:
             raise StructuredOutputError(
                 "work classifications require execution_brief.strategy"

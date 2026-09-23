@@ -39,6 +39,7 @@ from orchestrator.her_v2.presentation import (
 from orchestrator.her_v2.progress import ProviderActivityTracker
 from orchestrator.her_v2.runtime import HERv2Runtime
 from orchestrator.her_v2.runtime_support import _merged_stage_timings_s
+from orchestrator.her_v2.route_judgment import RouteJudgment
 from orchestrator.multimodal_contract import (
     attachment_manifest,
     canonical_request_content,
@@ -446,6 +447,82 @@ def _initial(
             )
         ],
     }
+
+
+class _RecordingRouteJudge:
+    def __init__(self, provider, classification):
+        self.provider = provider
+        self.classification = classification
+        self.calls = 0
+        self.provider_request_order = []
+
+    async def judge(self, state, turn_id):
+        del state, turn_id
+        self.calls += 1
+        # The first Immediate Response must have completed before JEV starts;
+        # Strategy must not have started yet.
+        self.provider_request_order.append(
+            [request.stage for _profile, request in self.provider.requests]
+        )
+        return RouteJudgment(
+            classification=self.classification,
+            probabilities={self.classification.value: 1.0},
+            confidence=1.0,
+            model="test-jev",
+            provider_request_id="test-jev-request",
+        )
+
+
+@pytest.mark.asyncio
+async def test_jev_serial_route_emits_initial_ack_before_strategy_and_final_response(
+    tmp_path,
+):
+    provider = ScriptedProvider(
+        {
+            Stage.IMMEDIATE_RESPONSE: [
+                {"message": "收到，臣妾先确认请求。"},
+                {"message": "这是根据请求得到的直接答复。"},
+            ],
+            Stage.TRIAGE: [
+                _triage(
+                    "DIRECT_RESPONSE",
+                    real_goal="回答当前问题。",
+                )
+            ],
+        }
+    )
+    runtime = _runtime(
+        tmp_path,
+        provider,
+        config=_config(
+            route_judgment={
+                "enabled": True,
+                "serial_initial_response": True,
+            }
+        ),
+    )
+    judge = _RecordingRouteJudge(provider, TriageClassification.DIRECT_RESPONSE)
+    runtime.route_judgment = judge
+
+    result = await runtime.run_turn(
+        "Please answer this question.",
+        "req-jev-serial",
+        effort=Effort.LOW,
+    )
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert result.text == "这是根据请求得到的直接答复。"
+    assert judge.calls == 1
+    assert judge.provider_request_order == [[Stage.IMMEDIATE_RESPONSE]]
+    assert [request.stage for _profile, request in provider.requests] == [
+        Stage.IMMEDIATE_RESPONSE,
+        Stage.TRIAGE,
+        Stage.IMMEDIATE_RESPONSE,
+    ]
+    assert [record.kind for record in result.delivery_records] == [
+        "acknowledgement",
+        "final",
+    ]
 
 
 def _modality_profiles(

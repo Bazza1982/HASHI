@@ -35,9 +35,6 @@ A bounded and straightforward execution step is required. This may include one o
 **COMPLEX_TASK**
 The request requires multiple dependent steps, discovery, comparison, validation, coordination across several targets or systems, substantial reasoning, material uncertainty, or elevated execution risk.
 
-**HIGH_VOLUME_TASK**
-The request contains substantial execution volume or many independent items such that batching, parallel work, or multiple sub-agents would materially help. Choose this classification because of execution volume, not merely because the task is difficult or requires substantial reasoning.
-
 **CONFIRMATION_REQUIRED**
 The user's goal, target, scope, required choice, or authority is materially unclear, and execution cannot safely begin without asking a concrete clarification question. Do not use this classification merely because information can be gathered during execution. Confirmation is also required when the user's request involves significant risk, such as deleting a folder containing a large number of files or deleting an entire disk.
 

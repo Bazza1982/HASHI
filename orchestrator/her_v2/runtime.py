@@ -84,6 +84,7 @@ from .presentation import RequiredPersonaRenderer
 from .progress import ProgressTracker
 from .prompts import extract_authoritative_current_request
 from .retry import DEFAULT_PROVIDER_RETRY_POLICY, ProviderRetryPolicy
+from .route_judgment import RouteJudgment
 from .runtime_invocation import RuntimeInvocationMixin
 from .runtime_support import (
     RuntimeSupportMixin,
@@ -300,6 +301,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         capability_cache_path: Path | str | None = None,
         final_style: Any | None = None,
         final_style_unavailable_reason: str = "",
+        route_judgment: Any | None = None,
         workzone_preflight: Any | None = None,
     ) -> None:
         self.config = config
@@ -307,6 +309,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         self.final_style_unavailable_reason = str(
             final_style_unavailable_reason or ""
         )
+        self.route_judgment = route_judgment
         self.workzone_preflight = workzone_preflight
         self.provider = provider
         self.ledger_store = ledger_store
@@ -334,6 +337,56 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         self._controls: dict[str, TurnControl] = {}
         self._turn_tasks: dict[str, asyncio.Task] = {}
         self._background_tasks: set[asyncio.Task] = set()
+
+    async def _run_route_judgment(
+        self, state: _TurnState
+    ) -> RouteJudgment | None:
+        """Ask JEV for the fixed route, degrading to Strategy on failure."""
+
+        judge = self.route_judgment
+        if judge is None:
+            return None
+        context = state.request
+        if len(context) > 48_000:
+            context = (
+                context[:24_000]
+                + "\n\n[route context truncated by HASHI]\n\n"
+                + context[-24_000:]
+            )
+        payload = {
+            "current_request": extract_authoritative_current_request(state.request)
+            or state.request,
+            "typed_context": context,
+            "effort": state.effort.value,
+            "attachments": [dict(item) for item in state.attachment_manifest],
+        }
+        try:
+            result = await state.control.run_cancellable(
+                judge.judge(payload, state.ledger.turn_id)
+            )
+            if not isinstance(result, RouteJudgment):
+                raise TypeError("route judgment returned an invalid typed result")
+            self._audit(
+                state,
+                stage=Stage.TRIAGE.value,
+                role="route_judge",
+                event="route_judgment_completed",
+                event_id=f"{state.ledger.turn_id}:route:judgment",
+                payload=result.as_payload(),
+            )
+            return result
+        except (asyncio.CancelledError, TurnStopped, AuditPersistenceError):
+            raise
+        except Exception as exc:
+            self._audit(
+                state,
+                stage=Stage.TRIAGE.value,
+                role="route_judge",
+                event="route_judgment_degraded",
+                event_id=f"{state.ledger.turn_id}:route:degraded",
+                payload={"error_type": type(exc).__name__, "fallback": "strategy"},
+            )
+            return None
 
     async def run_turn(
         self,
@@ -919,12 +972,13 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 )
             return await text_audio_task
 
-        async def invoke_immediate():
+        async def invoke_immediate(*, initial_response_only: bool = False):
             return await self._invoke_stage(
                 state,
                 Stage.IMMEDIATE_RESPONSE,
                 parse_immediate,
                 allow_tools=False,
+                context={"initial_response_only": initial_response_only},
                 request_content_override=await adapted_content(immediate_transport),
             )
 
@@ -959,6 +1013,47 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         }
 
         strategy_mapping_parser = getattr(parse_strategy, "_mapping_parser")
+        route_judgment: RouteJudgment | None = None
+
+        def enforce_route_authority(decision: StrategyDecision) -> StrategyDecision:
+            """Keep the model's goal/cards, but never let it override JEV's route."""
+
+            if route_judgment is None:
+                return decision
+            selected = route_judgment.classification
+            if decision.classification is selected:
+                return decision
+            if selected is not TriageClassification.CONFIRMATION_REQUIRED and not str(
+                decision.real_goal or ""
+            ).strip():
+                raise StructuredOutputError(
+                    "JEV resolved route requires the Strategy real_goal"
+                )
+            if selected is TriageClassification.CONFIRMATION_REQUIRED and not decision.clarification:
+                raise StructuredOutputError(
+                    "JEV route CONFIRMATION_REQUIRED requires a clarification"
+                )
+            if selected in WORK_CLASSIFICATIONS and not str(
+                decision.execution_brief.get("strategy") or ""
+            ).strip():
+                raise StructuredOutputError(
+                    "JEV work route requires a non-empty execution strategy"
+                )
+            self._audit(
+                state,
+                stage=Stage.TRIAGE.value,
+                role="route_judge",
+                event="route_judgment_authoritative_override",
+                event_id=(
+                    f"{state.ledger.turn_id}:route:override:"
+                    f"{decision.classification.value.lower()}"
+                ),
+                payload={
+                    "jev_classification": selected.value,
+                    "strategy_classification": decision.classification.value,
+                },
+            )
+            return replace(decision, classification=selected)
 
         def validate_strategy_mapping(
             data: Mapping[str, Any],
@@ -968,7 +1063,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 playbook.resolve_cards(decision.selected_strategy_cards)
             except StrategyPlaybookError as exc:
                 raise StructuredOutputError(str(exc)) from exc
-            return decision
+            return enforce_route_authority(decision)
 
         def validate_strategy(response: StageResponse) -> StrategyDecision:
             decision = parse_strategy(response)
@@ -976,7 +1071,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 playbook.resolve_cards(decision.selected_strategy_cards)
             except StrategyPlaybookError as exc:
                 raise StructuredOutputError(str(exc)) from exc
-            return decision
+            return enforce_route_authority(decision)
 
         setattr(validate_strategy, "_mapping_parser", validate_strategy_mapping)
 
@@ -998,8 +1093,227 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                     "strategy_cards": playbook.selection_payload(),
                     "execution_capabilities": execution_capabilities,
                     "request_resources": request_resources,
+                    "route_judgment": (
+                        route_judgment.as_payload() if route_judgment else None
+                    ),
                 },
                 request_content_override=await adapted_content(triage_transport),
+            )
+
+        # Pilot path: a safe initial acknowledgement is emitted first, then the
+        # frozen turn context goes through JEV and the existing Strategy/Card
+        # stage.  This deliberately avoids the old Immediate/Strategy race.  A
+        # direct route receives a second, substantive Immediate call only after
+        # the authoritative route and real goal are known.
+        serial_mode = bool(
+            self.route_judgment is not None
+            and self.config.route_judgment.serial_initial_response
+        )
+        if serial_mode:
+            initial_pair = None
+            if not immediate_skipped_for_modality:
+                try:
+                    initial_pair = await invoke_immediate(initial_response_only=True)
+                except StageInvocationError as exc:
+                    self._audit(
+                        state,
+                        stage=Stage.IMMEDIATE_RESPONSE.value,
+                        role=self.config.stage_roles[Stage.IMMEDIATE_RESPONSE],
+                        event="initial_response_degraded",
+                        event_id=f"{state.ledger.turn_id}:initial:degraded",
+                        payload={"error_type": type(exc).__name__},
+                    )
+                if initial_pair is not None:
+                    initial_content = tuple(initial_pair[0].content)
+                    await self._deliver(
+                        state,
+                        kind="acknowledgement",
+                        text=initial_pair[1],
+                        event_id=f"{state.ledger.turn_id}:initial",
+                        required=_content_includes_audio(initial_content),
+                        content=initial_content,
+                    )
+
+            route_judgment = await self._run_route_judgment(state)
+            try:
+                triage_response, triage = await invoke_triage()
+            except BaseException:
+                if text_audio_task is not None:
+                    text_audio_task.cancel()
+                    await asyncio.gather(text_audio_task, return_exceptions=True)
+                raise
+            assert isinstance(triage, StrategyDecision)
+
+            immediate_pair = initial_pair
+            if triage.classification is TriageClassification.DIRECT_RESPONSE:
+                if immediate_skipped_for_modality:
+                    self._record_strategy(state, triage, playbook)
+                    state.progress.record(
+                        "classification", triage.classification.value
+                    )
+                    return await self._run_direct_after_triage(state)
+                try:
+                    immediate_pair = await invoke_immediate(
+                        initial_response_only=False
+                    )
+                except StageInvocationError as exc:
+                    raise exc.terminal_copy(
+                        "direct response requires a valid Immediate Response",
+                        attempts=exc.attempts,
+                        human_description=(
+                            "direct response requires a valid substantive response "
+                            f"after JEV routing: {exc.human_description}"
+                        ),
+                    ) from exc
+
+            if triage.classification is TriageClassification.DIRECT_RESPONSE and state.attachment_manifest:
+                required_ids = {
+                    str(item.get("attachment_id") or "")
+                    for item in state.attachment_manifest
+                }
+
+                def serial_consumed_ids(
+                    response: StageResponse | None, *, triage_stage: bool = False
+                ) -> set[str]:
+                    if response is None:
+                        return set()
+                    accepted_routes = {"native"}
+                    if triage_stage:
+                        accepted_routes.add("local_transcript")
+                        if (
+                            response.validation_source == "runtime_voice_boundary"
+                            or (
+                                response.provider == "hashi-runtime"
+                                and response.model == "safe-voice-boundary"
+                            )
+                        ):
+                            accepted_routes.add("transcript_unavailable")
+                    return {
+                        str(item.get("attachment_id") or "")
+                        for item in response.media_routing
+                        if str(item.get("route") or "") in accepted_routes
+                    }
+
+                direct_media_fulfilled = (
+                    bool(required_ids)
+                    and required_ids.issubset(
+                        serial_consumed_ids(triage_response, triage_stage=True)
+                    )
+                    and required_ids.issubset(
+                        serial_consumed_ids(
+                            immediate_pair[0] if immediate_pair is not None else None
+                        )
+                    )
+                )
+                if not direct_media_fulfilled:
+                    triage = replace(
+                        triage,
+                        classification=TriageClassification.SIMPLE_TASK,
+                        execution_brief={
+                            "strategy": (
+                                "Use the capable Execution route to inspect the supplied "
+                                "media and complete the resolved goal."
+                            ),
+                            "stages": ["Inspect the supplied media", "Complete the goal"],
+                            "dependencies": ["Goal completion follows media inspection"],
+                            "verification": [
+                                "Verify the result against the supplied media"
+                            ],
+                            "success_criteria": [
+                                "The media-dependent goal is satisfied"
+                            ],
+                            "replan_conditions": [
+                                "The supplied media cannot be inspected reliably"
+                            ],
+                        },
+                    )
+                    self._audit(
+                        state,
+                        stage=Stage.TRIAGE.value,
+                        role="route_judge",
+                        event="direct_response_media_deferred_to_work",
+                        event_id=f"{state.ledger.turn_id}:route:media-fallback",
+                        payload={
+                            "required_attachment_ids": sorted(required_ids),
+                            "classification_override": TriageClassification.SIMPLE_TASK.value,
+                            "reason": "direct_response_media_capability_unfulfilled",
+                        },
+                    )
+
+            # JEV is authoritative for the route, while the model remains the
+            # owner of real_goal, Cards, Habits, and the execution brief.
+            self._record_strategy(state, triage, playbook)
+            state.progress.record("classification", triage.classification.value)
+
+            if triage.classification is TriageClassification.DIRECT_RESPONSE:
+                assert immediate_pair is not None
+                immediate_response, immediate_text = immediate_pair
+                immediate_content = tuple(immediate_response.content)
+                immediate_text = await self._final_style_text(
+                    state, immediate_text, content=immediate_content
+                )
+                await self._deliver(
+                    state,
+                    kind="final",
+                    text=immediate_text,
+                    event_id=f"{state.ledger.turn_id}:final",
+                    required=True,
+                    content=immediate_content,
+                )
+                await self._transition(state, LifecycleState.FINALISING)
+                await self._transition(
+                    state,
+                    LifecycleState.COMPLETED,
+                    terminal_reason="direct_response",
+                )
+                return self._result(
+                    state,
+                    terminal=TerminalState.COMPLETED,
+                    text=immediate_text,
+                    final_was_immediate=True,
+                    content=immediate_content,
+                )
+
+            if triage.classification is TriageClassification.CONFIRMATION_REQUIRED:
+                clarification, provenance, detail = (
+                    await self._render_required_clarification(
+                        state,
+                        text=triage.clarification,
+                        event_id=f"{state.ledger.turn_id}:clarification",
+                    )
+                )
+                clarification = await self._final_style_text(state, clarification)
+                await self._deliver(
+                    state,
+                    kind="clarification",
+                    text=clarification,
+                    event_id=f"{state.ledger.turn_id}:clarification",
+                    required=True,
+                    provenance=provenance,
+                    detail=detail,
+                )
+                await self._transition(
+                    state,
+                    LifecycleState.PENDING_USER_INPUT,
+                    terminal_reason="confirmation_required",
+                )
+                return self._result(
+                    state,
+                    terminal=TerminalState.PENDING_USER_INPUT,
+                    text=clarification,
+                )
+
+            if triage.classification not in WORK_CLASSIFICATIONS:
+                raise StageInvocationError(
+                    "JEV/Strategy returned an unsupported work classification"
+                )
+            if text_audio_task is not None:
+                with suppress(Exception):
+                    await text_audio_task
+            return await self._run_work(
+                state,
+                triage.classification,
+                policy=effort_policy,
             )
 
         immediate_task = (

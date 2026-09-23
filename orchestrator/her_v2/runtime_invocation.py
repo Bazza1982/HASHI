@@ -64,7 +64,7 @@ Validator = Callable[[StageResponse], Any]
 
 _CLASSIFICATION_ANCHOR_RE = re.compile(
     r'"classification"\s*:\s*"(DIRECT_RESPONSE|SIMPLE_TASK|COMPLEX_TASK|'
-    r'HIGH_VOLUME_TASK|CONFIRMATION_REQUIRED)"'
+    r'CONFIRMATION_REQUIRED)"'
 )
 
 

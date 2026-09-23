@@ -15,7 +15,7 @@ _SCHEMAS = {
     Stage.TRIAGE: {
         "classification": (
             "DIRECT_RESPONSE | SIMPLE_TASK | COMPLEX_TASK | "
-            "HIGH_VOLUME_TASK | CONFIRMATION_REQUIRED"
+            "CONFIRMATION_REQUIRED"
         ),
         "real_goal": (
             "concise resolved operational goal; null only when "
@@ -410,7 +410,7 @@ def render_stage_prompt(request: StageRequest) -> str:
             if isinstance(raw_catalogue, (list, tuple))
             else []
         )
-        return render_prompt_asset(
+        prompt = render_prompt_asset(
             "system_strategy",
             goal=request.goal,
             strategy_cards=json.dumps(
@@ -436,6 +436,19 @@ def render_stage_prompt(request: StageRequest) -> str:
             ),
             stage_tool_policy=_strategy_stage_tool_policy(request),
         )
+        route_judgment = request.context.get("route_judgment")
+        if isinstance(route_judgment, Mapping):
+            prompt += (
+                "\n\n## Authoritative JEV route\n\n"
+                "JEV has selected the fixed route below. Treat this as an "
+                "authoritative workflow choice: resolve the real goal, select the "
+                "existing Strategy Cards, and compose the execution brief, but do "
+                "not replace the route with another classification. JEV's "
+                "probabilities and confidence express uncertainty; they do not "
+                "create another option.\n\n"
+                + json.dumps(dict(route_judgment), ensure_ascii=False, indent=2)
+            )
+        return prompt
     if request.stage is Stage.PLANNING:
         raw_habits = request.context.get("relevant_habits")
         habits = (
@@ -781,13 +794,14 @@ Complete Strategy Card Playbook:
 def render_immediate_response_system_prompt(
     *,
     goal: str,
+    initial_response_only: bool = False,
     guidance: str,
     display_name: str,
     usable: bool,
     persona_block_begin: str,
     persona_block_end: str,
 ) -> str:
-    return render_prompt_asset(
+    prompt = render_prompt_asset(
         "system_immediate_response",
         goal=_immediate_response_goal(goal),
         persona_block_begin=persona_block_begin,
@@ -796,6 +810,17 @@ def render_immediate_response_system_prompt(
         ),
         persona_block_end=persona_block_end,
     )
+    if initial_response_only:
+        prompt += (
+            "\n\n## Serial initial-response mode\n\n"
+            "This is the first, pre-route acknowledgement in a serial HER v2 "
+            "turn. Return only a brief natural acknowledgement that the request "
+            "was received and is being assessed. Do not answer the request, make "
+            "a recommendation, report findings, ask a substantive clarification, "
+            "or claim that work has been completed. The later Strategy stage owns "
+            "the authoritative classification and any substantive response."
+        )
+    return prompt
 
 
 def render_execution_system_prompt(
