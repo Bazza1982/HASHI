@@ -118,15 +118,20 @@ Agent creation uses that same HER mode contract; it must not present
 provider/model/reasoning bundles as HER effort presets.
 
 HER v2's experimental **Style finalisation** is an Agent-local `/model` opt-in,
-disabled by default. It asks TypeSafe/JEV one presentation-only Choice. A
-selected `rewrite` performs one silent text-only rewrite through the configured
-Quick/light target with reasoning and tools off; `keep`/`uncertain` publish the
-original. No probability gate overrides the selected Choice. It is not task
-review, replanning, fact checking, or the legacy Finalisation stage. Failure
-publishes the original answer. Eligible terminal text includes Direct answers,
-required clarifications, ordinary work results, and reviewed Finalisation
-reports. Progress/acknowledgement text, rich output, stop notices, and
-deterministic technical or safety fallbacks are intentionally not rewritten.
+disabled by default. It asks TypeSafe/JEV one strict compliance Choice: whether
+the final response follows the concrete persona and reporting requirements in the
+typed system-prompt snapshot and current request. The typed `authority` field is
+authoritative; source list order is presentation order only. A selected `rewrite`
+performs one silent text-only rewrite through the configured Quick/light target
+with reasoning and tools off; `keep`/`uncertain` publish the original. No
+probability gate overrides the selected Choice. Generic words such as "report"
+do not exempt a response from a supplied brevity/plain-language requirement;
+explicit detailed-content requirements remain binding. It is not task review,
+replanning, fact checking, or the legacy Finalisation stage. Failure publishes the
+original answer. Eligible terminal text includes Direct answers, required
+clarifications, ordinary work results, and reviewed Finalisation reports.
+Progress/acknowledgement text, rich output, stop notices, and deterministic
+technical or safety fallbacks are intentionally not rewritten.
 Fixed-session Style capture supports both `initial_turn` and `turn`. When the
 feature is enabled, each eligible terminal result leaves a checked, skipped, or
 degraded receipt; initialisation failure may not survive only as a hidden log.

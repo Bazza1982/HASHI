@@ -475,6 +475,14 @@ async def test_typesafe_wire_and_quick_route_use_one_silent_rewrite(monkeypatch)
     body = json.loads(sent[0].content)
     assert set(body["questions"]) == {"style"}
     assert body["questions"]["style"]["type"] == "choice"
+    instructions = body["questions"]["style"]["instructions"]
+    lower_instructions = instructions.lower()
+    assert "strict compliance check" in lower_instructions
+    assert "typed `authority`" in instructions
+    assert "list order is presentation order, not authority" in lower_instructions
+    assert "do not by themselves authorize a long technical report" in lower_instructions
+    assert "satisfies every applicable persona/reporting requirement" in body["questions"]["style"]["criteria"]["keep"]
+    assert "a requested technical report, code, exact quotation or json must not be simplified" not in lower_instructions
     profile = provider._package_persona_text_once.call_args.args[0]
     assert profile.engine == "openrouter-api" and profile.model == "quick-test"
     assert profile.reasoning == "off"

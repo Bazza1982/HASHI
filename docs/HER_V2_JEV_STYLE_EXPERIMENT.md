@@ -214,3 +214,18 @@ Isolated Python 3.12 runner, full focused module (including UI): `21 passed`.
   or raise that limit.
 - **Live verification:** not yet performed. Source and offline checks do not
   authorize or prove adoption by Arale's running Function Worker.
+
+## HASHI2 prompt-compliance judgement correction — 2026-09-23
+
+- **Approval:** the current user directed HER v2 to make JEV judge strict
+  compliance with the supplied system prompts' Persona and reporting
+  requirements, rather than apply a generic writing-style preference.
+- **Implementation:** the JEV question now evaluates every applicable requirement
+  in the typed prompt snapshot, uses the typed `authority` field instead of source
+  list order, and treats a material Persona/reporting miss as `rewrite`. Generic
+  words such as "report" or "technical work" no longer exempt a response from a
+  supplied brevity/plain-language rule. The Quick rewrite prompt uses the same
+  authority semantics and may change presentation only.
+- **Offline verification:** focused final-style tests cover the provider wire
+  contract, typed authority semantics, and removal of the broad technical-report
+  exception. Live adoption remains unverified; no reboot was performed.
