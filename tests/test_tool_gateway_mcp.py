@@ -11,6 +11,7 @@ import pytest
 from PIL import Image
 
 from orchestrator.background_job_policy import USER_BACKGROUND_JOB_REQUEST_SOURCE
+from orchestrator.flexible_backend_manager import FlexibleBackendManager
 from tools.gateway.context import (
     live_workbench_api_base_url,
     load_gateway_context,
@@ -92,6 +93,55 @@ def test_gateway_context_uses_running_workbench_bind_host(tmp_path):
     assert loaded.workbench_api_base_url == base_url
     assert rebuilt.audit_context["workbench_api_base_url"] == base_url
     assert "_runtime" not in loaded.audit
+
+
+def test_direct_tool_registry_receives_running_workbench_endpoint(tmp_path):
+    global_config = SimpleNamespace(
+        instance_id="HASHI2",
+        api_host="127.0.0.1",
+        workbench_port=18800,
+    )
+    runtime = SimpleNamespace(
+        name="momo",
+        _request_meta_by_id={},
+        current_request_meta={},
+        orchestrator=SimpleNamespace(
+            resolve_service_endpoint=lambda service, expected_instance=None: {
+                "service": service,
+                "instance_id": expected_instance,
+                "base_url": "http://172.29.144.7:18847",
+            }
+        ),
+    )
+    registry = ToolRegistry(
+        allowed_tools=["hashi_scheduler_list"],
+        access_root=tmp_path,
+        workspace_dir=tmp_path,
+        secrets={},
+        audit_context={
+            "agent_name": "momo",
+            "global_config": global_config,
+            "_runtime": runtime,
+        },
+    )
+    manager = object.__new__(FlexibleBackendManager)
+    manager.current_backend = SimpleNamespace(
+        tool_registry=registry,
+        _hashi_mcp_enabled=False,
+    )
+    manager.runtime = runtime
+    manager.global_config = global_config
+    manager.config = SimpleNamespace(active_backend="her-v2")
+    manager.logger = SimpleNamespace(warning=lambda *args, **kwargs: None)
+
+    manager._refresh_tool_runtime_context("request-1")
+
+    assert registry.audit_context["workbench_api_base_url"] == (
+        "http://172.29.144.7:18847"
+    )
+    assert registry.audit_context["scheduler_api_base_url"] == (
+        "http://172.29.144.7:18847"
+    )
 
 
 def test_gateway_context_rejects_cross_instance_workbench_endpoint(tmp_path):

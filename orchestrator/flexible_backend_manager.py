@@ -1989,6 +1989,21 @@ class FlexibleBackendManager:
             if isinstance(authorization, dict):
                 context["memory_search_authorization"] = dict(authorization)
         registry.audit_context = context
+        try:
+            from tools.gateway.context import live_workbench_api_base_url
+
+            workbench_url = live_workbench_api_base_url(
+                registry,
+                self.global_config,
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "Workbench API endpoint unavailable for ToolRegistry: %s",
+                exc,
+            )
+        else:
+            registry.audit_context["workbench_api_base_url"] = workbench_url
+            registry.audit_context["scheduler_api_base_url"] = workbench_url
         if str(getattr(self.config, "active_backend", "")) in {
             "codex-cli",
             "claude-cli",
