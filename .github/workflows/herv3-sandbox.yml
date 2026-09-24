@@ -1,0 +1,26 @@
+name: HER v3 branch sandbox
+
+on:
+  push:
+    branches: [exp-herv2j]
+    paths:
+      - '.github/workflows/herv3-sandbox.yml'
+      - '.herv3.patch'
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Export tracked experiment source only
+        run: git archive --format=tar.gz HEAD > "$RUNNER_TEMP/herv3-source.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: herv3-source
+          path: ${{ runner.temp }}/herv3-source.tar.gz
+          retention-days: 1
