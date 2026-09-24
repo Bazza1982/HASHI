@@ -798,9 +798,9 @@ async def test_zero_can_self_select_from_playbook_without_adding_a_stage(tmp_pat
     assert request.stage is Stage.DIRECT
     assert request.context["direct_strategy_self_selection"] is True
     playbook = request.context["strategy_playbook"]
-    assert playbook["playbook_version"] == "2026-08-29.1"
+    assert playbook["playbook_version"] == "2026-09-24.1"
     assert playbook["sha256"].startswith("sha256:")
-    assert len(playbook["cards"]) == 38
+    assert len(playbook["cards"]) == 42
     assert {
         Stage.IMMEDIATE_RESPONSE,
         Stage.TRIAGE,
@@ -817,7 +817,7 @@ async def test_zero_can_self_select_from_playbook_without_adding_a_stage(tmp_pat
     attached = next(
         row for row in audit_rows if row["event"] == "direct_strategy_playbook_attached"
     )
-    assert attached["payload"]["card_count"] == 38
+    assert attached["payload"]["card_count"] == 42
     assert attached["payload"]["selection_mode"] == "direct_self_selection"
 
 
@@ -2138,7 +2138,7 @@ async def test_low_strategy_handoff_contains_only_selected_cards_and_skips_plann
     assert strategy_call.role == "strategist"
     assert strategy_call.allow_tools is True
     assert strategy_call.allow_side_effects is True
-    assert len(strategy_call.context["strategy_cards"]["cards"]) == 38
+    assert len(strategy_call.context["strategy_cards"]["cards"]) == 42
     assert strategy_call.context["execution_capabilities"]["skills"] == [
         {"name": "debug", "description": "Debug work"}
     ]

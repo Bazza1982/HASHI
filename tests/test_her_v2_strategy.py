@@ -35,9 +35,9 @@ def _brief(strategy: str = "Inspect, change, and verify.") -> dict[str, object]:
 def test_external_strategy_playbook_is_complete_versioned_and_resolvable() -> None:
     playbook = load_strategy_playbook()
 
-    assert playbook.playbook_version == "2026-08-29.1"
-    assert len(playbook.cards) == 38
-    assert len(set(playbook.card_ids)) == 38
+    assert playbook.playbook_version == "2026-09-24.1"
+    assert len(playbook.cards) == 42
+    assert len(set(playbook.card_ids)) == 42
     assert playbook.sha256.startswith("sha256:")
     selected = playbook.resolve_cards(["CODE_MODIFY", "TEST_QA"])
     assert [card["id"] for card in selected] == ["CODE_MODIFY", "TEST_QA"]
