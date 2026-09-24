@@ -183,6 +183,8 @@ effects, and meter every physical call.
 Tool-enabled HER Direct and Primary Execution may propose interim commentary,
 but only typed Persona-packaged output is user-facing; raw or packaging-failed
 provider text and provider progress from other stages stay internal.
+Primary Execution now comments on evidence-backed progress that matters to the
+user's goal; ordinary tool calls and continuations do not require narration.
 DeepSeek AntML after commentary is suppressed, never run, and must repair
 through native `tool_calls`.
 

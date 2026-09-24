@@ -375,6 +375,12 @@ keeps the raw provider text internal without changing workflow. Provider
 commentary from Planning, Replanning, Review, tool-disabled Direct or Execution,
 or generic runtime activity also remains internal and cannot enter that lane.
 
+Primary Execution authors interim commentary only for evidence-backed changes
+that matter to the user's goal: significant findings, completed milestones,
+material obstacles or failed validation, and substantive changes of approach.
+Routine tool calls and continuations need no accompanying prose. This authoring
+rule does not change Direct, other stages, or the typed delivery boundary.
+
 This boundary governs interim commentary packaging, Triage clarification
 rendering, and the Persona inputs used by Immediate Response, Primary
 Execution, and Finalisation.
