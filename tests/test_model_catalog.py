@@ -15,39 +15,34 @@ from orchestrator.model_catalog import (
 )
 
 
-def test_codex_catalog_exposes_only_the_supported_hashi_models():
+def test_codex_catalog_matches_the_qualified_codex_cli_models():
     expected = [
+        "gpt-6-astra",
+        "gpt-6-sol",
+        "gpt-6-luna",
         "gpt-5.6-sol",
         "gpt-5.6-terra",
         "gpt-5.6-luna",
         "gpt-5.5",
-        "gpt-6-astra",
     ]
     assert AVAILABLE_CODEX_MODELS == expected
     assert get_available_models("codex-cli") == expected
 
 
-def test_codex_gateway_models_expose_live_probed_reasoning_efforts():
-    expected = ["none", "low", "medium", "high", "xhigh", "max"]
-    assert get_available_efforts("codex-cli", "gpt-5.6-sol") == expected
-    assert get_available_efforts("codex-cli", "gpt-5.6-luna") == expected
-    assert get_available_efforts("codex-cli", "gpt-5.6-terra") == [
-        "low",
-        "medium",
-        "high",
-        "xhigh",
-    ]
-    assert normalize_effort("codex-cli", "none", "gpt-5.6-luna") == "none"
-    assert normalize_effort("codex-cli", "max", "gpt-5.6-luna") == "max"
-    assert normalize_effort("codex-cli", "max", "gpt-5.6-sol") == "max"
-    assert normalize_effort("codex-cli", "max", "gpt-5.6-terra") == "medium"
-    assert get_available_efforts("codex-cli", "gpt-6-astra") == [
-        "low",
-        "medium",
-        "high",
-        "xhigh",
-        "max",
-    ]
+def test_codex_models_expose_qualified_cli_efforts():
+    through_ultra = ["low", "medium", "high", "xhigh", "max", "ultra"]
+    through_max = ["low", "medium", "high", "xhigh", "max"]
+    through_xhigh = ["low", "medium", "high", "xhigh"]
+
+    for model in ("gpt-6-astra", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.6-terra"):
+        assert get_available_efforts("codex-cli", model) == through_ultra
+    for model in ("gpt-6-luna", "gpt-5.6-luna"):
+        assert get_available_efforts("codex-cli", model) == through_max
+    assert get_available_efforts("codex-cli", "gpt-5.5") == through_xhigh
+
+    assert normalize_effort("codex-cli", "ultra", "gpt-6-sol") == "ultra"
+    assert normalize_effort("codex-cli", "ultra", "gpt-6-luna") == "medium"
+    assert normalize_effort("codex-cli", "max", "gpt-5.6-terra") == "max"
 
 
 def test_hashi_api_declares_reasoning_efforts_for_both_gateway_models():
@@ -131,7 +126,7 @@ def test_deepseek_exposes_only_distinct_provider_reasoning_states():
 
 def test_compatibility_catalog_is_derived_from_backend_registry():
     assert available_gateway_models() == get_all_gateway_models()
-    assert default_gateway_model() == "gpt-5.6-sol"
+    assert default_gateway_model() == "gpt-6-astra"
     assert AVAILABLE_OPENROUTER_MODELS == [
         "deepseek/deepseek-v3.2-exp",
         "deepseek/deepseek-v4-flash",

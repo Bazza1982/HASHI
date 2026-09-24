@@ -147,8 +147,8 @@ user changes their model.
 
 `grok-4.5` is also available through the API Gateway's `xai-api` backend. It
 uses xAI's Responses API route with the credential source configured for that
-backend. The Codex API Gateway catalogue exposes `gpt-5.5`,
-`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, and `gpt-6-astra`.
+backend. The Codex API Gateway catalogue exposes `gpt-6-astra`, `gpt-6-sol`,
+`gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, and `gpt-5.5`.
 
 The separate HASHI-native device-login utility is documented in
 [HASHI_XAI_OAUTH.md](HASHI_XAI_OAUTH.md). Its token store is not implicitly
@@ -162,22 +162,25 @@ changes the compaction trigger policy.
 
 ### Codex CLI models
 
-HASHI advertises only the smoke-tested Codex CLI models below. The bare
-`gpt-5.6` alias is deliberately omitted in favor of the explicit Sol model ID.
-The default is `gpt-5.6-sol` at explicit `medium` effort.
+HASHI advertises only the qualified Codex CLI models below. The bare `gpt-5.6`
+alias is deliberately omitted in favor of explicit tier model IDs. The default
+for a new or unpinned selection is `gpt-6-astra` at explicit `medium` effort;
+existing explicit Agent choices remain unchanged.
 
 | Model | HASHI use | `/effort` choices |
 |---|---|---|
-| `gpt-5.5` | Previous flagship retained for compatibility | `low`, `medium`, `high`, `xhigh` |
-| `gpt-5.6-sol` | Highest-capability tier for difficult, long-horizon work | `low`, `medium`, `high`, `xhigh`, `max` |
-| `gpt-5.6-terra` | Balanced daily-use tier | `low`, `medium`, `high`, `xhigh` |
-| `gpt-5.6-luna` | Fast, cost-efficient tier | `low`, `medium`, `high`, `xhigh`, `max` |
-| `gpt-6-astra` | Hardest quality-first work | `low`, `medium`, `high`, `xhigh`, `max` |
+| `gpt-6-astra` | Frontier model for the most demanding work | `low`, `medium`, `high`, `xhigh`, `max`, `ultra` |
+| `gpt-6-sol` | Workhorse model for coding and everyday work | `low`, `medium`, `high`, `xhigh`, `max`, `ultra` |
+| `gpt-6-luna` | Fast, affordable model for easier tasks | `low`, `medium`, `high`, `xhigh`, `max` |
+| `gpt-5.6-sol` | Older coding model for complex work | `low`, `medium`, `high`, `xhigh`, `max`, `ultra` |
+| `gpt-5.6-terra` | Older balanced model for straightforward work | `low`, `medium`, `high`, `xhigh`, `max`, `ultra` |
+| `gpt-5.6-luna` | Older fast and efficient model | `low`, `medium`, `high`, `xhigh`, `max` |
+| `gpt-5.5` | Legacy coding model | `low`, `medium`, `high`, `xhigh` |
 
 The Telegram `/effort` command follows the currently selected model rather
 than exposing one unsafe backend-wide list. If an agent switches from a model
-with `max` selected to Terra or GPT-5.5, HASHI automatically normalizes effort
-to `medium` before the next Codex invocation.
+with `ultra` selected to a Luna model, or from `max`/`ultra` to GPT-5.5, HASHI
+automatically normalizes effort to `medium` before the next Codex invocation.
 
 ### HER v2 provider models
 
@@ -337,9 +340,10 @@ it does not currently stream partial JSON argument fragments.
 Codex requests may also include a top-level `reasoning_effort`. HASHI validates
 the value against the selected model before acquiring a pooled adapter and
 applies it only to that request, so concurrent clients cannot overwrite one
-another's effort. Current live-probed Luna and Sol values are `none`, `low`,
-`medium`, `high`, `xhigh`, and `max`. Invalid or unverified model/value pairs
-return `invalid_reasoning_effort` instead of silently falling back.
+another's effort. The exact model-specific choices are listed above; `ultra`
+is unavailable on Luna models and GPT-5.5 stops at `xhigh`. Invalid or
+unverified model/value pairs return `invalid_reasoning_effort` instead of
+silently falling back.
 
 For both synchronous and streaming Codex responses, HASHI returns the
 backend-reported token usage. Streaming places it on the terminal completion
@@ -351,8 +355,8 @@ for executing each function and sending the next request with the assistant
 
 Current boundaries:
 
-- Supported by every Codex model advertised by `GET /v1/models`, including the
-  smoke-tested `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` variants.
+- Supported by every qualified Codex model advertised by `GET /v1/models`,
+  including `gpt-6-astra`, `gpt-6-sol`, and `gpt-6-luna`.
 - Also supported by `xai-api` models using `/chat/completions`, such as
   `grok-4.3`.
 - Gemini CLI, Claude CLI, and Grok CLI models are rejected instead of silently
