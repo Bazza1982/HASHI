@@ -420,7 +420,7 @@ async def test_receipt_delivery_survives_origin_worker_loss_and_does_not_repeat_
     recovered.receipts.recover()
 
     async def recovered_send(_kernel, **kwargs):
-        assert "补发" in kwargs["render_text"]("sunny", "备用名称")
+        assert "补发" not in kwargs["render_text"]("sunny", "备用名称")
         return {"sent": True, "sender": "sunny", "message_id": 2}
 
     monkeypatch.setattr(
@@ -1216,6 +1216,9 @@ def test_reboot_notices_use_names_for_one_target_and_counts_for_many():
     assert "20" in starting and "shared Functions" in starting and "Agent 0" not in starting
     assert "20" in completed and "enabled Remote" in completed and "Agent 0" not in completed
     assert "/reboot status" not in starting
+
+    recovered = {**many, "recovered": True, "locale": "zh-CN"}
+    assert render_notice(recovered, locale="zh-CN") == "✅ 热重启完成，20名代理在线"
 
     partial = {
         **many,

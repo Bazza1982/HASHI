@@ -2402,7 +2402,6 @@
     "reboot.not_accepted": "❌ The system did not accept this hot restart. {reason}",
     "reboot.ack_unknown": "⚠️ HASHI cannot confirm whether the hot restart started.",
     "reboot.status_unavailable": "⚠️ Restart results are temporarily unavailable.",
-    "reboot.delayed_notice": "ℹ️ Delayed result of an earlier restart:",
     "reboot.sent_by": "Sent via {agent}.",
     "reboot.no_recent": "ℹ️ No restart record for this conversation.",
     "reboot.delivery_status": "Notification: {status}",

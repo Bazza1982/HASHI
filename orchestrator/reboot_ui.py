@@ -99,8 +99,6 @@ def render_notice(
             locale=language,
             reason=ui_language.tr("reboot.reason." + reason, locale=language),
         )
-    if record.get("recovered") and not starting:
-        text = ui_language.tr("reboot.delayed_notice", locale=language) + "\n" + text
     if sender and sender != record.get("source_agent"):
         text += "\n" + ui_language.tr(
             "reboot.sent_by",
