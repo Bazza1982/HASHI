@@ -43,6 +43,7 @@ class Herv2CardData:
     review_count: int = 0
     replan_count: int = 0
     checkpoint_count: int = 0
+    execution_route: str = ""
 
 
 # Human-friendly stage labels (zh-CN and en)
@@ -173,8 +174,9 @@ def herv2_card_data_from_metadata(
         return None
 
     turn_id = str(her_v2.get("turn_id") or "")
-    classification = str(her_v2.get("classification") or "UNKNOWN")
+    classification = str(her_v2.get("classification") or "").strip()
     terminal_state = str(her_v2.get("terminal_state") or "COMPLETED")
+    execution_route = str(her_v2.get("execution_route") or "").strip().upper()
 
     # Strategy cards
     raw_cards = her_v2.get("strategy_cards") or ()
@@ -198,12 +200,19 @@ def herv2_card_data_from_metadata(
     raw_effort = her_v2.get("effort")
     if isinstance(raw_effort, Mapping):
         effort = str(
-            raw_effort.get("requested_effort")
+            raw_effort.get("effective")
+            or raw_effort.get("requested_effort")
             or raw_effort.get("canonical_effort")
             or ""
         )
     else:
         effort = str(raw_effort or "")
+
+    # Older HER metadata did not carry an explicit execution route.  The
+    # effective zero policy is authoritative for the Direct path, so retain a
+    # truthful card value while those responses are still in circulation.
+    if not classification and not execution_route and effort.casefold() == "zero":
+        execution_route = "DIRECT"
 
     # Stage timings
     timings = dict(stage_timings_s or her_v2.get("stage_timings_s") or {})
@@ -280,6 +289,7 @@ def herv2_card_data_from_metadata(
         turn_id=turn_id,
         classification=classification,
         terminal_state=terminal_state,
+        execution_route=execution_route,
         strategy_cards=strategy_cards,
         strategy_card_details=strategy_card_details,
         execution_brief=execution_brief,
@@ -405,15 +415,25 @@ def format_herv2_card(
         lines.append("─" * 40)
 
     # Route
-    route_val = data.classification
+    route_val = data.classification or data.execution_route or "UNKNOWN"
+    route_note = ""
+    if not data.classification and data.execution_route == "DIRECT":
+        route_note = (
+            " \u00b7 \u76f4\u8fbe\uff08\u672a\u5206\u8bca\uff09"
+            if is_zh
+            else " · Direct (no triage)"
+        )
     effort_suffix = f" · {data.effort}" if data.effort else ""
     if is_tg:
         lines.append(
             f"<b>{route_lbl}{label_sep}</b>"
-            f"<code>{html.escape(route_val)}</code>{html.escape(effort_suffix)}"
+            f"<code>{html.escape(route_val)}</code>"
+            f"{html.escape(route_note)}{html.escape(effort_suffix)}"
         )
     else:
-        lines.append(f"{route_lbl}{label_sep}{route_val}{effort_suffix}")
+        lines.append(
+            f"{route_lbl}{label_sep}{route_val}{route_note}{effort_suffix}"
+        )
 
     # Strategy cards (localized titles only; uppercase ids dropped)
     if data.strategy_card_details:

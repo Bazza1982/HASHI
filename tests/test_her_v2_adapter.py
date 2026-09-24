@@ -1131,6 +1131,7 @@ async def test_adapter_zero_effort_is_one_direct_call_and_question_is_completed(
     assert response.stop_reason == "completed"
     assert response.stream_metadata["her_v2"]["terminal_state"] == "COMPLETED"
     assert response.stream_metadata["her_v2"]["classification"] is None
+    assert response.stream_metadata["her_v2"]["execution_route"] == "DIRECT"
     assert response.stream_metadata["her_v2"]["plan_id"] is None
     assert response.stream_metadata["her_v2"]["stage_timings_s"]["direct"] > 0
     assert response.stream_metadata["her_v2"]["effort"] == {
@@ -1184,6 +1185,7 @@ async def test_scheduler_direct_policy_is_request_scoped_and_preserves_instructi
     scheduled_profile, scheduled_request = provider.requests[0]
     assert scheduled_request.goal == original_instruction
     assert scheduled_request.classification is None
+    assert scheduled.stream_metadata["her_v2"]["execution_route"] == "DIRECT"
     assert scheduled.stream_metadata["her_v2"]["effort"] == {
         "configured": "max",
         "effective": "zero",

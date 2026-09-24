@@ -217,6 +217,35 @@ def test_herv2_card_data_extraction_direct():
         assert st.slot == "Quick"
 
 
+def test_herv2_card_direct_mode_without_triage_is_not_unknown():
+    card_data = herv2_card_data_from_metadata(
+        {
+            "turn_id": "turn-direct-zero",
+            "classification": None,
+            "terminal_state": "COMPLETED",
+            "effort": {"effective": "zero"},
+        }
+    )
+
+    assert card_data is not None
+    assert card_data.classification == ""
+    assert card_data.execution_route == "DIRECT"
+
+    plain = format_herv2_card(card_data, locale="en", surface="plain")
+    assert "Route: DIRECT · Direct (no triage) · zero" in plain
+    assert "Route: UNKNOWN" not in plain
+
+    zh_plain = format_herv2_card(card_data, locale="zh-CN", surface="plain")
+    assert "\u8def\u7531\uff1aDIRECT \u00b7 \u76f4\u8fbe\uff08\u672a\u5206\u8bca\uff09 \u00b7 zero" in zh_plain
+
+    telegram_html = format_herv2_card(
+        card_data,
+        locale="zh-CN",
+        surface="telegram",
+    )
+    assert "<code>DIRECT</code> \u00b7 \u76f4\u8fbe\uff08\u672a\u5206\u8bca\uff09 \u00b7 zero" in telegram_html
+
+
 def test_herv2_card_formatting_telegram_html():
     card_data = Herv2CardData(
         turn_id="turn-789",

@@ -130,6 +130,9 @@ independent. `/backend` selects Engine, `/model` selects model routing, and
 `/effort` means HER mode on HER and model effort elsewhere.
 Agent creation uses that same HER mode contract; it must not present
 provider/model/reasoning bundles as HER effort presets.
+The HER v2 routing card shows `DIRECT` with `Direct (no triage)` for the Direct
+(`zero`) path; when Triage runs, it shows the validated classification instead.
+`UNKNOWN` is only a legacy/malformed-metadata fallback.
 
 Use current metadata for context, price, effort, and modality. Media needs model,
 Adapter, and policy support; distinguish unknown, unsupported, unimplemented,
@@ -166,15 +169,11 @@ completed calls never replay. Repair preserves Provider fields, identity,
 finish/error, and retry count. Continuation is not retry, prose “stop” is not a
 typed stop, and degraded intent cannot complete a request without native repair.
 
-Capture request, response prefix, parsing, Tool effects, recovery, terminal
-state, and receipt in one I/O chain. Keep restricted
-originals separate from safe projections; partial or unread evidence is not
-empty. `/stop` preserves interruption evidence; `/retry`, `/resend`, and
-`/steer` retain their distinct contracts. Recovery never duplicates a Cron Run,
-replays completed effects, restores revoked authority, or reconciles a live
-fixed-session owner. CLI terminal events bound drain; open handles cannot keep
-Runs busy. Unknown effects remain fail-closed. See
-[HER v2](HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md).
+Capture each request through terminal receipt, keeping restricted originals
+separate from safe projections; partial evidence is not empty. `/stop`,
+`/retry`, `/resend`, and `/steer` keep distinct contracts. Recovery never
+duplicates a Cron Run, replays effects, restores revoked authority, or accepts
+unknown effects. See [HER v2](HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md).
 
 ## TUI, Workbench, and media
 
@@ -199,16 +198,12 @@ Replanning, Review, and Finalisation. Native providers get native content;
 fallbacks get exact managed references, never guessed workspace copies. Tool,
 filesystem, and sub-agent authority do not widen.
 
-Commands follow the [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md): localize and
-escape, state plain outcomes, and keep internals in diagnostics. Remote Agent
-lifecycle timeouts are outcome-unknown: obey PAO's budget, reconcile, never
-replay. If reboot finds unfinished Function source, say an update is still in
-progress, saved settings and the current Agent are safe, and retry later;
-technical paths remain diagnostic.
-`/help` derives from metadata. Workbench and Telegram share one personal
-Session: semantic messages appear on both; presentation rows stay out of model
-history. Menus use authenticated paths and server state. Projection v2 retains
-menus across snapshots and cards do not invalidate one another; v1 is unchanged.
+Commands follow the [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md): localize,
+escape, state plain outcomes, and keep internals in diagnostics. Obey PAO
+budgets, reconcile outcome-unknown lifecycle operations, and never replay.
+`/help` derives from metadata. Workbench and Telegram share a Session while
+presentation rows stay out of model history; menus use authenticated paths and
+server state.
 
 `/new` selects a fresh primary Session without deleting old Conversations.
 History is owner/Agent scoped; old messages stay read-only and attachments use
@@ -218,29 +213,24 @@ PAO owns Agent deletion; it is default-on only with `agent_deletion`, and its
 preview, blockers, and cleanup receipts bind. Workbench `/telegram` persists
 per owner; the TUI preference remains a separate per-Run choice.
 
-Workbench voice is transcript-first. Safe Voice off admits text; on holds a
-preview until **Confirm and send**. Discard, expiry, Session change, or disable
-sends nothing. Optional STT stays in a sidecar; its stdio is always UTF-8 bytes,
-independent of locale or code page, and npm ships its runtime provisioner.
+Workbench voice is transcript-first; Safe Voice on requires **Confirm and send**
+and discard/expiry/Session change/disable sends nothing. Optional STT stays in
+an isolated UTF-8 sidecar.
 
 ## Move, Clone, jobs, and HCC
 
-`/move` and `/clone` share package, journal, registry, workspace, Scheduler,
-secret, and lifecycle owners. Move removes verified source state only after
-target activation. Clone preserves it, excludes Telegram credentials, and
-disables imported jobs. History records owner, generation, and provenance;
-`accepted` is not `completed`. See
-[Agent Move](HASHI_AGENT_MOVE_V1.md).
+`/move` and `/clone` share package, registry, workspace, Scheduler, secret, and
+lifecycle owners. Move removes verified source only after activation; Clone
+preserves it, excludes Telegram credentials, and disables imported jobs.
+`accepted` is not `completed`. See [Agent Move](HASHI_AGENT_MOVE_V1.md).
 
-Scheduler recurrence stores UTC instants, wall time, and IANA zone; unknown
-legacy zones use UTC. Telegram recovery binds instance, lifecycle, and Bot;
-permanent errors stop the chat, bounded retries honor `RetryAfter`.
+Scheduler recurrence stores UTC instants, wall time, and IANA zone; legacy
+unknown zones use UTC. Telegram recovery binds instance/lifecycle/Bot and
+bounded retries honor `RetryAfter`.
 
-Use authorized capabilities only. Device actions need a same-instance Worker;
-re-plan if absent. Prefer `log_query` for logs. Agents work foreground; only
-explicit `/bg` grants that request background work. Tests prove scope, not live
-adoption; preserve user work and report failures.
+Use authorized capabilities only; device actions need a same-instance Worker.
+Prefer `log_query`; Agents work foreground unless `/bg` is explicit. Tests prove
+scope, not live adoption; preserve user work and report failures.
 
-HCC is optional, non-authoritative PCM context. `/hcc` controls injection;
-`hcc-refresh` refreshes authorized sources without rewriting PCM or retrying
-conflicts.
+HCC is optional, non-authoritative PCM context; `/hcc` and `hcc-refresh`
+refresh sources; do not rewrite PCM or retry.
