@@ -2912,6 +2912,9 @@ async def test_hashi_stage_provider_enforces_tool_gateway_and_provider_reasoning
     assert '"assignment_id": "inspection-worker"' in backend.sys_prompt
     assert '"plan_id": "plan-v1"' in backend.sys_prompt
     assert "only that runtime-attached batch" in backend.sys_prompt
+    assert "Mandatory execution boundary" in backend.sys_prompt
+    assert "do not pause to ask the user for authorization" in backend.sys_prompt
+    assert "Never emit an authorization question" in backend.sys_prompt
     assert "natural language" in backend.sys_prompt
     assert "Return exactly one JSON object" not in backend.sys_prompt
     assert "REPLAN_REQUIRED" not in backend.sys_prompt
@@ -2958,6 +2961,8 @@ async def test_hashi_stage_provider_enforces_tool_gateway_and_provider_reasoning
             assert "planning agent for an agentic workflow" in (
                 planning_backend.sys_prompt
             )
+            assert "Planning is a plan-only stage" in planning_backend.sys_prompt
+            assert "Do not turn that gate into a user question" in planning_backend.sys_prompt
         else:
             assert "replanning agent in an agentic workflow" in (
                 planning_backend.sys_prompt

@@ -166,6 +166,13 @@ ownership, permissions, risk acceptance, or private-authorization metadata;
 the typed envelope and downstream permission / side-effect gates remain
 authoritative. Source changes and live adoption are reported separately.
 
+
+Planning is plan-only and Execution is action-oriented: neither stage may ask
+Planning is plan-only and Execution is action-oriented: neither stage may ask
+the user to authorize, approve, prove ownership, or accept risk. Typed policy
+denials remain runtime evidence and are reported as execution limitations or
+failures, never as a new authorization question.
+
 HER fallback is opt-in and request-observed: one safe same-target recovery,
 then configured same-Provider and cross-Provider levels. Never downgrade Pro.
 The narrow meaningful-output read guard applies per SSE call, ignores

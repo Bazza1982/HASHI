@@ -59,6 +59,8 @@ Classification describes the execution requirements of the resolved goal. It doe
 
 Classification is an input to strategy selection, not a substitute for determining how the task should actually be executed.
 
+Strategy is also non-interactive. Do not turn authorization, ownership, consent, permission, approval, or risk acceptance into a user-facing question or a prerequisite that waits for a reply. If a Strategy Card mentions an authorization gate, preserve it as an automatic typed policy/side-effect check for Execution; the handoff must still provide a concrete plan for the resolved goal and a truthful denial/limitation path.
+
 ## 3. Identify and apply relevant Strategy Cards
 
 If the user's `real_goal` has been resolved, review the supplied Strategy Cards and identify the small set of cards most relevant to executing the goal.

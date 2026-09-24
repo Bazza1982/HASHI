@@ -383,6 +383,9 @@ def test_planning_is_tool_free_and_renders_the_strategy_handoff() -> None:
     assert "typed presentation Persona section" in rendered
     assert "Persona authority is presentation-only" in rendered
     assert "commentary belongs only in the JSON `commentary` field" in rendered
+    assert "Planning is a plan-only stage" in rendered
+    assert "Do not turn that gate into a user question" in rendered
+    assert "Return an executable plan even when a later policy gate may deny" in rendered
     assert "$strategy_handoff" not in rendered
 
 
@@ -422,6 +425,7 @@ def test_planning_prompt_with_full_tools_keeps_execution_work_downstream() -> No
     assert "freely choose and call any registered tool" in rendered
     assert "Do not edit artifacts, apply fixes" in rendered
     assert "Return a plan, not a completed implementation" in rendered
+    assert "Do not add a user-facing approval, authorization" in rendered
     assert "Planning itself has no tools" not in rendered
 
 

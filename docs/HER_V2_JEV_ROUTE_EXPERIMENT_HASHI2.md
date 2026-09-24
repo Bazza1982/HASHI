@@ -27,6 +27,12 @@ clarification triggers. The typed request envelope and downstream permission /
 side-effect gates remain authoritative and may stop execution without asking the
 user to prove authority again.
 
+Planning and Execution have the same non-interactive boundary: Planning only
+constructs the plan; it must not ask for authorization or wait for approval.
+Execution must carry out the plan. A typed permission or side-effect denial is
+recorded as execution evidence or a limitation; it is never turned into a
+user-facing authorization question or a request to reopen Triage.
+
 `HIGH_VOLUME_TASK` remains readable only for old ledgers/replays. New JEV
 routing never emits it; the former category is represented by
 `COMPLEX_TASK`.
