@@ -23,7 +23,8 @@ jobs:
       - name: Export tracked experiment source only
         run: git archive --format=tar.gz HEAD > "$RUNNER_TEMP/herv3-source.tar.gz"
       - name: Download small offline-test dependencies
-        run: python -m pip download --only-binary=:all: --dest "$RUNNER_TEMP/herv3-wheels" python-telegram-bot croniter ruff
+        run: |
+          python -m pip download --only-binary=:all: --dest "$RUNNER_TEMP/herv3-wheels" python-telegram-bot croniter ruff
       - uses: actions/upload-artifact@v4
         with:
           name: herv3-source
