@@ -2776,7 +2776,7 @@ def test_instance_model_reselection_preserves_model_and_effort(tmp_path):
     assert manager.current_backend.effort == "max"
     assert _read_state(manager.config.workspace_dir)["active_model"] == "instance-preview"
     runtime._set_backend_model("codex-cli", "gpt-5.6-terra")
-    assert manager.current_backend.effort == "medium"
+    assert manager.current_backend.effort == "max"
     assert "instance-preview" in runtime._get_available_models()
     runtime._set_backend_model("codex-cli", "instance-preview")
     assert manager.current_backend.config.model == "instance-preview"

@@ -49,6 +49,11 @@ model opt-ins—not names/memory. Keep secrets ignored. Instance opt-ins belong
 in `allowed_backends`; shared compatibility in Function registry; explicit
 model choices persist until retired.
 
+Codex CLI 0.156.1 qualification adds GPT-6 Astra, Sol, and Luna. New or
+unpinned Codex selections default to Astra; existing explicit selections stay
+put. Effort choices remain model-specific: Astra/Sol reach `ultra`, Luna reaches
+`max`, and unsupported values normalize before invocation.
+
 Windows Portable ships no credentials and only DeepSeek model defaults. Users
 supply all others; validation fails closed.
 
