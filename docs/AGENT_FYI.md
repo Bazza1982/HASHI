@@ -163,6 +163,15 @@ provider text and provider progress from other stages stay internal.
 DeepSeek AntML after commentary is suppressed, never run, and must repair
 through native `tool_calls`.
 
+HER v2 Agents manage their own recurring work through typed Scheduler tools:
+`hashi_scheduler_create`, `hashi_scheduler_update`, and
+`hashi_scheduler_delete` cover Cron, Heartbeat, and Nudge jobs.  Superloop
+operations use the corresponding `hashi_superloop_*` tools.  The Workbench API
+binds every read and write to the current Agent; deletion requires explicit
+authorization, and agents must never edit `tasks.json` or Superloop files
+directly.  The typed paths are Functions-layer behavior; live adoption still
+requires the normal Worker/Function rollout check.
+
 Tool-enabled Planning closes through the Provider's native grammar. A valid
 structured `tool_calls` response means continue; once evidence is sufficient,
 the Planner returns its final JSON as ordinary assistant content without

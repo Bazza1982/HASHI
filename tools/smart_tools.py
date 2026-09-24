@@ -73,6 +73,8 @@ _QUERY_TOOLS = frozenset(
         "desktop_window_list",
         "hashi_scheduler_list",
         "hashi_scheduler_run_history",
+        "hashi_superloop_list",
+        "hashi_superloop_get",
         "obsidian_read_note",
         "obsidian_list_folder",
         "obsidian_search",
@@ -128,6 +130,12 @@ _SIDE_EFFECT_ACTION_TOOLS = frozenset(
         "browser_type_text",
         "background_job_start",
         "hashi_scheduler_rerun",
+        "hashi_scheduler_create",
+        "hashi_scheduler_update",
+        "hashi_scheduler_delete",
+        "hashi_superloop_create",
+        "hashi_superloop_update",
+        "hashi_superloop_delete",
         "windows_click",
         "windows_drag",
         "windows_type",
@@ -151,6 +159,14 @@ _TOOL_ADAPTERS = {
     "hashi_scheduler_status": "scheduler",
     "hashi_scheduler_run_history": "scheduler",
     "hashi_scheduler_rerun": "scheduler",
+    "hashi_scheduler_create": "scheduler",
+    "hashi_scheduler_update": "scheduler",
+    "hashi_scheduler_delete": "scheduler",
+    "hashi_superloop_list": "superloop",
+    "hashi_superloop_get": "superloop",
+    "hashi_superloop_create": "superloop",
+    "hashi_superloop_update": "superloop",
+    "hashi_superloop_delete": "superloop",
 }
 
 
@@ -700,7 +716,58 @@ def _scheduler_outcome(
             ),
         )
     outcome = _generic_outcome(spec, text, raw_is_error, details)
-    if outcome.status == "success" and spec.name == "hashi_scheduler_rerun":
+    if outcome.status == "success" and spec.name in {
+        "hashi_scheduler_rerun",
+        "hashi_scheduler_create",
+        "hashi_scheduler_update",
+        "hashi_scheduler_delete",
+    }:
+        return replace(outcome, effect="changed")
+    return outcome
+
+
+def _superloop_outcome(
+    spec: SmartToolSpec,
+    output: str,
+    raw_is_error: bool,
+    details: Mapping[str, Any],
+) -> SmartToolOutcome:
+    text = str(output or "")
+    lowered = text.casefold()
+    if "workbench api is unavailable" in lowered or "gateway context" in lowered:
+        return SmartToolOutcome(
+            status="unavailable",
+            effect="no_change",
+            error=SmartToolError(
+                "gateway_context_missing",
+                "Superloop is unavailable in the current environment.",
+                False,
+            ),
+            warning=SmartToolWarning(
+                "unavailable_environment",
+                "Repeating this call in the current environment will not help.",
+                "Continue without Superloop access.",
+            ),
+        )
+    if "superloop api is unavailable" in lowered or "cannot connect" in lowered:
+        return SmartToolOutcome(
+            status="unavailable",
+            effect="unknown" if spec.profile == "side_effect_action" else "no_change",
+            error=SmartToolError(
+                "superloop_unreachable", _legacy_error_message(text), True
+            ),
+            warning=SmartToolWarning(
+                "temporary_unavailability",
+                "The Superloop endpoint is currently unreachable.",
+                "Retry later after the endpoint is available.",
+            ),
+        )
+    outcome = _generic_outcome(spec, text, raw_is_error, details)
+    if outcome.status == "success" and spec.name in {
+        "hashi_superloop_create",
+        "hashi_superloop_update",
+        "hashi_superloop_delete",
+    }:
         return replace(outcome, effect="changed")
     return outcome
 
@@ -738,6 +805,7 @@ def _patch_outcome(
 _ADAPTERS = {
     "bash": _bash_outcome,
     "scheduler": _scheduler_outcome,
+    "superloop": _superloop_outcome,
     "apply_patch": _patch_outcome,
 }
 

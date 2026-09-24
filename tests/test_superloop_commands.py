@@ -9,6 +9,7 @@ import pytest
 from orchestrator.commands.superloop import CALLBACKS, superloop_callback
 from orchestrator.runtime_superloop import handle_superloop_callback, handle_superloop_command
 from orchestrator.superloop_scheduler import advance_superloops_once
+from orchestrator.superloop_agent import SuperloopAgentService
 from orchestrator.superloop_store import SuperloopStore
 
 
@@ -166,6 +167,40 @@ async def test_superloop_quickstart_and_wizard(tmp_path: Path) -> None:
 
     await handle_superloop_command(runtime, _FakeUpdate("/superloop wizard wizard goal"), "wizard wizard goal")
     assert any("Wizard" in text for text in runtime.messages)
+
+
+def test_agent_superloop_service_binds_create_manage_delete_to_owner(tmp_path: Path) -> None:
+    service = SuperloopAgentService(
+        tmp_path / "superloops",
+        agent_name="momo",
+        instance="HASHI4",
+    )
+    created = service.create_quickstart("keep the migration moving")
+    assert created["ok"] is True
+    loop_id = created["loop_id"]
+    listed = service.list_loops()
+    assert [item["loop_id"] for item in listed] == [loop_id]
+
+    task = service.update_loop(
+        loop_id,
+        action="task_add",
+        arguments={"title": "verify the next checkpoint"},
+    )
+    assert task["owner_agent"] == "momo"
+    fetched = service.get_loop(loop_id)
+    assert any(item["task_id"] == task["task_id"] for item in fetched["tasks"])
+
+    with pytest.raises(PermissionError):
+        SuperloopAgentService(
+            tmp_path / "superloops",
+            agent_name="lily",
+            instance="HASHI4",
+        ).get_loop(loop_id)
+
+    deleted = service.delete_loop(loop_id)
+    assert deleted["status"] == "deleted"
+    assert service.list_loops() == []
+    assert service.list_loops(include_deleted=True)[0]["status"] == "deleted"
 
 
 @pytest.mark.asyncio

@@ -255,6 +255,178 @@ async def test_gateway_exposes_authoritative_hashi_scheduler_tools(tmp_path, mon
 
 
 @pytest.mark.asyncio
+async def test_gateway_exposes_agent_owned_scheduler_and_superloop_mutations(
+    tmp_path, monkeypatch
+):
+    registry = _registry(tmp_path)
+    context_path = tmp_path / "agent-task-context.json"
+    write_gateway_context(
+        registry,
+        context_path,
+        additional_allowed_tools={
+            "hashi_scheduler_create",
+            "hashi_scheduler_update",
+            "hashi_scheduler_delete",
+            "hashi_superloop_list",
+            "hashi_superloop_get",
+            "hashi_superloop_create",
+            "hashi_superloop_update",
+            "hashi_superloop_delete",
+        },
+        workbench_api_base_url="http://10.255.255.254:18800",
+    )
+    gateway = ToolGateway(load_gateway_context(context_path))
+    calls = []
+
+    async def fake_request(method, url, *, payload=None):
+        calls.append((method, url, payload))
+        return 200, {"ok": True, "state_changed": True}
+
+    monkeypatch.setattr("tools.hashi_scheduler._request_json", fake_request)
+    monkeypatch.setattr("tools.hashi_superloop._request_json", fake_request)
+
+    names = {item["name"] for item in gateway.tool_definitions()}
+    assert {
+        "hashi_scheduler_create",
+        "hashi_scheduler_update",
+        "hashi_scheduler_delete",
+        "hashi_superloop_list",
+        "hashi_superloop_get",
+        "hashi_superloop_create",
+        "hashi_superloop_update",
+        "hashi_superloop_delete",
+    } <= names
+
+    created = await gateway.call(
+        "hashi_scheduler_create",
+        {
+            "kind": "heartbeat",
+            "task_id": "momo-loop-1",
+            "interval_seconds": 60,
+            "prompt": "check the work",
+        },
+        "create-1",
+    )
+    assert created["isError"] is False
+    assert calls[-1] == (
+        "POST",
+        "http://10.255.255.254:18800/api/agents/momo/scheduler/jobs",
+        {
+            "kind": "heartbeat",
+            "task_id": "momo-loop-1",
+            "interval_seconds": 60,
+            "prompt": "check the work",
+            "requested_by": "hashi_tool_gateway",
+        },
+    )
+
+    updated = await gateway.call(
+        "hashi_scheduler_update",
+        {
+            "kind": "heartbeat",
+            "job_id": "momo-loop-1",
+            "enabled": False,
+        },
+        "update-1",
+    )
+    assert updated["isError"] is False
+    assert calls[-1] == (
+        "PATCH",
+        "http://10.255.255.254:18800/api/agents/momo/scheduler/jobs/momo-loop-1",
+        {
+            "kind": "heartbeat",
+            "enabled": False,
+            "requested_by": "hashi_tool_gateway",
+        },
+    )
+
+    denied = await gateway.call(
+        "hashi_scheduler_delete",
+        {"kind": "heartbeat", "job_id": "momo-loop-1"},
+        "delete-denied",
+    )
+    assert denied["isError"] is True
+    assert calls[-1][0] == "PATCH"
+
+    deleted = await gateway.call(
+        "hashi_scheduler_delete",
+        {
+            "kind": "heartbeat",
+            "job_id": "momo-loop-1",
+            "authorization": "explicit_user_authorization",
+        },
+        "delete-1",
+    )
+    assert deleted["isError"] is False
+    assert calls[-1] == (
+        "DELETE",
+        "http://10.255.255.254:18800/api/agents/momo/scheduler/jobs/momo-loop-1",
+        {
+            "kind": "heartbeat",
+            "requested_by": "hashi_tool_gateway",
+            "authorization": "explicit_user_authorization",
+        },
+    )
+
+    created_loop = await gateway.call(
+        "hashi_superloop_create",
+        {"goal": "keep the migration moving"},
+        "superloop-create-1",
+    )
+    assert created_loop["isError"] is False
+    assert calls[-1] == (
+        "POST",
+        "http://10.255.255.254:18800/api/agents/momo/superloops",
+        {
+            "goal": "keep the migration moving",
+            "task_title": None,
+            "requested_by": "hashi_tool_gateway",
+        },
+    )
+
+    await gateway.call(
+        "hashi_superloop_update",
+        {"loop_id": "sl-1", "action": "pause", "mode": "drain"},
+        "superloop-update-1",
+    )
+    assert calls[-1] == (
+        "PATCH",
+        "http://10.255.255.254:18800/api/agents/momo/superloops/sl-1",
+        {
+            "action": "pause",
+            "mode": "drain",
+            "requested_by": "hashi_tool_gateway",
+        },
+    )
+
+    denied_loop = await gateway.call(
+        "hashi_superloop_delete",
+        {"loop_id": "sl-1"},
+        "superloop-delete-denied",
+    )
+    assert denied_loop["isError"] is True
+    assert calls[-1][0] == "PATCH"
+
+    deleted_loop = await gateway.call(
+        "hashi_superloop_delete",
+        {
+            "loop_id": "sl-1",
+            "authorization": "explicit_user_authorization",
+        },
+        "superloop-delete-1",
+    )
+    assert deleted_loop["isError"] is False
+    assert calls[-1] == (
+        "DELETE",
+        "http://10.255.255.254:18800/api/agents/momo/superloops/sl-1",
+        {
+            "requested_by": "hashi_tool_gateway",
+            "authorization": "explicit_user_authorization",
+        },
+    )
+
+
+@pytest.mark.asyncio
 async def test_gateway_background_jobs_use_serialized_workbench_api(tmp_path, monkeypatch):
     registry = ToolRegistry(
         allowed_tools=[

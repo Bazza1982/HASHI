@@ -10,6 +10,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import time
 from collections.abc import Mapping
 from datetime import datetime
@@ -731,6 +732,18 @@ class WorkbenchApiServer:
             "/api/agents/{name}/scheduler/jobs",
             self.handle_agent_scheduler_jobs,
         )
+        self.app.router.add_post(
+            "/api/agents/{name}/scheduler/jobs",
+            self.handle_agent_scheduler_create,
+        )
+        self.app.router.add_patch(
+            "/api/agents/{name}/scheduler/jobs/{job_id}",
+            self.handle_agent_scheduler_update,
+        )
+        self.app.router.add_delete(
+            "/api/agents/{name}/scheduler/jobs/{job_id}",
+            self.handle_agent_scheduler_delete,
+        )
         self.app.router.add_get(
             "/api/agents/{name}/scheduler/status",
             self.handle_agent_scheduler_status,
@@ -741,6 +754,21 @@ class WorkbenchApiServer:
         )
         self.app.router.add_post(
             "/api/agents/{name}/jobs/run", self.handle_agent_run_job
+        )
+        self.app.router.add_get(
+            "/api/agents/{name}/superloops", self.handle_agent_superloops
+        )
+        self.app.router.add_post(
+            "/api/agents/{name}/superloops", self.handle_agent_superloop_create
+        )
+        self.app.router.add_get(
+            "/api/agents/{name}/superloops/{loop_id}", self.handle_agent_superloop_get
+        )
+        self.app.router.add_patch(
+            "/api/agents/{name}/superloops/{loop_id}", self.handle_agent_superloop_update
+        )
+        self.app.router.add_delete(
+            "/api/agents/{name}/superloops/{loop_id}", self.handle_agent_superloop_delete
         )
         self.app.router.add_post(
             "/api/background-jobs", self.handle_background_jobs_start
@@ -7695,6 +7723,220 @@ class WorkbenchApiServer:
             }
         )
 
+    @staticmethod
+    def _scheduler_task_id_valid(task_id: str) -> bool:
+        return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", task_id or ""))
+
+    async def handle_agent_scheduler_create(self, request):
+        """Create one Agent-owned scheduler task through the typed API."""
+
+        agent_name = request.match_info.get("name")
+        runtime = self._runtime_map().get(agent_name)
+        if runtime is None:
+            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+        skill_manager = getattr(runtime, "skill_manager", None)
+        if skill_manager is None:
+            return web.json_response({"ok": False, "error": "skill manager unavailable"}, status=503)
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "request body must be JSON"}, status=400)
+        if not isinstance(payload, dict):
+            return web.json_response({"ok": False, "error": "request body must be an object"}, status=400)
+        kind = str(payload.get("kind") or "").strip().lower()
+        if kind not in {"cron", "heartbeat", "nudge"}:
+            return web.json_response({"ok": False, "error": "kind must be cron, heartbeat, or nudge"}, status=400)
+        task_id = str(payload.get("task_id") or "").strip()
+        if task_id and not self._scheduler_task_id_valid(task_id):
+            return web.json_response({"ok": False, "error": "task_id has invalid characters"}, status=400)
+        action = str(payload.get("action") or "enqueue_prompt").strip()
+        if action != "enqueue_prompt":
+            return web.json_response({"ok": False, "error": "Agent-managed tasks must use enqueue_prompt"}, status=400)
+        enabled = payload.get("enabled", True)
+        if not isinstance(enabled, bool):
+            return web.json_response({"ok": False, "error": "enabled must be boolean"}, status=400)
+        note = str(payload.get("note") or "").strip()
+        try:
+            if kind == "cron":
+                schedule = str(payload.get("schedule") or "").strip()
+                prompt = str(payload.get("prompt") or "").strip()
+                if not schedule or not prompt:
+                    raise ValueError("cron requires schedule and prompt")
+                from orchestrator.scheduler import validate_cron_schedule
+                from orchestrator.timezone_policy import canonical_timezone_name
+
+                timezone_name = canonical_timezone_name(payload.get("timezone"))
+                valid, error = validate_cron_schedule(schedule, timezone_name=timezone_name)
+                if not valid:
+                    raise ValueError(error or "invalid cron schedule")
+                task_id = task_id or f"{agent_name}-cron-{uuid4().hex[:8]}"
+                loop_max = payload.get("loop_max")
+                loop_meta = None
+                if loop_max is not None:
+                    loop_meta = {"count": 0, "max": max(0, int(loop_max)), "task_summary": note}
+                job = skill_manager.upsert_cron_job(
+                    task_id=task_id,
+                    agent_name=agent_name,
+                    schedule=schedule,
+                    action=action,
+                    enabled=enabled,
+                    note=note,
+                    prompt=prompt,
+                    timezone_name=timezone_name,
+                    loop_meta=loop_meta,
+                )
+            elif kind == "heartbeat":
+                prompt = str(payload.get("prompt") or "").strip()
+                if not prompt:
+                    raise ValueError("heartbeat requires prompt")
+                interval_seconds = payload.get("interval_seconds")
+                if interval_seconds is None and payload.get("interval_minutes") is not None:
+                    interval_seconds = int(payload.get("interval_minutes")) * 60
+                if interval_seconds is None:
+                    raise ValueError("heartbeat requires interval_seconds or interval_minutes")
+                interval_seconds = int(interval_seconds)
+                if interval_seconds < 1:
+                    raise ValueError("interval_seconds must be at least 1")
+                task_id = task_id or f"{agent_name}-heartbeat-{uuid4().hex[:8]}"
+                loop_max = payload.get("loop_max")
+                loop_meta = None
+                if loop_max is not None:
+                    loop_meta = {"count": 0, "max": max(0, int(loop_max)), "task_summary": note}
+                job = skill_manager.upsert_heartbeat_job(
+                    task_id=task_id,
+                    agent_name=agent_name,
+                    interval_seconds=interval_seconds,
+                    prompt=prompt,
+                    enabled=enabled,
+                    action=action,
+                    note=note,
+                    loop_meta=loop_meta,
+                )
+            else:
+                exit_condition = str(payload.get("exit_condition") or "").strip()
+                if not exit_condition:
+                    raise ValueError("nudge requires exit_condition")
+                interval_minutes = payload.get("interval_minutes")
+                if interval_minutes is None and payload.get("interval_seconds") is not None:
+                    interval_minutes = 1
+                if interval_minutes is None:
+                    raise ValueError("nudge requires interval_minutes or interval_seconds")
+                interval_seconds = payload.get("interval_seconds")
+                if interval_seconds is not None:
+                    interval_seconds = int(interval_seconds)
+                    if interval_seconds < 1:
+                        raise ValueError("interval_seconds must be at least 1")
+                max_nudges = max(0, int(payload.get("max_nudges", 0) or 0))
+                task_id = task_id or f"{agent_name}-nudge-{uuid4().hex[:8]}"
+                job = skill_manager.create_nudge_job(
+                    agent_name=agent_name,
+                    interval_minutes=max(1, int(interval_minutes)),
+                    exit_condition=exit_condition,
+                    max_nudges=max_nudges,
+                    task_id=task_id,
+                    enabled=enabled,
+                    interval_seconds=interval_seconds,
+                )
+        except (TypeError, ValueError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        except (ConfigConflictError, ConfigDurabilityError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=409)
+        return web.json_response(
+            {
+                "ok": True,
+                "authority": "HASHI Scheduler",
+                "agent": agent_name,
+                "kind": kind,
+                "job": self._scheduler_job_record(agent_name=agent_name, kind=kind, job=job),
+            },
+            status=201,
+        )
+
+    async def handle_agent_scheduler_update(self, request):
+        """Update one owned scheduler task without trusting a model-supplied agent."""
+
+        agent_name = request.match_info.get("name")
+        job_id = str(request.match_info.get("job_id") or "").strip()
+        runtime = self._runtime_map().get(agent_name)
+        if runtime is None:
+            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+        skill_manager = getattr(runtime, "skill_manager", None)
+        if skill_manager is None:
+            return web.json_response({"ok": False, "error": "skill manager unavailable"}, status=503)
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "request body must be JSON"}, status=400)
+        if not isinstance(payload, dict):
+            return web.json_response({"ok": False, "error": "request body must be an object"}, status=400)
+        kind = str(payload.pop("kind") or "").strip().lower()
+        if kind not in {"cron", "heartbeat", "nudge"}:
+            return web.json_response({"ok": False, "error": "kind must be cron, heartbeat, or nudge"}, status=400)
+        payload.pop("requested_by", None)
+        existing = skill_manager.get_job(kind, job_id)
+        if not existing or str(existing.get("agent") or "") != agent_name:
+            return web.json_response({"ok": False, "error": "job not found for agent"}, status=404)
+        if kind == "cron" and ("schedule" in payload or "timezone" in payload):
+            from orchestrator.scheduler import validate_cron_schedule
+            from orchestrator.timezone_policy import canonical_timezone_name
+
+            schedule = str(payload.get("schedule") or existing.get("schedule") or "").strip()
+            timezone_name = canonical_timezone_name(payload.get("timezone") or existing.get("timezone"))
+            valid, error = validate_cron_schedule(schedule, timezone_name=timezone_name)
+            if not valid:
+                return web.json_response({"ok": False, "error": error or "invalid cron schedule"}, status=400)
+        try:
+            ok, message, job = skill_manager.update_owned_job(
+                kind, job_id, agent_name=agent_name, updates=payload
+            )
+        except (ConfigConflictError, ConfigDurabilityError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=409)
+        except (TypeError, ValueError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        if not ok or job is None:
+            return web.json_response({"ok": False, "error": message}, status=404)
+        return web.json_response(
+            {
+                "ok": True,
+                "authority": "HASHI Scheduler",
+                "agent": agent_name,
+                "kind": kind,
+                "job": self._scheduler_job_record(agent_name=agent_name, kind=kind, job=job),
+            }
+        )
+
+    async def handle_agent_scheduler_delete(self, request):
+        """Delete one owned scheduler task after exact user authorization."""
+
+        agent_name = request.match_info.get("name")
+        job_id = str(request.match_info.get("job_id") or "").strip()
+        runtime = self._runtime_map().get(agent_name)
+        if runtime is None:
+            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        if payload.get("authorization") != "explicit_user_authorization":
+            return web.json_response({"ok": False, "error": "explicit task deletion authorization is required"}, status=403)
+        kind = str(payload.get("kind") or "").strip().lower()
+        if kind not in {"cron", "heartbeat", "nudge"}:
+            return web.json_response({"ok": False, "error": "kind must be cron, heartbeat, or nudge"}, status=400)
+        skill_manager = getattr(runtime, "skill_manager", None)
+        if skill_manager is None:
+            return web.json_response({"ok": False, "error": "skill manager unavailable"}, status=503)
+        try:
+            ok, message = skill_manager.delete_owned_job(kind, job_id, agent_name=agent_name)
+        except (ConfigConflictError, ConfigDurabilityError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=409)
+        if not ok:
+            return web.json_response({"ok": False, "error": message}, status=404)
+        return web.json_response(
+            {"ok": True, "authority": "HASHI Scheduler", "agent": agent_name, "kind": kind, "job_id": job_id}
+        )
+
     async def handle_agent_scheduler_status(self, request):
         """Return one authoritative job definition and persisted scheduler state."""
         agent_name = request.match_info.get("name")
@@ -7858,6 +8100,122 @@ class WorkbenchApiServer:
                 "message": message,
             },
             status=status_code,
+        )
+
+    def _superloop_service(self, agent_name: str):
+        from orchestrator.superloop_agent import SuperloopAgentService
+
+        root = Path(getattr(self.global_config, "project_root", Path.cwd())) / "superloops"
+        instance = str(getattr(self.global_config, "instance_id", "HASHI") or "HASHI")
+        return SuperloopAgentService(root, agent_name=agent_name, instance=instance)
+
+    async def handle_agent_superloops(self, request):
+        agent_name = request.match_info.get("name")
+        if self._runtime_map().get(agent_name) is None:
+            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+        include_deleted = str(request.query.get("include_deleted") or "").lower() == "true"
+        try:
+            loops = self._superloop_service(agent_name).list_loops(include_deleted=include_deleted)
+        except (OSError, ValueError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=503)
+        return web.json_response(
+            {
+                "ok": True,
+                "authority": "HASHI Superloop",
+                "agent": agent_name,
+                "loops": loops,
+                "count": len(loops),
+            }
+        )
+
+    async def handle_agent_superloop_create(self, request):
+        agent_name = request.match_info.get("name")
+        if self._runtime_map().get(agent_name) is None:
+            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "request body must be JSON"}, status=400)
+        if not isinstance(payload, dict):
+            return web.json_response({"ok": False, "error": "request body must be an object"}, status=400)
+        try:
+            result = self._superloop_service(agent_name).create_quickstart(
+                str(payload.get("goal") or ""),
+                task_title=str(payload.get("task_title") or "").strip() or None,
+            )
+        except (TypeError, ValueError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        except OSError as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=503)
+        return web.json_response(
+            {"authority": "HASHI Superloop", "agent": agent_name, **result},
+            status=201 if result.get("ok") else 409,
+        )
+
+    async def handle_agent_superloop_get(self, request):
+        agent_name = request.match_info.get("name")
+        loop_id = str(request.match_info.get("loop_id") or "").strip()
+        if self._runtime_map().get(agent_name) is None:
+            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+        try:
+            result = self._superloop_service(agent_name).get_loop(loop_id)
+        except (FileNotFoundError, PermissionError):
+            return web.json_response({"ok": False, "error": "loop not found for agent"}, status=404)
+        except (TypeError, ValueError, OSError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        return web.json_response(
+            {"ok": True, "authority": "HASHI Superloop", "agent": agent_name, **result}
+        )
+
+    async def handle_agent_superloop_update(self, request):
+        agent_name = request.match_info.get("name")
+        loop_id = str(request.match_info.get("loop_id") or "").strip()
+        if self._runtime_map().get(agent_name) is None:
+            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "request body must be JSON"}, status=400)
+        if not isinstance(payload, dict):
+            return web.json_response({"ok": False, "error": "request body must be an object"}, status=400)
+        action = str(payload.pop("action") or "").strip().lower()
+        payload.pop("requested_by", None)
+        try:
+            result = self._superloop_service(agent_name).update_loop(
+                loop_id, action=action, arguments=payload
+            )
+        except (FileNotFoundError, PermissionError):
+            return web.json_response({"ok": False, "error": "loop not found for agent"}, status=404)
+        except (TypeError, ValueError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        except OSError as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=503)
+        return web.json_response(
+            {"authority": "HASHI Superloop", "agent": agent_name, "loop_id": loop_id, **result},
+            status=200 if result.get("ok", True) else 409,
+        )
+
+    async def handle_agent_superloop_delete(self, request):
+        agent_name = request.match_info.get("name")
+        loop_id = str(request.match_info.get("loop_id") or "").strip()
+        if self._runtime_map().get(agent_name) is None:
+            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        if payload.get("authorization") != "explicit_user_authorization":
+            return web.json_response({"ok": False, "error": "explicit loop deletion authorization is required"}, status=403)
+        try:
+            result = self._superloop_service(agent_name).delete_loop(loop_id)
+        except (FileNotFoundError, PermissionError):
+            return web.json_response({"ok": False, "error": "loop not found for agent"}, status=404)
+        except (TypeError, ValueError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        return web.json_response(
+            {"authority": "HASHI Superloop", "agent": agent_name, **result}
         )
 
     def _background_job_manager(self):

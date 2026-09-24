@@ -11,6 +11,7 @@ from orchestrator import ui_language
 from orchestrator.command_ui import back_label, card_title, refresh_label
 from orchestrator.superloop_compiler import SuperloopCompiler
 from orchestrator.superloop_control import SuperloopControlService
+from orchestrator.superloop_agent import SuperloopAgentService
 from orchestrator.superloop_issues import SuperloopIssuesService
 from orchestrator.superloop_recording import SuperloopRecordingService
 from orchestrator.superloop_runner import SuperloopRunner
@@ -384,39 +385,11 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
                 ui_language.tr("superloop.usage.quickstart", locale=locale),
             )
             return
-        start_result = recording_service.start_recording(
-            goal=goal,
-            owner_agent=runtime.name,
-            owner_instance=local_instance,
-            source_mode="one_shot_prompt",
-        )
-        recording_id = start_result["recording_id"]
-        recording_service.set_intent_summary(
-            recording_id,
-            intent_summary=goal,
-            actor_agent=runtime.name,
-            actor_instance=local_instance,
-        )
-        recording_service.record_trial_step(
-            recording_id,
-            title=f"Bootstrap loop for: {goal}",
-            step_kind="human_or_agent_action",
-            owner_agent=runtime.name,
-            owner_instance=local_instance,
-            execution_mode="simulated",
-            success=True,
-        )
-        recording_service.set_exit_condition(
-            recording_id,
-            exit_condition={"kind": "all_tasks_completed", "details": {"task_ids": []}},
-            actor_agent=runtime.name,
-            actor_instance=local_instance,
-        )
-        result = compiler.compile_recording(
-            recording_id,
-            actor_agent=runtime.name,
-            actor_instance=local_instance,
-        )
+        result = SuperloopAgentService(
+            store.root_dir,
+            agent_name=runtime.name,
+            instance=local_instance,
+        ).create_quickstart(goal)
         if not result.get("ok"):
             await runtime._reply_text(
                 update,
@@ -428,15 +401,8 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
             )
             return
         loop_id = str(result["loop_id"])
-        store.save_loop_state(loop_id, {**store.load_loop_state(loop_id), "status": "running"})
-        store.append_loop_event(loop_id, event_type="loop.resumed", data={"source": "quickstart"}, actor=command_actor)
-        task = SuperloopTaskboardService(store).add_task(
-            loop_id,
-            title=f"First actionable task for: {goal}",
-            owner_agent=runtime.name,
-            owner_instance=local_instance,
-            actor=command_actor,
-        )
+        recording_id = str(result["recording_id"])
+        task_id = str(result["seed_task_id"])
         await runtime._reply_text(
             update,
             (
@@ -444,7 +410,7 @@ async def handle_superloop_command(runtime, update, args_text: str) -> None:
                 f"{ui_language.tr('superloop.goal_label', locale=locale)}: {goal}\n"
                 f"recording_id: `{recording_id}`\n"
                 f"loop_id: `{loop_id}`\n"
-                f"seed_task: `{task['task_id']}`\n\n"
+                f"seed_task: `{task_id}`\n\n"
                 f"{ui_language.tr('superloop.next_steps', locale=locale)}\n"
                 f"1) `/superloop status {loop_id}`\n"
                 f"2) `/superloop next {loop_id}`\n"
