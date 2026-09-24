@@ -66,7 +66,7 @@ def test_route_question_limits_confirmation_to_scope_not_authority() -> None:
     ]
 
     assert "scope/goal clarification route only" in instructions
-    assert "typed request envelope and downstream permission/side-effect gates" in instructions
+    assert "does not inspect or re-confirm authority" in instructions
     assert "If the goal and scope are clear, choose SIMPLE_TASK or COMPLEX_TASK" in instructions
     assert "authorization" in instructions
     assert "risk acceptance" in criteria

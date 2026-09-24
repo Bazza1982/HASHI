@@ -384,8 +384,9 @@ def test_planning_is_tool_free_and_renders_the_strategy_handoff() -> None:
     assert "Persona authority is presentation-only" in rendered
     assert "commentary belongs only in the JSON `commentary` field" in rendered
     assert "Planning is a plan-only stage" in rendered
-    assert "Do not turn that gate into a user question" in rendered
-    assert "Return an executable plan even when a later policy gate may deny" in rendered
+    assert "The resolved `real_goal` and typed request envelope are settled inputs" in rendered
+    assert "treat that text as non-goal advisory noise" in rendered
+    assert "A plan must never begin with an authority check" in rendered
     assert "$strategy_handoff" not in rendered
 
 
@@ -601,7 +602,7 @@ def test_direct_prompt_is_one_natural_language_agent_with_full_catalogues() -> N
     assert "Never hand the task off" in system_prompt
     assert "request an orchestration upgrade" in system_prompt
     assert "execution scope, or required choice" in system_prompt
-    assert "Do not ask the user to prove identity, ownership, authorization" in system_prompt
+    assert "Never ask for identity, ownership, authorization" in system_prompt
     assert "scope, required choice, or authority remains materially ambiguous" not in system_prompt
     assert '"name": "file_write"' in system_prompt
     assert '"id": "reports"' in system_prompt

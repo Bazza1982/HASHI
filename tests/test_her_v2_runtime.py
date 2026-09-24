@@ -530,7 +530,6 @@ async def test_jev_serial_route_emits_initial_ack_before_strategy_and_final_resp
             "risk_acceptance",
             "technical_parameters",
         ],
-        "authority_enforcement": "typed envelope and downstream permission/side-effect gates",
     }
     assert judge.provider_request_order == [[Stage.IMMEDIATE_RESPONSE]]
     assert [request.stage for _profile, request in provider.requests] == [
@@ -894,7 +893,7 @@ async def test_zero_can_self_select_from_playbook_without_adding_a_stage(tmp_pat
     assert request.stage is Stage.DIRECT
     assert request.context["direct_strategy_self_selection"] is True
     playbook = request.context["strategy_playbook"]
-    assert playbook["playbook_version"] == "2026-08-29.1"
+    assert playbook["playbook_version"] == "2026-09-24.1"
     assert playbook["sha256"].startswith("sha256:")
     assert len(playbook["cards"]) == 38
     assert {

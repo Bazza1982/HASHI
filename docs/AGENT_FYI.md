@@ -289,3 +289,14 @@ adoption; preserve user work and report failures.
 HCC is optional, non-authoritative PCM context. `/hcc` controls injection;
 `hcc-refresh` refreshes authorized sources without rewriting PCM or retrying
 conflicts.
+
+## HER v2 goal-to-execution boundary — 2026-09-24
+
+JEV/Strategy still resolves and preserves `real_goal`; that step is not an
+authority check. Triage, Strategy, Planning, Execution, Replanning, Direct, and
+style rewrite must not turn authority, ownership, consent, permission, risk, or
+HITL wording into a clarification question, a plan prerequisite, or a predicted
+refusal. Planning constructs the concrete plan and Execution follows it. Only
+actual observations or tool results may change the execution report. The HASHI2
+JEV route and playbook remain a Functions-layer experiment; no Core or live
+instance adoption is implied by source tests.

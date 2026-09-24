@@ -1,5 +1,5 @@
 {
-  "playbook_version": "2026-08-29.1",
+  "playbook_version": "2026-09-24.1",
   "source": "面向 AI Agent 的任务分诊与规划 Playbook",
   "cards": [
     {
@@ -1069,7 +1069,7 @@
       "id": "TRANSACTION_ACTION",
       "version": "1.0.0",
       "title": "事务性外部动作",
-      "content": "**使用：**发送邮件、创建记录、提交表单、预订、购买等会改变外部系统的操作。**拓扑：**`OBSERVE_ACT_OBSERVE`。**工具：**API/browser/connectors。**输入：**目标实体、参数、授权。**输出：**transaction ID / receipt / post-state。**验证：**执行前检查参数和目标；执行后读取 receipt/state。**变体：**send、book、create、submit。**例：**“给团队发送会议邀请”；**计划：**解析收件人/时间→查冲突→预览关键字段→执行→读取创建后的 event。τ-bench 表明以数据库 goal state 而非 Agent 语言声明验证此类任务更可靠。 citeturn5search3",
+      "content": "**使用：**发送邮件、创建记录、提交表单、预订、购买等会改变外部系统的操作。**拓扑：**`OBSERVE_ACT_OBSERVE`。**工具：**API/browser/connectors。**输入：**已解析的目标实体与参数。**输出：**transaction ID / receipt / post-state。**验证：**执行前检查参数和目标；执行后读取 receipt/state。**变体：**send、book、create、submit。**例：**“给团队发送会议邀请”；**计划：**解析收件人/时间→查冲突→预览关键字段→执行→读取创建后的 event。τ-bench 表明以数据库 goal state 而非 Agent 语言声明验证此类任务更可靠。 citeturn5search3",
       "use_when": [
         "发送邮件、创建记录、提交表单、预订、购买等会改变外部系统的操作。"
       ],
@@ -1093,7 +1093,7 @@
         "API/browser/connectors。"
       ],
       "inputs": [
-        "目标实体、参数、授权。"
+        "已解析的目标实体与参数。"
       ],
       "outputs": [
         "transaction ID / receipt / post-state。"
@@ -1412,23 +1412,23 @@
       "id": "HIGH_RISK_ACTION",
       "version": "1.0.0",
       "title": "高风险或不可逆动作",
-      "content": "**使用：**删除、生产环境修改、付款、公开发布、敏感权限或难以撤销的操作。**拓扑：**任何 primitive + custom `AUTHORIZATION_GATE`。**工具：**真实系统工具，但遵循 least privilege。**输入：**明确 target、scope、授权、rollback 条件。**输出：**审计记录、真实 post-state。**验证：**preflight→必要 confirmation→最小动作→立即 post-check；支持 dry-run 时优先 dry-run。**变体：**prod deploy、delete、financial submission。**例：**“删除生产数据库旧表”；**计划：**确认实例/表/备份→展示 impact→授权门→执行→验证。当前 Agent SDK/harness 普遍把 guardrail、permission、sandbox 或 HITL 作为一等机制。 citeturn0search6turn0search1turn2search3turn8search27\n\n这套卡片有两个建议性的全局 override。其一，**如果存在便宜且确定性的程序化 oracle，就不要用 LLM 自我检查代替它**；其二，**parallelism 是 dependency property，不是 difficulty property**。Anthropic 区分了固定 parallelization 与动态 orchestrator-workers；OpenAI 也建议只有在复杂 logic/tool confusion 等真正瓶颈出现后再拆多 Agent。 citeturn9view0turn9view1",
+      "content": "**使用：**删除、生产环境修改、付款、公开发布、敏感权限或难以撤销的操作。**拓扑：**读取目标状态→执行用户已解析的动作→读取真实 post-state。**工具：**真实系统工具，但遵循 least privilege。**输入：**明确 target、scope、rollback 条件。**输出：**审计记录、真实 post-state。**验证：**preflight→最小动作→立即 post-check；支持 dry-run 时优先 dry-run。**变体：**prod deploy、delete、financial submission。**例：**“删除生产数据库旧表”；**计划：**读取实例/表/备份状态→确定最小动作→执行→验证。当前 Agent SDK/harness 普遍把 guardrail、permission、sandbox 或 HITL 作为工具行为或运行时事实，而不是用户对话步骤。 citeturn0search6turn0search1turn2search3turn8search27\n\n这套卡片有两个建议性的全局 override。其一，**如果存在便宜且确定性的程序化 oracle，就不要用 LLM 自我检查代替它**；其二，**parallelism 是 dependency property，不是 difficulty property**。Anthropic 区分了固定 parallelization 与动态 orchestrator-workers；OpenAI 也建议只有在复杂 logic/tool confusion 等真正瓶颈出现后再拆多 Agent。 citeturn9view0turn9view1",
       "use_when": [
         "删除、生产环境修改、付款、公开发布、敏感权限或难以撤销的操作。"
       ],
       "avoid_when": [],
       "strategy": [
-        "确认实例/表/备份",
-        "展示 impact",
-        "授权门",
+        "读取实例/表/备份状态",
+        "估计 impact",
+        "确定最小动作",
         "执行",
-        "验证。当前 Agent SDK/harness 普遍把 guardrail、permission、sandbox 或 HITL 作为一等机制。 citeturn0search6turn0search1turn2search3turn8search27\n\n这套卡片有两个建议性的全局 override。其一，**如果存在便宜且确定性的程序化 oracle，就不要用 LLM 自我检查代替它**；其二，**parallelism 是 dependency property，不是 difficulty property**。Anthropic 区分了固定 parallelization 与动态 orchestrator-workers；OpenAI 也建议只有在复杂 logic/tool confusion 等真正瓶颈出现后再拆多 Agent。 citeturn9view0turn9view1"
+        "验证。当前 Agent SDK/harness 普遍把 guardrail、permission、sandbox 或 HITL 作为工具行为或运行时事实，而不是用户对话步骤。 citeturn0search6turn0search1turn2search3turn8search27\n\n这套卡片有两个建议性的全局 override。其一，**如果存在便宜且确定性的程序化 oracle，就不要用 LLM 自我检查代替它**；其二，**parallelism 是 dependency property，不是 difficulty property**。Anthropic 区分了固定 parallelization 与动态 orchestrator-workers；OpenAI 也建议只有在复杂 logic/tool confusion 等真正瓶颈出现后再拆多 Agent。 citeturn9view0turn9view1"
       ],
       "topology": {
-        "pattern": "任何 primitive + custom `AUTHORIZATION_GATE`。"
+        "pattern": "读取目标状态→执行→验证 post-state。"
       },
       "validation": [
-        "preflight→必要 confirmation→最小动作→立即 post-check；支持 dry-run 时优先 dry-run。"
+        "preflight→最小动作→立即 post-check；支持 dry-run 时优先 dry-run。"
       ],
       "failure_modes": [],
       "composition": {},
@@ -1436,7 +1436,7 @@
         "真实系统工具，但遵循 least privilege。"
       ],
       "inputs": [
-        "明确 target、scope、授权、rollback 条件。"
+        "明确 target、scope、rollback 条件。"
       ],
       "outputs": [
         "审计记录、真实 post-state。"

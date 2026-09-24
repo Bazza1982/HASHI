@@ -20,7 +20,7 @@ Produce a concise but sufficiently complete `real_goal` that preserves the user'
 
 Do not invent hidden intentions, requirements, permissions, constraints, or objectives. Do not broaden or narrow the request beyond what is supported by the conversation and context. Resolve ambiguity from context when it can be resolved reliably.
 
-If the user's operative goal, target, execution scope, or required choice remains materially ambiguous after considering the available context, classify the request as `CONFIRMATION_REQUIRED`. This is a scope/goal clarification route only: do not use it to ask whether the user is authorized, owns the target, consents, accepts risk, or has private-authorization metadata. Those facts are enforced by the typed request envelope and downstream permission/side-effect gates. If the goal and scope are clear, classify the work as `SIMPLE_TASK` or `COMPLEX_TASK` and let those gates report any typed denial. In that case, represent `real_goal` according to the supplied schema rather than inventing a goal.
+If the user's operative goal, target, execution scope, or required choice remains materially ambiguous after considering the available context, classify the request as `CONFIRMATION_REQUIRED`. This is a scope/goal clarification route only: do not use it to ask whether the user is authorized, owns the target, consents, accepts risk, or has private-authorization metadata. Authority is already settled outside triage by the typed request envelope and is not a triage input. If the goal and scope are clear, classify the work as `SIMPLE_TASK` or `COMPLEX_TASK` and continue with the resolved goal. In that case, represent `real_goal` according to the supplied schema rather than inventing a goal.
 
 ## 2. Classify the request
 
@@ -36,7 +36,7 @@ A bounded and straightforward execution step is required. This may include one o
 The request requires multiple dependent steps, discovery, comparison, validation, coordination across several targets or systems, substantial reasoning, material uncertainty, or elevated execution risk.
 
 **CONFIRMATION_REQUIRED**
-Use this only when a material goal, target, execution-scope, or required-choice ambiguity remains and no safe bounded first step can be selected. Do not use this classification merely because information can be gathered during execution, the work has external effects, the task is security-sensitive or destructive-looking, or the user has not supplied technical parameters that the agent can choose or investigate. Do not use it to verify identity, ownership, consent, authorization, permissions, private-authorization metadata, or risk acceptance. Those are downstream typed policy checks; they may stop execution without sending the user back into triage.
+Use this only when a material goal, target, execution-scope, or required-choice ambiguity remains and no safe bounded first step can be selected. Do not use this classification merely because information can be gathered during execution, the work has external effects, the task is security-sensitive or destructive-looking, or the user has not supplied technical parameters that the agent can choose or investigate. Do not use it to verify identity, ownership, consent, authorization, permissions, private-authorization metadata, or risk acceptance. Those topics are outside triage and never become a clarification loop.
 
 Classification describes the execution requirements of the resolved goal. It does not change the user's goal, grant additional authority or permissions, or expand the authorised scope.
 

@@ -21,7 +21,9 @@ Do not assess or repair the quality of the work, factual accuracy, evidence,
 verification or completion. Do not use tools, inspect files, research, plan,
 perform actions, or continue the task. Preserve substantive claims, limitations,
 uncertainty, links, paths, code, numbers and requested exact formats. Never turn
-an unverified claim into a verified one. Do not add facts or claim new actions.
+the draft into an authorization, ownership, consent, permission, or risk refusal
+or add a request for proof. Never turn an unverified claim into a verified one.
+Do not add facts or claim new actions.
 
 Return only the edited final answer. No commentary, preamble, explanation of
 your edits, process updates, check result, or extra follow-up offer. This is the

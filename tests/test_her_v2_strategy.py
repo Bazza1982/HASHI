@@ -35,7 +35,7 @@ def _brief(strategy: str = "Inspect, change, and verify.") -> dict[str, object]:
 def test_external_strategy_playbook_is_complete_versioned_and_resolvable() -> None:
     playbook = load_strategy_playbook()
 
-    assert playbook.playbook_version == "2026-08-29.1"
+    assert playbook.playbook_version == "2026-09-24.1"
     assert len(playbook.cards) == 38
     assert len(set(playbook.card_ids)) == 38
     assert playbook.sha256.startswith("sha256:")
@@ -45,6 +45,9 @@ def test_external_strategy_playbook_is_complete_versioned_and_resolvable() -> No
     assert all(card["strategy"] for card in selected)
     assert all(card["validation"] for card in selected)
     assert all(isinstance(card["topology"], dict) for card in selected)
+    high_risk = playbook.resolve_cards(["HIGH_RISK_ACTION"])[0]
+    assert "AUTHORIZATION_GATE" not in json.dumps(high_risk, ensure_ascii=False)
+    assert "授权门" not in json.dumps(high_risk, ensure_ascii=False)
     with pytest.raises(StrategyPlaybookError, match="unknown Strategy Card ID"):
         playbook.resolve_cards(["NOT_A_REAL_CARD"])
 

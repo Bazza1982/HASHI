@@ -23,15 +23,18 @@ goal, target, execution scope, or required user choice is still materially
 unclear and no safe bounded first step can be chosen. Missing or uncertain user
 authorization, ownership, consent, permissions, risk acceptance, private
 authorization metadata, or agent-selectable technical parameters are not triage
-clarification triggers. The typed request envelope and downstream permission /
-side-effect gates remain authoritative and may stop execution without asking the
-user to prove authority again.
+clarification triggers. The typed request envelope is already the authority input
+for the turn, but HER's goal sorting, planning, and execution stages must not
+interpret it as a conversational gate: they must not ask, re-confirm, predict a
+denial, or make an authority check the first plan step. Only an actual tool result
+or observed failure may change the execution report.
 
 Planning and Execution have the same non-interactive boundary: Planning only
 constructs the plan; it must not ask for authorization or wait for approval.
-Execution must carry out the plan. A typed permission or side-effect denial is
-recorded as execution evidence or a limitation; it is never turned into a
-user-facing authorization question or a request to reopen Triage.
+Execution must carry out the plan and resolved goal. Strategy Card text about
+authorization, confirmation, or HITL is not copied into the plan, and an imagined
+gate is never treated as execution evidence. Actual tool errors remain reportable
+as observed failures.
 
 `HIGH_VOLUME_TASK` remains readable only for old ledgers/replays. New JEV
 routing never emits it; the former category is represented by

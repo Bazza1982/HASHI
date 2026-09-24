@@ -374,7 +374,6 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                     "risk_acceptance",
                     "technical_parameters",
                 ],
-                "authority_enforcement": "typed envelope and downstream permission/side-effect gates",
             },
         }
         try:

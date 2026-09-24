@@ -2711,7 +2711,7 @@ async def test_strategy_receives_complete_policy_and_minimal_turn_prompt():
         assert decision_boundary in backend.sys_prompt
     assert "Return exactly one valid JSON object" in backend.sys_prompt
     assert "do not use it to ask whether the user is authorized" in backend.sys_prompt
-    assert "Those are downstream typed policy checks" in backend.sys_prompt
+    assert "Those topics are outside Strategy" in backend.sys_prompt
     assert "risk, authority, or confirmation boundaries" not in backend.sys_prompt
     assert '"real_goal"' in backend.sys_prompt
     assert '"selected_strategy_cards"' in backend.sys_prompt
@@ -2913,7 +2913,7 @@ async def test_hashi_stage_provider_enforces_tool_gateway_and_provider_reasoning
     assert '"plan_id": "plan-v1"' in backend.sys_prompt
     assert "only that runtime-attached batch" in backend.sys_prompt
     assert "Mandatory execution boundary" in backend.sys_prompt
-    assert "do not pause to ask the user for authorization" in backend.sys_prompt
+    assert "do not ask, re-check, infer, or discuss authorization" in backend.sys_prompt
     assert "Never emit an authorization question" in backend.sys_prompt
     assert "natural language" in backend.sys_prompt
     assert "Return exactly one JSON object" not in backend.sys_prompt
@@ -2962,7 +2962,7 @@ async def test_hashi_stage_provider_enforces_tool_gateway_and_provider_reasoning
                 planning_backend.sys_prompt
             )
             assert "Planning is a plan-only stage" in planning_backend.sys_prompt
-            assert "Do not turn that gate into a user question" in planning_backend.sys_prompt
+            assert "A plan must never begin with an authority check" in planning_backend.sys_prompt
         else:
             assert "replanning agent in an agentic workflow" in (
                 planning_backend.sys_prompt
