@@ -1570,6 +1570,148 @@ async def execute_background_job_start(
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
+def _managed_process_owner(audit_context: dict | None) -> str:
+    owner = str((audit_context or {}).get("agent_name") or "").strip()
+    if not owner:
+        raise ValueError("managed process calls require an Agent identity")
+    return owner
+
+
+def _managed_process_controller(audit_context: dict | None):
+    from orchestrator.agent_companion import BackgroundJobProcessController
+
+    return BackgroundJobProcessController(
+        lambda: _background_manager_from_context(audit_context)
+    )
+
+
+def _managed_process_summary(handle: Any) -> dict[str, Any]:
+    return {
+        "authority": "HASHI managed process",
+        "process_id": str(getattr(handle, "process_id", "")),
+        "owner": str(getattr(handle, "owner", "")),
+        "state": str(getattr(handle, "state", "unknown")),
+        "pid": getattr(handle, "pid", None),
+        "process_group": getattr(handle, "process_group", None),
+        "lease_expires_at": getattr(handle, "lease_expires_at", None),
+        "managed": bool(getattr(handle, "managed", False)),
+    }
+
+
+async def execute_managed_process_start(
+    args: dict,
+    access_root: Path | Sequence[Path],
+    workspace_dir: Path,
+    audit_context: dict | None = None,
+) -> str:
+    """Start a resident application with typed Agent ownership."""
+
+    try:
+        owner = _managed_process_owner(audit_context)
+    except ValueError as exc:
+        return f"Error: {exc}"
+    command = str(args.get("command") or "").strip()
+    argv = args.get("argv")
+    shell = str(args.get("shell") or "").strip() or None
+    if argv is not None:
+        if not isinstance(argv, list) or not argv or not all(
+            isinstance(item, str) and item for item in argv
+        ):
+            return "Error: argv must be a non-empty list of strings"
+    if not command and not argv:
+        return "Error: command or argv is required"
+    if command and argv:
+        return "Error: provide command or argv, not both"
+    if argv and shell:
+        return "Error: shell is valid only with command mode"
+    try:
+        cwd = _resolve_path(
+            str(args.get("cwd") or ".").strip() or ".",
+            access_root,
+            workspace_dir,
+        )
+    except ValueError as exc:
+        return f"Error: {exc}"
+    if not cwd.exists() or not cwd.is_dir():
+        return f"Error: cwd is not a directory: {cwd}"
+    lease_seconds = args.get("lease_seconds")
+    if lease_seconds is not None:
+        if isinstance(lease_seconds, bool):
+            return "Error: lease_seconds must be a non-negative number"
+        try:
+            lease_seconds = float(lease_seconds)
+        except (TypeError, ValueError):
+            return "Error: lease_seconds must be a non-negative number"
+        if not math.isfinite(lease_seconds) or lease_seconds < 0:
+            return "Error: lease_seconds must be a non-negative number"
+    try:
+        from orchestrator.agent_companion import ManagedProcessSpec
+
+        spec = ManagedProcessSpec(
+            cwd=str(cwd),
+            argv=tuple(argv or ()),
+            command=command or None,
+            shell=shell,
+            lease_seconds=lease_seconds,
+            label=str(args.get("label") or "").strip(),
+        )
+        handle = await _managed_process_controller(audit_context).start(owner, spec)
+    except Exception as exc:
+        return f"Error: managed process start failed: {type(exc).__name__}: {exc}"
+    return json.dumps(_managed_process_summary(handle), ensure_ascii=False, indent=2)
+
+
+async def execute_managed_process_status(
+    args: dict,
+    audit_context: dict | None = None,
+) -> str:
+    try:
+        owner = _managed_process_owner(audit_context)
+    except ValueError as exc:
+        return f"Error: {exc}"
+    process_id = str(args.get("process_id") or "").strip()
+    if not process_id:
+        return "Error: process_id is required"
+    try:
+        handle = await _managed_process_controller(audit_context).inspect(owner, process_id)
+    except Exception as exc:
+        return f"Error: managed process status failed: {type(exc).__name__}: {exc}"
+    if handle is None:
+        return f"Error: managed process not found: {process_id}"
+    return json.dumps(_managed_process_summary(handle), ensure_ascii=False, indent=2)
+
+
+async def execute_managed_process_stop(
+    args: dict,
+    audit_context: dict | None = None,
+) -> str:
+    try:
+        owner = _managed_process_owner(audit_context)
+    except ValueError as exc:
+        return f"Error: {exc}"
+    process_id = str(args.get("process_id") or "").strip()
+    if not process_id:
+        return "Error: process_id is required"
+    grace_seconds = args.get("grace_seconds", 2.0)
+    if isinstance(grace_seconds, bool):
+        return "Error: grace_seconds must be a non-negative number"
+    try:
+        grace_seconds = float(grace_seconds)
+    except (TypeError, ValueError):
+        return "Error: grace_seconds must be a non-negative number"
+    if not math.isfinite(grace_seconds) or grace_seconds < 0:
+        return "Error: grace_seconds must be a non-negative number"
+    try:
+        handle = await _managed_process_controller(audit_context).stop(
+            owner,
+            process_id,
+            grace_seconds=grace_seconds,
+        )
+    except Exception as exc:
+        return f"Error: managed process stop failed: {type(exc).__name__}: {exc}"
+    return json.dumps(_managed_process_summary(handle), ensure_ascii=False, indent=2)
+
+
 async def execute_background_job_status(args: dict, audit_context: dict | None = None) -> str:
     job_id = str(args.get("job_id") or "").strip()
     if not job_id:

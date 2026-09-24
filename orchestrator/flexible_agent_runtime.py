@@ -105,6 +105,14 @@ from orchestrator.runtime_common import (
 from orchestrator.request_activity import RequestActivityStore
 from orchestrator.runtime_defaults import DEFAULT_HASHI_REMOTE_PORT
 from orchestrator.agent_fyi import build_agent_fyi_primer
+from orchestrator.agent_companion import (
+    AgentCompanionSupervisor,
+    BackgroundJobProcessController,
+    CompanionPolicy,
+    InterventionEvent,
+    build_jev_judge,
+    companion_enabled,
+)
 from orchestrator.bridge_memory import BridgeMemoryStore, BridgeContextAssembler, SysPromptManager
 from orchestrator.ephemeral_invoker import make_backend_sidecar_invoker
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
@@ -428,6 +436,31 @@ class FlexibleAgentRuntime:
         from orchestrator.out_of_band_control import AgentControlLane
 
         self.control_lane = AgentControlLane(self)
+        self._agent_companion_events: list[dict[str, Any]] = []
+        self.agent_companion_supervisor = None
+        try:
+            if companion_enabled(self.config.extra):
+                companion_policy = CompanionPolicy.from_options(self.config.extra)
+                self.agent_companion_supervisor = AgentCompanionSupervisor(
+                    agent_id=self.name,
+                    control_lane=self.control_lane,
+                    judge=build_jev_judge(self.config.extra, self.secrets),
+                    managed_processes=BackgroundJobProcessController(
+                        lambda: getattr(
+                            getattr(self, "orchestrator", None),
+                            "background_job_manager",
+                            None,
+                        )
+                        or getattr(self, "background_job_manager", None)
+                    ),
+                    event_sink=self._emit_agent_companion_event,
+                    policy=companion_policy,
+                )
+        except (TypeError, ValueError) as exc:
+            self.logger.warning(
+                "Invalid Agent Companion configuration; AC remains disabled: %s",
+                exc,
+            )
         self._sidecar_invoker, self._sidecar_context_getter = make_backend_sidecar_invoker(
             self.backend_manager,
             session_id_getter=lambda: self.session_id_dt,
@@ -1392,6 +1425,47 @@ class FlexibleAgentRuntime:
         for key, value in fields.items():
             parts.append(f"{key}={value!r}")
         self.maintenance_logger.info(" ".join(parts))
+
+    async def _emit_agent_companion_event(self, event: InterventionEvent) -> None:
+        """Record and deliver one typed AC intervention without exposing raw state."""
+
+        payload = event.to_dict()
+        self._agent_companion_events.append(payload)
+        if len(self._agent_companion_events) > 64:
+            del self._agent_companion_events[:-64]
+        self.logger.warning(
+            "Agent Companion intervention agent=%s turn=%s issue=%s action=%s source=%s",
+            self.name,
+            event.turn_id,
+            event.issue.value,
+            event.action.value,
+            event.source,
+        )
+        # The Agent receives a bounded operational message through the normal
+        # queue.  It is marked internal so this message cannot recursively
+        # create another companion.  Telegram delivery remains disabled; the
+        # user-facing report is still owned by the original turn.
+        try:
+            await self.enqueue_api_text(
+                event.to_agent_message(),
+                source="agent-companion",
+                deliver_to_telegram=False,
+                request_metadata={
+                    "agent_companion_internal": True,
+                    "system_exchange": True,
+                    "system_exchange_kind": "agent_companion_intervention",
+                    "agent_companion_event_id": event.event_id,
+                    "agent_companion_parent_turn_id": event.turn_id,
+                    "agent_companion_parent_run_id": event.run_id,
+                },
+                idempotency_key=event.event_id,
+            )
+        except Exception as exc:
+            self.error_logger.warning(
+                "Agent Companion intervention delivery failed safely: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
 
     def get_display_name(self) -> str:
         if self.config.extra and self.config.extra.get("display_name"):
@@ -11561,6 +11635,16 @@ class FlexibleAgentRuntime:
                 self,
                 item.request_id,
             )
+            companion_supervisor = getattr(self, "agent_companion_supervisor", None)
+            if companion_supervisor is not None:
+                try:
+                    await companion_supervisor.finish(item.request_id, terminal=True)
+                except Exception as companion_exc:
+                    self.error_logger.warning(
+                        "Agent Companion background cleanup failed safely: %s: %s",
+                        type(companion_exc).__name__,
+                        companion_exc,
+                    )
             await runtime_delivery_order.complete_turn(self, item.request_id)
 
     async def process_queue(self):

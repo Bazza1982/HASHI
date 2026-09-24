@@ -1881,6 +1881,93 @@ BACKGROUND_JOB_TOOL_SCHEMAS = [
     },
 ]
 
+MANAGED_PROCESS_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "managed_process_start",
+            "description": (
+                "Start an Agent-owned resident application through the typed managed-process "
+                "service. Use this instead of shell for monitors, servers, watchers, or any "
+                "process expected to outlive the current turn. Ownership is bound to the "
+                "calling Agent; do not supply another Agent name."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "Shell command. Do not provide with argv.",
+                    },
+                    "shell": {
+                        "type": "string",
+                        "enum": ["bash", "powershell", "cmd"],
+                        "description": "Optional shell for command mode; invalid with argv.",
+                    },
+                    "argv": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "description": "Argument vector without a shell. Do not provide with command.",
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Working directory, absolute or workspace-relative. Default workspace.",
+                    },
+                    "lease_seconds": {
+                        "type": "number",
+                        "minimum": 0,
+                        "description": "Optional ownership lease. Omit for an explicit no-expiry lease.",
+                    },
+                    "label": {
+                        "type": "string",
+                        "description": "Short non-secret label for the managed process.",
+                    },
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "managed_process_status",
+            "description": "Show status for one managed process owned by this Agent.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "process_id": {"type": "string", "description": "Managed process id."},
+                },
+                "required": ["process_id"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "managed_process_stop",
+            "description": (
+                "Stop one managed process owned by this Agent after an ownership and lease "
+                "check. This cannot stop an arbitrary PID or another Agent's process."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "process_id": {"type": "string", "description": "Managed process id."},
+                    "grace_seconds": {
+                        "type": "number",
+                        "minimum": 0,
+                        "description": "Grace period before the manager's tree cleanup. Default 2 seconds.",
+                    },
+                },
+                "required": ["process_id"],
+                "additionalProperties": False,
+            },
+        },
+    },
+]
+
 HASHI_SCHEDULER_TOOL_SCHEMAS = [
     {
         "type": "function",
@@ -2176,6 +2263,7 @@ HASHI_SUPERLOOP_TOOL_SCHEMAS = [
 ]
 
 TOOL_SCHEMAS.extend(BACKGROUND_JOB_TOOL_SCHEMAS)
+TOOL_SCHEMAS.extend(MANAGED_PROCESS_TOOL_SCHEMAS)
 TOOL_SCHEMAS.extend(HASHI_SCHEDULER_TOOL_SCHEMAS)
 TOOL_SCHEMAS.extend(HASHI_SUPERLOOP_TOOL_SCHEMAS)
 TOOL_SCHEMAS.extend(WINDOWS_USE_TOOL_SCHEMAS)

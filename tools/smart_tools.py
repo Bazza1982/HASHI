@@ -88,6 +88,7 @@ _POLL_TOOLS = frozenset(
         "background_job_status",
         "background_job_tail",
         "background_job_list",
+        "managed_process_status",
         "hashi_scheduler_status",
         "browser_wait_for",
     }
@@ -102,6 +103,7 @@ _IDEMPOTENT_ACTION_TOOLS = frozenset(
         "browser_open_play_verify",
         "browser_react",
         "background_job_cancel",
+        "managed_process_stop",
         "windows_mouse_move",
         "windows_window_focus",
         "windows_reset_input_state",
@@ -129,6 +131,8 @@ _SIDE_EFFECT_ACTION_TOOLS = frozenset(
         "browser_fill",
         "browser_type_text",
         "background_job_start",
+        "managed_process_start",
+        "managed_process_stop",
         "hashi_scheduler_rerun",
         "hashi_scheduler_create",
         "hashi_scheduler_update",
@@ -167,6 +171,9 @@ _TOOL_ADAPTERS = {
     "hashi_superloop_create": "superloop",
     "hashi_superloop_update": "superloop",
     "hashi_superloop_delete": "superloop",
+    "managed_process_start": "managed_process",
+    "managed_process_status": "managed_process",
+    "managed_process_stop": "managed_process",
 }
 
 

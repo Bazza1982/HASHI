@@ -22,7 +22,13 @@ POLICY_RELATIVE_PATH = Path("state") / "platform" / "live-runtime-protection.jso
 _PATH_WRITE_TOOLS = frozenset({"file_write", "apply_patch"})
 _PATH_READ_TOOLS = frozenset({"file_read", "log_query"})
 _COMMAND_TOOLS = frozenset(
-    {"bash", "shell", "background_job_start", "verification_run"}
+    {
+        "bash",
+        "shell",
+        "background_job_start",
+        "managed_process_start",
+        "verification_run",
+    }
 )
 _PACKAGE_MUTATIONS = frozenset(
     {"add", "install", "remove", "sync", "uninstall", "upgrade"}
@@ -258,6 +264,16 @@ def evaluate_live_runtime_request(
     if tool_name not in _COMMAND_TOOLS:
         return None
 
+    if tool_name == "managed_process_start":
+        cwd = _argument_path(args.get("cwd"), workspace_dir)
+        if cwd is not None:
+            target = _matching_path(
+                cwd,
+                (*policy.protected_write_paths, *policy.runtime_roots),
+            )
+            if target is not None:
+                return _decision("managed_process_start", target)
+
     command, tokens = _command_and_tokens(tool_name, args)
     if not command:
         return None
@@ -404,7 +420,9 @@ def _read_core_pid(path: Path) -> int | None:
 
 
 def _command_and_tokens(tool_name: str, arguments: Mapping[str, Any]) -> tuple[str, list[str]]:
-    if tool_name == "verification_run":
+    if tool_name == "verification_run" or (
+        tool_name == "managed_process_start" and arguments.get("argv") is not None
+    ):
         argv = arguments.get("argv")
         if not isinstance(argv, list):
             return "", []

@@ -33,6 +33,7 @@ TOOL_TIERS: dict[str, list[str]] = {
     "background": [
         "background_job_start", "background_job_status", "background_job_tail",
         "background_job_cancel", "background_job_list",
+        "managed_process_start", "managed_process_status", "managed_process_stop",
     ],
     "web": ["web_search", "web_fetch", "http_request", "xai_imagine"],
     "communication": ["telegram_send", "frontend_send_attachments"],
@@ -89,6 +90,7 @@ READ_ONLY_TOOL_NAMES = frozenset(
         "desktop_screenshot",
         "file_list",
         "file_read",
+        "managed_process_status",
         "hashi_scheduler_list",
         "hashi_scheduler_run_history",
         "hashi_scheduler_status",
@@ -706,7 +708,12 @@ class ToolRegistry:
         if context.get("system_exchange") is not True:
             return None
         blocked = False
-        if tool_name in {"bash", "shell", "background_job_start"}:
+        if tool_name in {
+            "bash",
+            "shell",
+            "background_job_start",
+            "managed_process_start",
+        }:
             command = str((arguments or {}).get("command") or "").casefold()
             blocked = any(
                 marker in command
@@ -978,7 +985,12 @@ class ToolRegistry:
         )
 
     def _check_enterprise_shell_gate(self, tool_name: str, *, tool_call_id: str) -> ToolResult | None:
-        if tool_name not in {"bash", "shell", "background_job_start"}:
+        if tool_name not in {
+            "bash",
+            "shell",
+            "background_job_start",
+            "managed_process_start",
+        }:
             return None
         context = self._effective_audit_context()
         org_id = str(context.get("org_id") or "").strip()
@@ -1242,6 +1254,9 @@ class ToolRegistry:
             execute_background_job_tail,
             execute_background_job_cancel,
             execute_background_job_list,
+            execute_managed_process_start,
+            execute_managed_process_status,
+            execute_managed_process_stop,
             execute_request_diagnostics,
             execute_telegram_send,
             execute_telegram_send_file,
@@ -1371,6 +1386,26 @@ class ToolRegistry:
                 arguments,
                 access_root=self.access_roots,
                 workspace_dir=self.workspace_dir,
+                audit_context=self._effective_audit_context(),
+            )
+
+        if tool_name == "managed_process_start":
+            return await execute_managed_process_start(
+                arguments,
+                access_root=self.access_roots,
+                workspace_dir=self.workspace_dir,
+                audit_context=self._effective_audit_context(),
+            )
+
+        if tool_name == "managed_process_status":
+            return await execute_managed_process_status(
+                arguments,
+                audit_context=self._effective_audit_context(),
+            )
+
+        if tool_name == "managed_process_stop":
+            return await execute_managed_process_stop(
+                arguments,
                 audit_context=self._effective_audit_context(),
             )
 

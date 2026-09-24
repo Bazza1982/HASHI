@@ -110,6 +110,16 @@ tool. Recall terminalizes an eligible READY direct Run and releases delivery.
 Every turn needs a visible result. Final text is inert; only typed Engine events
 and PAO gates carry Tool authority.
 
+The PAO Agent Companion is an optional Function-layer supervisor for each active
+Turn of an explicitly opted-in Agent. It is disabled by default and is currently
+scoped to the HASHI2 `exp-herv2j` Arale canary. It observes a bounded snapshot,
+may ask Jev for a typed advisory, and routes only policy-approved interventions
+through the existing control lane. It does not add a hard timeout, infer
+permission, or kill an unmanaged PID.
+Long-lived applications must use the typed `managed_process_start/status/stop`
+entries with an owning Agent and lease; a foreground shell command remains
+foreground by design.
+
 ## Engines, tools, and recovery
 
 Engine and Model Provider are different. HER v2 exposes Direct (`zero`),

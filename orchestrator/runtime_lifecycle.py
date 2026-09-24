@@ -246,6 +246,16 @@ async def shutdown(runtime: Any) -> None:
         )
         and clean
     )
+    companion_supervisor = getattr(runtime, "agent_companion_supervisor", None)
+    if companion_supervisor is not None:
+        clean = (
+            await _run_shutdown_step(
+                runtime,
+                companion_supervisor.close(),
+                label="agent-companion",
+            )
+            and clean
+        )
     control_lane = getattr(runtime, "control_lane", None)
     if control_lane is not None:
         clean = (
@@ -321,6 +331,8 @@ async def process_queue(runtime: Any) -> None:
         item = None
         feedback = None
         feedback_cleaned = False
+        companion_started = False
+        companion_detached = False
         try:
             item = await runtime.queue.get()
             if not item.prompt or not item.prompt.strip():
@@ -371,6 +383,21 @@ async def process_queue(runtime: Any) -> None:
                 final_prompt=final_prompt,
                 is_bridge_request=is_bridge_request,
             )
+            companion = getattr(runtime, "agent_companion_supervisor", None)
+            companion_internal = bool(
+                (getattr(item, "request_metadata", None) or {}).get(
+                    "agent_companion_internal"
+                )
+            )
+            if companion is not None and not companion_internal:
+                companion.start_for_turn(
+                    run_id=str(getattr(item, "run_id", None) or item.request_id),
+                    turn_id=str(item.request_id),
+                    task_summary=str(item.summary or ""),
+                    chat_id=getattr(item, "chat_id", None),
+                    can_interrupt=True,
+                )
+                companion_started = True
 
             audit_active = runtime._audit_enabled() and should_audit_source(item.source)
             audit_collector = AuditTelemetryCollector() if audit_active else None
@@ -382,11 +409,18 @@ async def process_queue(runtime: Any) -> None:
             )
             runtime_background_status.prepare(runtime, item)
 
+            companion_stream_callback = feedback.on_stream_event
+            if companion is not None and companion_started:
+                companion_stream_callback = companion.wrap_stream_callback(
+                    item.request_id,
+                    feedback.on_stream_event,
+                )
+
             generation = await runtime_pipeline.run_backend_generation(
                 runtime,
                 item,
                 final_prompt,
-                on_stream_event=feedback.on_stream_event,
+                on_stream_event=companion_stream_callback,
                 audit_active=audit_active,
             )
             await _publish_worker_metadata(
@@ -445,6 +479,7 @@ async def process_queue(runtime: Any) -> None:
                     status_placeholder,
                 )
                 runtime._register_background_task(generation.generation_task, item)
+                companion_detached = companion_started
                 runtime.logger.info(
                     f"Detached {item.request_id} to background "
                     f"(threshold={generation.detach_after_s}s, backend={runtime.config.active_backend})"
@@ -458,7 +493,7 @@ async def process_queue(runtime: Any) -> None:
                 runtime,
                 item,
                 response,
-                on_stream_event=feedback.on_stream_event,
+                on_stream_event=companion_stream_callback,
             )
             if recovered is not None:
                 response, final_prompt = recovered
@@ -619,6 +654,18 @@ async def process_queue(runtime: Any) -> None:
         finally:
             if item is not None:
                 runtime.is_generating = False
+            if item is not None and companion_started and not companion_detached:
+                try:
+                    await getattr(runtime, "agent_companion_supervisor").finish(
+                        item.request_id,
+                        terminal=True,
+                    )
+                except Exception as companion_exc:
+                    runtime.error_logger.warning(
+                        "Agent Companion cleanup failed safely: %s: %s",
+                        type(companion_exc).__name__,
+                        companion_exc,
+                    )
             if (
                 feedback is not None
                 and not feedback_cleaned
