@@ -159,6 +159,12 @@ and display it as `TypeSafe/Jev`, so it cannot turn another model's known
 subtotal into unknown. If a provider later reports a non-zero amount, that
 reported amount remains authoritative. Source changes and live adoption remain
 separate facts.
+HER v2 JEV route classification keeps `CONFIRMATION_REQUIRED` limited to
+materially unresolved goal, target, execution scope, or required user choice.
+It must not send the user back to triage merely to prove authorization,
+ownership, permissions, risk acceptance, or private-authorization metadata;
+the typed envelope and downstream permission / side-effect gates remain
+authoritative. Source changes and live adoption are reported separately.
 
 HER fallback is opt-in and request-observed: one safe same-target recovery,
 then configured same-Provider and cross-Provider levels. Never downgrade Pro.

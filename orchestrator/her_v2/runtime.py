@@ -359,6 +359,23 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             "typed_context": context,
             "effort": state.effort.value,
             "attachments": [dict(item) for item in state.attachment_manifest],
+            "route_policy": {
+                "confirmation_required_only_for": [
+                    "goal",
+                    "target",
+                    "execution_scope",
+                    "required_choice",
+                ],
+                "not_confirmation_triggers": [
+                    "authorization",
+                    "ownership",
+                    "permission",
+                    "private_authorization_metadata",
+                    "risk_acceptance",
+                    "technical_parameters",
+                ],
+                "authority_enforcement": "typed envelope and downstream permission/side-effect gates",
+            },
         }
         try:
             result = await state.control.run_cancellable(

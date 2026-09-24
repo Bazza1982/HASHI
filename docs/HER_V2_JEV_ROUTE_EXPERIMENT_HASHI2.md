@@ -18,6 +18,15 @@ resolve `real_goal`, select the existing Strategy Cards and Habits, and write th
 execution brief. JEV probabilities and confidence are retained as uncertainty
 evidence, not treated as a guarantee of certainty.
 
+`CONFIRMATION_REQUIRED` is deliberately narrow. It is selected only when the
+goal, target, execution scope, or required user choice is still materially
+unclear and no safe bounded first step can be chosen. Missing or uncertain user
+authorization, ownership, consent, permissions, risk acceptance, private
+authorization metadata, or agent-selectable technical parameters are not triage
+clarification triggers. The typed request envelope and downstream permission /
+side-effect gates remain authoritative and may stop execution without asking the
+user to prove authority again.
+
 `HIGH_VOLUME_TASK` remains readable only for old ledgers/replays. New JEV
 routing never emits it; the former category is represented by
 `COMPLEX_TASK`.

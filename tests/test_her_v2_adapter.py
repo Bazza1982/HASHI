@@ -2706,10 +2706,13 @@ async def test_strategy_receives_complete_policy_and_minimal_turn_prompt():
     for decision_boundary in (
         "A bounded and straightforward execution step is required",
         "multiple dependent steps, discovery, comparison, validation",
-        "goal, target, scope, required choice, or authority is materially unclear",
+        "goal, target, execution scope, or required choice remains materially ambiguous",
     ):
         assert decision_boundary in backend.sys_prompt
     assert "Return exactly one valid JSON object" in backend.sys_prompt
+    assert "do not use it to ask whether the user is authorized" in backend.sys_prompt
+    assert "Those are downstream typed policy checks" in backend.sys_prompt
+    assert "risk, authority, or confirmation boundaries" not in backend.sys_prompt
     assert '"real_goal"' in backend.sys_prompt
     assert '"selected_strategy_cards"' in backend.sys_prompt
     assert '"execution_brief"' in backend.sys_prompt

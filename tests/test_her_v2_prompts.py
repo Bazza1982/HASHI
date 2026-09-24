@@ -596,6 +596,9 @@ def test_direct_prompt_is_one_natural_language_agent_with_full_catalogues() -> N
     assert "zero-orchestration Direct route" in system_prompt
     assert "Never hand the task off" in system_prompt
     assert "request an orchestration upgrade" in system_prompt
+    assert "execution scope, or required choice" in system_prompt
+    assert "Do not ask the user to prove identity, ownership, authorization" in system_prompt
+    assert "scope, required choice, or authority remains materially ambiguous" not in system_prompt
     assert '"name": "file_write"' in system_prompt
     assert '"id": "reports"' in system_prompt
     assert "Check the current workspace" in system_prompt

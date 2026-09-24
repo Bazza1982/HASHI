@@ -48,7 +48,7 @@ Produce a concise but sufficiently complete `real_goal` that preserves the user'
 
 Do not invent hidden intentions, requirements, permissions, constraints, or objectives. Do not broaden or narrow the request beyond what is supported by the conversation and context. Resolve ambiguity from context when it can be resolved reliably.
 
-If the user's operative goal, target, scope, required choice, or authority remains materially ambiguous after considering the available context, ask the user a concise clarification or confirmation question instead of proceeding on an unsupported assumption.
+If the user's operative goal, target, execution scope, or required choice remains materially ambiguous after considering the available context, ask the user a concise clarification question instead of proceeding on an unsupported assumption. Do not ask the user to prove identity, ownership, authorization, permissions, or risk acceptance; those are governed by the typed request envelope and downstream policy gates.
 
 ## 2. Identify relevant Habits
 

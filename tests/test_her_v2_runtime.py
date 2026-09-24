@@ -455,10 +455,12 @@ class _RecordingRouteJudge:
         self.classification = classification
         self.calls = 0
         self.provider_request_order = []
+        self.payloads = []
 
     async def judge(self, state, turn_id):
-        del state, turn_id
+        del turn_id
         self.calls += 1
+        self.payloads.append(state)
         # The first Immediate Response must have completed before JEV starts;
         # Strategy must not have started yet.
         self.provider_request_order.append(
@@ -513,6 +515,23 @@ async def test_jev_serial_route_emits_initial_ack_before_strategy_and_final_resp
     assert result.terminal_state is TerminalState.COMPLETED
     assert result.text == "这是根据请求得到的直接答复。"
     assert judge.calls == 1
+    assert judge.payloads[0]["route_policy"] == {
+        "confirmation_required_only_for": [
+            "goal",
+            "target",
+            "execution_scope",
+            "required_choice",
+        ],
+        "not_confirmation_triggers": [
+            "authorization",
+            "ownership",
+            "permission",
+            "private_authorization_metadata",
+            "risk_acceptance",
+            "technical_parameters",
+        ],
+        "authority_enforcement": "typed envelope and downstream permission/side-effect gates",
+    }
     assert judge.provider_request_order == [[Stage.IMMEDIATE_RESPONSE]]
     assert [request.stage for _profile, request in provider.requests] == [
         Stage.IMMEDIATE_RESPONSE,

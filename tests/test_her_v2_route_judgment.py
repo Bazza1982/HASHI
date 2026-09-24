@@ -9,6 +9,7 @@ from orchestrator.her_v2.prompts import (
 )
 from orchestrator.her_v2.route_judgment import (
     ROUTE_CLASSIFICATIONS,
+    ROUTE_QUESTION,
     RouteJudgmentConfig,
     parse_route_answer,
 )
@@ -56,6 +57,21 @@ def test_route_choice_accepts_only_the_four_active_categories() -> None:
                 }
             }
         )
+
+
+def test_route_question_limits_confirmation_to_scope_not_authority() -> None:
+    instructions = ROUTE_QUESTION["instructions"]
+    criteria = ROUTE_QUESTION["criteria"][
+        TriageClassification.CONFIRMATION_REQUIRED.value
+    ]
+
+    assert "scope/goal clarification route only" in instructions
+    assert "typed request envelope and downstream permission/side-effect gates" in instructions
+    assert "If the goal and scope are clear, choose SIMPLE_TASK or COMPLEX_TASK" in instructions
+    assert "authorization" in instructions
+    assert "risk acceptance" in criteria
+    assert "technical parameters are not confirmation triggers" in criteria
+    assert "significant risk blocks safe execution" not in criteria
 
 
 def test_route_config_is_opt_in_and_serial_mode_is_explicit() -> None:
