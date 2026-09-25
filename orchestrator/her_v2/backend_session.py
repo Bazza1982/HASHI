@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +49,7 @@ class AcceptedHerTurn:
     duplicate: bool = False
     duplicate_text: str = ""
     resource_attachments: tuple[dict[str, Any], ...] = ()
+    pcm_input: Mapping[str, Any] = field(default_factory=dict)
 
 
 class HerBackendSessionCoordinator:
@@ -529,12 +530,25 @@ class HerBackendSessionCoordinator:
         turn = accepted["turn"]
         duplicate = bool(accepted.get("duplicate"))
         materialized = ""
+        history = self.store.recent_completed_turns(
+            session_id, limit=self.history_limit
+        )
+        pcm_sections = [
+            dict(value)
+            for value in (session.get("pcm") or {}).values()
+            if isinstance(value, Mapping)
+        ]
+        pcm_input = {
+            "sections": pcm_sections,
+            "history": [dict(item) for item in history if isinstance(item, Mapping)],
+            "current_request": str(turn.get("user_message") or ""),
+        }
         if not duplicate or str(turn.get("status") or "") == "active":
             materialized = self._render_prompt(
                 session.get("pcm") or {},
                 session.get("resources") or {},
                 str(turn.get("user_message") or ""),
-                self.store.recent_completed_turns(session_id, limit=self.history_limit),
+                history,
             )
         return AcceptedHerTurn(
             session_id=session_id,
@@ -560,6 +574,7 @@ class HerBackendSessionCoordinator:
                 )
                 if isinstance(item, Mapping)
             ),
+            pcm_input=pcm_input,
         )
 
     @staticmethod

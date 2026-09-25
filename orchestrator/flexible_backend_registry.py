@@ -109,10 +109,8 @@ BACKEND_REGISTRY: dict[str, dict] = {
         "privacy_levels": [0, 1],
         "models": ["role-configured"],
         "default_model": "role-configured",
-        # Public HER v2 product modes.  Higher experimental policies remain
-        # implemented internally, but are intentionally not user-selectable
-        # until their Replanning/Review design is revisited.
-        "efforts": ["zero", "low", "medium"],
+        # HER v3 exposes model reasoning effort only; workflow routing is fixed.
+        "efforts": ["none", "low", "medium", "high", "xhigh", "max"],
         "default_effort": "medium",
         # Each role profile resolves credentials through its concrete provider.
         "secret_keys": [],
@@ -486,8 +484,11 @@ def normalize_effort(
         effort = "xhigh"
     if canonical_backend_engine(engine) == HER_V2_ENGINE:
         effort = {
-            "direct": "zero",
-            "zero_orchestration": "zero",
+            "none": "none",
+            "off": "none",
+            "zero": "none",
+            "direct": "none",
+            "zero_orchestration": "none",
             "strategic": "low",
             "fast": "low",
             "fast_path": "low",

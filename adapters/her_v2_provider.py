@@ -90,6 +90,7 @@ from orchestrator.her_v2.retry import (
     DEFAULT_PROVIDER_RETRY_POLICY,
     ProviderRetryPolicy,
 )
+from orchestrator.her_v2.v3_prompt import compile_main_prompt
 from orchestrator.her_v2.task_state import (
     HASHI_TASK_DELTA_ARGUMENT,
     HERTaskState,
@@ -1523,12 +1524,14 @@ class _CognitiveControlToolRegistry:
         audit_log: DurableAuditLog | None = None,
         provider: str = "",
         model: str = "",
+        turn_services: Any | None = None,
     ) -> None:
         self._base = base
         self._request = request
         self._audit_log = audit_log
         self._provider = str(provider or "")
         self._model = str(model or "")
+        self._turn_services = turn_services
         self._audit_serial = 0
         self.task_state = (
             request.task_state
@@ -1632,7 +1635,10 @@ class _CognitiveControlToolRegistry:
                 if str((item.get("function") or {}).get("name") or "") in allowed
             ]
         )
-        return [self._with_task_delta(item) for item in selected]
+        # HER v3 does not force the model to maintain a parallel TaskState on
+        # every tool call. The deterministic cycle detector still observes the
+        # real tool/result stream, and legacy deltas remain accepted if supplied.
+        return selected
 
     def allowed_tool_names(self) -> tuple[str, ...]:
         if self.controller.awaiting_decision:
@@ -1802,18 +1808,19 @@ class _CognitiveControlToolRegistry:
         )
         task_snapshot = self.task_state.prompt_snapshot()
         output = str(getattr(result, "output", "") or "").rstrip()
-        output += "\n\nHASHI_TASK_STATE: " + json.dumps(
-            task_snapshot,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        details.update(
-            {
-                "task_state_delta": delta_application.as_dict(),
-                "task_state": task_snapshot,
-            }
-        )
+        if delta_application.status != "missing":
+            output += "\n\nHASHI_TASK_STATE: " + json.dumps(
+                task_snapshot,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            details.update(
+                {
+                    "task_state_delta": delta_application.as_dict(),
+                    "task_state": task_snapshot,
+                }
+            )
         if interrupt is not None:
             payload = self.controller.interrupt_payload()
             self._audit(
@@ -1835,6 +1842,15 @@ class _CognitiveControlToolRegistry:
                     "cognitive_interrupt": interrupt.as_dict(),
                     "cognitive_control": self.controller.snapshot(),
                 }
+            )
+        if self._turn_services is not None:
+            self._turn_services.tool_completed(
+                name,
+                tool_call_id=str(getattr(result, "tool_call_id", "") or tool_call_id),
+                output=str(getattr(result, "output", "") or ""),
+                is_error=bool(getattr(result, "is_error", False)),
+                details=details,
+                cognitive_interrupt=(interrupt.as_dict() if interrupt is not None else None),
             )
         return self._result(
             tool_call_id=str(getattr(result, "tool_call_id", "") or tool_call_id),
@@ -1904,6 +1920,20 @@ class _CognitiveControlToolRegistry:
             )
 
         semantic_arguments, delta = self._split_arguments(arguments)
+        if self._turn_services is not None:
+            notice = str(self._turn_services.take_intervention() or "").strip()
+            if notice:
+                return self._result(
+                    tool_call_id=tool_call_id,
+                    output=(
+                        "HASHI_AGENT_COMPANION_INTERVENTION\n" + notice +
+                        "\nThe requested tool action was not executed. Decide the next "
+                        "step yourself; do not repeat mechanically."
+                    ),
+                    is_error=True,
+                    details={"control_disposition": "agent_companion_intervention"},
+                )
+            self._turn_services.tool_started(name, semantic_arguments, tool_call_id)
         delta_application = self._apply_task_delta(
             delta,
             tool_call_id=tool_call_id,
@@ -2283,6 +2313,7 @@ class HashiStageProvider(StageProvider):
         self.tool_registry = tool_registry
         self.on_stream_event = on_stream_event
         self._commentary_port: CommentaryPort | None = None
+        self._turn_services: Any | None = None
         self.silent = silent
         self.retry_policy = retry_policy or DEFAULT_PROVIDER_RETRY_POLICY
         self.audit_log = audit_log
@@ -2320,6 +2351,11 @@ class HashiStageProvider(StageProvider):
         """Bind the typed Persona lane for provider-authored commentary."""
 
         self._commentary_port = commentary
+
+    def bind_turn_services(self, services: Any | None) -> None:
+        """Bind request-local HER v3 observability/liveness sidecars."""
+
+        self._turn_services = services
 
     def _track_active_backend(self, backend: Any) -> None:
         with self._active_backend_lock:
@@ -3346,6 +3382,7 @@ class HashiStageProvider(StageProvider):
                 audit_log=self.audit_log,
                 provider=profile.engine,
                 model=profile.model,
+                turn_services=self._turn_services,
             )
             lifecycle_task_state = cognitive_registry.task_state
             selected_registry = cognitive_registry
@@ -3952,20 +3989,32 @@ class HashiStageProvider(StageProvider):
                             if isinstance(raw_skills, (list, tuple))
                             else []
                         )
-                        system_prompt = _direct_system_prompt(
-                            source,
-                            goal=request.goal,
-                            habit_catalogue=habits,
-                            skills_catalogue=skills,
-                            tool_catalogue=tool_catalogue,
-                            strategy_playbook=(
-                                request.context.get("strategy_playbook")
-                                if isinstance(
-                                    request.context.get("strategy_playbook"), Mapping
-                                )
-                                else None
-                            ),
-                        )
+                        if request.context.get("her_v3"):
+                            pcm_input = request.context.get("pcm_input")
+                            pcm_input = (
+                                dict(pcm_input) if isinstance(pcm_input, Mapping) else {}
+                            )
+                            system_prompt, stage_prompt = compile_main_prompt(
+                                pcm_input=pcm_input,
+                                fallback_request=request.goal,
+                                context=request.context,
+                                fallback_persona=(source.guidance if source.usable else ""),
+                            )
+                        else:
+                            system_prompt = _direct_system_prompt(
+                                source,
+                                goal=request.goal,
+                                habit_catalogue=habits,
+                                skills_catalogue=skills,
+                                tool_catalogue=tool_catalogue,
+                                strategy_playbook=(
+                                    request.context.get("strategy_playbook")
+                                    if isinstance(
+                                        request.context.get("strategy_playbook"), Mapping
+                                    )
+                                    else None
+                                ),
+                            )
                     else:
                         raw_sub_agent_results = request.context.get(
                             "sub_agent_results", []
@@ -4168,13 +4217,14 @@ class HashiStageProvider(StageProvider):
                 contracts = []
                 if cognitive_registry is not None:
                     contracts.append(cognitive_system_contract())
-                contracts.append(
-                    task_state_contract(
-                        lifecycle_task_state.prompt_snapshot(),
-                        stage=request.stage.value,
-                        tool_enabled=cognitive_registry is not None,
+                if not request.context.get("her_v3"):
+                    contracts.append(
+                        task_state_contract(
+                            lifecycle_task_state.prompt_snapshot(),
+                            stage=request.stage.value,
+                            tool_enabled=cognitive_registry is not None,
+                        )
                     )
-                )
                 contract = "\n\n".join(contracts)
                 current_system = str(getattr(backend, "sys_prompt", "") or "").strip()
                 if current_system:

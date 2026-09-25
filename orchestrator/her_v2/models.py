@@ -47,15 +47,17 @@ class Effort(StrEnum):
 
 
 EFFORT_DISPLAY_LABELS: Mapping[Effort, str] = {
-    Effort.ZERO: "Direct",
-    Effort.LOW: "Strategic",
-    Effort.MEDIUM: "Planned",
-    Effort.HIGH: "Adaptive",
-    Effort.XHIGH: "Reviewed",
-    Effort.MAX: "Assured",
+    Effort.ZERO: "None",
+    Effort.LOW: "Low",
+    Effort.MEDIUM: "Medium",
+    Effort.HIGH: "High",
+    Effort.XHIGH: "Extra High",
+    Effort.MAX: "Maximum",
 }
 
 _EFFORT_ALIASES: Mapping[str, Effort] = {
+    "none": Effort.ZERO,
+    "off": Effort.ZERO,
     "direct": Effort.ZERO,
     "zero_orchestration": Effort.ZERO,
     "strategic": Effort.LOW,
@@ -64,12 +66,14 @@ _EFFORT_ALIASES: Mapping[str, Effort] = {
     "planned": Effort.MEDIUM,
     "adaptive": Effort.HIGH,
     "reviewed": Effort.XHIGH,
+    "extra": Effort.XHIGH,
+    "extra_high": Effort.XHIGH,
     "assured": Effort.MAX,
 }
 
 
 def parse_effort(value: Effort | str) -> Effort:
-    """Accept stable wire values plus user-facing HER execution-mode aliases."""
+    """Accept model-reasoning effort plus legacy HER v2 aliases."""
 
     if isinstance(value, Effort):
         return value

@@ -298,9 +298,13 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         skills_catalogue: Sequence[Mapping[str, Any]] | None = None,
         capability_cache_path: Path | str | None = None,
         final_style: Any | None = None,
+        pcm_input: Mapping[str, Any] | None = None,
+        turn_services: Any | None = None,
     ) -> None:
         self.config = config
         self.final_style = final_style
+        self.pcm_input = dict(pcm_input or {})
+        self.turn_services = turn_services
         self.provider = provider
         self.ledger_store = ledger_store
         self.audit_log = audit_log
@@ -705,6 +709,8 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         return merged
 
     async def _run_turn(self, state: _TurnState) -> TurnResult:
+        """Run HER v3 as one model-owned reasoning/tool loop for every effort."""
+
         ref = self._audit(
             state,
             stage="initial",
@@ -713,625 +719,39 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             event_id=f"{state.ledger.turn_id}:request",
             payload={
                 "request": state.request,
-                "effort": state.effort.value,
+                "reasoning_effort": state.effort.value,
+                "workflow": "single_loop",
                 "request_content_version": (
                     state.request_content.get("version")
                     if isinstance(state.request_content, Mapping)
                     else None
                 ),
-                "attachment_manifest": [
-                    dict(item) for item in state.attachment_manifest
-                ],
+                "attachment_manifest": [dict(item) for item in state.attachment_manifest],
             },
         )
         state.ledger.add_log_ref(ref)
         self.ledger_store.save(state.ledger)
 
-        text_only_turn = not state.attachment_manifest
-        if state.effort is Effort.ZERO:
-            direct_content: Mapping[str, Any] | None = None
-            if text_only_turn:
-                direct_contract = await self._stage_modality_contract(Stage.DIRECT)
-                direct_transport = self._text_transport_for_stage(
-                    Stage.DIRECT, direct_contract
+        direct_content: Mapping[str, Any] | None = None
+        if not state.attachment_manifest:
+            direct_contract = await self._stage_modality_contract(Stage.DIRECT)
+            direct_transport = self._text_transport_for_stage(Stage.DIRECT, direct_contract)
+            if direct_transport == "audio":
+                direct_content = await self._materialize_text_audio(
+                    state, stages=(Stage.DIRECT,)
                 )
-                if direct_transport == "audio":
-                    direct_content = await self._materialize_text_audio(
-                        state, stages=(Stage.DIRECT,)
-                    )
-                elif direct_transport == "unsupported":
-                    raise StageInvocationError(
-                        "Direct model accepts neither text nor audio input",
-                        retryable=False,
-                        code=ProviderFailureCode.PROVIDER_MODALITY_UNSUPPORTED,
-                        human_description=(
-                            "The configured Direct model cannot consume the current "
-                            "text request and exposes no audio adaptation route."
-                        ),
-                    )
-            return await self._run_direct(
-                state, request_content_override=direct_content
-            )
-
-        effort_policy = resolve_policy(
-            state.effort,
-            review_limit=self.config.review_limits[state.effort],
-        )
-
-        habit_catalogue: Sequence[str] = ()
-        if self.config.meditation_enabled:
-            with suppress(Exception):
-                habit_catalogue = await self.habits.retrieve(
-                    goal=state.goal,
-                    turn_id=state.ledger.turn_id,
-                )
-        state.habit_catalogue = tuple(
-            str(item).strip() for item in habit_catalogue if str(item).strip()
-        )
-
-        immediate_transport = "text"
-        triage_transport = "text"
-        immediate_skipped_for_modality = False
-        text_audio_task: asyncio.Task | None = None
-        if text_only_turn:
-            immediate_contract, triage_contract = await asyncio.gather(
-                self._stage_modality_contract(Stage.IMMEDIATE_RESPONSE),
-                self._stage_modality_contract(Stage.TRIAGE),
-            )
-            immediate_transport = self._text_transport_for_stage(
-                Stage.IMMEDIATE_RESPONSE, immediate_contract
-            )
-            triage_transport = self._text_transport_for_stage(
-                Stage.TRIAGE, triage_contract
-            )
-            if "text" not in triage_contract.output_modalities:
+            elif direct_transport == "unsupported":
                 raise StageInvocationError(
-                    "Triage model cannot produce structured text output",
-                    retryable=False,
-                    code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
-                    human_description=(
-                        "The configured Triage model must provide structured text "
-                        "output for an authoritative classification."
-                    ),
-                )
-            if triage_transport == "unsupported":
-                raise StageInvocationError(
-                    "Triage model accepts neither text nor audio input",
+                    "HER v3 main model accepts neither text nor audio input",
                     retryable=False,
                     code=ProviderFailureCode.PROVIDER_MODALITY_UNSUPPORTED,
                     human_description=(
-                        "The configured Triage model cannot consume the current text "
-                        "request and exposes no audio adaptation route."
+                        "The configured HER v3 main model cannot consume the current request."
                     ),
                 )
-            immediate_skipped_for_modality = (
-                immediate_transport == "unsupported"
-                or (
-                    triage_transport == "text"
-                    and immediate_transport != "text"
-                )
-            )
-            audio_stages: list[Stage] = []
-            if triage_transport == "audio":
-                audio_stages.append(Stage.TRIAGE)
-            if (
-                immediate_transport == "audio"
-                and not immediate_skipped_for_modality
-            ):
-                audio_stages.insert(0, Stage.IMMEDIATE_RESPONSE)
-            if audio_stages:
-                text_audio_task = asyncio.create_task(
-                    self._materialize_text_audio(state, stages=tuple(audio_stages))
-                )
-            if immediate_skipped_for_modality:
-                self._audit(
-                    state,
-                    stage=Stage.IMMEDIATE_RESPONSE.value,
-                    role=self.config.stage_roles[Stage.IMMEDIATE_RESPONSE],
-                    event="optional_stage_skipped",
-                    event_id=f"{state.ledger.turn_id}:immediate:modality-skipped",
-                    payload={
-                        "reason": "triage_accepts_authoritative_text_directly",
-                        "immediate_transport": immediate_transport,
-                        "triage_transport": triage_transport,
-                        "tts_avoided": True,
-                    },
-                )
-
-        async def adapted_content(transport: str) -> Mapping[str, Any] | None:
-            if transport != "audio":
-                return None
-            if text_audio_task is None:
-                raise StageInvocationError(
-                    "audio input adaptation was not scheduled",
-                    retryable=False,
-                    code=ProviderFailureCode.INPUT_MODALITY_CONVERSION_FAILED,
-                    human_description=(
-                        "HASHI could not prepare the audio input required by the "
-                        "configured stage model."
-                    ),
-                )
-            return await text_audio_task
-
-        async def invoke_immediate():
-            return await self._invoke_stage(
-                state,
-                Stage.IMMEDIATE_RESPONSE,
-                parse_immediate,
-                allow_tools=False,
-                request_content_override=await adapted_content(immediate_transport),
-            )
-
-        playbook = load_strategy_playbook()
-
-        def capability_index(items: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-            indexed: list[dict[str, Any]] = []
-            for item in items:
-                function = item.get("function")
-                function = function if isinstance(function, Mapping) else {}
-                name = str(function.get("name") or item.get("name") or "").strip()
-                if not name:
-                    continue
-                description = str(
-                    function.get("description") or item.get("description") or ""
-                ).strip()
-                row: dict[str, Any] = {"name": name}
-                if description:
-                    row["description"] = description[:500]
-                if "hashi_read_only" in item:
-                    row["hashi_read_only"] = item.get("hashi_read_only") is True
-                indexed.append(row)
-            return indexed
-
-        execution_capabilities = {
-            "tools": capability_index(self._execution_tool_catalogue()),
-            "skills": capability_index(self.skills_catalogue),
-            "allow_side_effects": not self.config.shadow_mode,
-        }
-        request_resources = {
-            "attachments": [dict(item) for item in state.attachment_manifest]
-        }
-
-        strategy_mapping_parser = getattr(parse_strategy, "_mapping_parser")
-
-        def validate_strategy_mapping(
-            data: Mapping[str, Any],
-        ) -> StrategyDecision:
-            decision = strategy_mapping_parser(data)
-            try:
-                playbook.resolve_cards(decision.selected_strategy_cards)
-            except StrategyPlaybookError as exc:
-                raise StructuredOutputError(str(exc)) from exc
-            return decision
-
-        def validate_strategy(response: StageResponse) -> StrategyDecision:
-            decision = parse_strategy(response)
-            try:
-                playbook.resolve_cards(decision.selected_strategy_cards)
-            except StrategyPlaybookError as exc:
-                raise StructuredOutputError(str(exc)) from exc
-            return decision
-
-        setattr(validate_strategy, "_mapping_parser", validate_strategy_mapping)
-
-        async def invoke_triage():
-            strategy_tools_enabled = (
-                effort_policy.strategy_tools and self.config.strategy_tools_enabled
-            )
-            return await self._invoke_stage(
-                state,
-                Stage.TRIAGE,
-                validate_strategy,
-                allow_tools=strategy_tools_enabled,
-                allow_side_effects=(
-                    strategy_tools_enabled and not self.config.shadow_mode
-                ),
-                role_override="strategist",
-                context={
-                    "habit_catalogue": list(state.habit_catalogue),
-                    "strategy_cards": playbook.selection_payload(),
-                    "execution_capabilities": execution_capabilities,
-                    "request_resources": request_resources,
-                },
-                request_content_override=await adapted_content(triage_transport),
-            )
-
-        immediate_task = (
-            None
-            if immediate_skipped_for_modality
-            else asyncio.create_task(invoke_immediate())
+        return await self._run_direct(
+            state, request_content_override=direct_content
         )
-        triage_task = asyncio.create_task(invoke_triage())
-        immediate_pair = None
-        triage_pair = None
-        immediate_error: StageInvocationError | None = None
-        immediate_delivery_attempted_early = False
-        immediate_delivered_early = False
-
-        async def consume_immediate() -> None:
-            nonlocal immediate_pair, immediate_error
-            if immediate_task is None:
-                return
-            try:
-                immediate_pair = await immediate_task
-            except StageInvocationError as exc:
-                immediate_error = exc
-
-        try:
-            race_tasks = {triage_task}
-            if immediate_task is not None:
-                race_tasks.add(immediate_task)
-            done, _pending = await asyncio.wait(
-                race_tasks,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if (
-                immediate_task is not None
-                and immediate_task in done
-                and triage_task not in done
-            ):
-                await consume_immediate()
-                if immediate_pair is not None:
-                    immediate_delivery_attempted_early = True
-                    immediate_content = tuple(immediate_pair[0].content)
-                    immediate_delivered_early = await self._deliver(
-                        state,
-                        kind="immediate",
-                        text=immediate_pair[1],
-                        event_id=f"{state.ledger.turn_id}:immediate",
-                        # Native voice is prescribed reply content, not optional
-                        # Persona commentary.  It must remain first-ready even
-                        # when /commentary is disabled.
-                        required=_content_includes_audio(immediate_content),
-                        content=immediate_content,
-                    )
-            triage_pair = await triage_task
-        except BaseException:
-            if immediate_task is not None:
-                immediate_task.cancel()
-            triage_task.cancel()
-            if text_audio_task is not None:
-                text_audio_task.cancel()
-            await asyncio.gather(
-                *(
-                    task
-                    for task in (immediate_task, triage_task, text_audio_task)
-                    if task is not None
-                ),
-                return_exceptions=True,
-            )
-            if immediate_delivered_early:
-                with suppress(Exception):
-                    await self._resolve_initial(
-                        state,
-                        resolution="discard",
-                        text="",
-                        target_event_id=f"{state.ledger.turn_id}:immediate",
-                        event_id=f"{state.ledger.turn_id}:immediate:discard",
-                    )
-            raise
-
-        _triage_response, triage = triage_pair
-        assert isinstance(triage, StrategyDecision)
-
-        if (
-            triage.classification is TriageClassification.DIRECT_RESPONSE
-            and state.attachment_manifest
-        ):
-            if immediate_pair is None and immediate_error is None:
-                await consume_immediate()
-
-            required_ids = {
-                str(item.get("attachment_id") or "")
-                for item in state.attachment_manifest
-            }
-
-            def consumed_ids(
-                response: StageResponse | None, *, triage: bool = False
-            ) -> set[str]:
-                if response is None:
-                    return set()
-                accepted_routes = {"native"}
-                if triage:
-                    accepted_routes.add("local_transcript")
-                    if (
-                        response.validation_source == "runtime_voice_boundary"
-                        or (
-                            response.provider == "hashi-runtime"
-                            and response.model == "safe-voice-boundary"
-                        )
-                    ):
-                        # STT failure or Safe Voice discard intentionally ends
-                        # the transcript-dependent branch.  The no-tool native
-                        # Immediate remains a valid direct chat result and must
-                        # not be converted into an impossible work run.
-                        accepted_routes.add("transcript_unavailable")
-                return {
-                    str(item.get("attachment_id") or "")
-                    for item in response.media_routing
-                    if str(item.get("route") or "")
-                    in accepted_routes
-                }
-
-            immediate_response = (
-                immediate_pair[0] if immediate_pair is not None else None
-            )
-            direct_media_fulfilled = (
-                bool(required_ids)
-                and required_ids.issubset(
-                    consumed_ids(_triage_response, triage=True)
-                )
-                and required_ids.issubset(consumed_ids(immediate_response))
-            )
-            if not direct_media_fulfilled:
-                triage = replace(
-                    triage,
-                    classification=TriageClassification.SIMPLE_TASK,
-                    execution_brief={
-                        "strategy": (
-                            "Use the capable Execution route to inspect the supplied "
-                            "media and complete the resolved goal."
-                        ),
-                        "stages": ["Inspect the supplied media", "Complete the goal"],
-                        "dependencies": ["Goal completion follows media inspection"],
-                        "verification": ["Verify the result against the supplied media"],
-                        "success_criteria": ["The media-dependent goal is satisfied"],
-                        "replan_conditions": [
-                            "The supplied media cannot be inspected reliably"
-                        ],
-                    },
-                )
-                self._audit(
-                    state,
-                    stage=Stage.TRIAGE.value,
-                    role=self.config.stage_roles[Stage.TRIAGE],
-                    event="direct_response_media_deferred_to_work",
-                    event_id=f"{state.ledger.turn_id}:triage:media-fallback",
-                    payload={
-                        "required_attachment_ids": sorted(required_ids),
-                        "triage_native_attachment_ids": sorted(
-                            consumed_ids(_triage_response, triage=True)
-                        ),
-                        "immediate_native_attachment_ids": sorted(
-                            consumed_ids(immediate_response)
-                        ),
-                        "immediate_error_code": (
-                            immediate_error.error_code
-                            if immediate_error is not None
-                            else None
-                        ),
-                        "classification_override": TriageClassification.SIMPLE_TASK.value,
-                        "reason": "direct_response_media_capability_unfulfilled",
-                    },
-                )
-
-        self._record_strategy(state, triage, playbook)
-        state.progress.record("classification", triage.classification.value)
-
-        if (
-            triage.classification is TriageClassification.DIRECT_RESPONSE
-            and immediate_skipped_for_modality
-        ):
-            return await self._run_direct_after_triage(state)
-
-        # Triage is authoritative, but winning this race does not cancel a
-        # still-useful Immediate Response.  Work begins without waiting while
-        # the optional acknowledgement remains owned by this turn.
-        immediate_pending_for_work = False
-        if (
-            immediate_task is not None
-            and immediate_pair is None
-            and immediate_error is None
-        ):
-            if triage.classification is TriageClassification.DIRECT_RESPONSE:
-                await consume_immediate()
-            elif immediate_task.done():
-                await consume_immediate()
-            elif triage.classification in WORK_CLASSIFICATIONS:
-                immediate_pending_for_work = True
-                self._audit(
-                    state,
-                    stage=Stage.IMMEDIATE_RESPONSE.value,
-                    role=self.config.stage_roles[Stage.IMMEDIATE_RESPONSE],
-                    event="optional_stage_continues",
-                    event_id=f"{state.ledger.turn_id}:immediate:continues",
-                    payload={
-                        "classification": triage.classification.value,
-                        "reason": "triage_completed_before_optional_immediate_response",
-                        "authoritative_path_waited": False,
-                        "delivery_when_ready": "acknowledgement",
-                    },
-                )
-            else:
-                immediate_task.cancel()
-                await asyncio.gather(immediate_task, return_exceptions=True)
-                self._audit(
-                    state,
-                    stage=Stage.IMMEDIATE_RESPONSE.value,
-                    role=self.config.stage_roles[Stage.IMMEDIATE_RESPONSE],
-                    event="optional_stage_superseded",
-                    event_id=f"{state.ledger.turn_id}:immediate:superseded",
-                    payload={
-                        "classification": triage.classification.value,
-                        "reason": "authoritative_clarification_ready",
-                        "authoritative_path_waited": False,
-                    },
-                )
-
-        if immediate_error is not None:
-            self._audit(
-                state,
-                stage=Stage.IMMEDIATE_RESPONSE.value,
-                role=self.config.stage_roles[Stage.IMMEDIATE_RESPONSE],
-                event="optional_stage_degraded",
-                event_id=f"{state.ledger.turn_id}:immediate:degraded",
-                payload={
-                    "classification": triage.classification.value,
-                    "reason": str(immediate_error),
-                    "authoritative_path_continued": (
-                        triage.classification
-                        is not TriageClassification.DIRECT_RESPONSE
-                    ),
-                },
-            )
-        if (
-            triage.classification is TriageClassification.DIRECT_RESPONSE
-            and immediate_pair is None
-            and not immediate_skipped_for_modality
-        ):
-            if isinstance(immediate_error, StageInvocationError):
-                raise immediate_error.terminal_copy(
-                    "direct response requires a valid Immediate Response: "
-                    f"{immediate_error}",
-                    attempts=immediate_error.attempts,
-                    human_description=(
-                        "direct response requires a valid Immediate Response; "
-                        f"{immediate_error.human_description}"
-                    ),
-                ) from immediate_error
-            raise StageInvocationError(
-                "direct response requires a valid Immediate Response: "
-                f"{immediate_error or 'response unavailable'}",
-                retryable=False,
-                code=ProviderFailureCode.PROVIDER_EMPTY_RESPONSE,
-                human_description=(
-                    "The required Immediate Response did not produce usable content."
-                ),
-            )
-
-        immediate_text = ""
-        if immediate_pair is not None:
-            _immediate_response, immediate_text = immediate_pair
-            assert isinstance(immediate_text, str)
-
-        clarification = triage.clarification
-        clarification_provenance = ""
-        clarification_detail = ""
-        if triage.classification is TriageClassification.CONFIRMATION_REQUIRED:
-            (
-                clarification,
-                clarification_provenance,
-                clarification_detail,
-            ) = await self._render_required_clarification(
-                state,
-                text=triage.clarification,
-                event_id=f"{state.ledger.turn_id}:clarification",
-            )
-
-        immediate_resolution_delivered = False
-        if immediate_delivered_early:
-            if triage.classification is TriageClassification.DIRECT_RESPONSE:
-                resolution = "final"
-                resolution_text = immediate_text
-            elif triage.classification is TriageClassification.CONFIRMATION_REQUIRED:
-                resolution = "clarification"
-                resolution_text = clarification
-            else:
-                resolution = "commentary"
-                resolution_text = immediate_text
-            immediate_resolution_delivered = await self._resolve_initial(
-                state,
-                resolution=resolution,
-                text=resolution_text,
-                target_event_id=f"{state.ledger.turn_id}:immediate",
-                event_id=f"{state.ledger.turn_id}:immediate:resolution",
-            )
-
-        immediate_kind = (
-            "final"
-            if triage.classification is TriageClassification.DIRECT_RESPONSE
-            else "acknowledgement"
-        )
-        if immediate_text and (
-            not immediate_delivery_attempted_early or not immediate_delivered_early
-        ):
-            immediate_content = (
-                tuple(immediate_pair[0].content) if immediate_pair else ()
-            )
-            await self._deliver(
-                state,
-                kind=immediate_kind,
-                text=immediate_text,
-                event_id=f"{state.ledger.turn_id}:immediate",
-                required=(
-                    immediate_kind == "final"
-                    or _content_includes_audio(immediate_content)
-                ),
-                content=immediate_content,
-            )
-
-        if triage.classification is TriageClassification.DIRECT_RESPONSE:
-            await self._transition(state, LifecycleState.FINALISING)
-            await self._transition(
-                state,
-                LifecycleState.COMPLETED,
-                terminal_reason="direct_response",
-            )
-            return self._result(
-                state,
-                terminal=TerminalState.COMPLETED,
-                text=immediate_text,
-                final_was_immediate=True,
-                final_already_delivered=immediate_resolution_delivered,
-                content=tuple(immediate_pair[0].content) if immediate_pair else (),
-            )
-
-        if triage.classification is TriageClassification.CONFIRMATION_REQUIRED:
-            clarification_already_resolved = immediate_resolution_delivered or any(
-                record.event_id == f"{state.ledger.turn_id}:immediate"
-                and record.kind == "clarification"
-                for record in state.deliveries
-            )
-            if not clarification_already_resolved:
-                await self._deliver(
-                    state,
-                    kind="clarification",
-                    text=clarification,
-                    event_id=f"{state.ledger.turn_id}:clarification",
-                    required=True,
-                    provenance=clarification_provenance,
-                    detail=clarification_detail,
-                )
-            await self._transition(
-                state,
-                LifecycleState.PENDING_USER_INPUT,
-                terminal_reason="confirmation_required",
-            )
-            return self._result(
-                state,
-                terminal=TerminalState.PENDING_USER_INPUT,
-                text=clarification,
-                final_already_delivered=immediate_resolution_delivered,
-            )
-
-        if triage.classification not in WORK_CLASSIFICATIONS:
-            raise StageInvocationError(
-                "Triage returned an unsupported work classification"
-            )
-        if not immediate_pending_for_work:
-            return await self._run_work(
-                state,
-                triage.classification,
-                policy=effort_policy,
-            )
-
-        late_immediate = asyncio.create_task(
-            self._deliver_pending_immediate(state, immediate_task)
-        )
-        state.late_immediate_source_task = immediate_task
-        state.late_immediate_delivery_task = late_immediate
-        try:
-            return await self._run_work(
-                state,
-                triage.classification,
-                policy=effort_policy,
-            )
-        finally:
-            await self._settle_late_immediate(
-                state,
-                reason="authoritative_work_path_ended_before_immediate_response",
-                deliver_if_source_ready=False,
-            )
 
     async def _final_style_text(self, state: _TurnState, text: str, *, content=()) -> str:
         """Optional presentation only: no stages, lifecycle changes or commentary."""
@@ -1348,7 +768,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         *,
         request_content_override: Mapping[str, Any] | None = None,
     ) -> TurnResult:
-        """Run the zero-orchestration path as one fully capable agent call."""
+        """Run the HER v3 foreground path as one fully capable agent/tool loop."""
 
         habits: Sequence[str] = ()
         if self.config.meditation_enabled:
@@ -1366,7 +786,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 "playbook_version": playbook.playbook_version,
                 "sha256": playbook.sha256,
                 "card_count": len(playbook.cards),
-                "selection_mode": "direct_self_selection",
+                "selection_mode": "optional_context",
             }
             ref = self._audit(
                 state,
@@ -1391,6 +811,8 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 "skills_catalogue": [dict(item) for item in self.skills_catalogue],
                 "direct_strategy_self_selection": bool(strategy_playbook),
                 "strategy_playbook": strategy_playbook,
+                "her_v3": True,
+                "pcm_input": self.pcm_input,
                 "zero_orchestration": True,
                 "automatic_effort_upgrade_allowed": False,
                 "sub_agent_delegation_allowed": False,
@@ -1412,10 +834,10 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             text=direct_text,
             event_id=f"{state.ledger.turn_id}:final",
             required=True,
-            provenance="zero_orchestration_direct",
+            provenance="her_v3_single_loop",
             detail=(
-                "single_direct_invocation=true; orchestration_upgrade=false; "
-                "finalisation_invoked=false"
+                "single_main_loop=true; planner=false; replanner=false; "
+                "reviewer=false; style_finalisation_optional=true"
             ),
             content=tuple(response.content),
         )
@@ -1423,6 +845,9 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             state,
             LifecycleState.COMPLETED,
             terminal_reason="direct_response_delivered",
+        )
+        self._schedule_meditation(
+            state, terminal=TerminalState.COMPLETED, execution_summary=direct_text
         )
         return self._result(
             state,
@@ -3474,3 +2899,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         if finding.outcome is ReviewOutcome.FAIL:
             return f"Independent validation found an unresolved issue: {detail}"
         return ""
+
+
+# Public migration alias: implementation remains behind the stable her-v2 adapter ID.
+HERv3Runtime = HERv2Runtime
