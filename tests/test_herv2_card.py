@@ -21,15 +21,8 @@ from tools.herv2_card import (
 )
 
 
-def test_command_specs_registration():
-    assert "herv2" in COMMAND_SPEC_BY_NAME
-    herv2_spec = COMMAND_SPEC_BY_NAME["herv2"]
-    assert herv2_spec.method_name == "cmd_herv2"
-    assert herv2_spec.group == "session"
-    assert herv2_spec.guide is not None
-    assert "on" in herv2_spec.guide.choices
-    assert "off" in herv2_spec.guide.choices
-    assert "status" in herv2_spec.guide.choices
+def test_retired_herv2_command_is_not_publicly_registered():
+    assert "herv2" not in COMMAND_SPEC_BY_NAME
 
 
 def test_display_preference_registration(tmp_path):

@@ -306,9 +306,10 @@ class FlexibleAgentRuntime:
             self, "meter", default=False
         )
         self._meter_receipt_by_id: dict[str, Any] = {}
-        self._herv2 = telegram_stream_policy.get_display_preference(
-            self, "herv2", default=False
-        )
+        # The HER v2 routing-card control exposed retired Quick/Pro orchestration
+        # concepts. HER v3 reports real Provider/model reasoning through the
+        # standard backend, effort and meter surfaces instead.
+        self._herv2 = False
         # Load persisted Telegram notification preference, including final-only Quiet mode.
         self._notify_mode = notification_mode(self)
         self._notify_enabled = self._notify_mode == "on"
@@ -3717,21 +3718,6 @@ class FlexibleAgentRuntime:
             await query.answer(
                 ui_language.tr(
                     "menu.meter.changed", state=status_label(enabled)
-                )
-            )
-
-        elif target == "herv2":
-            enabled = value == "on"
-            telegram_stream_policy.set_display_preference(self, "herv2", enabled)
-            self._herv2 = enabled
-            await query.edit_message_text(
-                self._herv2_menu_text(),
-                parse_mode="HTML",
-                reply_markup=self._herv2_keyboard(),
-            )
-            await query.answer(
-                ui_language.tr(
-                    "menu.herv2.changed", state=status_label(enabled)
                 )
             )
 
