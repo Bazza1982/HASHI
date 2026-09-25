@@ -34,6 +34,38 @@ def test_runtime_without_bridge_root_keeps_session_db_in_its_workspace(tmp_path)
     assert not (tmp_path / "state" / "sessions.sqlite3").exists()
 
 
+def test_listener_completion_projects_public_her_v3_source(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.create_session(owner_id=owner, agent_id="lily")
+    store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="lily",
+        request_id="her-v3-source",
+        text="hello",
+        source="session-api",
+        idempotency_key="her-v3-source",
+    )
+    store.mark_request_running("her-v3-source", worker_id="worker")
+    runtime = SimpleNamespace(
+        name="lily",
+        config=SimpleNamespace(active_backend="her-v2"),
+        backend_manager=SimpleNamespace(current_backend=None),
+        session_store=store,
+        _request_meta_by_id={},
+    )
+
+    runtime_session.finish_request_from_listener(
+        runtime,
+        "her-v3-source",
+        {"success": True, "text": "hello back"},
+    )
+
+    messages = store.messages(session["session_id"], owner_id=owner)
+    assert messages[-1]["source"] == "her-v3"
+
+
 def _complete(
     store: SessionStore,
     *,
