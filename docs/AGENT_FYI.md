@@ -133,6 +133,8 @@ provider/model/reasoning bundles as HER effort presets.
 The HER v2 routing card shows `DIRECT` with `Direct (no triage)` for the Direct
 (`zero`) path; when Triage runs, it shows the validated classification instead.
 `UNKNOWN` is only a legacy/malformed-metadata fallback.
+The main branch includes strategy playbook version `2026-09-24.1`. The separate
+JEV strategy-card selection experiment is not part of this branch.
 
 Use current metadata for context, price, effort, and modality. Media needs model,
 Adapter, and policy support; distinguish unknown, unsupported, unimplemented,
@@ -149,7 +151,7 @@ effects, and meter every physical call.
 Tool-enabled HER Direct and Primary Execution may propose interim commentary,
 but only typed Persona-packaged output is user-facing; raw or packaging-failed
 provider text and provider progress from other stages stay internal.
-Workbench may receive only HER's typed, ephemeral `answer_preview` lane after
+The Backend API may expose only HER's typed, ephemeral `answer_preview` lane after
 stage visibility checks; the raw `text_delta` protocol and all structured
 control stages remain private, and the final response stays authoritative.
 DeepSeek AntML after commentary is suppressed, never run, and must repair
