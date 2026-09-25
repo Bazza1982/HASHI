@@ -1714,6 +1714,29 @@ async def test_adapter_requires_explicit_role_profiles(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_adapter_bootstraps_from_v3_main_provider_model_target(tmp_path):
+    config = _agent_config(
+        tmp_path,
+        her_v2={
+            "main": {
+                "provider": "deepseek-api",
+                "model": "deepseek-v4-pro",
+            }
+        },
+        effort="high",
+    )
+    setattr(config, "_her_v2_stage_provider", _DirectProvider())
+    adapter = HERv2Adapter(config, _global_config(tmp_path))
+
+    assert await adapter.initialize() is True
+    assert set(adapter._v2_config.profiles) == {"main", "auxiliary"}
+    assert {
+        (profile.engine, profile.model)
+        for profile in adapter._v2_config.profiles.values()
+    } == {("deepseek-api", "deepseek-v4-pro")}
+
+
+@pytest.mark.asyncio
 async def test_adapter_supplies_concrete_meditation_service_when_enabled(tmp_path):
     raw = {"profiles": _profiles(), "meditation_enabled": True}
     config = _agent_config(tmp_path, her_v2=raw)

@@ -665,7 +665,9 @@ def _registry_is_read_only(registry: Any, tool_name: str) -> bool:
 def _manager_authorises_profile(manager: Any, profile: ProviderProfile) -> bool:
     """Accept provider/model targets configured at the HASHI instance level."""
 
-    option_getter = getattr(manager, "_her_v2_provider_option", None)
+    option_getter = getattr(manager, "_her_v3_provider_option", None)
+    if not callable(option_getter):
+        option_getter = getattr(manager, "_her_v2_provider_option", None)
     if callable(option_getter):
         option = option_getter(profile.engine)
         return bool(

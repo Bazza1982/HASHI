@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
@@ -114,6 +116,21 @@ def test_v3_provider_options_derive_deepseek_models_from_provider_catalogue(tmp_
     assert deepseek is not None
     assert deepseek["available"] is True
     assert deepseek["models"] == ["deepseek-flash", "deepseek-v4-pro"]
+
+
+@pytest.mark.asyncio
+async def test_v3_manager_initializes_from_public_main_target_without_v2_profiles(
+    tmp_path,
+):
+    manager = _manager(tmp_path)
+    manager.runtime = SimpleNamespace(backend_manager=manager)
+
+    assert await manager.initialize_active_backend() is True
+    assert set(manager.current_backend._v2_config.profiles) == {"main", "auxiliary"}
+    assert {
+        (profile.engine, profile.model)
+        for profile in manager.current_backend._v2_config.profiles.values()
+    } == {("deepseek-api", "deepseek-v4-pro")}
 
 
 def test_v3_effort_choices_are_deepseek_reasoning_levels_and_persist(tmp_path):

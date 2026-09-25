@@ -63,6 +63,7 @@ from orchestrator.her_v2.retry import (
     ProviderRetryPolicy,
 )
 from orchestrator.her_v2.runtime import HERv2Runtime
+from orchestrator.her_v2.v3_config import normalise_v3_config
 from orchestrator.her_v2.wip_journal import WIPJournal
 from orchestrator.multimodal_contract import (
     media_failure_code,
@@ -840,6 +841,17 @@ class HERv2Adapter(BaseBackend):
                 raise HERv2ConfigurationError(
                     "HER v2 requires a her_v2 object containing provider profiles"
                 )
+            # HER v3 persists one concrete Provider/model target.  Function
+            # Workers must be able to bootstrap directly from that public
+            # shape even when an older manager did not pre-expand the internal
+            # compatibility profiles before constructing this adapter.
+            profiles = raw.get("profiles")
+            if (
+                (not isinstance(profiles, Mapping) or not profiles)
+                and isinstance(raw.get("main"), Mapping)
+            ):
+                raw = normalise_v3_config(raw)
+                self._extra["her_v2"] = raw
             self._v2_config = HERv2Config.from_mapping(raw)
             requested_effort = (
                 str(self._extra.get("effort") or raw.get("effort") or "medium")

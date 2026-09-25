@@ -1413,9 +1413,9 @@ class FlexibleBackendManager:
         *,
         target_model: str | None,
     ) -> dict[str, Any] | None:
-        """Build an internal call config from an instance-level HER provider."""
+        """Build an internal call config from an instance-level HER v3 Provider."""
 
-        option = self._her_v2_provider_option(engine)
+        option = self._her_v3_provider_option(engine)
         if option is None or not option.get("available"):
             return None
         models = list(option.get("models") or [])
