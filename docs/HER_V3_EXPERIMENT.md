@@ -158,3 +158,21 @@ real DeepSeek execution, provider reasoning, Session presentation, token
 accounting, and meter reporting. They do not authorize a merge or deployment to
 another instance, and do not qualify optional Strategy Cards, Agent Companion,
 long-running processes, or Habit Reflection.
+
+### Model picker callback repair (2026-09-26)
+
+The visible HER v3 model buttons originally emitted `herv3_*` callback data,
+but the runtime callback registry did not route that namespace. Text-form
+`/model` acceptance therefore passed while Telegram button presses were ignored.
+The card generator and callback registry now share one HER v3 callback contract,
+with a regression that checks every generated Provider/model button resolves to
+exactly one runtime handler.
+
+HASHI3 adopted the repair through an authorized `/reboot max`: all nine Workers
+returned online on the new Function generation. Live command-menu acceptance
+opened the real `phd_1` `/model` card, invoked the generated
+`deepseek-flash` button, verified the live and persisted target changed, then
+opened a fresh card and invoked `deepseek-v4-pro` to restore the retained target.
+The retained effort is `max`. This exercises the same callback registry used by
+Telegram registration; a device-side Telegram tap remains an operator observation,
+not a synthesized test result.
