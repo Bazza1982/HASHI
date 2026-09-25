@@ -111,6 +111,13 @@ no Tool authority, only typed Engine events and PAO gates do.
 
 ## Engines, tools, and recovery
 
+HASHI3's `experiment/her-v3-hashi3` branch is a local HER v3 engine experiment
+based on current `main`; it is not the active `main` engine or a live Worker
+adoption. Its foreground path uses one main-model/tool loop, keeps PCM and
+delivery ownership, and leaves optional JEV Agent Companion disabled by
+default. See [HER v3 experiment](HER_V3_EXPERIMENT.md). Do not treat this note
+as permission to merge, deploy, or change another instance.
+
 Engine and Model Provider differ. HER v2 modes are Direct (`zero`), Strategic
 (`low`), and Planned (`medium`); Fixed/Flex and Memory+ are independent.
 `/backend` selects Engine, `/model` model routing, `/effort` HER mode on HER or
