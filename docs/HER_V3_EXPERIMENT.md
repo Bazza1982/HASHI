@@ -94,15 +94,11 @@ of this HASHI3 engine transplant.
 
 ## Local verification and next testing
 
-The HER adapter, core gate, and model-catalogue assertions were updated for
-the single main-model/tool loop. A fake-provider fixed-Session PCM path and
-HER v3 contract tests pass. The earlier `python -I -m pytest -q --tb=short`
-result (708 passed, 1 skipped) was the **curated Core gate**, not the full
-offline product suite. Explicit old HER v2 runtime tests still fail because
-they expect removed Triage/Planning/Quick/Pro stages; they are not evidence of
-HER v3 correctness. Focused HER v3 presentation, Frontend, command, locale,
-adapter, and contract tests pass. These source checks alone do not establish a
-live Worker or real-provider run.
+The HER adapter, model catalogue, public Frontend projections, commands,
+locales, token usage, and Function qualification now cover the single
+main-model/tool loop. The final full offline product suite completed with
+711 passed and 1 skipped; the Protected Core check also passed. Live Worker
+and real-provider evidence remains recorded separately below.
 
 ## HASHI3 live verification (2026-09-25)
 
@@ -137,6 +133,10 @@ Live acceptance used the formal Session API and durable usage records:
 - `req-phd_1-2026-09-25_221320-0002` ran `deepseek-v4-pro` at effort `max`,
   returned the correct `7^222 mod 1000 = 049`, recorded one Provider call and
   547 reasoning tokens, and public Session source `her-v3`.
+- `req-phd_1-2026-09-25_224626-0001` ran on the final deployed generation,
+  returned exactly `HER_V3_PUBLIC_ORIGIN_OK`, stored Session source `her-v3`,
+  and exposed only `her-v3`, `her-v3:deepseek-api`, and `her-v3:runtime` in
+  its public request-activity stream.
 - `worker-1` switched from `codex-cli / gpt-5.6-luna` to HER v3 through
   `/backend`; `req-worker-1-2026-09-25_221315-0001` then returned exactly
   `HER_V3_BACKEND_SWITCH_OK` through `deepseek-v4-pro`. The Agent was restored
