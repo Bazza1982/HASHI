@@ -323,7 +323,7 @@ class SessionStore:
     per-Session working files are derived state used by Memory+ and Compact.
     """
 
-    SCHEMA_VERSION = 9
+    SCHEMA_VERSION = 10
 
     def __init__(
         self,
@@ -730,6 +730,36 @@ class SessionStore:
                     FOREIGN KEY(event_id) REFERENCES run_events(event_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS connector_delivery_tasks (
+                    task_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    run_id TEXT,
+                    event_id TEXT NOT NULL,
+                    connector_id TEXT NOT NULL,
+                    endpoint_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content_modes_json TEXT NOT NULL DEFAULT '[]',
+                    retry_class TEXT NOT NULL DEFAULT 'query_before_retry',
+                    state TEXT NOT NULL DEFAULT 'pending',
+                    created_at TEXT NOT NULL,
+                    delivered_at TEXT,
+                    lease_owner TEXT,
+                    lease_token TEXT,
+                    lease_expires_at TEXT,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    last_error_code TEXT,
+                    completed_at TEXT,
+                    last_claim_token TEXT,
+                    last_claim_status TEXT,
+                    UNIQUE(event_id, endpoint_id),
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id),
+                    FOREIGN KEY(event_id) REFERENCES run_events(event_id)
+                );
+                CREATE INDEX IF NOT EXISTS connector_delivery_tasks_claimable
+                    ON connector_delivery_tasks(
+                        session_id, connector_id, endpoint_id, state, created_at
+                    );
+
                 CREATE TABLE IF NOT EXISTS connector_delivery_receipts (
                     event_id TEXT NOT NULL,
                     session_id TEXT NOT NULL,
@@ -1055,6 +1085,7 @@ class SessionStore:
         summary: str = "",
         detail: Mapping[str, Any] | None = None,
         outbox: bool = False,
+        delivery_route: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         row = connection.execute(
             "SELECT next_event_sequence FROM sessions WHERE session_id = ?",
@@ -1092,11 +1123,118 @@ class SessionStore:
         if outbox:
             connection.execute(
                 """
-                INSERT INTO delivery_outbox(outbox_id, session_id, run_id, event_id, created_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO delivery_outbox(
+                    outbox_id, session_id, run_id, event_id, state, created_at
+                ) VALUES (?, ?, ?, ?, 'delegated', ?)
                 """,
                 (_new_id("out"), session_id, run_id, event_id, created_at),
             )
+            resolved_route = dict(delivery_route or {})
+            route_was_resolved = delivery_route is not None
+            if not resolved_route and run_id is not None:
+                run_row = connection.execute(
+                    "SELECT delivery_route_json FROM runs WHERE run_id=?",
+                    (str(run_id),),
+                ).fetchone()
+                if run_row is not None:
+                    resolved_route = _json_object(
+                        run_row["delivery_route_json"] or "{}"
+                    )
+                    route_was_resolved = bool(resolved_route)
+            destinations: list[dict[str, Any]] = []
+            invalid_route = False
+            if resolved_route:
+                try:
+                    from orchestrator.frontend_delivery import (
+                        delivery_intent_from_run_route,
+                    )
+
+                    intent = delivery_intent_from_run_route(
+                        resolved_route,
+                        event_id=event_id,
+                        session_id=session_id,
+                        idempotency_key=f"{event_id}:{kind}",
+                        content_modes=(
+                            tuple(
+                                str(item).strip().casefold()
+                                for item in (detail or {}).get(
+                                    "content_modes", ()
+                                )
+                                if str(item).strip()
+                            )
+                            or (
+                                ("text", "media")
+                                if kind == "assistant.output.available"
+                                else ("text", "card")
+                            )
+                        ),
+                    )
+                    destinations = [
+                        dict(item) for item in intent.get("destinations", ())
+                    ]
+                except ValueError:
+                    invalid_route = True
+            if not destinations and not route_was_resolved:
+                from orchestrator.frontend_connector_registry import endpoint_id_for
+
+                destinations = [
+                    {
+                        "connector_id": "session_api",
+                        "endpoint_id": endpoint_id_for(
+                            "session_api",
+                            ingress_transport="session-api",
+                            channel_key="default",
+                        ),
+                        "role": "primary",
+                        "content_modes": ["text", "card", "media"],
+                        "retry_class": "query_before_retry",
+                    }
+                ]
+            for destination in destinations:
+                connection.execute(
+                    """
+                    INSERT INTO connector_delivery_tasks(
+                        task_id, session_id, run_id, event_id, connector_id,
+                        endpoint_id, role, content_modes_json, retry_class,
+                        state, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                    ON CONFLICT(event_id, endpoint_id) DO NOTHING
+                    """,
+                    (
+                        _new_id("delivery"),
+                        session_id,
+                        run_id,
+                        event_id,
+                        str(destination["connector_id"]),
+                        str(destination["endpoint_id"]),
+                        str(destination.get("role") or "primary"),
+                        _json(list(destination.get("content_modes") or [])),
+                        str(
+                            destination.get("retry_class")
+                            or "query_before_retry"
+                        ),
+                        created_at,
+                    ),
+                    )
+            if invalid_route:
+                connection.execute(
+                    """
+                    UPDATE delivery_outbox
+                    SET state='failed', completed_at=?,
+                        last_error_code='invalid_delivery_route'
+                    WHERE event_id=?
+                    """,
+                    (created_at, event_id),
+                )
+            elif not destinations:
+                connection.execute(
+                    """
+                    UPDATE delivery_outbox
+                    SET state='suppressed', completed_at=?
+                    WHERE event_id=?
+                    """,
+                    (created_at, event_id),
+                )
         return {
             "event_id": event_id,
             "session_id": session_id,
@@ -2095,8 +2233,25 @@ class SessionStore:
                     now,
                 ),
             )
+            if attachment_rows:
+                connection.executemany(
+                    """UPDATE session_attachments
+                       SET retention_seconds=NULL, retention_indefinite=1
+                       WHERE attachment_id=? AND session_id=? AND owner_id=?""",
+                    [
+                        (
+                            str(attachment["attachment_id"]),
+                            str(session_id),
+                            str(owner_id),
+                        )
+                        for attachment in attachment_rows
+                    ],
+                )
             for attachment in audio_rows:
                 asset_id = str(attachment["asset_id"])
+                self.audio_assets.set_indefinite(
+                    asset_id, owner_id=owner_id, session_id=session_id
+                )
                 self.audio_assets.acquire(
                     asset_id, owner_id=owner_id, session_id=session_id
                 )
@@ -2168,9 +2323,11 @@ class SessionStore:
         presentation_channel: str = "command",
         history_eligible: bool = False,
         message_context: Mapping[str, Any] | None = None,
+        content: Iterable[Mapping[str, Any]] | None = None,
         outbox: bool = False,
+        delivery_route: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Persist frontend-visible text without turning it into model input."""
+        """Persist frontend-visible standard content outside model history."""
 
         clean = str(text or "").strip()
         normalized_role = str(role or "").strip().casefold()
@@ -2178,8 +2335,8 @@ class SessionStore:
         stable_key = str(idempotency_key or "").strip()
         normalized_format = str(content_format or "plain-text").strip().casefold()
         normalized_channel = str(presentation_channel or "command").strip().casefold()
-        if not clean or not normalized_source or not stable_key:
-            raise ValueError("presentation message text, source and idempotency key are required")
+        if not normalized_source or not stable_key:
+            raise ValueError("presentation message source and idempotency key are required")
         if normalized_role not in {"user", "assistant"}:
             raise ValueError("presentation message role must be user or assistant")
         if normalized_format not in {"plain-text", "markdown", "telegram-html"}:
@@ -2192,8 +2349,62 @@ class SessionStore:
                 "presentation_only": not bool(history_eligible),
             }
         )
-        content = [{"type": "text", "text": clean}]
-        content_json = _json(content)
+        supplied_content = list(content or ())
+        normalized_content: list[dict[str, Any]] = []
+        if supplied_content:
+            if contains_persistent_inline_media(supplied_content):
+                raise SessionConflict(
+                    "presentation content cannot contain inline media bytes"
+                )
+            for raw_part in supplied_content:
+                if not isinstance(raw_part, Mapping):
+                    raise ValueError("presentation content parts must be objects")
+                part = dict(raw_part)
+                part_type = str(part.get("type") or "").strip().casefold()
+                if part_type == "text":
+                    part_text = str(part.get("text") or "")
+                    if not part_text:
+                        raise ValueError("presentation text parts require text")
+                    normalized_content.append(
+                        {"type": "text", "text": part_text}
+                    )
+                    if not clean and part_text.strip():
+                        clean = part_text.strip()
+                elif part_type in {"attachment", "media"}:
+                    attachment_id = str(
+                        part.get("attachment_id") or ""
+                    ).strip()
+                    if not attachment_id:
+                        raise ValueError(
+                            "presentation media requires attachment_id"
+                        )
+                    normalized_content.append(
+                        self.attachment_canonical_part(
+                            session_id=str(session_id),
+                            owner_id=str(owner_id),
+                            attachment_id=attachment_id,
+                            item_index=len(normalized_content) + 1,
+                            semantic_role=str(
+                                part.get("semantic_role") or ""
+                            )
+                            or None,
+                            presentation_role=str(
+                                part.get("presentation_role") or ""
+                            )
+                            or None,
+                            caption=str(part.get("caption") or ""),
+                            detail=str(part.get("detail") or ""),
+                        )
+                    )
+                else:
+                    raise ValueError(
+                        f"unsupported presentation content type {part_type!r}"
+                    )
+        elif clean:
+            normalized_content = [{"type": "text", "text": clean}]
+        if not normalized_content:
+            raise ValueError("presentation message requires text or media")
+        content_json = _json(normalized_content)
         content_hash = hashlib.sha256(content_json.encode("utf-8")).hexdigest()
         identity = "\n".join(
             (
@@ -2278,8 +2489,18 @@ class SessionStore:
                     "message_id": message_id,
                     "source": normalized_source,
                     "presentation_channel": normalized_channel,
+                    "content_modes": sorted(
+                        {
+                            "media"
+                            if str(item.get("type") or "").casefold()
+                            in {"attachment", "media", "audio"}
+                            else "text"
+                            for item in normalized_content
+                        }
+                    ),
                 },
                 outbox=outbox,
+                delivery_route=delivery_route,
             )
             connection.execute(
                 """
@@ -2318,10 +2539,20 @@ class SessionStore:
         if not clean:
             raise ValueError("presentation message text is required")
         supplied_context = dict(message_context or {})
-        if set(supplied_context) != {"command_ui"} or not isinstance(
-            supplied_context.get("command_ui"), Mapping
+        if (
+            not supplied_context
+            or set(supplied_context) - {"command_ui", "frontend_presentation"}
+            or not isinstance(supplied_context.get("command_ui"), Mapping)
+            or (
+                "frontend_presentation" in supplied_context
+                and not isinstance(
+                    supplied_context.get("frontend_presentation"), Mapping
+                )
+            )
         ):
-            raise ValueError("only command_ui presentation state may be updated")
+            raise ValueError(
+                "only command_ui and its standard presentation may be updated"
+            )
         content = [{"type": "text", "text": clean}]
         content_json = _json(content)
         content_hash = hashlib.sha256(content_json.encode("utf-8")).hexdigest()
@@ -2362,6 +2593,21 @@ class SessionStore:
                 raise SessionNotFound("presentation message not found")
             context = _json_object(existing["message_context_json"])
             context.update(supplied_context)
+            if "frontend_presentation" not in supplied_context and isinstance(
+                context.get("frontend_presentation"), Mapping
+            ):
+                presentation = dict(context["frontend_presentation"])
+                blocks = [
+                    dict(item)
+                    for item in presentation.get("content_blocks") or []
+                    if isinstance(item, Mapping)
+                ]
+                for block in blocks:
+                    if block.get("type") == "text":
+                        block["text"] = clean
+                        break
+                presentation["content_blocks"] = blocks
+                context["frontend_presentation"] = presentation
             # These invariants keep the row outside model history regardless of
             # what a Connector callback attempted to supply.
             context["presentation_only"] = True
@@ -2582,6 +2828,7 @@ class SessionStore:
             and str(part.get("attachment_id") or "").strip()
             for part in normalized_content
         )
+        terminal_content_already_published = False
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             run = connection.execute(
@@ -2621,6 +2868,7 @@ class SessionStore:
                         # first-ready time.  Reuse that canonical Message when
                         # the Run later settles instead of duplicating it.
                         final_message_id = str(existing_output["message_id"])
+                        terminal_content_already_published = True
                     else:
                         final_message_id = _new_id("msg")
                         ordinal = self._next_ordinal(connection, session_id)
@@ -2665,7 +2913,11 @@ class SessionStore:
                                 "disposition": "final",
                                 "content": content,
                             },
-                            outbox=True,
+                            # The terminal run.completed Event owns delivery of
+                            # final Message content.  Keep this availability
+                            # Event in the feed, but do not create a second
+                            # destination task for the same attachment bytes.
+                            outbox=False,
                         )
             state = "completed" if success else str(failure_state or "failed")
             if state not in TERMINAL_RUN_STATES:
@@ -2707,7 +2959,10 @@ class SessionStore:
                 detail={"message_id": final_message_id}
                 if success
                 else {"error": str(error_text or "run failed")},
-                outbox=True,
+                # A first-ready native output Event already owns delivery of
+                # a reused Message.  The terminal Event remains in the feed,
+                # but must not enqueue the same text/audio a second time.
+                outbox=not terminal_content_already_published,
             )
             projection = {
                 "run_id": str(run["run_id"]),
@@ -2782,7 +3037,13 @@ class SessionStore:
             outcome_status = str(outcome_state or "").strip().casefold() or (
                 "delivered" if delivered else "failed"
             )
-            if outcome_status not in {"queued", "delivered", "failed"}:
+            if outcome_status not in {
+                "queued",
+                "accepted",
+                "delivered",
+                "failed",
+                "unknown",
+            }:
                 raise ValueError("unsupported assistant delivery outcome state")
             if delivered != (outcome_status == "delivered"):
                 raise ValueError(
@@ -2831,7 +3092,15 @@ class SessionStore:
                     else (
                         "Assistant final response queued"
                         if outcome_status == "queued"
-                        else "Assistant final response delivery failed"
+                        else (
+                            "Assistant final response accepted by transport"
+                            if outcome_status == "accepted"
+                            else (
+                                "Assistant final response delivery outcome unknown"
+                                if outcome_status == "unknown"
+                                else "Assistant final response delivery failed"
+                            )
+                        )
                     )
                 ),
                 detail=detail,
@@ -2993,8 +3262,11 @@ class SessionStore:
                 raise ValueError("duration_ms must be non-negative")
             if not retention_indefinite and int(retention_seconds) < MIN_RETENTION_SECONDS:
                 raise ValueError("audio retention must be at least 60 seconds")
-        elif normalized_role:
-            raise ValueError("semantic_role is only supported for audio attachments")
+        else:
+            if normalized_role:
+                raise ValueError("semantic_role is only supported for audio attachments")
+            if not retention_indefinite and int(retention_seconds) < 1:
+                raise ValueError("attachment retention must be positive")
         requires_upload = True if upload_required is None else bool(upload_required)
         normalized_duration = int(duration_ms) if duration_ms is not None else None
         normalized_retention_indefinite = bool(retention_indefinite)
@@ -3326,6 +3598,7 @@ class SessionStore:
         attachment_id: str,
         item_index: int,
         semantic_role: str | None = None,
+        presentation_role: str | None = None,
         caption: str = "",
         detail: str = "",
     ) -> dict[str, Any]:
@@ -3355,12 +3628,29 @@ class SessionStore:
         role = str(
             semantic_role or attachment["semantic_role"] or "audio_attachment"
         )
+        resolved_presentation_role = str(
+            presentation_role or ""
+        ).strip().casefold()
+        if resolved_presentation_role not in {
+            "",
+            "audio",
+            "document",
+            "image",
+            "photo",
+            "video",
+            "voice",
+        }:
+            raise ValueError("attachment presentation_role is invalid")
         part = {
             "type": "media",
             "item_index": int(item_index),
             "attachment_id": str(attachment_id),
             "modality": modality,
-            "kind": "voice" if modality == "audio" and role == "voice_message" else modality,
+            "kind": (
+                "voice"
+                if modality == "audio" and role == "voice_message"
+                else resolved_presentation_role or modality
+            ),
             "mime_type": media_type,
             "filename": str(attachment["filename"]),
             "caption": str(caption or ""),
@@ -3372,6 +3662,8 @@ class SessionStore:
         if modality == "audio":
             part["semantic_role"] = role
             part["duration_ms"] = attachment["duration_ms"]
+        if resolved_presentation_role:
+            part["presentation_role"] = resolved_presentation_role
         if detail:
             part["detail"] = str(detail)
         return part
@@ -3665,16 +3957,21 @@ class SessionStore:
         )
         if group is None:
             raise SessionConflict("frontend attachment output was not persisted")
+        durable_attachment_ids = [
+            str(part.get("attachment_id") or "")
+            for part in group["attachments"]
+            if str(part.get("attachment_id") or "")
+        ]
         durable_audio_attachment_ids = [
             str(part.get("attachment_id") or "")
             for part in group["attachments"]
             if str(part.get("modality") or "").casefold() == "audio"
             and str(part.get("attachment_id") or "")
         ]
-        if durable_audio_attachment_ids:
-            # Once audio is visible as part of the assistant Message, its
-            # lifetime follows that Message. This also repairs replayed groups
-            # created by older tool versions with preview-only retention.
+        if durable_attachment_ids:
+            # Once bytes are bound to a visible Message, their lifetime follows
+            # that Message. This also repairs replayed groups created by older
+            # tool versions with preview-only retention.
             durable_audio_assets: list[tuple[str, str]] = []
             with self._lock, self._connection() as connection:
                 for attachment_id in durable_audio_attachment_ids:
@@ -3703,7 +4000,7 @@ class SessionStore:
                        WHERE attachment_id=? AND session_id=? AND owner_id=?""",
                     [
                         (attachment_id, str(session_id), str(owner_id))
-                        for attachment_id, _asset_id in durable_audio_assets
+                        for attachment_id in durable_attachment_ids
                     ],
                 )
         return {**group, "replayed": replayed}
@@ -3805,6 +4102,120 @@ class SessionStore:
             "retention_expires_at": asset.get("retention_expires_at"),
             "retention_indefinite": asset["retention_indefinite"],
         }
+
+    def cleanup_attachments(
+        self, *, now: datetime | None = None
+    ) -> list[dict[str, Any]]:
+        """Expire only unbound, finite non-audio bytes outside active delivery."""
+
+        observed_now = now or datetime.now(timezone.utc)
+        if observed_now.tzinfo is None:
+            observed_now = observed_now.replace(tzinfo=timezone.utc)
+        expired: list[dict[str, Any]] = []
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """
+                SELECT * FROM session_attachments
+                WHERE state IN ('staged','committed')
+                  AND retention_indefinite=0
+                  AND retention_seconds IS NOT NULL
+                  AND media_type NOT LIKE 'audio/%'
+                ORDER BY created_at, attachment_id
+                """
+            ).fetchall()
+            for row in rows:
+                try:
+                    created_at = datetime.fromisoformat(
+                        str(row["created_at"]).replace("Z", "+00:00")
+                    )
+                except ValueError:
+                    continue
+                deadline = created_at + timedelta(
+                    seconds=max(1, int(row["retention_seconds"]))
+                )
+                if observed_now < deadline:
+                    continue
+                attachment_id = str(row["attachment_id"])
+                reference_pattern = (
+                    '%"attachment_id":"'
+                    + attachment_id
+                    + '"%'
+                )
+                message_bound = connection.execute(
+                    """
+                    SELECT 1 FROM messages
+                    WHERE session_id=? AND content_json LIKE ? LIMIT 1
+                    """,
+                    (str(row["session_id"]), reference_pattern),
+                ).fetchone()
+                output_bound = connection.execute(
+                    """
+                    SELECT 1 FROM run_output_attachments
+                    WHERE attachment_id=? LIMIT 1
+                    """,
+                    (attachment_id,),
+                ).fetchone()
+                if message_bound is not None or output_bound is not None:
+                    connection.execute(
+                        """
+                        UPDATE session_attachments
+                        SET retention_seconds=NULL, retention_indefinite=1
+                        WHERE attachment_id=?
+                        """,
+                        (attachment_id,),
+                    )
+                    continue
+                active_delivery = connection.execute(
+                    """
+                    SELECT 1
+                    FROM connector_delivery_tasks AS t
+                    JOIN run_events AS e ON e.event_id=t.event_id
+                    WHERE t.session_id=?
+                      AND t.state IN ('pending','retry','claimed','unknown')
+                      AND e.detail_json LIKE ?
+                    LIMIT 1
+                    """,
+                    (str(row["session_id"]), reference_pattern),
+                ).fetchone()
+                if active_delivery is not None:
+                    continue
+                if str(row["asset_id"] or ""):
+                    try:
+                        self._attachment_file_path(
+                            attachment_id, str(row["filename"])
+                        ).unlink(missing_ok=True)
+                    except OSError:
+                        continue
+                expired_at = observed_now.astimezone(timezone.utc).isoformat().replace(
+                    "+00:00", "Z"
+                )
+                connection.execute(
+                    """
+                    UPDATE session_attachments SET state='expired'
+                    WHERE attachment_id=? AND state IN ('staged','committed')
+                    """,
+                    (attachment_id,),
+                )
+                self._append_event(
+                    connection,
+                    session_id=str(row["session_id"]),
+                    run_id=None,
+                    kind="attachment.expired",
+                    status="expired",
+                    phase="retention",
+                    summary="Unbound attachment bytes expired",
+                    detail={"attachment_id": attachment_id},
+                )
+                expired.append(
+                    {
+                        "attachment_id": attachment_id,
+                        "session_id": str(row["session_id"]),
+                        "state": "expired",
+                        "expired_at": expired_at,
+                    }
+                )
+        return expired
 
     def cleanup_audio_assets(self) -> list[dict[str, Any]]:
         expired = self.audio_assets.cleanup()
@@ -4276,6 +4687,17 @@ class SessionStore:
             part.get("type") == "audio" and str(part.get("asset_id") or "")
             for part in parts
         )
+        summary_text = str(summary or "").strip()
+        if has_audio and summary_text and not any(
+            str(part.get("type") or "").casefold() == "text"
+            and str(part.get("text") or "").strip()
+            for part in parts
+        ):
+            # Provider-native audio commentary often carries its companion
+            # transcript in the typed Event summary.  Promote that semantic
+            # text into the canonical Message so every Connector sees the same
+            # audio+text result; audio-only policy remains a renderer choice.
+            parts.insert(0, {"type": "text", "text": summary_text})
         now = _utc_now()
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -4410,6 +4832,34 @@ class SessionStore:
                 ),
             )
         return event
+
+    def runtime_event_delivery_target(
+        self,
+        *,
+        source_event_id: str,
+        request_id: str,
+        owner_id: str,
+    ) -> dict[str, Any] | None:
+        """Resolve a persisted provider Event to its FC delivery identity."""
+
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT c.event_id, c.session_id, c.run_id, c.kind
+                FROM runtime_event_correlations AS c
+                JOIN runs AS r ON r.run_id=c.run_id
+                JOIN sessions AS s ON s.session_id=c.session_id
+                WHERE c.source_event_id=? AND r.request_id=?
+                  AND s.instance_id=? AND s.owner_id=?
+                """,
+                (
+                    str(source_event_id),
+                    str(request_id),
+                    self.instance_id,
+                    str(owner_id),
+                ),
+            ).fetchone()
+        return dict(row) if row is not None else None
 
     def decide_voice_transcript(
         self, *, request_id: str, confirmed: bool
@@ -4898,6 +5348,28 @@ class SessionStore:
             ).fetchall()
         return [self._message_dict(row) for row in rows]
 
+    def get_message(
+        self,
+        message_id: str,
+        *,
+        session_id: str,
+        owner_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Return one owner-scoped canonical Message by its durable identity."""
+
+        self.get_session(str(session_id), owner_id=owner_id)
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM messages
+                WHERE message_id=? AND session_id=?
+                """,
+                (str(message_id), str(session_id)),
+            ).fetchone()
+        if row is None:
+            raise SessionNotFound(str(message_id))
+        return self._message_dict(row)
+
     def recent_messages(
         self,
         session_id: str,
@@ -5149,13 +5621,49 @@ class SessionStore:
         for item_index, part in enumerate(
             content if isinstance(content, list) else (), start=1
         ):
+            part_type = (
+                str(part.get("type") or "").casefold()
+                if isinstance(part, Mapping)
+                else ""
+            )
+            part_attachment_id = (
+                str(
+                    part.get("attachment_id")
+                    or (part.get("asset_id") if part_type == "audio" else "")
+                    or ""
+                )
+                if isinstance(part, Mapping)
+                else ""
+            )
             if (
                 isinstance(part, Mapping)
-                and str(part.get("type") or "").casefold()
-                in {"attachment", "media", "audio"}
-                and str(part.get("attachment_id") or "") == str(attachment_id)
+                and part_type in {"attachment", "media", "audio"}
+                and part_attachment_id == str(attachment_id)
             ):
-                if str(part.get("type") or "").casefold() != "attachment":
+                if part_type == "audio":
+                    metadata, local_path = self.audio_asset_path(
+                        session_id=str(session_id),
+                        owner_id=str(owner_id),
+                        asset_id=part_attachment_id,
+                    )
+                    return {
+                        **dict(part),
+                        "attachment_id": part_attachment_id,
+                        "local_ref": str(local_path),
+                        "filename": str(
+                            part.get("filename")
+                            or metadata.get("filename")
+                            or local_path.name
+                        ),
+                        "mime_type": str(
+                            part.get("mime_type")
+                            or metadata.get("mime_type")
+                            or "audio/ogg"
+                        ),
+                        "size_bytes": int(metadata.get("size_bytes") or 0),
+                        "sha256": str(metadata.get("sha256") or ""),
+                    }
+                if part_type == "media":
                     return dict(part)
                 return self.attachment_canonical_part(
                     session_id=str(session_id),
@@ -7145,6 +7653,43 @@ class SessionStore:
             }
         return result
 
+    @staticmethod
+    def _refresh_delivery_outbox_aggregate(
+        connection: sqlite3.Connection, *, event_id: str
+    ) -> None:
+        """Project endpoint tasks into the legacy event-level rollback view."""
+
+        rows = connection.execute(
+            "SELECT state FROM connector_delivery_tasks WHERE event_id=?",
+            (str(event_id),),
+        ).fetchall()
+        if not rows:
+            return
+        states = {str(row["state"]) for row in rows}
+        error_code = None
+        completed_at = None
+        if "unknown" in states:
+            aggregate = "unknown"
+            error_code = "endpoint_outcome_unknown"
+            completed_at = _utc_now()
+        elif states & {"pending", "retry", "claimed"}:
+            aggregate = "delegated"
+        elif states & {"failed", "expired"}:
+            aggregate = "failed"
+            error_code = "endpoint_delivery_failed"
+            completed_at = _utc_now()
+        else:
+            aggregate = "completed"
+            completed_at = _utc_now()
+        connection.execute(
+            """
+            UPDATE delivery_outbox
+            SET state=?, completed_at=?, last_error_code=?
+            WHERE event_id=?
+            """,
+            (aggregate, completed_at, error_code, str(event_id)),
+        )
+
     def claim_delivery_outbox(
         self,
         *,
@@ -7152,6 +7697,8 @@ class SessionStore:
         owner_id: str,
         worker_id: str,
         event_id: str | None = None,
+        connector_id: str | None = None,
+        endpoint_id: str | None = None,
         limit: int = 20,
         lease_seconds: int = 60,
     ) -> list[dict[str, Any]]:
@@ -7177,6 +7724,119 @@ class SessionStore:
         now_text = now.isoformat()
         expires_text = (now + timedelta(seconds=int(lease_seconds))).isoformat()
         claimed: list[dict[str, Any]] = []
+        task_filters = []
+        task_params: list[Any] = [
+            resolved_session_id,
+            resolved_owner_id,
+            self.instance_id,
+        ]
+        if event_id is not None:
+            task_filters.append("t.event_id=?")
+            task_params.append(str(event_id))
+        if connector_id is not None:
+            task_filters.append("t.connector_id=?")
+            task_params.append(str(connector_id).strip().casefold())
+        if endpoint_id is not None:
+            task_filters.append("t.endpoint_id=?")
+            task_params.append(str(endpoint_id).strip())
+        task_where = "".join(f" AND {item}" for item in task_filters)
+        task_params.append(int(limit))
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            expired_tasks = connection.execute(
+                """
+                SELECT task_id, event_id FROM connector_delivery_tasks
+                WHERE session_id=? AND state='claimed'
+                  AND lease_expires_at IS NOT NULL AND lease_expires_at<=?
+                """,
+                (resolved_session_id, now_text),
+            ).fetchall()
+            for expired in expired_tasks:
+                connection.execute(
+                    """
+                    UPDATE connector_delivery_tasks
+                    SET state='unknown', completed_at=?,
+                        last_error_code='lease_expired_outcome_unknown',
+                        last_claim_token=lease_token, last_claim_status='unknown',
+                        lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL
+                    WHERE task_id=? AND state='claimed'
+                    """,
+                    (now_text, str(expired["task_id"])),
+                )
+                self._refresh_delivery_outbox_aggregate(
+                    connection, event_id=str(expired["event_id"])
+                )
+            rows = connection.execute(
+                f"""
+                SELECT t.*, e.sequence, e.kind, e.status, e.phase, e.summary,
+                       e.detail_json, e.created_at AS event_created_at,
+                       r.delivery_route_json
+                FROM connector_delivery_tasks AS t
+                JOIN run_events AS e ON e.event_id=t.event_id
+                JOIN sessions AS s ON s.session_id=t.session_id
+                LEFT JOIN runs AS r ON r.run_id=t.run_id
+                WHERE t.session_id=? AND s.owner_id=? AND s.instance_id=?
+                  AND t.state IN ('pending','retry')
+                  {task_where}
+                ORDER BY t.created_at ASC, t.task_id ASC
+                LIMIT ?
+                """,
+                task_params,
+            ).fetchall()
+            for row in rows:
+                lease_token = _new_id("lease")
+                updated = connection.execute(
+                    """
+                    UPDATE connector_delivery_tasks
+                    SET state='claimed', lease_owner=?, lease_token=?,
+                        lease_expires_at=?, attempt_count=attempt_count+1
+                    WHERE task_id=? AND state IN ('pending','retry')
+                    """,
+                    (
+                        resolved_worker_id,
+                        lease_token,
+                        expires_text,
+                        str(row["task_id"]),
+                    ),
+                )
+                if updated.rowcount != 1:
+                    continue
+                try:
+                    content_modes = json.loads(row["content_modes_json"] or "[]")
+                except (TypeError, ValueError):
+                    content_modes = []
+                claimed.append(
+                    {
+                        "outbox_id": str(row["task_id"]),
+                        "session_id": resolved_session_id,
+                        "run_id": row["run_id"],
+                        "event_id": str(row["event_id"]),
+                        "connector_id": str(row["connector_id"]),
+                        "endpoint_id": str(row["endpoint_id"]),
+                        "role": str(row["role"]),
+                        "content_modes": (
+                            list(content_modes)
+                            if isinstance(content_modes, list)
+                            else []
+                        ),
+                        "retry_class": str(row["retry_class"]),
+                        "sequence": int(row["sequence"]),
+                        "kind": str(row["kind"]),
+                        "status": row["status"],
+                        "phase": row["phase"],
+                        "summary": str(row["summary"] or ""),
+                        "detail": _json_object(row["detail_json"]),
+                        "delivery_route": _json_object(
+                            row["delivery_route_json"] or "{}"
+                        ),
+                        "attempt_count": int(row["attempt_count"]) + 1,
+                        "lease_owner": resolved_worker_id,
+                        "lease_token": lease_token,
+                        "lease_expires_at": expires_text,
+                    }
+                )
+        if claimed:
+            return claimed
         event_filter = " AND o.event_id=?" if event_id is not None else ""
         query_params: list[Any] = [
             resolved_session_id,
@@ -7342,6 +8002,7 @@ class SessionStore:
         from orchestrator.frontend_contracts import normalize_delivery_intent
 
         delivery_destinations = []
+        selected_destination: dict[str, Any] | None = None
         for raw_destination in destinations:
             if not isinstance(raw_destination, Mapping):
                 continue
@@ -7352,24 +8013,28 @@ class SessionStore:
                 ingress_transport=destination_surface,
                 surface=destination_surface,
             )
-            delivery_destinations.append(
-                {
-                    "connector_id": connector_id,
-                    "endpoint_id": endpoint_id_for(
-                        connector_id,
-                        ingress_transport=destination_surface,
-                        channel_key=destination_channel,
-                    ),
-                    "channel_key": destination_channel,
-                    "role": (
-                        "primary"
-                        if route.get("primary") == raw_destination
-                        else "mirror"
-                    ),
-                    "content_modes": ["text"],
-                    "retry_class": "query_before_retry",
-                }
-            )
+            delivery_destination = {
+                "connector_id": connector_id,
+                "endpoint_id": endpoint_id_for(
+                    connector_id,
+                    ingress_transport=destination_surface,
+                    channel_key=destination_channel,
+                ),
+                "channel_key": destination_channel,
+                "role": (
+                    "primary"
+                    if route.get("primary") == raw_destination
+                    else "mirror"
+                ),
+                "content_modes": ["text"],
+                "retry_class": "query_before_retry",
+            }
+            delivery_destinations.append(delivery_destination)
+            if (
+                destination_surface == resolved_surface
+                and destination_channel == resolved_channel
+            ):
+                selected_destination = delivery_destination
         digest_material = "\n".join(
             [str(request_id), event_id]
             + sorted(item["endpoint_id"] for item in delivery_destinations)
@@ -7391,6 +8056,16 @@ class SessionStore:
             owner_id=str(owner_id),
             worker_id=worker_id,
             event_id=event_id,
+            connector_id=(
+                str(selected_destination["connector_id"])
+                if selected_destination is not None
+                else None
+            ),
+            endpoint_id=(
+                str(selected_destination["endpoint_id"])
+                if selected_destination is not None
+                else None
+            ),
             limit=1,
             lease_seconds=lease_seconds,
         )
@@ -7406,9 +8081,22 @@ class SessionStore:
             }
         with self._lock, self._connection() as connection:
             current = connection.execute(
-                "SELECT state FROM delivery_outbox WHERE event_id=?",
-                (event_id,),
+                """
+                SELECT state FROM connector_delivery_tasks
+                WHERE event_id=? AND endpoint_id=?
+                """,
+                (
+                    event_id,
+                    str(selected_destination["endpoint_id"])
+                    if selected_destination is not None
+                    else "",
+                ),
             ).fetchone()
+            if current is None:
+                current = connection.execute(
+                    "SELECT state FROM delivery_outbox WHERE event_id=?",
+                    (event_id,),
+                ).fetchone()
         return {
             "managed": True,
             "state": str(current["state"]) if current is not None else "missing_outbox",
@@ -7453,6 +8141,60 @@ class SessionStore:
         now = _utc_now()
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            task = connection.execute(
+                "SELECT * FROM connector_delivery_tasks WHERE task_id=?",
+                (str(outbox_id),),
+            ).fetchone()
+            if task is not None:
+                if (
+                    str(task["state"]) != "claimed"
+                    or str(task["lease_token"] or "") != token
+                ):
+                    if (
+                        str(task["last_claim_token"] or "") == token
+                        and str(task["last_claim_status"] or "")
+                        == resolved_status
+                    ):
+                        return {
+                            "outbox_id": str(outbox_id),
+                            "state": resolved_status,
+                            "attempt_count": int(task["attempt_count"]),
+                            "connector_id": str(task["connector_id"]),
+                            "endpoint_id": str(task["endpoint_id"]),
+                            "duplicate": True,
+                        }
+                    raise SessionConflict("delivery outbox lease is stale")
+                terminal = resolved_status != "retry"
+                connection.execute(
+                    """
+                    UPDATE connector_delivery_tasks
+                    SET state=?, delivered_at=?, completed_at=?,
+                        last_error_code=?, last_claim_token=lease_token,
+                        last_claim_status=?, lease_owner=NULL,
+                        lease_token=NULL, lease_expires_at=NULL
+                    WHERE task_id=? AND state='claimed' AND lease_token=?
+                    """,
+                    (
+                        resolved_status,
+                        now if resolved_status == "completed" else None,
+                        now if terminal else None,
+                        safe_error_code or None,
+                        resolved_status,
+                        str(outbox_id),
+                        token,
+                    ),
+                )
+                self._refresh_delivery_outbox_aggregate(
+                    connection, event_id=str(task["event_id"])
+                )
+                return {
+                    "outbox_id": str(outbox_id),
+                    "state": resolved_status,
+                    "attempt_count": int(task["attempt_count"]),
+                    "connector_id": str(task["connector_id"]),
+                    "endpoint_id": str(task["endpoint_id"]),
+                    "duplicate": False,
+                }
             row = connection.execute(
                 "SELECT * FROM delivery_outbox WHERE outbox_id=?",
                 (str(outbox_id),),
@@ -7496,6 +8238,101 @@ class SessionStore:
                 "outbox_id": str(outbox_id),
                 "state": resolved_status,
                 "attempt_count": int(row["attempt_count"]),
+                "duplicate": False,
+            }
+
+    def reconcile_unknown_delivery(
+        self,
+        *,
+        outbox_id: str,
+        resolution: str,
+        proof: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Resolve an unknown endpoint only from connector query evidence."""
+
+        resolved = str(resolution or "").strip().casefold()
+        if resolved not in {"delivered", "not_delivered"}:
+            raise ValueError("unknown delivery resolution is invalid")
+        proof_type = str(proof.get("type") or "").strip()
+        proof_value = str(proof.get("value") or "").strip()
+        if (
+            not proof_type
+            or not proof_value
+            or len(proof_type) > 64
+            or len(proof_value) > 256
+            or any(ord(char) < 33 or ord(char) > 126 for char in proof_type)
+            or any(ord(char) < 33 or ord(char) > 126 for char in proof_value)
+        ):
+            raise ValueError("unknown delivery reconciliation proof is invalid")
+        now = _utc_now()
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            task = connection.execute(
+                "SELECT * FROM connector_delivery_tasks WHERE task_id=?",
+                (str(outbox_id),),
+            ).fetchone()
+            if task is None:
+                raise SessionNotFound(str(outbox_id))
+            state = str(task["state"])
+            target_state = "completed" if resolved == "delivered" else "retry"
+            if state == target_state:
+                return {
+                    "outbox_id": str(outbox_id),
+                    "state": state,
+                    "resolution": resolved,
+                    "duplicate": True,
+                }
+            if state != "unknown":
+                raise SessionConflict("delivery task is not awaiting reconciliation")
+            connection.execute(
+                """
+                UPDATE connector_delivery_tasks
+                SET state=?, delivered_at=?, completed_at=?,
+                    last_error_code=?, last_claim_status=?,
+                    lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL
+                WHERE task_id=? AND state='unknown'
+                """,
+                (
+                    target_state,
+                    now if resolved == "delivered" else None,
+                    now if resolved == "delivered" else None,
+                    (
+                        "reconciled_not_delivered"
+                        if resolved == "not_delivered"
+                        else None
+                    ),
+                    f"reconciled_{resolved}",
+                    str(outbox_id),
+                ),
+            )
+            if resolved == "delivered":
+                proof_json = _json({"type": proof_type, "value": proof_value})
+                connection.execute(
+                    """
+                    INSERT INTO connector_delivery_receipts(
+                        event_id, session_id, endpoint_id, status,
+                        proof_json, attempt_count, updated_at
+                    ) VALUES (?, ?, ?, 'delivered', ?, 1, ?)
+                    ON CONFLICT(event_id, endpoint_id) DO UPDATE SET
+                        status='delivered', proof_json=excluded.proof_json,
+                        attempt_count=connector_delivery_receipts.attempt_count+1,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        str(task["event_id"]),
+                        str(task["session_id"]),
+                        str(task["endpoint_id"]),
+                        proof_json,
+                        now,
+                    ),
+                )
+            self._refresh_delivery_outbox_aggregate(
+                connection, event_id=str(task["event_id"])
+            )
+            return {
+                "outbox_id": str(outbox_id),
+                "state": target_state,
+                "resolution": resolved,
                 "duplicate": False,
             }
 

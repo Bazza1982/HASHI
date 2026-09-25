@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from telegram import constants
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, constants
 from telegram.error import RetryAfter
 
 from orchestrator import runtime_delivery
@@ -27,13 +27,54 @@ class _Logger:
 class _Bot:
     def __init__(self, *, error=None):
         self.messages = []
+        self.media = []
         self.actions = []
         self.error = error
+        self._next_message_id = 100
 
     async def send_message(self, **kwargs):
         if self.error is not None:
             raise self.error
         self.messages.append(kwargs)
+        self._next_message_id += 1
+        return SimpleNamespace(message_id=self._next_message_id)
+
+    async def _send_media(self, media_type, **kwargs):
+        if self.error is not None:
+            raise self.error
+        field = {
+            "photo": "photo",
+            "video": "video",
+            "audio": "audio",
+            "voice": "voice",
+            "document": "document",
+        }[media_type]
+        handle = kwargs.pop(field)
+        self.media.append(
+            {
+                "type": media_type,
+                "filename": Path(handle.name).name,
+                "payload": handle.read(),
+                **kwargs,
+            }
+        )
+        self._next_message_id += 1
+        return SimpleNamespace(message_id=self._next_message_id)
+
+    async def send_photo(self, **kwargs):
+        return await self._send_media("photo", **kwargs)
+
+    async def send_video(self, **kwargs):
+        return await self._send_media("video", **kwargs)
+
+    async def send_audio(self, **kwargs):
+        return await self._send_media("audio", **kwargs)
+
+    async def send_voice(self, **kwargs):
+        return await self._send_media("voice", **kwargs)
+
+    async def send_document(self, **kwargs):
+        return await self._send_media("document", **kwargs)
 
     async def send_chat_action(self, **kwargs):
         self.actions.append(kwargs)
@@ -58,6 +99,116 @@ def _runtime(tmp_path: Path, *, connected: bool = True, bot_error=None):
         workspace_dir=tmp_path,
         _notify_enabled=False,
     )
+
+
+def test_telegram_inline_keyboard_round_trips_through_standard_actions(tmp_path):
+    runtime = _runtime(tmp_path)
+    context = runtime_delivery.telegram_presentation_context(
+        text="<b>Choose</b>",
+        content_format="telegram-html",
+        presentation_channel="command",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "Continue", callback_data="example:continue"
+                    ),
+                    InlineKeyboardButton("Read", url="https://example.org"),
+                ]
+            ]
+        ),
+    )
+    blocks = context["frontend_presentation"]["content_blocks"]
+    assert blocks[0] == {"type": "text", "text": "Choose", "format": "plain"}
+    assert [block["type"] for block in blocks[1:]] == ["action", "action"]
+    event = {
+        "content_blocks": blocks,
+    }
+
+    rendered = runtime_delivery.telegram_reply_markup_for_event(runtime, event)
+
+    assert rendered is not None
+    assert [button.text for button in rendered.inline_keyboard[0]] == [
+        "Continue",
+        "Read",
+    ]
+    assert rendered.inline_keyboard[0][0].callback_data == "example:continue"
+    assert rendered.inline_keyboard[0][1].url == "https://example.org"
+
+
+@pytest.mark.asyncio
+async def test_managed_short_send_projects_buttons_and_records_acceptance(
+    tmp_path, monkeypatch
+):
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    runtime = _runtime(tmp_path)
+    runtime.global_config.authorized_id = 7
+
+    async def accepted_without_transport_id(**kwargs):
+        runtime.app.bot.messages.append(kwargs)
+        return SimpleNamespace()
+
+    async def not_blocked(*_args, **_kwargs):
+        return False
+
+    runtime.app.bot.send_message = accepted_without_transport_id
+    monkeypatch.setattr(
+        "orchestrator.flexible_agent_runtime.apply_disable_notification_default",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "orchestrator.flexible_agent_runtime.telegram_delivery_failover.handle_blocked_send",
+        not_blocked,
+    )
+    markup = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Continue", callback_data="example:continue")]]
+    )
+
+    result = await FlexibleAgentRuntime._send_text(
+        runtime,
+        7,
+        "<b>Choose</b>",
+        parse_mode="HTML",
+        reply_markup=markup,
+        _request_id="req-short-button",
+        _purpose="command-result",
+    )
+
+    assert result is not None
+    assert len(runtime.app.bot.messages) == 1
+    sent = runtime.app.bot.messages[0]
+    assert sent["text"] == "<b>Choose</b>"
+    assert sent["reply_markup"] is not markup
+    assert sent["reply_markup"].inline_keyboard[0][0].callback_data == (
+        "example:continue"
+    )
+    session = runtime.session_store.resolve_primary_session(
+        owner_id="user:7", agent_id="test-agent"
+    )
+    event = next(
+        item
+        for item in runtime.session_store.events(
+            session["session_id"], owner_id="user:7"
+        )
+        if item["kind"] == "frontend.message.recorded"
+    )
+    from orchestrator.frontend_dispatch import project_claimed_frontend_event
+
+    projected = project_claimed_frontend_event(
+        runtime.session_store,
+        event,
+        session_id=session["session_id"],
+        owner_id="user:7",
+    )
+    assert any(block["type"] == "action" for block in projected["content_blocks"])
+    receipts = runtime.session_store.frontend_delivery_receipts(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        event_id=event["event_id"],
+    )
+    assert receipts[0]["status"] == "accepted"
+    assert receipts[0]["proof"] is None
 
 
 @pytest.mark.asyncio
@@ -253,6 +404,301 @@ async def test_canonical_background_reply_uses_outbox_and_does_not_double_send(
             (event["event_id"],),
         ).fetchone()[0]
     assert state == "completed"
+
+
+@pytest.mark.asyncio
+async def test_canonical_transport_exception_is_unknown_and_never_replayed(
+    tmp_path, monkeypatch
+):
+    from orchestrator.frontend_delivery import freeze_run_delivery_route
+    from orchestrator.session_store import SessionStore
+
+    store = SessionStore(
+        tmp_path / "state" / "sessions.sqlite3",
+        instance_id="HASHI1",
+    )
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="test-agent")
+    route = freeze_run_delivery_route(
+        message_source_id="telegram",
+        session_surface="telegram",
+        session_channel_key="7",
+        chat_id=7,
+        telegram_requested=False,
+    )
+    accepted = store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="test-agent",
+        request_id="req-outcome-unknown",
+        text="question",
+        source="telegram",
+        idempotency_key="outcome-unknown-key",
+        delivery_route=route,
+    )
+    store.mark_request_running(accepted.request_id, worker_id="test-worker")
+    store.finish_request(
+        accepted.request_id,
+        success=True,
+        assistant_text="answer",
+    )
+    runtime = _runtime(tmp_path)
+    runtime.session_store = store
+    runtime.global_config.authorized_id = 7
+    attempts = []
+
+    async def uncertain_send(**kwargs):
+        attempts.append(kwargs)
+        raise RuntimeError("connection lost after write")
+
+    async def no_wait(*_args, **_kwargs):
+        return None
+
+    async def not_blocked(*_args, **_kwargs):
+        return False
+
+    runtime.app.bot.send_message = uncertain_send
+    monkeypatch.setattr(runtime_delivery.runtime_delivery_order, "wait_for_turn", no_wait)
+    monkeypatch.setattr(
+        runtime_delivery.telegram_delivery_failover,
+        "handle_blocked_send",
+        not_blocked,
+    )
+
+    with pytest.raises(RuntimeError, match="connection lost"):
+        await runtime_delivery.send_long_message(
+            runtime,
+            chat_id=7,
+            text="answer",
+            request_id=accepted.request_id,
+            purpose="bg-response",
+            frontend_outbox=True,
+        )
+
+    assert len(attempts) == 1
+    event = next(
+        item
+        for item in store.events(session["session_id"], owner_id=owner)
+        if item["kind"] == "run.completed"
+    )
+    with store._connection() as connection:
+        task = connection.execute(
+            "SELECT state, attempt_count FROM connector_delivery_tasks WHERE event_id=?",
+            (event["event_id"],),
+        ).fetchone()
+    assert (task["state"], task["attempt_count"]) == ("unknown", 1)
+
+    replay = await runtime_delivery.send_long_message(
+        runtime,
+        chat_id=7,
+        text="answer",
+        request_id=accepted.request_id,
+        purpose="bg-response",
+        frontend_outbox=True,
+    )
+    assert replay == (0.0, 0)
+    assert len(attempts) == 1
+
+
+@pytest.mark.asyncio
+async def test_canonical_telegram_delivery_ignores_untrusted_text_copy(
+    tmp_path, monkeypatch
+):
+    from orchestrator.frontend_delivery import freeze_run_delivery_route
+    from orchestrator.session_store import SessionStore
+
+    store = SessionStore(
+        tmp_path / "state" / "sessions.sqlite3",
+        instance_id="HASHI1",
+    )
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="test-agent")
+    accepted = store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="test-agent",
+        request_id="req-canonical-content",
+        text="question",
+        source="telegram",
+        idempotency_key="canonical-content-key",
+        delivery_route=freeze_run_delivery_route(
+            message_source_id="telegram",
+            session_surface="telegram",
+            session_channel_key="7",
+            chat_id=7,
+            telegram_requested=False,
+        ),
+    )
+    store.mark_request_running(accepted.request_id, worker_id="test-worker")
+    store.finish_request(
+        accepted.request_id,
+        success=True,
+        assistant_text="**canonical answer**",
+    )
+    runtime = _runtime(tmp_path)
+    runtime.session_store = store
+    runtime.global_config.authorized_id = 7
+
+    async def no_wait(*_args, **_kwargs):
+        return None
+
+    async def not_blocked(*_args, **_kwargs):
+        return False
+
+    monkeypatch.setattr(runtime_delivery.runtime_delivery_order, "wait_for_turn", no_wait)
+    monkeypatch.setattr(
+        runtime_delivery.telegram_delivery_failover,
+        "handle_blocked_send",
+        not_blocked,
+    )
+
+    await runtime_delivery.send_long_message(
+        runtime,
+        chat_id=7,
+        text="untrusted callback copy",
+        request_id=accepted.request_id,
+        purpose="bg-response",
+        frontend_outbox=True,
+    )
+
+    assert len(runtime.app.bot.messages) == 1
+    assert runtime.app.bot.messages[0]["text"] == "<b>canonical answer</b>"
+
+
+@pytest.mark.asyncio
+async def test_canonical_telegram_delivery_sends_ordered_media_once(
+    tmp_path, monkeypatch
+):
+    from orchestrator.frontend_delivery import freeze_run_delivery_route
+    from orchestrator.session_store import SessionStore
+
+    store = SessionStore(
+        tmp_path / "state" / "sessions.sqlite3",
+        instance_id="HASHI1",
+    )
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="test-agent")
+    accepted = store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="test-agent",
+        request_id="req-canonical-media",
+        text="question",
+        source="telegram",
+        idempotency_key="canonical-media-key",
+        delivery_route=freeze_run_delivery_route(
+            message_source_id="telegram",
+            session_surface="telegram",
+            session_channel_key="7",
+            chat_id=7,
+            telegram_requested=False,
+        ),
+    )
+    store.mark_request_running(accepted.request_id, worker_id="test-worker")
+    payload = b"canonical report bytes"
+    digest = hashlib.sha256(payload).hexdigest()
+    staged = store.stage_attachment(
+        session_id=session["session_id"],
+        owner_id=owner,
+        filename="report.txt",
+        media_type="text/plain",
+        size_bytes=len(payload),
+        sha256=digest,
+        idempotency_key="stage-canonical-media",
+    )
+    store.upload_attachment_bytes(
+        session_id=session["session_id"],
+        owner_id=owner,
+        attachment_id=staged["attachment_id"],
+        payload=payload,
+    )
+    store.commit_attachment(
+        session_id=session["session_id"],
+        owner_id=owner,
+        attachment_id=staged["attachment_id"],
+    )
+    store.bind_run_output_attachments(
+        request_id=accepted.request_id,
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="test-agent",
+        idempotency_key="bind-canonical-media",
+        request_digest=digest,
+        attachments=[
+            {
+                "attachment_id": staged["attachment_id"],
+                "caption": "the report",
+            }
+        ],
+    )
+    store.finish_request(
+        accepted.request_id,
+        success=True,
+        assistant_text="canonical answer",
+    )
+    runtime = _runtime(tmp_path)
+    runtime.session_store = store
+    runtime.global_config.authorized_id = 7
+
+    async def no_wait(*_args, **_kwargs):
+        return None
+
+    async def not_blocked(*_args, **_kwargs):
+        return False
+
+    monkeypatch.setattr(runtime_delivery.runtime_delivery_order, "wait_for_turn", no_wait)
+    monkeypatch.setattr(
+        runtime_delivery.telegram_delivery_failover,
+        "handle_blocked_send",
+        not_blocked,
+    )
+
+    first = await runtime_delivery.send_long_message(
+        runtime,
+        chat_id=7,
+        text="untrusted callback copy",
+        request_id=accepted.request_id,
+        purpose="response",
+        frontend_outbox=True,
+    )
+    replay = await runtime_delivery.send_long_message(
+        runtime,
+        chat_id=7,
+        text="untrusted callback copy",
+        request_id=accepted.request_id,
+        purpose="response",
+        frontend_outbox=True,
+    )
+
+    assert first[1] == 2
+    assert replay == (0.0, 0)
+    assert [item["text"] for item in runtime.app.bot.messages] == [
+        "canonical answer"
+    ]
+    assert runtime.app.bot.media == [
+        {
+            "type": "document",
+            "filename": Path(staged["attachment_id"]).name + ".txt",
+            "payload": payload,
+            "chat_id": 7,
+            "caption": "the report",
+            "disable_notification": True,
+            "read_timeout": 30,
+            "write_timeout": 30,
+            "connect_timeout": 15,
+        }
+    ]
+    event = next(
+        item
+        for item in store.events(session["session_id"], owner_id=owner)
+        if item["kind"] == "run.completed"
+    )
+    receipts = store.frontend_delivery_receipts(
+        session_id=session["session_id"],
+        owner_id=owner,
+        event_id=event["event_id"],
+    )
+    assert [receipt["status"] for receipt in receipts] == ["delivered"]
 
 
 @pytest.mark.asyncio

@@ -7,7 +7,434 @@ from collections.abc import Mapping
 from typing import Any
 
 REGISTRY_TYPE = "hashi.frontend-connector-registry"
-REGISTRY_VERSION = 2
+REGISTRY_VERSION = 3
+
+# These are FC semantic operations, not claims about a transport's native
+# widgets.  A Connector may render a standard display or button as text when
+# its transport has no richer primitive, but it may not change the operation's
+# meaning or bypass admission.
+STANDARD_INGRESS_OPERATIONS = frozenset(
+    {"message", "command", "action", "control", "ack"}
+)
+STANDARD_EGRESS_SEMANTICS = frozenset(
+    {
+        "message",
+        "display",
+        "button",
+        "media",
+        "state",
+        "notification",
+        "receipt",
+    }
+)
+
+_TUI_COMMAND_CUSTOMIZATIONS: tuple[dict[str, str], ...] = (
+    {
+        "kind": "command_override",
+        "key": "agents",
+        "route": "connector_local",
+        "semantic": "agent_directory",
+        "reason": "local_navigation",
+    },
+    {
+        "kind": "command_override",
+        "key": "to",
+        "route": "connector_local",
+        "semantic": "target_selection",
+        "reason": "local_navigation",
+    },
+    {
+        "kind": "command_override",
+        "key": "instance",
+        "route": "connector_local",
+        "semantic": "instance_selection",
+        "reason": "local_navigation",
+    },
+    {
+        "kind": "command_override",
+        "key": "attach",
+        "route": "connector_local",
+        "semantic": "attachment_staging",
+        "reason": "local_input",
+    },
+    {
+        "kind": "command_override",
+        "key": "say",
+        "route": "connector_local",
+        "semantic": "local_speech_playback",
+        "reason": "local_presentation",
+    },
+    {
+        "kind": "command_override",
+        "key": "voice",
+        "route": "connector_local",
+        "semantic": "local_voice_controls",
+        "reason": "local_presentation",
+    },
+    {
+        "kind": "command_override",
+        "key": "telegram",
+        "route": "connector_local",
+        "semantic": "delivery_mirror_preference",
+        "reason": "local_presentation",
+    },
+    {
+        "kind": "command_override",
+        "key": "sidepanel",
+        "route": "connector_local",
+        "semantic": "local_information_panel",
+        "reason": "local_presentation",
+    },
+    {
+        "kind": "command_override",
+        "key": "tui",
+        "route": "connector_local",
+        "semantic": "local_connector_preferences",
+        "reason": "local_presentation",
+    },
+    {
+        "kind": "command_override",
+        "key": "help",
+        "route": "connector_local",
+        "semantic": "local_command_discovery",
+        "reason": "local_navigation",
+    },
+    {
+        "kind": "command_override",
+        "key": "connect",
+        "route": "connector_local",
+        "semantic": "local_connection_setup",
+        "reason": "local_control",
+    },
+    {
+        "kind": "command_override",
+        "key": "theme",
+        "route": "connector_local",
+        "semantic": "local_theme",
+        "reason": "local_presentation",
+    },
+    {
+        "kind": "command_override",
+        "key": "layout",
+        "route": "connector_local",
+        "semantic": "local_layout",
+        "reason": "local_presentation",
+    },
+    {
+        "kind": "command_override",
+        "key": "clear",
+        "route": "connector_local",
+        "semantic": "local_view_clear",
+        "reason": "local_presentation",
+    },
+    {
+        "kind": "command_override",
+        "key": "quit",
+        "route": "connector_local",
+        "semantic": "local_client_exit",
+        "reason": "local_control",
+    },
+    {
+        "kind": "command_override",
+        "key": "log",
+        "route": "connector_local",
+        "semantic": "local_log_view",
+        "reason": "local_presentation",
+    },
+)
+
+_TELEGRAM_PRESENTATION_CUSTOMIZATIONS: tuple[dict[str, str], ...] = (
+    {
+        "kind": "presentation_override",
+        "key": "reply_prompt",
+        "route": "connector_local",
+        "semantic": "reply_prompt",
+        "reason": "local_interaction",
+    },
+    {
+        "kind": "presentation_override",
+        "key": "reply_keyboard",
+        "route": "connector_local",
+        "semantic": "reply_keyboard",
+        "reason": "local_interaction",
+    },
+    {
+        "kind": "presentation_override",
+        "key": "voice_rendition",
+        "route": "connector_local",
+        "semantic": "message_voice_rendition",
+        "reason": "local_presentation",
+    },
+    {
+        "kind": "presentation_override",
+        "key": "voice_profile_preview",
+        "route": "connector_local",
+        "semantic": "voice_profile_preview",
+        "reason": "local_presentation",
+    },
+    {
+        "kind": "presentation_override",
+        "key": "ephemeral_progress",
+        "route": "connector_local",
+        "semantic": "progress_state",
+        "reason": "local_presentation",
+    },
+    {
+        "kind": "presentation_override",
+        "key": "delivery_failover_notice",
+        "route": "connector_local",
+        "semantic": "delivery_health_notice",
+        "reason": "operational_fallback",
+    },
+    {
+        "kind": "presentation_override",
+        "key": "callback_interaction_rendering",
+        "route": "connector_local",
+        "semantic": "command_interaction_update",
+        "reason": "local_interaction",
+    },
+)
+
+_WHATSAPP_COMMAND_CUSTOMIZATIONS: tuple[dict[str, str], ...] = (
+    {
+        "kind": "command_override",
+        "key": "agent",
+        "route": "connector_local",
+        "semantic": "target_selection",
+        "reason": "local_navigation",
+    },
+    {
+        "kind": "command_override",
+        "key": "all",
+        "route": "connector_local",
+        "semantic": "target_broadcast",
+        "reason": "local_navigation",
+    },
+    {
+        "kind": "command_override",
+        "key": "restart",
+        "route": "connector_local",
+        "semantic": "watchtower_restart",
+        "reason": "local_control",
+    },
+    {
+        "kind": "command_override",
+        "key": "terminate",
+        "route": "connector_local",
+        "semantic": "named_agent_termination",
+        "reason": "local_control",
+    },
+    {
+        "kind": "command_override",
+        "key": "start",
+        "route": "connector_local",
+        "semantic": "named_agent_start",
+        "reason": "local_control",
+    },
+    {
+        "kind": "command_override",
+        "key": "stop",
+        "route": "connector_local",
+        "semantic": "named_agent_stop",
+        "reason": "local_control",
+    },
+)
+
+# Existing public routes remain wire-compatible, but their implementation is
+# explicitly registered here as a thin conversion into the standard FC
+# operation.  This is the allow-list for compatibility; adding an HTTP route,
+# transport callback, or local override does not grant an untracked bypass.
+_COMPATIBILITY_ADAPTERS: tuple[dict[str, str], ...] = (
+    {
+        "id": "telegram.message",
+        "connector_id": "telegram",
+        "direction": "ingress",
+        "operation": "message",
+        "route": "standard_fc",
+    },
+    {
+        "id": "telegram.native_command",
+        "connector_id": "telegram",
+        "direction": "ingress",
+        "operation": "command",
+        "route": "standard_fc",
+    },
+    {
+        "id": "telegram.native_callback",
+        "connector_id": "telegram",
+        "direction": "ingress",
+        "operation": "action",
+        "route": "standard_fc",
+    },
+    {
+        "id": "telegram.explicit_notification",
+        "connector_id": "telegram",
+        "direction": "egress",
+        "operation": "notification",
+        "route": "standard_fc",
+    },
+    {
+        "id": "telegram.explicit_media",
+        "connector_id": "telegram",
+        "direction": "egress",
+        "operation": "media",
+        "route": "standard_fc",
+    },
+    {
+        "id": "telegram.inline_keyboard",
+        "connector_id": "telegram",
+        "direction": "egress",
+        "operation": "button",
+        "route": "standard_fc",
+    },
+    {
+        "id": "backend_api.chat",
+        "connector_id": "backend_api",
+        "direction": "ingress",
+        "operation": "message",
+        "route": "standard_fc",
+    },
+    {
+        "id": "backend_api.chat_command",
+        "connector_id": "backend_api",
+        "direction": "ingress",
+        "operation": "command",
+        "route": "standard_fc",
+    },
+    {
+        "id": "backend_api.agent_command",
+        "connector_id": "backend_api",
+        "direction": "ingress",
+        "operation": "command",
+        "route": "standard_fc",
+    },
+    {
+        "id": "backend_api.admin_command",
+        "connector_id": "backend_api",
+        "direction": "ingress",
+        "operation": "command",
+        "route": "standard_fc",
+    },
+    {
+        "id": "session_api.run",
+        "connector_id": "session_api",
+        "direction": "ingress",
+        "operation": "message",
+        "route": "standard_fc",
+    },
+    {
+        "id": "session_api.command",
+        "connector_id": "session_api",
+        "direction": "ingress",
+        "operation": "command",
+        "route": "standard_fc",
+    },
+    {
+        "id": "session_api.control",
+        "connector_id": "session_api",
+        "direction": "ingress",
+        "operation": "control",
+        "route": "standard_fc",
+    },
+    {
+        "id": "session_api.action",
+        "connector_id": "session_api",
+        "direction": "ingress",
+        "operation": "action",
+        "route": "standard_fc",
+    },
+    {
+        "id": "session_api.ack",
+        "connector_id": "session_api",
+        "direction": "ingress",
+        "operation": "ack",
+        "route": "standard_fc",
+    },
+    {
+        "id": "tui.proxy",
+        "connector_id": "tui",
+        "direction": "ingress",
+        "operation": "message",
+        "route": "standard_fc",
+    },
+    {
+        "id": "tui.command",
+        "connector_id": "tui",
+        "direction": "ingress",
+        "operation": "command",
+        "route": "standard_fc",
+    },
+    {
+        "id": "tui.local_command",
+        "connector_id": "tui",
+        "direction": "ingress",
+        "operation": "command",
+        "route": "registered_connector_local",
+    },
+    {
+        "id": "hchat.legacy_relay",
+        "connector_id": "hchat",
+        "direction": "ingress",
+        "operation": "message",
+        "route": "standard_fc",
+    },
+    {
+        "id": "remote.protocol",
+        "connector_id": "remote",
+        "direction": "ingress",
+        "operation": "message",
+        "route": "standard_fc",
+    },
+    {
+        "id": "exchange.wss",
+        "connector_id": "exchange",
+        "direction": "ingress",
+        "operation": "message",
+        "route": "standard_fc",
+    },
+    {
+        "id": "whatsapp.transport",
+        "connector_id": "whatsapp",
+        "direction": "ingress",
+        "operation": "message",
+        "route": "standard_fc",
+    },
+    {
+        "id": "whatsapp.native_command",
+        "connector_id": "whatsapp",
+        "direction": "ingress",
+        "operation": "command",
+        "route": "standard_fc",
+    },
+    {
+        "id": "whatsapp.local_command",
+        "connector_id": "whatsapp",
+        "direction": "ingress",
+        "operation": "command",
+        "route": "registered_connector_local",
+    },
+    {
+        "id": "hchat.command",
+        "connector_id": "hchat",
+        "direction": "ingress",
+        "operation": "command",
+        "route": "standard_fc",
+    },
+    {
+        "id": "remote.command",
+        "connector_id": "remote",
+        "direction": "ingress",
+        "operation": "command",
+        "route": "standard_fc",
+    },
+    {
+        "id": "exchange.command",
+        "connector_id": "exchange",
+        "direction": "ingress",
+        "operation": "command",
+        "route": "standard_fc",
+    },
+)
 
 _CONNECTORS: tuple[dict[str, Any], ...] = (
     {
@@ -16,6 +443,7 @@ _CONNECTORS: tuple[dict[str, Any], ...] = (
         "ingress": ["message", "command", "callback", "media", "voice"],
         "egress": ["text", "media", "voice", "command_result"],
         "canonical_feed": "persistent_session_events",
+        "customizations": _TELEGRAM_PRESENTATION_CUSTOMIZATIONS,
     },
     {
         "id": "tui",
@@ -23,6 +451,7 @@ _CONNECTORS: tuple[dict[str, Any], ...] = (
         "ingress": ["message", "command", "media", "voice"],
         "egress": ["text", "media", "voice", "status", "approval"],
         "canonical_feed": "persistent_session_events",
+        "customizations": _TUI_COMMAND_CUSTOMIZATIONS,
     },
     {
         "id": "backend_api",
@@ -63,8 +492,9 @@ _CONNECTORS: tuple[dict[str, Any], ...] = (
         "id": "whatsapp",
         "class": "messaging",
         "ingress": ["message", "command", "media"],
-        "egress": ["text", "media", "receipt"],
+        "egress": ["text", "receipt"],
         "canonical_feed": "persistent_session_events",
+        "customizations": _WHATSAPP_COMMAND_CUSTOMIZATIONS,
     },
     {
         "id": "external",
@@ -116,32 +546,58 @@ def canonical_connector_id(
     ingress_transport: str = "",
     surface: str = "",
 ) -> str:
-    """Map legacy transport/source labels to one stable connector identity."""
+    """Map registered transport labels to one stable connector identity.
+
+    Transport and surface win over a user-declared message-source label.  An
+    unknown label fails closed: callers must register a Connector instead of
+    being silently admitted through a generic bucket.
+    """
 
     source = str(source_id or "").strip().casefold()
     transport = str(ingress_transport or "").strip().casefold()
     normalized_surface = str(surface or "").strip().casefold()
+
+    def _matches(value: str, *prefixes: str) -> bool:
+        return any(value == prefix or value.startswith(prefix + ".") for prefix in prefixes)
+
+    # The actual connection surface is authoritative when a Backend API client
+    # supplies a custom public message_source identifier.
+    if source in {"session-api", "session_api"}:
+        return "session_api"
+    if _matches(normalized_surface, "telegram") or _matches(transport, "telegram"):
+        return "telegram"
+    if _matches(normalized_surface, "whatsapp") or _matches(transport, "whatsapp"):
+        return "whatsapp"
+    if _matches(normalized_surface, "tui") or _matches(transport, "tui"):
+        return "tui"
+    if normalized_surface in {"session-api", "session_api"} or "session-api" in transport:
+        return "session_api"
+    if normalized_surface in {"workbench", "backend-api", "backend_api", "api"}:
+        return "backend_api"
+    if _matches(normalized_surface, "exchange") or "exchange" in transport:
+        return "exchange"
+    if _matches(normalized_surface, "remote") or "remote" in transport:
+        return "remote"
+    if _matches(normalized_surface, "hchat") or _matches(transport, "hchat"):
+        return "hchat"
+    if normalized_surface in _DYNAMIC_CONNECTORS:
+        return normalized_surface
+
     if source in _INTERNAL_SOURCE_IDS or source.startswith(("hashi.internal", "scheduler:", "cron:", "heartbeat:", "proactive:", "bridge:")):
         return "internal"
-    if source == "telegram" or source.startswith("telegram.") or normalized_surface == "telegram":
+    if source == "telegram" or source.startswith("telegram."):
         return "telegram"
-    if source == "whatsapp" or normalized_surface == "whatsapp":
+    if source == "whatsapp":
         return "whatsapp"
-    if source == "tui" or normalized_surface == "tui":
+    if source == "tui":
         return "tui"
     if source == "hchat":
-        if "exchange" in transport or normalized_surface == "exchange":
-            return "exchange"
-        if "remote" in transport or normalized_surface == "remote":
-            return "remote"
         return "hchat"
-    if source in {"remote", "remote-api"} or normalized_surface == "remote":
+    if source in {"remote", "remote-api"}:
         return "remote"
-    if source in {"exchange", "hchat-exchange"} or normalized_surface == "exchange":
+    if source in {"exchange", "hchat-exchange"}:
         return "exchange"
     if source in {"api", "api_chat", "workbench", "backend-api"}:
-        if "session-api" in transport or normalized_surface == "session-api":
-            return "session_api"
         return "backend_api"
     if source in _DYNAMIC_CONNECTORS:
         return source
@@ -149,7 +605,13 @@ def canonical_connector_id(
         return "reference"
     if source in {"session-api", "session_api"}:
         return "session_api"
-    return "external"
+    if source == "external" or normalized_surface == "external":
+        return "external"
+    raise ValueError(
+        "unregistered frontend connector: "
+        f"source={source or '<empty>'} transport={transport or '<empty>'} "
+        f"surface={normalized_surface or '<empty>'}"
+    )
 
 
 def endpoint_id_for(
@@ -179,6 +641,163 @@ def _normalize_capability_list(value: Any, field: str) -> list[str]:
         if capability not in normalized:
             normalized.append(capability)
     return normalized
+
+
+def _normalize_customizations(value: Any) -> list[dict[str, str]]:
+    if value is None:
+        return []
+    if not isinstance(value, (list, tuple)) or len(value) > 64:
+        raise ValueError("connector customizations must be a list")
+    normalized: list[dict[str, str]] = []
+    identities: set[tuple[str, str]] = set()
+    for raw in value:
+        if not isinstance(raw, Mapping):
+            raise ValueError("connector customization must be an object")
+        kind = str(raw.get("kind") or "").strip().casefold()
+        key = str(raw.get("key") or "").strip().casefold().lstrip("/")
+        route = str(raw.get("route") or "").strip().casefold()
+        semantic = str(raw.get("semantic") or "").strip().casefold()
+        reason = str(raw.get("reason") or "").strip().casefold()
+        if kind not in {"command_override", "presentation_override"}:
+            raise ValueError("connector customization kind is unsupported")
+        if not _CAPABILITY_ID.fullmatch(key):
+            raise ValueError("connector customization key is invalid")
+        if route not in {"connector_local", "standard"}:
+            raise ValueError("connector customization route is invalid")
+        if not _CAPABILITY_ID.fullmatch(semantic):
+            raise ValueError("connector customization semantic is invalid")
+        if not _CAPABILITY_ID.fullmatch(reason):
+            raise ValueError("connector customization reason is invalid")
+        identity = (kind, key)
+        if identity in identities:
+            raise ValueError("connector customization is duplicated")
+        identities.add(identity)
+        normalized.append(
+            {
+                "kind": kind,
+                "key": key,
+                "route": route,
+                "semantic": semantic,
+                "reason": reason,
+            }
+        )
+    return normalized
+
+
+def _descriptor(connector_id: str) -> Mapping[str, Any]:
+    cid = str(connector_id or "").strip().casefold()
+    if cid in _DYNAMIC_CONNECTORS:
+        return _DYNAMIC_CONNECTORS[cid]
+    for item in _CONNECTORS:
+        if item["id"] == cid:
+            return item
+    raise ValueError(f"unknown connector: {cid}")
+
+
+def get_connector_customization(
+    connector_id: str,
+    *,
+    kind: str,
+    key: str,
+) -> dict[str, str] | None:
+    """Return one registered semantic exception, never an inferred bypass."""
+
+    wanted_kind = str(kind or "").strip().casefold()
+    wanted_key = str(key or "").strip().casefold().lstrip("/")
+    descriptor = _descriptor(connector_id)
+    for item in _normalize_customizations(descriptor.get("customizations")):
+        if item["kind"] == wanted_kind and item["key"] == wanted_key:
+            return dict(item)
+    return None
+
+
+def require_connector_presentation_override(
+    connector_id: str,
+    key: str,
+) -> dict[str, str]:
+    """Require an explicit FC registration for connector-local rendering."""
+
+    customization = get_connector_customization(
+        connector_id,
+        kind="presentation_override",
+        key=key,
+    )
+    if customization is None or customization.get("route") != "connector_local":
+        raise ValueError(
+            "unregistered Connector-local presentation override: "
+            f"{connector_id}/{str(key or '').strip() or '<empty>'}"
+        )
+    return customization
+
+
+def require_connector_operation(
+    connector_id: str,
+    direction: str,
+    operation: str,
+) -> str:
+    """Validate a standard FC operation for a registered Connector."""
+
+    _descriptor(connector_id)
+    normalized_direction = str(direction or "").strip().casefold()
+    normalized_operation = str(operation or "").strip().casefold()
+    allowed = (
+        STANDARD_INGRESS_OPERATIONS
+        if normalized_direction == "ingress"
+        else STANDARD_EGRESS_SEMANTICS
+        if normalized_direction == "egress"
+        else None
+    )
+    if allowed is None:
+        raise ValueError("connector operation direction is invalid")
+    if normalized_operation not in allowed:
+        raise ValueError(
+            f"unsupported standard connector operation: {normalized_operation}"
+        )
+    return normalized_operation
+
+
+def get_compatibility_adapter(adapter_id: str) -> dict[str, str]:
+    """Return one explicitly registered legacy-to-FC conversion boundary."""
+
+    wanted = str(adapter_id or "").strip().casefold()
+    for item in _COMPATIBILITY_ADAPTERS:
+        if item["id"] != wanted:
+            continue
+        require_connector_operation(
+            item["connector_id"], item["direction"], item["operation"]
+        )
+        return dict(item)
+    raise ValueError(f"unregistered compatibility adapter: {wanted or '<empty>'}")
+
+
+def require_connector_event(
+    connector_id: str,
+    event: Mapping[str, Any],
+) -> set[str]:
+    """Validate every standard output primitive before an adapter renders it."""
+
+    if not isinstance(event, Mapping):
+        raise ValueError("frontend event must be an object")
+    if str(event.get("type") or "") != "hashi.frontend-event":
+        raise ValueError("connector adapter requires a standard frontend event")
+    interface_kind = str(event.get("interface_kind") or "").strip().casefold()
+    required = {require_connector_operation(connector_id, "egress", interface_kind)}
+    blocks = event.get("content_blocks")
+    if not isinstance(blocks, (list, tuple)):
+        raise ValueError("frontend event content_blocks must be a list")
+    for block in blocks:
+        if not isinstance(block, Mapping):
+            raise ValueError("frontend event content block must be an object")
+        block_type = str(block.get("type") or "").strip().casefold()
+        if block_type == "action":
+            required.add(
+                require_connector_operation(connector_id, "egress", "button")
+            )
+        elif block_type == "media_ref":
+            required.add(
+                require_connector_operation(connector_id, "egress", "media")
+            )
+    return required
 
 
 def _normalize_runtime_facts(value: Any) -> dict[str, Any]:
@@ -252,6 +871,9 @@ def register_connector(connector: dict[str, Any]) -> None:
         "ingress": _normalize_capability_list(connector.get("ingress"), "ingress"),
         "egress": _normalize_capability_list(connector.get("egress"), "egress"),
         "canonical_feed": canonical_feed,
+        "customizations": _normalize_customizations(
+            connector.get("customizations")
+        ),
         "runtime": _normalize_runtime_facts(connector.get("runtime")),
     }
 
@@ -267,16 +889,7 @@ def get_connector_capabilities(
 ) -> dict[str, Any]:
     """Retrieve the declared and verified capabilities for a connector endpoint."""
     cid = str(connector_id or "").strip().casefold()
-    descriptor = None
-    if cid in _DYNAMIC_CONNECTORS:
-        descriptor = _DYNAMIC_CONNECTORS[cid]
-    else:
-        for item in _CONNECTORS:
-            if item["id"] == cid:
-                descriptor = item
-                break
-    if descriptor is None:
-        raise ValueError(f"unknown connector: {cid}")
+    descriptor = _descriptor(cid)
     runtime = _normalize_runtime_facts(descriptor.get("runtime"))
     requested_endpoint = str(endpoint_id or "").strip() or runtime["endpoint_id"]
     endpoint_registered = bool(
@@ -287,9 +900,14 @@ def get_connector_capabilities(
         "connector_id": cid,
         "endpoint_id": requested_endpoint,
         "endpoint_registered": endpoint_registered,
-        "protocol_version": 2,
+        "protocol_version": 3,
         "ingress": list(descriptor.get("ingress", [])),
         "egress": list(descriptor.get("egress", [])),
+        "standard_ingress": sorted(STANDARD_INGRESS_OPERATIONS),
+        "standard_egress": sorted(STANDARD_EGRESS_SEMANTICS),
+        "customizations": _normalize_customizations(
+            descriptor.get("customizations")
+        ),
         "canonical_feed": descriptor.get("canonical_feed", "persistent_session_events"),
         "ready": bool(endpoint_registered and runtime["ready"]),
         "health": runtime["health"] if endpoint_registered else "unobserved",
@@ -305,6 +923,9 @@ def connector_registry_snapshot() -> dict[str, Any]:
             **item,
             "ingress": list(item["ingress"]),
             "egress": list(item["egress"]),
+            "customizations": _normalize_customizations(
+                item.get("customizations")
+            ),
             "runtime": _normalize_runtime_facts(item.get("runtime")),
         }
         for item in _CONNECTORS
@@ -315,11 +936,19 @@ def connector_registry_snapshot() -> dict[str, Any]:
                 **dyn,
                 "ingress": list(dyn.get("ingress", [])),
                 "egress": list(dyn.get("egress", [])),
+                "customizations": _normalize_customizations(
+                    dyn.get("customizations")
+                ),
             }
         )
     return {
         "type": REGISTRY_TYPE,
         "version": REGISTRY_VERSION,
+        "standard_interface": {
+            "ingress": sorted(STANDARD_INGRESS_OPERATIONS),
+            "egress": sorted(STANDARD_EGRESS_SEMANTICS),
+        },
+        "compatibility_adapters": [dict(item) for item in _COMPATIBILITY_ADAPTERS],
         "connectors": all_connectors,
     }
 
@@ -420,10 +1049,16 @@ __all__ = [
     "REGISTRY_TYPE",
     "REGISTRY_VERSION",
     "ReferenceConnectorAdapter",
+    "STANDARD_EGRESS_SEMANTICS",
+    "STANDARD_INGRESS_OPERATIONS",
     "canonical_connector_id",
     "connector_registry_snapshot",
     "endpoint_id_for",
+    "get_compatibility_adapter",
     "get_connector_capabilities",
+    "get_connector_customization",
     "register_connector",
+    "require_connector_event",
+    "require_connector_operation",
     "unregister_connector",
 ]

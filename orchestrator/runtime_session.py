@@ -311,6 +311,249 @@ def current_session_for_update(runtime: Any, update: Any) -> dict[str, Any]:
     )
 
 
+def publish_frontend_message(
+    runtime: Any,
+    *,
+    role: str,
+    text: str,
+    source: str,
+    publication_id: str,
+    surface: str,
+    channel_key: str,
+    explicit_owner_id: str | None = None,
+    explicit_session_id: str | None = None,
+    content_format: str = "plain-text",
+    presentation_channel: str = "command",
+    message_context: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Commit a frontend event and endpoint task before the transport effect."""
+
+    from orchestrator.frontend_projection import (
+        build_frontend_presentation_context,
+    )
+
+    canonical_message_context = build_frontend_presentation_context(
+        text=text,
+        content_format=content_format,
+        presentation_channel=presentation_channel,
+        message_context=message_context,
+    )
+    store = ensure_store(runtime)
+    resolved_owner = owner_id(runtime, explicit_owner_id)
+    normalized_surface = str(surface or "").strip().casefold()
+    if normalized_surface in _SHARED_PRIMARY_SURFACES:
+        session = store.resolve_primary_session(
+            owner_id=resolved_owner,
+            agent_id=runtime.name,
+            establish=True,
+        )
+    else:
+        session = store.resolve_session(
+            owner_id=resolved_owner,
+            agent_id=runtime.name,
+            surface=normalized_surface,
+            channel_key=str(channel_key),
+            explicit_session_id=explicit_session_id,
+        )
+    from orchestrator.frontend_delivery import freeze_run_delivery_route
+
+    delivery_route = freeze_run_delivery_route(
+        message_source_id=normalized_surface,
+        session_surface=normalized_surface,
+        session_channel_key=str(channel_key),
+        chat_id=str(channel_key),
+        telegram_requested=normalized_surface == "telegram",
+    )
+    message = store.append_presentation_message(
+        session_id=session["session_id"],
+        owner_id=resolved_owner,
+        agent_id=runtime.name,
+        role=role,
+        text=text,
+        source=source,
+        idempotency_key=(
+            f"{normalized_surface}:{channel_key}:publication:{publication_id}"
+        ),
+        content_format=content_format,
+        presentation_channel=presentation_channel,
+        history_eligible=False,
+        message_context=canonical_message_context,
+        outbox=True,
+        delivery_route=delivery_route,
+    )
+    return {
+        **message,
+        "owner_id": resolved_owner,
+        "surface": normalized_surface,
+        "channel_key": str(channel_key),
+    }
+
+
+def publish_frontend_media_notification(
+    runtime: Any,
+    *,
+    filename: str,
+    media_type: str,
+    payload: bytes,
+    sha256: str,
+    caption: str,
+    publication_id: str,
+    surface: str,
+    channel_key: str,
+    semantic_role: str = "",
+    presentation_role: str = "",
+    explicit_owner_id: str | None = None,
+) -> dict[str, Any]:
+    """Commit a destination-scoped media notification before transport I/O."""
+
+    store = ensure_store(runtime)
+    resolved_owner = owner_id(runtime, explicit_owner_id)
+    normalized_surface = str(surface or "").strip().casefold()
+    if normalized_surface in _SHARED_PRIMARY_SURFACES:
+        session = store.resolve_primary_session(
+            owner_id=resolved_owner,
+            agent_id=runtime.name,
+            establish=True,
+        )
+    else:
+        session = store.resolve_session(
+            owner_id=resolved_owner,
+            agent_id=runtime.name,
+            surface=normalized_surface,
+            channel_key=str(channel_key),
+        )
+    stable_id = str(publication_id or "").strip()
+    if not stable_id:
+        raise ValueError("media notification publication_id is required")
+    is_audio = str(media_type or "").strip().casefold().startswith("audio/")
+    resolved_role = str(semantic_role or "").strip().casefold()
+    resolved_presentation_role = str(
+        presentation_role or ""
+    ).strip().casefold()
+    if resolved_presentation_role not in {
+        "",
+        "audio",
+        "document",
+        "image",
+        "photo",
+        "video",
+        "voice",
+    }:
+        raise ValueError("media notification presentation role is invalid")
+    if is_audio:
+        resolved_role = resolved_role or "audio_attachment"
+        if resolved_role not in {"audio_attachment", "voice_message"}:
+            raise ValueError("media notification audio role is invalid")
+    elif resolved_role:
+        raise ValueError("media notification role is only supported for audio")
+    attachment = store.stage_attachment(
+        session_id=str(session["session_id"]),
+        owner_id=resolved_owner,
+        filename=str(filename),
+        media_type=str(media_type),
+        size_bytes=len(payload),
+        sha256=str(sha256),
+        semantic_role=resolved_role,
+        # The asset is about to become part of a durable visible Message.
+        # Message-bound output must remain readable with its history.
+        retention_indefinite=True,
+        idempotency_key=f"explicit-media:{stable_id}:asset",
+    )
+    store.upload_attachment_bytes(
+        session_id=str(session["session_id"]),
+        owner_id=resolved_owner,
+        attachment_id=str(attachment["attachment_id"]),
+        payload=payload,
+        audio_direction="output",
+    )
+    store.commit_attachment(
+        session_id=str(session["session_id"]),
+        owner_id=resolved_owner,
+        attachment_id=str(attachment["attachment_id"]),
+    )
+    from orchestrator.frontend_delivery import freeze_run_delivery_route
+    from orchestrator.frontend_projection import (
+        build_frontend_presentation_context,
+    )
+
+    route = freeze_run_delivery_route(
+        message_source_id=normalized_surface,
+        session_surface=normalized_surface,
+        session_channel_key=str(channel_key),
+        chat_id=str(channel_key),
+        telegram_requested=normalized_surface == "telegram",
+    )
+    message = store.append_presentation_message(
+        session_id=str(session["session_id"]),
+        owner_id=resolved_owner,
+        agent_id=runtime.name,
+        role="assistant",
+        text="",
+        source=f"{normalized_surface}.explicit-media",
+        idempotency_key=(
+            f"{normalized_surface}:{channel_key}:publication:{stable_id}"
+        ),
+        presentation_channel="notification",
+        history_eligible=False,
+        message_context=build_frontend_presentation_context(
+            text="",
+            content_format="plain-text",
+            presentation_channel="notification",
+        ),
+        content=[
+            {
+                "type": "media",
+                "attachment_id": str(attachment["attachment_id"]),
+                "caption": str(caption or ""),
+                **({"semantic_role": resolved_role} if resolved_role else {}),
+                **(
+                    {"presentation_role": resolved_presentation_role}
+                    if resolved_presentation_role
+                    else {}
+                ),
+            }
+        ],
+        outbox=True,
+        delivery_route=route,
+    )
+    return {
+        **message,
+        "owner_id": resolved_owner,
+        "surface": normalized_surface,
+        "channel_key": str(channel_key),
+        "attachment_id": str(attachment["attachment_id"]),
+    }
+
+
+def publish_frontend_message_for_update(
+    runtime: Any,
+    update: Any,
+    *,
+    role: str,
+    text: str,
+    source: str,
+    publication_id: str,
+    content_format: str = "plain-text",
+    presentation_channel: str = "command",
+    message_context: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    surface, channel_key, resolved_owner, explicit_session_id = (
+        _update_session_route(runtime, update)
+    )
+    return publish_frontend_message(
+        runtime,
+        role=role,
+        text=text,
+        source=source,
+        publication_id=publication_id,
+        surface=surface,
+        channel_key=channel_key,
+        explicit_owner_id=resolved_owner,
+        explicit_session_id=explicit_session_id,
+        content_format=content_format,
+        presentation_channel=presentation_channel,
+        message_context=message_context,
+    )
 def record_frontend_message_for_update(
     runtime: Any,
     update: Any,
@@ -381,6 +624,16 @@ def record_frontend_message(
     if transport_message_id is None or not str(text or "").strip():
         return None
     try:
+        from orchestrator.frontend_projection import (
+            build_frontend_presentation_context,
+        )
+
+        canonical_message_context = build_frontend_presentation_context(
+            text=text,
+            content_format=content_format,
+            presentation_channel=presentation_channel,
+            message_context=message_context,
+        )
         store = ensure_store(runtime)
         resolved_owner = owner_id(runtime, explicit_owner_id)
         normalized_surface = str(surface or "").strip().casefold()
@@ -412,7 +665,7 @@ def record_frontend_message(
             content_format=content_format,
             presentation_channel=presentation_channel,
             history_eligible=False,
-            message_context=message_context,
+            message_context=canonical_message_context,
         )
     except Exception as exc:  # presentation mirroring must never block delivery
         target_logger = getattr(runtime, "logger", None) or logger
@@ -497,6 +750,10 @@ def record_kernel_presentation_notice(
             agent_id=agent_id,
             establish=True,
         )
+        from orchestrator.frontend_projection import (
+            build_frontend_presentation_context,
+        )
+
         return store.append_presentation_message(
             session_id=session["session_id"],
             owner_id=resolved_owner,
@@ -508,6 +765,11 @@ def record_kernel_presentation_notice(
             content_format=content_format,
             presentation_channel="command",
             history_eligible=False,
+            message_context=build_frontend_presentation_context(
+                text=text,
+                content_format=content_format,
+                presentation_channel="command",
+            ),
         )
     except Exception as exc:  # operational delivery remains authoritative
         logger.warning(
@@ -1523,6 +1785,8 @@ __all__ = [
     "owner_id",
     "promote_sessions",
     "promotion_is_due",
+    "publish_frontend_media_notification",
+    "publish_frontend_message",
     "recent_exchanges",
     "record_assistant_delivery",
     "record_working_exchange",

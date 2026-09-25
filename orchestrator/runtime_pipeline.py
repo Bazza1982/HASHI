@@ -1733,14 +1733,14 @@ async def cleanup_interactive_feedback(
         )
         await _run_interactive_feedback_cleanup_step(
             runtime,
-            runtime._flush_thinking(item.chat_id),
+            runtime._flush_thinking(item.chat_id, request_id=item.request_id),
             label="thinking-flush-final",
         )
         flush_commentary = getattr(runtime, "_flush_commentary", None)
         if callable(flush_commentary):
             await _run_interactive_feedback_cleanup_step(
                 runtime,
-                flush_commentary(item.chat_id),
+                flush_commentary(item.chat_id, request_id=item.request_id),
                 label="commentary-flush-final",
             )
 
@@ -2028,6 +2028,7 @@ def wrap_her_persona_stream(
         await runtime_delivery_order.wait_for_turn(runtime, item.request_id)
         from orchestrator.native_audio_delivery import (
             audio_parts,
+            dispatch_persisted_audio_event,
             native_reply_content_policy,
             send_native_audio_parts,
         )
@@ -2042,22 +2043,39 @@ def wrap_her_persona_stream(
         has_audio = bool(audio_parts(typed_content))
         reply_policy = native_reply_content_policy(runtime, item)
         audio_task = None
+        audio_managed = False
+        audio_accepted = False
         if has_audio and reply_policy != "text_only":
-            audio_task = asyncio.create_task(
-                send_native_audio_parts(
+            audio_managed, audio_accepted = (
+                await dispatch_persisted_audio_event(
                     runtime,
                     item,
-                    typed_content,
+                    source_event_id=str(
+                        getattr(event, "event_id", "") or ""
+                    ),
                     purpose=purpose,
+                    include_text=reply_policy != "audio_only",
                 )
             )
+            if not audio_managed:
+                audio_task = asyncio.create_task(
+                    send_native_audio_parts(
+                        runtime,
+                        item,
+                        typed_content,
+                        purpose=purpose,
+                    )
+                )
         raw_text = normalize_user_visible_paths(
             str(getattr(event, "summary", "") or "").strip()
         )
-        if has_audio and reply_policy == "audio_only":
+        if audio_managed or (has_audio and reply_policy == "audio_only"):
             raw_text = ""
         if not raw_text and audio_task is None:
-            return False
+            event_id = str(getattr(event, "event_id", "") or "").strip()
+            if audio_accepted and event_id:
+                provisional_audio_events.add(event_id)
+            return audio_accepted
         if not raw_text:
             try:
                 audio_accepted = bool(await audio_task)
@@ -2108,7 +2126,6 @@ def wrap_her_persona_stream(
                 error_type=type(exc).__name__,
             )
             raise
-        audio_accepted = False
         if audio_task is not None:
             try:
                 audio_accepted = bool(await audio_task)
@@ -2380,6 +2397,13 @@ def wrap_her_persona_stream(
 
 async def _send_live_verbose_placeholder(runtime, item):
     try:
+        from orchestrator.frontend_connector_registry import (
+            require_connector_presentation_override,
+        )
+
+        require_connector_presentation_override(
+            "telegram", "ephemeral_progress"
+        )
         if await telegram_delivery_failover.handle_blocked_send(
             runtime,
             chat_id=item.chat_id,
@@ -2600,6 +2624,13 @@ async def setup_interactive_feedback(
         )
 
     if typing_delivery_enabled or verbose_delivery_enabled:
+        from orchestrator.frontend_connector_registry import (
+            require_connector_presentation_override,
+        )
+
+        require_connector_presentation_override(
+            "telegram", "ephemeral_progress"
+        )
         if typing_delivery_enabled:
             placeholder_text, placeholder_parse_mode = runtime.get_typing_placeholder()
         else:
@@ -2711,7 +2742,11 @@ async def setup_interactive_feedback(
             name=f"live-verbose-supervisor-{item.request_id}",
         )
         think_flush_task = asyncio.create_task(
-            runtime._thinking_flush_loop(item.chat_id, stop_typing),
+            runtime._thinking_flush_loop(
+                item.chat_id,
+                stop_typing,
+                request_id=item.request_id,
+            ),
             name=f"live-think-{item.request_id}",
         )
         if verbose_delivery_enabled:
@@ -2846,6 +2881,24 @@ async def finalize_streamed_answer(
     if stream_state is None:
         return StreamFinalization(streamed=False, final_delivered=False, fallback_required=True)
 
+    # A text preview cannot settle an Event that also carries canonical media.
+    # Remove the ephemeral placeholder and let the FC adapter claim and render
+    # the complete ordered Event under one durable outbox lease.
+    if _canonical_run_has_media(runtime, item):
+        if stream_state.placeholder is not None:
+            try:
+                await runtime.app.bot.delete_message(
+                    chat_id=item.chat_id,
+                    message_id=stream_state.placeholder.message_id,
+                )
+            except Exception:
+                pass
+        return StreamFinalization(
+            streamed=stream_state.has_text,
+            final_delivered=False,
+            fallback_required=True,
+        )
+
     if not stream_state.has_text or stream_state.failed or stream_state.placeholder is None:
         if stream_state.placeholder is not None:
             try:
@@ -2867,6 +2920,27 @@ async def finalize_streamed_answer(
             error=stream_state.failure_reason,
         )
 
+    claim_result = runtime_session.claim_run_delivery_outbox(
+        runtime,
+        request_id=item.request_id,
+        surface="telegram",
+        channel_key=str(item.chat_id),
+        worker_id=(
+            f"fc-telegram-stream-{getattr(runtime, 'name', 'agent')}-"
+            f"{item.request_id}"
+        ),
+    )
+    claim = None
+    if claim_result is not None:
+        if claim_result.get("state") != "claimed":
+            return StreamFinalization(
+                streamed=True,
+                final_delivered=False,
+                fallback_required=False,
+                error=f"outbox_{claim_result.get('state')}",
+            )
+        claim = claim_result["claim"]
+
     if await telegram_delivery_failover.handle_blocked_send(
         runtime,
         chat_id=item.chat_id,
@@ -2874,6 +2948,13 @@ async def finalize_streamed_answer(
         purpose="response",
         text=final_text,
     ):
+        if claim is not None:
+            runtime_session.ensure_store(runtime).complete_delivery_outbox(
+                outbox_id=str(claim["outbox_id"]),
+                lease_token=str(claim["lease_token"]),
+                status="failed",
+                error_code="telegram_delivery_blocked",
+            )
         runtime.telegram_logger.warning(
             f"Answer stream final promotion skipped for {item.request_id} — delivery blocked"
         )
@@ -2903,6 +2984,30 @@ async def finalize_streamed_answer(
                 request_id=item.request_id,
                 purpose="response_continuation",
             )
+            if continuation_chunks <= 0:
+                raise RuntimeError("Telegram continuation was not accepted")
+        if claim is not None:
+            runtime_session.record_frontend_delivery_receipt(
+                runtime,
+                session_id=str(claim["session_id"]),
+                owner_id=runtime_session.owner_id(runtime),
+                receipt={
+                    "type": "hashi.delivery-receipt",
+                    "version": 1,
+                    "event_id": str(claim["event_id"]),
+                    "endpoint_id": str(claim["endpoint_id"]),
+                    "status": "delivered",
+                    "proof": {
+                        "type": "telegram-message-id",
+                        "value": f"tgmsg_{stream_state.placeholder.message_id}",
+                    },
+                },
+            )
+            runtime_session.ensure_store(runtime).complete_delivery_outbox(
+                outbox_id=str(claim["outbox_id"]),
+                lease_token=str(claim["lease_token"]),
+                status="completed",
+            )
         runtime.logger.info(
             f"Answer stream finalized {item.request_id}: promoted=True, "
             f"deltas={stream_state.delta_count}, edits={stream_state.edit_count}, "
@@ -2914,6 +3019,18 @@ async def finalize_streamed_answer(
             continuation_chunks_sent=continuation_chunks,
         )
     except Exception as exc:
+        if claim is not None:
+            completion_status = (
+                "failed"
+                if isinstance(exc, RetryAfter) and not stream_state.final_promoted
+                else "unknown"
+            )
+            runtime_session.ensure_store(runtime).complete_delivery_outbox(
+                outbox_id=str(claim["outbox_id"]),
+                lease_token=str(claim["lease_token"]),
+                status=completion_status,
+                error_code=f"telegram_stream_{completion_status}",
+            )
         stream_state.failed = True
         stream_state.failure_reason = str(exc)
         if isinstance(exc, RetryAfter):
@@ -2946,22 +3063,6 @@ async def handle_empty_success_response(runtime, item) -> None:
     runtime._mark_error(err_msg)
     if runtime._should_buffer_during_transfer(item.request_id):
         runtime._record_suppressed_transfer_result(item, success=False, error=err_msg)
-    delivered = False
-    if not item.silent and not runtime._should_buffer_during_transfer(item.request_id):
-        _elapsed, chunk_count = await runtime.send_long_message(
-            chat_id=item.chat_id,
-            text=err_msg,
-            request_id=item.request_id,
-            purpose="error",
-        )
-        delivered = chunk_count > 0
-    runtime_cross_session.record_turn_result(
-        runtime,
-        item,
-        error=err_msg,
-        delivered=delivered,
-        completion_path="foreground",
-    )
     await runtime._notify_request_listeners(
         item.request_id,
         {
@@ -2973,6 +3074,23 @@ async def handle_empty_success_response(runtime, item) -> None:
             "summary": item.summary,
             **request_context_warning_fields(runtime, item.request_id),
         },
+    )
+    delivered = False
+    if not item.silent and not runtime._should_buffer_during_transfer(item.request_id):
+        _elapsed, chunk_count = await runtime.send_long_message(
+            chat_id=item.chat_id,
+            text=err_msg,
+            request_id=item.request_id,
+            purpose="error",
+            frontend_outbox=True,
+        )
+        delivered = chunk_count > 0
+    runtime_cross_session.record_turn_result(
+        runtime,
+        item,
+        error=err_msg,
+        delivered=delivered,
+        completion_path="foreground",
     )
 
 
@@ -3892,6 +4010,7 @@ async def handle_backend_error(
         request_id=item.request_id,
         purpose="error",
         error_context=failure_fields,
+        frontend_outbox=True,
     )
     total_elapsed_s = (
         max(0.0, time.monotonic() - queued_monotonic)
@@ -3916,20 +4035,105 @@ async def handle_backend_error(
 
 
 async def _route_hchat_reply_with_receipt(runtime, item, response_text: str) -> bool:
-    """Execute the HChat leg and persist only the Connector's observed result."""
+    """Dispatch an HChat or Exchange reply through the standard FC adapter."""
 
-    outcome = await runtime._hchat_route_reply(item, response_text)
-    if not isinstance(outcome, Mapping) or not outcome.get("attempted"):
+    route = _typed_run_delivery_route(item)
+    connector_surface = None
+    destination = None
+    if isinstance(route, Mapping):
+        from orchestrator.frontend_delivery import route_destination
+
+        for candidate in ("exchange", "hchat"):
+            selected = route_destination(route, candidate)
+            if selected is not None:
+                connector_surface = candidate
+                destination = selected
+                break
+        if destination is None:
+            # Remote has its own authenticated connection owner, which claims
+            # the same standard Run event in ProtocolManager.
+            return False
+
+    claim_result = None
+    if destination is not None and connector_surface is not None:
+        claim_result = runtime_session.claim_run_delivery_outbox(
+            runtime,
+            request_id=str(getattr(item, "request_id", "")),
+            surface=connector_surface,
+            channel_key=str(destination["channel_key"]),
+            worker_id=(
+                f"fc-{connector_surface}-{getattr(runtime, 'name', 'agent')}-"
+                f"{getattr(item, 'request_id', 'unknown')}"
+            ),
+        )
+        if claim_result is not None and claim_result.get("state") != "claimed":
+            return False
+
+    captured: dict[str, Any] = {}
+    if isinstance(claim_result, Mapping) and claim_result.get("state") == "claimed":
+        from orchestrator.frontend_dispatch import (
+            FrontendDispatcher,
+            OutcomeConnectorAdapter,
+        )
+        from orchestrator.frontend_projection import render_event_to_plain_text
+
+        async def send_standard_event(event, *, endpoint_id):
+            del endpoint_id
+            semantic_text = render_event_to_plain_text(event)
+            if not semantic_text:
+                raise ValueError("standard frontend event has no reply text")
+            result = await runtime._hchat_route_reply(item, semantic_text)
+            if isinstance(result, Mapping):
+                captured.update(result)
+            return result
+
+        dispatcher = FrontendDispatcher(
+            runtime,
+            worker_id=(
+                f"fc-{connector_surface}-{getattr(runtime, 'name', 'agent')}-"
+                f"{getattr(item, 'request_id', 'unknown')}"
+            ),
+            adapters={
+                str(connector_surface): OutcomeConnectorAdapter(
+                    str(connector_surface), send_standard_event
+                )
+            },
+        )
+        dispatch_result = await dispatcher.dispatch_claimed_task(
+            claim_result["claim"],
+            session_id=str(claim_result["session_id"]),
+            owner_id=runtime_session.owner_id(runtime),
+        )
+        if not captured and dispatch_result.get("status") == "unknown":
+            captured.update(
+                {
+                    "attempted": True,
+                    "delivered": False,
+                    "state": "unknown",
+                    "surface": connector_surface,
+                    "channel_key": str(destination["channel_key"]),
+                    "transport": connector_surface,
+                    "disposition": "connector_outcome_unknown",
+                }
+            )
+        outcome: Mapping[str, Any] = captured
+    else:
+        # Legacy non-Session calls keep their compatibility adapter. Canonical
+        # Runs always take the claimed standard Event path above.
+        raw_outcome = await runtime._hchat_route_reply(item, response_text)
+        outcome = raw_outcome if isinstance(raw_outcome, Mapping) else {}
+
+    if not outcome.get("attempted"):
         return False
     runtime_session.record_assistant_delivery(
         runtime,
         item,
         delivered=bool(outcome.get("delivered")),
         assistant_text=response_text,
-        transport=str(outcome.get("transport") or "hchat"),
+        transport=str(outcome.get("transport") or connector_surface or "hchat"),
         completion_path="foreground",
         disposition=str(outcome.get("disposition") or "transport_returned_no_receipt"),
-        surface=str(outcome.get("surface") or "hchat"),
+        surface=str(outcome.get("surface") or connector_surface or "hchat"),
         channel_key=str(outcome.get("channel_key") or "default"),
         outcome_state=str(outcome.get("state") or "") or None,
     )
@@ -3949,6 +4153,36 @@ def _typed_run_delivery_route(item) -> dict[str, Any] | None:
                 metadata.get(RUN_DELIVERY_ROUTE_METADATA_KEY)
             )
     return None
+
+
+def _canonical_run_has_media(runtime, item) -> bool:
+    """Read the committed final Message instead of inferring media from text."""
+
+    store = getattr(runtime, "session_store", None)
+    session_id = str(getattr(item, "session_id", "") or "").strip()
+    request_id = str(getattr(item, "request_id", "") or "").strip()
+    item_owner_id = str(getattr(item, "owner_id", "") or "").strip()
+    if store is None or not session_id or not request_id:
+        return False
+    try:
+        owner = item_owner_id or runtime_session.owner_id(runtime)
+        run = store.get_run_by_request(request_id, owner_id=owner)
+        message_id = str(run.get("final_message_id") or "").strip()
+        if not message_id:
+            return False
+        message = store.get_message(
+            message_id,
+            session_id=session_id,
+            owner_id=owner,
+        )
+    except Exception:
+        return False
+    return any(
+        isinstance(part, Mapping)
+        and str(part.get("type") or "").strip().casefold()
+        in {"attachment", "media", "audio"}
+        for part in message.get("content") or ()
+    )
 
 
 def _run_delivery_primary_surface(item) -> str:
@@ -4075,11 +4309,13 @@ async def handle_success_delivery(
     delivered_at_initial_resolution = bool(
         her_delivery.get("final_already_delivered")
     )
+    canonical_media_delivery = _canonical_run_has_media(runtime, item)
     native_delivery_task = None
     native_delivery_attempted = bool(
         native_parts
         and native_policy != "text_only"
         and not delivered_at_initial_resolution
+        and not canonical_media_delivery
     )
     if native_delivery_attempted:
         native_delivery_task = asyncio.create_task(
@@ -4112,7 +4348,7 @@ async def handle_success_delivery(
             send_elapsed_s, chunk_count = 0.0, 0
             receipt_disposition = "initial_resolution_delivered"
         else:
-            if delivery_text:
+            if delivery_text or canonical_media_delivery:
                 stream_finalization = await finalize_streamed_answer(
                     runtime,
                     item,
@@ -4135,6 +4371,8 @@ async def handle_success_delivery(
                     text=delivery_text,
                     request_id=item.request_id,
                     purpose="response",
+                    frontend_outbox=True,
+                    include_canonical_text=native_policy != "audio_only",
                 )
                 receipt_disposition = (
                     "transport_delivered"
@@ -4196,6 +4434,8 @@ async def handle_success_delivery(
         return
     native_delivered = False
     native_delivery_error = None
+    if canonical_media_delivery and native_parts and chunk_count > 0:
+        native_delivered = True
     if native_delivery_task is not None:
         try:
             native_delivered = bool(await native_delivery_task)

@@ -428,7 +428,7 @@ async def test_v2_frontend_capability_endpoint_is_discoverable_and_keeps_v1_comp
         "version": 2,
         "event_source": "persistent_session_events",
     }
-    assert payload["frontend_connector_registry"]["version"] == 2
+    assert payload["frontend_connector_registry"]["version"] == 3
     legacy = json.loads((await server.handle_v1_capabilities(_Request())).text)
     assert "frontend_contract_protocol" not in legacy
     assert legacy["session_api_version"] == "1.0"
@@ -1461,6 +1461,148 @@ async def test_session_api_run_event_ack_and_fresh_contract(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_frontend_feed_projects_final_message_and_accepts_exact_endpoint(tmp_path):
+    from adapters.stream_events import (
+        DELIVERY_ANSWER_PREVIEW,
+        DELIVERY_FINAL,
+        DELIVERY_USER_COMMENTARY,
+    )
+    from orchestrator.frontend_delivery import freeze_run_delivery_route
+    from orchestrator.request_activity import RequestActivityStore
+
+    server, runtime = _server(tmp_path)
+    owner = "user:7"
+    session = server.session_store.ensure_default_session(
+        owner_id=owner, agent_id="lily"
+    )
+    route = freeze_run_delivery_route(
+        message_source_id="api",
+        session_surface="backend-api",
+        session_channel_key="client-a",
+        chat_id=7,
+        telegram_requested=False,
+    )
+    accepted = server.session_store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="lily",
+        request_id="req-feed",
+        text="question",
+        source="api",
+        idempotency_key="feed-key",
+        delivery_route=route,
+    )
+    server.session_store.mark_request_running(
+        accepted.request_id, worker_id="feed-test"
+    )
+    finished = server.session_store.finish_request(
+        accepted.request_id,
+        success=True,
+        assistant_text="canonical final answer",
+    )
+    runtime.request_activity = RequestActivityStore(epoch=17)
+    runtime.request_activity.bind_presentation_settings(
+        accepted.request_id,
+        lambda: {"commentary": True, "answer_preview": True},
+    )
+    runtime.request_activity.start(accepted.request_id)
+    runtime.request_activity.publish_stream(
+        accepted.request_id,
+        SimpleNamespace(
+            kind="commentary",
+            summary="safe commentary",
+            event_id="commentary-1",
+            delivery_class=DELIVERY_USER_COMMENTARY,
+        ),
+    )
+    runtime.request_activity.publish_stream(
+        accepted.request_id,
+        SimpleNamespace(
+            kind="text_delta",
+            summary="raw provider delta must stay internal",
+            event_id="raw-delta-1",
+        ),
+    )
+    runtime.request_activity.publish_stream(
+        accepted.request_id,
+        SimpleNamespace(
+            kind="answer_preview",
+            summary="safe answer preview",
+            event_id="preview-1",
+            delivery_class=DELIVERY_ANSWER_PREVIEW,
+        ),
+    )
+    runtime.request_activity.publish_stream(
+        accepted.request_id,
+        SimpleNamespace(
+            kind="final",
+            summary="activity final must not replace durable final",
+            event_id="activity-final-1",
+            delivery_class=DELIVERY_FINAL,
+        ),
+    )
+
+    request = _Request(
+        query={
+            "surface": "backend-api",
+            "client_id": "client-a",
+            "request_id": accepted.request_id,
+        },
+        match_info={"session_id": session["session_id"]},
+    )
+    response = await server.handle_v2_frontend_feed(request)
+    payload = json.loads(response.text)
+
+    assert response.status == 200
+    assert payload["connector_id"] == "backend_api"
+    terminal = next(
+        event
+        for event in payload["durable_events"]
+        if event["run_id"] == accepted.run_id
+        and event["semantic_kind"] == "final"
+    )
+    assert terminal["semantic_kind"] == "final"
+    assert terminal["content_blocks"][0]["text"] == "canonical final answer"
+    assert payload["ephemeral_epoch"] == 17
+    assert [
+        event["content_blocks"][0]["text"]
+        for event in payload["ephemeral_events"]
+    ] == ["safe commentary", "safe answer preview"]
+    assert [
+        event["semantic_kind"] for event in payload["ephemeral_events"]
+    ] == ["commentary", "answer_preview"]
+    assert payload["ephemeral_watermark"] == 5
+    assert terminal["event_id"] in payload["accepted_event_ids"]
+    receipts = server.session_store.frontend_delivery_receipts(
+        session_id=session["session_id"],
+        owner_id=owner,
+        event_id=terminal["event_id"],
+    )
+    assert [(row["endpoint_id"], row["status"]) for row in receipts] == [
+        (payload["endpoint_id"], "accepted")
+    ]
+
+    replay = json.loads((await server.handle_v2_frontend_feed(request)).text)
+    assert replay["accepted_event_ids"] == []
+
+    reset_request = _Request(
+        query={
+            "surface": "backend-api",
+            "client_id": "client-a",
+            "request_id": accepted.request_id,
+            "after_durable_sequence": str(payload["durable_watermark"]),
+            "after_ephemeral_sequence": str(payload["ephemeral_watermark"]),
+            "ephemeral_epoch": "16",
+        },
+        match_info={"session_id": session["session_id"]},
+    )
+    reset = json.loads((await server.handle_v2_frontend_feed(reset_request)).text)
+    assert reset["durable_events"] == []
+    assert reset["ephemeral_reset"] is True
+    assert len(reset["ephemeral_events"]) == 2
+
+
+@pytest.mark.asyncio
 async def test_session_api_cancel_and_attachment_controls(tmp_path):
     server, _runtime = _server(tmp_path)
     created = json.loads(
@@ -1537,6 +1679,18 @@ async def test_session_api_cancel_and_attachment_controls(tmp_path):
         ).text
     )
     assert committed["attachment"]["state"] == "committed"
+    downloaded = await server.handle_v1_attachment_get(
+        _Request(
+            match_info={
+                "session_id": session_id,
+                "attachment_id": staged["attachment_id"],
+            }
+        )
+    )
+    assert downloaded.status == 200
+    assert downloaded.body == body
+    assert downloaded.headers["X-Content-SHA256"] == hashlib.sha256(body).hexdigest()
+    assert downloaded.headers["Content-Disposition"].startswith("attachment;")
 
 
 @pytest.mark.asyncio

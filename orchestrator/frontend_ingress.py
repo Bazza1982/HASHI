@@ -17,8 +17,11 @@ from orchestrator.frontend_command_admission import (
     reserve_frontend_command_invocation,
 )
 from orchestrator.frontend_contracts import (
+    FRONTEND_REQUEST_TYPE,
+    FRONTEND_REQUEST_VERSION,
     normalize_admission_receipt,
     normalize_frontend_ingress_envelope,
+    normalize_frontend_request,
 )
 from orchestrator.frontend_delivery import freeze_run_delivery_route
 from orchestrator.runtime_session import ensure_store, owner_id
@@ -29,6 +32,95 @@ from orchestrator.session_store import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def accept_runtime_ingress(
+    runtime: Any,
+    envelope: Mapping[str, Any],
+    *,
+    request_id: str,
+    chat_id: Any,
+    prompt: str,
+    source: str,
+    request_metadata: Mapping[str, Any] | None,
+    request_content: Mapping[str, Any] | None,
+    idempotency_key: str | None,
+) -> tuple[dict[str, Any], Any | None, str, str, str]:
+    """Validate the standard envelope, then use PAO's sole Run writer."""
+
+    normalized = normalize_frontend_ingress_envelope(envelope)
+    operation_content: list[dict[str, Any]] = []
+    canonical_parts = (
+        request_content.get("parts")
+        if isinstance(request_content, Mapping)
+        else None
+    )
+    if isinstance(canonical_parts, (list, tuple)):
+        for part in canonical_parts:
+            if not isinstance(part, Mapping):
+                continue
+            part_type = str(part.get("type") or "").strip().casefold()
+            if part_type == "text" and str(part.get("text") or ""):
+                operation_content.append(
+                    {"type": "text", "text": str(part["text"])}
+                )
+            elif part_type == "media" and str(part.get("attachment_id") or ""):
+                operation_content.append(
+                    {
+                        "type": "attachment_ref",
+                        "attachment_id": str(part["attachment_id"]),
+                        "ordinal": len(operation_content),
+                        "caption": str(part.get("caption") or "") or None,
+                    }
+                )
+    if not operation_content and str(prompt or ""):
+        operation_content.append({"type": "text", "text": str(prompt)})
+    normalize_frontend_request(
+        {
+            "type": FRONTEND_REQUEST_TYPE,
+            "version": FRONTEND_REQUEST_VERSION,
+            "ingress": normalized,
+            "operation": {"kind": "message", "content": operation_content},
+        }
+    )
+    expected_idempotency_digest = "sha256:" + hashlib.sha256(
+        str(idempotency_key or request_id).encode("utf-8")
+    ).hexdigest()
+    if normalized["message"]["idempotency_digest"] != expected_idempotency_digest:
+        raise SessionConflict("frontend ingress idempotency binding changed")
+    expected_instance = str(
+        getattr(runtime.global_config, "instance_id", None) or "HASHI"
+    ).upper()
+    if normalized["instance_id"] != expected_instance:
+        raise SessionConflict("frontend ingress instance changed during admission")
+    if normalized["target"]["agent_id"] != str(runtime.name).casefold():
+        raise SessionConflict("frontend ingress Agent changed during admission")
+    if normalized["message"]["request_id"] != str(request_id):
+        raise SessionConflict("frontend ingress request changed during admission")
+    metadata = dict(request_metadata or {})
+    if normalized["target"]["session_id"] != str(
+        metadata.get("session_id") or ""
+    ):
+        raise SessionConflict("frontend ingress Session changed during admission")
+
+    from orchestrator import runtime_session
+
+    result = runtime_session.accept_request(
+        runtime,
+        request_id=request_id,
+        chat_id=chat_id,
+        prompt=prompt,
+        source=source,
+        request_metadata=metadata,
+        request_content=request_content,
+        idempotency_key=idempotency_key,
+    )
+    session, accepted, _owner, _surface, _channel = result
+    if str(session.get("session_id") or "") != normalized["target"]["session_id"]:
+        raise SessionConflict("frontend ingress Session binding was not preserved")
+    if accepted is not None and str(accepted.request_id) != str(request_id):
+        raise SessionConflict("frontend ingress receipt request mismatch")
+    return result
 
 
 def admit_frontend_ingress(
@@ -52,6 +144,11 @@ def admit_frontend_ingress(
     and returns a normalized AdmissionReceipt.
     """
     normalized_env = normalize_frontend_ingress_envelope(envelope)
+    from orchestrator.frontend_connector_registry import (
+        get_connector_customization,
+        require_connector_operation,
+    )
+    connector_id = normalized_env["connector"]["id"]
 
     # 1. Instance and Agent verification
     expected_instance = str(
@@ -112,6 +209,7 @@ def admit_frontend_ingress(
 
     # 2. Control intent
     if control_action is not None or command_name in {"/cancel", "cancel", "/stop", "stop"}:
+        require_connector_operation(connector_id, "ingress", "control")
         action = str(control_action or "cancel").strip().casefold()
         if action in {"cancel", "stop"}:
             endpoint_id = normalized_env["connector"]["endpoint_id"]
@@ -224,8 +322,36 @@ def admit_frontend_ingress(
 
     # 3. Command intent
     if command_name is not None:
+        require_connector_operation(connector_id, "ingress", "command")
         cmd = str(command_name).strip().lstrip("/")
         args = list(command_arguments or [])
+        customization = get_connector_customization(
+            connector_id,
+            kind="command_override",
+            key=cmd,
+        )
+        if customization and customization["route"] == "connector_local":
+            return normalize_admission_receipt(
+                {
+                    "type": "hashi.admission-receipt",
+                    "version": 1,
+                    "status": "rejected",
+                    "session_id": session_id,
+                    "run_id": None,
+                    "request_id": normalized_env["message"]["request_id"],
+                    "idempotency_digest": normalized_env["message"]["idempotency_digest"],
+                    "replayed": False,
+                    "reason": "registered_connector_local_override",
+                }
+            )
+        registry = getattr(runtime, "command_registry", None)
+        command_registered = bool(
+            registry is not None and registry.has_command(cmd)
+        )
+        authorizer = getattr(runtime, "_is_command_allowed", None)
+        command_allowed = command_registered and (
+            not callable(authorizer) or bool(authorizer(cmd))
+        )
         endpoint_id = normalized_env["connector"]["endpoint_id"]
         client_id = f"{normalized_env['connector']['id']}:{endpoint_id}"
         request_id = normalized_env["message"]["request_id"]
@@ -244,7 +370,10 @@ def admit_frontend_ingress(
             "arguments": args,
             "actor_digest": "sha256:" + hashlib.sha256(resolved_owner.encode("utf-8")).hexdigest(),
             "idempotency_digest": normalized_env["message"]["idempotency_digest"],
-            "authorization": {"decision": "allowed", "scope": "session"},
+            "authorization": {
+                "decision": "allowed" if command_allowed else "denied",
+                "scope": "session",
+            },
         }
         try:
             reservation = reserve_frontend_command_invocation(
@@ -301,11 +430,47 @@ def admit_frontend_ingress(
                 }
             )
 
-        # Dispatch command execution
+        # Dispatch only a command owned by PAO's registry.  A missing command is
+        # a terminal rejection, never a successful no-op invented by FC.
+        if not command_registered:
+            reservation.complete(
+                {"ok": False, "command": cmd, "error_code": "command_not_registered"}
+            )
+            return normalize_admission_receipt(
+                {
+                    "type": "hashi.admission-receipt",
+                    "version": 1,
+                    "status": "rejected",
+                    "session_id": session_id,
+                    "run_id": None,
+                    "request_id": request_id,
+                    "idempotency_digest": normalized_env["message"]["idempotency_digest"],
+                    "replayed": False,
+                    "reason": "command_not_registered",
+                }
+            )
+        if not command_allowed:
+            reservation.complete(
+                {"ok": False, "command": cmd, "error_code": "command_forbidden"}
+            )
+            return normalize_admission_receipt(
+                {
+                    "type": "hashi.admission-receipt",
+                    "version": 1,
+                    "status": "rejected",
+                    "session_id": session_id,
+                    "run_id": None,
+                    "request_id": request_id,
+                    "idempotency_digest": normalized_env["message"]["idempotency_digest"],
+                    "replayed": False,
+                    "reason": "command_forbidden",
+                }
+            )
+
         cmd_result: dict[str, Any] = {"ok": True, "command": cmd}
-        if hasattr(runtime, "command_registry") and runtime.command_registry.has_command(cmd):
+        if registry.has_command(cmd):
             try:
-                cmd_obj = runtime.command_registry.get_command(cmd)
+                cmd_obj = registry.get_command(cmd)
                 if hasattr(cmd_obj, "handler"):
                     res = cmd_obj.handler(runtime, *args)
                     if isinstance(res, dict):
@@ -330,7 +495,7 @@ def admit_frontend_ingress(
         )
 
     # 4. Message intent (Turn / Run admission)
-    connector_id = normalized_env["connector"]["id"]
+    require_connector_operation(connector_id, "ingress", "message")
     delivery_route = freeze_run_delivery_route(
         message_source_id=connector_id,
         session_surface=connector_id,
@@ -437,6 +602,7 @@ def query_ingress_admission(
 
 
 __all__ = [
+    "accept_runtime_ingress",
     "admit_frontend_ingress",
     "query_ingress_admission",
 ]

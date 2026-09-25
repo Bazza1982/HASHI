@@ -305,7 +305,7 @@ async def test_t06_t07_t10_dispatcher_leases_multi_destinations_and_recovery(
     dispatcher1 = FrontendDispatcher(
         store,
         worker_id="worker_alpha",
-        adapters={"reference": adapter_primary, "reference_mirror": adapter_mirror},
+        adapters={"reference": adapter_primary},
     )
 
     # T06: Competing dispatcher cannot claim tasks held by worker_alpha
@@ -406,10 +406,14 @@ async def test_dispatcher_end_to_end_claim_and_dispatch(tmp_path: Path):
     evt_id = msg["delivery_event_id"]
 
     ref_adapter = ReferenceConnectorAdapter(connector_id="reference", endpoint_id="reference:primary")
+    session_adapter = ReferenceConnectorAdapter(
+        connector_id="session_api",
+        endpoint_id="session_api:default",
+    )
     dispatcher = FrontendDispatcher(
         store,
         worker_id="dispatcher_e2e",
-        adapters={"reference": ref_adapter, "session_api": ref_adapter},
+        adapters={"reference": ref_adapter, "session_api": session_adapter},
     )
 
     # Dispatch pending outbox tasks
@@ -420,6 +424,12 @@ async def test_dispatcher_end_to_end_claim_and_dispatch(tmp_path: Path):
     )
     assert len(dispatched) == 1
     assert dispatched[0]["status"] == "completed"
+    assert len(session_adapter.received_events) == 1
+    delivered_event = session_adapter.received_events[0]
+    assert delivered_event["type"] == "hashi.frontend-event"
+    assert delivered_event["interface_kind"] == "message"
+    assert "lease_token" not in delivered_event
+    assert delivered_event["content_blocks"][0]["text"] == "End to end outbox message"
 
     # Receipts recorded
     receipts = store.frontend_delivery_receipts(
@@ -440,7 +450,7 @@ async def test_dispatcher_end_to_end_claim_and_dispatch(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_dispatcher_does_not_overstate_pull_delivery_or_adapter_exceptions(
+async def test_dispatcher_leaves_pull_tasks_for_feed_and_isolates_adapter_exceptions(
     tmp_path: Path,
 ):
     runtime, store, owner, session = _setup_runtime(tmp_path)
@@ -465,15 +475,13 @@ async def test_dispatcher_does_not_overstate_pull_delivery_or_adapter_exceptions
         owner_id=owner,
         event_id=pull_message["delivery_event_id"],
     )
-    assert len(pull_result) == 1
-    assert pull_result[0]["status"] == "completed"
+    assert pull_result == []
     pull_receipts = store.frontend_delivery_receipts(
         session_id=session["session_id"],
         owner_id=owner,
         event_id=pull_message["delivery_event_id"],
     )
-    assert pull_receipts[0]["status"] == "accepted"
-    assert pull_receipts[0]["proof"] is None
+    assert pull_receipts == []
 
     class ExplodingAdapter:
         async def dispatch(self, _task, *, endpoint_id):

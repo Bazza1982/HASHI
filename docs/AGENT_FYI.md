@@ -115,6 +115,16 @@ handler and stores completion with a canonical Session event. Pending/unknown
 results must never be replayed; after Worker-local state loss, replay the saved
 result without stale buttons and require refresh.
 
+Frontend Connector is one semantic boundary across frontends: message,
+command, display/card, button/action, media and receipt meanings do not change
+with Telegram, TUI, Backend API, an external desktop client, or a future
+Connector. PAO persists normal ingress and durable output before transport;
+Connectors own authentication, wire conversion, local rendering and receipts.
+Do not add frontend-specific business cards or direct runtime injection.
+Connector-local behavior is allowed only when registered in the FC registry;
+unregistered overrides and compatibility routes fail closed. Existing frontend
+programs keep their native standards and normally require only a thin adapter.
+
 ## Engines, tools, and recovery
 
 Engine and Model Provider differ. HER v2 modes are Direct (`zero`), Strategic

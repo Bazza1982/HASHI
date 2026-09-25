@@ -359,6 +359,33 @@ In particular:
 - a Backend API response must not expose internal implementation state as a
   public contract accidentally.
 
+### 8.1 Standard semantic boundary (2026-09-26)
+
+FC defines one semantic interface for every frontend. A message is a message,
+a command is a command, a display/card is a display, and an interactive button
+is an action regardless of whether the Connector is Telegram, TUI, Backend API,
+an external desktop frontend, or a future registered Connector.
+
+PAO remains the authority for Sessions, Messages, Runs, Events, routing and
+delivery state. Every normal ingress is normalized by a registered FC adapter
+before PAO admission. Every durable user-facing output is first a canonical
+Message/Event with per-endpoint outbox state; only then may a Connector render
+and send it. Frontend applications do not inject objects into a runtime, and
+runtime business code does not emit frontend-specific cards as a second source
+of truth.
+
+Connector-local layout, HTML, terminal styling, media rendition and native
+interaction mechanics remain allowed. A semantic exception, such as TUI-local
+`/agents`, must be declared in the FC registry and fail closed when it is not
+registered. Telegram ephemeral progress and the no-Worker delivery-health
+notice are likewise registered presentation-only exceptions; neither may
+become a second command, Session, Message, or delivery-status authority.
+
+Existing frontend programs keep their own standards. Compatibility endpoints
+and transport APIs are thin Connector adapters around FC; a normal FC change
+does not require editing Telegram, an external Workbench application, or HASHI
+business behavior merely to reproduce the same command/card for another UI.
+
 ## 9. Engineering-layer placement
 
 Connector business behaviour belongs in the Functions layer. Stable process
@@ -372,14 +399,18 @@ into HASHI Functions or Core.
 
 ## 10. Current alignment debt
 
-- The TUI has trusted multi-instance switching but still uses basic Backend API
-  chat/transcript routes.
-- Some orchestrator modules still directly depend on Telegram types rather
-  than a transport-neutral delivery dispatcher and durable endpoint receipts.
+- The TUI keeps registered local commands and basic Backend API compatibility
+  routes. They are intentionally thin FC adapters; a complete v2 multi-Session
+  TUI is not required by the current standard-interface migration.
+- Telegram-native classes remain inside its Connector renderer and registered
+  presentation exceptions. They are not canonical Event or command types.
 - Retired Workbench compatibility names remain in source and configuration.
 - Persistent Session API v1 remains fail-closed when its runtime qualification
   evidence is absent, even though qualified personal instances enable it by
   default.
+- Source convergence and live adoption are separate. The 2026-09-26 FC source
+  candidate still requires a clean committed generation and live acceptance
+  before it can be described as adopted.
 
 These are current implementation facts, not target architecture exceptions.
 

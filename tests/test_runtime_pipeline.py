@@ -232,6 +232,8 @@ def _runtime():
     runtime.logger = _Logger()
     runtime.telegram_logger = _Logger()
     runtime.error_logger = _Logger()
+    runtime.telegram_connected = True
+    runtime._notify_enabled = False
     runtime.last_prompt = None
     runtime.current_request_meta = None
     runtime.is_generating = False
@@ -323,7 +325,7 @@ def _runtime():
 
     runtime._streaming_display_loop = _streaming_display_loop
 
-    async def _thinking_flush_loop(chat_id, stop_typing):
+    async def _thinking_flush_loop(chat_id, stop_typing, **_kwargs):
         await stop_typing.wait()
 
     runtime._thinking_flush_loop = _thinking_flush_loop
@@ -2351,6 +2353,13 @@ async def test_setup_interactive_feedback_placeholder_retry_after_records_failov
         token="token-lin-yueru",
     )
     failover_runtime.workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    async def _failover_send_text(chat_id, text, **_kwargs):
+        return await failover_runtime.app.bot.send_message(
+            chat_id=chat_id, text=text
+        )
+
+    failover_runtime._send_text = _failover_send_text
     orchestrator = SimpleNamespace(runtimes=[runtime, failover_runtime], raw_config={})
     runtime.orchestrator = orchestrator
     failover_runtime.orchestrator = orchestrator
@@ -2517,7 +2526,7 @@ async def test_typing_off_keeps_thinking_delivery_independent_without_placeholde
     runtime._think = True
     telegram_stream_policy.set_typing_enabled(runtime, False)
 
-    async def _flush_thinking(_chat_id):
+    async def _flush_thinking(_chat_id, **_kwargs):
         return None
 
     runtime._flush_thinking = _flush_thinking
@@ -3920,6 +3929,27 @@ async def test_voice_origin_delivers_native_audio_and_companion_text_without_tts
         owner_id="user:123",
         request_metadata={"voice_origin": True},
     )
+    from orchestrator.frontend_delivery import freeze_run_delivery_route
+
+    runtime.session_store.accept_run(
+        session_id=session["session_id"],
+        owner_id="user:123",
+        agent_id=runtime.name,
+        request_id=item.request_id,
+        text=item.prompt,
+        source="telegram",
+        idempotency_key="native-terminal-run",
+        delivery_route=freeze_run_delivery_route(
+            message_source_id="telegram",
+            session_surface="telegram",
+            session_channel_key=str(item.chat_id),
+            chat_id=item.chat_id,
+            telegram_requested=False,
+        ),
+    )
+    runtime.session_store.mark_request_running(
+        item.request_id, worker_id="native-terminal-worker"
+    )
     asset = runtime.session_store.audio_assets.create(
         b"OggS" + b"\0" * 64,
         owner_id="",
@@ -3973,7 +4003,7 @@ async def test_voice_origin_delivers_native_audio_and_companion_text_without_tts
         audit_collector=None,
     )
 
-    assert runtime.sent_message["text"] == "Native transcript."
+    assert runtime.app.bot.sent[0]["text"] == "Native transcript."
     assert len(sent_voice) == 1
     assert sent_voice[0]["chat_id"] == item.chat_id
     assert runtime.voice_replies == []
@@ -4309,13 +4339,35 @@ async def test_required_native_audio_immediate_ignores_commentary_and_uses_quiet
     runtime.app.bot.send_voice = _send_voice
     runtime._send_text = _send_text
     telegram_stream_policy.set_typing_enabled(runtime, False)
+    item = _item(
+        request_id="req-native-immediate",
+        session_id=session["session_id"],
+        owner_id="user:123",
+    )
+    from orchestrator.frontend_delivery import freeze_run_delivery_route
+
+    runtime.session_store.accept_run(
+        session_id=session["session_id"],
+        owner_id="user:123",
+        agent_id=runtime.name,
+        request_id=item.request_id,
+        text=item.prompt,
+        source="telegram",
+        idempotency_key="native-immediate-run",
+        delivery_route=freeze_run_delivery_route(
+            message_source_id="telegram",
+            session_surface="telegram",
+            session_channel_key=str(item.chat_id),
+            chat_id=item.chat_id,
+            telegram_requested=False,
+        ),
+    )
+    runtime.session_store.mark_request_running(
+        item.request_id, worker_id="native-immediate-worker"
+    )
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
-        _item(
-            request_id="req-native-immediate",
-            session_id=session["session_id"],
-            owner_id="user:123",
-        ),
+        item,
         audit_active=False,
         audit_collector=None,
     )
@@ -4345,8 +4397,7 @@ async def test_required_native_audio_immediate_ignores_commentary_and_uses_quiet
 
     assert accepted is True
     assert len(sent_voice) == 1
-    assert runtime.sent_message["text"] == "Native transcript."
-    assert runtime.sent_message["_purpose"] == "task_acknowledgement"
+    assert runtime.app.bot.sent[0]["text"] == "Native transcript."
 
 
 @pytest.mark.asyncio

@@ -32,6 +32,7 @@ def build_frontend_command_invocation(
     from orchestrator.frontend_connector_registry import (
         canonical_connector_id,
         endpoint_id_for,
+        require_connector_operation,
     )
     from orchestrator.frontend_contracts import normalize_command_invocation
 
@@ -43,6 +44,7 @@ def build_frontend_command_invocation(
         ingress_transport=ingress_transport,
         surface=str(metadata.get("session_surface") or "workbench"),
     )
+    require_connector_operation(connector_id, "ingress", "command")
     idempotency_digest = hashlib.sha256(
         f"{client_id}\0{request_id}".encode("utf-8")
     ).hexdigest()

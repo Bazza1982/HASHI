@@ -153,6 +153,13 @@ async def send_wrapper_polishing_placeholder(runtime: Any, item: Any):
     if bot is None or not hasattr(bot, "send_message"):
         return None
     try:
+        from orchestrator.frontend_connector_registry import (
+            require_connector_presentation_override,
+        )
+
+        require_connector_presentation_override(
+            "telegram", "ephemeral_progress"
+        )
         return await bot.send_message(
             chat_id=item.chat_id,
             text=ui_language.tr("wrapper.polishing"),

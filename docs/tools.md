@@ -375,7 +375,9 @@ Chrome/Chromium auto-detected on Linux, macOS, and Windows (including WSL). Fall
 
 ## Telegram File Sending
 
-Agents can send photos, documents, videos, and audio files directly to the user's Telegram chat.
+Agents can publish photos, documents, videos, and audio files to the user's
+Telegram endpoint through the standard Frontend Connector outbox. The CLI does
+not call Telegram's HTTP API directly.
 
 ### CLI Script (all backends)
 
@@ -387,11 +389,16 @@ python tools/telegram_send_file_cli.py --path /tmp/report.pdf --type document
 Parameters:
 - `--path` (required): absolute path to the file
 - `--caption` (optional): message caption
-- `--type` (optional): `photo | document | video | audio` (default: auto-detect from extension)
-- `--agent` (optional): agent name for token resolution (defaults to first available)
+- `--type` (optional): `photo | document | video | audio | voice` (default: auto-detect from extension)
+- `--agent` (optional): configured Agent identity (otherwise `HASHI_AGENT_NAME` is required)
 - `--chat-id` (optional): override target chat ID
+- `--publication-id` (optional): stable idempotency identity for a safe replay
 
 Auto-detection: `.jpg/.jpeg/.png/.webp` → photo, `.mp4/.mov/.avi/.mkv` → video, `.mp3/.ogg/.flac/.wav/.m4a` → audio, everything else → document.
+
+An explicit `--type` remains a Connector-local rendition choice. The file is
+first stored as a durable Session attachment and delivery is recorded per
+endpoint; replaying the same `--publication-id` does not send it twice.
 
 ### Native Tool Call (HER v2 provider/tool paths)
 

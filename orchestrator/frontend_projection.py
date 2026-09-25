@@ -10,6 +10,8 @@ from __future__ import annotations
 import html
 import logging
 from collections.abc import Mapping
+from datetime import datetime, timezone
+from html.parser import HTMLParser
 from typing import Any
 
 from orchestrator.frontend_contracts import (
@@ -19,6 +21,84 @@ from orchestrator.frontend_contracts import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class _TransportHTMLToText(HTMLParser):
+    """Discard transport markup while retaining readable semantic text."""
+
+    _BREAK_TAGS = frozenset({"br", "p", "div", "li", "tr"})
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.casefold() == "br":
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.casefold() in self._BREAK_TAGS - {"br"}:
+            self.parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        self.parts.append(data)
+
+
+def transport_text_component(text: str, content_format: str) -> dict[str, str]:
+    """Convert connector-authored text into the shared text representation."""
+
+    value = str(text or "")
+    normalized_format = str(content_format or "plain-text").strip().casefold()
+    if normalized_format in {"telegram-html", "html"}:
+        parser = _TransportHTMLToText()
+        parser.feed(value)
+        parser.close()
+        lines = [line.rstrip() for line in "".join(parser.parts).splitlines()]
+        while lines and not lines[0]:
+            lines.pop(0)
+        while lines and not lines[-1]:
+            lines.pop()
+        value = "\n".join(lines)
+        block_format = "plain"
+    elif normalized_format in {"markdown", "markdownv2"}:
+        block_format = "markdown"
+    else:
+        block_format = "plain"
+    return {"type": "text", "text": value, "format": block_format}
+
+
+def build_frontend_presentation_context(
+    *,
+    text: str,
+    content_format: str,
+    presentation_channel: str,
+    message_context: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Attach a canonical display projection without changing local styling."""
+
+    context = dict(message_context or {})
+    if isinstance(context.get("frontend_presentation"), Mapping):
+        return context
+    channel = str(presentation_channel or "command").strip().casefold()
+    semantic_kind = channel or "status"
+    interface_kind = (
+        "notification"
+        if semantic_kind == "notification"
+        else "message"
+        if semantic_kind in {"final", "message", "commentary"}
+        else "state"
+        if semantic_kind in {"reasoning", "technical", "answer_preview", "progress"}
+        else "display"
+    )
+    context["frontend_presentation"] = {
+        "interface_kind": interface_kind,
+        "semantic_kind": semantic_kind,
+        "presentation_channel": channel,
+        "content_blocks": (
+            [transport_text_component(text, content_format)] if text else []
+        ),
+    }
+    return context
 
 
 def project_frontend_event(
@@ -50,6 +130,12 @@ def project_frontend_event(
     if message_map and detail.get("message_id") and str(detail.get("message_id")) in message_map:
         msg_obj = message_map[str(detail.get("message_id"))]
 
+    canonical_presentation = None
+    if msg_obj and isinstance(msg_obj.get("message_context"), Mapping):
+        candidate = msg_obj["message_context"].get("frontend_presentation")
+        if isinstance(candidate, Mapping):
+            canonical_presentation = candidate
+
     chan = str(
         detail.get("presentation_channel")
         or (
@@ -72,6 +158,7 @@ def project_frontend_event(
         "status",
         "final",
         "error",
+        "notification",
     }:
         semantic_kind = chan
     elif kind in {"message.created", "message", "run.completed"}:
@@ -101,6 +188,26 @@ def project_frontend_event(
 
     # Build typed content blocks
     blocks: list[dict[str, Any]] = []
+    interface_kind = None
+    if canonical_presentation is not None:
+        candidate_kind = str(
+            canonical_presentation.get("semantic_kind") or ""
+        ).strip().casefold()
+        candidate_channel = str(
+            canonical_presentation.get("presentation_channel") or ""
+        ).strip().casefold()
+        candidate_interface = str(
+            canonical_presentation.get("interface_kind") or ""
+        ).strip().casefold()
+        candidate_blocks = canonical_presentation.get("content_blocks")
+        if candidate_kind:
+            semantic_kind = candidate_kind
+        if candidate_channel:
+            presentation_channel = candidate_channel
+        if candidate_interface:
+            interface_kind = candidate_interface
+        if isinstance(candidate_blocks, (list, tuple)):
+            blocks = [dict(item) for item in candidate_blocks if isinstance(item, Mapping)]
     text_content = str(
         detail.get("text")
         or detail.get("assistant_text")
@@ -108,9 +215,13 @@ def project_frontend_event(
         or summary
         or ""
     )
-    if text_content:
-        fmt = "html" if "<b" in text_content or "<code" in text_content else "markdown"
-        blocks.append({"type": "text", "text": text_content, "format": fmt})
+    if text_content and not blocks:
+        inferred_format = (
+            "telegram-html"
+            if "<b" in text_content or "<code" in text_content
+            else "markdown"
+        )
+        blocks.append(transport_text_component(text_content, inferred_format))
 
     # Structured metrics / key-values
     metrics = detail.get("metrics") or detail.get("items")
@@ -140,20 +251,52 @@ def project_frontend_event(
                     }
                 )
 
-    # Attachments
-    attachments = detail.get("attachments")
-    if isinstance(attachments, (list, tuple)):
-        for att in attachments:
-            if isinstance(att, Mapping):
-                blocks.append(
-                    {
-                        "type": "media_ref",
-                        "group_id": str(att.get("group_id") or "default"),
-                        "attachment_id": str(att.get("attachment_id") or ""),
-                        "role": str(att.get("semantic_role") or "attachment"),
-                        "caption": str(att.get("caption") or "") or None,
-                    }
-                )
+    # Media references may be carried by the event itself or by its canonical
+    # Message.  Only opaque asset identities cross the FC boundary; managed
+    # paths and inline bytes are never projected.
+    media_sources: list[Any] = []
+    for candidate in (
+        detail.get("attachments"),
+        detail.get("content"),
+        msg_obj.get("content") if msg_obj else None,
+    ):
+        if isinstance(candidate, (list, tuple)):
+            media_sources.extend(candidate)
+    seen_media: set[str] = set()
+    for att in media_sources:
+        if not isinstance(att, Mapping):
+            continue
+        part_type = str(att.get("type") or "").strip().casefold()
+        attachment_id = str(
+            att.get("attachment_id")
+            or (att.get("asset_id") if part_type == "audio" else "")
+            or ""
+        ).strip()
+        if not attachment_id or attachment_id in seen_media:
+            continue
+        if part_type and part_type not in {"attachment", "media", "audio"}:
+            continue
+        seen_media.add(attachment_id)
+        blocks.append(
+            {
+                "type": "media_ref",
+                "group_id": str(
+                    att.get("group_id") or f"event:{event_id or 'media'}"
+                ),
+                "attachment_id": attachment_id,
+                "role": str(
+                    att.get("presentation_role")
+                    or att.get("semantic_role")
+                    or att.get("kind")
+                    or (
+                        "voice_message"
+                        if part_type == "audio"
+                        else "attachment"
+                    )
+                ),
+                "caption": str(att.get("caption") or "") or None,
+            }
+        )
 
     if not blocks:
         blocks.append({"type": "text", "text": summary or "Event", "format": "plain"})
@@ -174,6 +317,7 @@ def project_frontend_event(
             "ephemeral_sequence": None,
             "audience": "user",
             "visibility": "public",
+            "interface_kind": interface_kind,
             "semantic_kind": semantic_kind,
             "presentation_channel": presentation_channel,
             "content_blocks": blocks,
@@ -193,16 +337,43 @@ def project_ephemeral_event(
     epoch: int = 1,
 ) -> dict[str, Any]:
     """Convert a volatile RequestActivity item into an ephemeral FrontendEvent."""
-    activity_id = str(raw_activity.get("id") or raw_activity.get("event_id") or "eph-1")
     seq = int(raw_activity.get("sequence", 0))
-    kind = str(raw_activity.get("kind") or "commentary").strip().casefold()
-    text = str(raw_activity.get("text") or raw_activity.get("summary") or "")
+    channel = str(
+        raw_activity.get("presentation_channel")
+        or raw_activity.get("kind")
+        or "commentary"
+    ).strip().casefold()
+    semantic_kind, presentation_channel = {
+        "commentary": ("commentary", "commentary"),
+        "thinking": ("reasoning", "reasoning"),
+        "reasoning": ("reasoning", "reasoning"),
+        "verbose": ("technical", "technical"),
+        "technical": ("technical", "technical"),
+        "answer": ("answer_preview", "answer"),
+        "answer_preview": ("answer_preview", "answer"),
+    }.get(channel, ("commentary", "commentary"))
+    text = str(
+        (
+            raw_activity.get("raw_delta")
+            if presentation_channel == "reasoning"
+            else None
+        )
+        or raw_activity.get("text")
+        or raw_activity.get("summary")
+        or raw_activity.get("detail")
+        or ""
+    )
+    created_at = raw_activity.get("created_at") or raw_activity.get("timestamp")
+    if isinstance(created_at, (int, float)) and not isinstance(created_at, bool):
+        created_at = datetime.fromtimestamp(
+            float(created_at), tz=timezone.utc
+        ).isoformat().replace("+00:00", "Z")
 
     return normalize_frontend_event(
         {
             "type": FRONTEND_EVENT_TYPE,
             "version": FRONTEND_EVENT_VERSION,
-            "event_id": f"eph_{activity_id}",
+            "event_id": f"eph:{epoch}:{seq}",
             "session_id": session_id,
             "sequence": None,
             "run_id": str(raw_activity.get("run_id") or "") or None,
@@ -212,16 +383,66 @@ def project_ephemeral_event(
             "ephemeral_sequence": seq,
             "audience": "user",
             "visibility": "ephemeral_preview",
-            "semantic_kind": kind if kind in {"commentary", "reasoning", "technical"} else "commentary",
-            "presentation_channel": kind if kind in {"commentary", "reasoning", "technical"} else "commentary",
+            "semantic_kind": semantic_kind,
+            "presentation_channel": presentation_channel,
             "content_blocks": [{"type": "text", "text": text, "format": "plain"}],
             "delivery_intent_ref": None,
             "replaces_event_id": str(raw_activity.get("replaces_id") or "") or None,
             "superseded_by": None,
             "reply_to_event_id": None,
-            "created_at": str(raw_activity.get("created_at") or "") or "2026-09-25T00:00:00Z",
+            "created_at": str(created_at or "") or "2026-09-25T00:00:00Z",
         }
     )
+
+
+def project_ephemeral_feed(
+    session_id: str,
+    activity: Mapping[str, Any],
+    *,
+    after_ephemeral_sequence: int = 0,
+    epoch_reset: bool = False,
+) -> dict[str, Any]:
+    """Project only visibility-checked RequestActivity events for one feed.
+
+    RequestActivity is already a sanitised presentation projection.  This
+    second gate deliberately excludes internal/control/provider events and the
+    final answer replacement, which must come from the durable Session event.
+    """
+
+    epoch = int(activity.get("ephemeral_epoch") or 0)
+    projected: list[dict[str, Any]] = []
+    raw_events = activity.get("events")
+    if not isinstance(raw_events, (list, tuple)):
+        raw_events = []
+    seen_watermark = max(0, int(after_ephemeral_sequence))
+    for raw in raw_events:
+        if not isinstance(raw, Mapping):
+            continue
+        sequence = int(raw.get("sequence") or 0)
+        seen_watermark = max(seen_watermark, sequence)
+        channel = str(raw.get("presentation_channel") or "").strip().casefold()
+        if not bool(raw.get("presentation_enabled")):
+            continue
+        if channel not in {"commentary", "thinking", "reasoning", "verbose", "technical", "answer"}:
+            continue
+        if channel == "answer" and not bool(raw.get("answer_ephemeral")):
+            continue
+        event = project_ephemeral_event(session_id, raw, epoch=epoch)
+        if not event["content_blocks"][0].get("text"):
+            continue
+        projected.append(event)
+    latest = int(activity.get("latest_sequence") or seen_watermark)
+    replay_complete = bool(activity.get("replay_complete", False))
+    return {
+        "ephemeral_events": projected,
+        "ephemeral_epoch": epoch,
+        "ephemeral_watermark": seen_watermark,
+        "ephemeral_latest_sequence": latest,
+        "ephemeral_has_more": seen_watermark < latest,
+        "ephemeral_replay_complete": replay_complete,
+        "ephemeral_gap": not replay_complete,
+        "ephemeral_reset": bool(epoch_reset),
+    }
 
 
 def render_event_to_plain_text(event: Mapping[str, Any]) -> str:
@@ -297,12 +518,21 @@ def poll_frontend_feed(
         run_id=run_id,
     )
     msgs: dict[str, Any] = {}
-    try:
-        for m in store.messages(session_id, owner_id=owner_id):
-            if isinstance(m, dict) and m.get("message_id"):
-                msgs[str(m["message_id"])] = m
-    except Exception:
-        pass
+    for raw_event in raw_events:
+        detail = raw_event.get("detail")
+        if not isinstance(detail, Mapping):
+            detail = {}
+        message_id = str(detail.get("message_id") or "").strip()
+        if not message_id or message_id in msgs:
+            continue
+        try:
+            msgs[message_id] = store.get_message(
+                message_id,
+                session_id=session_id,
+                owner_id=owner_id,
+            )
+        except Exception:
+            continue
     projected = [project_frontend_event(e, message_map=msgs) for e in raw_events]
     watermark = (
         max(e["sequence"] for e in projected)
@@ -318,9 +548,12 @@ def poll_frontend_feed(
 
 
 __all__ = [
+    "build_frontend_presentation_context",
     "poll_frontend_feed",
     "project_ephemeral_event",
+    "project_ephemeral_feed",
     "project_frontend_event",
     "render_event_to_html",
     "render_event_to_plain_text",
+    "transport_text_component",
 ]

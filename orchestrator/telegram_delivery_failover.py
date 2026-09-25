@@ -505,7 +505,12 @@ async def _send_direct(runtime: Any, *, chat_id: int, text: str) -> None:
                     reason="telegram_send_returned_no_receipt",
                 )
             return
-        await runtime.app.bot.send_message(chat_id=chat_id, text=text)
+        raise TelegramDeliveryError(
+            "fc_sender_unavailable",
+            retryable=True,
+            permanent=False,
+            reason="runtime_has_no_frontend_connector_sender",
+        )
     except Exception as exc:
         raise classify_telegram_delivery_error(exc) from exc
 
@@ -518,6 +523,13 @@ async def send_runtime_notice(
     Keep the original destination across fallback. Only this instance's known
     bot credentials are considered; no model, poller or Agent is started.
     """
+    from orchestrator.frontend_connector_registry import (
+        require_connector_presentation_override,
+    )
+
+    require_connector_presentation_override(
+        "telegram", "delivery_failover_notice"
+    )
     from telegram import Bot
 
     workers = getattr(kernel, "function_workers", None)

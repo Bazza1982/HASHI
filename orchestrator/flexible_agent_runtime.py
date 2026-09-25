@@ -641,6 +641,17 @@ class FlexibleAgentRuntime:
                         or "telegram"
                     ).strip().casefold()
                     if surface == "telegram":
+                        from orchestrator.frontend_connector_registry import (
+                            require_connector_presentation_override,
+                        )
+
+                        # Command/action identity and side effects are standard
+                        # FC operations.  Telegram may still edit the existing
+                        # inline card in place as an explicitly registered
+                        # Connector-local rendition of that shared result.
+                        require_connector_presentation_override(
+                            "telegram", "callback_interaction_rendering"
+                        )
                         from orchestrator.frontend_command_admission import (
                             reserve_telegram_command_invocation,
                         )
@@ -1149,24 +1160,23 @@ class FlexibleAgentRuntime:
         )
         from orchestrator.frontend_contracts import build_frontend_ingress_envelope
 
-        message_context_snapshot["frontend_ingress"] = (
-            build_frontend_ingress_envelope(
-                source_id=str(source_fact["id"]),
-                ingress_transport=source,
-                surface=resolved_surface,
-                channel_key=resolved_channel_key,
-                instance_id=str(message_context_snapshot["processing_instance"]),
-                principal=message_context_snapshot["sender"],
-                network_authentication=str(
-                    message_context_snapshot["network_authentication"]
-                ),
-                relay_chain=message_context_snapshot["relay_chain"],
-                request_id=request_id,
-                idempotency_key=idempotency_key or request_id,
-                session_id=str(resolved_session["session_id"]),
-                agent_id=self.name,
-            )
+        frontend_ingress_envelope = build_frontend_ingress_envelope(
+            source_id=str(source_fact["id"]),
+            ingress_transport=source,
+            surface=resolved_surface,
+            channel_key=resolved_channel_key,
+            instance_id=str(message_context_snapshot["processing_instance"]),
+            principal=message_context_snapshot["sender"],
+            network_authentication=str(
+                message_context_snapshot["network_authentication"]
+            ),
+            relay_chain=message_context_snapshot["relay_chain"],
+            request_id=request_id,
+            idempotency_key=idempotency_key or request_id,
+            session_id=str(resolved_session["session_id"]),
+            agent_id=self.name,
         )
+        message_context_snapshot["frontend_ingress"] = frontend_ingress_envelope
         metadata[MESSAGE_CONTEXT_METADATA_KEY] = message_context_snapshot
         private_authorization_evidence = {
             key: metadata.pop(key)
@@ -1182,10 +1192,13 @@ class FlexibleAgentRuntime:
         # or canonical request audit metadata.
         metadata.pop(CONNECTOR_EVIDENCE_METADATA_KEY, None)
         metadata.pop(PRIVATE_AUTHORIZATION_RESULTS_METADATA_KEY, None)
+        from orchestrator.frontend_ingress import accept_runtime_ingress
+
         session, accepted, session_owner, session_surface, session_channel_key = (
             await asyncio.to_thread(
-                runtime_session.accept_request,
+                accept_runtime_ingress,
                 self,
+                frontend_ingress_envelope,
                 request_id=request_id,
                 chat_id=chat_id,
                 prompt=clean_prompt,
@@ -1393,7 +1406,16 @@ class FlexibleAgentRuntime:
             if parse_mode in {"markdown", "markdownv2"}
             else "plain-text"
         )
+        reply_markup = kwargs.get("reply_markup")
+        standard_message_context = runtime_delivery.telegram_presentation_context(
+            text=text,
+            content_format=content_format,
+            presentation_channel="command",
+            reply_markup=reply_markup,
+        )
         chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
+        if chat_id is None:
+            raise ValueError("frontend reply has no registered connector endpoint")
         if delivery_mode != "failover_notice":
             if await telegram_delivery_failover.handle_blocked_send(
                 self,
@@ -1403,11 +1425,134 @@ class FlexibleAgentRuntime:
                 text=text,
             ):
                 return None
-        last_error = None
-        for _ in range(2):
-            try:
-                sent = await update.message.reply_text(text, **kwargs)
-                presentation_context = getattr(sent, "_hashi_message_context", None)
+        publication = None
+        claim = None
+        # Connector delivery is fail-closed around the durable FC boundary.
+        # Embedded callers without an initialized store receive an isolated
+        # store from the same owner rather than a raw transport bypass.
+        runtime_session.ensure_store(self)
+        if getattr(self, "session_store", None) is not None and chat_id is not None:
+            identity = str(
+                request_id
+                or getattr(update, "update_id", None)
+                or getattr(getattr(update, "message", None), "message_id", None)
+                or "telegram-reply"
+            )
+            publication_id = "reply_" + hashlib.sha256(
+                f"{identity}\0{purpose}\0{text}".encode("utf-8")
+            ).hexdigest()
+            publication = runtime_session.publish_frontend_message_for_update(
+                self,
+                update,
+                role="assistant",
+                text=text,
+                source="telegram.reply",
+                publication_id=publication_id,
+                content_format=content_format,
+                message_context=standard_message_context,
+            )
+            from orchestrator.frontend_connector_registry import (
+                canonical_connector_id,
+                endpoint_id_for,
+            )
+
+            connector_id = canonical_connector_id(
+                str(publication["surface"]),
+                ingress_transport=str(publication["surface"]),
+                surface=str(publication["surface"]),
+            )
+            endpoint_id = endpoint_id_for(
+                connector_id,
+                ingress_transport=str(publication["surface"]),
+                channel_key=str(publication["channel_key"]),
+            )
+            claims = self.session_store.claim_delivery_outbox(
+                session_id=str(publication["session_id"]),
+                owner_id=str(publication["owner_id"]),
+                worker_id=f"fc-{connector_id}-command-{self.name}-{uuid4().hex}",
+                event_id=str(publication["delivery_event_id"]),
+                connector_id=connector_id,
+                endpoint_id=endpoint_id,
+                limit=1,
+            )
+            if not claims:
+                return None
+            claim = claims[0]
+        try:
+            send_text = text
+            send_kwargs = dict(kwargs)
+            if publication is not None and claim is not None and connector_id == "telegram":
+                from orchestrator.frontend_connector_registry import (
+                    require_connector_event,
+                )
+                from orchestrator.frontend_dispatch import (
+                    project_claimed_frontend_event,
+                )
+
+                standard_event = project_claimed_frontend_event(
+                    self.session_store,
+                    claim,
+                    session_id=str(publication["session_id"]),
+                    owner_id=str(publication["owner_id"]),
+                )
+                require_connector_event("telegram", standard_event)
+                runtime_delivery.require_matching_telegram_rendition(
+                    standard_event,
+                    text=text,
+                    content_format=content_format,
+                )
+                canonical_markup = runtime_delivery.telegram_reply_markup_for_event(
+                    self, standard_event
+                )
+                if canonical_markup is not None:
+                    send_kwargs["reply_markup"] = canonical_markup
+                elif reply_markup is None:
+                    send_kwargs.pop("reply_markup", None)
+            sent = await update.message.reply_text(send_text, **send_kwargs)
+            presentation_context = getattr(sent, "_hashi_message_context", None)
+            if publication is not None and claim is not None:
+                recorded = publication
+                if isinstance(presentation_context, Mapping):
+                    recorded = self.session_store.update_presentation_message(
+                        session_id=str(publication["session_id"]),
+                        owner_id=str(publication["owner_id"]),
+                        agent_id=self.name,
+                        message_id=str(publication["message_id"]),
+                        text=text,
+                        message_context=presentation_context,
+                    )
+                transport_message_id = (
+                    getattr(sent, "_hashi_transport_message_id", None)
+                    or getattr(sent, "message_id", None)
+                )
+                receipt_status = (
+                    "delivered" if transport_message_id is not None else "accepted"
+                )
+                self.session_store.record_frontend_delivery_receipt(
+                    session_id=str(publication["session_id"]),
+                    owner_id=str(publication["owner_id"]),
+                    receipt={
+                        "type": "hashi.delivery-receipt",
+                        "version": 1,
+                        "event_id": str(publication["delivery_event_id"]),
+                        "endpoint_id": str(claim["endpoint_id"]),
+                        "status": receipt_status,
+                        "proof": (
+                            {
+                                "type": f"{connector_id}-message-id",
+                                "value": str(transport_message_id),
+                            }
+                            if transport_message_id is not None
+                            else None
+                        ),
+                    },
+                )
+                self.session_store.complete_delivery_outbox(
+                    outbox_id=str(claim["outbox_id"]),
+                    lease_token=str(claim["lease_token"]),
+                    status="completed",
+                )
+            else:
                 recorded = runtime_session.record_frontend_message_for_update(
                     self,
                     update,
@@ -1425,29 +1570,40 @@ class FlexibleAgentRuntime:
                         else None
                     ),
                 )
-                bind_presentation = getattr(
-                    sent, "_hashi_bind_presentation_message", None
+            bind_presentation = getattr(
+                sent, "_hashi_bind_presentation_message", None
+            )
+            if callable(bind_presentation) and recorded is not None:
+                bind_presentation(recorded)
+            return sent
+        except RetryAfter as exc:
+            if claim is not None:
+                self.session_store.complete_delivery_outbox(
+                    outbox_id=str(claim["outbox_id"]),
+                    lease_token=str(claim["lease_token"]),
+                    status="failed",
+                    error_code="telegram_retry_after",
                 )
-                if callable(bind_presentation) and recorded is not None:
-                    bind_presentation(recorded)
-                return sent
-            except RetryAfter as exc:
-                last_error = exc
-                await telegram_delivery_failover.handle_retry_after(
-                    self,
-                    exc=exc,
-                    chat_id=chat_id,
-                    request_id=request_id,
-                    purpose=purpose,
-                    text=text,
+            await telegram_delivery_failover.handle_retry_after(
+                self,
+                exc=exc,
+                chat_id=chat_id,
+                request_id=request_id,
+                purpose=purpose,
+                text=text,
+            )
+            self.telegram_logger.warning(f"Reply failed: {exc}")
+            return None
+        except Exception as exc:
+            if claim is not None:
+                self.session_store.complete_delivery_outbox(
+                    outbox_id=str(claim["outbox_id"]),
+                    lease_token=str(claim["lease_token"]),
+                    status="unknown",
+                    error_code="telegram_reply_outcome_unknown",
                 )
-                self.telegram_logger.warning(f"Reply failed: {exc}")
-                return None
-            except Exception as e:
-                last_error = e
-                self.telegram_logger.warning(f"Reply failed: {e}")
-                await asyncio.sleep(0.8)
-        raise last_error
+            self.telegram_logger.warning(f"Reply failed: {exc}")
+            raise
 
     async def _send_text(self, chat_id: int, text: str, **kwargs):
         apply_disable_notification_default(self, kwargs)
@@ -1463,6 +1619,20 @@ class FlexibleAgentRuntime:
             if parse_mode in {"markdown", "markdownv2"}
             else "plain-text"
         )
+        reply_markup = kwargs.get("reply_markup")
+        presentation_channel = (
+            "notification"
+            if "notification" in purpose
+            else "error"
+            if "error" in purpose
+            else "status"
+        )
+        standard_message_context = runtime_delivery.telegram_presentation_context(
+            text=text,
+            content_format=content_format,
+            presentation_channel=presentation_channel,
+            reply_markup=reply_markup,
+        )
         if delivery_mode != "failover_notice":
             if await telegram_delivery_failover.handle_blocked_send(
                 self,
@@ -1472,14 +1642,110 @@ class FlexibleAgentRuntime:
                 text=text,
             ):
                 return None
-        last_error = None
-        for _ in range(2):
-            try:
-                sent = await self.app.bot.send_message(
-                    chat_id=chat_id,
-                    text=text,
-                    **kwargs,
+        publication = None
+        claim = None
+        runtime_session.ensure_store(self)
+        if getattr(self, "session_store", None) is not None:
+            publication_identity = str(request_id or f"local-{uuid4().hex}")
+            publication_id = "send_" + hashlib.sha256(
+                f"{publication_identity}\0{purpose}\0{text}".encode("utf-8")
+            ).hexdigest()
+            publication = runtime_session.publish_frontend_message(
+                self,
+                role="assistant",
+                text=text,
+                source="telegram.send",
+                publication_id=publication_id,
+                surface="telegram",
+                channel_key=str(chat_id),
+                content_format=content_format,
+                presentation_channel=presentation_channel,
+                message_context=standard_message_context,
+            )
+            from orchestrator.frontend_connector_registry import endpoint_id_for
+
+            endpoint_id = endpoint_id_for(
+                "telegram",
+                ingress_transport="telegram",
+                channel_key=str(chat_id),
+            )
+            claims = self.session_store.claim_delivery_outbox(
+                session_id=str(publication["session_id"]),
+                owner_id=str(publication["owner_id"]),
+                worker_id=f"fc-telegram-notice-{self.name}-{uuid4().hex}",
+                event_id=str(publication["delivery_event_id"]),
+                connector_id="telegram",
+                endpoint_id=endpoint_id,
+                limit=1,
+            )
+            if not claims:
+                return None
+            claim = claims[0]
+        try:
+            send_text = text
+            send_kwargs = dict(kwargs)
+            if publication is not None and claim is not None:
+                from orchestrator.frontend_connector_registry import (
+                    require_connector_event,
                 )
+                from orchestrator.frontend_dispatch import (
+                    project_claimed_frontend_event,
+                )
+
+                standard_event = project_claimed_frontend_event(
+                    self.session_store,
+                    claim,
+                    session_id=str(publication["session_id"]),
+                    owner_id=str(publication["owner_id"]),
+                )
+                require_connector_event("telegram", standard_event)
+                runtime_delivery.require_matching_telegram_rendition(
+                    standard_event,
+                    text=text,
+                    content_format=content_format,
+                )
+                canonical_markup = runtime_delivery.telegram_reply_markup_for_event(
+                    self, standard_event
+                )
+                if canonical_markup is not None:
+                    send_kwargs["reply_markup"] = canonical_markup
+                elif reply_markup is None:
+                    send_kwargs.pop("reply_markup", None)
+            sent = await self.app.bot.send_message(
+                chat_id=chat_id,
+                text=send_text,
+                **send_kwargs,
+            )
+            if publication is not None and claim is not None:
+                transport_message_id = getattr(sent, "message_id", None)
+                receipt_status = (
+                    "delivered" if transport_message_id is not None else "accepted"
+                )
+                self.session_store.record_frontend_delivery_receipt(
+                    session_id=str(publication["session_id"]),
+                    owner_id=str(publication["owner_id"]),
+                    receipt={
+                        "type": "hashi.delivery-receipt",
+                        "version": 1,
+                        "event_id": str(publication["delivery_event_id"]),
+                        "endpoint_id": str(claim["endpoint_id"]),
+                        "status": receipt_status,
+                        "proof": (
+                            {
+                                "type": "telegram-message-id",
+                                "value": str(transport_message_id),
+                            }
+                            if transport_message_id is not None
+                            else None
+                        ),
+                    },
+                )
+                self.session_store.complete_delivery_outbox(
+                    outbox_id=str(claim["outbox_id"]),
+                    lease_token=str(claim["lease_token"]),
+                    status="completed",
+                )
+            else:
                 runtime_session.record_frontend_message(
                     self,
                     role="assistant",
@@ -1490,28 +1756,37 @@ class FlexibleAgentRuntime:
                     channel_key=str(chat_id),
                     content_format=content_format,
                 )
-                return sent
-            except RetryAfter as exc:
-                last_error = exc
-                await telegram_delivery_failover.handle_retry_after(
-                    self,
-                    exc=exc,
-                    chat_id=chat_id,
-                    request_id=request_id,
-                    purpose=purpose,
-                    text=text,
+            return sent
+        except RetryAfter as exc:
+            if claim is not None:
+                self.session_store.complete_delivery_outbox(
+                    outbox_id=str(claim["outbox_id"]),
+                    lease_token=str(claim["lease_token"]),
+                    status="failed",
+                    error_code="telegram_retry_after",
                 )
-                self.telegram_logger.warning(f"Send failed: {exc}")
-                if raise_delivery_error:
-                    raise
-                return None
-            except Exception as e:
-                last_error = e
-                self.telegram_logger.warning(f"Send failed: {e}")
-                if raise_delivery_error:
-                    raise
-                await asyncio.sleep(0.8)
-        raise last_error
+            await telegram_delivery_failover.handle_retry_after(
+                self,
+                exc=exc,
+                chat_id=chat_id,
+                request_id=request_id,
+                purpose=purpose,
+                text=text,
+            )
+            self.telegram_logger.warning(f"Send failed: {exc}")
+            if raise_delivery_error:
+                raise
+            return None
+        except Exception as exc:
+            if claim is not None:
+                self.session_store.complete_delivery_outbox(
+                    outbox_id=str(claim["outbox_id"]),
+                    lease_token=str(claim["lease_token"]),
+                    status="unknown",
+                    error_code="telegram_send_outcome_unknown",
+                )
+            self.telegram_logger.warning(f"Send failed: {exc}")
+            raise
 
     def _backend_busy(self) -> bool:
         return self.is_generating or (not self.queue.empty())
@@ -2295,54 +2570,104 @@ class FlexibleAgentRuntime:
         request_id: str,
         force: bool = False,
     ) -> bool | None:
-        """Send voice and preserve Telegram's ambiguous timeout outcome.
+        """Publish a Telegram-local voice rendition through the FC outbox.
 
         ``True`` is an acknowledged delivery, ``False`` is a hard failure,
-        and ``None`` means Telegram may have accepted the upload before the
-        acknowledgement timed out.  That last case must never be retried.
+        and ``None`` is an ambiguous outcome that must never be retried.
         """
-        # Guard: skip if Telegram not connected
         if not self.telegram_connected:
             return False
+        publication = None
         try:
+            from orchestrator.frontend_connector_registry import (
+                endpoint_id_for,
+                get_connector_customization,
+            )
+
+            customization = get_connector_customization(
+                "telegram",
+                kind="presentation_override",
+                key="voice_rendition",
+            )
+            if not customization or customization.get("route") != "connector_local":
+                raise RuntimeError("Telegram voice rendition is not registered in FC")
             asset = await self.voice_manager.synthesize_reply(self.name, request_id, text, force=force)
             if asset is None:
                 return False
-            max_attempts = 3
-            last_error = None
-            for attempt in range(1, max_attempts + 1):
+            payload = asset.ogg_path.read_bytes()
+            publication = runtime_session.publish_frontend_media_notification(
+                self,
+                filename=asset.ogg_path.name,
+                media_type="audio/ogg",
+                payload=payload,
+                sha256=hashlib.sha256(payload).hexdigest(),
+                caption="",
+                publication_id=(
+                    "voice-rendition:"
+                    + hashlib.sha256(
+                        f"{request_id}\0{text}".encode("utf-8")
+                    ).hexdigest()
+                ),
+                surface="telegram",
+                channel_key=str(chat_id),
+                semantic_role="voice_message",
+            )
+            endpoint_id = endpoint_id_for(
+                "telegram",
+                ingress_transport="telegram",
+                channel_key=str(chat_id),
+            )
+            claims = self.session_store.claim_delivery_outbox(
+                session_id=str(publication["session_id"]),
+                owner_id=str(publication["owner_id"]),
+                worker_id=f"fc-telegram-voice-{self.name}-{uuid4().hex}",
+                event_id=str(publication["delivery_event_id"]),
+                connector_id="telegram",
+                endpoint_id=endpoint_id,
+                limit=1,
+            )
+            if claims:
+                await runtime_delivery.dispatch_claimed_telegram_event(
+                    self,
+                    chat_id=chat_id,
+                    store=self.session_store,
+                    claim=claims[0],
+                    frontend_owner_id=str(publication["owner_id"]),
+                    request_id=request_id,
+                    purpose="voice-rendition",
+                    include_text=False,
+                )
+            receipts = self.session_store.frontend_delivery_receipts(
+                session_id=str(publication["session_id"]),
+                owner_id=str(publication["owner_id"]),
+                event_id=str(publication["delivery_event_id"]),
+            )
+            status = str(receipts[-1]["status"] if receipts else "unknown")
+            if status in {"accepted", "delivered"}:
+                return True
+            if status == "unknown":
+                return None
+            return False
+        except Exception as exc:
+            status = ""
+            if publication is not None:
                 try:
-                    with asset.ogg_path.open("rb") as f:
-                        await self.app.bot.send_voice(
-                            chat_id=chat_id, voice=f,
-                            read_timeout=30, write_timeout=30, connect_timeout=15,
-                        )
-                    self.telegram_logger.info(
-                        f"Sent Telegram voice reply for request_id={request_id} "
-                        f"(path={asset.ogg_path.name}, attempt={attempt})"
+                    receipts = self.session_store.frontend_delivery_receipts(
+                        session_id=str(publication["session_id"]),
+                        owner_id=str(publication["owner_id"]),
+                        event_id=str(publication["delivery_event_id"]),
                     )
-                    return True
-                except TelegramTimedOut as e:
-                    # TimedOut means the request may have reached Telegram but we didn't
-                    # get an ack. Retrying risks sending a duplicate — don't retry.
-                    self.telegram_logger.warning(
-                        f"Voice reply timed out for {request_id} (not retrying to avoid duplicate): {e}"
+                    status = str(
+                        receipts[-1]["status"] if receipts else ""
                     )
-                    return None
-                except Exception as e:
-                    last_error = e
-                    if attempt >= max_attempts:
-                        break
-                    delay_s = float(attempt)
-                    self.telegram_logger.warning(
-                        f"Voice reply send attempt {attempt}/{max_attempts} failed for "
-                        f"{request_id}: {e}. Retrying in {delay_s:.1f}s."
-                    )
-                    await asyncio.sleep(delay_s)
-            raise last_error or RuntimeError("Unknown voice send failure")
-        except Exception as e:
-            self.error_logger.error(f"Voice reply failed for {request_id}: {e}")
-            self._mark_error(f"Voice reply failed: {e}")
+                except Exception:
+                    status = ""
+            self.error_logger.error(
+                f"Voice reply failed for {request_id}: {type(exc).__name__}"
+            )
+            if status == "unknown":
+                return None
+            self._mark_error(f"Voice reply failed: {type(exc).__name__}")
             return False
 
     def tui_voice_state(self) -> dict[str, Any]:
@@ -2689,7 +3014,20 @@ class FlexibleAgentRuntime:
                             "Exchange HChat reply failed for %s",
                             sender_address,
                         )
-                    return
+                    return {
+                        "attempted": True,
+                        "delivered": False,
+                        "surface": "exchange",
+                        "channel_key": sender_address,
+                        "transport": "exchange",
+                        "disposition": (
+                            "exchange_queue_accepted"
+                            if ok
+                            else "exchange_queue_rejected"
+                        ),
+                        "state": "queued" if ok else "failed",
+                        "message_id": reply_message_id,
+                    }
 
         try:
             from tools.hchat_send import (
@@ -3291,6 +3629,18 @@ class FlexibleAgentRuntime:
             chat_id = getattr(getattr(message, "chat", None), "id", None)
         if chat_id is None or not assets:
             return 0
+        from orchestrator.frontend_connector_registry import (
+            endpoint_id_for,
+            get_connector_customization,
+        )
+
+        customization = get_connector_customization(
+            "telegram",
+            kind="presentation_override",
+            key="voice_profile_preview",
+        )
+        if not customization or customization.get("route") != "connector_local":
+            raise RuntimeError("Telegram voice preview is not registered in FC")
         profile_label = ui_language.tr(f"voice.profile.{profile_id}")
         sent = 0
         for renderer, path in assets:
@@ -3299,31 +3649,68 @@ class FlexibleAgentRuntime:
                 voice=profile_label,
             )
             try:
-                with path.open("rb") as handle:
-                    await self.app.bot.send_voice(
-                        chat_id=chat_id,
-                        voice=handle,
-                        caption=caption,
-                        read_timeout=30,
-                        write_timeout=30,
-                        connect_timeout=15,
-                    )
-                sent += 1
-            except TelegramTimedOut as exc:
-                # Telegram may already have accepted the upload. A retry can
-                # duplicate the preview, so leave this result ambiguous.
-                self.telegram_logger.warning(
-                    "Voice preview timed out without retry: profile=%s renderer=%s error=%s",
-                    profile_id,
-                    renderer,
-                    exc,
+                payload = path.read_bytes()
+                publication_id = (
+                    "voice-profile-preview:"
+                    + hashlib.sha256(
+                        f"{profile_id}\0{renderer}\0".encode("utf-8")
+                        + payload
+                    ).hexdigest()
                 )
+                publication = runtime_session.publish_frontend_media_notification(
+                    self,
+                    filename=path.name,
+                    media_type="audio/ogg",
+                    payload=payload,
+                    sha256=hashlib.sha256(payload).hexdigest(),
+                    caption=caption,
+                    publication_id=publication_id,
+                    surface="telegram",
+                    channel_key=str(chat_id),
+                    semantic_role="voice_message",
+                )
+                endpoint_id = endpoint_id_for(
+                    "telegram",
+                    ingress_transport="telegram",
+                    channel_key=str(chat_id),
+                )
+                claims = self.session_store.claim_delivery_outbox(
+                    session_id=str(publication["session_id"]),
+                    owner_id=str(publication["owner_id"]),
+                    worker_id=f"fc-telegram-preview-{self.name}-{uuid4().hex}",
+                    event_id=str(publication["delivery_event_id"]),
+                    connector_id="telegram",
+                    endpoint_id=endpoint_id,
+                    limit=1,
+                )
+                if claims:
+                    await runtime_delivery.dispatch_claimed_telegram_event(
+                        self,
+                        chat_id=int(chat_id),
+                        store=self.session_store,
+                        claim=claims[0],
+                        frontend_owner_id=str(publication["owner_id"]),
+                        request_id=publication_id,
+                        purpose="voice-profile-preview",
+                        include_text=False,
+                    )
+                receipts = self.session_store.frontend_delivery_receipts(
+                    session_id=str(publication["session_id"]),
+                    owner_id=str(publication["owner_id"]),
+                    event_id=str(publication["delivery_event_id"]),
+                )
+                if receipts and str(receipts[-1]["status"]) in {
+                    "accepted",
+                    "delivered",
+                }:
+                    sent += 1
             except Exception as exc:
                 self.error_logger.error(
-                    "Voice preview delivery failed: profile=%s renderer=%s error=%s",
+                    "Voice preview delivery was not confirmed: "
+                    "profile=%s renderer=%s error_type=%s",
                     profile_id,
                     renderer,
-                    exc,
+                    type(exc).__name__,
                 )
         return sent
 
@@ -10071,6 +10458,7 @@ class FlexibleAgentRuntime:
         frontend_session_id: str | None = None,
         frontend_owner_id: str | None = None,
         frontend_outbox: bool = False,
+        include_canonical_text: bool = True,
     ):
         return await runtime_delivery.send_long_message(
             self,
@@ -10084,6 +10472,7 @@ class FlexibleAgentRuntime:
             frontend_session_id=frontend_session_id,
             frontend_owner_id=frontend_owner_id,
             frontend_outbox=frontend_outbox,
+            include_canonical_text=include_canonical_text,
         )
 
     async def typing_loop(self, chat_id: int, stop_event: asyncio.Event):
@@ -10254,6 +10643,13 @@ class FlexibleAgentRuntime:
         async def _rollover_placeholder(text: str) -> bool:
             nonlocal current_message, last_edit_at, last_rendered_text, dirty, edit_attempts, display_disabled
             try:
+                from orchestrator.frontend_connector_registry import (
+                    require_connector_presentation_override,
+                )
+
+                require_connector_presentation_override(
+                    "telegram", "ephemeral_progress"
+                )
                 current_message = await self.app.bot.send_message(
                     chat_id=chat_id,
                     text=text,
@@ -10559,7 +10955,12 @@ class FlexibleAgentRuntime:
     # Think mode: periodic flushing of thinking traces as permanent messages
     # ------------------------------------------------------------------
 
-    async def _flush_thinking(self, chat_id: int):
+    async def _flush_thinking(
+        self,
+        chat_id: int,
+        *,
+        request_id: str | None = None,
+    ):
         """Send accumulated thinking events to Telegram, console, and transcript."""
         if not bool(getattr(self, "_think", True)):
             self._think_buffer.clear()
@@ -10582,35 +10983,24 @@ class FlexibleAgentRuntime:
         if not self.telegram_connected:
             return
         _think_raw = f"💭 {text}"
-        _think_msg = _md_to_html(_think_raw)
-        if len(_think_msg) > 3800:
-            # Long Codex commentary is intentionally not clipped. Reuse the
-            # normal Telegram chunker so every character reaches the user.
-            await self.send_long_message(chat_id, _think_raw, purpose="think")
-            return
         try:
-            await self.app.bot.send_message(
+            send_options = {"purpose": "think"}
+            if request_id:
+                send_options["request_id"] = request_id
+            await self.send_long_message(
                 chat_id=chat_id,
-                text=_think_msg,
-                parse_mode="HTML",
-                disable_notification=disable_notification(self, purpose="think"),
+                text=_think_raw,
+                **send_options,
             )
         except Exception as e:
-            if "ConnectError" in type(e).__name__ or "ConnectError" in str(e):
-                await asyncio.sleep(2)
-                try:
-                    await self.app.bot.send_message(
-                        chat_id=chat_id,
-                        text=_think_msg,
-                        parse_mode="HTML",
-                        disable_notification=disable_notification(self, purpose="think"),
-                    )
-                except Exception as e2:
-                    self.telegram_logger.warning(f"Failed to send thinking message (retry): {e2}")
-            else:
-                self.telegram_logger.warning(f"Failed to send thinking message: {e}")
+            self.telegram_logger.warning(f"Failed to send thinking message: {e}")
 
-    async def _flush_commentary(self, chat_id: int):
+    async def _flush_commentary(
+        self,
+        chat_id: int,
+        *,
+        request_id: str | None = None,
+    ):
         """Deliver model-authored commentary without recasting it as thought."""
 
         buffer = getattr(self, "_commentary_buffer", None)
@@ -10630,40 +11020,38 @@ class FlexibleAgentRuntime:
         if not self.telegram_connected:
             return
         raw = f"💬 {text}"
-        rendered = _md_to_html(raw)
-        if len(rendered) > 3_500:
+        try:
+            send_options = {"purpose": "task_commentary"}
+            if request_id:
+                send_options["request_id"] = request_id
             await self.send_long_message(
                 chat_id,
                 raw,
-                purpose="task_commentary",
-            )
-            return
-        try:
-            await self.app.bot.send_message(
-                chat_id=chat_id,
-                text=rendered,
-                parse_mode="HTML",
-                disable_notification=disable_notification(
-                    self, purpose="task_commentary"
-                ),
+                **send_options,
             )
         except Exception as exc:
             self.telegram_logger.warning(
                 f"Failed to send commentary message: {exc}"
             )
 
-    async def _thinking_flush_loop(self, chat_id: int, stop_event: asyncio.Event):
+    async def _thinking_flush_loop(
+        self,
+        chat_id: int,
+        stop_event: asyncio.Event,
+        *,
+        request_id: str | None = None,
+    ):
         """Periodically flush the independent reasoning/commentary channels."""
         while not stop_event.is_set():
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=6)
-                await self._flush_thinking(chat_id)
-                await self._flush_commentary(chat_id)
+                await self._flush_thinking(chat_id, request_id=request_id)
+                await self._flush_commentary(chat_id, request_id=request_id)
                 break  # stop_event was set
             except asyncio.TimeoutError:
                 pass  # 6s elapsed — flush
-            await self._flush_thinking(chat_id)
-            await self._flush_commentary(chat_id)
+            await self._flush_thinking(chat_id, request_id=request_id)
+            await self._flush_commentary(chat_id, request_id=request_id)
 
     def _wrapper_enabled(self) -> bool:
         return runtime_wrapper.wrapper_enabled(self)

@@ -378,6 +378,23 @@ def test_content_component_normalization_supports_standard_components():
     assert normalized[5]["role"] == "voice_message"
 
 
+def test_standard_content_capacity_covers_large_connector_button_displays():
+    from orchestrator.frontend_contracts import normalize_content_blocks
+
+    blocks = [{"type": "text", "text": "Choose"}]
+    blocks.extend(
+        {
+            "type": "action",
+            "action_id": f"choice_{index}",
+            "label": f"Choice {index}",
+        }
+        for index in range(100)
+    )
+    assert len(normalize_content_blocks(blocks)) == 101
+    with pytest.raises(ValueError, match="maximum limit of 128"):
+        normalize_content_blocks(blocks + blocks[:28])
+
+
 def test_admission_receipt_normalization():
     from orchestrator.frontend_contracts import normalize_admission_receipt
 
@@ -445,7 +462,7 @@ async def test_t01_t12_dynamic_third_connector_registration_and_reference_adapte
         assert canonical_connector_id(custom_id) == custom_id
         caps = get_connector_capabilities(custom_id)
         assert caps["connector_id"] == custom_id
-        assert caps["protocol_version"] == 2
+        assert caps["protocol_version"] == 3
         assert "message" in caps["ingress"]
         assert caps["endpoint_registered"] is True
         assert caps["ready"] is True
@@ -519,4 +536,5 @@ async def test_t01_t12_dynamic_third_connector_registration_and_reference_adapte
             await adapter.dispatch(test_event)
     finally:
         unregister_connector(custom_id)
-        assert canonical_connector_id(custom_id) == "external"
+        with pytest.raises(ValueError, match="unregistered frontend connector"):
+            canonical_connector_id(custom_id)

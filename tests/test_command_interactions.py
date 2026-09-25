@@ -5,6 +5,7 @@ import asyncio
 import dataclasses
 import json
 import unittest
+from unittest import mock
 
 import pytest
 
@@ -66,6 +67,13 @@ class MenuTests(unittest.IsolatedAsyncioTestCase):
         ref = initial.messages[0]['message_ref']
         self.assertLess(menu.message_id, 0)
         self.assertNotIn('example:next', json.dumps(initial.messages))
+        presentation = initial.messages[0]['presentation']
+        self.assertEqual(presentation['interface_kind'], 'display')
+        self.assertEqual(presentation['semantic_kind'], 'command_result')
+        self.assertEqual(
+            [block['interface_kind'] for block in presentation['content_blocks'][1:]],
+            ['button', 'button'],
+        )
         result = await self.action(menu)
         self.assertTrue(result['ok'])
         self.assertEqual(self.calls, ['example:next'])
@@ -210,6 +218,19 @@ class MenuTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(menu.closed)
         self.assertEqual(capture.messages[0]['op'], 'delete')
         self.assertEqual(capture.messages[0]['command_ui']['rows'], [])
+
+    async def test_generated_button_id_always_satisfies_standard_action_contract(self):
+        with mock.patch(
+            'orchestrator.command_interactions.secrets.token_urlsafe',
+            return_value='-leading-url-safe-token',
+        ):
+            capture, menu = await self.open()
+
+        self.assertTrue(menu.rows[0][0]['button_id'].startswith('act_'))
+        self.assertEqual(
+            capture.messages[0]['presentation']['content_blocks'][1]['action_id'],
+            menu.rows[0][0]['button_id'],
+        )
 
     async def test_captured_menu_exposes_stable_presentation_identity_and_persists_edits(self):
         persisted = []

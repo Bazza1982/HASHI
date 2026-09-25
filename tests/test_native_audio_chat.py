@@ -386,8 +386,17 @@ def test_audio_duration_limit_uses_verified_duration_instead_of_rejecting_all(
 def test_first_ready_audio_transcript_is_canonical_and_direct_finish_reuses_it(
     tmp_path,
 ):
+    from orchestrator.frontend_delivery import freeze_run_delivery_route
+
     store = SessionStore(tmp_path / "state" / "sessions.sqlite3")
     session = store.create_session(owner_id="user:7", agent_id="arale")
+    route = freeze_run_delivery_route(
+        message_source_id="telegram",
+        session_surface="telegram",
+        session_channel_key="7",
+        chat_id=7,
+        telegram_requested=False,
+    )
     accepted = store.accept_run(
         session_id=session["session_id"],
         owner_id="user:7",
@@ -396,6 +405,7 @@ def test_first_ready_audio_transcript_is_canonical_and_direct_finish_reuses_it(
         text="voice turn",
         source="test",
         idempotency_key="idem-first-ready",
+        delivery_route=route,
     )
     output = store.audio_assets.create(
         _wav_bytes(tmp_path / "reply.wav"),
@@ -466,6 +476,31 @@ def test_first_ready_audio_transcript_is_canonical_and_direct_finish_reuses_it(
         for event in store.events(session["session_id"], owner_id="user:7")
         if event["kind"].startswith("assistant.output")
     ] == ["assistant.output.available", "assistant.output.resolved"]
+    durable_events = store.events(session["session_id"], owner_id="user:7")
+    available_event = next(
+        event
+        for event in durable_events
+        if event["kind"] == "assistant.output.available"
+    )
+    terminal_event = next(
+        event for event in durable_events if event["kind"] == "run.completed"
+    )
+    assert len(
+        store.claim_delivery_outbox(
+            session_id=session["session_id"],
+            owner_id="user:7",
+            worker_id="native-audio-first-ready-worker",
+            event_id=available_event["event_id"],
+            limit=1,
+        )
+    ) == 1
+    assert store.claim_delivery_outbox(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        worker_id="native-audio-terminal-worker",
+        event_id=terminal_event["event_id"],
+        limit=1,
+    ) == []
 
 
 def test_accepted_input_and_output_transcripts_enter_pcm_history_with_provenance(

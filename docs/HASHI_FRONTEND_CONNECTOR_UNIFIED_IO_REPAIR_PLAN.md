@@ -967,3 +967,20 @@ Telegram 原生 slash/callback 的持久去重切片已完成离线验证，但�
 - 修正后 HASHI 聚焦候选回归为 **322 passed / 4 subtests passed**；完整提交前门禁为 **709 passed / 3 failed**，三个失败均明确来自 generation 门禁拒绝未提交 Function 源码，未发现其他行为失败。必须在干净提交后重跑，不能提前记通过。
 - HASHI 候选提交后在干净 HEAD 上重跑完整门禁，结果为 **712 passed / 0 failed / 0 skipped**；三个 generation 失败全部消失，Protected Core 检查继续通过。该结果确认源码候选合格，不改变“尚未运行采用和现场验收”的边界。
 - Workbench 完整服务测试为 **579 passed / 0 failed / 0 skipped**，UI policy 为 **589 passed / 0 failed / 0 skipped**，生产构建成功。HASHI1 与 HASHI2 的只读健康端点均为 `ready`；HASHI2 未被修改或重启。HASHI1 运行 generation 仍是旧候选，以上仍是源码/离线证据，不是采用或现场交付。
+
+### 标准 FC 收敛补记（2026-09-26）
+
+- 统一契约现已成为生产入口和出口的共同路径，而不是只供符合性测试调用：
+  正常消息/命令/动作经登记 adapter 接纳；持久用户输出先成为 PAO
+  Message/Event 和逐 endpoint outbox，再由 Connector renderer 发送。
+- Telegram inline keyboard 已转成标准 action/button；HTML 和媒体发送形式只
+  作为本地 rendition。TUI 和 WhatsApp 的局部命令、Telegram 临时进度、回调
+  原位编辑及无 Worker 故障提示均有 FC Registry 登记，未登记例外 fail closed。
+- 清除了独立文件工具、新闻投递和原生音频的并行直发；Remote/Exchange 和
+  WhatsApp 出口使用标准 dispatcher/receipt。首次可用的原生音频不会在 Run
+  完成时二次排队，unknown 结果仍禁止盲目重发。
+- 外部前端程序、Telegram 平台和 Protected Core 未修改。TUI 保持本地体验，
+  兼容 Backend API 路由继续作为薄 adapter，而不是第二套业务状态。
+- M1/M2 源码范围现已收敛；干净提交后的 Function generation/Core gate 仍待
+  最终记录。HASHI1 Worker 尚未热采用，真实前端及回滚验收未执行，M3 保持
+  未完成。

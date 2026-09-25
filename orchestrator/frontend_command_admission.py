@@ -120,7 +120,10 @@ def reserve_telegram_command_invocation(
     from orchestrator.command_interaction_bridge import (
         build_frontend_command_invocation,
     )
-    from orchestrator.frontend_connector_registry import endpoint_id_for
+    from orchestrator.frontend_connector_registry import (
+        endpoint_id_for,
+        require_connector_operation,
+    )
     from orchestrator.runtime_session import current_session_for_update, owner_id
     from orchestrator.slash_command_audit import redact_args
 
@@ -146,6 +149,7 @@ def reserve_telegram_command_invocation(
         str(getattr(update, "_hashi_session_owner_id", None) or "") or None,
     )
     transport = str(ingress_transport or "").strip().casefold()
+    require_connector_operation("telegram", "ingress", "command")
     endpoint_id = endpoint_id_for(
         "telegram",
         ingress_transport=transport,

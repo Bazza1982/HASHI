@@ -157,7 +157,15 @@ def freeze_run_delivery_route(
             else _destination(resolved_surface, resolved_channel)
         )
     elif source_id == "hchat":
-        primary = _destination("hchat", primary_channel)
+        # HChat is the message semantic.  The authenticated transport remains
+        # its own Connector so Remote and Exchange can use separate adapters,
+        # health, receipts, and recovery without pretending to be one another.
+        relay_surface = (
+            resolved_surface
+            if resolved_surface in {"hchat", "remote", "exchange"}
+            else "hchat"
+        )
+        primary = _destination(relay_surface, primary_channel)
     elif source_id == "hashi.internal":
         primary = (
             _destination("telegram", telegram_channel)

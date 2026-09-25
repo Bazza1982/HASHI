@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -68,11 +69,146 @@ def test_attachment_stage_idempotency_reuses_metadata_and_rejects_conflicts(tmp_
 
     with pytest.raises(IdempotencyConflict):
         store.stage_attachment(**{**metadata, "filename": "other.txt"})
-
     distinct = store.stage_attachment(
         **{**metadata, "idempotency_key": "send-attachment-1"}
     )
     assert distinct["attachment_id"] != first["attachment_id"]
+
+
+def test_attachment_cleanup_expires_only_unbound_and_non_inflight_bytes(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+
+    def prepared(name: str, payload: bytes):
+        staged = store.stage_attachment(
+            session_id=session["session_id"],
+            owner_id=owner,
+            filename=name,
+            media_type="text/plain",
+            size_bytes=len(payload),
+            sha256=hashlib.sha256(payload).hexdigest(),
+            retention_seconds=1,
+        )
+        store.upload_attachment_bytes(
+            session_id=session["session_id"],
+            owner_id=owner,
+            attachment_id=staged["attachment_id"],
+            payload=payload,
+        )
+        return staged
+
+    unbound = prepared("unbound.txt", b"unbound")
+    inflight = prepared("inflight.txt", b"inflight")
+    store.commit_attachment(
+        session_id=session["session_id"],
+        owner_id=owner,
+        attachment_id=inflight["attachment_id"],
+    )
+    with store._lock, store._connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        event = store._append_event(
+            connection,
+            session_id=session["session_id"],
+            run_id=None,
+            kind="frontend.media.available",
+            status="ready",
+            phase="publication",
+            summary="Media ready",
+            detail={"attachments": [{"attachment_id": inflight["attachment_id"]}]},
+            outbox=True,
+        )
+        connection.execute(
+            """UPDATE session_attachments SET created_at=?
+               WHERE attachment_id IN (?,?)""",
+            (
+                "2000-01-01T00:00:00Z",
+                unbound["attachment_id"],
+                inflight["attachment_id"],
+            ),
+        )
+
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    expired = store.cleanup_attachments(now=now)
+    assert [item["attachment_id"] for item in expired] == [
+        unbound["attachment_id"]
+    ]
+    assert store.cleanup_attachments(now=now) == []
+    with pytest.raises(SessionConflict):
+        store.commit_attachment(
+            session_id=session["session_id"],
+            owner_id=owner,
+            attachment_id=unbound["attachment_id"],
+        )
+    store.attachment_bytes(
+        session_id=session["session_id"],
+        owner_id=owner,
+        attachment_id=inflight["attachment_id"],
+    )
+
+    claim = store.claim_delivery_outbox(
+        session_id=session["session_id"],
+        owner_id=owner,
+        worker_id="media-test",
+        event_id=event["event_id"],
+        limit=1,
+    )[0]
+    store.complete_delivery_outbox(
+        outbox_id=claim["outbox_id"],
+        lease_token=claim["lease_token"],
+        status="completed",
+    )
+    assert [
+        item["attachment_id"]
+        for item in store.cleanup_attachments(now=now)
+    ] == [inflight["attachment_id"]]
+
+
+def test_message_bound_attachment_becomes_indefinite(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    payload = b"durable history"
+    attachment = store.stage_attachment(
+        session_id=session["session_id"],
+        owner_id=owner,
+        filename="history.txt",
+        media_type="text/plain",
+        size_bytes=len(payload),
+        sha256=hashlib.sha256(payload).hexdigest(),
+        retention_seconds=1,
+    )
+    store.upload_attachment_bytes(
+        session_id=session["session_id"],
+        owner_id=owner,
+        attachment_id=attachment["attachment_id"],
+        payload=payload,
+    )
+    store.commit_attachment(
+        session_id=session["session_id"],
+        owner_id=owner,
+        attachment_id=attachment["attachment_id"],
+    )
+    store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="lily",
+        request_id="req-bound-attachment",
+        text="see attachment",
+        source="api",
+        idempotency_key="bound-attachment",
+        content=[
+            {"type": "text", "text": "see attachment"},
+            {"type": "attachment", "attachment_id": attachment["attachment_id"]},
+        ],
+    )
+    with store._connection() as connection:
+        row = connection.execute(
+            """SELECT retention_indefinite, retention_seconds
+               FROM session_attachments WHERE attachment_id=?""",
+            (attachment["attachment_id"],),
+        ).fetchone()
+    assert tuple(row) == (1, None)
 
 
 def test_voice_transcript_decision_is_fenced_to_its_original_session_generation(tmp_path):
@@ -1128,6 +1264,50 @@ def test_delivery_queue_acknowledgement_is_not_a_delivered_receipt(tmp_path):
     ) == "peer answer"
 
 
+def test_unknown_assistant_delivery_is_not_mislabeled_or_replayed(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    accepted = _complete(
+        store,
+        session_id=session["session_id"],
+        owner_id=owner,
+        request_id="req-unknown-delivery",
+        key="unknown-delivery",
+        text="prompt",
+        answer="answer",
+        source="text",
+    )
+
+    event = store.record_assistant_delivery(
+        accepted.request_id,
+        delivered=False,
+        outcome_state="unknown",
+        surface="whatsapp",
+        channel_key="peer",
+        transport="whatsapp",
+        completion_path="foreground",
+        disposition="connector_outcome_unknown",
+    )
+    duplicate = store.record_assistant_delivery(
+        accepted.request_id,
+        delivered=False,
+        outcome_state="unknown",
+        surface="whatsapp",
+        channel_key="peer",
+        transport="whatsapp",
+        completion_path="foreground",
+        disposition="connector_outcome_unknown",
+    )
+
+    assert event["status"] == "unknown"
+    assert event["detail"]["outcome_state"] == "unknown"
+    assert duplicate["event_id"] == event["event_id"]
+    assert store.latest_delivered_assistant_text(
+        session["session_id"], surface="whatsapp", channel_key="peer"
+    ) is None
+
+
 def test_say_delivery_lookup_targets_telegram_when_command_arrives_via_workbench(
     tmp_path,
 ):
@@ -1897,6 +2077,78 @@ def test_run_delivery_claim_obeys_frozen_destination_and_is_single_attempt(tmp_p
     assert after_completion["state"] == "completed"
 
 
+def test_run_delivery_outbox_is_independent_per_frozen_endpoint(tmp_path):
+    from orchestrator.frontend_delivery import freeze_run_delivery_route
+
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    route = freeze_run_delivery_route(
+        message_source_id="api",
+        session_surface="session-api",
+        session_channel_key="desktop-a",
+        chat_id=7,
+        telegram_requested=True,
+    )
+    accepted = store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="lily",
+        request_id="req-multi-destination",
+        text="question",
+        source="session-api",
+        idempotency_key="multi-destination-key",
+        delivery_route=route,
+    )
+    store.mark_request_running(accepted.request_id, worker_id="test-worker")
+    store.finish_request(
+        accepted.request_id,
+        success=True,
+        assistant_text="answer",
+    )
+
+    telegram = store.claim_run_delivery_outbox(
+        request_id=accepted.request_id,
+        owner_id=owner,
+        surface="telegram",
+        channel_key="7",
+        worker_id="telegram-worker",
+    )
+    assert telegram["state"] == "claimed"
+    store.complete_delivery_outbox(
+        outbox_id=telegram["claim"]["outbox_id"],
+        lease_token=telegram["claim"]["lease_token"],
+        status="completed",
+    )
+
+    session_api = store.claim_run_delivery_outbox(
+        request_id=accepted.request_id,
+        owner_id=owner,
+        surface="session-api",
+        channel_key="desktop-a",
+        worker_id="session-api-worker",
+    )
+    assert session_api["state"] == "claimed"
+    assert (
+        session_api["claim"]["outbox_id"]
+        != telegram["claim"]["outbox_id"]
+    )
+    store.complete_delivery_outbox(
+        outbox_id=session_api["claim"]["outbox_id"],
+        lease_token=session_api["claim"]["lease_token"],
+        status="completed",
+    )
+
+    with sqlite3.connect(store.db_path) as connection:
+        rows = connection.execute(
+            """SELECT endpoint_id, state FROM connector_delivery_tasks
+               WHERE event_id=? ORDER BY endpoint_id""",
+            (telegram["claim"]["event_id"],),
+        ).fetchall()
+    assert len(rows) == 2
+    assert {row[1] for row in rows} == {"completed"}
+
+
 def test_delivery_outbox_adds_claim_columns_to_legacy_session_database(tmp_path):
     path = tmp_path / "state" / "sessions.sqlite3"
     path.parent.mkdir(parents=True)
@@ -1954,7 +2206,8 @@ def test_expired_delivery_claim_becomes_unknown_instead_of_auto_replay(tmp_path)
     )[0]
     with store._connection() as connection:
         connection.execute(
-            "UPDATE delivery_outbox SET lease_expires_at=? WHERE outbox_id=?",
+            """UPDATE connector_delivery_tasks SET lease_expires_at=?
+               WHERE task_id=?""",
             ("2000-01-01T00:00:00+00:00", claimed["outbox_id"]),
         )
 
@@ -1967,10 +2220,73 @@ def test_expired_delivery_claim_becomes_unknown_instead_of_auto_replay(tmp_path)
     assert all(item["outbox_id"] != claimed["outbox_id"] for item in next_claim)
     with store._connection() as connection:
         state = connection.execute(
-            "SELECT state FROM delivery_outbox WHERE outbox_id=?",
+            "SELECT state FROM connector_delivery_tasks WHERE task_id=?",
             (claimed["outbox_id"],),
         ).fetchone()[0]
+        aggregate = connection.execute(
+            "SELECT state FROM delivery_outbox WHERE event_id=?",
+            (claimed["event_id"],),
+        ).fetchone()[0]
     assert state == "unknown"
+    assert aggregate == "unknown"
+
+
+def test_unknown_delivery_requires_connector_evidence_before_retry(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    _complete(
+        store,
+        session_id=session["session_id"],
+        owner_id=owner,
+        request_id="req-outbox-reconcile",
+        key="outbox-reconcile-key",
+        text="question",
+        answer="answer",
+    )
+    claim = store.claim_delivery_outbox(
+        session_id=session["session_id"],
+        owner_id=owner,
+        worker_id="fc-worker-a",
+        limit=1,
+    )[0]
+    store.complete_delivery_outbox(
+        outbox_id=claim["outbox_id"],
+        lease_token=claim["lease_token"],
+        status="unknown",
+        error_code="transport_timeout",
+    )
+    assert all(
+        item["outbox_id"] != claim["outbox_id"]
+        for item in store.claim_delivery_outbox(
+            session_id=session["session_id"],
+            owner_id=owner,
+            worker_id="fc-worker-b",
+            limit=20,
+        )
+    )
+    with pytest.raises(ValueError, match="proof"):
+        store.reconcile_unknown_delivery(
+            outbox_id=claim["outbox_id"],
+            resolution="not_delivered",
+            proof={},
+        )
+
+    reconciled = store.reconcile_unknown_delivery(
+        outbox_id=claim["outbox_id"],
+        resolution="not_delivered",
+        proof={"type": "provider-query", "value": "not-found-1"},
+    )
+    assert reconciled["state"] == "retry"
+    retry = store.claim_delivery_outbox(
+        session_id=session["session_id"],
+        owner_id=owner,
+        worker_id="fc-worker-c",
+        event_id=claim["event_id"],
+        limit=1,
+    )[0]
+    assert retry["outbox_id"] == claim["outbox_id"]
+    assert retry["attempt_count"] == 2
 
 
 def test_presentation_message_returns_same_durable_event_identity_on_replay(tmp_path):

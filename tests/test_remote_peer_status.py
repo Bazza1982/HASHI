@@ -2722,10 +2722,6 @@ def test_protocol_message_preserves_hchat_sender_relay_and_private_proofs(tmp_pa
     manager._inflight_path = tmp_path / "inflight.json"
     manager._peer_registry = None
     manager.get_local_agents_snapshot = lambda: [{"agent_name": "sunny"}]
-    async def transcript_offset(_agent):
-        return 0
-
-    manager._get_transcript_offset = transcript_offset
     manager._save_inflight = lambda: None
 
     async def enqueue(agent_name, text, **kwargs):
@@ -2784,37 +2780,26 @@ def test_protocol_ignores_legacy_reply_deadline_instead_of_timing_out():
     assert manager._inflight["active"]["state"] == "delivered_to_local_queue"
 
 
-def test_protocol_reply_collection_stops_at_next_user_request_boundary():
+def test_protocol_reply_recovers_durable_identity_for_legacy_inflight_item():
     manager = ProtocolManager.__new__(ProtocolManager)
-    manager._settle_window_seconds = 30
-
-    async def poll_transcript(agent_name, offset):
-        assert agent_name == "agent1"
-        assert offset == 12
+    async def resolve_request_identity(agent_name, request_id):
+        assert (agent_name, request_id) == ("agent1", "req-legacy")
         return {
-            "offset": 900,
-            "messages": [
-                {
-                    "role": "user",
-                    "text": "expected prompt",
-                    "source": "protocol:message",
-                },
-                {
-                    "role": "assistant",
-                    "text": "EXPECTED_REPLY",
-                    "source": "protocol:message",
-                },
-                {
-                    "role": "user",
-                    "text": "unrelated terminal prompt",
-                    "source": "protocol:reply",
-                },
-                {
-                    "role": "assistant",
-                    "text": "UNRELATED_REPLY",
-                    "source": "protocol:reply",
-                },
-            ],
+            "request_id": request_id,
+            "session_id": "ses-legacy",
+            "run_id": "run-legacy",
+        }
+
+    async def poll_session_result(agent_name, session_id, run_id):
+        assert (agent_name, session_id, run_id) == (
+            "agent1",
+            "ses-legacy",
+            "run-legacy",
+        )
+        return {
+            "state": "completed",
+            "request_id": "req-legacy",
+            "text": "EXPECTED_REPLY",
         }
 
     sent = []
@@ -2823,24 +2808,144 @@ def test_protocol_reply_collection_stops_at_next_user_request_boundary():
         sent.append(reply_text)
         return True
 
-    manager._poll_transcript = poll_transcript
+    manager._resolve_request_identity = resolve_request_identity
+    manager._poll_session_result = poll_session_result
     manager._send_agent_reply = send_agent_reply
     item = {
         "to_agent": "agent1",
-        "prompt_text": "expected prompt",
-        "last_seen_offset": 12,
-        "matched_user_prompt": False,
+        "request_id": "req-legacy",
         "state": "delivered_to_local_queue",
     }
 
     changed = asyncio.run(manager._advance_inflight_item(item, now=100.0))
 
     assert changed is True
-    assert item["last_seen_offset"] == 900
-    assert item["assistant_segments"] == ["EXPECTED_REPLY"]
+    assert item["session_id"] == "ses-legacy"
+    assert item["run_id"] == "run-legacy"
     assert item["reply_text"] == "EXPECTED_REPLY"
     assert item["state"] == "reply_sent"
     assert sent == ["EXPECTED_REPLY"]
+
+
+def test_protocol_reply_uses_canonical_run_result_not_transcript_matching():
+    manager = ProtocolManager.__new__(ProtocolManager)
+
+    async def poll_session_result(agent_name, session_id, run_id):
+        assert agent_name == "agent1"
+        assert session_id == "ses-1"
+        assert run_id == "run-1"
+        return {
+            "state": "completed",
+            "request_id": "req-1",
+            "text": "EXPECTED_REPLY",
+        }
+
+    async def transcript_must_not_be_read(*_args, **_kwargs):
+        raise AssertionError("typed Run correlation must not scan transcript text")
+
+    sent = []
+
+    async def send_agent_reply(_item, reply_text):
+        sent.append(reply_text)
+        return True
+
+    manager._poll_session_result = poll_session_result
+    manager._poll_transcript = transcript_must_not_be_read
+    manager._send_agent_reply = send_agent_reply
+    item = {
+        "to_agent": "agent1",
+        "request_id": "req-1",
+        "session_id": "ses-1",
+        "run_id": "run-1",
+        "state": "delivered_to_local_queue",
+    }
+
+    changed = asyncio.run(manager._advance_inflight_item(item, now=100.0))
+
+    assert changed is True
+    assert item["reply_text"] == "EXPECTED_REPLY"
+    assert item["state"] == "reply_sent"
+    assert sent == ["EXPECTED_REPLY"]
+
+
+def test_protocol_reply_claims_standard_fc_event_before_transport(tmp_path):
+    from orchestrator.frontend_delivery import freeze_run_delivery_route
+    from orchestrator.session_store import SessionStore
+
+    hashi_root = tmp_path / "hashi"
+    store = SessionStore(
+        hashi_root / "state" / "sessions.sqlite3",
+        instance_id="HASHI1",
+        attachment_root=hashi_root / "media" / "session_attachments",
+    )
+    owner = "user:7"
+    channel_key = "HASHI2:conv-1"
+    session = store.resolve_session(
+        owner_id=owner,
+        agent_id="agent1",
+        surface="remote",
+        channel_key=channel_key,
+    )
+    accepted = store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="agent1",
+        request_id="req-remote-fc",
+        text="question",
+        source="protocol:message",
+        idempotency_key="remote-fc-key",
+        delivery_route=freeze_run_delivery_route(
+            message_source_id="hchat",
+            session_surface="remote",
+            session_channel_key=channel_key,
+            chat_id=7,
+            telegram_requested=False,
+        ),
+    )
+    store.mark_request_running(accepted.request_id, worker_id="test-worker")
+    store.finish_request(
+        accepted.request_id,
+        success=True,
+        assistant_text="standard reply",
+    )
+
+    manager = ProtocolManager.__new__(ProtocolManager)
+    manager._hashi_root = hashi_root
+    manager._instance_info = {"instance_id": "HASHI1"}
+    sent = []
+
+    async def send_agent_reply(_item, reply_text):
+        sent.append(reply_text)
+        return True
+
+    manager._send_agent_reply = send_agent_reply
+    item = {
+        "message_id": "msg-1",
+        "conversation_id": "conv-1",
+        "from_instance": "HASHI2",
+        "from_agent": "sender",
+        "to_agent": "agent1",
+        "request_id": accepted.request_id,
+        "session_id": session["session_id"],
+        "run_id": accepted.run_id,
+        "reply_attachments": [],
+    }
+
+    first = asyncio.run(manager._dispatch_agent_reply(item, "untrusted fallback"))
+    second = asyncio.run(manager._dispatch_agent_reply(item, "must not replay"))
+
+    assert first == {"sent": True, "known_failure": False, "state": "delivered"}
+    assert second == {
+        "sent": True,
+        "known_failure": False,
+        "state": "already_completed",
+    }
+    assert sent == ["standard reply"]
+    receipts = store.frontend_delivery_receipts(
+        session_id=session["session_id"],
+        owner_id=owner,
+    )
+    assert receipts[-1]["status"] == "delivered"
 
 
 def _reply_payload(**overrides):
@@ -2980,7 +3085,13 @@ def test_protocol_reply_enqueue_is_idempotent_and_tool_terminal(monkeypatch):
 
     def post(url, payload, timeout):
         captured.append((url, payload, timeout))
-        return {"ok": True, "request_id": "req-terminal"}
+        return {
+            "ok": True,
+            "request_id": "req-terminal",
+            "session_id": "ses-terminal",
+            "run_id": "run-terminal",
+            "message_id": "msg-terminal",
+        }
 
     manager._post_json = post
     monkeypatch.setattr(
@@ -2988,7 +3099,7 @@ def test_protocol_reply_enqueue_is_idempotent_and_tool_terminal(monkeypatch):
         lambda: ("127.0.0.1",),
     )
 
-    request_id = asyncio.run(
+    acceptance = asyncio.run(
         manager._enqueue_local_prompt(
             "zelda",
             "terminal reply",
@@ -3001,7 +3112,12 @@ def test_protocol_reply_enqueue_is_idempotent_and_tool_terminal(monkeypatch):
         )
     )
 
-    assert request_id == "req-terminal"
+    assert acceptance == {
+        "request_id": "req-terminal",
+        "session_id": "ses-terminal",
+        "run_id": "run-terminal",
+        "message_id": "msg-terminal",
+    }
     # /api/chat acknowledges queue admission with a request id. It does not
     # return the later Telegram transport receipt.
     assert captured[0][0] == "http://127.0.0.1:18804/api/chat"

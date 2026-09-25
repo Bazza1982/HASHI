@@ -17,6 +17,10 @@ from orchestrator.command_interaction_transport import (
     try_dispatch_command_interaction_transport,
 )
 from orchestrator.command_registry import runtime_command_map
+from orchestrator.frontend_compatibility import (
+    ConnectorLocalCommand,
+    normalize_compatibility_command,
+)
 from orchestrator.runtime_command_binding import COMMAND_BINDINGS
 from orchestrator import (
     runtime_menu_views,
@@ -459,6 +463,30 @@ async def execute_local_command(
         if not command_name:
             session.fail("empty command")
             return {"ok": False, "error": "empty command"}
+        try:
+            frontend_boundary = normalize_compatibility_command(
+                command_line,
+                source_channel=source_channel,
+                session_metadata=session_metadata,
+            )
+        except ConnectorLocalCommand as exc:
+            session.block("connector_local_command")
+            return {
+                "ok": False,
+                "command": command_name,
+                "args": args,
+                "error_code": "connector_local_command",
+                "error": str(exc),
+            }
+        except ValueError as exc:
+            session.block("frontend_adapter_rejected")
+            return {
+                "ok": False,
+                "command": command_name,
+                "args": args,
+                "error_code": "frontend_adapter_rejected",
+                "error": str(exc),
+            }
         method_name = f"cmd_{command_name}"
         method = getattr(runtime, method_name, None)
         registry_command = None
@@ -488,7 +516,12 @@ async def execute_local_command(
             command_line,
             session_metadata=local_session_metadata,
         )
-        context = SimpleNamespace(args=args, source_channel=source_channel)
+        context = SimpleNamespace(
+            args=args,
+            source_channel=source_channel,
+            frontend_operation=frontend_boundary["operation"],
+            frontend_connector_id=frontend_boundary["connector_id"],
+        )
 
         lock = getattr(runtime, "_local_admin_lock", None)
         if lock is None:

@@ -1399,12 +1399,18 @@ class ToolRegistry:
                 arguments,
                 secrets=self.secrets,
                 agents_config=self.agents_config,
+                audit_context=self._effective_audit_context(),
+                tool_call_id=tool_call_id,
             )
 
         if tool_name == "telegram_send_file":
             return await execute_telegram_send_file(
                 arguments,
                 secrets=self.secrets,
+                access_root=self.access_roots,
+                workspace_dir=self.workspace_dir,
+                audit_context=self._effective_audit_context(),
+                tool_call_id=tool_call_id,
             )
 
         if tool_name == "frontend_send_attachments":

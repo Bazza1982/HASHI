@@ -18,6 +18,8 @@ _INSTANCE = re.compile(r"^[A-Z][A-Z0-9_-]{0,31}$")
 
 FRONTEND_INGRESS_TYPE = "hashi.frontend-ingress"
 FRONTEND_INGRESS_VERSION = 2
+FRONTEND_REQUEST_TYPE = "hashi.frontend-request"
+FRONTEND_REQUEST_VERSION = 1
 FRONTEND_EVENT_TYPE = "hashi.frontend-event"
 FRONTEND_EVENT_VERSION = 2
 ADMISSION_RECEIPT_TYPE = "hashi.admission-receipt"
@@ -34,6 +36,7 @@ RELAY_ENVELOPE_TYPE = "hashi.frontend-relay"
 RELAY_ENVELOPE_VERSION = 1
 TOOL_INTERACTION_TYPE = "hashi.frontend-tool-interaction"
 TOOL_INTERACTION_VERSION = 1
+MAX_CONTENT_BLOCKS = 128
 
 
 def _object(value: Any, name: str) -> Mapping[str, Any]:
@@ -211,6 +214,144 @@ def build_frontend_ingress_envelope(
             "relay_chain": list(relay_chain),
         }
     )
+
+
+def normalize_frontend_operation(value: Any) -> dict[str, Any]:
+    """Validate the transport-neutral meaning of one frontend request."""
+
+    raw = _object(value, "frontend operation")
+    kind = str(raw.get("kind") or "").strip().casefold()
+    if kind == "message":
+        content_raw = raw.get("content")
+        if not isinstance(content_raw, (list, tuple)) or not content_raw:
+            raise ValueError("message operation requires content")
+        if len(content_raw) > 64:
+            raise ValueError("message operation content exceeds the limit")
+        content: list[dict[str, Any]] = []
+        for ordinal, entry in enumerate(content_raw):
+            item = _object(entry, "message content")
+            item_type = str(item.get("type") or "").strip().casefold()
+            if item_type == "text":
+                text = str(item.get("text") or "")
+                if not text or len(text) > 1_000_000:
+                    raise ValueError("message text is invalid")
+                content.append({"type": "text", "text": text})
+            elif item_type == "attachment_ref":
+                declared_ordinal = item.get("ordinal", ordinal)
+                if declared_ordinal != ordinal:
+                    raise ValueError("message attachment ordinals must preserve order")
+                content.append(
+                    {
+                        "type": "attachment_ref",
+                        "attachment_id": _token(
+                            item.get("attachment_id"), "attachment_id"
+                        ),
+                        "ordinal": ordinal,
+                        "caption": (
+                            _string(item.get("caption"), "caption", maximum=4096)
+                            if item.get("caption")
+                            else None
+                        ),
+                    }
+                )
+            elif item_type == "reply_ref":
+                content.append(
+                    {
+                        "type": "reply_ref",
+                        "event_id": _token(item.get("event_id"), "event_id"),
+                    }
+                )
+            else:
+                raise ValueError(f"unsupported message content type: {item_type}")
+        return {"kind": "message", "content": content}
+
+    if kind == "command":
+        arguments = raw.get("arguments", [])
+        if not isinstance(arguments, (list, tuple)) or len(arguments) > 64:
+            raise ValueError("command arguments must be a list of at most 64 values")
+        return {
+            "kind": "command",
+            "name": _token(
+                str(raw.get("name") or "").lstrip("/"),
+                "command name",
+                maximum=128,
+            ).casefold(),
+            "arguments": [
+                _string(argument, "command argument", maximum=4096)
+                for argument in arguments
+            ],
+        }
+
+    if kind == "action":
+        revision = raw.get("revision")
+        if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+            raise ValueError("action revision is invalid")
+        return {
+            "kind": "action",
+            "action_id": _issued_action_id(raw.get("action_id")),
+            "revision": revision,
+        }
+
+    if kind == "control":
+        action = str(raw.get("action") or "").strip().casefold()
+        if action not in {
+            "cancel",
+            "stop",
+            "steer",
+            "retry",
+            "approve",
+            "reject",
+            "fresh",
+        }:
+            raise ValueError("control action is invalid")
+        return {
+            "kind": "control",
+            "action": action,
+            "target_run_id": (
+                _token(raw.get("target_run_id"), "target_run_id")
+                if raw.get("target_run_id")
+                else None
+            ),
+            "text": (
+                _string(raw.get("text"), "control text", maximum=65536)
+                if raw.get("text")
+                else None
+            ),
+        }
+
+    if kind == "ack":
+        state = str(raw.get("state") or "received").strip().casefold()
+        if state not in {"received", "displayed", "read"}:
+            raise ValueError("ack state is invalid")
+        return {
+            "kind": "ack",
+            "event_id": _token(raw.get("event_id"), "event_id"),
+            "state": state,
+        }
+
+    raise ValueError("frontend operation kind is invalid")
+
+
+def normalize_frontend_request(value: Any) -> dict[str, Any]:
+    """Validate one complete Connector request before it reaches PAO."""
+
+    raw = _object(value, "frontend request")
+    _version(raw, FRONTEND_REQUEST_TYPE, FRONTEND_REQUEST_VERSION)
+    ingress = normalize_frontend_ingress_envelope(raw.get("ingress"))
+    operation = normalize_frontend_operation(raw.get("operation"))
+    from orchestrator.frontend_connector_registry import require_connector_operation
+
+    require_connector_operation(
+        ingress["connector"]["id"], "ingress", operation["kind"]
+    )
+    return {
+        "type": FRONTEND_REQUEST_TYPE,
+        "version": FRONTEND_REQUEST_VERSION,
+        "ingress": ingress,
+        "operation": operation,
+    }
+
+
 def normalize_delivery_intent(value: Any) -> dict[str, Any]:
     """Validate one immutable event-to-endpoint routing decision."""
 
@@ -498,7 +639,11 @@ def normalize_content_component(value: Any) -> dict[str, Any]:
     if component_type == "text":
         text = str(raw.get("text") or "")
         fmt = str(raw.get("format") or "plain").casefold()
-        if fmt not in {"plain", "markdown", "html"}:
+        if fmt == "html":
+            raise ValueError(
+                "standard frontend text must be transport-neutral; HTML belongs in an adapter"
+            )
+        if fmt not in {"plain", "markdown"}:
             raise ValueError("text component format is invalid")
         return {"type": "text", "text": text, "format": fmt}
     elif component_type in {"key_value", "kv"}:
@@ -534,7 +679,14 @@ def normalize_content_component(value: Any) -> dict[str, Any]:
         if style not in {"primary", "secondary", "danger"}:
             raise ValueError("action component style is invalid")
         payload = dict(raw.get("payload") or {}) if isinstance(raw.get("payload"), Mapping) else {}
-        return {"type": "action", "action_id": action_id, "label": label, "style": style, "payload": payload}
+        return {
+            "type": "action",
+            "interface_kind": "button",
+            "action_id": action_id,
+            "label": label,
+            "style": style,
+            "payload": payload,
+        }
     elif component_type == "hint":
         level = str(raw.get("level") or "info").casefold()
         if level not in {"info", "warning", "error"}:
@@ -555,8 +707,10 @@ def normalize_content_component(value: Any) -> dict[str, Any]:
 def normalize_content_blocks(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, (list, tuple)):
         raise ValueError("content_blocks must be a list")
-    if len(value) > 64:
-        raise ValueError("content_blocks exceeds maximum limit of 64")
+    if len(value) > MAX_CONTENT_BLOCKS:
+        raise ValueError(
+            f"content_blocks exceeds maximum limit of {MAX_CONTENT_BLOCKS}"
+        )
     return [normalize_content_component(item) for item in value]
 
 
@@ -608,6 +762,33 @@ def normalize_frontend_event(value: Any) -> dict[str, Any]:
         raw.get("presentation_channel") or "final", "presentation_channel", maximum=64
     ).casefold()
 
+    interface_kind = str(raw.get("interface_kind") or "").strip().casefold()
+    if not interface_kind:
+        if semantic_kind in {"final", "message", "commentary"}:
+            interface_kind = "message"
+        elif semantic_kind in {
+            "meter",
+            "herv2",
+            "command",
+            "command_result",
+            "approval",
+            "status",
+            "error",
+            "display",
+        }:
+            interface_kind = "display"
+        elif semantic_kind in {
+            "reasoning",
+            "technical",
+            "answer_preview",
+            "progress",
+        }:
+            interface_kind = "state"
+        else:
+            interface_kind = "display"
+    if interface_kind not in {"message", "display", "state", "notification"}:
+        raise ValueError("frontend event interface_kind is invalid")
+
     content_blocks = normalize_content_blocks(raw.get("content_blocks", []))
     created_at = _string(raw.get("created_at") or "", "created_at", maximum=64)
 
@@ -626,6 +807,7 @@ def normalize_frontend_event(value: Any) -> dict[str, Any]:
         "ephemeral_sequence": ephemeral_sequence,
         "audience": audience,
         "visibility": visibility,
+        "interface_kind": interface_kind,
         "semantic_kind": semantic_kind,
         "presentation_channel": presentation_channel,
         "content_blocks": content_blocks,
@@ -685,6 +867,8 @@ __all__ = [
     "FRONTEND_EVENT_VERSION",
     "FRONTEND_INGRESS_TYPE",
     "FRONTEND_INGRESS_VERSION",
+    "FRONTEND_REQUEST_TYPE",
+    "FRONTEND_REQUEST_VERSION",
     "MEDIA_GROUP_TYPE",
     "MEDIA_GROUP_VERSION",
     "RELAY_ENVELOPE_TYPE",
@@ -700,6 +884,8 @@ __all__ = [
     "normalize_delivery_receipt",
     "normalize_frontend_event",
     "normalize_frontend_ingress_envelope",
+    "normalize_frontend_operation",
+    "normalize_frontend_request",
     "normalize_media_group",
     "normalize_relay_envelope",
     "normalize_tool_interaction",

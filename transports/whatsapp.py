@@ -37,6 +37,7 @@ from pathlib import Path
 from orchestrator.admin_local_testing import try_execute_slash_command_text
 from orchestrator.enterprise.audit_schema import AuditEventWriter
 from orchestrator.enterprise.channel_gate import EnterpriseChannelGate
+from orchestrator.frontend_compatibility import require_connector_local_command
 from orchestrator.pathing import resolve_path_value
 from orchestrator.slash_command_audit import (
     SlashCommandAuditSession,
@@ -50,6 +51,10 @@ _C_WA_IN = "\033[38;5;116m"
 _C_WA_OUT = "\033[38;5;115m"
 _C_WA_SYS = "\033[38;5;109m"
 _C_RESET = "\033[0m"
+
+WHATSAPP_LOCAL_COMMANDS = frozenset(
+    {"agent", "all", "restart", "terminate", "start", "stop"}
+)
 
 
 def _print_wa_line(color: str, label: str, text: str):
@@ -259,10 +264,10 @@ class WhatsAppTransport:
             # Routing and lifecycle commands are intercepted here; never forwarded to agents
             if text:
                 first_word = text.strip().split()[0].lower()
-                if first_word in ("/agent", "/all"):
+                if first_word.lstrip("/") in {"agent", "all"}:
                     await self._handle_routing_command(chat_key, text.strip())
                     return
-                if first_word in ("/reboot", "/restart", "/terminate", "/start", "/stop"):
+                if first_word.lstrip("/") in WHATSAPP_LOCAL_COMMANDS:
                     await self._handle_lifecycle_command(chat_key, text.strip())
                     return
 
@@ -428,7 +433,13 @@ class WhatsAppTransport:
         runtime = self._get_runtime(agent_name)
         request_id = str(payload.get("request_id") or "").strip()
 
-        def record(delivered: bool, disposition: str, text: str = "") -> None:
+        def record(
+            delivered: bool,
+            disposition: str,
+            text: str = "",
+            *,
+            outcome_state: str | None = None,
+        ) -> None:
             if runtime is None or not request_id:
                 return
             from orchestrator import runtime_session
@@ -444,6 +455,7 @@ class WhatsAppTransport:
                 transport="whatsapp",
                 completion_path="foreground",
                 disposition=disposition,
+                outcome_state=outcome_state,
             )
 
         store = getattr(runtime, "session_store", None)
@@ -482,27 +494,42 @@ class WhatsAppTransport:
             record(False, "enterprise_egress_denied")
             return
 
-        if not payload.get("success"):
-            err = payload.get("error", "Unknown error")
-            logger.warning("WhatsApp agent response failed: agent=%s error=%s", agent_name, err)
-            await self._send_text(chat_key, f"[{agent_name}] Error: {err}")
-            return
-
-        text = payload.get("text") or ""
+        success = bool(payload.get("success"))
+        text = (
+            str(payload.get("text") or "")
+            if success
+            else str(payload.get("error") or "Unknown error")
+        )
         if not text:
             logger.info("WhatsApp agent response empty: agent=%s", agent_name)
             return
+        if not success:
+            logger.warning(
+                "WhatsApp agent response failed: agent=%s error=%s",
+                agent_name,
+                text,
+            )
 
-        # Always prefix agent name for text replies so routing/switching is clear
-        full_text = f"[{agent_name}]: {text}"
-
-        delivered = bool(await self._send_text(chat_key, full_text))
-        record(
-            delivered,
-            "transport_delivered" if delivered else "transport_returned_no_receipt",
-            full_text,
+        dispatch = await self._dispatch_standard_response(
+            runtime=runtime,
+            request_id=request_id,
+            chat_key=chat_key,
+            agent_name=agent_name,
+            fallback_text=text,
+            fallback_error=not success,
         )
-        if not delivered:
+        if dispatch["state"] == "already_completed":
+            return
+        transport_sent = bool(dispatch["transport_sent"])
+        outcome_state = str(dispatch.get("state") or "unknown")
+        full_text = str(dispatch.get("text") or "")
+        record(
+            outcome_state == "delivered",
+            str(dispatch.get("disposition") or "transport_returned_no_receipt"),
+            full_text,
+            outcome_state=outcome_state,
+        )
+        if not success or not transport_sent:
             return
         if runtime is None or not hasattr(runtime, "voice_manager"):
             return
@@ -518,6 +545,152 @@ class WhatsAppTransport:
         if asset is None:
             return
         await self._send_voice(chat_key, asset.ogg_path)
+
+    async def _dispatch_standard_response(
+        self,
+        *,
+        runtime,
+        request_id: str,
+        chat_key: str,
+        agent_name: str,
+        fallback_text: str,
+        fallback_error: bool,
+    ) -> dict[str, object]:
+        """Send one canonical Run Event through the WhatsApp FC adapter."""
+
+        async def legacy_compatibility() -> dict[str, object]:
+            rendered = (
+                f"[{agent_name}] Error: {fallback_text}"
+                if fallback_error
+                else f"[{agent_name}]: {fallback_text}"
+            )
+            sent = bool(await self._send_text(chat_key, rendered))
+            return {
+                "transport_sent": sent,
+                "text": rendered,
+                "state": "accepted" if sent else "failed",
+                "disposition": (
+                    "transport_accepted"
+                    if sent
+                    else "transport_returned_no_receipt"
+                ),
+            }
+
+        store = getattr(runtime, "session_store", None)
+        if store is None or not request_id:
+            return await legacy_compatibility()
+        try:
+            run = store.get_run_by_request(request_id)
+            session = store.get_session(str(run["session_id"]))
+            claim_result = store.claim_run_delivery_outbox(
+                request_id=request_id,
+                owner_id=str(session["owner_id"]),
+                surface="whatsapp",
+                channel_key=chat_key,
+                worker_id=f"fc-whatsapp-{request_id}",
+            )
+        except (AttributeError, KeyError):
+            return await legacy_compatibility()
+        except Exception as exc:
+            logger.warning(
+                "WhatsApp FC lookup outcome is unknown for %s: %s",
+                request_id,
+                type(exc).__name__,
+            )
+            return {
+                "transport_sent": False,
+                "text": "",
+                "state": "unknown",
+                "disposition": "connector_outcome_unknown",
+            }
+        if claim_result is None:
+            return await legacy_compatibility()
+        if claim_result.get("state") != "claimed" or "claim" not in claim_result:
+            return {
+                "transport_sent": False,
+                "text": "",
+                "state": (
+                    "already_completed"
+                    if claim_result.get("state") == "completed"
+                    else str(claim_result.get("state") or "unknown")
+                ),
+                "disposition": "canonical_delivery_already_terminal",
+            }
+
+        from orchestrator.frontend_dispatch import (
+            FrontendDispatcher,
+            OutcomeConnectorAdapter,
+        )
+
+        observed: dict[str, object] = {}
+
+        async def send_standard_event(event, *, endpoint_id):
+            del endpoint_id
+            blocks = event.get("content_blocks") or ()
+            media_refs = [
+                block
+                for block in blocks
+                if isinstance(block, dict) and block.get("type") == "media_ref"
+            ]
+            semantic_text = "\n".join(
+                str(block.get("text") or "")
+                for block in blocks
+                if isinstance(block, dict) and block.get("type") == "text"
+            ).strip()
+            if media_refs:
+                outcome = {
+                    "attempted": True,
+                    "delivered": False,
+                    "state": "failed",
+                    "error_code": "whatsapp_media_output_unsupported",
+                }
+                observed.update(outcome)
+                return outcome
+            if not semantic_text:
+                raise ValueError("standard frontend Event has no reply text")
+            rendered = (
+                f"[{agent_name}] Error: {semantic_text}"
+                if event.get("semantic_kind") == "error"
+                else f"[{agent_name}]: {semantic_text}"
+            )
+            sent = bool(await self._send_text(chat_key, rendered))
+            outcome = {
+                "attempted": True,
+                "delivered": sent,
+                "state": "accepted" if sent else "unknown",
+            }
+            observed.update(outcome)
+            observed["text"] = rendered
+            return outcome
+
+        dispatcher = FrontendDispatcher(
+            store,
+            worker_id=f"fc-whatsapp-{request_id}",
+            adapters={
+                "whatsapp": OutcomeConnectorAdapter(
+                    "whatsapp", send_standard_event
+                )
+            },
+        )
+        result = await dispatcher.dispatch_claimed_task(
+            claim_result["claim"],
+            session_id=str(run["session_id"]),
+            owner_id=str(session["owner_id"]),
+        )
+        transport_sent = bool(observed.get("delivered"))
+        state = str(result.get("status") or "unknown")
+        return {
+            "transport_sent": transport_sent,
+            "text": str(observed.get("text") or ""),
+            "state": "accepted" if transport_sent else state,
+            "disposition": (
+                "transport_accepted"
+                if transport_sent
+                else "connector_outcome_unknown"
+                if state == "unknown"
+                else "transport_failed"
+            ),
+        }
 
     # ------------------------------------------------------------------
     # Command handling
@@ -608,6 +781,7 @@ class WhatsAppTransport:
         parts = text.split()
         cmd = parts[0].lower()
         command_name = "all" if cmd == "/all" else "agent"
+        require_connector_local_command("whatsapp", command_name)
         session = self._whatsapp_command_session(
             chat_key,
             command_name,
@@ -691,10 +865,11 @@ class WhatsAppTransport:
         return "\n".join(lines)
 
     async def _handle_lifecycle_command(self, chat_key: str, text: str):
-        """Handle /reboot, /restart, /terminate, /start, /stop lifecycle commands via WhatsApp."""
+        """Handle registered WhatsApp-local lifecycle commands."""
         parts = text.split()
         cmd = parts[0].lower()
         command_name = cmd.lstrip("/") or "lifecycle"
+        require_connector_local_command("whatsapp", command_name)
         session = self._whatsapp_command_session(
             chat_key,
             command_name,
@@ -704,12 +879,6 @@ class WhatsAppTransport:
         try:
             parts = text.split()
             cmd = parts[0].lower()
-
-            if cmd == "/reboot":
-                await self._send_text(chat_key, "🔄 Requesting hot restart...")
-                session.add_side_effect("hot_restart")
-                self.orchestrator.request_restart(mode="same")
-                return
 
             if cmd == "/restart":
                 from orchestrator.commands import api_restart

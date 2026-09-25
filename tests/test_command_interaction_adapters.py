@@ -271,7 +271,11 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
 
 
 @pytest.mark.asyncio
-async def test_runtime_reply_records_command_ui_context_and_binds_the_canonical_message():
+async def test_runtime_reply_records_command_ui_context_and_binds_the_canonical_message(
+    tmp_path,
+):
+    from orchestrator.session_store import SessionStore
+
     menu_store = MenuStore()
     binding = Binding(
         'instance', 'agent', '7', 'session', 1,
@@ -285,8 +289,21 @@ async def test_runtime_reply_records_command_ui_context_and_binds_the_canonical_
             return await capture.capture_reply(text, **kwargs)
 
     update = NS(message=Message(), effective_chat=NS(id=7))
-    runtime = NS(telegram_logger=NS(warning=lambda *_args, **_kwargs: None))
-    recorded = {'message_id': 'msg_persisted'}
+    runtime = NS(
+        app=NS(bot=None),
+        telegram_logger=NS(warning=lambda *_args, **_kwargs: None),
+        global_config=NS(
+            authorized_id=7,
+            instance_id='HASHI1',
+            project_root=tmp_path,
+        ),
+        name='agent',
+        session_store=SessionStore(
+            tmp_path / 'state' / 'sessions.sqlite3',
+            instance_id='HASHI1',
+        ),
+        workspace_dir=tmp_path,
+    )
     with (
         patch(
             'orchestrator.flexible_agent_runtime.apply_disable_notification_default'
@@ -295,10 +312,6 @@ async def test_runtime_reply_records_command_ui_context_and_binds_the_canonical_
             'orchestrator.flexible_agent_runtime.telegram_delivery_failover.handle_blocked_send',
             new=AsyncMock(return_value=False),
         ),
-        patch(
-            'orchestrator.flexible_agent_runtime.runtime_session.record_frontend_message_for_update',
-            return_value=recorded,
-        ) as record,
     ):
         sent = await FlexibleAgentRuntime._reply_text(
             runtime,
@@ -313,10 +326,15 @@ async def test_runtime_reply_records_command_ui_context_and_binds_the_canonical_
             },
         )
 
-    kwargs = record.call_args.kwargs
-    assert kwargs['transport_message_id'] == f'command-ui:{sent.menu.id}'
-    assert kwargs['message_context']['command_ui'] == menu_store.render(sent.menu)
-    assert sent.menu.presentation_message_id == 'msg_persisted'
+    session = runtime.session_store.resolve_primary_session(
+        owner_id='user:7', agent_id='agent'
+    )
+    messages = runtime.session_store.messages(
+        session['session_id'], owner_id='user:7'
+    )
+    recorded = next(message for message in messages if message['role'] == 'assistant')
+    assert recorded['message_context']['command_ui'] == menu_store.render(sent.menu)
+    assert sent.menu.presentation_message_id == recorded['message_id']
 
 
 if __name__ == '__main__':
