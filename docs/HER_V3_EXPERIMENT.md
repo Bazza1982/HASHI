@@ -125,7 +125,9 @@ restored service. A real-manager regression reproduced the failure, the HER v3
 provider target now bootstraps directly, and later shared replacements
 succeeded with all nine Workers online. A subsequent live red Run exposed the
 internal compatibility Engine in a Session assistant-message source; the
-public projection was fixed and the rerun stored `source=her-v3`.
+public projection was fixed and the rerun stored `source=her-v3`. Final live
+acceptance also found the same compatibility name in request-activity origins;
+that public stream now projects `her-v3` while internal storage remains intact.
 
 Live acceptance used the formal Session API and durable usage records:
 

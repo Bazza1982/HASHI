@@ -185,6 +185,40 @@ _CONNECTOR_SECRET_REF_PREFIXES = (
 )
 
 
+def _public_request_activity(
+    runtime: Any,
+    result: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Project storage-only HER origins onto the active public Engine."""
+
+    manager = getattr(runtime, "backend_manager", None)
+    backend = (
+        getattr(manager, "active_backend", None)
+        or getattr(getattr(runtime, "config", None), "active_backend", None)
+        or ""
+    )
+    events = result.get("events")
+    if (
+        public_backend_engine(backend) != HER_V3_ENGINE
+        or not isinstance(events, list)
+    ):
+        return dict(result)
+
+    projected = dict(result)
+    projected_events: list[Any] = []
+    for item in events:
+        if not isinstance(item, Mapping):
+            projected_events.append(item)
+            continue
+        event = dict(item)
+        origin = str(event.get("origin") or "")
+        if origin == "her_v2" or origin.startswith("her_v2:"):
+            event["origin"] = f"{HER_V3_ENGINE}{origin[len('her_v2'):]}"
+        projected_events.append(event)
+    projected["events"] = projected_events
+    return projected
+
+
 def _connector_scopes_from_payload(value) -> list[str]:
     if isinstance(value, str):
         raw_items = value.split(",")
@@ -5052,6 +5086,7 @@ class WorkbenchApiServer:
             "context_generation": int(run["context_generation"]),
         }
         if result.get("ok"):
+            result = _public_request_activity(runtime, result)
             result.update(identity)
             return web.json_response(result)
 
