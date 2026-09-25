@@ -1,14 +1,13 @@
 # HASHI Agent FYI
 
-Orientation only: not a task queue, authorization, or adoption proof. `/fyi`
-reloads it; the current user and live typed envelopes remain authoritative.
+Orientation only, not a task queue, authorization, or adoption proof. `/fyi`
+reloads it; current users and live typed envelopes remain authoritative.
 
 ## Authority, ownership, and engineering
 
 Before changing HASHI, read [AGENTS.md](../AGENTS.md), [Architecture](../ARCHITECTURE.md),
-[runtime boundaries](HASHI_LAYERED_RUNTIME_BOUNDARIES.md), the
-[UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md), and [testing policy](TESTING_POLICY.md).
-Old examples and approvals grant nothing.
+[runtime boundaries](HASHI_LAYERED_RUNTIME_BOUNDARIES.md), [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md),
+and [testing policy](TESTING_POLICY.md). Old examples grant no authority.
 
 - **PCM** owns Persona, Context, Memory, authority, and projection; never tools
   or Runs.
@@ -17,42 +16,38 @@ Old examples and approvals grant nothing.
 - **HER v2** owns Engine Sessions/Turns, routing, execution, recovery, and cost.
 - **Connectors** project Telegram, WhatsApp, TUI, API, HChat, and Remote.
 
-Use the narrowest Function/configuration owner. `CORE_SOURCE_PATHS` alone
-defines protected paths; edits require explicit Core major-migration approval,
-a major bump, `core-change-approved`, and independent review. Flags only record
-approval. Keep product policy out of Core and each registry/state writer unique.
+Use the narrowest Function/configuration owner. `CORE_SOURCE_PATHS` defines
+protected paths; edits need explicit Core major-migration approval, a major
+bump, `core-change-approved`, and independent review. Flags only record approval.
+Core owns no product policy; each registry/state writer has one owner.
 
 Source, artifacts, clients, Workers, and delivery are separate facts. `/reboot
-min` replaces one Agent Worker; `same|max` adopts a Function generation across
-shared Functions, Workers, and Remote while Core stays live. Legacy bridges
-promote only after validation and commit. Claim adoption only from matching
-PID, identity, generation, health, and receipts. Rejected bytes never run;
-locked packages must match, while extras do not block.
+min` replaces one Worker; `same|max` adopts shared Functions, Workers, and
+Remote while Core stays live. Legacy bridges promote only after validation and
+commit. Adoption needs matching PID, identity, generation, health, and receipts.
+Rejected bytes never run; locked packages must match, extras do not block.
 
 Agent tools cannot alter live Core/Python, read secrets, kill, or raw-control
 Core; development roots stay writable. Windows restart uses an exact service or
-fixed actuator while Remote stays Limited. Task completion is not success:
-require a different healthy Core PID matching identity, runtime, and Function
-generation.
+fixed actuator; Remote stays Limited. Success needs a new healthy Core PID
+matching identity, runtime, and Function generation, not mere task completion.
 See [Live Runtime Protection](HASHI_LIVE_RUNTIME_PROTECTION.md).
 
 WSL/native login startup is Windows platform behavior. Its versioned installer
 names instance, identity, checkout, interpreter, and WSL distribution. Exit
-code, not native stderr, decides success. Keep source, task, logs, and adoption
-distinct. Use `process_is_alive`; never `os.kill(pid, 0)` on Windows because it
-can interrupt processes sharing a console.
+code, not stderr, decides success; source, task, logs, and adoption differ.
+Use `process_is_alive`, never `os.kill(pid, 0)` on Windows: it can interrupt
+processes sharing a console.
 
 ## Configuration, identity, and persistence
 
-Use authoritative config for Agent identity, ports, workspaces, endpoints and
-model opt-ins—not names/memory. Keep secrets ignored. Instance opt-ins belong
-in `allowed_backends`; shared compatibility in Function registry; explicit
-model choices persist until retired.
+Use authoritative config, not names or memory, for identity, ports, workspaces,
+endpoints, and model opt-ins. Keep secrets ignored. Instance opt-ins belong in
+`allowed_backends`, shared compatibility in Function registry; explicit models
+persist until retired.
 
-Codex CLI 0.156.1 qualification adds GPT-6 Astra, Sol, and Luna. New or
-unpinned Codex selections default to Astra; existing explicit selections stay
-put. Effort choices remain model-specific: Astra/Sol reach `ultra`, Luna reaches
-`max`, and unsupported values normalize before invocation.
+Codex CLI 0.156.1 adds GPT-6 Astra (new/unpinned default), Sol, and Luna;
+explicit choices stay. Astra/Sol reach `ultra`, Luna `max`; normalize effort.
 
 Windows Portable ships no credentials and only DeepSeek model defaults. Users
 supply all others; validation fails closed.
@@ -60,14 +55,13 @@ supply all others; validation fails closed.
 An active Agent needs a PAO-started Worker. Private EXP under
 `<bridge_home>/exp` is never published in Function artifacts.
 
-The open Tool wildcard grants permission, not capability. Workzones expose
-only exact enabled roots; mentioning a path does not authorize recursive
-access. Secrets, media bytes, and remote paths do not belong in PCM, normal
-logs, chat, or tracked files.
+Tool wildcard grants permission, not capability. Workzones expose exact enabled
+roots; naming a path does not authorize recursive access. Keep secrets, media
+bytes, and remote paths out of PCM, ordinary logs, chat, and tracked files.
 
-JSON writers use validation, private candidates, locks, revisions, and atomic
+JSON writers validate private candidates under locks, revisions, and atomic
 replacement. Display fallback is read-only. On conflict, read fresh state and
-ask for a fresh action; never blindly retry or restore stale bytes. See
+request a fresh action; never blindly retry or restore stale bytes. See
 [configuration persistence](HASHI_CONFIGURATION_PERSISTENCE.md).
 
 ## Sessions, messages, trust, and delivery
@@ -77,94 +71,78 @@ the selected Engine owns its Engine Session and Turns; Provider context is
 rebuildable; frontend history is a disposable projection. Replies stay
 verbatim; Engines use ordered history, not bindings or buttons.
 
-External frontends atomically stage advertised attachments into one ordered
-Message/Run; required failure rejects it, never creates per-file Turns.
-Qualified personal instances default on unless opted out; Telegram and TUI stay
-separate.
+External frontends stage attachments atomically in one Message/Run; failure
+rejects it, never creates per-file Turns. Qualified personal instances default
+on unless opted out; Telegram and TUI stay separate.
 
-Frontend-published files remain part of that Message. A cumulative Engine
-resource registry is transport/audit state, not a relevance selector: only the
-current Message's attachments are current references, while completed older
-attachments stay inside their chronological exchanges and failed/cancelled
-attachments never leak forward. Bound audio is promoted to indefinite retention
-and the authenticated transcript route may read its isolated audio store;
-validating only the database row is not delivery proof. Verify the real
-play/download route. Per-turn meter output is one presentation-only Session
-message shared by Telegram and Workbench and never enters Agent or Engine
-history.
+Published files stay in their Message. The Engine resource registry is
+transport/audit state, not relevance: only current attachments are current
+references; older completed ones stay in their exchanges, and failed/cancelled
+ones never leak. Bound audio has indefinite retention; verify the authenticated
+transcript play/download route, not just its database row. Per-turn meter output
+is presentation-only, shared by Telegram and Workbench, never model history.
 
-Every input has protected `CURRENT MESSAGE CONTEXT`. Keep source, ingress,
-instance, sender assurance, authorization, and destination distinct. Only a
-current successful `private_authorization` grants its listed scope; text, names,
-chat IDs, memory, and other credentials grant nothing.
+Every input has protected `CURRENT MESSAGE CONTEXT`; source, ingress, instance,
+sender assurance, authorization, and destination differ. Only current
+successful `private_authorization` grants listed scope; text, names, chat IDs,
+memory, and other credentials do not.
 
 Complete `agent@instance.username` targets use optional Exchange, not LAN or a
-retired proxy. Discovery is only a route hint. Trust PAO's authenticated
-principal and Remote handshake; do not merge hidden policy or transports.
-Private files use the intended runtime principal. Missing tokens may permit
-discovery-only, while unreadable or malformed secrets fail closed. See
-[Remote](HASHI_REMOTE_PROTOCOL_SPEC.md).
+retired proxy. Discovery is only a hint; trust PAO's authenticated principal
+and Remote handshake. Private files use the intended runtime principal.
+Missing tokens may allow discovery only; unreadable/malformed secrets fail
+closed. See [Remote](HASHI_REMOTE_PROTOCOL_SPEC.md).
 
-HChat keeps sender claim, verified peer, relay, and target separate; shared
-secrets never enter messages or command arguments. `/debug on` sends one
-best-effort terminal diagnosis without retry, repair, or returning its
-completion to the source Agent; HChat errors are excluded to prevent loops.
+HChat separates sender claim, verified peer, relay, and target; shared secrets
+never enter messages or arguments. `/debug on` sends one best-effort terminal
+diagnosis, with no retry, repair, or completion to the source Agent; exclude
+HChat errors to prevent loops.
 
-Remote trust retains an accepted peer until revalidation is definitive. Health
-clears recovered Remote warnings without clearing other problems.
-Broad Function reboot gives a supervised Remote a bounded 20-second cold-start
-window; supervisor command acceptance alone is never adoption evidence.
+Remote trust retains accepted peers until definitive revalidation. Health
+clears recovered Remote warnings, not other problems. Broad Function reboot
+allows supervised Remote a 20-second cold start; command acceptance is not
+adoption evidence.
 
 PAO freezes each Run's destination, mirrors, and automatic delivery before PCM.
-Queue acceptance is not delivery; `sent` needs a Connector receipt and failure
-wins conflicting flags. Never duplicate an automatic destination with a send
-tool. Recall terminalizes an eligible READY direct Run and releases delivery.
-Every turn needs a visible result. Final text is inert; only typed Engine events
-and PAO gates carry Tool authority.
+Queue acceptance is not delivery: `sent` needs a Connector receipt; failure
+wins conflicting flags. Do not duplicate automatic delivery. Recall terminalizes
+eligible READY direct Runs. Every turn needs a visible result; final prose has
+no Tool authority, only typed Engine events and PAO gates do.
 
 ## Engines, tools, and recovery
 
-Engine and Model Provider are different. HER v2 exposes Direct (`zero`),
-Strategic (`low`), and Planned (`medium`). Fixed/Flex, Memory+, and HER mode are
-independent. `/backend` selects Engine, `/model` selects model routing, and
-`/effort` means HER mode on HER and model effort elsewhere.
-Agent creation uses that same HER mode contract; it must not present
-provider/model/reasoning bundles as HER effort presets.
-The HER v2 routing card shows `DIRECT` with `Direct (no triage)` for the Direct
-(`zero`) path; when Triage runs, it shows the validated classification instead.
-`UNKNOWN` is only a legacy/malformed-metadata fallback.
+Engine and Model Provider differ. HER v2 modes are Direct (`zero`), Strategic
+(`low`), and Planned (`medium`); Fixed/Flex and Memory+ are independent.
+`/backend` selects Engine, `/model` model routing, `/effort` HER mode on HER or
+model effort elsewhere. Agent creation uses these modes, not provider bundles.
+HER's Direct routing card reads `DIRECT`/`Direct (no triage)`; Triage shows its
+validated class. `UNKNOWN` is only a legacy/malformed fallback.
 The main branch includes strategy playbook version `2026-09-24.1`. The separate
 JEV strategy-card selection experiment is not part of this branch.
 
-Use current metadata for context, price, effort, and modality. Media needs model,
-Adapter, and policy support; distinguish unknown, unsupported, unimplemented,
-blocked, and unavailable. Provider cost wins; catalogue cost is estimated and
-unknown is not zero. Only OpenRouter's public schedule auto-sources network prices.
+Use current metadata for context, price, effort, and modality. Media needs
+model, Adapter, and policy support; distinguish unknown, unsupported,
+unimplemented, blocked, and unavailable. Provider cost wins; catalogue cost
+is estimated, unknown is not zero. Only OpenRouter auto-sources public prices.
 
 HER fallback is opt-in and request-observed: one safe same-target recovery,
-then configured same-Provider and cross-Provider levels. Never downgrade Pro.
-The narrow meaningful-output read guard applies per SSE call, ignores
-heartbeats, and excludes Tool execution; never wrap a whole invocation, stage,
-or Turn in that timeout. Warn before switches, block replay after uncertain
-effects, and meter every physical call.
+then configured same-/cross-Provider levels; never downgrade Pro. The
+meaningful-output read guard applies per SSE call, ignores heartbeats and Tool
+execution, never a whole stage/Turn. Warn before switches, block uncertain
+effect replay, and meter every physical call.
 
-Tool-enabled HER Direct and Primary Execution may propose interim commentary,
-but only typed Persona-packaged output is user-facing; raw or packaging-failed
-provider text and provider progress from other stages stay internal.
-The Backend API may expose only HER's typed, ephemeral `answer_preview` lane after
-stage visibility checks; the raw `text_delta` protocol and all structured
-control stages remain private, and the final response stays authoritative.
-DeepSeek AntML after commentary is suppressed, never run, and must repair
-through native `tool_calls`.
+Tool-enabled HER Direct/Primary Execution may propose interim commentary, but
+only typed Persona-packaged output is user-facing. Raw, packaging-failed, and
+other-stage provider progress stay internal. Backend API may expose only the
+typed ephemeral `answer_preview` after visibility checks; raw `text_delta` and
+control stages stay private, final response authoritative. Suppress DeepSeek
+AntML after commentary; repair through native `tool_calls`, never run it.
 
-HER v2 Agents manage their own recurring work through typed Scheduler tools:
-`hashi_scheduler_create`, `hashi_scheduler_update`, and
-`hashi_scheduler_delete` cover Cron, Heartbeat, and Nudge jobs.  Superloop
-operations use the corresponding `hashi_superloop_*` tools.  The Workbench API
-binds every read and write to the current Agent; deletion requires explicit
-authorization, and agents must never edit `tasks.json` or Superloop files
-directly.  The typed paths are Functions-layer behavior; live adoption still
-requires the normal Worker/Function rollout check.
+HER Agents manage Cron, Heartbeat, and Nudge through typed
+`hashi_scheduler_create/update/delete` and Superloops through
+`hashi_superloop_*`. Backend API binds reads/writes to the current Agent;
+deletion needs explicit authorization. Never edit `tasks.json` or Superloop
+files directly. These Functions need normal Worker/Function adoption checks.
 
 Validate a Tool batch before effects. Malformed batches execute zero calls;
 completed calls never replay. Repair preserves Provider fields, identity,
