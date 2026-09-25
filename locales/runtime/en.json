@@ -2134,6 +2134,7 @@
     "usage.agent_line": "{tokens} Token · {cost}",
     "usage.session_suffix": "session {tokens} Token · {cost}",
     "usage.none": "📊 No token usage recorded yet.",
+    "usage.model.legacy_unattributed": "historical-unattributed",
     "usage.category.cli": "🖥️ CLI backends",
     "usage.category.api": "🌐 API backends",
     "usage.category.other": "❓ Other",

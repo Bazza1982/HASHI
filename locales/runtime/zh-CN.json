@@ -2134,6 +2134,7 @@
     "usage.agent_line": "{tokens} Token · {cost}",
     "usage.session_suffix": "当前会话 {tokens} Token · {cost}",
     "usage.none": "尚无 Token 用量记录。",
+    "usage.model.legacy_unattributed": "历史未归属",
     "usage.category.cli": "🖥️ CLI 后端",
     "usage.category.api": "🌐 API 后端",
     "usage.category.other": "❓ 其他",

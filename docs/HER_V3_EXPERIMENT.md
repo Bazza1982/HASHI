@@ -141,7 +141,9 @@ Live acceptance used the formal Session API and durable usage records:
   to its original Codex model and `max` effort afterward.
 - `/metre summary` reported the Pro Run as `deepseek-api /
   deepseek-v4-pro`, one call, 17,801 tokens, and US$0.003296. `/token` showed
-  the HER v3 public label and no public HER v2 bucket.
+  the HER v3 public label and no public HER v2 bucket. `/usage` presents
+  pre-attribution history as `historical-unattributed` / `历史未归属` instead
+  of exposing the retired storage placeholder `role-configured`.
 
 The final retained `phd_1` setting is `deepseek-api / deepseek-v4-pro` at
 effort `high`. These checks establish HASHI3 Backend API selection, persistence,

@@ -123,6 +123,8 @@ All nine HASHI3 Agents expose DeepSeek models `deepseek-flash` and
 commands and Session/token projections use `her-v3`; `/herv2` is retired, and
 `/metre` is a working alias. Live acceptance proved Flash/off, Pro/max,
 cross-Engine `/backend` switching, durable token accounting, and meter output.
+Historical usage without a model attribution is shown as `历史未归属`, not the
+retired storage placeholder `role-configured`.
 See [HER v3 experiment](HER_V3_EXPERIMENT.md) for request receipts and the
 recovered adoption failure. This note is not merge permission.
 
