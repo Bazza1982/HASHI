@@ -143,12 +143,15 @@ Telegram mirroring and performed no mailbox actions.
 This proves the real main-model/tool loop with HASHI API and DeepSeek on two
 HASHI3 Agents. It is not the full external-frontend acceptance suite, nor proof
 for all providers, effort levels, Strategy Cards, Agent Companion, long-running
-processes, or Habit
-Reflection. The shared `/api/backends/catalogue` process still serves its old
-HER row (`HER`, three v2 efforts) because an Agent-scoped reboot does not
-replace shared Functions. Full Workbench catalogue adoption would require a
-separate broad HASHI3 shared-Function replacement; do not imply that it has
-already happened.
+processes, or Habit Reflection. The live shared `/api/backends/catalogue` now
+serves `HER v3 (experiment)` and all six reasoning choices. A separate earlier
+HASHI3 `/reboot max` receipt (`66cba3bb4a74471e91445ae1429135c7`) records a
+committed shared-Function replacement; the Agent-scoped DeepSeek reboot above
+did not perform that replacement. The shared catalogue still uses
+`role-configured` as its model placeholder, not a selectable DeepSeek model
+list. Inspect the Agent-specific `/model` or runtime status for its actual
+`deepseek-api / deepseek-v4-pro` main target. This does not establish full
+Workbench model-selection acceptance.
 
 Before merging or adopting elsewhere, test more real-provider cases on this
 HASHI3 experiment: fixed Session PCM deltas, model/tool continuity,
