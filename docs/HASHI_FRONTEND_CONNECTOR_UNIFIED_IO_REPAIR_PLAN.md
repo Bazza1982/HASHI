@@ -965,4 +965,5 @@ Telegram 原生 slash/callback 的持久去重切片已完成离线验证，但�
 - 取消控制动作已通过持久 reservation 防重；完成态重放返回原结果，不会误停后来创建的新 Run，pending/unknown 不自动重执行。
 - Workbench Minato E2E 使用独立数据根目录，修复全量套件共享项目目录造成的次序波动。文字兼容回退只发生在标准能力探测明确不支持且任何 canonical 写入尚未开始之前；超时、连接中断或已开始 Run 接纳均不回退。
 - 修正后 HASHI 聚焦候选回归为 **322 passed / 4 subtests passed**；完整提交前门禁为 **709 passed / 3 failed**，三个失败均明确来自 generation 门禁拒绝未提交 Function 源码，未发现其他行为失败。必须在干净提交后重跑，不能提前记通过。
+- HASHI 候选提交后在干净 HEAD 上重跑完整门禁，结果为 **712 passed / 0 failed / 0 skipped**；三个 generation 失败全部消失，Protected Core 检查继续通过。该结果确认源码候选合格，不改变“尚未运行采用和现场验收”的边界。
 - Workbench 完整服务测试为 **579 passed / 0 failed / 0 skipped**，UI policy 为 **589 passed / 0 failed / 0 skipped**，生产构建成功。HASHI1 与 HASHI2 的只读健康端点均为 `ready`；HASHI2 未被修改或重启。HASHI1 运行 generation 仍是旧候选，以上仍是源码/离线证据，不是采用或现场交付。
