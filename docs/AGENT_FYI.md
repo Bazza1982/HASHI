@@ -126,6 +126,8 @@ cross-Engine `/backend` switching, durable token accounting, and meter output.
 Workbench request-activity origins also project the public `her-v3` Engine ID.
 Historical usage without a model attribution is shown as `历史未归属`, not the
 retired storage placeholder `role-configured`.
+HER v3 model/provider cards and callback dispatch share one callback contract;
+validate the generated buttons themselves, not only text-form commands.
 See [HER v3 experiment](HER_V3_EXPERIMENT.md) for request receipts and the
 recovered adoption failure. This note is not merge permission.
 

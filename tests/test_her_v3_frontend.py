@@ -1,10 +1,12 @@
 """Observable HER v3 command presentation while the storage ID remains her-v2."""
 
+import re
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
+from orchestrator import runtime_command_binding
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.her_v2.v3_config import HERv3ModelTarget
 from orchestrator.runtime_menu_views import her_commentary_text
@@ -99,6 +101,31 @@ async def test_model_menu_reports_the_actual_single_main_model():
     assert "old-fast" not in text
     assert "old-pro" not in text
     assert runtime._reply_text.await_args.kwargs["reply_markup"] is not None
+
+
+@pytest.mark.asyncio
+async def test_generated_model_picker_buttons_are_registered_for_callback_dispatch():
+    callbacks = []
+    for command in (cmd_provider, cmd_model):
+        runtime = _runtime()
+        update = SimpleNamespace(effective_user=SimpleNamespace(id=1))
+        await command(runtime, update, SimpleNamespace(args=[]))
+        markup = runtime._reply_text.await_args.kwargs["reply_markup"]
+        callbacks.extend(
+            button.callback_data
+            for row in markup.inline_keyboard
+            for button in row
+            if button.callback_data and button.callback_data.startswith("herv3_")
+        )
+
+    assert callbacks
+    for callback_data in callbacks:
+        matches = [
+            binding.method_name
+            for binding in runtime_command_binding.CALLBACK_BINDINGS
+            if re.match(binding.pattern, callback_data)
+        ]
+        assert matches == ["callback_model"]
 
 
 def test_effort_menu_reports_model_reasoning_not_old_execution_modes():

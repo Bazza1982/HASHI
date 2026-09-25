@@ -100,6 +100,11 @@ main-model/tool loop. The final full offline product suite completed with
 711 passed and 1 skipped; the Protected Core check also passed. Live Worker
 and real-provider evidence remains recorded separately below.
 
+HER v3 model/provider buttons use one shared callback contract for both card
+generation and Frontend dispatch. Acceptance must exercise generated button
+callback data through the registered callback handler; successful text-form
+`/model` or `/provider` commands do not prove that Telegram buttons work.
+
 ## HASHI3 live verification (2026-09-25)
 
 The approval covered this HASHI3-only experiment, all-Agent HER v3 availability,

@@ -16,6 +16,13 @@ from orchestrator.flexible_backend_registry import (
     is_selectable_backend,
     normalize_model,
 )
+from orchestrator.her_v2.v3_callback_contract import (
+    HER_V3_CALLBACK_MODEL,
+    HER_V3_CALLBACK_PROVIDER,
+    HER_V3_CALLBACK_PROVIDER_LOCKED,
+    HER_V3_CALLBACK_PROVIDER_MENU,
+    her_v3_callback_data,
+)
 from orchestrator.runtime_effort_options import get_available_efforts, normalize_effort
 from orchestrator.her_v2.models import Route
 
@@ -270,10 +277,18 @@ def her_v3_provider_keyboard(runtime) -> InlineKeyboardMarkup:
         label = str(option.get("label") or engine)
         token = _her_v2_callback_token(engine)
         if option.get("available"):
-            callback = f"herv3_provider:{index}:{token}"
+            callback = her_v3_callback_data(
+                HER_V3_CALLBACK_PROVIDER,
+                index,
+                token,
+            )
             label = selected_label(label, engine == target.provider)
         else:
-            callback = f"herv3_provider_locked:{index}:{token}"
+            callback = her_v3_callback_data(
+                HER_V3_CALLBACK_PROVIDER_LOCKED,
+                index,
+                token,
+            )
             label = f"🔒 {label}"
         buttons.append([InlineKeyboardButton(label, callback_data=callback)])
     buttons.append([InlineKeyboardButton(back_label(), callback_data="backend_menu")])
@@ -288,15 +303,22 @@ def her_v3_model_keyboard(runtime) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(
                 selected_label(model, model == target.model),
-                callback_data=(
-                    f"herv3_model:{index}:{_her_v2_callback_token(model)}"
+                callback_data=her_v3_callback_data(
+                    HER_V3_CALLBACK_MODEL,
+                    index,
+                    _her_v2_callback_token(model),
                 ),
             )
         ]
         for index, model in enumerate(models)
     ]
     buttons.append(
-        [InlineKeyboardButton(back_label(), callback_data="herv3_provider_menu")]
+        [
+            InlineKeyboardButton(
+                back_label(),
+                callback_data=HER_V3_CALLBACK_PROVIDER_MENU,
+            )
+        ]
     )
     return InlineKeyboardMarkup(buttons)
 
@@ -1821,19 +1843,19 @@ async def callback_model(runtime, update, context: Any) -> None:
         )
         return
     try:
-        if data == "herv3_provider_menu":
+        if data == HER_V3_CALLBACK_PROVIDER_MENU:
             await query.edit_message_text(
                 her_v3_provider_menu_text(runtime),
                 parse_mode="HTML",
                 reply_markup=her_v3_provider_keyboard(runtime),
             )
-        elif data.startswith("herv3_provider_locked:"):
+        elif data.startswith(f"{HER_V3_CALLBACK_PROVIDER_LOCKED}:"):
             await query.answer(
                 ui_language.tr("menu.provider.none"),
                 show_alert=True,
             )
             return
-        elif data.startswith("herv3_provider:"):
+        elif data.startswith(f"{HER_V3_CALLBACK_PROVIDER}:"):
             _, raw_index, token = data.split(":", 2)
             options = runtime.backend_manager.get_her_v3_provider_options()
             _index, option = _her_v2_indexed_choice(options, raw_index)
@@ -1850,7 +1872,7 @@ async def callback_model(runtime, update, context: Any) -> None:
                 parse_mode="HTML",
                 reply_markup=her_v3_model_keyboard(runtime),
             )
-        elif data.startswith("herv3_model:"):
+        elif data.startswith(f"{HER_V3_CALLBACK_MODEL}:"):
             _, raw_index, token = data.split(":", 2)
             current = runtime.backend_manager.get_her_v3_target()
             option = runtime.backend_manager._her_v3_provider_option(
