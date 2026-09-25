@@ -172,7 +172,7 @@ def test_runtime_presentation_status_reports_her_v3_main_model():
 
     status = runtime_presentation_status(runtime)
 
-    assert status["engine"] == "her-v2"
+    assert status["engine"] == "her-v3"
     assert status["her_v3"] == {"main": {"provider": "anthropic", "model": "claude-pro"}}
     assert "her_v2" not in status
     assert status["effort"] == "high"

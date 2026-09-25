@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 HER_V2_ENGINE = "her-v2"
-RETIRED_HER_ENGINE_ALIASES = frozenset({"her"})
+HER_V3_ENGINE = "her-v3"
+# ``her-v2`` remains the storage/adapter identifier until that compatibility
+# boundary is removed.  Public commands and projections use ``her-v3``.
+RETIRED_HER_ENGINE_ALIASES = frozenset({"her", HER_V3_ENGINE})
 REMOVED_ENGINE_IDS = frozenset({"claw-cli"})
 PROVIDER_ONLY_ENGINE_IDS = frozenset(
     {"openrouter-api", "deepseek-api", "openai-compatible-api"}
@@ -111,13 +114,14 @@ BACKEND_REGISTRY: dict[str, dict] = {
         "secret_keys": ["codex-cli_key"],
     },
     "her-v2": {
-        "label": "HER v3 (experiment)",
+        "label": "HER v3",
         "privacy_levels": [0, 1],
-        "models": ["role-configured"],
-        "default_model": "role-configured",
-        # HER v3 exposes model reasoning effort only; workflow routing is fixed.
-        "efforts": ["none", "low", "medium", "high", "xhigh", "max"],
-        "default_effort": "medium",
+        # Provider, model and reasoning choices are instance-derived. Keeping
+        # placeholders here would leak the retired HER v2 route matrix.
+        "models": [],
+        "default_model": None,
+        "efforts": [],
+        "default_effort": None,
         # Each role profile resolves credentials through its concrete provider.
         "secret_keys": [],
     },
@@ -276,6 +280,13 @@ def canonical_backend_engine(engine: str | None) -> str:
 
     value = str(engine or "").strip()
     return HER_V2_ENGINE if value in RETIRED_HER_ENGINE_ALIASES else value
+
+
+def public_backend_engine(engine: str | None) -> str:
+    """Return the product-facing Engine ID without exposing storage aliases."""
+
+    canonical = canonical_backend_engine(engine)
+    return HER_V3_ENGINE if canonical == HER_V2_ENGINE else canonical
 
 
 def apply_backend_policy_defaults(backend: dict) -> dict:

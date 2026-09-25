@@ -1,10 +1,12 @@
 from orchestrator.flexible_backend_registry import (
+    canonical_backend_engine,
     get_all_gateway_models,
     get_available_efforts,
     get_available_models,
     get_provider_reasoning_efforts,
     is_cli_backend,
     normalize_effort,
+    public_backend_engine,
 )
 from orchestrator.model_catalog import (
     AVAILABLE_CODEX_MODELS,
@@ -75,18 +77,12 @@ def test_grok_cli_exposes_reasoning_effort_with_medium_default():
     assert normalize_effort("grok-cli", "xhigh", "grok-4.5") == "medium"
 
 
-def test_retired_her_id_exposes_v3_model_reasoning_efforts():
-    expected = ["none", "low", "medium", "high", "xhigh", "max"]
-    assert get_available_efforts("her", "deepseek/deepseek-v4-pro") == expected
-    assert normalize_effort("her", None, "deepseek/deepseek-v4-pro") == "medium"
-    assert normalize_effort("her", "zero", "deepseek/deepseek-v4-pro") == "none"
-    assert normalize_effort("her", "direct", "deepseek/deepseek-v4-pro") == "none"
-    assert normalize_effort("her", "strategic", "deepseek/deepseek-v4-pro") == "low"
-    assert normalize_effort("her", "fast", "deepseek/deepseek-v4-pro") == "low"
-    assert normalize_effort("her", "planned", "deepseek/deepseek-v4-pro") == "medium"
-    assert normalize_effort("her", "max", "deepseek/deepseek-v4-pro") == "max"
-    assert normalize_effort("her", "max+", "deepseek/deepseek-v4-pro") == "medium"
-    assert normalize_effort("her", "ultra", "deepseek/deepseek-v4-pro") == "medium"
+def test_her_v3_public_id_has_no_placeholder_models_or_efforts():
+    assert canonical_backend_engine("her-v3") == "her-v2"
+    assert public_backend_engine("her-v2") == "her-v3"
+    assert get_available_models("her-v3") == []
+    assert get_available_efforts("her-v3") == []
+    assert normalize_effort("her-v3", "planned") is None
 
 
 def test_xai_api_models_are_available_to_gateway_catalog():

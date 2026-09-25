@@ -51,16 +51,18 @@ backend/session migration is required. New configurations may use:
 }
 ```
 
-`/model` and `/provider` show the effective `main` target, rather than the
-retired Quick/Pro route editor. This experimental menu is read-only: change the
-main target in local configuration. The Frontend presentation status reports
-`her_v3.main`, while the backend ID remains `her-v2` for stored compatibility.
-Old route buttons are rejected rather than allowed to change ignored settings.
+The public Engine ID is `her-v3`. The internal `her-v2` adapter and `her_v2`
+configuration key remain only as storage compatibility boundaries and are not
+returned by the Backend API or command cards. `/provider` selects one configured
+Provider, `/model` selects one of that Provider's real model IDs, and both changes
+persist immediately for subsequent turns. Old route buttons are rejected rather
+than allowed to change ignored settings.
 
-`/effort` is model reasoning only. The accepted HER wire values are `none`, `low`,
-`medium`, `high`, `xhigh`, and `max`; provider adapters map them to the actual API
-capability. For example DeepSeek currently reduces intermediate values to its supported
-thinking levels rather than changing HASHI workflow.
+`/effort` is model reasoning only and is derived from the selected Provider/model.
+DeepSeek exposes exactly `off`, `high`, and `max`; those values control the
+DeepSeek request's thinking mode and never select a HASHI workflow. The Backend
+catalogue exposes Provider-specific models and effort choices rather than copied
+HER-wide placeholders.
 
 ## Strategy Cards
 

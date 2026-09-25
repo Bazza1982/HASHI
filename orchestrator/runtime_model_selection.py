@@ -198,11 +198,12 @@ def schedule_current_model_metadata(runtime) -> None:
     engine = str(getattr(runtime.config, "active_backend", "") or "")
     if engine == HER_V2_ENGINE:
         try:
-            selected = runtime.backend_manager.get_her_v2_configuration()
+            selected = runtime.backend_manager.get_her_v3_target()
         except (AttributeError, OSError, TypeError, ValueError):
             return
-        _schedule_her_v2_pricing_prewarm(runtime, selected)
-        _schedule_her_v2_capability_prewarm(runtime, selected)
+        target = (selected.provider, selected.model)
+        _schedule_pricing_prewarm(runtime, target)
+        _schedule_capability_prewarm(runtime, target)
         return
     backend = getattr(runtime.backend_manager, "current_backend", None)
     model = str(
@@ -240,6 +241,75 @@ def her_v3_model_menu_text(runtime) -> str:
         model=str(getattr(profile, "model", "") or "unavailable"),
         effort=str(runtime._get_current_effort() or "n/a"),
     )
+
+
+def her_v3_provider_menu_text(runtime) -> str:
+    target = runtime.backend_manager.get_her_v3_target()
+    available: list[str] = []
+    unavailable: list[tuple[str, str]] = []
+    for option in runtime.backend_manager.get_her_v3_provider_options():
+        label = str(option.get("label") or option.get("engine") or "unknown")
+        if option.get("available"):
+            available.append(label)
+        else:
+            unavailable.append((label, str(option.get("reason") or "unavailable")))
+    return runtime_menu_views.her_v3_provider_menu_text(
+        current_provider=target.provider,
+        available=available,
+        unavailable=unavailable,
+    )
+
+
+def her_v3_provider_keyboard(runtime) -> InlineKeyboardMarkup:
+    target = runtime.backend_manager.get_her_v3_target()
+    buttons: list[list[InlineKeyboardButton]] = []
+    for index, option in enumerate(
+        runtime.backend_manager.get_her_v3_provider_options()
+    ):
+        engine = str(option.get("engine") or "")
+        label = str(option.get("label") or engine)
+        token = _her_v2_callback_token(engine)
+        if option.get("available"):
+            callback = f"herv3_provider:{index}:{token}"
+            label = selected_label(label, engine == target.provider)
+        else:
+            callback = f"herv3_provider_locked:{index}:{token}"
+            label = f"🔒 {label}"
+        buttons.append([InlineKeyboardButton(label, callback_data=callback)])
+    buttons.append([InlineKeyboardButton(back_label(), callback_data="backend_menu")])
+    return InlineKeyboardMarkup(buttons)
+
+
+def her_v3_model_keyboard(runtime) -> InlineKeyboardMarkup:
+    target = runtime.backend_manager.get_her_v3_target()
+    option = runtime.backend_manager._her_v3_provider_option(target.provider)
+    models = list(option.get("models") or []) if option else []
+    buttons = [
+        [
+            InlineKeyboardButton(
+                selected_label(model, model == target.model),
+                callback_data=(
+                    f"herv3_model:{index}:{_her_v2_callback_token(model)}"
+                ),
+            )
+        ]
+        for index, model in enumerate(models)
+    ]
+    buttons.append(
+        [InlineKeyboardButton(back_label(), callback_data="herv3_provider_menu")]
+    )
+    return InlineKeyboardMarkup(buttons)
+
+
+def apply_her_v3_target(runtime, target) -> str | None:
+    try:
+        runtime.backend_manager.apply_her_v3_target(target)
+    except (OSError, TypeError, ValueError) as exc:
+        return str(exc)
+    provider_model = (target.provider, target.model)
+    _schedule_pricing_prewarm(runtime, provider_model)
+    _schedule_capability_prewarm(runtime, provider_model)
+    return None
 
 
 def backend_keyboard(runtime) -> InlineKeyboardMarkup:
@@ -1224,7 +1294,30 @@ async def cmd_provider(runtime, update, context: Any) -> None:
     if not runtime._is_authorized_user(update.effective_user.id):
         return
     if runtime.config.active_backend == HER_V2_ENGINE:
-        await _cmd_her_v3_model(runtime, update, list(context.args or []))
+        args = list(context.args or [])
+        if not args:
+            await runtime._reply_text(
+                update,
+                her_v3_provider_menu_text(runtime),
+                parse_mode="HTML",
+                reply_markup=her_v3_provider_keyboard(runtime),
+            )
+            return
+        try:
+            target = runtime.backend_manager.prepare_her_v3_provider(args[0])
+        except (TypeError, ValueError) as exc:
+            await runtime._reply_text(update, str(exc))
+            return
+        error = apply_her_v3_target(runtime, target)
+        if error:
+            await runtime._reply_text(update, error)
+            return
+        await runtime._reply_text(
+            update,
+            her_v3_model_menu_text(runtime),
+            parse_mode="HTML",
+            reply_markup=her_v3_model_keyboard(runtime),
+        )
         return
     if runtime.config.active_backend != HER_V2_ENGINE:
         await runtime._reply_text(
@@ -1566,13 +1659,28 @@ async def _cmd_her_v2_model(runtime, update, args: list[str]) -> None:
 
 async def _cmd_her_v3_model(runtime, update, args: list[str]) -> None:
     if args:
-        await runtime._reply_text(update, ui_language.tr("menu.her_v3.read_only"))
+        try:
+            target = runtime.backend_manager.prepare_her_v3_model(args[0])
+        except (TypeError, ValueError) as exc:
+            await runtime._reply_text(update, str(exc))
+            return
+        error = apply_her_v3_target(runtime, target)
+        if error:
+            await runtime._reply_text(update, error)
+            return
+        text, reply_markup = runtime._configuration_followup("model")
+        await runtime._reply_text(
+            update,
+            text,
+            parse_mode="HTML",
+            reply_markup=reply_markup,
+        )
         return
     await runtime._reply_text(
         update,
         her_v3_model_menu_text(runtime),
         parse_mode="HTML",
-        reply_markup=None,
+        reply_markup=her_v3_model_keyboard(runtime),
     )
 
 
@@ -1713,7 +1821,57 @@ async def callback_model(runtime, update, context: Any) -> None:
         )
         return
     try:
-        if data == "backend_mode_confirm":
+        if data == "herv3_provider_menu":
+            await query.edit_message_text(
+                her_v3_provider_menu_text(runtime),
+                parse_mode="HTML",
+                reply_markup=her_v3_provider_keyboard(runtime),
+            )
+        elif data.startswith("herv3_provider_locked:"):
+            await query.answer(
+                ui_language.tr("menu.provider.none"),
+                show_alert=True,
+            )
+            return
+        elif data.startswith("herv3_provider:"):
+            _, raw_index, token = data.split(":", 2)
+            options = runtime.backend_manager.get_her_v3_provider_options()
+            _index, option = _her_v2_indexed_choice(options, raw_index)
+            engine = str(option.get("engine") or "")
+            if token != _her_v2_callback_token(engine):
+                raise ValueError(ui_language.tr("model.menu.stale"))
+            target = runtime.backend_manager.prepare_her_v3_provider(engine)
+            error = apply_her_v3_target(runtime, target)
+            if error:
+                await query.answer(error, show_alert=True)
+                return
+            await query.edit_message_text(
+                her_v3_model_menu_text(runtime),
+                parse_mode="HTML",
+                reply_markup=her_v3_model_keyboard(runtime),
+            )
+        elif data.startswith("herv3_model:"):
+            _, raw_index, token = data.split(":", 2)
+            current = runtime.backend_manager.get_her_v3_target()
+            option = runtime.backend_manager._her_v3_provider_option(
+                current.provider
+            )
+            models = list(option.get("models") or []) if option else []
+            _index, model = _her_v2_indexed_choice(models, raw_index)
+            if token != _her_v2_callback_token(model):
+                raise ValueError(ui_language.tr("model.menu.stale"))
+            target = runtime.backend_manager.prepare_her_v3_model(model)
+            error = apply_her_v3_target(runtime, target)
+            if error:
+                await query.answer(error, show_alert=True)
+                return
+            text, reply_markup = runtime._configuration_followup("model")
+            await query.edit_message_text(
+                text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+        elif data == "backend_mode_confirm":
             # Old Telegram cards remain usable without changing working mode.
             await query.edit_message_text(
                 runtime._build_backend_menu_text(),
@@ -2380,7 +2538,7 @@ async def callback_model(runtime, update, context: Any) -> None:
                 await query.edit_message_text(
                     her_v3_model_menu_text(runtime),
                     parse_mode="HTML",
-                    reply_markup=None,
+                    reply_markup=her_v3_model_keyboard(runtime),
                 )
                 await query.answer()
                 return
@@ -2450,11 +2608,9 @@ async def callback_model(runtime, update, context: Any) -> None:
                     await query.answer(message, show_alert=True)
                     return
                 await query.edit_message_text(
-                    runtime_menu_views.her_v2_backend_selected_text(
-                        with_context=with_context
-                    ),
+                    her_v3_provider_menu_text(runtime),
                     parse_mode="HTML",
-                    reply_markup=None,
+                    reply_markup=her_v3_provider_keyboard(runtime),
                 )
             else:
                 await query.edit_message_text(
@@ -2514,11 +2670,9 @@ async def callback_model(runtime, update, context: Any) -> None:
                     )
                 else:
                     if runtime.config.active_backend == HER_V2_ENGINE:
-                        from orchestrator.her_v2.models import effort_display_label
-
                         switched_text = ui_language.tr(
-                            "model.execution_mode_switched",
-                            mode=effort_display_label(requested),
+                            "model.effort_switched",
+                            effort=requested,
                         )
                     else:
                         switched_text = ui_language.tr(

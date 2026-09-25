@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from orchestrator.flexible_backend_registry import HER_V2_ENGINE
+from orchestrator.flexible_backend_registry import HER_V2_ENGINE, public_backend_engine
 
 
 def _optional_bool(runtime: Any, name: str) -> bool | None:
@@ -14,7 +14,9 @@ def _optional_bool(runtime: Any, name: str) -> bool | None:
 def runtime_presentation_status(runtime: Any) -> dict[str, Any]:
     """Project current runtime facts without duplicating provider catalogues."""
 
-    engine = str(getattr(getattr(runtime, "config", None), "active_backend", "") or "unknown")
+    storage_engine = str(
+        getattr(getattr(runtime, "config", None), "active_backend", "") or "unknown"
+    )
     get_model = getattr(runtime, "get_current_model", None)
     get_effort = getattr(runtime, "_get_current_effort", None)
     try:
@@ -28,14 +30,14 @@ def runtime_presentation_status(runtime: Any) -> dict[str, Any]:
     result: dict[str, Any] = {
         "schema_version": 1,
         "source": "live_runtime",
-        "engine": engine,
+        "engine": public_backend_engine(storage_engine),
         "model": str(model_value or "unknown"),
         "effort": None if effort is None else str(effort),
         "think": _optional_bool(runtime, "_think"),
         "verbose": _optional_bool(runtime, "_verbose"),
         "commentary": _optional_bool(runtime, "_commentary"),
     }
-    if engine != HER_V2_ENGINE:
+    if storage_engine != HER_V2_ENGINE:
         # Model Provider is an HER-owned routing fact.  Other Engines expose
         # only their Engine/model pair and never manufacture a provider label.
         return result

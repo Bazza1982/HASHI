@@ -117,6 +117,7 @@ from orchestrator.flexible_backend_registry import (
     get_backend_label,
     is_selectable_backend,
     normalize_model,
+    public_backend_engine,
 )
 from orchestrator.runtime_effort_options import get_available_efforts, normalize_effort
 from orchestrator.memory_index import MemoryIndex
@@ -1566,16 +1567,57 @@ class FlexibleAgentRuntime:
 
         delivery = telegram_delivery_failover.delivery_status_summary(self)
         display_policy = telegram_stream_policy.get_display_policy(self)
+        public_backend = public_backend_engine(self.config.active_backend)
+        public_allowed_backends: list[dict[str, Any]] = []
+        for configured in self.config.allowed_backends:
+            row = dict(configured)
+            if canonical_backend_engine(row.get("engine")) == HER_V2_ENGINE:
+                target = self.backend_manager.get_her_v3_target()
+                option = self.backend_manager._her_v3_provider_option(
+                    target.provider
+                )
+                effort = str(configured.get("effort") or "").casefold() or None
+                if effort in {"none", "zero"}:
+                    effort = "off"
+                row = {
+                    key: value
+                    for key, value in row.items()
+                    if key
+                    not in {
+                        "engine",
+                        "model",
+                        "models",
+                        "default_model",
+                        "effort",
+                        "her_v2",
+                    }
+                }
+                row.update(
+                    {
+                        "engine": "her-v3",
+                        "provider": target.provider,
+                        "model": target.model,
+                        "models": list(option.get("models") or []) if option else [],
+                        "effort": effort,
+                        "efforts": get_available_efforts(
+                            target.provider,
+                            target.model,
+                            allowed_backends=self.config.allowed_backends,
+                            provider=True,
+                        ),
+                    }
+                )
+            public_allowed_backends.append(row)
         return {
             "id": self.name,
             "name": self.name,
             "display_name": self.get_display_name(),
             "emoji": self.get_agent_emoji(),
-            "engine": self.config.active_backend,
-            "active_backend": self.config.active_backend,
+            "engine": public_backend,
+            "active_backend": public_backend,
             "model": self.get_current_model(),
             "provider": self.get_current_provider(),
-            "allowed_backends": [dict(backend) for backend in self.config.allowed_backends],
+            "allowed_backends": public_allowed_backends,
             "workspace_dir": str(self.workspace_dir),
             "transcript_path": str(self.transcript_log_path),
             "online": bool(self.backend_ready),
@@ -6671,10 +6713,9 @@ class FlexibleAgentRuntime:
                 return
             await self._reply_text(
                 update,
-                runtime_menu_views.her_v2_backend_selected_text(
-                    with_context=with_context
-                ),
+                runtime_model_selection.her_v3_provider_menu_text(self),
                 parse_mode="HTML",
+                reply_markup=runtime_model_selection.her_v3_provider_keyboard(self),
             )
             return
 
@@ -7048,8 +7089,8 @@ class FlexibleAgentRuntime:
 
     def _get_available_models(self) -> list[str]:
         if self.config.active_backend == HER_V2_ENGINE:
-            selected = self.backend_manager.get_her_v2_configuration()
-            option = self.backend_manager._her_v2_provider_option(selected.provider)
+            selected = self.backend_manager.get_her_v3_target()
+            option = self.backend_manager._her_v3_provider_option(selected.provider)
             return list(option["models"]) if option and option["available"] else []
         return self._get_available_models_for(self.config.active_backend)
 
@@ -7058,8 +7099,8 @@ class FlexibleAgentRuntime:
         engine: str,
     ) -> list[str]:
         if engine == HER_V2_ENGINE:
-            selected = self.backend_manager.get_her_v2_configuration()
-            option = self.backend_manager._her_v2_provider_option(selected.provider)
+            selected = self.backend_manager.get_her_v3_target()
+            option = self.backend_manager._her_v3_provider_option(selected.provider)
             return list(option["models"]) if option and option["available"] else []
         models = get_available_models(engine)
         backend_cfg = self._get_backend_cfg(engine)
@@ -7094,6 +7135,14 @@ class FlexibleAgentRuntime:
         return self._get_available_efforts_for(self.config.active_backend, self.get_current_model())
 
     def _get_available_efforts_for(self, engine: str, model: str | None = None) -> list[str]:
+        if canonical_backend_engine(engine) == HER_V2_ENGINE:
+            target = self.backend_manager.get_her_v3_target()
+            return get_available_efforts(
+                target.provider,
+                target.model,
+                allowed_backends=self.config.allowed_backends,
+                provider=True,
+            )
         return get_available_efforts(engine, model, allowed_backends=self.config.allowed_backends)
 
     def _get_backend_cfg(
@@ -7107,25 +7156,44 @@ class FlexibleAgentRuntime:
         if self.backend_manager.current_backend:
             effort = getattr(self.backend_manager.current_backend, "effort", None)
             if effort:
+                if self.config.active_backend == HER_V2_ENGINE:
+                    return {"zero": "off", "none": "off"}.get(
+                        str(effort).casefold(), str(effort).casefold()
+                    )
                 return effort
         backend_cfg = self._get_backend_cfg(self.config.active_backend)
         if backend_cfg:
-            return backend_cfg.get("effort")
+            effort = backend_cfg.get("effort")
+            if effort and self.config.active_backend == HER_V2_ENGINE:
+                return {"zero": "off", "none": "off"}.get(
+                    str(effort).casefold(), str(effort).casefold()
+                )
+            return effort
         return None
 
     _set_backend_model = runtime_model_selection.set_backend_model
 
     def _set_active_effort(self, requested: str):
-        normalized = normalize_effort(
-            self.config.active_backend,
-            requested,
-            self.get_current_model(),
-            allowed_backends=self.config.allowed_backends,
-        )
+        if self.config.active_backend == HER_V2_ENGINE:
+            normalized = {"none": "off", "zero": "off"}.get(
+                str(requested).strip().casefold(),
+                str(requested).strip().casefold(),
+            )
+            if normalized not in self._get_available_efforts():
+                return
+            live_value = "zero" if normalized == "off" else normalized
+        else:
+            normalized = normalize_effort(
+                self.config.active_backend,
+                requested,
+                self.get_current_model(),
+                allowed_backends=self.config.allowed_backends,
+            )
+            live_value = normalized
         if not normalized:
             return
         if self.backend_manager.current_backend and hasattr(self.backend_manager.current_backend, "effort"):
-            self.backend_manager.current_backend.effort = normalized
+            self.backend_manager.current_backend.effort = live_value
         backend_cfg = self._get_backend_cfg(self.config.active_backend)
         if backend_cfg is not None:
             backend_cfg["effort"] = normalized
@@ -7151,12 +7219,7 @@ class FlexibleAgentRuntime:
         active = current_effort or self._get_current_effort()
         buttons = []
         for effort in self._get_available_efforts():
-            if self.config.active_backend == HER_V2_ENGINE:
-                from orchestrator.her_v2.models import effort_display_label
-
-                visible_effort = effort_display_label(effort)
-            else:
-                visible_effort = effort
+            visible_effort = effort
             label = selected_label(visible_effort, effort == active)
             callback_data = f"effort:{source}:{effort}" if source else f"effort:{effort}"
             buttons.append([InlineKeyboardButton(label, callback_data=callback_data)])
@@ -7185,7 +7248,7 @@ class FlexibleAgentRuntime:
             consequence = ui_language.tr("menu.effort.standard_effect")
         facts = [
             f"<b>{html.escape(ui_language.tr('common.backend'))}</b> · "
-            f"<code>{html.escape(self.config.active_backend)}</code>",
+            f"<code>{html.escape(public_backend_engine(self.config.active_backend))}</code>",
         ]
         provider = self.get_current_provider()
         if provider:
@@ -7206,9 +7269,7 @@ class FlexibleAgentRuntime:
                 f"<code>{html.escape(self.get_current_model())}</code>"
             )
         if self.config.active_backend == HER_V2_ENGINE:
-            from orchestrator.her_v2.models import effort_display_label
-
-            current_display = effort_display_label(current)
+            current_display = current
             title = ui_language.tr("menu.effort.her_title")
             action = ui_language.tr("menu.effort.her_action")
         else:
@@ -7280,7 +7341,9 @@ class FlexibleAgentRuntime:
         return InlineKeyboardMarkup(buttons)
 
     def _build_backend_menu_text(self) -> str:
-        return runtime_menu_views.backend_menu_text(active_backend=self.config.active_backend)
+        return runtime_menu_views.backend_menu_text(
+            active_backend=public_backend_engine(self.config.active_backend)
+        )
 
     def _build_backend_model_prompt(self, target_engine: str, with_context: bool) -> str:
         current_model = self._get_configured_model_for(target_engine)
@@ -7415,12 +7478,9 @@ class FlexibleAgentRuntime:
             if requested == "extra":
                 requested = "extra_high"
             if self.config.active_backend == HER_V2_ENGINE:
-                from orchestrator.her_v2.models import parse_effort
-
-                try:
-                    requested = parse_effort(requested).value
-                except ValueError:
-                    pass
+                requested = {"none": "off", "zero": "off"}.get(
+                    requested, requested
+                )
             if requested not in available:
                 await self._reply_text(
                     update,
@@ -7433,11 +7493,9 @@ class FlexibleAgentRuntime:
                 return
             self._set_active_effort(requested)
             if self.config.active_backend == HER_V2_ENGINE:
-                from orchestrator.her_v2.models import effort_display_label
-
                 switched = ui_language.tr(
                     "menu.effort.her_switched",
-                    effort=effort_display_label(requested),
+                    effort=requested,
                 )
             else:
                 switched = ui_language.tr(
@@ -7462,10 +7520,8 @@ class FlexibleAgentRuntime:
                 f"<code>{html.escape(self.get_current_model())}</code>"
             ]
         if self.config.active_backend == HER_V2_ENGINE:
-            from orchestrator.her_v2.models import effort_display_label
-
             effort_title = ui_language.tr("menu.effort.her_title")
-            current_display = effort_display_label(current_effort)
+            current_display = current_effort
         else:
             effort_title = "Model effort"
             current_display = current_effort

@@ -99,13 +99,20 @@ from orchestrator.enterprise.secret_refs import ConnectorSecretResolver
 from orchestrator.flexible_backend_registry import (
     BACKEND_REGISTRY,
     HER_V2_ENGINE,
+    HER_V3_ENGINE,
     is_selectable_backend,
+    canonical_backend_engine,
+    get_available_models,
+    get_backend_entry,
+    get_provider_reasoning_efforts,
+    public_backend_engine,
 )
 from orchestrator.frontend_delivery import (
     RUN_DELIVERY_ROUTE_METADATA_KEY,
     normalize_tui_run_delivery_policy,
     tui_request_metadata,
 )
+from orchestrator.her_v2.v3_config import resolve_v3_target
 from orchestrator.message_context import (
     CONNECTOR_EVIDENCE_METADATA_KEY,
     HCHAT_CONTEXT_METADATA_KEY,
@@ -1298,22 +1305,72 @@ class WorkbenchApiServer:
                 "active_backend", "unknown"
             )
             model = agent_row.get("model") or "unknown"
+            public_backends: list[dict[str, Any]] = []
             if agent_row.get("type") in {"flex", "limited"}:
                 for backend in agent_row.get("allowed_backends", []):
-                    if backend.get("engine") == agent_row.get("active_backend"):
-                        model = backend.get("model") or model
-                        break
+                    public_row = dict(backend)
+                    if canonical_backend_engine(backend.get("engine")) == HER_V2_ENGINE:
+                        try:
+                            target = resolve_v3_target(backend.get("her_v2") or {})
+                        except (TypeError, ValueError):
+                            target = None
+                        public_row = {
+                            key: value
+                            for key, value in backend.items()
+                            if key
+                            not in {
+                                "engine",
+                                "model",
+                                "models",
+                                "default_model",
+                                "effort",
+                                "her_v2",
+                            }
+                        }
+                        public_row["engine"] = HER_V3_ENGINE
+                        if target is not None:
+                            public_row.update(
+                                {
+                                    "provider": target.provider,
+                                    "model": target.model,
+                                    "models": get_available_models(target.provider),
+                                    "effort": {
+                                        "none": "off",
+                                        "zero": "off",
+                                    }.get(
+                                        str(backend.get("effort") or "").casefold(),
+                                        backend.get("effort"),
+                                    ),
+                                    "efforts": get_provider_reasoning_efforts(
+                                        target.provider,
+                                        target.model,
+                                    ),
+                                }
+                            )
+                        if canonical_backend_engine(
+                            agent_row.get("active_backend")
+                        ) == HER_V2_ENGINE and target is not None:
+                            model = target.model
+                    public_backends.append(public_row)
+                    if canonical_backend_engine(
+                        backend.get("engine")
+                    ) == canonical_backend_engine(agent_row.get("active_backend")):
+                        if canonical_backend_engine(
+                            backend.get("engine")
+                        ) != HER_V2_ENGINE:
+                            model = backend.get("model") or model
+            public_engine = public_backend_engine(engine)
             metadata = {
                 "id": agent_row["name"],
                 "name": agent_row["name"],
                 "display_name": agent_row.get("display_name", agent_row["name"]),
                 "emoji": agent_row.get("emoji", "🤖"),
-                "engine": engine,
-                "active_backend": agent_row.get("active_backend", engine),
+                "engine": public_engine,
+                "active_backend": public_backend_engine(
+                    agent_row.get("active_backend", engine)
+                ),
                 "model": model,
-                "allowed_backends": [
-                    dict(backend) for backend in agent_row.get("allowed_backends", [])
-                ],
+                "allowed_backends": public_backends,
                 "workspace_dir": str(workspace_dir),
                 "transcript_path": str(transcript_path),
                 "online": False,
@@ -1323,7 +1380,9 @@ class WorkbenchApiServer:
                 "presentation_status": {
                     "schema_version": 1,
                     "source": "configured_offline_agent",
-                    "engine": agent_row.get("active_backend") or engine,
+                    "engine": public_backend_engine(
+                        agent_row.get("active_backend") or engine
+                    ),
                     "model": model,
                     "effort": None,
                     "think": None,
@@ -3855,7 +3914,82 @@ class WorkbenchApiServer:
         for engine, registry_entry in BACKEND_REGISTRY.items():
             if not is_selectable_backend(engine):
                 continue
-            entry = {"engine": engine}
+            public_engine = public_backend_engine(engine)
+            entry = {"engine": public_engine}
+            if engine == HER_V2_ENGINE:
+                raw_her = getattr(self.global_config, "her_providers", None) or {}
+                raw_profiles = (
+                    raw_her.get("providers") if isinstance(raw_her, dict) else {}
+                )
+                raw_profiles = raw_profiles if isinstance(raw_profiles, dict) else {}
+                providers: dict[str, dict[str, Any]] = {}
+                for name, raw_profile in raw_profiles.items():
+                    if not isinstance(raw_profile, dict):
+                        continue
+                    provider = canonical_backend_engine(
+                        str(
+                            raw_profile.get("engine")
+                            or (
+                                str(name)
+                                if str(name).endswith("-api")
+                                else f"{name}-api"
+                            )
+                        ).strip()
+                    )
+                    provider_entry = get_backend_entry(provider)
+                    if not provider_entry:
+                        continue
+                    models = list(
+                        dict.fromkeys(
+                            str(value).strip()
+                            for value in [
+                                *(raw_profile.get("models") or []),
+                                raw_profile.get("default_model"),
+                                raw_profile.get("model"),
+                                raw_profile.get("fast_model"),
+                                raw_profile.get("pro_model"),
+                                *get_available_models(provider),
+                            ]
+                            if str(value or "").strip()
+                            and str(value).strip().casefold() != "role-configured"
+                        )
+                    )
+                    default_model = str(
+                        raw_profile.get("pro_model")
+                        or raw_profile.get("default_model")
+                        or raw_profile.get("model")
+                        or provider_entry.get("default_model")
+                        or next(iter(models), "")
+                    ).strip()
+                    status = str(raw_profile.get("status") or "stable").strip().lower()
+                    providers[provider] = {
+                        "engine": provider,
+                        "label": str(provider_entry.get("label") or provider),
+                        "models": models,
+                        "default_model": default_model or None,
+                        "model_efforts": {
+                            model: get_provider_reasoning_efforts(provider, model)
+                            for model in models
+                        },
+                        "available": status != "disabled" and bool(models),
+                        "status": status,
+                    }
+                entry.update(
+                    {
+                        "label": str(registry_entry.get("label") or HER_V3_ENGINE),
+                        "models": [],
+                        "default_model": None,
+                        "efforts": [],
+                        "default_effort": None,
+                        "privacy_levels": list(
+                            registry_entry.get("privacy_levels") or []
+                        ),
+                        "providers": providers,
+                        "creation": {"mode": "provider_model"},
+                    }
+                )
+                backends[public_engine] = entry
+                continue
             for field in public_fields:
                 if field in registry_entry:
                     value = registry_entry[field]
@@ -3867,14 +4001,11 @@ class WorkbenchApiServer:
                             for key, item in value.items()
                         }
                     entry[field] = value
-            if engine == HER_V2_ENGINE:
-                entry["creation"] = {"mode": "effort"}
-            else:
-                # Creation support is explicit. Older schema-v1 catalogues do
-                # not advertise this capability, so clients can fail closed
-                # instead of exposing a button that reaches a missing route.
-                entry["creation"] = {"mode": "model"}
-            backends[engine] = entry
+            # Creation support is explicit. Older schema-v1 catalogues do not
+            # advertise this capability, so clients can fail closed instead of
+            # exposing a button that reaches a missing route.
+            entry["creation"] = {"mode": "model"}
+            backends[public_engine] = entry
         return web.json_response(
             {
                 "ok": True,

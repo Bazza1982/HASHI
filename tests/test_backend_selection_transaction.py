@@ -26,14 +26,21 @@ def make_selection(tmp_path, monkeypatch, *, mode="fixed", memory=True,
         allowed_backends=[
             {"engine": "codex-cli", "model": "gpt-5.4"},
             {"engine": "claude-cli", "model": "claude-haiku-4-5"},
-            {"engine": "her-v2", "model": "role-configured",
-             "her_v2": {"profiles": {"configured": {}}}},
+            {"engine": "her-v2", "model": "deepseek-v4-pro", "effort": "high",
+             "her_v2": {"main": {
+                 "provider": "deepseek-api", "model": "deepseek-v4-pro",
+             }}},
+            {"engine": "deepseek-api",
+             "models": ["deepseek-flash", "deepseek-v4-pro"]},
         ],
         project_root=tmp_path,
     )
     global_cfg = GlobalConfig(
         authorized_id=1, base_logs_dir=tmp_path / "logs",
         base_media_dir=tmp_path / "media", project_root=tmp_path,
+        her_providers={"providers": {"deepseek": {
+            "engine": "deepseek-api", "status": "stable",
+        }}},
     )
     manager = FlexibleBackendManager(cfg, global_cfg, secrets={})
     manager.agent_mode = mode
