@@ -106,57 +106,46 @@ live Worker or real-provider run.
 
 ## HASHI3 live verification (2026-09-25)
 
-The HASHI3 root checkout now runs local branch `experiment/her-v3-live-hashi3`;
-the adopted Worker source was `ba5eab45`. `main` remains at `6a36caf5`, and
-GitHub `main` was not changed.
-After all nine HASHI3 Agents were observed idle, only `phd_1` received an
-Agent-scoped hot `/reboot min` (receipt `22df43de1dc042b9834390c29705448a`,
-status `succeeded`). The adopted Worker presents `her_v3.main` as
-`hashi-api / gpt-6-astra`; `/model` and `/effort` show the single main target and
-six reasoning choices. Its pre-existing `low` effort was not changed.
+The approval covered this HASHI3-only experiment, all-Agent HER v3 availability,
+and live switching/usage acceptance. The HASHI3 root checkout runs local branch
+`experiment/her-v3-live-hashi3`; `main` remains at `6a36caf5`, GitHub `main` was
+not changed, and Protected Core was not edited.
 
-Two real-provider Runs through the HASHI3 Backend API completed without
-Telegram mirroring. Request `req-phd_1-2026-09-25_175648-0001` returned the
-requested `HER_V3_LIVE_OK`; its final activity had
-`provenance=her_v3_single_loop` and `planner=false; replanner=false;
-reviewer=false`. Request `req-phd_1-2026-09-25_175648-0003` called the
-read-only PowerShell UTC-time tool, received `status=success`, and then
-answered using that result with the same HER v3 provenance. An intervening
-tool Run failed because Windows PowerShell did not support `Get-Date -AsUTC`;
-the Agent reported that error honestly, and the corrected command succeeded.
+All nine HASHI3 Agents now advertise public Engine `her-v3` with Provider
+`deepseek-api`, models `deepseek-flash` and `deepseek-v4-pro`, and model-reasoning
+efforts `off`, `high`, and `max`. The shared catalogue derives the same
+Provider-specific choices. `/backend`, `/provider`, `/model`, and `/effort`
+show and persist those values; `/herv2` is absent from the public command set.
+`/metre` works as the declared alias of `/meter`, and `/token` normalizes the
+internal compatibility Engine to the public `her-v3` label.
 
-Later on 2026-09-25 the `email-agent-1` instance configuration was given an
-explicit HER v3 `main` target, `deepseek-api / deepseek-v4-pro`, replacing its
-implicit fallback to the legacy premium profile. Its pre-existing DeepSeek
-credential was present; other Agents were not reconfigured. Agent-scoped hot
-adoption receipt `aad9494d2f99491484ab1587acb63bf0` succeeded. The
-Agent-owned `/effort high` command also persisted `high` in its workspace
-state, while its declared main profile uses DeepSeek reasoning `high`.
-Request `req-email-agent-1-2026-09-25_190631-0001` returned
-`DEEPSEEK_HERV3_LIVE_OK`. Requests
-`req-email-agent-1-2026-09-25_190631-0002` and
-`req-email-agent-1-2026-09-25_190631-0003` each executed a
-read-only UTC-time shell Tool; their activity origin was
-`her_v2:deepseek-api`, the Tool returned `status=success`, and the final answer
-carried `provenance=her_v3_single_loop`. The last request ran after effort was
-set to `high` and included DeepSeek thinking deltas. All three Runs disabled
-Telegram mirroring and performed no mailbox actions.
+The first all-Agent adoption exposed a startup dependency on removed legacy
+profiles. The replacement did not commit; the registered HASHI3 recovery task
+restored service. A real-manager regression reproduced the failure, the HER v3
+provider target now bootstraps directly, and later shared replacements
+succeeded with all nine Workers online. A subsequent live red Run exposed the
+internal compatibility Engine in a Session assistant-message source; the
+public projection was fixed and the rerun stored `source=her-v3`.
 
-This proves the real main-model/tool loop with HASHI API and DeepSeek on two
-HASHI3 Agents. It is not the full external-frontend acceptance suite, nor proof
-for all providers, effort levels, Strategy Cards, Agent Companion, long-running
-processes, or Habit Reflection. The live shared `/api/backends/catalogue` now
-serves `HER v3 (experiment)` and all six reasoning choices. A separate earlier
-HASHI3 `/reboot max` receipt (`66cba3bb4a74471e91445ae1429135c7`) records a
-committed shared-Function replacement; the Agent-scoped DeepSeek reboot above
-did not perform that replacement. The shared catalogue still uses
-`role-configured` as its model placeholder, not a selectable DeepSeek model
-list. Inspect the Agent-specific `/model` or runtime status for its actual
-`deepseek-api / deepseek-v4-pro` main target. This does not establish full
-Workbench model-selection acceptance.
+Live acceptance used the formal Session API and durable usage records:
 
-Before merging or adopting elsewhere, test more real-provider cases on this
-HASHI3 experiment: fixed Session PCM deltas, model/tool continuity,
-`/effort`, Strategy on/off, AC 5/10-minute behaviour, commentary cadence,
-long-running managed processes, and Habit Reflection. An Agent-scoped hot
-reboot adopts source from the HASHI3 root checkout, not a separate worktree.
+- `req-phd_1-2026-09-25_221320-0001` ran `deepseek-flash` at effort `off`,
+  returned exactly `HER_V3_FLASH_PUBLIC_SOURCE_OK`, recorded one Provider call,
+  zero reasoning tokens, and public Session source `her-v3`.
+- `req-phd_1-2026-09-25_221320-0002` ran `deepseek-v4-pro` at effort `max`,
+  returned the correct `7^222 mod 1000 = 049`, recorded one Provider call and
+  547 reasoning tokens, and public Session source `her-v3`.
+- `worker-1` switched from `codex-cli / gpt-5.6-luna` to HER v3 through
+  `/backend`; `req-worker-1-2026-09-25_221315-0001` then returned exactly
+  `HER_V3_BACKEND_SWITCH_OK` through `deepseek-v4-pro`. The Agent was restored
+  to its original Codex model and `max` effort afterward.
+- `/metre summary` reported the Pro Run as `deepseek-api /
+  deepseek-v4-pro`, one call, 17,801 tokens, and US$0.003296. `/token` showed
+  the HER v3 public label and no public HER v2 bucket.
+
+The final retained `phd_1` setting is `deepseek-api / deepseek-v4-pro` at
+effort `high`. These checks establish HASHI3 Backend API selection, persistence,
+real DeepSeek execution, provider reasoning, Session presentation, token
+accounting, and meter reporting. They do not authorize a merge or deployment to
+another instance, and do not qualify optional Strategy Cards, Agent Companion,
+long-running processes, or Habit Reflection.

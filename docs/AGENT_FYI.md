@@ -118,20 +118,20 @@ ownership, and leaves optional JEV Agent Companion disabled by default.
 The public Engine ID is `her-v3`; the internal `her-v2` name remains only at
 the adapter/storage compatibility boundary. `/provider` and `/model` switch the
 real single `main` target, and `/effort` changes model reasoning, not workflow.
-See [HER v3 experiment](HER_V3_EXPERIMENT.md). The 708-pass result was the
-curated Core gate, not the full product suite. One HASHI3 Agent (`phd_1`) has
-now passed real-provider and read-only tool-loop Runs after a successful
-Agent-scoped hot adoption. `email-agent-1` also passed real DeepSeek/tool Runs.
-The current revision replaces the old shared placeholders with Provider-specific
-model and reasoning choices; its final all-Agent adoption is recorded in the
-experiment document after live verification. This note is not merge permission.
+All nine HASHI3 Agents expose DeepSeek models `deepseek-flash` and
+`deepseek-v4-pro` with reasoning efforts `off`, `high`, and `max`. Public
+commands and Session/token projections use `her-v3`; `/herv2` is retired, and
+`/metre` is a working alias. Live acceptance proved Flash/off, Pro/max,
+cross-Engine `/backend` switching, durable token accounting, and meter output.
+See [HER v3 experiment](HER_V3_EXPERIMENT.md) for request receipts and the
+recovered adoption failure. This note is not merge permission.
 
-Engine and Model Provider differ. In this experiment HER v3 has one main model
-at every effort level; effort controls provider reasoning, not Direct/Strategic/
-Planned workflow. Fixed/Flex and Memory+ remain independent. `/backend`
-selects Engine, `/model` inspects the effective main target, and `/effort`
-controls reasoning depth. Legacy v2 stage names may still exist in stored
-compatibility data but are not foreground execution stages here.
+Engine and Model Provider differ. HER v3 has one selected main model at every
+effort level; effort controls Provider reasoning, not Direct/Strategic/Planned
+workflow. Fixed/Flex and Memory+ remain independent. `/backend` selects Engine,
+`/provider` selects Provider, `/model` selects its model, and `/effort` controls
+reasoning depth. Legacy v2 stage names may still exist only in internal stored
+compatibility data; they are not public controls or foreground execution stages.
 The main branch includes strategy playbook version `2026-09-24.1`. The separate
 JEV strategy-card selection experiment is not part of this branch.
 
