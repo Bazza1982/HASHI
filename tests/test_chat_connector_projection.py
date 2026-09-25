@@ -616,6 +616,69 @@ async def test_staged_frontend_image_is_visible_through_transcript_route(
     assert response.content_type == "image/png"
 
 
+@pytest.mark.asyncio
+async def test_staged_frontend_audio_is_playable_and_downloadable_through_transcript_route(
+    tmp_path: Path,
+):
+    server = _server(tmp_path)
+    owner_id = "user:7"
+    payload = b"OggS-real-workbench-audio"
+    session = server.session_store.ensure_default_session(
+        owner_id=owner_id, agent_id="a"
+    )
+    staged = server.session_store.stage_attachment(
+        session_id=session["session_id"],
+        owner_id=owner_id,
+        filename="audiomorning.ogg",
+        media_type="audio/ogg",
+        size_bytes=len(payload),
+        sha256=hashlib.sha256(payload).hexdigest(),
+        semantic_role="audio_attachment",
+        retention_indefinite=True,
+    )
+    server.session_store.upload_attachment_bytes(
+        session_id=session["session_id"],
+        owner_id=owner_id,
+        attachment_id=staged["attachment_id"],
+        payload=payload,
+        audio_direction="output",
+    )
+    server.session_store.commit_attachment(
+        session_id=session["session_id"],
+        owner_id=owner_id,
+        attachment_id=staged["attachment_id"],
+    )
+    accepted = server.session_store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner_id,
+        agent_id="a",
+        request_id="frontend-audio-preview",
+        text="frontend audio",
+        source="session-api",
+        idempotency_key="frontend-audio-preview",
+        content=[
+            {"type": "text", "text": "frontend audio"},
+            {"type": "attachment", "attachment_id": staged["attachment_id"]},
+        ],
+    )
+    request = SimpleNamespace(
+        match_info={
+            "name": "a",
+            "message_id": accepted.message_id,
+            "attachment_id": staged["attachment_id"],
+        },
+        query={"download": "1"},
+        headers={},
+    )
+
+    response = await server.handle_transcript_attachment(request)
+
+    assert response.status == 200
+    assert response.body == payload
+    assert response.content_type == "audio/ogg"
+    assert str(response.headers["Content-Disposition"]).startswith("attachment")
+
+
 def test_projection_message_cursor_streams_presentation_only_messages(tmp_path: Path):
     store = SessionStore(tmp_path / "presentation.sqlite", instance_id="HASHI2")
     session = store.ensure_default_session(owner_id="user:7", agent_id="a")

@@ -3301,6 +3301,47 @@ class SessionStore:
         )
         if group is None:
             raise SessionConflict("frontend attachment output was not persisted")
+        durable_audio_attachment_ids = [
+            str(part.get("attachment_id") or "")
+            for part in group["attachments"]
+            if str(part.get("modality") or "").casefold() == "audio"
+            and str(part.get("attachment_id") or "")
+        ]
+        if durable_audio_attachment_ids:
+            # Once audio is visible as part of the assistant Message, its
+            # lifetime follows that Message. This also repairs replayed groups
+            # created by older tool versions with preview-only retention.
+            durable_audio_assets: list[tuple[str, str]] = []
+            with self._lock, self._connection() as connection:
+                for attachment_id in durable_audio_attachment_ids:
+                    row = connection.execute(
+                        """SELECT asset_id FROM session_attachments
+                           WHERE attachment_id=? AND session_id=? AND owner_id=?
+                             AND state='committed'""",
+                        (attachment_id, str(session_id), str(owner_id)),
+                    ).fetchone()
+                    asset_id = str(row["asset_id"] or "") if row is not None else ""
+                    if not asset_id:
+                        raise SessionConflict(
+                            "frontend audio attachment is unavailable"
+                        )
+                    durable_audio_assets.append((attachment_id, asset_id))
+            for _attachment_id, asset_id in durable_audio_assets:
+                self.audio_assets.set_indefinite(
+                    asset_id,
+                    owner_id=owner_id,
+                    session_id=session_id,
+                )
+            with self._lock, self._connection() as connection:
+                connection.executemany(
+                    """UPDATE session_attachments
+                       SET retention_seconds=NULL, retention_indefinite=1
+                       WHERE attachment_id=? AND session_id=? AND owner_id=?""",
+                    [
+                        (attachment_id, str(session_id), str(owner_id))
+                        for attachment_id, _asset_id in durable_audio_assets
+                    ],
+                )
         return {**group, "replayed": replayed}
 
     def audio_asset_bytes(

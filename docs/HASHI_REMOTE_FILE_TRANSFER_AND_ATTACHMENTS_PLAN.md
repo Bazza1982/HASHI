@@ -530,3 +530,14 @@ Proceed in two layers:
 That keeps the first repair focused and low-risk while leaving room for a
 cleaner attachment-commit model instead of bolting files onto legacy message
 paths or destabilizing existing chat compatibility.
+
+## Frontend message attachment durability addendum (2026-09-22)
+
+Files published through `frontend_send_attachments` are canonical ordered
+assistant-Message attachments. Audio is therefore promoted from temporary
+generated-audio retention to indefinite message retention when staged and again
+when bound (including idempotent replay of older groups). The transcript
+attachment route admits both the ordinary attachment store and the isolated
+audio asset store after owner, Session, message visibility, size, and digest
+checks. MIME decides inline presentation versus download; it never decides
+whether an otherwise authorized canonical attachment exists.

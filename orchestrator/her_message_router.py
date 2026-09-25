@@ -12,6 +12,7 @@ from typing import Any, Awaitable, Callable
 
 from adapters.stream_events import (
     DELIVERY_CLASSES,
+    DELIVERY_ANSWER_PREVIEW,
     DELIVERY_CONTROL,
     DELIVERY_FINAL,
     DELIVERY_INTERNAL,
@@ -164,6 +165,10 @@ class HERMessageRouter:
                 presenter=self.initial_resolution_presenter,
             )
         if delivery_class == DELIVERY_INTERNAL:
+            return False
+        if delivery_class == DELIVERY_ANSWER_PREVIEW:
+            # This lane is persisted for local Workbench activity polling only.
+            # It must never enter Telegram or any ordinary transport presenter.
             return False
         if delivery_class == DELIVERY_FINAL:
             self.deferred_final = event

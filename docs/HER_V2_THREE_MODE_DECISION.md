@@ -23,6 +23,15 @@ HER v2 exposes exactly three production execution modes:
 These modes are orchestration policies. They do not change provider reasoning,
 tool-call ceilings, filesystem authority, or user-granted scope.
 
+### Routing-card projection
+
+The HER v2 per-turn card keeps the execution route separate from Triage
+classification. Direct (`zero`) turns bypass Triage and therefore display
+`DIRECT` with a `Direct (no triage)` note. Strategic and Planned turns display
+the validated Triage classification (`DIRECT_RESPONSE`, `SIMPLE_TASK`,
+`COMPLEX_TASK`, or `CONFIRMATION_REQUIRED`). `UNKNOWN` is reserved for
+malformed or legacy metadata that contains neither fact.
+
 ## In-turn semantic progress
 
 The three public modes use stage-authored, event-driven Commentary only:

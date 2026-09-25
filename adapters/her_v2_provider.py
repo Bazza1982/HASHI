@@ -22,12 +22,14 @@ from adapters import her_persona
 from adapters.base import BackendResponse, TokenUsage
 from adapters.openrouter_api import ProviderCallObserverError
 from adapters.stream_events import (
+    DELIVERY_ANSWER_PREVIEW,
     DELIVERY_FINAL,
     DELIVERY_INTERNAL,
     DELIVERY_REASONING,
     DELIVERY_TECHNICAL,
     DELIVERY_USER_COMMENTARY,
     KIND_ACKNOWLEDGEMENT,
+    KIND_ANSWER_PREVIEW,
     KIND_COMMENTARY,
     KIND_INITIAL_RESOLUTION,
     KIND_PROVIDER_ACTIVITY,
@@ -144,6 +146,28 @@ def _request_recovery_kind(request: StageRequest) -> str:
     if request.attempt > 1:
         return "fresh_connection_retry"
     return "none"
+
+
+def _answer_preview_allowed(request: StageRequest) -> bool:
+    """Return whether provider text is already user-visible for this stage.
+
+    HER v2 uses provider text as a structured control carrier for strategy,
+    planning, replanning, review, and tool-enabled execution.  Those deltas
+    stay internal.  The remaining presentation stages either explicitly
+    accept natural-language text or have no tool loop that could emit private
+    work instructions before the answer.
+    """
+
+    if request.stage in {
+        Stage.IMMEDIATE_RESPONSE,
+        Stage.FINALISATION,
+    }:
+        return True
+    if request.stage is Stage.DIRECT:
+        return not bool(request.allow_tools)
+    if request.stage is Stage.EXECUTION:
+        return not bool(request.allow_tools)
+    return False
 
 
 def _persona_commentary_agent_failure(text: str) -> tuple[bool, str]:
@@ -3672,9 +3696,11 @@ class HashiStageProvider(StageProvider):
         provider_text_activity = False
         provider_request_inflight: tuple[str, str, str, bool] | None = None
         provider_commentary_serial = 0
+        provider_answer_preview_serial = 0
 
         async def _capture(event: StreamEvent) -> None:
             nonlocal provider_commentary_serial
+            nonlocal provider_answer_preview_serial
             nonlocal provider_replay_activity
             nonlocal provider_text_activity
             nonlocal provider_tool_activity
@@ -3710,9 +3736,49 @@ class HashiStageProvider(StageProvider):
                 trace = str(event.raw_delta or event.summary or "")
                 if trace:
                     reasoning_chunks.append(trace)
-            # Structured JSON answer deltas are internal.  Reasoning and
-            # invalid envelope retries are not meaningful execution progress.
-            if event.kind in {KIND_TEXT_DELTA, KIND_PROVIDER_ACTIVITY}:
+            # Provider text is internal unless this stage has already declared
+            # the text to be the user-visible answer.  The typed preview event
+            # is deliberately separate from raw text_delta so Workbench cannot
+            # accidentally render a strategy/control envelope.
+            if event.kind == KIND_TEXT_DELTA:
+                if (
+                    content
+                    and _answer_preview_allowed(request)
+                    and self.on_stream_event is not None
+                ):
+                    provider_answer_preview_serial += 1
+                    invocation = str(
+                        request.invocation_id
+                        or f"{request.turn_id}:{request.stage.value}:{request.attempt}"
+                    )
+                    preview_event = replace(
+                        event,
+                        kind=KIND_ANSWER_PREVIEW,
+                        summary=content,
+                        raw_delta="",
+                        event_id=(
+                            f"{invocation}:answer-preview:"
+                            f"{provider_answer_preview_serial}"
+                        ),
+                        delivery_class=DELIVERY_ANSWER_PREVIEW,
+                        origin=event.origin or f"her_v2:{profile.engine}",
+                        phase=event.phase or request.stage.value,
+                        provenance="provider_visible_text_delta",
+                        metadata={
+                            **(
+                                dict(event.metadata)
+                                if isinstance(event.metadata, Mapping)
+                                else {}
+                            ),
+                            "ephemeral": True,
+                            "answer_preview": True,
+                        },
+                    )
+                    await self.on_stream_event(preview_event)
+                return
+            # Provider activity is an internal liveness signal and must never
+            # be projected to a user-facing connector.
+            if event.kind == KIND_PROVIDER_ACTIVITY:
                 return
             if event.kind in {KIND_TOOL_END, KIND_COMMENTARY} and request.progress_callback is not None:
                 request.progress_callback(event.kind, event.summary, True)

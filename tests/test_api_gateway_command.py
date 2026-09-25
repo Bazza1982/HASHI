@@ -40,7 +40,7 @@ def test_api_gateway_config_defaults_and_persistence(tmp_path):
     loaded = load_api_gateway_config(cfg)
 
     assert loaded["enabled"] is False
-    assert loaded["default_model"] == "gpt-5.6-sol"
+    assert loaded["default_model"] == "gpt-6-astra"
 
     saved = save_api_gateway_config(
         cfg,
@@ -89,9 +89,9 @@ def test_api_gateway_default_model_list_includes_grok_models():
     assert "grok-imagine-video" in models
 
 
-def test_api_gateway_model_list_includes_smoke_tested_gpt56_variants():
+def test_api_gateway_model_list_includes_qualified_gpt6_variants():
     models = available_api_models()
-    assert {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}.issubset(models)
+    assert {"gpt-6-astra", "gpt-6-sol", "gpt-6-luna"}.issubset(models)
 
 
 def test_api_command_module_is_registered():
@@ -299,7 +299,8 @@ async def test_api_gateway_uses_default_model_when_request_omits_model(tmp_path)
     [
         ("gpt-5.6-luna", "high"),
         ("gpt-5.6-sol", "max"),
-        ("gpt-5.6-luna", "none"),
+        ("gpt-6-sol", "ultra"),
+        ("gpt-6-luna", "max"),
     ],
 )
 async def test_api_gateway_passes_valid_reasoning_effort_to_codex_request(
@@ -427,7 +428,7 @@ async def test_api_gateway_streams_backend_usage_with_request_effort(tmp_path):
         ("gpt-5.6-luna", "ultra"),
         ("gpt-5.6-luna", 5),
         ("gpt-5.6-luna", ""),
-        ("gpt-5.6-terra", "max"),
+        ("gpt-5.5", "max"),
     ],
 )
 async def test_api_gateway_rejects_invalid_reasoning_effort_before_adapter_init(

@@ -82,24 +82,30 @@ BACKEND_REGISTRY: dict[str, dict] = {
     "codex-cli": {
         "label": "codex",
         "gateway_enabled": True,
-        "gateway_default_model": "gpt-5.6-sol",
+        "gateway_default_model": "gpt-6-astra",
         "privacy_levels": [0, 1],
         "models": [
+            "gpt-6-astra",
+            "gpt-6-sol",
+            "gpt-6-luna",
             "gpt-5.6-sol",
             "gpt-5.6-terra",
             "gpt-5.6-luna",
             "gpt-5.5",
-            "gpt-6-astra",
         ],
-        "default_model": "gpt-5.6-sol",
+        "default_model": "gpt-6-astra",
         "efforts": ["low", "medium", "high", "xhigh"],
-        # Current app-server capability probes prove the full set below for
-        # these two HASHI gateway models. Keep the override model-specific so
-        # unverified Codex variants do not inherit `none` or `max`.
+        # Codex CLI 0.156.1 model metadata, qualified on 2026-09-24. Keep each
+        # override model-specific so unverified variants inherit only the
+        # conservative backend-wide effort set above.
         "model_efforts": {
-            "gpt-5.6-luna": ["none", "low", "medium", "high", "xhigh", "max"],
-            "gpt-5.6-sol": ["none", "low", "medium", "high", "xhigh", "max"],
-            "gpt-6-astra": ["low", "medium", "high", "xhigh", "max"],
+            "gpt-6-astra": ["low", "medium", "high", "xhigh", "max", "ultra"],
+            "gpt-6-sol": ["low", "medium", "high", "xhigh", "max", "ultra"],
+            "gpt-6-luna": ["low", "medium", "high", "xhigh", "max"],
+            "gpt-5.6-sol": ["low", "medium", "high", "xhigh", "max", "ultra"],
+            "gpt-5.6-terra": ["low", "medium", "high", "xhigh", "max", "ultra"],
+            "gpt-5.6-luna": ["low", "medium", "high", "xhigh", "max"],
+            "gpt-5.5": ["low", "medium", "high", "xhigh"],
         },
         "default_effort": "medium",
         "secret_keys": ["codex-cli_key"],

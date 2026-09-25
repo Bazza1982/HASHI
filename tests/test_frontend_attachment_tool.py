@@ -128,6 +128,32 @@ async def test_agent_publishes_ordered_multi_attachment_as_one_assistant_message
 
 
 @pytest.mark.asyncio
+async def test_bound_output_audio_is_promoted_to_durable_message_retention(tmp_path):
+    store, owner, session, _accepted = _running_session(tmp_path)
+    audio = tmp_path / "briefing.ogg"
+    audio.write_bytes(b"OggS-workbench-output-audio")
+    registry = _registry(tmp_path, store, owner, session)
+
+    result = await registry.execute(
+        "frontend_send_attachments",
+        {"attachments": [{"path": str(audio), "caption": "Morning voice"}]},
+        tool_call_id="durable-audio-output",
+    )
+
+    assert result.is_error is False, result.output
+    published = json.loads(result.output)
+    part = published["attachments"][0]
+    assert part["modality"] == "audio"
+    metadata = store.audio_assets.describe(
+        part["attachment_id"],
+        owner_id=owner,
+        session_id=session["session_id"],
+    )
+    assert metadata["retention_indefinite"] is True
+    assert metadata["retention_expires_at"] is None
+
+
+@pytest.mark.asyncio
 async def test_frontend_attachment_publish_is_idempotent_and_tui_is_separate(tmp_path):
     store, owner, session, _accepted = _running_session(tmp_path)
     target = tmp_path / "proof.png"

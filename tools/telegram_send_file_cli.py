@@ -179,7 +179,14 @@ def send_file(file_path: Path, caption: str | None, file_type: str,
         return False
 
 
-def bind_for_frontend(file_path: Path, caption: str | None, agent_name: str | None) -> str:
+def bind_for_frontend(
+    file_path: Path,
+    caption: str | None,
+    agent_name: str | None,
+    *,
+    retain_indefinite: bool = False,
+    retention_seconds: int | None = None,
+) -> str:
     """Bind the file to the canonical Session message (best effort).
 
     Telegram push stays the primary delivery; this binding mirrors the file
@@ -248,6 +255,11 @@ def bind_for_frontend(file_path: Path, caption: str | None, agent_name: str | No
         if existing is not None:
             count = int(existing.get("attachment_count") or 0)
             return f"bound (replayed): {count} attachment(s)"
+        stage_kwargs = {}
+        if retain_indefinite:
+            stage_kwargs["retention_indefinite"] = True
+        elif retention_seconds is not None:
+            stage_kwargs["retention_seconds"] = int(retention_seconds)
         staged = store.stage_attachment(
             session_id=session_id,
             owner_id=owner_id,
@@ -256,6 +268,7 @@ def bind_for_frontend(file_path: Path, caption: str | None, agent_name: str | No
             size_bytes=size_bytes,
             sha256=digest,
             semantic_role="audio_attachment" if mime_type.startswith("audio/") else "",
+            **stage_kwargs,
         )
         store.upload_attachment_bytes(
             session_id=session_id,
@@ -292,6 +305,10 @@ def main():
                         choices=["auto", "photo", "document", "video", "audio", "voice"],
                         help="File type (default: auto-detect)")
     parser.add_argument("--chat-id", default=None, help="Override chat ID")
+    parser.add_argument("--retain-indefinite", action="store_true",
+                        help="Keep the Workbench copy without audio TTL expiry")
+    parser.add_argument("--retention-seconds", type=int, default=None,
+                        help="Custom Workbench retention in seconds")
     args = parser.parse_args()
 
     file_path = Path(args.path)
@@ -310,7 +327,13 @@ def main():
     token = _resolve_token(secrets, detected_agent)
     chat_id = args.chat_id or _resolve_chat_id(secrets)
 
-    bind_summary = bind_for_frontend(file_path, args.caption, detected_agent)
+    bind_summary = bind_for_frontend(
+        file_path,
+        args.caption,
+        detected_agent,
+        retain_indefinite=bool(args.retain_indefinite),
+        retention_seconds=args.retention_seconds,
+    )
     success = send_file(file_path, args.caption, file_type, token, chat_id)
     print(f"[bind] {bind_summary}")
     sys.exit(0 if success else 1)

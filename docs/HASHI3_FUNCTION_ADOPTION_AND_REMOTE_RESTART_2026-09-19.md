@@ -27,6 +27,14 @@ startup failure. The ordinary localized notice describes an unfinished software
 update, confirms the current Agent and saved settings remain safe, and asks the
 user to retry after the update completes; file paths remain diagnostic detail.
 
+Supervisor command acceptance is not Remote adoption evidence. After an
+enabled Remote is replaced, PAO allows a bounded 20-second cold-start window
+for the successor to import its Function closure, publish the exact-instance
+ownership claim, and report ready health. Only that owned ready health can
+complete the Remote step; exhausting the window remains an unconfirmed reboot,
+while a normal delayed start must not be rejected by the former three-second
+polling budget.
+
 One compatibility bridge is required when the currently running shared
 generation predates whole-Function reboot semantics. Its newly qualified Agent
 Workers wait for the legacy `same|max` Worker transaction to finish; the

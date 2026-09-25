@@ -27,6 +27,26 @@ This upgrade does not replace or weaken:
 Provider/model selection, recovery, accounting, and Compact are control-plane
 concerns around that existing Session.
 
+## Turn-scoped attachment projection
+
+HER's durable resource registry remains cumulative so transport deltas,
+permissions, revocations, and audit state can be reconciled. It is not a
+relevance decision and must never be projected wholesale as though every
+registered attachment belongs to the current request.
+
+Every accepted HER Turn therefore records the exact resource keys supplied by
+its originating HASHI Message. Only those attachments are rendered as current
+message references. When a completed Turn enters recent history, its attachment
+metadata stays inside that chronological exchange and is labelled historical
+context. Failed or cancelled Turns do not enter that completed-exchange
+projection. A Turn with no attachment manifest has no current attachments even
+when the Session registry still retains earlier resources.
+
+This boundary preserves PCM's role: it transports the current request,
+chronological background, authority, and accessible resource facts. The Engine,
+not PCM or HER transport, determines which background facts matter to the
+current conversation.
+
 ## Route revision and Turn freezing
 
 `routing_revision` increases only when the effective default route changes.

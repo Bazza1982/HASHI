@@ -224,5 +224,14 @@ revision）。2026-09-15，HASHI1 的 Lily 已通过 `/reboot min` 单独采用�
 真实“请求 → 查价 → 用量展示”验收；HASHI1 其余 Agent 与其他实例没有在该次
 授权范围内采用，不能据此宣称全局部署完成。
 
+## 11. Frontend Connector 共享展示（2026-09-22）
+
+前台回合成本尾不再只投递 Telegram。Telegram 确认接收后，Frontend
+Connector 把同一份纯文本报告以 `presentation_channel=meter` 写入权威
+Session 的展示消息流，Workbench 与其他当前／未来前台由同一投影读取。
+该展示消息不进入 Agent 记忆、Engine history、语音、wrapper 或正文，也不复制
+计价逻辑。稳定的 `meter_cost:<request_id>` 作为传输身份，避免不同前台各自
+重新计算或拼接成本。
+
 ---
-_更新时间：2026-09-15 · v2.5 OpenRouter-only 价目来源与 fallback 分调用计价_
+_更新时间：2026-09-22 · v2.6 共享 Session meter 展示_

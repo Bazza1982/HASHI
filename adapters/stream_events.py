@@ -23,6 +23,10 @@ KIND_FILE_READ = "file_read"
 KIND_FILE_EDIT = "file_edit"
 KIND_SHELL_EXEC = "shell_exec"
 KIND_TEXT_DELTA = "text_delta"
+# A provider text delta that has already crossed the HER v2 stage visibility
+# boundary.  This is deliberately distinct from ``KIND_TEXT_DELTA``: the
+# latter remains provider-internal and may contain structured control JSON.
+KIND_ANSWER_PREVIEW = "answer_preview"
 KIND_PROGRESS = "progress"
 KIND_ACKNOWLEDGEMENT = "acknowledgement"
 KIND_INITIAL_RESOLUTION = "initial_resolution"
@@ -45,6 +49,9 @@ DELIVERY_REASONING = "reasoning"
 DELIVERY_FINAL = "final"
 DELIVERY_CONTROL = "control"
 DELIVERY_INTERNAL = "internal"
+# Workbench-only, ephemeral answer text.  It is never a Telegram delivery
+# owner and never becomes transcript, memory, or final-answer authority.
+DELIVERY_ANSWER_PREVIEW = "answer_preview"
 DELIVERY_CLASSES = frozenset(
     {
         DELIVERY_TECHNICAL,
@@ -53,6 +60,7 @@ DELIVERY_CLASSES = frozenset(
         DELIVERY_FINAL,
         DELIVERY_CONTROL,
         DELIVERY_INTERNAL,
+        DELIVERY_ANSWER_PREVIEW,
     }
 )
 
@@ -68,6 +76,8 @@ def legacy_delivery_class(kind: str) -> str:
         return DELIVERY_USER_COMMENTARY
     if kind == KIND_TEXT_DELTA:
         return DELIVERY_INTERNAL
+    if kind == KIND_ANSWER_PREVIEW:
+        return DELIVERY_ANSWER_PREVIEW
     return DELIVERY_TECHNICAL
 
 

@@ -198,6 +198,30 @@ class HerBackendSessionCoordinator:
     def _resource_digest(cls, resources: Sequence[Mapping[str, Any]]) -> str:
         return _digest(cls._resource_map(resources))
 
+    @staticmethod
+    def _turn_resource_keys(
+        turn: Mapping[str, Any],
+        *,
+        fallback: Sequence[str],
+    ) -> list[str]:
+        raw = turn.get("resource_keys")
+        if raw is None:
+            return sorted({str(key) for key in fallback if str(key)})
+        if not isinstance(raw, list) or any(
+            not isinstance(key, str) or not key.strip() for key in raw
+        ):
+            raise HerFixedProtocolError(
+                "invalid_turn_resources",
+                "HER Turn resource_keys must be an array of non-empty strings.",
+            )
+        normalized = [key.strip() for key in raw]
+        if len(normalized) != len(set(normalized)):
+            raise HerFixedProtocolError(
+                "invalid_turn_resources",
+                "HER Turn resource_keys must not contain duplicates.",
+            )
+        return sorted(normalized)
+
     def prepare_transport(
         self,
         *,
@@ -254,6 +278,9 @@ class HerBackendSessionCoordinator:
                     "message_id": resolved_message_id,
                     "idempotency_key": idempotency_key,
                     "user_message": str(user_message),
+                    "resource_keys": sorted(
+                        self._resource_map(resource_snapshot["attachments"])
+                    ),
                 },
             }
             encoded = self.encode(payload)
@@ -351,6 +378,7 @@ class HerBackendSessionCoordinator:
                 "message_id": resolved_message_id,
                 "idempotency_key": idempotency_key,
                 "user_message": str(user_message),
+                "resource_keys": sorted(incoming_resource_map),
             },
             "pcm_delta": {
                 "base_revision": pcm_base,
@@ -436,13 +464,16 @@ class HerBackendSessionCoordinator:
                         "pcm_digest_conflict", "HER PCM snapshot digest does not match."
                     )
                 resource_attachments = list(resource_snapshot.get("attachments") or [])
-                if str(resource_snapshot.get("digest") or "") != _digest(
-                    self._resource_map(resource_attachments)
-                ):
+                resource_map = self._resource_map(resource_attachments)
+                if str(resource_snapshot.get("digest") or "") != _digest(resource_map):
                     raise HerFixedProtocolError(
                         "resource_digest_conflict",
                         "HER resource snapshot digest does not match.",
                     )
+                turn_resource_keys = self._turn_resource_keys(
+                    turn,
+                    fallback=tuple(resource_map),
+                )
                 accepted = self.store.open_session(
                     session_id=session_id,
                     epoch=int(payload.get("session_epoch") or 1),
@@ -458,6 +489,7 @@ class HerBackendSessionCoordinator:
                     message_id=str(turn.get("message_id") or ""),
                     idempotency_key=str(turn.get("idempotency_key") or ""),
                     user_message=str(turn.get("user_message") or ""),
+                    turn_resource_keys=turn_resource_keys,
                     **binding,
                     **self._execution_owner_fields(),
                 )
@@ -477,6 +509,14 @@ class HerBackendSessionCoordinator:
                     raise HerFixedProtocolError(
                         "invalid_pcm_delta", "HER PCM operations must be an array."
                     )
+                resource_additions = [
+                    dict(item)
+                    for item in list(resource_delta.get("attachments_added") or [])
+                ]
+                turn_resource_keys = self._turn_resource_keys(
+                    turn,
+                    fallback=tuple(self._resource_map(resource_additions)),
+                )
                 accepted = self.store.append_turn(
                     session_id=session_id,
                     epoch=int(payload.get("session_epoch") or 0),
@@ -496,10 +536,7 @@ class HerBackendSessionCoordinator:
                     resource_target_revision=int(
                         resource_delta.get("target_revision") or 0
                     ),
-                    resource_additions=[
-                        dict(item)
-                        for item in list(resource_delta.get("attachments_added") or [])
-                    ],
+                    resource_additions=resource_additions,
                     resource_revocations=[
                         str(item)
                         for item in list(
@@ -514,6 +551,7 @@ class HerBackendSessionCoordinator:
                     message_id=str(turn.get("message_id") or ""),
                     idempotency_key=str(turn.get("idempotency_key") or ""),
                     user_message=str(turn.get("user_message") or ""),
+                    turn_resource_keys=turn_resource_keys,
                     **binding,
                     **self._execution_owner_fields(),
                 )
@@ -528,11 +566,16 @@ class HerBackendSessionCoordinator:
         session = accepted["session"]
         turn = accepted["turn"]
         duplicate = bool(accepted.get("duplicate"))
+        turn_resources = [
+            dict(item)
+            for item in list(turn.get("resource_attachments") or [])
+            if isinstance(item, Mapping)
+        ]
         materialized = ""
         if not duplicate or str(turn.get("status") or "") == "active":
             materialized = self._render_prompt(
                 session.get("pcm") or {},
-                session.get("resources") or {},
+                {"attachments": turn_resources},
                 str(turn.get("user_message") or ""),
                 self.store.recent_completed_turns(session_id, limit=self.history_limit),
             )
@@ -553,13 +596,7 @@ class HerBackendSessionCoordinator:
             transport_chars=len(encoded),
             duplicate=duplicate,
             duplicate_text=str(turn.get("assistant_text") or ""),
-            resource_attachments=tuple(
-                dict(item)
-                for item in list(
-                    (session.get("resources") or {}).get("attachments") or []
-                )
-                if isinstance(item, Mapping)
-            ),
+            resource_attachments=tuple(turn_resources),
         )
 
     @staticmethod
@@ -603,10 +640,10 @@ class HerBackendSessionCoordinator:
         ]
         if attachments:
             parts.append(
-                "--- HER SESSION AUTHORISED RESOURCES ---\n\n"
-                "The following resource metadata is materialised from HASHI's "
-                "authoritative resource deltas. It grants no authority beyond its "
-                "recorded Workzone and permissions.\n\n"
+                "--- CURRENT MESSAGE ATTACHMENTS — REFERENCE ONLY ---\n\n"
+                "These attachment records belong only to the current user message. "
+                "Their presence grants access but does not decide relevance; interpret "
+                "the current request and chronological history normally.\n\n"
                 + json.dumps(
                     attachments,
                     ensure_ascii=False,
@@ -617,13 +654,30 @@ class HerBackendSessionCoordinator:
         if history:
             exchanges = []
             for item in history:
-                exchanges.append(
-                    "Exchange sequence={sequence}\nUSER: {user}\nASSISTANT: {assistant}".format(
+                exchange = (
+                    "Exchange sequence={sequence}\nUSER: {user}".format(
                         sequence=int(item.get("sequence") or 0),
                         user=str(item.get("user_message") or ""),
-                        assistant=str(item.get("assistant_text") or ""),
                     )
                 )
+                historical_attachments = [
+                    dict(resource)
+                    for resource in list(item.get("resource_attachments") or [])
+                    if isinstance(resource, Mapping)
+                ]
+                if historical_attachments:
+                    exchange += (
+                        "\nATTACHMENTS ON THIS HISTORICAL EXCHANGE "
+                        "(CONTEXT ONLY, NOT CURRENT):\n"
+                        + json.dumps(
+                            historical_attachments,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                    )
+                exchange += "\nASSISTANT: " + str(item.get("assistant_text") or "")
+                exchanges.append(exchange)
             parts.append(
                 "--- HER FIXED SESSION CONTINUITY — CONTEXT ONLY ---\n\n"
                 "These completed exchanges are owned by the current HER session. They are "

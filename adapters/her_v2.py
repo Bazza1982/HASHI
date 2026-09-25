@@ -2040,6 +2040,12 @@ class HERv2Adapter(BaseBackend):
                 "classification": (
                     result.classification.value if result.classification else None
                 ),
+                # Direct/zero turns intentionally bypass Triage.  Preserve
+                # that authoritative execution route so presentation never
+                # has to turn a missing classification into UNKNOWN.
+                "execution_route": (
+                    "DIRECT" if effort_resolution.effective is Effort.ZERO else None
+                ),
                 "terminal_state": result.terminal_state.value,
                 "plan_id": result.ledger.get("plan_id"),
                 "review_count": result.review_count,

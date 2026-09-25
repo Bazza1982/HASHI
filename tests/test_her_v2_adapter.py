@@ -27,15 +27,18 @@ from adapters.openrouter_api import (
 )
 from adapters.registry import get_backend_class
 from adapters.stream_events import (
+    DELIVERY_ANSWER_PREVIEW,
     DELIVERY_FINAL,
     DELIVERY_INTERNAL,
     DELIVERY_TECHNICAL,
     DELIVERY_USER_COMMENTARY,
     KIND_COMMENTARY,
+    KIND_ANSWER_PREVIEW,
     KIND_INITIAL_RESOLUTION,
     KIND_PROVIDER_ACTIVITY,
     KIND_REVIEW,
     KIND_THINKING,
+    KIND_TEXT_DELTA,
     KIND_TOOL_START,
     StreamEvent,
 )
@@ -1128,6 +1131,7 @@ async def test_adapter_zero_effort_is_one_direct_call_and_question_is_completed(
     assert response.stop_reason == "completed"
     assert response.stream_metadata["her_v2"]["terminal_state"] == "COMPLETED"
     assert response.stream_metadata["her_v2"]["classification"] is None
+    assert response.stream_metadata["her_v2"]["execution_route"] == "DIRECT"
     assert response.stream_metadata["her_v2"]["plan_id"] is None
     assert response.stream_metadata["her_v2"]["stage_timings_s"]["direct"] > 0
     assert response.stream_metadata["her_v2"]["effort"] == {
@@ -1181,6 +1185,7 @@ async def test_scheduler_direct_policy_is_request_scoped_and_preserves_instructi
     scheduled_profile, scheduled_request = provider.requests[0]
     assert scheduled_request.goal == original_instruction
     assert scheduled_request.classification is None
+    assert scheduled.stream_metadata["her_v2"]["execution_route"] == "DIRECT"
     assert scheduled.stream_metadata["her_v2"]["effort"] == {
         "configured": "max",
         "effective": "zero",
@@ -2310,6 +2315,33 @@ class _ProviderActivityManager(_FakeManager):
         return backend
 
 
+class _AnswerPreviewBackend(_FakeBackend):
+    async def generate_response(
+        self, prompt, request_id, is_retry=False, silent=False, on_stream_event=None
+    ):
+        del request_id, is_retry, silent
+        self.prompt = prompt
+        await on_stream_event(
+            StreamEvent(kind=KIND_TEXT_DELTA, summary="Workbench ")
+        )
+        await on_stream_event(
+            StreamEvent(kind=KIND_TEXT_DELTA, summary="answer")
+        )
+        return BackendResponse(
+            text="Workbench answer",
+            duration_ms=1,
+        )
+
+
+class _AnswerPreviewManager(_FakeManager):
+    def create_ephemeral_backend(self, engine, target_model=None):
+        assert engine == "openrouter-api"
+        assert target_model == "configured/model"
+        backend = _AnswerPreviewBackend(self.system_md)
+        self.backends.append(backend)
+        return backend
+
+
 class _FlakyPersonaBackend(_FakeBackend):
     def __init__(self, manager):
         super().__init__()
@@ -2798,6 +2830,57 @@ async def test_hashi_stage_provider_consumes_activity_without_presenting_it():
     assert observed[0]["tool_name"] == ""
     assert forwarded == []
     assert manager.backends[-1].shutdown_called is True
+
+
+@pytest.mark.asyncio
+async def test_hashi_stage_provider_emits_typed_preview_only_for_visible_stage_text():
+    manager = _AnswerPreviewManager()
+    forwarded = []
+
+    async def capture(event):
+        forwarded.append(event)
+
+    provider = HashiStageProvider(
+        backend_manager=manager,
+        on_stream_event=capture,
+    )
+    profile = ProviderProfile(
+        "lightweight",
+        "openrouter-api",
+        "configured/model",
+    )
+
+    await provider.invoke(
+        profile,
+        _stage_request(
+            Stage.IMMEDIATE_RESPONSE,
+            allow_tools=False,
+            allow_side_effects=False,
+        ),
+    )
+
+    assert [event.kind for event in forwarded] == [
+        KIND_ANSWER_PREVIEW,
+        KIND_ANSWER_PREVIEW,
+    ]
+    assert [event.delivery_class for event in forwarded] == [
+        DELIVERY_ANSWER_PREVIEW,
+        DELIVERY_ANSWER_PREVIEW,
+    ]
+    assert [event.summary for event in forwarded] == ["Workbench ", "answer"]
+    assert all(event.raw_delta == "" for event in forwarded)
+    assert all(event.provenance == "provider_visible_text_delta" for event in forwarded)
+
+    forwarded.clear()
+    await provider.invoke(
+        profile,
+        _stage_request(
+            Stage.TRIAGE,
+            allow_tools=False,
+            allow_side_effects=False,
+        ),
+    )
+    assert forwarded == []
 
 
 @pytest.mark.asyncio

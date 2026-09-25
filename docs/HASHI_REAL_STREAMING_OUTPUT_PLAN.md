@@ -9,6 +9,13 @@
 
 **Status:** implementation plan with Phase 0, Phase 1, Phase 2 OpenRouter streaming, Phase 2b full-delta preservation, and CLI stream-json full-delta preservation implemented behind explicit capability/config gates. OpenRouter live streaming was verified on 2026-06-13 with the `temp` agent. Direct Codex Responses streaming remains future work.
 
+**2026-09-24 implementation checkpoint:** HER v2 now keeps raw provider text
+deltas private, but emits a typed `answer_preview` event for safe,
+already-user-visible stages.  The bounded request-activity projection exposes
+that ephemeral lane only to Workbench and marks the final response as the
+authoritative replacement.  Telegram, transcript/history, memory, and
+canonical/audit persistence do not consume the preview lane.
+
 **Scope:** backend adapters, runtime streaming state, Telegram delivery, API gateway streaming, audit/transcript persistence, and all user-facing modes.
 
 **Non-goal:** rewrite HASHI core identity, queue ownership, memory semantics, remote registry, or tool execution contracts.

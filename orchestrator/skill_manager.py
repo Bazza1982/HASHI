@@ -1033,8 +1033,10 @@ class SkillManager:
         action: str,
         enabled: bool,
         note: str,
+        prompt: str | None = None,
         her_v2_effort: str | None = None,
         timezone_name: str | None = None,
+        loop_meta: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Create or update one owned fixed-wall-clock cron definition.
 
@@ -1052,6 +1054,9 @@ class SkillManager:
         selected_timezone = canonical_timezone_name(
             timezone_name or (existing or {}).get("timezone") or UTC_TIMEZONE_NAME
         )
+        normalized_prompt = None if prompt is None else str(prompt).strip()
+        if normalized_prompt is not None and not normalized_prompt:
+            raise ValueError("prompt must not be empty")
         job.update(
             {
                 "agent": agent_name,
@@ -1063,11 +1068,20 @@ class SkillManager:
                 "updated_at": self._now(),
             }
         )
+        if normalized_prompt is not None:
+            job["prompt"] = normalized_prompt
         discard_legacy_job_effort_in_place(job)
         job.pop("time", None)
         if existing is None:
             job["created_at"] = job["updated_at"]
             crons.append(job)
+        if loop_meta is not None:
+            if not isinstance(loop_meta, dict):
+                raise ValueError("loop_meta must be an object")
+            normalized_meta = dict(loop_meta)
+            normalized_meta["count"] = max(0, int(normalized_meta.get("count", 0) or 0))
+            normalized_meta["max"] = max(0, int(normalized_meta.get("max", 100) or 0))
+            job["loop_meta"] = normalized_meta
         self._save_tasks(tasks)
         return dict(job)
 
@@ -1351,16 +1365,29 @@ class SkillManager:
         interval_minutes: int,
         exit_condition: str,
         max_nudges: int = 0,
+        task_id: str | None = None,
+        enabled: bool = True,
+        interval_seconds: int | None = None,
     ) -> dict[str, Any]:
         tasks = self._load_tasks()
-        task_id = f"{agent_name}-nudge-{uuid4().hex[:6]}"
-        interval_minutes = max(1, int(interval_minutes))
+        task_id = str(task_id or f"{agent_name}-nudge-{uuid4().hex[:6]}").strip()
+        if interval_seconds is None:
+            interval_seconds = max(1, int(interval_minutes)) * 60
+        else:
+            interval_seconds = int(interval_seconds)
+            if interval_seconds < 1:
+                raise ValueError("interval_seconds must be at least 1")
         exit_condition = str(exit_condition or "").strip()
+        if not task_id or not exit_condition:
+            raise ValueError("task_id and exit_condition are required")
+        if any(job.get("id") == task_id for job in tasks.get("nudges", [])):
+            raise ValueError(f"Nudge task already exists: {task_id}")
+        max_nudges = max(0, int(max_nudges or 0))
         job = {
             "id": task_id,
             "agent": agent_name,
-            "enabled": True,
-            "interval_seconds": interval_minutes * 60,
+            "enabled": bool(enabled),
+            "interval_seconds": interval_seconds,
             "action": "enqueue_prompt",
             "prompt": self._nudge_prompt(task_id, exit_condition),
             "note": f"Nudge: {exit_condition[:80]}",
@@ -1374,6 +1401,219 @@ class SkillManager:
         tasks.setdefault("nudges", []).append(job)
         self._save_tasks(tasks)
         return job
+
+    def upsert_heartbeat_job(
+        self,
+        *,
+        task_id: str,
+        agent_name: str,
+        interval_seconds: int,
+        prompt: str,
+        enabled: bool = True,
+        action: str = "enqueue_prompt",
+        note: str = "",
+        loop_meta: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Create or update one Agent-owned interval heartbeat.
+
+        This is the typed write path for HER v2.  It deliberately accepts only
+        the prompt action; privileged actions such as transcript export and
+        Dream maintenance remain owned by their existing runtime managers.
+        """
+
+        task_id = str(task_id or "").strip()
+        agent_name = str(agent_name or "").strip()
+        prompt = str(prompt or "").strip()
+        action = str(action or "enqueue_prompt").strip()
+        if not task_id or not agent_name:
+            raise ValueError("task_id and agent_name are required")
+        if action != "enqueue_prompt":
+            raise ValueError("Agent-created heartbeats must use enqueue_prompt")
+        if not prompt:
+            raise ValueError("prompt is required")
+        interval_seconds = int(interval_seconds)
+        if interval_seconds < 1:
+            raise ValueError("interval_seconds must be at least 1")
+
+        self._ensure_active_heartbeats_migrated()
+        tasks = self._load_tasks()
+        heartbeats = tasks.setdefault("heartbeats", [])
+        active_heartbeats = self._load_active_heartbeats()
+        existing = next((job for job in heartbeats if job.get("id") == task_id), None)
+        active_existing = next(
+            (job for job in active_heartbeats if job.get("id") == task_id), None
+        )
+        if existing is not None and active_existing is not None:
+            raise ValueError(f"Heartbeat task {task_id} is duplicated")
+        if active_existing is not None:
+            existing = active_existing
+        if existing is not None and existing.get("agent") != agent_name:
+            raise ValueError(f"Heartbeat task {task_id} belongs to another agent")
+        now = self._now()
+        job = existing if existing is not None else {"id": task_id, "created_at": now}
+        job.update(
+            {
+                "agent": agent_name,
+                "enabled": bool(enabled),
+                "interval_seconds": interval_seconds,
+                "action": action,
+                "prompt": prompt,
+                "note": str(note or "").strip(),
+                "updated_at": now,
+            }
+        )
+        if loop_meta is not None:
+            if not isinstance(loop_meta, dict):
+                raise ValueError("loop_meta must be an object")
+            normalized_meta = dict(loop_meta)
+            normalized_meta["count"] = max(0, int(normalized_meta.get("count", 0) or 0))
+            normalized_meta["max"] = max(0, int(normalized_meta.get("max", 100) or 0))
+            job["loop_meta"] = normalized_meta
+        discard_legacy_job_effort_in_place(job)
+        if active_existing is not None:
+            self._save_active_heartbeats(active_heartbeats)
+        elif existing is None:
+            heartbeats.append(job)
+            self._save_tasks(tasks)
+        else:
+            self._save_tasks(tasks)
+        return dict(job)
+
+    def update_owned_job(
+        self,
+        kind: str,
+        task_id: str,
+        *,
+        agent_name: str,
+        updates: dict[str, Any],
+    ) -> tuple[bool, str, dict[str, Any] | None]:
+        """Apply a narrow update to a job only when it belongs to ``agent_name``."""
+
+        self._ensure_active_heartbeats_migrated()
+        kind = str(kind or "").strip().lower()
+        task_id = str(task_id or "").strip()
+        agent_name = str(agent_name or "").strip()
+        if kind not in {"cron", "heartbeat", "nudge"}:
+            return False, f"Unknown task kind: {kind}", None
+        if not isinstance(updates, dict):
+            return False, "updates must be an object", None
+
+        tasks = self._load_tasks()
+        if kind == "heartbeat":
+            active_jobs = self._load_active_heartbeats()
+            if any(entry.get("id") == task_id for entry in active_jobs):
+                target_list = active_jobs
+                target_path = "active"
+            else:
+                target_list = tasks.setdefault("heartbeats", [])
+                target_path = "tasks"
+        else:
+            target_list = tasks.setdefault(self._task_key_for_kind(kind), [])
+            target_path = "tasks"
+        job = next((entry for entry in target_list if entry.get("id") == task_id), None)
+        if job is None or str(job.get("agent") or "") != agent_name:
+            return False, f"Unknown {kind} task for agent: {task_id}", None
+
+        allowed = {
+            "enabled",
+            "schedule",
+            "timezone",
+            "interval_seconds",
+            "prompt",
+            "action",
+            "note",
+            "exit_condition",
+            "max_nudges",
+            "loop_max",
+        }
+        unknown = set(updates) - allowed
+        if unknown:
+            return False, f"Unsupported task fields: {', '.join(sorted(unknown))}", None
+        if "enabled" in updates:
+            if not isinstance(updates["enabled"], bool):
+                return False, "enabled must be boolean", None
+            job["enabled"] = bool(updates["enabled"])
+        if "schedule" in updates:
+            schedule = str(updates["schedule"] or "").strip()
+            if not schedule:
+                return False, "schedule must not be empty", None
+            job["schedule"] = schedule
+            job.pop("time", None)
+        if "timezone" in updates:
+            try:
+                job["timezone"] = canonical_timezone_name(updates["timezone"])
+            except (TypeError, ValueError) as exc:
+                return False, str(exc), None
+        if "interval_seconds" in updates:
+            try:
+                interval_seconds = int(updates["interval_seconds"])
+            except (TypeError, ValueError):
+                return False, "interval_seconds must be an integer", None
+            if interval_seconds < 1:
+                return False, "interval_seconds must be at least 1", None
+            job["interval_seconds"] = interval_seconds
+        if "prompt" in updates:
+            prompt = str(updates["prompt"] or "").strip()
+            if not prompt:
+                return False, "prompt must not be empty", None
+            job["prompt"] = prompt
+        if "action" in updates:
+            action = str(updates["action"] or "").strip()
+            if action != "enqueue_prompt":
+                return False, "Agent-managed tasks must use enqueue_prompt", None
+            job["action"] = action
+        if "note" in updates:
+            job["note"] = str(updates["note"] or "").strip()
+        if "exit_condition" in updates:
+            condition = str(updates["exit_condition"] or "").strip()
+            if kind != "nudge" or not condition:
+                return False, "exit_condition is only supported for non-empty nudges", None
+            job["exit_condition"] = condition
+            if "prompt" not in updates:
+                job["prompt"] = self._nudge_prompt(task_id, condition)
+        if "max_nudges" in updates:
+            if kind != "nudge":
+                return False, "max_nudges is only supported for nudges", None
+            try:
+                max_value = int(updates["max_nudges"] or 0)
+            except (TypeError, ValueError):
+                return False, "max_nudges must be an integer", None
+            if max_value < 0:
+                return False, "max_nudges must be non-negative", None
+            job.setdefault("nudge_meta", {})["max"] = max_value
+            job["nudge_meta"].pop("stopped_reason", None)
+        if "loop_max" in updates:
+            if kind not in {"cron", "heartbeat"}:
+                return False, "loop_max is only supported for cron and heartbeat tasks", None
+            try:
+                max_value = int(updates["loop_max"] or 0)
+            except (TypeError, ValueError):
+                return False, "loop_max must be an integer", None
+            if max_value < 0:
+                return False, "loop_max must be non-negative", None
+            loop_meta = job.setdefault("loop_meta", {})
+            loop_meta["max"] = max_value
+            loop_meta.setdefault("count", 0)
+        if job.get("enabled") and ownership_mismatch_label(job):
+            return False, f"Refusing to enable {task_id}: {ownership_mismatch_label(job)}.", None
+        if kind in {"cron", "heartbeat"}:
+            discard_legacy_job_effort_in_place(job)
+        job["updated_at"] = self._now()
+        if target_path == "active":
+            self._save_active_heartbeats(target_list)
+        else:
+            self._save_tasks(tasks)
+        return True, f"Updated {kind} task [{task_id}].", dict(job)
+
+    def delete_owned_job(
+        self, kind: str, task_id: str, *, agent_name: str
+    ) -> tuple[bool, str]:
+        """Delete one task only when its persisted owner matches the caller."""
+
+        job = self.get_job(kind, task_id)
+        if job is None or str(job.get("agent") or "") != str(agent_name or ""):
+            return False, f"Unknown {kind} task for agent: {task_id}"
+        return self.delete_job(kind, task_id)
 
     def get_active_heartbeat_job_id(self, agent_name: str) -> str:
         return f"{agent_name}-active-heartbeat"

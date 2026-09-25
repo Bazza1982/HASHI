@@ -20,6 +20,7 @@ from adapters.stream_events import (
     DELIVERY_TECHNICAL,
     DELIVERY_USER_COMMENTARY,
     KIND_ACKNOWLEDGEMENT,
+    KIND_ANSWER_PREVIEW,
     KIND_COMMENTARY,
     KIND_INITIAL_RESOLUTION,
     KIND_PROGRESS,
@@ -567,6 +568,31 @@ async def test_reasoning_stream_audit_batches_without_copying_raw_delta(
         "req-reasoning:stream-batch:1"
     }
     assert runtime._canonical_reasoning_seen == {"req-reasoning"}
+
+
+def test_answer_preview_is_not_retained_in_canonical_stream_audit():
+    class BatchStore:
+        def __init__(self):
+            self.commits: list[list[dict]] = []
+
+        def record_many(self, records):
+            self.commits.append([dict(record) for record in records])
+
+    store = BatchStore()
+    runtime = SimpleNamespace(canonical_audit=store, error_logger=_Logger())
+    batch = runtime_pipeline._CanonicalStreamAuditBatch(runtime, "req-preview")
+
+    batch.capture(
+        StreamEvent(
+            kind=KIND_ANSWER_PREVIEW,
+            summary="partial answer",
+            event_id="preview-1",
+            delivery_class="answer_preview",
+        )
+    )
+    batch.flush(reason="test_boundary")
+
+    assert store.commits == []
 
 
 @pytest.mark.asyncio
