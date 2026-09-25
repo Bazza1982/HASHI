@@ -21,7 +21,8 @@ from orchestrator.workbench_telegram_state import (
     state_path,
 )
 
-STATE_FILE_NAME = "workbench_telegram_state.json"
+STATE_FILE_NAME = "frontend_delivery_preferences.json"
+LEGACY_STATE_FILE_NAME = "workbench_telegram_state.json"
 
 
 def _workbench_metadata(owner: str = "owner-a", surface: str = "workbench"):
@@ -46,6 +47,20 @@ def test_corrupt_state_fails_open_to_default(tmp_path):
     state_path(tmp_path).parent.mkdir(parents=True)
     state_path(tmp_path).write_text("{not json", encoding="utf-8")
     assert mirror_enabled(tmp_path, "owner-a") is True
+    assert load_state(tmp_path) == {"revision": 0, "owners": {}}
+    with pytest.raises((OSError, ValueError)):
+        set_mirror(tmp_path, "owner-a", False)
+
+
+def test_preference_writer_rejects_truthy_non_boolean_without_rewriting(tmp_path):
+    original = '{"schema_version":1,"revision":0,"owners":{}}'
+    state_path(tmp_path).parent.mkdir(parents=True)
+    state_path(tmp_path).write_text(original, encoding="utf-8")
+
+    with pytest.raises(TypeError, match="boolean"):
+        set_mirror(tmp_path, "owner-a", "false")
+
+    assert state_path(tmp_path).read_text(encoding="utf-8") == original
 
 
 def test_set_mirror_roundtrip_and_revision(tmp_path):
@@ -56,7 +71,8 @@ def test_set_mirror_roundtrip_and_revision(tmp_path):
     assert mirror_enabled(tmp_path, "owner-a") is True
     assert second["revision"] == 2
     raw = json.loads(state_path(tmp_path).read_text(encoding="utf-8"))
-    assert raw["owners"]["owner-a"] is True
+    assert raw["schema_version"] == 1
+    assert raw["owners"]["owner-a"]["connectors"]["telegram"]["mirror"] is True
     assert raw["revision"] == 2
 
 
@@ -70,8 +86,28 @@ def test_set_mirror_leaves_no_temp_files(tmp_path):
     set_mirror(tmp_path, "owner-a", False)
     state_dir = state_path(tmp_path).parent
     names = {path.name for path in state_dir.iterdir()}
-    assert names <= {STATE_FILE_NAME, STATE_FILE_NAME + ".lock"}
+    assert STATE_FILE_NAME in names
+    assert any(name.endswith(".lock") for name in names)
     assert json.loads(state_path(tmp_path).read_text(encoding="utf-8"))["revision"] == 1
+
+
+def test_legacy_workbench_state_is_read_and_migrated_on_write(tmp_path):
+    legacy = tmp_path / "state" / LEGACY_STATE_FILE_NAME
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(
+        json.dumps({"revision": 7, "owners": {"owner-a": False}}),
+        encoding="utf-8",
+    )
+
+    assert mirror_enabled(tmp_path, "owner-a") is False
+    assert not state_path(tmp_path).exists()
+
+    migrated = set_mirror(tmp_path, "owner-a", True)
+    assert migrated["revision"] == 8
+    assert mirror_enabled(tmp_path, "owner-a") is True
+    raw = json.loads(state_path(tmp_path).read_text(encoding="utf-8"))
+    assert raw["owners"]["owner-a"]["connectors"]["telegram"]["mirror"] is True
+    assert json.loads(legacy.read_text(encoding="utf-8"))["owners"]["owner-a"] is False
 
 
 def test_parse_mirror_arg():
@@ -124,7 +160,7 @@ def test_resolver_defaults_on_without_state_file(tmp_path):
     )
 
 
-def test_resolver_ignores_non_workbench_surface(tmp_path):
+def test_resolver_applies_owner_connector_preference_across_surfaces(tmp_path):
     set_mirror(tmp_path, "owner-a", False)
     assert (
         telegram_delivery_for_admission(
@@ -132,7 +168,7 @@ def test_resolver_ignores_non_workbench_surface(tmp_path):
             request_metadata=_workbench_metadata(surface="voice"),
             state_root=tmp_path,
         )
-        is True
+        is False
     )
 
 
@@ -159,14 +195,13 @@ def test_resolver_without_state_root_keeps_legacy_default(tmp_path):
     )
 
 
-def test_resolver_other_sources_unchanged(tmp_path):
+def test_resolver_preserves_direct_routes_and_applies_external_connector_preference(tmp_path):
     set_mirror(tmp_path, "owner-a", False)
     sources = (
         "telegram.command",
         "telegram.reply",
         "telegram.send",
         "scheduler",
-        "hchat",
     )
     for source in sources:
         assert (
@@ -177,14 +212,14 @@ def test_resolver_other_sources_unchanged(tmp_path):
             )
             is True
         )
-        assert (
-            telegram_delivery_for_admission(
-                source=source,
-                request_metadata=None,
-                state_root=tmp_path,
-            )
-            is True
+    assert (
+        telegram_delivery_for_admission(
+            source="hchat",
+            request_metadata={"owner_id": "owner-a"},
+            state_root=tmp_path,
         )
+        is False
+    )
 
 
 def test_resolver_tui_policy_still_authoritative(tmp_path):

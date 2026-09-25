@@ -129,6 +129,9 @@ async def test_worker_derives_canonical_session_for_mutating_menu_operation(monk
     assert observed[0]["owner_id"] == "canonical-owner"
     assert observed[0]["session_id"] == "canonical-session"
     assert observed[0]["context_generation"] == 4
+    assert observed[0]["_durable_command_invocation"] is True
+    assert observed[0]["connector_id"] == "workbench"
+    assert observed[0]["ingress_transport"] == "workbench-command-ui"
 
 
 @pytest.mark.asyncio

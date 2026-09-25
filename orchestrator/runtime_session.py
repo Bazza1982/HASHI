@@ -424,6 +424,54 @@ def record_frontend_message(
         return None
 
 
+def record_frontend_delivery_receipt(
+    runtime: Any,
+    *,
+    session_id: str,
+    owner_id: str,
+    receipt: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Best-effort persistence of one connector adapter's transport receipt."""
+
+    try:
+        store = ensure_store(runtime)
+        return store.record_frontend_delivery_receipt(
+            session_id=str(session_id),
+            owner_id=str(owner_id),
+            receipt=receipt,
+        )
+    except Exception as exc:
+        target_logger = getattr(runtime, "logger", None) or logger
+        target_logger.warning(
+            "Frontend delivery receipt persistence failed for %s (%s)",
+            getattr(runtime, "name", "unknown"),
+            type(exc).__name__,
+        )
+        return None
+
+
+def claim_run_delivery_outbox(
+    runtime: Any,
+    *,
+    request_id: str,
+    surface: str,
+    channel_key: str,
+    worker_id: str,
+    lease_seconds: int = 60,
+) -> dict[str, Any] | None:
+    """Claim the canonical Run delivery before a legacy transport adapter sends."""
+
+    store = ensure_store(runtime)
+    return store.claim_run_delivery_outbox(
+        request_id=str(request_id),
+        owner_id=owner_id(runtime),
+        surface=surface,
+        channel_key=channel_key,
+        worker_id=worker_id,
+        lease_seconds=lease_seconds,
+    )
+
+
 def record_kernel_presentation_notice(
     kernel: Any,
     *,

@@ -1854,11 +1854,10 @@ async def execute_frontend_send_attachments(
     audit_context: dict | None,
     tool_call_id: str = "",
 ) -> str:
-    """Bind ordered local files to the current canonical assistant Message.
+    """Bind authorized, ordered local files to the current assistant Message.
 
-    ``access_root`` is accepted for dispatch compatibility but is deliberately
-    not enforced here: the agent chooses which readable local files to attach,
-    and frontend attachment paths may reference any location.
+    Every source path is resolved against the invocation's authorized roots
+    before it is read; connector display identity never widens that authority.
     """
 
     import hashlib
@@ -1876,11 +1875,8 @@ async def execute_frontend_send_attachments(
 
     context = dict(audit_context or {})
     surface = str(context.get("session_surface") or "").strip().casefold()
-    if surface == "tui":
-        return "Error: the built-in TUI uses its dedicated HASHI attachment path"
-    # Unified attachment delivery contract: the surface is a rendering hint,
-    # never an admission gate.  Telegram turns may bind to the canonical
-    # Session too; pushing to Telegram remains the caller's concern.
+    # Connector surfaces are presentation hints, not eligibility gates. All
+    # attachments bind to the same canonical Session message/group contract.
     request_id = str(context.get("request_id") or "").strip()
     session_id = str(context.get("hashi_session_id") or "").strip()
     owner_id = str(context.get("owner_id") or "").strip()
@@ -1938,13 +1934,7 @@ async def execute_frontend_send_attachments(
             raw_path = str(raw.get("path") or "").strip()
             if not raw_path:
                 raise ValueError("each attachment requires path")
-            # No access-scope enforcement for frontend attachments: resolve the
-            # path (relative to workspace_dir when relative) without checking it
-            # against the tool access roots.
-            path = Path(raw_path)
-            if not path.is_absolute():
-                path = workspace_dir / path
-            path = path.resolve()
+            path = _resolve_path(raw_path, access_root, workspace_dir)
             if not path.exists():
                 raise ValueError(f"file not found: {path}")
             if not path.is_file():
@@ -2019,6 +2009,8 @@ async def execute_frontend_send_attachments(
                 {
                     "ok": True,
                     "request_id": request_id,
+                    "group_id": existing["group_id"],
+                    "media_group": existing["media_group"],
                     "attachment_count": len(existing["attachments"]),
                     "attachments": existing["attachments"],
                     "bind_only": bool(bind_only),
@@ -2077,6 +2069,8 @@ async def execute_frontend_send_attachments(
             {
                 "ok": True,
                 "request_id": request_id,
+                "group_id": bound["group_id"],
+                "media_group": bound["media_group"],
                 "attachment_count": len(bound["attachments"]),
                 "attachments": bound["attachments"],
                 "bind_only": bool(bind_only),

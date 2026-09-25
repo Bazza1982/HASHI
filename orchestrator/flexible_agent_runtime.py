@@ -635,8 +635,72 @@ class FlexibleAgentRuntime:
                     ):
                         session.block("channel_denied")
                         return
+                    ticket = None
+                    surface = str(
+                        getattr(update, "_hashi_session_surface", None)
+                        or "telegram"
+                    ).strip().casefold()
+                    if surface == "telegram":
+                        from orchestrator.frontend_command_admission import (
+                            reserve_telegram_command_invocation,
+                        )
+
+                        transport_id = getattr(query, "id", None)
+                        if transport_id is None:
+                            transport_id = getattr(update, "update_id", None)
+                        if transport_id is None:
+                            raise RuntimeError(
+                                "Telegram callback has no stable transport identity"
+                            )
+                        ticket = reserve_telegram_command_invocation(
+                            self,
+                            update,
+                            command_name=command_name,
+                            arguments=args,
+                            transport_id=transport_id,
+                            ingress_transport="telegram.callback",
+                            request_payload={
+                                "callback_id": str(transport_id),
+                                "callback_data": callback_data,
+                                "handler_kind": handler_kind,
+                            },
+                        )
+                        command_logger = getattr(
+                            self,
+                            "logger",
+                            logging.getLogger("FlexRuntime.TelegramCallback"),
+                        )
+                        if ticket.state == "completed":
+                            session.block("duplicate_command_replay")
+                            command_logger.info(
+                                "Ignored completed Telegram callback replay: "
+                                "agent=%s command=%s",
+                                self.name,
+                                command_name,
+                            )
+                            return
+                        if ticket.state != "reserved":
+                            session.block("command_outcome_unknown")
+                            command_logger.warning(
+                                "Telegram callback outcome is unknown; refusing replay: "
+                                "agent=%s command=%s state=%s",
+                                self.name,
+                                command_name,
+                                ticket.state or "unknown",
+                            )
+                            return
                     with bind_slash_command_audit_session(session):
                         await handler(update, context)
+                    if ticket is not None:
+                        ticket.complete(
+                            {
+                                "ok": True,
+                                "command": command_name,
+                                "execution_state": "completed",
+                                "connector_id": "telegram",
+                                "transport_delivery_state": "not_observed",
+                            }
+                        )
             except Exception as exc:
                 session.fail(exc)
                 raise
@@ -691,8 +755,96 @@ class FlexibleAgentRuntime:
                             ui_language.tr("command.disabled", command=cmd),
                         )
                         return
+
+                    from orchestrator.frontend_command_admission import (
+                        reserve_telegram_command_invocation,
+                    )
+                    from orchestrator.session_store import IdempotencyConflict
+
+                    message = getattr(update, "effective_message", None) or getattr(
+                        update, "message", None
+                    )
+                    transport_id = getattr(update, "update_id", None)
+                    if transport_id is None:
+                        transport_id = getattr(message, "message_id", None)
+                    if transport_id is None:
+                        raise RuntimeError(
+                            "Telegram command has no stable transport update identity"
+                        )
+                    invocation_request = {
+                        "update_id": str(transport_id),
+                        "message_id": str(
+                            getattr(message, "message_id", "") or ""
+                        ),
+                        "command": cmd,
+                        "arguments": args,
+                        "text": str(getattr(message, "text", "") or ""),
+                    }
+                    try:
+                        ticket = reserve_telegram_command_invocation(
+                            self,
+                            update,
+                            command_name=cmd,
+                            arguments=args,
+                            transport_id=transport_id,
+                            ingress_transport="telegram.command",
+                            request_payload=invocation_request,
+                        )
+                    except IdempotencyConflict:
+                        command_logger = getattr(
+                            self,
+                            "logger",
+                            logging.getLogger("FlexRuntime.TelegramCommand"),
+                        )
+                        command_logger.warning(
+                            "Rejected conflicting Telegram command replay: "
+                            "agent=%s command=%s",
+                            self.name,
+                            cmd,
+                        )
+                        raise
+
+                    if ticket.state == "completed":
+                        session.block("duplicate_command_replay")
+                        command_logger = getattr(
+                            self,
+                            "logger",
+                            logging.getLogger("FlexRuntime.TelegramCommand"),
+                        )
+                        command_logger.info(
+                            "Ignored completed Telegram command replay: "
+                            "agent=%s command=%s",
+                            self.name,
+                            cmd,
+                        )
+                        return
+                    if ticket.state != "reserved":
+                        session.block("command_outcome_unknown")
+                        command_logger = getattr(
+                            self,
+                            "logger",
+                            logging.getLogger("FlexRuntime.TelegramCommand"),
+                        )
+                        command_logger.warning(
+                            "Telegram command outcome is unknown; refusing replay: "
+                            "agent=%s command=%s state=%s",
+                            self.name,
+                            cmd,
+                            ticket.state or "unknown",
+                        )
+                        return
+
                     with bind_slash_command_audit_session(session):
                         await handler(update, context)
+                    ticket.complete(
+                        {
+                            "ok": True,
+                            "command": cmd,
+                            "execution_state": "completed",
+                            "connector_id": "telegram",
+                            "transport_delivery_state": "not_observed",
+                        }
+                    )
             except Exception as exc:
                 session.fail(exc)
                 raise
@@ -988,13 +1140,34 @@ class FlexibleAgentRuntime:
             )
             is not None
         )
-        metadata[MESSAGE_CONTEXT_METADATA_KEY] = build_message_context_snapshot(
+        message_context_snapshot = build_message_context_snapshot(
             self,
             source=source,
             chat_id=chat_id,
             prompt=clean_prompt,
             metadata=metadata,
         )
+        from orchestrator.frontend_contracts import build_frontend_ingress_envelope
+
+        message_context_snapshot["frontend_ingress"] = (
+            build_frontend_ingress_envelope(
+                source_id=str(source_fact["id"]),
+                ingress_transport=source,
+                surface=resolved_surface,
+                channel_key=resolved_channel_key,
+                instance_id=str(message_context_snapshot["processing_instance"]),
+                principal=message_context_snapshot["sender"],
+                network_authentication=str(
+                    message_context_snapshot["network_authentication"]
+                ),
+                relay_chain=message_context_snapshot["relay_chain"],
+                request_id=request_id,
+                idempotency_key=idempotency_key or request_id,
+                session_id=str(resolved_session["session_id"]),
+                agent_id=self.name,
+            )
+        )
+        metadata[MESSAGE_CONTEXT_METADATA_KEY] = message_context_snapshot
         private_authorization_evidence = {
             key: metadata.pop(key)
             for key in (
@@ -9894,6 +10067,10 @@ class FlexibleAgentRuntime:
         purpose: str = "response",
         parse_mode: str | None = None,
         error_context: Mapping[str, Any] | None = None,
+        frontend_event_id: str | None = None,
+        frontend_session_id: str | None = None,
+        frontend_owner_id: str | None = None,
+        frontend_outbox: bool = False,
     ):
         return await runtime_delivery.send_long_message(
             self,
@@ -9903,6 +10080,10 @@ class FlexibleAgentRuntime:
             purpose=purpose,
             parse_mode=parse_mode,
             error_context=error_context,
+            frontend_event_id=frontend_event_id,
+            frontend_session_id=frontend_session_id,
+            frontend_owner_id=frontend_owner_id,
+            frontend_outbox=frontend_outbox,
         )
 
     async def typing_loop(self, chat_id: int, stop_event: asyncio.Event):
@@ -10711,16 +10892,16 @@ class FlexibleAgentRuntime:
     ) -> None:
         """Send the per-turn cost tail after the answer is confirmed delivered.
 
-        Uses request-local ``meter_at_start`` so a mid-flight toggle never changes
-        an in-progress turn.  Never writes to memory/transcript/wrapper and is
-        skipped for silent, non-Telegram, transfer-buffered, or undelivered
-        turns. The same presentation-only report is projected to the shared
-        Session after Telegram accepts it; it never enters model history.
+        Uses the request-local meter_at_start snapshot so a mid-flight toggle
+        never changes an in-progress Run. Never writes to model history,
+        memory, or wrapper state. The report is first committed as a shared
+        Session presentation event for every visible Run; Telegram is only an
+        optional transport projection and its endpoint receipt is stored separately.
         """
         request_meta = runtime_pipeline.request_meta_for(self, item.request_id)
         if request_meta.get("meter_at_start") is not True:
             return
-        if getattr(item, "silent", False) or not getattr(item, "deliver_to_telegram", True):
+        if getattr(item, "silent", False):
             return
         if self._should_buffer_during_transfer(item.request_id):
             return
@@ -10752,22 +10933,11 @@ class FlexibleAgentRuntime:
         except Exception:
             self.logger.exception("meter cost tail formatting failed")
             return
-        try:
-            await self.send_long_message(
-                chat_id=item.chat_id,
-                text=text,
-                request_id=item.request_id,
-                purpose="meter-cost",
-            )
-        except Exception:
-            # A failed cost tail must never break the turn.
-            self.logger.exception("meter cost tail delivery failed")
-            return
-
+        recorded = None
         try:
             from orchestrator import runtime_session
 
-            runtime_session.record_frontend_message(
+            recorded = runtime_session.record_frontend_message(
                 self,
                 role="assistant",
                 text=text,
@@ -10783,9 +10953,26 @@ class FlexibleAgentRuntime:
                 presentation_channel="meter",
             )
         except Exception:
-            self.logger.debug(
-                "meter cost tail session recording failed", exc_info=True
+            self.logger.exception("meter cost presentation event persistence failed")
+            return
+        if not isinstance(recorded, Mapping):
+            self.logger.warning("meter cost presentation event was not persisted")
+            return
+
+        if not getattr(item, "deliver_to_telegram", True):
+            return
+        try:
+            await self.send_long_message(
+                chat_id=item.chat_id,
+                text=text,
+                request_id=item.request_id,
+                purpose="meter-cost",
+                frontend_event_id=str(recorded.get("delivery_event_id") or ""),
+                frontend_session_id=str(recorded.get("session_id") or ""),
+                frontend_owner_id=str(getattr(item, "owner_id", "") or ""),
             )
+        except Exception:
+            self.logger.exception("meter cost connector delivery failed")
 
     async def _send_herv2_card(
         self,
@@ -10804,7 +10991,7 @@ class FlexibleAgentRuntime:
         request_meta = runtime_pipeline.request_meta_for(self, item.request_id)
         if request_meta.get("herv2_at_start") is not True:
             return
-        if getattr(item, "silent", False) or not getattr(item, "deliver_to_telegram", True):
+        if getattr(item, "silent", False):
             return
         if self._should_buffer_during_transfer(item.request_id):
             return
@@ -10842,21 +11029,11 @@ class FlexibleAgentRuntime:
             self.logger.exception("herv2 routing card formatting failed")
             return
 
-        try:
-            await self.send_long_message(
-                chat_id=item.chat_id,
-                text=html_text,
-                request_id=item.request_id,
-                purpose="herv2-card",
-                parse_mode="HTML",
-            )
-        except Exception:
-            self.logger.exception("herv2 routing card delivery failed")
-
+        recorded = None
         try:
             from orchestrator import runtime_session
 
-            runtime_session.record_frontend_message(
+            recorded = runtime_session.record_frontend_message(
                 self,
                 role="assistant",
                 text=plain_text,
@@ -10870,7 +11047,26 @@ class FlexibleAgentRuntime:
                 presentation_channel="herv2",
             )
         except Exception:
-            self.logger.debug("herv2 routing card session recording failed", exc_info=True)
+            self.logger.exception("herv2 routing card canonical event persistence failed")
+            return
+        if not isinstance(recorded, Mapping):
+            self.logger.warning("herv2 routing card was not committed to the Session")
+            return
+        if not getattr(item, "deliver_to_telegram", True):
+            return
+        try:
+            await self.send_long_message(
+                chat_id=item.chat_id,
+                text=html_text,
+                request_id=item.request_id,
+                purpose="herv2-card",
+                parse_mode="HTML",
+                frontend_event_id=str(recorded.get("delivery_event_id") or ""),
+                frontend_session_id=str(recorded.get("session_id") or ""),
+                frontend_owner_id=str(getattr(item, "owner_id", "") or ""),
+            )
+        except Exception:
+            self.logger.exception("herv2 card connector delivery failed")
 
     async def _send_meditation_cost_tail(
         self, job: dict[str, Any]
@@ -11144,6 +11340,7 @@ class FlexibleAgentRuntime:
                     ),
                     request_id=item.request_id,
                     purpose="bg-cancelled",
+                    frontend_outbox=True,
                 )
                 receipt_delivered = chunk_count > 0
                 return
@@ -11185,6 +11382,7 @@ class FlexibleAgentRuntime:
                     ),
                     request_id=item.request_id,
                     purpose="bg-error",
+                    frontend_outbox=True,
                 )
                 receipt_delivered = chunk_count > 0
                 return
@@ -11426,6 +11624,7 @@ class FlexibleAgentRuntime:
                         text=visible_text,
                         request_id=item.request_id,
                         purpose="bg-response",
+                        frontend_outbox=True,
                     )
                     receipt_delivered = chunk_count > 0
                     receipt_disposition = (
@@ -11534,6 +11733,7 @@ class FlexibleAgentRuntime:
                     ),
                     request_id=item.request_id,
                     purpose="bg-error",
+                    frontend_outbox=True,
                 )
                 receipt_delivered = chunk_count > 0
 

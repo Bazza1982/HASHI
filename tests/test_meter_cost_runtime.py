@@ -42,6 +42,7 @@ class FakeMeterRuntime:
         self.logger = logging.getLogger("test.meter")
         self.logger.addHandler(logging.NullHandler())
         self.sent: list[tuple[int, str, dict[str, Any]]] = []
+        self.delivery_order: list[str] = []
         self.voice_sent: list[tuple[int, str, str]] = []
         self.memory_turns: list[tuple[str, str, str]] = []
         self.wrapper_calls: int = 0
@@ -50,6 +51,7 @@ class FakeMeterRuntime:
         return self._buffer_during_transfer
 
     async def send_long_message(self, chat_id, text, **kwargs) -> None:
+        self.delivery_order.append("telegram")
         self.sent.append((chat_id, text, kwargs))
         return 0.0, 1
 
@@ -59,6 +61,24 @@ class FakeMeterRuntime:
     def record_turn(self, role: str, source: str, text: str) -> None:
         # Mirrors the memory-store surface to prove the tail never calls it.
         self.memory_turns.append((role, source, text))
+
+
+def _capture_canonical_event(monkeypatch, runtime):
+    from orchestrator import runtime_session
+
+    projected: list[dict[str, Any]] = []
+
+    def record(_runtime, **kwargs):
+        runtime.delivery_order.append("session-event")
+        projected.append(kwargs)
+        return {
+            "message_id": f"msg-{kwargs['transport_message_id']}",
+            "session_id": "session-1",
+            "delivery_event_id": "evt-meter-1",
+        }
+
+    monkeypatch.setattr(runtime_session, "record_frontend_message", record)
+    return projected
 
 
 class FakeMeterCommandRuntime:
@@ -182,17 +202,26 @@ async def test_meter_command_only_on_and_off_mutate_state(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_foreground_tail_sends_single_deduped_message():
+async def test_foreground_tail_commits_canonical_event_before_telegram_projection(monkeypatch):
     from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 
     runtime = FakeMeterRuntime(meter_at_start=True, receipt=_receipt())
+    _capture_canonical_event(monkeypatch, runtime)
     item = SimpleNamespace(
-        request_id="req-1", chat_id=99, silent=False, deliver_to_telegram=True
+        request_id="req-1",
+        chat_id=99,
+        owner_id="owner-1",
+        silent=False,
+        deliver_to_telegram=True,
     )
     await FlexibleAgentRuntime._send_meter_cost_tail(runtime, item)
+    assert runtime.delivery_order == ["session-event", "telegram"]
     assert len(runtime.sent) == 1
     _, text, kwargs = runtime.sent[0]
     assert kwargs["purpose"] == "meter-cost"
+    assert kwargs["frontend_event_id"] == "evt-meter-1"
+    assert kwargs["frontend_session_id"] == "session-1"
+    assert kwargs["frontend_owner_id"] == "owner-1"
     assert text.startswith("💰 本回合：")
     assert "服务提供方：HASHI API" in text.splitlines()[0]
     # Dedup: the tail is a standalone message, never duplicated per stream chunk.
@@ -206,13 +235,8 @@ async def test_foreground_tail_projects_the_same_report_to_the_shared_session(mo
     from orchestrator import runtime_session
     from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 
-    projected: list[dict[str, Any]] = []
-    monkeypatch.setattr(
-        runtime_session,
-        "record_frontend_message",
-        lambda _runtime, **kwargs: projected.append(kwargs),
-    )
     runtime = FakeMeterRuntime(meter_at_start=True, receipt=_receipt())
+    projected = _capture_canonical_event(monkeypatch, runtime)
     item = SimpleNamespace(
         request_id="req-1",
         chat_id=99,
@@ -235,10 +259,11 @@ async def test_foreground_tail_projects_the_same_report_to_the_shared_session(mo
 
 
 @pytest.mark.asyncio
-async def test_foreground_tail_renders_frozen_total_and_stage_timings():
+async def test_foreground_tail_renders_frozen_total_and_stage_timings(monkeypatch):
     from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 
     runtime = FakeMeterRuntime(meter_at_start=True, receipt=_receipt())
+    projected = _capture_canonical_event(monkeypatch, runtime)
     item = SimpleNamespace(
         request_id="req-1", chat_id=99, silent=False, deliver_to_telegram=True
     )
@@ -250,13 +275,13 @@ async def test_foreground_tail_renders_frozen_total_and_stage_timings():
         stage_timings_s={"triage": 5.4, "execution": 68.1},
     )
 
-    text = runtime.sent[0][1]
+    text = projected[0]["text"]
     assert "⏱️ 本回合耗时：1分15秒" in text
     assert "🧭 主要阶段：策略 5.4秒 · 执行 1分8秒" in text
 
 
 @pytest.mark.asyncio
-async def test_foreground_tail_uses_matching_request_state_under_overlap():
+async def test_foreground_tail_uses_matching_request_state_under_overlap(monkeypatch):
     """A later request must not replace an earlier request's meter receipt."""
     from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 
@@ -273,6 +298,7 @@ async def test_foreground_tail_uses_matching_request_state_under_overlap():
         ],
     )
     runtime = FakeMeterRuntime(meter_at_start=True, receipt=receipt_a)
+    projected = _capture_canonical_event(monkeypatch, runtime)
     runtime._request_meta_by_id = {
         "req-1": {"meter_at_start": True},
         "req-2": {"meter_at_start": False},
@@ -292,9 +318,9 @@ async def test_foreground_tail_uses_matching_request_state_under_overlap():
         ),
     )
 
-    assert len(runtime.sent) == 1
-    assert "1.23 cents" in runtime.sent[0][1]
-    assert "2.00 cents" not in runtime.sent[0][1]
+    assert len(projected) == 1
+    assert "1.23 cents" in projected[0]["text"]
+    assert "2.00 cents" not in projected[0]["text"]
 
 
 @pytest.mark.asyncio
@@ -322,15 +348,17 @@ async def test_foreground_tail_skips_silent():
 
 
 @pytest.mark.asyncio
-async def test_foreground_tail_skips_non_telegram():
+async def test_foreground_tail_records_event_without_telegram_delivery(monkeypatch):
     from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 
     runtime = FakeMeterRuntime(meter_at_start=True, receipt=_receipt())
+    projected = _capture_canonical_event(monkeypatch, runtime)
     item = SimpleNamespace(
         request_id="req-1", chat_id=99, silent=False, deliver_to_telegram=False
     )
     await FlexibleAgentRuntime._send_meter_cost_tail(runtime, item)
     assert runtime.sent == []
+    assert len(projected) == 1
 
 
 @pytest.mark.asyncio
@@ -345,6 +373,31 @@ async def test_foreground_tail_skips_transfer_buffered():
     )
     await FlexibleAgentRuntime._send_meter_cost_tail(runtime, item)
     assert runtime.sent == []
+
+
+@pytest.mark.asyncio
+async def test_meter_presentation_is_canonical_for_workbench_without_telegram(monkeypatch):
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    runtime = FakeMeterRuntime(meter_at_start=True, receipt=_receipt())
+    projected = _capture_canonical_event(monkeypatch, runtime)
+    item = SimpleNamespace(
+        request_id="req-1",
+        chat_id=99,
+        silent=False,
+        deliver_to_telegram=False,
+        session_surface="workbench",
+        session_channel_key="workbench:primary",
+        owner_id="user:7",
+        session_id="session-1",
+    )
+
+    await FlexibleAgentRuntime._send_meter_cost_tail(runtime, item)
+
+    assert runtime.sent == []
+    assert len(projected) == 1
+    assert projected[0]["source"] == "meter-cost"
+    assert projected[0]["presentation_channel"] == "meter"
 
 
 @pytest.mark.asyncio

@@ -75,6 +75,7 @@ class _Runtime:
         self.server = None
         self.last_request_metadata = None
         self.last_request_content = None
+        self.last_source = None
         self.enqueue_request_calls = 0
         self.api_request_metadata = []
         self.api_delivery_flags = []
@@ -116,6 +117,7 @@ class _Runtime:
         **_kwargs,
     ):
         self.enqueue_request_calls += 1
+        self.last_source = source
         self.last_request_metadata = dict(request_metadata)
         self.last_request_content = _kwargs.get("request_content")
         request_id = "req-api"
@@ -206,6 +208,119 @@ def _server(
 
 
 @pytest.mark.asyncio
+async def test_session_workzone_reference_stages_committed_managed_bytes(tmp_path):
+    from orchestrator.frontend_delivery import tui_run_delivery_policy
+
+    server, runtime = _server(tmp_path)
+    zone = tmp_path / "zone"
+    zone.mkdir()
+    content = b"inside the workzone"
+    (zone / "report.txt").write_bytes(content)
+    runtime._workzone_state = {
+        "revision": 1,
+        "slots": [
+            {"slot_id": "main", "path": str(zone), "enabled": True,
+             "available": True}
+        ],
+    }
+    owner = server._v1_owner_id(_Request())
+    session = server.session_store.resolve_primary_session(
+        owner_id=owner, agent_id="lily", establish=True
+    )
+    response = await server.handle_v1_workzone_attachment_stage(
+        _Request(
+            {"reference": "report.txt"},
+            match_info={"session_id": session["session_id"]},
+        )
+    )
+
+    assert response.status == 201
+    attachment = json.loads(response.text)["attachment"]
+    assert attachment["state"] == "committed"
+    stored, data = server.session_store.attachment_bytes(
+        session_id=session["session_id"], owner_id=owner,
+        attachment_id=attachment["attachment_id"],
+    )
+    assert data == content
+    assert stored["sha256"] == hashlib.sha256(content).hexdigest()
+    assert runtime.enqueue_request_calls == 0
+
+    run_response = await server.handle_v1_session_runs_create(
+        _Request(
+            {
+                "idempotency_key": "tui-workzone-one-turn",
+                "surface": "tui",
+                "client_id": "tui-window-1",
+                "delivery_policy": tui_run_delivery_policy(
+                    telegram_mirror=False, client_id="tui-window-1"
+                ),
+                "message": {"content": [
+                    {"type": "text", "text": "read this"},
+                    {"type": "attachment", "attachment_id": attachment["attachment_id"]},
+                ]},
+            },
+            match_info={"session_id": session["session_id"]},
+        )
+    )
+    assert run_response.status == 202, json.loads(run_response.text)
+    assert runtime.enqueue_request_calls == 1
+    assert [
+        part.get("attachment_id")
+        for part in runtime.last_request_content["parts"]
+        if part["type"] == "media"
+    ] == [attachment["attachment_id"]]
+
+
+@pytest.mark.asyncio
+async def test_session_workzone_reference_rejects_traversal_before_staging(tmp_path):
+    server, runtime = _server(tmp_path)
+    zone = tmp_path / "zone"
+    zone.mkdir()
+    (tmp_path / "outside.txt").write_text("not allowed", encoding="utf-8")
+    runtime._workzone_state = {
+        "revision": 1,
+        "slots": [
+            {"slot_id": "main", "path": str(zone), "enabled": True,
+             "available": True}
+        ],
+    }
+    owner = server._v1_owner_id(_Request())
+    session = server.session_store.resolve_primary_session(
+        owner_id=owner, agent_id="lily", establish=True
+    )
+    response = await server.handle_v1_workzone_attachment_stage(
+        _Request(
+            {"reference": "../outside.txt"},
+            match_info={"session_id": session["session_id"]},
+        )
+    )
+    assert response.status == 400
+    assert json.loads(response.text)["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_session_workzone_reference_requires_session_owner_before_file_read(
+    tmp_path, monkeypatch
+):
+    server, _runtime = _server(tmp_path)
+    monkeypatch.setattr(server, "_v1_owner_id", lambda request: None)
+    monkeypatch.setattr(
+        server, "_resolve_workzone_attachment",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("unowned Workzone must not be read")
+        ),
+    )
+    response = await server.handle_v1_workzone_attachment_stage(
+        _Request(
+            {"reference": "report.txt"},
+            match_info={"session_id": "ses-unowned"},
+        )
+    )
+    assert response.status == 401
+    assert json.loads(response.text)["ok"] is False
+
+
+@pytest.mark.asyncio
 async def test_tui_speech_generates_asset_without_enqueue_or_connector_send(tmp_path):
     server, runtime = _server(tmp_path)
     response = await server.handle_tui_speech(
@@ -213,7 +328,7 @@ async def test_tui_speech_generates_asset_without_enqueue_or_connector_send(tmp_
     )
     payload = json.loads(response.text)
 
-    assert response.status == 200
+    assert response.status == 200, response.text
     assert payload["ok"] is True
     assert base64.b64decode(payload["content_b64"]).startswith(b"OggS")
     assert payload["spoken"] == "read this"
@@ -279,6 +394,44 @@ async def test_personal_instance_enables_standard_frontend_attachments_by_defaul
     assert capabilities["session_api_version"] == "1.0"
     assert capabilities["frontend_connector"]["multi_attachment"] is True
     assert capabilities["frontend_connector"]["atomic_run_admission"] is True
+    assert capabilities["frontend_connector"]["attachment_stage_idempotency"] is True
+    assert capabilities["frontend_contract_versions"] == {
+        "ingress": 2,
+        "delivery_intent": 2,
+        "delivery_receipt": 1,
+        "media_group": 1,
+        "command_invocation": 2,
+        "relay_envelope": 1,
+        "tool_interaction": 1,
+    }
+    assert capabilities["frontend_connector"]["event_source"] == "persistent_session_events"
+    connector_ids = {
+        connector["id"]
+        for connector in capabilities["frontend_connector_registry"]["connectors"]
+    }
+    assert {"telegram", "tui", "backend_api", "session_api", "hchat", "remote", "exchange"} <= connector_ids
+
+
+@pytest.mark.asyncio
+async def test_v2_frontend_capability_endpoint_is_discoverable_and_keeps_v1_compatibility(
+    tmp_path,
+):
+    server, _runtime = _server(tmp_path)
+    server.global_config.persistent_session_v1 = True
+
+    response = await server.handle_v2_frontend_capabilities(_Request())
+    payload = json.loads(response.text)
+
+    assert response.status == 200
+    assert payload["frontend_contract_protocol"] == {
+        "type": "hashi.frontend-contracts",
+        "version": 2,
+        "event_source": "persistent_session_events",
+    }
+    assert payload["frontend_connector_registry"]["version"] == 2
+    legacy = json.loads((await server.handle_v1_capabilities(_Request())).text)
+    assert "frontend_contract_protocol" not in legacy
+    assert legacy["session_api_version"] == "1.0"
 
 
 def test_personal_instance_can_explicitly_opt_out_of_persistent_session(tmp_path):
@@ -484,6 +637,358 @@ async def test_frontend_connector_rejects_multi_attachment_atomically(tmp_path):
     assert response.status == 404
     assert runtime.enqueue_request_calls == 0
     assert server.session_store.messages(session_id, owner_id="user:7") == []
+
+
+@pytest.mark.asyncio
+async def test_primary_session_endpoint_resolves_shared_tui_conversation(tmp_path):
+    server, runtime = _server(tmp_path)
+    shared = server.session_store.resolve_primary_session(
+        owner_id="user:7", agent_id="lily", establish=True
+    )
+    response = await server.handle_v1_agent_primary_session(
+        _Request(match_info={"agent_id": "lily"})
+    )
+    payload = json.loads(response.text)
+    assert response.status == 200
+    assert payload["session"]["session_id"] == shared["session_id"]
+    assert runtime.enqueue_request_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_tui_session_ingress_capability_is_explicit_when_ready(tmp_path):
+    server, _runtime = _server(tmp_path)
+    server.global_config.persistent_session_v1 = True
+
+    response = await server.handle_v1_capabilities(_Request())
+    payload = json.loads(response.text)
+
+    assert payload["tui_session_ingress"] == {
+        "version": 1,
+        "primary_session": True,
+        "text_runs": True,
+        "attachment_runs": True,
+        "workzone_attachment_runs": True,
+        "command_invocations": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_tui_command_invocation_dispatches_with_bound_session_metadata(
+    tmp_path, monkeypatch
+):
+    from orchestrator import command_interaction_bridge, slash_command_audit
+
+    server, _runtime = _server(tmp_path)
+    session = server.session_store.resolve_primary_session(
+        owner_id="user:7", agent_id="lily", establish=True
+    )
+    seen = {}
+    dispatch_calls = []
+
+    monkeypatch.setattr(
+        slash_command_audit,
+        "is_supported_slash_command",
+        lambda _runtime, command: command == "model",
+    )
+
+    async def dispatch(_runtime, payload, metadata):
+        dispatch_calls.append(1)
+        seen["payload"] = payload
+        seen["metadata"] = metadata
+        return {"ok": True, "http_status": 200}
+
+    monkeypatch.setattr(
+        command_interaction_bridge, "dispatch_command_interaction", dispatch
+    )
+    request_payload = {
+        "command": "model",
+        "arguments": ["balanced"],
+        "client_id": "tui-window-client-7",
+        "request_id": "command-request-123456",
+        "ui_locale": "zh-CN",
+        "context_generation": session["context_generation"],
+    }
+    response = await server.handle_v1_session_command_invocation(
+        _Request(
+            request_payload,
+            match_info={"session_id": session["session_id"]},
+        )
+    )
+
+    result = json.loads(response.text)
+    assert response.status == 200, response.text
+    assert result["slash_command"] is True
+    assert result["session_id"] == session["session_id"]
+    assert seen["payload"]["op"] == "open"
+    assert seen["payload"]["command"] == "/model balanced"
+    assert seen["metadata"]["connector_id"] == "tui"
+    assert seen["metadata"]["ingress_transport"] == "tui-session-command"
+    assert seen["metadata"]["source_channel"] == "tui_session_command"
+    assert seen["metadata"]["context_generation"] == session["context_generation"]
+    assert result["command_invocation"]["type"] == "hashi.frontend-command"
+    assert result["replayed"] is False
+    events = server.session_store.events(
+        session["session_id"], owner_id="user:7"
+    )
+    command_events = [event for event in events if event["kind"] == "frontend.command_result"]
+    assert len(command_events) == 1
+    assert command_events[0]["event_id"] == result["command_event_id"]
+    assert command_events[0]["detail"]["command_invocation"] == result["command_invocation"]
+
+    from orchestrator.session_store import SessionStore
+
+    server.session_store = SessionStore(
+        server.session_store.db_path, instance_id="HASHI1"
+    )
+    replay = await server.handle_v1_session_command_invocation(
+        _Request(
+            request_payload,
+            match_info={"session_id": session["session_id"]},
+        )
+    )
+    replayed = json.loads(replay.text)
+    assert replay.status == 200
+    assert replayed["replayed"] is True
+    assert replayed["command_event_id"] == result["command_event_id"]
+    assert dispatch_calls == [1]
+
+
+@pytest.mark.asyncio
+async def test_tui_command_invocation_rejects_stale_session_generation(
+    tmp_path, monkeypatch
+):
+    from orchestrator import command_interaction_bridge, slash_command_audit
+
+    server, _runtime = _server(tmp_path)
+    session = server.session_store.resolve_primary_session(
+        owner_id="user:7", agent_id="lily", establish=True
+    )
+    monkeypatch.setattr(
+        slash_command_audit, "is_supported_slash_command", lambda *_args: True
+    )
+    monkeypatch.setattr(
+        command_interaction_bridge,
+        "dispatch_command_interaction",
+        lambda *_args: pytest.fail("stale command must not dispatch"),
+    )
+    response = await server.handle_v1_session_command_invocation(
+        _Request(
+            {
+                "command": "model",
+                "arguments": [],
+                "client_id": "tui-window-client-7",
+                "request_id": "command-request-123456",
+                "ui_locale": "en",
+                "context_generation": session["context_generation"] + 1,
+            },
+            match_info={"session_id": session["session_id"]},
+        )
+    )
+
+    assert response.status == 409
+
+
+@pytest.mark.asyncio
+async def test_tui_command_invocation_rejects_untrusted_request_metadata(tmp_path):
+    server, _runtime = _server(tmp_path)
+    session = server.session_store.resolve_primary_session(
+        owner_id="user:7", agent_id="lily", establish=True
+    )
+    response = await server.handle_v1_session_command_invocation(
+        _Request(
+            {
+                "command": "model",
+                "arguments": [],
+                "client_id": "tui-window-7",
+                "request_id": "command-request-123456",
+                "ui_locale": "en",
+                "context_generation": session["context_generation"],
+                "request_metadata": {"message_source": "telegram"},
+            },
+            match_info={"session_id": session["session_id"]},
+        )
+    )
+
+    assert response.status == 400
+
+
+@pytest.mark.asyncio
+async def test_session_run_tui_policy_is_validated_and_frozen_at_admission(tmp_path):
+    from orchestrator.frontend_delivery import (
+        telegram_delivery_for_admission,
+        tui_run_delivery_policy,
+    )
+    from orchestrator.message_context import resolve_message_source_fact
+
+    server, runtime = _server(tmp_path)
+    shared = server.session_store.resolve_primary_session(
+        owner_id="user:7", agent_id="lily", establish=True
+    )
+    policy = tui_run_delivery_policy(
+        telegram_mirror=False, client_id="tui-window-7"
+    )
+    response = await server.handle_v1_session_runs_create(
+        _Request(
+            {
+                "idempotency_key": "tui-message-1",
+                "surface": "tui",
+                "client_id": "tui-window-7",
+                "ui_locale": "zh-CN",
+                "delivery_policy": policy,
+                "message": {"content": [{"type": "text", "text": "hello"}]},
+            },
+            match_info={"session_id": shared["session_id"]},
+        )
+    )
+    payload = json.loads(response.text)
+    assert response.status == 202, payload
+    assert runtime.last_request_metadata["frontend_client"] == {
+        "kind": "tui", "client_id": "tui-window-7"
+    }
+    assert runtime.last_request_metadata["frontend_delivery_policy"] == policy
+    assert runtime.last_request_metadata["response_preferences"][
+        "frontend_delivery_policy"
+    ] == policy
+    assert runtime.last_request_metadata["ui_locale"] == "zh-CN"
+    assert runtime.last_source == "tui"
+    assert telegram_delivery_for_admission(
+        source=runtime.last_source,
+        request_metadata=runtime.last_request_metadata,
+        state_root=tmp_path,
+    ) is False
+    assert resolve_message_source_fact(
+        source=runtime.last_source,
+        chat_id=123,
+        metadata=runtime.last_request_metadata,
+    )["id"] == "tui"
+
+    invalid = await server.handle_v1_session_runs_create(
+        _Request(
+            {
+                "idempotency_key": "tui-message-2",
+                "surface": "tui",
+                "client_id": "different-client",
+                "delivery_policy": policy,
+                "message": {"content": [{"type": "text", "text": "reject"}]},
+            },
+            match_info={"session_id": shared["session_id"]},
+        )
+    )
+    assert invalid.status == 400
+    assert runtime.enqueue_request_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_session_api_external_delivery_policy_is_bound_and_can_suppress_private_mirror(tmp_path):
+    from orchestrator.frontend_delivery import (
+        frontend_run_delivery_policy,
+        telegram_delivery_for_admission,
+    )
+
+    server, runtime = _server(tmp_path)
+    shared = server.session_store.resolve_primary_session(
+        owner_id="user:7", agent_id="lily", establish=True
+    )
+    policy = frontend_run_delivery_policy(
+        connector_id="session_api",
+        client_id="hashi-workbench-v2",
+        targets=[
+            {"connector_id": "telegram", "role": "mirror", "enabled": False}
+        ],
+    )
+    response = await server.handle_v1_session_runs_create(
+        _Request(
+            {
+                "idempotency_key": "external-private-1",
+                "surface": "workbench",
+                "client_id": "hashi-workbench-v2",
+                "delivery_policy": policy,
+                "message": {"content": [{"type": "text", "text": "private reply"}]},
+            },
+            match_info={"session_id": shared["session_id"]},
+        )
+    )
+    payload = json.loads(response.text)
+    assert response.status == 202, payload
+    assert runtime.last_source == "session-api"
+    assert runtime.last_request_metadata["frontend_client"] == {
+        "kind": "session_api",
+        "client_id": "hashi-workbench-v2",
+    }
+    assert runtime.last_request_metadata["frontend_delivery_policy"] == policy
+    assert telegram_delivery_for_admission(
+        source=runtime.last_source,
+        request_metadata=runtime.last_request_metadata,
+        state_root=tmp_path,
+    ) is False
+
+    invalid_policy = frontend_run_delivery_policy(
+        connector_id="session_api",
+        client_id="hashi-workbench-v2",
+        targets=[
+            {"connector_id": "hchat", "role": "subscriber", "enabled": True}
+        ],
+    )
+    rejected = await server.handle_v1_session_runs_create(
+        _Request(
+            {
+                "idempotency_key": "external-policy-2",
+                "surface": "workbench",
+                "client_id": "hashi-workbench-v2",
+                "delivery_policy": invalid_policy,
+                "message": {"content": [{"type": "text", "text": "reject route injection"}]},
+            },
+            match_info={"session_id": shared["session_id"]},
+        )
+    )
+    assert rejected.status == 400
+    assert runtime.enqueue_request_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_tui_session_run_passes_only_signed_remote_origin_evidence(tmp_path):
+    from orchestrator.frontend_delivery import tui_run_delivery_policy
+    from orchestrator.message_context import seal_connector_evidence
+
+    (tmp_path / "secrets.json").write_text(
+        json.dumps({"hashi_remote_shared_token": "test-network-secret"}),
+        encoding="utf-8",
+    )
+    server, runtime = _server(tmp_path)
+    session = server.session_store.resolve_primary_session(
+        owner_id="user:7", agent_id="lily", establish=True
+    )
+    evidence = seal_connector_evidence(
+        tmp_path,
+        claims={"_origin_instance_evidence": {
+            "id": "HASHI2", "assurance": "shared_network_hmac"
+        }},
+        prompt="remote message",
+    )
+    response = await server.handle_v1_session_runs_create(
+        _Request(
+            {
+                "idempotency_key": "remote-tui-message-1",
+                "surface": "tui",
+                "client_id": "tui-remote-1",
+                "delivery_policy": tui_run_delivery_policy(
+                    telegram_mirror=True, client_id="tui-remote-1"
+                ),
+                "message": {
+                    "content": [{"type": "text", "text": "remote message"}]
+                },
+                "request_metadata": {
+                    "_connector_evidence": evidence,
+                    "_message_source_reserved": "telegram",
+                },
+            },
+            match_info={"session_id": session["session_id"]},
+        )
+    )
+
+    assert response.status == 202
+    assert runtime.last_request_metadata["_connector_evidence"] == evidence
+    assert runtime.last_source == "tui"
 
 
 @pytest.mark.asyncio
@@ -907,6 +1412,18 @@ async def test_session_api_run_event_ack_and_fresh_contract(tmp_path):
         "run.started",
         "run.completed",
     ]
+    run_events = json.loads(
+        (
+            await server.handle_v1_session_events(
+                _Request(
+                    query={"run_id": run_payload["run_id"], "after_sequence": "0"},
+                    match_info={"session_id": session_id},
+                )
+            )
+        ).text
+    )
+    assert run_events["events"]
+    assert all(event["run_id"] == run_payload["run_id"] for event in run_events["events"])
 
     ack_response = await server.handle_v1_event_consumer_ack(
         _Request(

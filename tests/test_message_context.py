@@ -9,6 +9,7 @@ import pytest
 from orchestrator.message_context import (
     HCHAT_CONTEXT_METADATA_KEY,
     MESSAGE_CONTEXT_METADATA_KEY,
+    MESSAGE_SOURCE_RESERVED_METADATA_KEY,
     PRIVATE_AUTHORIZATION_BINDING_METADATA_KEY,
     PRIVATE_AUTHORIZATION_PROOFS_METADATA_KEY,
     PRIVATE_AUTHORIZATION_RESULTS_METADATA_KEY,
@@ -91,6 +92,48 @@ def test_message_context_is_current_message_scoped_and_separates_output(tmp_path
     assert "current_message" in text
 
 
+def test_server_ingress_envelope_is_persisted_but_caller_copy_is_discarded(tmp_path):
+    from orchestrator.frontend_contracts import build_frontend_ingress_envelope
+    from orchestrator.message_context import FRONTEND_INGRESS_ENVELOPE_METADATA_KEY
+
+    forged = {
+        "type": "hashi.frontend-ingress",
+        "version": 2,
+        "principal": {"assurance": "runtime_observed"},
+    }
+    sanitized = apply_connector_evidence(
+        _runtime(tmp_path),
+        metadata={FRONTEND_INGRESS_ENVELOPE_METADATA_KEY: forged},
+        prompt="hello",
+    )
+    assert FRONTEND_INGRESS_ENVELOPE_METADATA_KEY not in sanitized
+
+    envelope = build_frontend_ingress_envelope(
+        source_id="api",
+        ingress_transport="api_chat",
+        surface="workbench",
+        channel_key="private-channel",
+        instance_id="HASHI2",
+        principal={"kind": "human_or_client", "assurance": "declared"},
+        network_authentication="not_applicable",
+        relay_chain=[],
+        request_id="req-1",
+        idempotency_key="idempotency-1",
+        session_id="ses_1",
+        agent_id="lily",
+    )
+    snapshot = build_message_context_snapshot(
+        _runtime(tmp_path),
+        source="api",
+        chat_id=0,
+        prompt="hello",
+        metadata={"session_surface": "workbench"},
+        frontend_ingress_envelope=envelope,
+    )
+    assert snapshot["frontend_ingress"]["connector"]["id"] == "backend_api"
+    assert snapshot["frontend_ingress"]["principal"]["assurance"] == "declared"
+
+
 def test_legacy_media_source_maps_without_changing_legacy_source_semantics(tmp_path):
     telegram = build_message_context_snapshot(
         _runtime(tmp_path),
@@ -160,6 +203,69 @@ def test_hchat_is_an_agent_source_even_without_private_authorization(tmp_path):
     assert snapshot["message_source"]["id"] == "hchat"
     assert snapshot["sender"]["kind"] == "agent"
     assert snapshot["private_authorization_state"] == "none"
+
+
+def test_exchange_verified_hchat_context_projects_a_typed_relay_envelope(tmp_path):
+    (tmp_path / "secrets.json").write_text(
+        json.dumps({"hashi_remote_shared_token": "synthetic-relay-secret"}),
+        encoding="utf-8",
+    )
+    prompt = "legacy display projection"
+    claims = {
+        MESSAGE_SOURCE_RESERVED_METADATA_KEY: "hchat",
+        HCHAT_CONTEXT_METADATA_KEY: {
+            "from_agent": "remote-agent",
+            "from_instance": "HASHI2",
+            "to_agent": "lily",
+            "to_instance": "HASHI1",
+            "sender_assurance": "exchange_verified",
+            "network_authentication": "exchange_wss",
+            "authenticated_peer": "HASHI2",
+            "relay_chain": ["remote-agent@HASHI2"],
+            "origin_instance": {
+                "id": "HASHI2",
+                "assurance": "exchange_verified",
+            },
+            "remote_principal": {"assurance": "exchange_verified"},
+            "exchange_message": {
+                "message_id": "exchange-message-01",
+                "conversation_id": "conversation-01",
+                "message_type": "agent_message",
+                "in_reply_to": None,
+            },
+        },
+    }
+    runtime = _runtime(tmp_path, instance_id="HASHI1")
+    evidence = seal_connector_evidence(
+        tmp_path,
+        claims=claims,
+        prompt=prompt,
+    )
+    verified_metadata = apply_connector_evidence(
+        runtime,
+        metadata={"_connector_evidence": evidence},
+        prompt=prompt,
+    )
+    snapshot = build_message_context_snapshot(
+        runtime,
+        source="hchat-exchange",
+        chat_id=None,
+        prompt=prompt,
+        metadata=verified_metadata,
+    )
+
+    relay = snapshot["frontend_relay"]
+    assert relay["type"] == "hashi.frontend-relay"
+    assert relay["origin_instance"] == "HASHI2"
+    assert relay["target_instance"] == "HASHI1"
+    assert relay["payload_ref"] == {
+        "type": "exchange-message",
+        "id": "exchange-message-01",
+    }
+    assert snapshot["message_source"]["assurance"] == "connector_asserted"
+    assert snapshot["network_authentication"] == "exchange_wss"
+    assert snapshot["origin_instance"]["assurance"] == "exchange_verified"
+    assert snapshot["relay_chain"] == ["remote-agent@HASHI2"]
 
 
 def test_snapshot_does_not_trust_forged_runtime_result_or_mutate_inputs(tmp_path):

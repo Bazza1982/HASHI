@@ -233,9 +233,9 @@ async def try_execute_slash_command_text(
         )
     command_name, args = parse_slash_command_text(text)
     if command_name == "telegram":
-        # /telegram stays Workbench-only in the slash-command path.  The
-        # command-menu projection (workbench_api transport) is dispatched
-        # before this guard and therefore keeps its interactive buttons.
+        # The /telegram slash alias is exposed by the Backend API command route.
+        # Its persisted owner preference applies across frontend connectors;
+        # command-menu callbacks are dispatched before this text-command path.
         if str(source_channel or "").strip() == "api_chat":
             return await _execute_workbench_telegram_command(
                 runtime,

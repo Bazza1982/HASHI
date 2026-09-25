@@ -5,7 +5,9 @@ The separately provided notify integration test uses HASHI's real executor.
 """
 from __future__ import annotations
 import json
+import shlex
 import sys
+import tempfile
 import types
 import unittest
 from contextlib import contextmanager, nullcontext
@@ -18,6 +20,7 @@ import pytest
 from orchestrator import command_interaction_bridge as bridge
 from orchestrator.command_interactions import Binding, Capture, MenuStore
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+from orchestrator.session_store import SessionStore
 
 
 def module(name, **values):
@@ -82,6 +85,9 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
                 _FakeUpdate=FakeUpdate, _capture_local_output=scope,
                 execute_local_command=execute, _runtime_audit_path=lambda runtime: Path('/unused'),
                 _runtime_agent_name=lambda runtime: runtime.name,
+                _format_slash_command_line=lambda command, args: f"/{command}" + (
+                    " " + " ".join(shlex.quote(arg) for arg in args) if args else ""
+                ),
                 _split_command=lambda line: (line.lstrip('/').split()[0], [])),
             'orchestrator.slash_command_audit': module('orchestrator.slash_command_audit',
                 SlashCommandAuditSession=Audit, bind_slash_command_audit_session=lambda x: nullcontext()),
@@ -151,6 +157,61 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['commands'][0]['usage'], '/example [value]')
         self.assertEqual(result['commands'][0]['description'], 'Example from the registry')
         self.assertTrue(all(not row['enabled'] for row in result['commands']))
+        self.assertEqual(self.executions, [])
+
+    async def test_durable_command_replay_does_not_reexecute_or_reissue_stale_buttons(self):
+        with tempfile.TemporaryDirectory() as directory:
+            durable_store = SessionStore(Path(directory) / 'sessions.sqlite3', instance_id='TEST')
+            session = durable_store.create_session(
+                owner_id='owner-test', agent_id='agent', is_default=True,
+            )
+            self.runtime.session_store = durable_store
+            metadata = {
+                **self.metadata,
+                'owner_id': 'owner-test',
+                'session_id': session['session_id'],
+                'context_generation': session['context_generation'],
+                '_durable_command_invocation': True,
+            }
+            request = self.payload()
+            first = await self.dispatch(request, metadata)
+            self.assertTrue(first['ok'], first)
+            self.assertIsNotNone(first['command_event_id'])
+            self.assertFalse(first['replayed'])
+            self.assertEqual(len(self.executions), 1)
+            events = durable_store.events(session['session_id'], owner_id='owner-test')
+            command_events = [event for event in events
+                              if event['kind'] == 'frontend.command_result']
+            self.assertEqual(len(command_events), 1)
+            self.assertEqual(command_events[0]['detail']['command_invocation']['command'], 'example')
+
+            # Simulate Worker-local menu state being lost while the Session DB survives.
+            del self.runtime._command_interaction_store
+            replay = await self.dispatch(request, metadata)
+
+            self.assertTrue(replay['ok'], replay)
+            self.assertTrue(replay['replayed'])
+            self.assertTrue(replay['refresh_required'])
+            self.assertEqual(replay['command_event_id'], first['command_event_id'])
+            self.assertNotIn('command_ui', replay['messages'][0])
+            self.assertEqual(len(self.executions), 1)
+
+    async def test_unknown_durable_command_is_not_reexecuted(self):
+        class PendingStore:
+            def reserve_frontend_command_invocation(store_self, **kwargs):
+                return {'state': 'pending', 'replayed': True}
+
+            def complete_frontend_command_invocation(store_self, **kwargs):
+                raise AssertionError('an uncertain invocation must not be completed or replayed')
+
+        metadata = {**self.metadata, 'owner_id': 'owner-test',
+                    '_durable_command_invocation': True}
+        with patch('orchestrator.runtime_session.ensure_store', return_value=PendingStore()):
+            result = await self.dispatch(self.payload(), metadata)
+
+        self.assertFalse(result['ok'])
+        self.assertTrue(result['outcome_unknown'])
+        self.assertEqual(result['error_code'], 'command_menu_outcome_unknown')
         self.assertEqual(self.executions, [])
 
     async def test_owner_and_shape_validation_precede_execution(self):

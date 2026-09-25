@@ -4,13 +4,14 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import shutil
 import sqlite3
 import threading
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -26,6 +27,10 @@ from orchestrator.audio_assets import (
 from orchestrator.multimodal_contract import (
     contains_persistent_inline_media,
     modality_for_attachment,
+)
+from orchestrator.frontend_contracts import (
+    normalize_delivery_receipt,
+    normalize_media_group,
 )
 from orchestrator.storage_profile import removable_storage_profile
 
@@ -318,7 +323,7 @@ class SessionStore:
     per-Session working files are derived state used by Memory+ and Compact.
     """
 
-    SCHEMA_VERSION = 8
+    SCHEMA_VERSION = 9
 
     def __init__(
         self,
@@ -565,6 +570,22 @@ class SessionStore:
                     FOREIGN KEY(run_id) REFERENCES runs(run_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS frontend_command_invocations (
+                    session_id TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    client_id TEXT NOT NULL,
+                    request_id TEXT NOT NULL,
+                    request_digest TEXT NOT NULL,
+                    invocation_json TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    response_json TEXT,
+                    event_id TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(session_id, client_id, request_id),
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id)
+                );
+
                 CREATE TABLE IF NOT EXISTS channel_bindings (
                     instance_id TEXT NOT NULL,
                     owner_id TEXT NOT NULL,
@@ -709,6 +730,28 @@ class SessionStore:
                     FOREIGN KEY(event_id) REFERENCES run_events(event_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS connector_delivery_receipts (
+                    event_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    endpoint_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    proof_json TEXT,
+                    attempt_count INTEGER NOT NULL DEFAULT 1,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(event_id, endpoint_id),
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id),
+                    FOREIGN KEY(event_id) REFERENCES run_events(event_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS frontend_message_events (
+                    message_id TEXT PRIMARY KEY,
+                    event_id TEXT NOT NULL UNIQUE,
+                    session_id TEXT NOT NULL,
+                    FOREIGN KEY(message_id) REFERENCES messages(message_id),
+                    FOREIGN KEY(event_id) REFERENCES run_events(event_id),
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id)
+                );
+
                 CREATE TABLE IF NOT EXISTS session_attachments (
                     attachment_id TEXT PRIMARY KEY,
                     session_id TEXT NOT NULL,
@@ -728,6 +771,19 @@ class SessionStore:
                     created_at TEXT NOT NULL,
                     committed_at TEXT,
                     FOREIGN KEY(session_id) REFERENCES sessions(session_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS attachment_stage_idempotency (
+                    session_id TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    request_digest TEXT NOT NULL,
+                    attachment_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(session_id, owner_id, idempotency_key),
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id),
+                    FOREIGN KEY(attachment_id) REFERENCES session_attachments(attachment_id)
+                        ON DELETE CASCADE
                 );
 
                 CREATE TABLE IF NOT EXISTS run_audio_assets (
@@ -816,6 +872,31 @@ class SessionStore:
                     "ALTER TABLE event_consumers ADD COLUMN "
                     "issued_through_sequence INTEGER NOT NULL DEFAULT 0"
                 )
+            outbox_columns = {
+                str(row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(delivery_outbox)"
+                ).fetchall()
+            }
+            outbox_migrations = {
+                "lease_owner": "TEXT",
+                "lease_token": "TEXT",
+                "lease_expires_at": "TEXT",
+                "attempt_count": "INTEGER NOT NULL DEFAULT 0",
+                "last_error_code": "TEXT",
+                "completed_at": "TEXT",
+                "last_claim_token": "TEXT",
+                "last_claim_status": "TEXT",
+            }
+            for column, declaration in outbox_migrations.items():
+                if column not in outbox_columns:
+                    connection.execute(
+                        f"ALTER TABLE delivery_outbox ADD COLUMN {column} {declaration}"
+                    )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS delivery_outbox_claimable "
+                "ON delivery_outbox(session_id, state, created_at)"
+            )
             attachment_columns = {
                 str(row["name"])
                 for row in connection.execute(
@@ -1027,6 +1108,156 @@ class SessionStore:
             "summary": summary,
             "detail": dict(detail or {}),
             "created_at": created_at,
+        }
+
+    def reserve_frontend_command_invocation(
+        self,
+        *,
+        session_id: str,
+        owner_id: str,
+        client_id: str,
+        request_id: str,
+        request_digest: str,
+        context_generation: int,
+        invocation: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Durably fence one command before any command handler can mutate state."""
+
+        identity = tuple(
+            str(value or "").strip()
+            for value in (session_id, owner_id, client_id, request_id)
+        )
+        if any(not value for value in identity):
+            raise ValueError("command invocation identity is required")
+        digest = str(request_digest or "").strip().casefold()
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError("command invocation digest is invalid")
+        encoded_invocation = _json(dict(invocation))
+        if len(encoded_invocation.encode("utf-8")) > 32768:
+            raise ValueError("command invocation exceeds the storage limit")
+        now = _utc_now()
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            session = connection.execute(
+                """
+                SELECT context_generation FROM sessions
+                WHERE session_id=? AND owner_id=? AND deleted_at IS NULL
+                """,
+                (identity[0], identity[1]),
+            ).fetchone()
+            if session is None:
+                raise SessionNotFound(identity[0])
+            if int(session["context_generation"]) != int(context_generation):
+                raise SessionConflict("session context changed before command admission")
+            existing = connection.execute(
+                """
+                SELECT request_digest, state, response_json, event_id
+                FROM frontend_command_invocations
+                WHERE session_id=? AND client_id=? AND request_id=?
+                """,
+                (identity[0], identity[2], identity[3]),
+            ).fetchone()
+            if existing is not None:
+                if str(existing["request_digest"]) != digest:
+                    raise IdempotencyConflict(
+                        "command request id is already bound to different content"
+                    )
+                if str(existing["state"]) == "completed":
+                    response = json.loads(str(existing["response_json"] or "{}"))
+                    return {
+                        "state": "completed",
+                        "response": response,
+                        "event_id": existing["event_id"],
+                        "replayed": True,
+                    }
+                return {"state": "pending", "replayed": True}
+            connection.execute(
+                """
+                INSERT INTO frontend_command_invocations(
+                    session_id, owner_id, client_id, request_id, request_digest,
+                    invocation_json, state, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                """,
+                (
+                    identity[0], identity[1], identity[2], identity[3], digest,
+                    encoded_invocation, now, now,
+                ),
+            )
+        return {"state": "reserved", "replayed": False}
+
+    def complete_frontend_command_invocation(
+        self,
+        *,
+        session_id: str,
+        owner_id: str,
+        client_id: str,
+        request_id: str,
+        request_digest: str,
+        response: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Persist a command result and its canonical Session event atomically."""
+
+        identity = tuple(
+            str(value or "").strip()
+            for value in (session_id, owner_id, client_id, request_id)
+        )
+        if any(not value for value in identity):
+            raise ValueError("command invocation identity is required")
+        digest = str(request_digest or "").strip().casefold()
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError("command invocation digest is invalid")
+        response_json = _json(dict(response))
+        if len(response_json.encode("utf-8")) > 262144:
+            raise ValueError("command result exceeds the storage limit")
+        now = _utc_now()
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT request_digest, invocation_json, state, response_json, event_id
+                FROM frontend_command_invocations
+                WHERE session_id=? AND owner_id=? AND client_id=? AND request_id=?
+                """,
+                identity,
+            ).fetchone()
+            if row is None:
+                raise SessionConflict("command invocation was not reserved")
+            if str(row["request_digest"]) != digest:
+                raise IdempotencyConflict(
+                    "command request id is already bound to different content"
+                )
+            if str(row["state"]) == "completed":
+                return {
+                    "state": "completed",
+                    "response": json.loads(str(row["response_json"] or "{}")),
+                    "event_id": row["event_id"],
+                    "replayed": True,
+                }
+            invocation = json.loads(str(row["invocation_json"]))
+            event_status = "completed" if response.get("ok") is True else "failed"
+            event = self._append_event(
+                connection,
+                session_id=identity[0],
+                run_id=None,
+                kind="frontend.command_result",
+                status=event_status,
+                phase="command",
+                summary=f"/{str(invocation.get('command') or 'command')} result",
+                detail={"command_invocation": invocation, "result": dict(response)},
+            )
+            connection.execute(
+                """
+                UPDATE frontend_command_invocations
+                SET state='completed', response_json=?, event_id=?, updated_at=?
+                WHERE session_id=? AND owner_id=? AND client_id=? AND request_id=?
+                """,
+                (response_json, event["event_id"], now, *identity),
+            )
+        return {
+            "state": "completed",
+            "response": dict(response),
+            "event_id": event["event_id"],
+            "replayed": False,
         }
 
     def create_session(
@@ -1308,10 +1539,13 @@ class SessionStore:
                 "runtime_event_correlations",
                 "run_approvals",
                 "delivery_outbox",
+                "connector_delivery_receipts",
+                "frontend_message_events",
                 "event_consumers",
                 "agent_memory_records",
                 "memory_promotion_watermarks",
                 "idempotency_records",
+                "frontend_command_invocations",
                 "run_projection_records",
                 "backend_bindings",
                 "channel_bindings",
@@ -1934,6 +2168,7 @@ class SessionStore:
         presentation_channel: str = "command",
         history_eligible: bool = False,
         message_context: Mapping[str, Any] | None = None,
+        outbox: bool = False,
     ) -> dict[str, Any]:
         """Persist frontend-visible text without turning it into model input."""
 
@@ -1997,7 +2232,14 @@ class SessionStore:
                     raise IdempotencyConflict(
                         "presentation idempotency key is bound to different content"
                     )
-                return self._message_dict(existing)
+                result = self._message_dict(existing)
+                event_link = connection.execute(
+                    "SELECT event_id FROM frontend_message_events WHERE message_id = ?",
+                    (message_id,),
+                ).fetchone()
+                if event_link is not None:
+                    result["delivery_event_id"] = str(event_link["event_id"])
+                return result
             ordinal = self._next_ordinal(connection, str(session_id))
             connection.execute(
                 """
@@ -2024,7 +2266,7 @@ class SessionStore:
                     now,
                 ),
             )
-            self._append_event(
+            presentation_event = self._append_event(
                 connection,
                 session_id=str(session_id),
                 run_id=None,
@@ -2037,6 +2279,14 @@ class SessionStore:
                     "source": normalized_source,
                     "presentation_channel": normalized_channel,
                 },
+                outbox=outbox,
+            )
+            connection.execute(
+                """
+                INSERT INTO frontend_message_events(message_id, event_id, session_id)
+                VALUES (?, ?, ?)
+                """,
+                (message_id, presentation_event["event_id"], str(session_id)),
             )
             connection.execute(
                 """
@@ -2048,7 +2298,9 @@ class SessionStore:
             inserted = connection.execute(
                 "SELECT * FROM messages WHERE message_id = ?", (message_id,)
             ).fetchone()
-        return self._message_dict(inserted)
+        result = self._message_dict(inserted)
+        result["delivery_event_id"] = presentation_event["event_id"]
+        return result
 
     def update_presentation_message(
         self,
@@ -2713,6 +2965,7 @@ class SessionStore:
         retention_seconds: int = DEFAULT_RETENTION_SECONDS,
         retention_indefinite: bool = False,
         upload_required: bool | None = None,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         self.get_session(session_id, owner_id=owner_id, include_deleted=False)
         digest = str(sha256).lower()
@@ -2743,8 +2996,69 @@ class SessionStore:
         elif normalized_role:
             raise ValueError("semantic_role is only supported for audio attachments")
         requires_upload = True if upload_required is None else bool(upload_required)
+        normalized_duration = int(duration_ms) if duration_ms is not None else None
+        normalized_retention_indefinite = bool(retention_indefinite)
+        normalized_retention = (
+            None if normalized_retention_indefinite else int(retention_seconds)
+        )
+        normalized_key = str(idempotency_key or "").strip()
+        if normalized_key and (
+            len(normalized_key) > 256
+            or any(ord(character) < 0x21 or ord(character) > 0x7E for character in normalized_key)
+        ):
+            raise ValueError("attachment idempotency key must be bounded printable ASCII")
+        request_digest = hashlib.sha256(
+            json.dumps(
+                {
+                    "filename": str(filename),
+                    "media_type": normalized_media_type,
+                    "size_bytes": declared_size,
+                    "sha256": digest,
+                    "semantic_role": normalized_role,
+                    "duration_ms": normalized_duration,
+                    "retention_seconds": normalized_retention,
+                    "retention_indefinite": normalized_retention_indefinite,
+                    "upload_required": bool(requires_upload),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
         attachment_id, now = _new_id("att"), _utc_now()
         with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if normalized_key:
+                previous = connection.execute(
+                    """SELECT request_digest, attachment_id
+                       FROM attachment_stage_idempotency
+                       WHERE session_id=? AND owner_id=? AND idempotency_key=?""",
+                    (str(session_id), str(owner_id), normalized_key),
+                ).fetchone()
+                if previous is not None:
+                    if str(previous["request_digest"]) != request_digest:
+                        raise IdempotencyConflict(
+                            "attachment stage idempotency key was reused with different metadata"
+                        )
+                    row = connection.execute(
+                        "SELECT * FROM session_attachments WHERE attachment_id=? "
+                        "AND session_id=? AND owner_id=?",
+                        (
+                            str(previous["attachment_id"]),
+                            str(session_id),
+                            str(owner_id),
+                        ),
+                    ).fetchone()
+                    if row is None:
+                        raise SessionConflict(
+                            "idempotent attachment stage is no longer available"
+                        )
+                    result = dict(row)
+                    result["retention_indefinite"] = bool(
+                        result["retention_indefinite"]
+                    )
+                    result["upload_required"] = bool(result["upload_required"])
+                    return result
             connection.execute(
                 """INSERT INTO session_attachments(attachment_id,session_id,owner_id,filename,
                    media_type,size_bytes,sha256,semantic_role,duration_ms,
@@ -2759,13 +3073,28 @@ class SessionStore:
                     declared_size,
                     digest,
                     normalized_role,
-                    int(duration_ms) if duration_ms is not None else None,
-                    None if retention_indefinite else int(retention_seconds),
-                    int(bool(retention_indefinite)),
+                    normalized_duration,
+                    normalized_retention,
+                    int(normalized_retention_indefinite),
                     int(requires_upload),
                     now,
                 ),
             )
+            if normalized_key:
+                connection.execute(
+                    """INSERT INTO attachment_stage_idempotency(
+                           session_id,owner_id,idempotency_key,request_digest,
+                           attachment_id,created_at
+                       ) VALUES(?,?,?,?,?,?)""",
+                    (
+                        str(session_id),
+                        str(owner_id),
+                        normalized_key,
+                        request_digest,
+                        attachment_id,
+                        now,
+                    ),
+                )
             row = connection.execute(
                 "SELECT * FROM session_attachments WHERE attachment_id=?",
                 (attachment_id,),
@@ -2846,8 +3175,8 @@ class SessionStore:
         if row is None:
             raise SessionNotFound("attachment not found")
         attachment = dict(row)
-        if attachment["state"] != "staged":
-            raise SessionConflict("only staged attachments can be uploaded")
+        if str(attachment["state"]) not in {"staged", "committed"}:
+            raise SessionConflict("attachment is no longer available for upload")
         actual_digest = hashlib.sha256(payload).hexdigest()
         if len(payload) != int(attachment["size_bytes"]):
             raise SessionConflict("attachment size does not match staged metadata")
@@ -2866,6 +3195,8 @@ class SessionStore:
             else:
                 self._validated_attachment_file(attachment)
             return attachment
+        if attachment["state"] != "staged":
+            raise SessionConflict("only staged attachments can be uploaded")
 
         if str(attachment["media_type"]).casefold().startswith("audio/"):
             audio_format = normalize_audio_format(
@@ -2938,6 +3269,8 @@ class SessionStore:
             ).fetchone()
             if row is None:
                 raise SessionNotFound("attachment not found")
+            if str(row["state"]) not in {"staged", "committed"}:
+                raise SessionConflict("attachment is no longer available for commit")
             if bool(row["upload_required"]) and not str(row["asset_id"] or ""):
                 raise SessionConflict("attachment bytes must be uploaded before commit")
             if str(row["asset_id"] or ""):
@@ -3069,7 +3402,7 @@ class SessionStore:
         with self._lock, self._connection() as connection:
             rows = connection.execute(
                 f"""
-                SELECT o.*, r.session_id, s.owner_id, r.agent_id
+                SELECT o.*, r.session_id, r.request_id, s.owner_id, r.agent_id
                 FROM run_output_attachments AS o
                 JOIN runs AS r ON r.run_id=o.run_id
                 JOIN sessions AS s ON s.session_id=r.session_id
@@ -3119,9 +3452,40 @@ class SessionStore:
         digests = {str(row["request_digest"]) for row in rows}
         if len(digests) != 1:
             raise SessionConflict("frontend attachment output group is inconsistent")
+        attachments = self._canonical_run_output_attachments(rows)
+        group_id_material = "\0".join(
+            (
+                self.instance_id,
+                str(rows[0]["session_id"]),
+                str(rows[0]["request_id"]),
+                str(rows[0]["idempotency_key"]),
+            )
+        )
+        group_id = "grp_" + hashlib.sha256(
+            group_id_material.encode("utf-8")
+        ).hexdigest()[:32]
+        media_group = normalize_media_group(
+            {
+                "type": "hashi.media-group",
+                "version": 1,
+                "group_id": group_id,
+                "retention_class": "message_bound",
+                "attachments": [
+                    {
+                        "attachment_id": str(item["attachment_id"]),
+                        "ordinal": index,
+                        "sha256": str(item["sha256"]),
+                        "filename": str(item["filename"]),
+                    }
+                    for index, item in enumerate(attachments)
+                ],
+            }
+        )
         return {
             "request_digest": next(iter(digests)),
-            "attachments": self._canonical_run_output_attachments(rows),
+            "group_id": group_id,
+            "media_group": media_group,
+            "attachments": attachments,
         }
 
     def run_output_attachment_content(
@@ -4119,13 +4483,16 @@ class SessionStore:
         owner_id: str,
         transcript_id: str,
         confirmed: bool,
+        expected_context_generation: int | None = None,
     ) -> dict[str, Any]:
         """Apply an authenticated generic-client Safe Voice decision."""
 
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                """SELECT vt.*, r.user_message_id, r.request_id
+                """SELECT vt.*, r.user_message_id, r.request_id,
+                          r.context_generation AS run_context_generation,
+                          s.context_generation AS current_context_generation
                    FROM voice_transcripts AS vt
                    JOIN runs AS r ON r.run_id=vt.run_id
                    JOIN sessions AS s ON s.session_id=vt.session_id
@@ -4134,6 +4501,13 @@ class SessionStore:
             ).fetchone()
             if row is None:
                 raise SessionNotFound("voice transcript not found")
+            if expected_context_generation is not None and (
+                int(row["run_context_generation"])
+                != int(expected_context_generation)
+                or int(row["current_context_generation"])
+                != int(expected_context_generation)
+            ):
+                raise SessionConflict("voice transcript belongs to a stale Session context")
             current = str(row["safe_voice_state"])
             desired = "released" if confirmed else "discarded"
             if current not in {"pending_confirmation", desired}:
@@ -5748,6 +6122,8 @@ class SessionStore:
             for session_id in empty_created_sessions:
                 for table in (
                     "delivery_outbox",
+                    "connector_delivery_receipts",
+                    "frontend_message_events",
                     "event_consumers",
                     "run_events",
                     "session_workzones",
@@ -6617,24 +6993,541 @@ class SessionStore:
         owner_id: str | None = None,
         after_sequence: int = 0,
         limit: int = 500,
+        run_id: str | None = None,
     ) -> list[dict[str, Any]]:
         self.get_session(session_id, owner_id=owner_id)
+        normalized_run_id = str(run_id or "").strip()
         with self._lock, self._connection() as connection:
-            rows = connection.execute(
-                """
-                SELECT * FROM run_events WHERE session_id = ? AND sequence > ?
-                ORDER BY sequence ASC LIMIT ?
-                """,
-                (
-                    str(session_id),
-                    max(0, int(after_sequence)),
-                    max(1, min(int(limit), 2000)),
-                ),
-            ).fetchall()
+            if normalized_run_id:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM run_events
+                    WHERE session_id = ? AND run_id = ? AND sequence > ?
+                    ORDER BY sequence ASC LIMIT ?
+                    """,
+                    (
+                        str(session_id),
+                        normalized_run_id,
+                        max(0, int(after_sequence)),
+                        max(1, min(int(limit), 2000)),
+                    ),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM run_events WHERE session_id = ? AND sequence > ?
+                    ORDER BY sequence ASC LIMIT ?
+                    """,
+                    (
+                        str(session_id),
+                        max(0, int(after_sequence)),
+                        max(1, min(int(limit), 2000)),
+                    ),
+                ).fetchall()
         result = []
         for row in rows:
             item = dict(row)
             item["detail"] = _json_object(item.pop("detail_json", "{}"))
+            result.append(item)
+        return result
+
+    def record_frontend_delivery_receipt(
+        self,
+        *,
+        session_id: str,
+        owner_id: str,
+        receipt: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Persist one endpoint's typed delivery outcome without leaking address data."""
+
+        normalized = normalize_delivery_receipt(receipt)
+        resolved_session_id = str(session_id)
+        self.get_session(resolved_session_id, owner_id=owner_id)
+        event_id = normalized["event_id"]
+        endpoint_id = normalized["endpoint_id"]
+        proof_json = _json(normalized["proof"]) if normalized["proof"] is not None else None
+        now = _utc_now()
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            event = connection.execute(
+                """
+                SELECT e.event_id
+                FROM run_events AS e
+                JOIN sessions AS s ON s.session_id = e.session_id
+                WHERE e.event_id = ? AND e.session_id = ?
+                  AND s.owner_id = ? AND s.instance_id = ?
+                """,
+                (event_id, resolved_session_id, str(owner_id), self.instance_id),
+            ).fetchone()
+            if event is None:
+                raise SessionNotFound("frontend event not found")
+            existing = connection.execute(
+                """
+                SELECT * FROM connector_delivery_receipts
+                WHERE event_id = ? AND endpoint_id = ?
+                """,
+                (event_id, endpoint_id),
+            ).fetchone()
+            if existing is not None:
+                previous_status = str(existing["status"])
+                previous_proof = existing["proof_json"]
+                if previous_status == "delivered":
+                    if normalized["status"] == "delivered" and previous_proof != proof_json:
+                        raise SessionConflict(
+                            "delivered receipt proof conflicts with the committed receipt"
+                        )
+                    result = dict(existing)
+                    result["proof"] = (
+                        _json_object(result.pop("proof_json"))
+                        if result.get("proof_json")
+                        else None
+                    )
+                    result["duplicate"] = normalized["status"] == "delivered"
+                    result["ignored_regression"] = normalized["status"] != "delivered"
+                    return result
+                if (
+                    previous_status == normalized["status"]
+                    and previous_proof == proof_json
+                ):
+                    result = dict(existing)
+                    result["proof"] = (
+                        _json_object(result.pop("proof_json"))
+                        if result.get("proof_json")
+                        else None
+                    )
+                    result["duplicate"] = True
+                    result["ignored_regression"] = False
+                    return result
+                connection.execute(
+                    """
+                    UPDATE connector_delivery_receipts
+                    SET status = ?, proof_json = ?, attempt_count = attempt_count + 1,
+                        updated_at = ?
+                    WHERE event_id = ? AND endpoint_id = ?
+                    """,
+                    (
+                        normalized["status"],
+                        proof_json,
+                        now,
+                        event_id,
+                        endpoint_id,
+                    ),
+                )
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO connector_delivery_receipts(
+                        event_id, session_id, endpoint_id, status,
+                        proof_json, attempt_count, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, 1, ?)
+                    """,
+                    (
+                        event_id,
+                        resolved_session_id,
+                        endpoint_id,
+                        normalized["status"],
+                        proof_json,
+                        now,
+                    ),
+                )
+            result = {
+                "event_id": event_id,
+                "session_id": resolved_session_id,
+                "endpoint_id": endpoint_id,
+                "status": normalized["status"],
+                "proof": normalized["proof"],
+                "attempt_count": (
+                    int(existing["attempt_count"]) + 1 if existing is not None else 1
+                ),
+                "updated_at": now,
+                "duplicate": False,
+                "ignored_regression": False,
+            }
+        return result
+
+    def claim_delivery_outbox(
+        self,
+        *,
+        session_id: str,
+        owner_id: str,
+        worker_id: str,
+        event_id: str | None = None,
+        limit: int = 20,
+        lease_seconds: int = 60,
+    ) -> list[dict[str, Any]]:
+        """Claim durable event deliveries with a fenced, expiring lease.
+
+        Expired claims become ``unknown`` instead of being replayed: the prior
+        worker may have caused an external side effect before it disappeared.
+        A connector may retry only after it has independently proved that the
+        previous attempt was not delivered.
+        """
+
+        resolved_session_id = str(session_id).strip()
+        resolved_owner_id = str(owner_id).strip()
+        resolved_worker_id = str(worker_id).strip()
+        if not resolved_worker_id or len(resolved_worker_id) > 128:
+            raise ValueError("delivery worker id is invalid")
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("delivery claim limit must be between 1 and 100")
+        if type(lease_seconds) is not int or not 1 <= lease_seconds <= 3600:
+            raise ValueError("delivery lease must be between 1 and 3600 seconds")
+        self.get_session(resolved_session_id, owner_id=resolved_owner_id)
+        now = datetime.now(timezone.utc)
+        now_text = now.isoformat()
+        expires_text = (now + timedelta(seconds=int(lease_seconds))).isoformat()
+        claimed: list[dict[str, Any]] = []
+        event_filter = " AND o.event_id=?" if event_id is not None else ""
+        query_params: list[Any] = [
+            resolved_session_id,
+            resolved_owner_id,
+            self.instance_id,
+        ]
+        if event_id is not None:
+            query_params.append(str(event_id))
+        query_params.append(int(limit))
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                UPDATE delivery_outbox
+                SET state='unknown', completed_at=?,
+                    last_error_code='lease_expired_outcome_unknown',
+                    last_claim_token=lease_token, last_claim_status='unknown',
+                    lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL
+                WHERE session_id=? AND state='claimed'
+                  AND lease_expires_at IS NOT NULL AND lease_expires_at<=?
+                """,
+                (now_text, resolved_session_id, now_text),
+            )
+            rows = connection.execute(
+                f"""
+                SELECT o.outbox_id, o.session_id, o.run_id, o.event_id,
+                       o.attempt_count, o.created_at,
+                       e.sequence, e.kind, e.status, e.phase, e.summary,
+                       e.detail_json, e.created_at AS event_created_at,
+                       r.delivery_route_json
+                FROM delivery_outbox AS o
+                JOIN run_events AS e ON e.event_id=o.event_id
+                JOIN sessions AS s ON s.session_id=o.session_id
+                LEFT JOIN runs AS r ON r.run_id=o.run_id
+                WHERE o.session_id=? AND s.owner_id=? AND s.instance_id=?
+                  AND o.state IN ('pending','retry')
+                  {event_filter}
+                ORDER BY o.created_at ASC, o.outbox_id ASC
+                LIMIT ?
+                """,
+                query_params,
+            ).fetchall()
+            for row in rows:
+                lease_token = _new_id("lease")
+                updated = connection.execute(
+                    """
+                    UPDATE delivery_outbox
+                    SET state='claimed', lease_owner=?, lease_token=?,
+                        lease_expires_at=?, attempt_count=attempt_count+1
+                    WHERE outbox_id=? AND state IN ('pending','retry')
+                    """,
+                    (
+                        resolved_worker_id,
+                        lease_token,
+                        expires_text,
+                        str(row["outbox_id"]),
+                    ),
+                )
+                if updated.rowcount != 1:
+                    continue
+                detail = _json_object(row["detail_json"])
+                route = _json_object(row["delivery_route_json"] or "{}")
+                claimed.append(
+                    {
+                        "outbox_id": str(row["outbox_id"]),
+                        "session_id": resolved_session_id,
+                        "run_id": row["run_id"],
+                        "event_id": str(row["event_id"]),
+                        "sequence": int(row["sequence"]),
+                        "kind": str(row["kind"]),
+                        "status": row["status"],
+                        "phase": row["phase"],
+                        "summary": str(row["summary"] or ""),
+                        "detail": detail,
+                        "delivery_route": route,
+                        "attempt_count": int(row["attempt_count"]) + 1,
+                        "lease_owner": resolved_worker_id,
+                        "lease_token": lease_token,
+                        "lease_expires_at": expires_text,
+                    }
+                )
+        return claimed
+
+    def claim_run_delivery_outbox(
+        self,
+        *,
+        request_id: str,
+        owner_id: str,
+        surface: str,
+        channel_key: str,
+        worker_id: str,
+        lease_seconds: int = 60,
+    ) -> dict[str, Any] | None:
+        """Claim exactly one terminal Run event for its frozen legacy route.
+
+        ``None`` means this is not a canonical Run and callers may use their
+        existing compatibility sender. Once a Run has a frozen route, every
+        other result is authoritative: a mismatched destination or a prior
+        claim must not fall back to an untracked second send.
+        """
+
+        try:
+            run = self.get_run_by_request(str(request_id), owner_id=str(owner_id))
+        except SessionNotFound:
+            return None
+        route_raw = run.get("delivery_route")
+        if not route_raw:
+            return None
+        from orchestrator.frontend_delivery import normalize_run_delivery_route
+
+        try:
+            route = normalize_run_delivery_route(route_raw)
+        except ValueError as exc:
+            raise SessionConflict("Run delivery route is invalid") from exc
+        resolved_surface = str(surface or "").strip().casefold()
+        resolved_channel = str(channel_key or "").strip()
+        destinations = [route.get("primary"), *route.get("mirrors", [])]
+        if not any(
+            isinstance(item, Mapping)
+            and item.get("surface") == resolved_surface
+            and item.get("channel_key") == resolved_channel
+            for item in destinations
+        ):
+            return {
+                "managed": True,
+                "state": "suppressed",
+                "reason": "destination_not_in_frozen_route",
+                "request_id": str(request_id),
+                "session_id": str(run["session_id"]),
+            }
+        run_state = str(run.get("state") or "")
+        if run_state not in TERMINAL_RUN_STATES:
+            return {
+                "managed": True,
+                "state": "not_ready",
+                "request_id": str(request_id),
+                "session_id": str(run["session_id"]),
+            }
+        terminal_kind = "run.completed" if run_state == "completed" else f"run.{run_state}"
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT e.event_id, o.state AS outbox_state
+                FROM run_events AS e
+                JOIN delivery_outbox AS o ON o.event_id=e.event_id
+                WHERE e.run_id=? AND e.kind=? AND e.session_id=?
+                ORDER BY e.sequence DESC LIMIT 1
+                """,
+                (str(run["run_id"]), terminal_kind, str(run["session_id"])),
+            ).fetchone()
+        if row is None:
+            return {
+                "managed": True,
+                "state": "missing_outbox",
+                "request_id": str(request_id),
+                "session_id": str(run["session_id"]),
+            }
+        event_id = str(row["event_id"])
+        from orchestrator.frontend_connector_registry import (
+            canonical_connector_id,
+            endpoint_id_for,
+        )
+        from orchestrator.frontend_contracts import normalize_delivery_intent
+
+        delivery_destinations = []
+        for raw_destination in destinations:
+            if not isinstance(raw_destination, Mapping):
+                continue
+            destination_surface = str(raw_destination.get("surface") or "")
+            destination_channel = str(raw_destination.get("channel_key") or "")
+            connector_id = canonical_connector_id(
+                destination_surface,
+                ingress_transport=destination_surface,
+                surface=destination_surface,
+            )
+            delivery_destinations.append(
+                {
+                    "connector_id": connector_id,
+                    "endpoint_id": endpoint_id_for(
+                        connector_id,
+                        ingress_transport=destination_surface,
+                        channel_key=destination_channel,
+                    ),
+                    "channel_key": destination_channel,
+                    "role": (
+                        "primary"
+                        if route.get("primary") == raw_destination
+                        else "mirror"
+                    ),
+                    "content_modes": ["text"],
+                    "retry_class": "query_before_retry",
+                }
+            )
+        digest_material = "\n".join(
+            [str(request_id), event_id]
+            + sorted(item["endpoint_id"] for item in delivery_destinations)
+        )
+        delivery_intent = normalize_delivery_intent(
+            {
+                "type": "hashi.delivery-intent",
+                "version": 2,
+                "scope": "run",
+                "event_id": event_id,
+                "session_id": str(run["session_id"]),
+                "idempotency_digest": "sha256:"
+                + hashlib.sha256(digest_material.encode("utf-8")).hexdigest(),
+                "destinations": delivery_destinations,
+            }
+        )
+        claims = self.claim_delivery_outbox(
+            session_id=str(run["session_id"]),
+            owner_id=str(owner_id),
+            worker_id=worker_id,
+            event_id=event_id,
+            limit=1,
+            lease_seconds=lease_seconds,
+        )
+        if claims:
+            return {
+                "managed": True,
+                "state": "claimed",
+                "request_id": str(request_id),
+                "session_id": str(run["session_id"]),
+                "run_id": str(run["run_id"]),
+                "delivery_intent": delivery_intent,
+                "claim": claims[0],
+            }
+        with self._lock, self._connection() as connection:
+            current = connection.execute(
+                "SELECT state FROM delivery_outbox WHERE event_id=?",
+                (event_id,),
+            ).fetchone()
+        return {
+            "managed": True,
+            "state": str(current["state"]) if current is not None else "missing_outbox",
+            "request_id": str(request_id),
+            "session_id": str(run["session_id"]),
+            "run_id": str(run["run_id"]),
+            "event_id": event_id,
+        }
+
+    def complete_delivery_outbox(
+        self,
+        *,
+        outbox_id: str,
+        lease_token: str,
+        status: str,
+        error_code: str | None = None,
+        retry_safe: bool = False,
+    ) -> dict[str, Any]:
+        """Complete a claimed dispatch, requiring proof of safety to retry."""
+
+        resolved_status = str(status or "").strip().casefold()
+        allowed_statuses = {
+            "completed",
+            "failed",
+            "unknown",
+            "suppressed",
+            "expired",
+            "retry",
+        }
+        if resolved_status not in allowed_statuses:
+            raise ValueError("delivery outbox status is invalid")
+        if resolved_status == "retry" and retry_safe is not True:
+            raise ValueError("delivery retry requires proof that retry is safe")
+        token = str(lease_token or "").strip()
+        if not token:
+            raise ValueError("delivery lease token is required")
+        safe_error_code = str(error_code or "").strip()
+        if len(safe_error_code) > 128 or any(
+            not (char.isalnum() or char in "._-") for char in safe_error_code
+        ):
+            raise ValueError("delivery error code is invalid")
+        now = _utc_now()
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM delivery_outbox WHERE outbox_id=?",
+                (str(outbox_id),),
+            ).fetchone()
+            if row is None:
+                raise SessionNotFound(str(outbox_id))
+            if (
+                str(row["state"]) != "claimed"
+                or str(row["lease_token"] or "") != token
+            ):
+                if (
+                    str(row["last_claim_token"] or "") == token
+                    and str(row["last_claim_status"] or "") == resolved_status
+                ):
+                    return {
+                        "outbox_id": str(outbox_id),
+                        "state": resolved_status,
+                        "attempt_count": int(row["attempt_count"]),
+                        "duplicate": True,
+                    }
+                raise SessionConflict("delivery outbox lease is stale")
+            terminal = resolved_status != "retry"
+            connection.execute(
+                """
+                UPDATE delivery_outbox
+                SET state=?, completed_at=?, last_error_code=?,
+                    last_claim_token=lease_token, last_claim_status=?,
+                    lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL
+                WHERE outbox_id=? AND state='claimed' AND lease_token=?
+                """,
+                (
+                    resolved_status,
+                    now if terminal else None,
+                    safe_error_code or None,
+                    resolved_status,
+                    str(outbox_id),
+                    token,
+                ),
+            )
+            return {
+                "outbox_id": str(outbox_id),
+                "state": resolved_status,
+                "attempt_count": int(row["attempt_count"]),
+                "duplicate": False,
+            }
+
+    def frontend_delivery_receipts(
+        self,
+        *,
+        session_id: str,
+        owner_id: str,
+        event_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        self.get_session(str(session_id), owner_id=owner_id)
+        query = """
+            SELECT r.*
+            FROM connector_delivery_receipts AS r
+            JOIN run_events AS e ON e.event_id = r.event_id
+            WHERE r.session_id = ?
+        """
+        parameters: list[Any] = [str(session_id)]
+        if event_id is not None:
+            query += " AND r.event_id = ?"
+            parameters.append(str(event_id))
+        query += " ORDER BY r.updated_at, r.endpoint_id"
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["proof"] = (
+                _json_object(item.pop("proof_json"))
+                if item.get("proof_json")
+                else None
+            )
             result.append(item)
         return result
 

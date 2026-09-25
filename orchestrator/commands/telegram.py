@@ -8,9 +8,6 @@ from orchestrator import ui_language, workbench_telegram_state
 from orchestrator.command_registry import RuntimeCallback, RuntimeCommand
 from orchestrator.command_ui import selected_label, setting_card, status_label
 
-TITLE = "Workbench Telegram mirror"
-
-
 def _is_authorized(runtime: Any, update: Any) -> bool:
     checker = getattr(runtime, "_is_authorized_user", None)
     user = getattr(update, "effective_user", None)
@@ -63,7 +60,7 @@ def _menu_text(runtime: Any, update: Any, *, notice: str | None = None) -> str:
         facts.insert(0, f"✅ {notice}")
     return setting_card(
         "📡",
-        TITLE,
+        ui_language.tr("menu.telegram.title"),
         current=f"<b>{status_label(enabled)}</b>",
         facts=facts,
         consequence=(
@@ -185,7 +182,7 @@ async def telegram_callback(runtime: Any, update: Any, context: Any) -> None:
 COMMANDS = [
     RuntimeCommand(
         name="telegram",
-        description="Toggle Workbench Telegram mirror [on|off]",
+        description="Toggle Telegram mirror for other connectors [on|off]",
         callback=telegram_command,
     ),
 ]

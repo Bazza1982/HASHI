@@ -109,6 +109,12 @@ wins conflicting flags. Do not duplicate automatic delivery. Recall terminalizes
 eligible READY direct Runs. Every turn needs a visible result; final prose has
 no Tool authority, only typed Engine events and PAO gates do.
 
+Frontend command menus use a typed, privacy-bounded invocation identity.
+Workbench menu dispatch reserves its Session/client/request before running a
+handler and stores completion with a canonical Session event. Pending/unknown
+results must never be replayed; after Worker-local state loss, replay the saved
+result without stale buttons and require refresh.
+
 ## Engines, tools, and recovery
 
 Engine and Model Provider differ. HER v2 modes are Direct (`zero`), Strategic
@@ -171,7 +177,19 @@ only after success; saved state starts nothing.
 sources stay unchanged. `/think` controls genuine provider reasoning;
 `/commentary` controls explicit Engine commentary. Attachments bind to one
 draft, instance, Agent, and submission. Remote sends managed bytes, never
-origin paths; speech stays local; late or cancelled media is discarded.
+origin paths. When the TUI Session capability is present, local and Remote
+single-file messages stage, upload, commit, then bind one Run; uncertain writes
+never replay on another route. Target-relative Workzone references are resolved
+by the selected Agent's enabled Workzone and committed into the same Session.
+Speech stays local; late or cancelled media is discarded.
+
+The external Frontend Connector adapter routes ordinary text, committed files,
+Canvas handoffs, approval notices, and voice audio through Session Runs. Voice
+uses `semantic_role=voice_message`; the durable Safe Voice transcript event is
+read by Run ID and confirm/discard use the typed Session decision endpoint.
+Keep the explicit user confirmation: never downgrade voice to ordinary text or
+auto-confirm it. Attachment stage retries require the advertised idempotency
+capability; a missing capability fails closed before writing bytes.
 
 HER v2 carries authorised attachment manifests through Planning, Execution,
 Replanning, Review, and Finalisation. Native providers get native content;
@@ -196,6 +214,15 @@ per owner; the TUI preference remains a separate per-Run choice.
 Workbench voice is transcript-first; Safe Voice on requires **Confirm and send**
 and discard/expiry/Session change/disable sends nothing. Optional STT stays in
 an isolated UTF-8 sidecar.
+
+Native Telegram slash commands and callbacks use the shared durable frontend
+command reservation helper. A stable Telegram Update/Callback identity is
+bound to the endpoint and request digest before the handler runs; completed
+replays do not execute again, conflicts are rejected, and pending/unknown
+outcomes are never retried automatically. The result event records
+transport_delivery_state=not_observed, not a claim that Telegram delivered a
+reply. Workbench-origin callbacks keep their own connector fence and are not
+double-reserved as Telegram.
 
 ## Move, Clone, jobs, and HCC
 

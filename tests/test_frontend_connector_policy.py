@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from orchestrator.frontend_delivery import (
+    delivery_intent_from_run_route,
     freeze_run_delivery_route,
     normalize_tui_run_delivery_policy,
     project_run_delivery_route,
@@ -16,7 +17,7 @@ from orchestrator.frontend_delivery import (
 from orchestrator.frontend_status import runtime_presentation_status
 
 
-def test_tui_delivery_policy_is_typed_client_bound_and_fail_visible():
+def test_frontend_delivery_policy_is_connector_neutral_client_bound_and_fail_visible():
     policy = tui_run_delivery_policy(
         telegram_mirror=False,
         client_id="tui-window-a",
@@ -30,6 +31,12 @@ def test_tui_delivery_policy_is_typed_client_bound_and_fail_visible():
         policy,
         client_id="tui-window-a",
     ) == policy
+    assert policy["type"] == "hashi.frontend-delivery-policy"
+    assert policy["version"] == 2
+    assert policy["connector_id"] == "tui"
+    assert policy["targets"] == [
+        {"connector_id": "telegram", "role": "mirror", "enabled": False}
+    ]
     assert telegram_delivery_for_admission(
         source="tui",
         request_metadata=metadata,
@@ -64,13 +71,13 @@ def test_tui_delivery_policy_is_typed_client_bound_and_fail_visible():
 @pytest.mark.parametrize(
     "mutation",
     [
-        lambda value: value.update(version=2),
+        lambda value: value.update(version=1),
         lambda value: value.update(scope="session"),
-        lambda value: value.update(frontend="browser"),
-        lambda value: value.update(telegram={"mirror": "off"}),
+        lambda value: value.update(connector_id="browser"),
+        lambda value: value.update(targets=[{"connector_id": "telegram", "role": "mirror", "enabled": "off"}]),
     ],
 )
-def test_invalid_tui_delivery_policy_is_rejected(mutation):
+def test_invalid_frontend_delivery_policy_is_rejected(mutation):
     policy = tui_run_delivery_policy(
         telegram_mirror=False,
         client_id="tui-window-a",
@@ -78,6 +85,22 @@ def test_invalid_tui_delivery_policy_is_rejected(mutation):
     mutation(policy)
     with pytest.raises(ValueError):
         normalize_tui_run_delivery_policy(policy, client_id="tui-window-a")
+
+
+def test_legacy_tui_delivery_policy_is_normalized_to_generic_contract():
+    legacy = {
+        "type": "hashi.frontend-delivery",
+        "version": 1,
+        "scope": "run",
+        "frontend": "tui",
+        "client_id": "tui-window-a",
+        "telegram": {"mirror": False},
+    }
+    normalized = normalize_tui_run_delivery_policy(
+        legacy, client_id="tui-window-a"
+    )
+    assert normalized["type"] == "hashi.frontend-delivery-policy"
+    assert normalized["targets"][0]["enabled"] is False
 
 
 @pytest.mark.parametrize(
@@ -135,6 +158,28 @@ def test_terminal_hchat_reply_routes_to_user_without_acknowledgement_loop():
         "telegram_mirror": False,
     }
     assert route_destination(route, "hchat") is None
+
+
+def test_legacy_run_route_projects_to_endpoint_level_delivery_intent():
+    route = freeze_run_delivery_route(
+        message_source_id="api",
+        session_surface="workbench",
+        session_channel_key="workbench:primary",
+        chat_id=123,
+        telegram_requested=True,
+    )
+    intent = delivery_intent_from_run_route(
+        route,
+        event_id="evt-1",
+        session_id="ses_1",
+        idempotency_key="meter:req-1",
+        content_modes=["text", "media"],
+    )
+    assert intent["version"] == 2
+    assert [
+        (item["connector_id"], item["role"])
+        for item in intent["destinations"]
+    ] == [("backend_api", "primary"), ("telegram", "mirror")]
 
 
 def test_internal_run_without_a_connector_target_is_explicitly_nonautomatic():

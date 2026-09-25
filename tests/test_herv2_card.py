@@ -428,7 +428,12 @@ async def test_runtime_send_herv2_card_delivery():
 
     runtime = MagicMock(spec=FlexibleAgentRuntime)
     runtime.logger = logging.getLogger("test.herv2")
-    runtime.send_long_message = AsyncMock()
+    delivery_order = []
+    async def send_long_message(**kwargs):
+        delivery_order.append("telegram")
+        return 0.0, 1
+
+    runtime.send_long_message = AsyncMock(side_effect=send_long_message)
     runtime._should_buffer_during_transfer = MagicMock(return_value=False)
 
     # Simulate _send_herv2_card unbound method call
@@ -467,10 +472,18 @@ async def test_runtime_send_herv2_card_delivery():
             await FlexibleAgentRuntime._send_herv2_card(runtime, item, response=response)
             runtime.send_long_message.assert_not_called()
 
-    # 2. When herv2_at_start is True, card is delivered to Telegram and recorded to session
+    # 2. The canonical Session event is committed before any Telegram projection.
     with patch("orchestrator.runtime_pipeline.request_meta_for", return_value={"herv2_at_start": True, "ui_locale_at_start": "zh-CN"}):
         with patch.object(FlexibleAgentRuntime, "_should_buffer_during_transfer", return_value=False):
             with patch("orchestrator.runtime_session.record_frontend_message") as mock_record:
+                def record_event(*_args, **kwargs):
+                    delivery_order.append("session-event")
+                    return {
+                        "delivery_event_id": "evt-herv2-1",
+                        "session_id": kwargs["explicit_session_id"],
+                    }
+
+                mock_record.side_effect = record_event
                 await FlexibleAgentRuntime._send_herv2_card(runtime, item, response=response)
                 runtime.send_long_message.assert_called_once()
                 call_args = runtime.send_long_message.call_args[1]
@@ -478,9 +491,21 @@ async def test_runtime_send_herv2_card_delivery():
                 assert call_args["purpose"] == "herv2-card"
                 assert call_args["parse_mode"] == "HTML"
                 assert "<b>HER v2 路由与策略卡</b>" in call_args["text"]
+                assert call_args["frontend_event_id"] == "evt-herv2-1"
 
                 mock_record.assert_called_once()
                 rec_kwargs = mock_record.call_args[1]
                 assert rec_kwargs["presentation_channel"] == "herv2"
                 assert rec_kwargs["role"] == "assistant"
                 assert "HER v2 路由与策略卡" in rec_kwargs["text"]
+                assert delivery_order == ["session-event", "telegram"]
+
+    # 3. Disabling Telegram does not suppress the canonical card for other clients.
+    runtime.send_long_message.reset_mock()
+    item.deliver_to_telegram = False
+    with patch("orchestrator.runtime_pipeline.request_meta_for", return_value={"herv2_at_start": True, "ui_locale_at_start": "zh-CN"}):
+        with patch.object(FlexibleAgentRuntime, "_should_buffer_during_transfer", return_value=False):
+            with patch("orchestrator.runtime_session.record_frontend_message", return_value={"delivery_event_id": "evt-herv2-2", "session_id": "sess-1"}) as mock_record:
+                await FlexibleAgentRuntime._send_herv2_card(runtime, item, response=response)
+                mock_record.assert_called_once()
+                runtime.send_long_message.assert_not_called()

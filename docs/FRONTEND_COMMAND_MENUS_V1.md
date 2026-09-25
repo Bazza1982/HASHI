@@ -118,11 +118,13 @@ Transport compatibility does not prove that every existing command has been
 qualified on this surface. Start with the supplied real `/notify` integration
 test and a read-only navigation canary.
 
-`/telegram` is also qualified as a settings card for the Workbench command
-projection. Its registered handler and callback reuse the existing
-server-authoritative per-owner mirror state and the standard localized card
-contract; the compatible `api_chat` text route keeps the same state owner.
-This does not change the TUI's separate per-Run Telegram mirror preference.
+`/telegram` is a compatibility command for the owner-scoped Telegram mirror
+preference, not a Workbench-specific setting. Its handler and callback reuse
+the server-authoritative connector-delivery preference and localized card
+contract. The `api_chat` text route remains a compatibility entry point.
+Telegram-origin replies continue to their originating endpoint; the preference
+controls whether other frontend connectors add Telegram as a mirror. TUI
+per-Run delivery targets remain explicit, client-bound overrides.
 
 ## Source, qualification and live adoption
 
@@ -194,3 +196,29 @@ and Connector selection passed 140 tests and 11 subtests.
 Approval, implementation and adoption remain separate: the current user request
 authorized diagnosis and source correction, not a HASHI3 `/reboot` or
 `/restart`. No live process was changed during this correction.
+
+### HASHI1 durable cross-frontend command results (2026-09-25)
+
+Workbench command-menu operations now opt into the same typed command
+invocation envelope used by the Session command endpoint. The Worker reserves
+the `(Session, client, request)` identity before the handler runs and atomically
+stores its result with a `frontend.command_result` Session event. A pending or
+unknown reservation is not executed again. A completed retry returns the saved
+result and event identity, but drops volatile button state and requests a menu
+refresh because Worker-local callback state may have been lost. Telegram menu
+callbacks and TUI command paths remain covered by the shared dispatcher and
+their connector-specific admission fences.
+
+Focused HASHI1 offline regression passed 178 tests and four subtests across
+command contracts, Workbench worker transport, Telegram menu callbacks, Session
+storage/API, TUI client, and Remote TUI proxy. This verifies source behavior,
+not live Worker adoption; no instance was restarted.
+
+The same durable reservation/complete primitive now fences native Telegram
+slash commands and callbacks. Each is bound to its stable transport identity,
+connector endpoint, Session generation and request digest before the handler
+runs. Completed redelivery is ignored; conflicting reuse and pending/unknown
+outcomes never re-execute. The Session result event explicitly reports that
+Telegram transport delivery was not observed, so it is not a delivery receipt.
+Workbench callbacks retain their Workbench fence and do not pass through this
+Telegram-native wrapper.

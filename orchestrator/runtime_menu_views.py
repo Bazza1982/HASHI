@@ -1275,7 +1275,7 @@ def safevoice_keyboard(*, enabled: bool) -> InlineKeyboardMarkup:
 def telegram_menu_text(*, enabled: bool) -> str:
     return setting_card(
         "📡",
-        "Workbench Telegram mirror",
+        _tr("menu.telegram.title"),
         current=f"<b>{status_label(enabled)}</b>",
         facts=[_fact("common.scope", html.escape(_tr("menu.telegram.scope")))],
         consequence=(

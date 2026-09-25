@@ -1,14 +1,22 @@
 """Async client for direct or Hashi-Remote-proxied Workbench access."""
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 import json
 import logging
 from urllib.parse import quote
+from uuid import uuid4
 
 import aiohttp
 
-from orchestrator.frontend_delivery import tui_run_delivery_policy
+from orchestrator.frontend_delivery import (
+    TUI_MUTATING_PROXY_OPERATIONS,
+    tui_run_delivery_policy,
+)
 from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_LOCALHOST_URL
+from orchestrator.slash_command_audit import parse_slash_command_text
 
 logger = logging.getLogger(__name__)
 
@@ -87,8 +95,29 @@ class TuiApiClient:
         *,
         json_body: dict | None = None,
         timeout: float = 10,
+        pinned_base: str | None = None,
     ) -> dict:
-        ordered_bases = [self.base, *(base for base in self._bases if base != self.base)]
+        if pinned_base is not None and pinned_base not in self._bases:
+            return {"ok": False, "code": "invalid_route", "error": "Unknown local HASHI route"}
+        mutating = method.upper() not in {"GET", "HEAD", "OPTIONS"}
+        if mutating and pinned_base is None and self.expected_instance_id:
+            health = await self._direct_request("GET", "/api/health", timeout=min(timeout, 5))
+            if not health.get("ok"):
+                return health
+            actual_instance = str(health.get("instance_id") or "").strip().upper()
+            if actual_instance != self.expected_instance_id:
+                return {
+                    "ok": False,
+                    "error": "instance_identity_mismatch",
+                    "expected_instance_id": self.expected_instance_id,
+                    "actual_instance_id": actual_instance,
+                }
+        ordered_bases = (
+            [pinned_base]
+            if pinned_base is not None
+            else [self.base] if mutating
+            else [self.base, *(base for base in self._bases if base != self.base)]
+        )
         first_error: Exception | None = None
         timed_out = False
         first_error_base = ordered_bases[0]
@@ -106,6 +135,20 @@ class TuiApiClient:
                     self.base = base
                 return data
             except (aiohttp.ClientError, TimeoutError) as exc:
+                if mutating and not isinstance(
+                    exc, aiohttp.ClientConnectorError
+                ):
+                    logger.warning(
+                        "TUI submission outcome unknown; not replaying on fallback: path=%s error=%s",
+                        path,
+                        type(exc).__name__,
+                    )
+                    return {
+                        "ok": False,
+                        "code": "request_outcome_unknown",
+                        "accepted": None,
+                        "error": "Submission outcome is unknown; check the conversation before retrying",
+                    }
                 timed_out = timed_out or isinstance(exc, TimeoutError)
                 if first_error is None:
                     first_error = exc
@@ -124,6 +167,48 @@ class TuiApiClient:
             f"{first_error or 'Workbench unavailable'}",
         }
 
+    async def _direct_binary_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        payload: bytes,
+        timeout: float = 10,
+        pinned_base: str,
+    ) -> dict:
+        """Upload immutable bytes only to the already verified Session host."""
+
+        if pinned_base not in self._bases:
+            return {"ok": False, "code": "invalid_route", "error": "Unknown local HASHI route"}
+        try:
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=timeout)
+            ) as session:
+                async with session.request(
+                    method,
+                    f"{pinned_base}{path}",
+                    data=payload,
+                    headers={"Content-Type": "application/octet-stream"},
+                ) as response:
+                    data = await self._read_json_response(response)
+            if response.status >= 400:
+                data.setdefault("ok", False)
+                data.setdefault("status", response.status)
+            return data
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            if isinstance(exc, aiohttp.ClientConnectorError):
+                return {
+                    "ok": False,
+                    "code": "connection_unavailable",
+                    "error": "Cannot connect to the verified HASHI Session host",
+                }
+            return {
+                "ok": False,
+                "code": "request_outcome_unknown",
+                "accepted": None,
+                "error": "Attachment upload outcome is unknown; check the conversation before retrying",
+            }
+
     async def _proxy_request(
         self,
         operation: str,
@@ -131,11 +216,15 @@ class TuiApiClient:
         agent: str | None = None,
         text: str | None = None,
         client_id: str | None = None,
+        idempotency_key: str | None = None,
         ui_locale: str | None = None,
         delivery_policy: dict | None = None,
         session_id: str | None = None,
         run_id: str | None = None,
         request_id: str | None = None,
+        command: str | None = None,
+        arguments: list[str] | None = None,
+        context_generation: int | None = None,
         voice_profile: str | None = None,
         attachment: dict | None = None,
         workzone_ref: str | None = None,
@@ -158,6 +247,8 @@ class TuiApiClient:
             payload["text"] = text
         if client_id is not None:
             payload["client_id"] = client_id
+        if idempotency_key is not None:
+            payload["idempotency_key"] = idempotency_key
         if ui_locale is not None:
             payload["ui_locale"] = ui_locale
         if delivery_policy is not None:
@@ -168,6 +259,12 @@ class TuiApiClient:
             payload["run_id"] = run_id
         if request_id is not None:
             payload["request_id"] = request_id
+        if command is not None:
+            payload["command"] = command
+        if arguments is not None:
+            payload["arguments"] = list(arguments)
+        if context_generation is not None:
+            payload["context_generation"] = int(context_generation)
         if voice_profile is not None:
             payload["voice_profile"] = voice_profile
         if attachment is not None:
@@ -206,6 +303,15 @@ class TuiApiClient:
                 operation,
                 exc,
             )
+            if operation in TUI_MUTATING_PROXY_OPERATIONS and not isinstance(
+                exc, aiohttp.ClientConnectorError
+            ):
+                return {
+                    "ok": False,
+                    "code": "request_outcome_unknown",
+                    "accepted": None,
+                    "error": "Submission outcome is unknown; check the conversation before retrying",
+                }
             return {
                 "ok": False,
                 "code": (
@@ -320,6 +426,164 @@ class TuiApiClient:
             if client_id
             else None
         )
+        if client_id:
+            capabilities = await self.capabilities_info()
+            versions = capabilities.get("frontend_contract_versions")
+            tui_ingress = capabilities.get("tui_session_ingress")
+            is_slash_command = text.strip().startswith("/")
+            command_name, command_arguments = parse_slash_command_text(text)
+            supports_canonical_ingress = (
+                capabilities.get("ok")
+                and capabilities.get("session_api_version")
+                and isinstance(versions, dict)
+                and versions.get("ingress") == 2
+                and isinstance(tui_ingress, dict)
+                and tui_ingress.get("version") == 1
+                and tui_ingress.get("primary_session") is True
+                and tui_ingress.get("text_runs") is True
+                and (
+                    not is_slash_command
+                    or (
+                        tui_ingress.get("command_invocations") is True
+                        and bool(command_name)
+                        and command_name != "telegram"
+                    )
+                )
+            )
+            if supports_canonical_ingress:
+                encoded_agent = quote(str(agent), safe="")
+                primary = (
+                    await self._proxy_request(
+                        "primary_session", agent=agent, timeout=10
+                    )
+                    if self.proxied
+                    else await self._direct_request(
+                        "GET",
+                        f"/api/v1/agents/{encoded_agent}/primary-session",
+                        timeout=10,
+                    )
+                )
+                if not primary.get("ok"):
+                    if not (
+                        self.proxied
+                        and primary.get("error") == "operation_not_allowed"
+                    ):
+                        return primary
+                else:
+                    session = primary.get("session")
+                    if not isinstance(session, dict):
+                        session = {}
+                    actual_instance = str(
+                        session.get("instance_id") or ""
+                    ).strip().upper()
+                    if (
+                        self.expected_instance_id
+                        and actual_instance != self.expected_instance_id
+                    ):
+                        return {
+                            "ok": False,
+                            "error": "instance_identity_mismatch",
+                            "expected_instance_id": self.expected_instance_id,
+                            "actual_instance_id": actual_instance,
+                        }
+                    session_id = str(session.get("session_id") or "").strip()
+                    if not session_id:
+                        return {
+                            "ok": False,
+                            "code": "invalid_primary_session",
+                            "error": "Server returned no primary Session",
+                        }
+                    context_generation = session.get("context_generation")
+                    if is_slash_command and (
+                        not isinstance(context_generation, int)
+                        or isinstance(context_generation, bool)
+                        or context_generation < 1
+                    ):
+                        return {
+                            "ok": False,
+                            "code": "invalid_primary_session",
+                            "error": "Server returned no valid Session context generation",
+                        }
+                    bound_base = self.base
+                    idempotency_key = f"tui-{uuid4().hex}"
+                    if is_slash_command:
+                        command_request_id = uuid4().hex
+                        if self.proxied:
+                            command_result = await self._proxy_request(
+                                "session_command_invocation",
+                                agent=agent,
+                                client_id=client_id,
+                                request_id=command_request_id,
+                                command=command_name,
+                                arguments=command_arguments,
+                                context_generation=context_generation,
+                                ui_locale=ui_locale,
+                                session_id=session_id,
+                                timeout=45,
+                            )
+                            if (
+                                command_result.get("error") == "operation_not_allowed"
+                                and command_result.get("canonical_operation_attempted")
+                                is not True
+                            ):
+                                return await self._proxy_request(
+                                    "chat",
+                                    agent=agent,
+                                    text=text,
+                                    client_id=client_id,
+                                    ui_locale=ui_locale,
+                                    delivery_policy=policy,
+                                )
+                        else:
+                            command_result = await self._direct_request(
+                                "POST",
+                                f"/api/v1/sessions/{quote(session_id, safe='')}/commands",
+                                json_body={
+                                    "command": command_name,
+                                    "arguments": command_arguments,
+                                    "client_id": client_id,
+                                    "request_id": command_request_id,
+                                    "ui_locale": ui_locale,
+                                    "context_generation": context_generation,
+                                },
+                                timeout=45,
+                                pinned_base=bound_base,
+                            )
+                        if not command_result.get("command_not_found"):
+                            if command_result.get("command_compatibility_required"):
+                                pass
+                            else:
+                                return command_result
+                    if self.proxied:
+                        return await self._proxy_request(
+                            "session_run",
+                            agent=agent,
+                            text=text,
+                            client_id=client_id,
+                            ui_locale=ui_locale,
+                            delivery_policy=policy,
+                            session_id=session_id,
+                            idempotency_key=idempotency_key,
+                            timeout=25,
+                        )
+                    return await self._direct_request(
+                        "POST",
+                        f"/api/v1/sessions/{quote(session_id, safe='')}/runs",
+                        json_body={
+                            "idempotency_key": idempotency_key,
+                            "surface": "tui",
+                            "client_id": client_id,
+                            "ui_locale": ui_locale,
+                            "delivery_policy": policy,
+                            "message": {
+                                "content": [{"type": "text", "text": text}]
+                            },
+                        },
+                        timeout=25,
+                        pinned_base=bound_base,
+                    )
+            if not capabilities.get("ok") and capabilities.get("status") != 404:
+                return capabilities
         if self.proxied:
             return await self._proxy_request(
                 "chat",
@@ -364,6 +628,281 @@ class TuiApiClient:
             telegram_mirror=telegram_mirror,
             client_id=str(client_id or "tui-client"),
         )
+        if attachment is not None:
+            capabilities = await self.capabilities_info()
+            versions = capabilities.get("frontend_contract_versions")
+            tui_ingress = capabilities.get("tui_session_ingress")
+            canonical_attachment_ready = (
+                capabilities.get("ok")
+                and capabilities.get("session_api_version")
+                and isinstance(versions, dict)
+                and versions.get("ingress") == 2
+                and isinstance(tui_ingress, dict)
+                and tui_ingress.get("version") == 1
+                and tui_ingress.get("primary_session") is True
+                and tui_ingress.get("attachment_runs") is True
+            )
+            if canonical_attachment_ready:
+                filename = str(attachment.get("filename") or "")
+                media_type = str(attachment.get("media_type") or "")
+                encoded = str(attachment.get("content_b64") or "")
+                if (
+                    not filename
+                    or filename in {".", ".."}
+                    or len(filename) > 255
+                    or any(character in filename for character in ("/", "\\"))
+                    or any(ord(character) < 32 for character in filename)
+                    or len(encoded) > ((25 * 1024 * 1024 + 2) // 3) * 4 + 16
+                ):
+                    return {"ok": False, "code": "invalid_attachment", "error": "Invalid attachment"}
+                try:
+                    content = base64.b64decode(encoded, validate=True)
+                    declared_size = int(attachment.get("size_bytes"))
+                except (ValueError, TypeError, OverflowError, binascii.Error):
+                    return {"ok": False, "code": "invalid_attachment", "error": "Invalid attachment"}
+                if (
+                    not content
+                    or len(content) > 25 * 1024 * 1024
+                    or len(content) != declared_size
+                    or hashlib.sha256(content).hexdigest()
+                    != str(attachment.get("sha256") or "").lower()
+                ):
+                    return {"ok": False, "code": "invalid_attachment", "error": "Attachment content changed"}
+                frozen_attachment = {
+                    "filename": filename,
+                    "media_type": media_type,
+                    "size_bytes": len(content),
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                    "content_b64": encoded,
+                }
+                encoded_agent = quote(str(agent), safe="")
+                primary = (
+                    await self._proxy_request(
+                        "primary_session", agent=agent, timeout=10
+                    )
+                    if self.proxied
+                    else await self._direct_request(
+                        "GET", f"/api/v1/agents/{encoded_agent}/primary-session",
+                        timeout=10,
+                    )
+                )
+                if not primary.get("ok"):
+                    if not (
+                        self.proxied
+                        and primary.get("error") == "operation_not_allowed"
+                    ):
+                        return primary
+                else:
+                    session = primary.get("session")
+                    if not isinstance(session, dict):
+                        session = {}
+                    actual_instance = str(session.get("instance_id") or "").strip().upper()
+                    if self.expected_instance_id and actual_instance != self.expected_instance_id:
+                        return {
+                            "ok": False,
+                            "error": "instance_identity_mismatch",
+                            "expected_instance_id": self.expected_instance_id,
+                            "actual_instance_id": actual_instance,
+                        }
+                    session_id = str(session.get("session_id") or "").strip()
+                    if not session_id:
+                        return {
+                            "ok": False,
+                            "code": "invalid_primary_session",
+                            "error": "Server returned no primary Session",
+                        }
+                    if self.proxied:
+                        result = await self._proxy_request(
+                            "session_attachment_run",
+                            agent=agent,
+                            text=text,
+                            client_id=str(client_id or "tui-client"),
+                            ui_locale=ui_locale,
+                            delivery_policy=policy,
+                            session_id=session_id,
+                            idempotency_key=f"tui-{uuid4().hex}",
+                            attachment=frozen_attachment,
+                            timeout=120,
+                        )
+                        if (
+                            result.get("error") != "operation_not_allowed"
+                            or result.get("canonical_operation_attempted")
+                        ):
+                            return result
+                    else:
+                        bound_base = self.base
+                        session_path = f"/api/v1/sessions/{quote(session_id, safe='')}"
+                        staged = await self._direct_request(
+                            "POST", f"{session_path}/attachments",
+                            json_body={
+                                "filename": filename,
+                                "media_type": media_type,
+                                "size_bytes": len(content),
+                                "sha256": hashlib.sha256(content).hexdigest(),
+                            },
+                            timeout=25,
+                            pinned_base=bound_base,
+                        )
+                        if not staged.get("ok"):
+                            return staged
+                        staged_attachment = staged.get("attachment")
+                        attachment_id = str(
+                            staged_attachment.get("attachment_id") or ""
+                            if isinstance(staged_attachment, dict) else ""
+                        )
+                        if not attachment_id:
+                            return {"ok": False, "code": "invalid_attachment_stage", "error": "Server returned no attachment ID"}
+                        attachment_path = f"{session_path}/attachments/{quote(attachment_id, safe='')}"
+                        uploaded = await self._direct_binary_request(
+                            "PUT", f"{attachment_path}/content",
+                            payload=content, timeout=35, pinned_base=bound_base,
+                        )
+                        if not uploaded.get("ok"):
+                            return uploaded
+                        committed = await self._direct_request(
+                            "POST", f"{attachment_path}/commit",
+                            json_body={}, timeout=15, pinned_base=bound_base,
+                        )
+                        if not committed.get("ok"):
+                            return committed
+                        message_content = []
+                        if str(text).strip():
+                            message_content.append({"type": "text", "text": str(text)})
+                        message_content.append(
+                            {"type": "attachment", "attachment_id": attachment_id}
+                        )
+                        return await self._direct_request(
+                            "POST", f"{session_path}/runs",
+                            json_body={
+                                "idempotency_key": f"tui-{uuid4().hex}",
+                                "surface": "tui",
+                                "client_id": str(client_id or "tui-client"),
+                                "ui_locale": ui_locale,
+                                "delivery_policy": policy,
+                                "message": {"content": message_content},
+                            },
+                            timeout=25,
+                            pinned_base=bound_base,
+                        )
+            if not capabilities.get("ok") and capabilities.get("status") != 404:
+                return capabilities
+        if workzone_ref is not None:
+            reference = str(workzone_ref)
+            if (
+                not reference
+                or len(reference.encode("utf-8")) > 4096
+                or reference.startswith(("/", "\\"))
+                or "\\" in reference
+                or ":" in reference
+                or any(part in {"", ".", ".."} for part in reference.split("/"))
+            ):
+                return {"ok": False, "code": "invalid_workzone_ref", "error": "Invalid Workzone reference"}
+            capabilities = await self.capabilities_info()
+            versions = capabilities.get("frontend_contract_versions")
+            tui_ingress = capabilities.get("tui_session_ingress")
+            workzone_ready = (
+                capabilities.get("ok")
+                and capabilities.get("session_api_version")
+                and isinstance(versions, dict)
+                and versions.get("ingress") == 2
+                and isinstance(tui_ingress, dict)
+                and tui_ingress.get("version") == 1
+                and tui_ingress.get("primary_session") is True
+                and tui_ingress.get("workzone_attachment_runs") is True
+            )
+            if workzone_ready:
+                encoded_agent = quote(str(agent), safe="")
+                primary = (
+                    await self._proxy_request(
+                        "primary_session", agent=agent, timeout=10
+                    )
+                    if self.proxied
+                    else await self._direct_request(
+                        "GET", f"/api/v1/agents/{encoded_agent}/primary-session",
+                        timeout=10,
+                    )
+                )
+                if not primary.get("ok"):
+                    if not (
+                        self.proxied
+                        and primary.get("error") == "operation_not_allowed"
+                    ):
+                        return primary
+                else:
+                    session = primary.get("session")
+                    if not isinstance(session, dict):
+                        session = {}
+                    actual_instance = str(session.get("instance_id") or "").strip().upper()
+                    if self.expected_instance_id and actual_instance != self.expected_instance_id:
+                        return {
+                            "ok": False,
+                            "error": "instance_identity_mismatch",
+                            "expected_instance_id": self.expected_instance_id,
+                            "actual_instance_id": actual_instance,
+                        }
+                    session_id = str(session.get("session_id") or "").strip()
+                    if not session_id:
+                        return {
+                            "ok": False,
+                            "code": "invalid_primary_session",
+                            "error": "Server returned no primary Session",
+                        }
+                    if self.proxied:
+                        result = await self._proxy_request(
+                            "session_workzone_attachment_run",
+                            agent=agent,
+                            text=text,
+                            client_id=str(client_id or "tui-client"),
+                            ui_locale=ui_locale,
+                            delivery_policy=policy,
+                            session_id=session_id,
+                            idempotency_key=f"tui-{uuid4().hex}",
+                            workzone_ref=reference,
+                            timeout=90,
+                        )
+                        if (
+                            result.get("error") != "operation_not_allowed"
+                            or result.get("canonical_operation_attempted")
+                        ):
+                            return result
+                    else:
+                        bound_base = self.base
+                        session_path = f"/api/v1/sessions/{quote(session_id, safe='')}"
+                        staged = await self._direct_request(
+                            "POST", f"{session_path}/attachments/from-workzone",
+                            json_body={"reference": reference}, timeout=35,
+                            pinned_base=bound_base,
+                        )
+                        if not staged.get("ok"):
+                            return staged
+                        staged_attachment = staged.get("attachment")
+                        attachment_id = str(
+                            staged_attachment.get("attachment_id") or ""
+                            if isinstance(staged_attachment, dict) else ""
+                        )
+                        if not attachment_id or staged_attachment.get("state") != "committed":
+                            return {"ok": False, "code": "invalid_attachment_stage", "error": "Workzone asset was not committed"}
+                        message_content = []
+                        if str(text).strip():
+                            message_content.append({"type": "text", "text": str(text)})
+                        message_content.append(
+                            {"type": "attachment", "attachment_id": attachment_id}
+                        )
+                        return await self._direct_request(
+                            "POST", f"{session_path}/runs",
+                            json_body={
+                                "idempotency_key": f"tui-{uuid4().hex}",
+                                "surface": "tui",
+                                "client_id": str(client_id or "tui-client"),
+                                "ui_locale": ui_locale,
+                                "delivery_policy": policy,
+                                "message": {"content": message_content},
+                            },
+                            timeout=25,
+                            pinned_base=bound_base,
+                        )
+            if not capabilities.get("ok") and capabilities.get("status") != 404:
+                return capabilities
         if self.proxied:
             return await self._proxy_request(
                 "chat_attachment",

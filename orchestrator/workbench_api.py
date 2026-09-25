@@ -102,7 +102,10 @@ from orchestrator.flexible_backend_registry import (
     is_selectable_backend,
 )
 from orchestrator.frontend_delivery import (
+    FRONTEND_CLIENT_METADATA_KEY,
+    FRONTEND_DELIVERY_METADATA_KEY,
     RUN_DELIVERY_ROUTE_METADATA_KEY,
+    normalize_frontend_run_delivery_policy,
     normalize_tui_run_delivery_policy,
     tui_request_metadata,
 )
@@ -551,6 +554,10 @@ class WorkbenchApiServer:
             self.handle_admin_agent_deletion_status,
         )
         self.app.router.add_get("/api/v1/capabilities", self.handle_v1_capabilities)
+        self.app.router.add_get(
+            "/api/v2/frontend/capabilities",
+            self.handle_v2_frontend_capabilities,
+        )
         self.app.router.add_get("/api/v1/agents", self.handle_v1_agents)
 
         def session_handler(handler):
@@ -563,6 +570,11 @@ class WorkbenchApiServer:
         for method, path, handler in (
             ("POST", "/api/v1/sessions", self.handle_v1_sessions_create),
             ("GET", "/api/v1/sessions", self.handle_v1_sessions_list),
+            (
+                "GET",
+                "/api/v1/agents/{agent_id}/primary-session",
+                self.handle_v1_agent_primary_session,
+            ),
             ("GET", "/api/v1/sessions/{session_id}", self.handle_v1_session_get),
             ("PATCH", "/api/v1/sessions/{session_id}", self.handle_v1_session_patch),
             ("DELETE", "/api/v1/sessions/{session_id}", self.handle_v1_session_delete),
@@ -575,6 +587,11 @@ class WorkbenchApiServer:
                 "GET",
                 "/api/v1/sessions/{session_id}/messages",
                 self.handle_v1_session_messages,
+            ),
+            (
+                "POST",
+                "/api/v1/sessions/{session_id}/commands",
+                self.handle_v1_session_command_invocation,
             ),
             (
                 "POST",
@@ -615,6 +632,11 @@ class WorkbenchApiServer:
                 "POST",
                 "/api/v1/sessions/{session_id}/attachments",
                 self.handle_v1_attachment_stage,
+            ),
+            (
+                "POST",
+                "/api/v1/sessions/{session_id}/attachments/from-workzone",
+                self.handle_v1_workzone_attachment_stage,
             ),
             (
                 "POST",
@@ -5152,6 +5174,28 @@ class WorkbenchApiServer:
             },
         }
         if self._persistent_session_v1_ready():
+            from orchestrator.frontend_connector_registry import (
+                connector_registry_snapshot,
+            )
+            from orchestrator.frontend_contracts import (
+                COMMAND_INVOCATION_VERSION,
+                DELIVERY_INTENT_VERSION,
+                DELIVERY_RECEIPT_VERSION,
+                FRONTEND_INGRESS_VERSION,
+                MEDIA_GROUP_VERSION,
+                RELAY_ENVELOPE_VERSION,
+                TOOL_INTERACTION_VERSION,
+            )
+
+            frontend_contract_versions = {
+                "ingress": FRONTEND_INGRESS_VERSION,
+                "delivery_intent": DELIVERY_INTENT_VERSION,
+                "delivery_receipt": DELIVERY_RECEIPT_VERSION,
+                "media_group": MEDIA_GROUP_VERSION,
+                "command_invocation": COMMAND_INVOCATION_VERSION,
+                "relay_envelope": RELAY_ENVELOPE_VERSION,
+                "tool_interaction": TOOL_INTERACTION_VERSION,
+            }
             capabilities.update(
                 {
                     "session_api_version": "1.0",
@@ -5166,6 +5210,16 @@ class WorkbenchApiServer:
                     "fencing_schema_version": "1.0",
                     "compatibility_policy": "capabilities-and-advertised-limits",
                     "durability": "sqlite-wal",
+                    "frontend_contract_versions": frontend_contract_versions,
+                    "frontend_connector_registry": connector_registry_snapshot(),
+                    "tui_session_ingress": {
+                        "version": 1,
+                        "primary_session": True,
+                        "text_runs": True,
+                        "attachment_runs": True,
+                        "workzone_attachment_runs": True,
+                        "command_invocations": True,
+                    },
                     "controls": [
                         "fresh",
                         "archive",
@@ -5198,11 +5252,14 @@ class WorkbenchApiServer:
                     },
                     "frontend_connector": {
                         "version": "1.1",
+                        "event_source": "persistent_session_events",
+                        "contract_versions": frontend_contract_versions,
                         "message_content_schema_version": "1.2",
                         "multi_attachment": True,
                         "assistant_multi_attachment": True,
                         "assistant_attachment_delivery": "terminal-message-projection",
                         "atomic_run_admission": True,
+                        "attachment_stage_idempotency": True,
                         "preserves_attachment_order": True,
                         "content_types": ["text", "attachment", "audio"],
                         "attachment_modalities": [
@@ -5240,6 +5297,27 @@ class WorkbenchApiServer:
                 )
         return web.json_response(capabilities)
 
+    async def handle_v2_frontend_capabilities(self, request):
+        """Expose the FC contract version without changing the v1 capability API."""
+
+        response = await self.handle_v1_capabilities(request)
+        if response.status != 200:
+            return response
+        try:
+            capabilities = json.loads(response.body.decode("utf-8"))
+        except (AttributeError, UnicodeDecodeError, json.JSONDecodeError):
+            return self._v1_error(ValueError("capability response is invalid"), status=500)
+        if not isinstance(capabilities, dict) or "frontend_contract_versions" not in capabilities:
+            return self._v1_error(
+                ValueError("frontend connector contract is not ready"), status=503
+            )
+        capabilities["frontend_contract_protocol"] = {
+            "type": "hashi.frontend-contracts",
+            "version": 2,
+            "event_source": "persistent_session_events",
+        }
+        return web.json_response(capabilities)
+
     async def handle_v1_agents(self, request):
         owner = self._v1_owner_id(request)
         if owner is None:
@@ -5256,6 +5334,23 @@ class WorkbenchApiServer:
             for runtime in self._runtime_list()
         ]
         return web.json_response({"ok": True, "agents": agents})
+
+    async def handle_v1_agent_primary_session(self, request):
+        """Resolve the owner-scoped conversation shared by interactive frontends."""
+
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        try:
+            agent_id = str(request.match_info.get("agent_id") or "").strip().lower()
+            if agent_id not in self._runtime_map():
+                raise SessionNotFound("agent not found")
+            session = self.session_store.resolve_primary_session(
+                owner_id=owner, agent_id=agent_id, establish=True
+            )
+            return web.json_response({"ok": True, "session": session})
+        except Exception as exc:
+            return self._v1_error(exc)
 
     async def handle_v1_sessions_create(self, request):
         owner = self._v1_owner_id(request)
@@ -5743,6 +5838,64 @@ class WorkbenchApiServer:
                 or payload.get("client_id")
                 or "default"
             )
+            supplied_delivery_policy = payload.get("delivery_policy")
+            tui_metadata: dict[str, Any] = {}
+            response_preferences = dict(payload.get("response_preferences") or {})
+            if surface == "tui":
+                if payload.get("message_source") is not None:
+                    raise ValueError("TUI source is asserted by the connector endpoint")
+                if supplied_delivery_policy is None:
+                    from orchestrator.frontend_delivery import tui_run_delivery_policy
+
+                    supplied_delivery_policy = tui_run_delivery_policy(
+                        telegram_mirror=True, client_id=client_id
+                    )
+                policy = normalize_tui_run_delivery_policy(
+                    supplied_delivery_policy, client_id=client_id
+                )
+                mirror = next(
+                    (
+                        target["enabled"]
+                        for target in policy["targets"]
+                        if target["connector_id"] == "telegram"
+                        and target["role"] == "mirror"
+                    ),
+                    True,
+                )
+                tui_metadata = {
+                    **tui_request_metadata(
+                        telegram_mirror=mirror, client_id=client_id
+                    ),
+                    "ui_locale": normalize_locale(payload.get("ui_locale")),
+                }
+                response_preferences["frontend_delivery_policy"] = policy
+            elif supplied_delivery_policy is not None:
+                if surface not in {"workbench", "external", "session-api"}:
+                    raise ValueError(
+                        "delivery_policy is supported only for surface=tui or an external frontend"
+                    )
+                policy = normalize_frontend_run_delivery_policy(
+                    supplied_delivery_policy,
+                    connector_id="session_api",
+                    client_id=client_id,
+                )
+                if any(
+                    target["connector_id"] != "telegram"
+                    or target["role"] != "mirror"
+                    for target in policy["targets"]
+                ):
+                    raise ValueError(
+                        "external frontend delivery_policy may only configure the Telegram mirror"
+                    )
+                frontend_metadata = {
+                    "kind": "session_api",
+                    "client_id": client_id,
+                }
+                tui_metadata = {
+                    FRONTEND_CLIENT_METADATA_KEY: frontend_metadata,
+                    FRONTEND_DELIVERY_METADATA_KEY: policy,
+                }
+                response_preferences[FRONTEND_DELIVERY_METADATA_KEY] = policy
             canonical_parts: list[dict[str, Any]] = []
             total_attachment_bytes = 0
             for item_index, block in enumerate(content, start=1):
@@ -5805,6 +5958,19 @@ class WorkbenchApiServer:
                 authorization_metadata[PRIVATE_AUTHORIZATION_BINDING_METADATA_KEY] = (
                     dict(binding)
                 )
+            supplied_metadata = payload.get("request_metadata")
+            if isinstance(supplied_metadata, Mapping):
+                connector_evidence = supplied_metadata.get(
+                    CONNECTOR_EVIDENCE_METADATA_KEY
+                )
+                if connector_evidence is not None:
+                    if not isinstance(connector_evidence, Mapping):
+                        raise ValueError("connector evidence must be an object")
+                    # PAO verifies the signature and prompt binding at
+                    # admission. No other client metadata enters this path.
+                    authorization_metadata[CONNECTOR_EVIDENCE_METADATA_KEY] = dict(
+                        connector_evidence
+                    )
             transcript_state = self._begin_session_voice_transcription(
                 runtime=runtime,
                 canonical_content=canonical_content,
@@ -5814,7 +5980,7 @@ class WorkbenchApiServer:
                 request_id = await runtime.enqueue_request(
                     runtime._primary_chat_id(),
                     text,
-                    "session-api",
+                    "tui" if surface == "tui" else "session-api",
                     text[:160],
                     deliver_to_telegram=True,
                     idempotency_key=idempotency_key,
@@ -5830,9 +5996,7 @@ class WorkbenchApiServer:
                         "session_context_generation": payload.get(
                             "session_context_generation"
                         ),
-                        "response_preferences": dict(
-                            payload.get("response_preferences") or {}
-                        ),
+                        "response_preferences": response_preferences,
                         **(
                             {
                                 MESSAGE_SOURCE_CLAIM_METADATA_KEY: (
@@ -5843,6 +6007,7 @@ class WorkbenchApiServer:
                             else {}
                         ),
                         **authorization_metadata,
+                        **tui_metadata,
                     },
                     request_content=canonical_content,
                 )
@@ -5871,6 +6036,272 @@ class WorkbenchApiServer:
                 },
                 status=202,
             )
+        except Exception as exc:
+            return self._v1_error(exc)
+
+    async def handle_v1_session_command_invocation(self, request):
+        """Admit one TUI command against an owner-scoped, generation-bound Session."""
+
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        try:
+            payload = await request.json()
+            if not isinstance(payload, Mapping):
+                raise ValueError("command invocation must be an object")
+            allowed_fields = {
+                "command",
+                "arguments",
+                "client_id",
+                "request_id",
+                "ui_locale",
+                "context_generation",
+                "request_metadata",
+            }
+            if set(payload) - allowed_fields:
+                raise ValueError("command invocation contains unsupported fields")
+            command = str(payload.get("command") or "").strip().casefold()
+            arguments = payload.get("arguments", [])
+            client_id = str(payload.get("client_id") or "").strip()
+            request_id = str(payload.get("request_id") or "").strip()
+            ui_locale = str(payload.get("ui_locale") or "en").strip()
+            context_generation = payload.get("context_generation")
+            from orchestrator.command_interactions import ID_PATTERN
+
+            if not command or len(command) > 128 or any(
+                character not in "abcdefghijklmnopqrstuvwxyz0123456789_.:-"
+                for character in command
+            ):
+                raise ValueError("command name is invalid")
+            if (
+                not isinstance(arguments, list)
+                or len(arguments) > 64
+                or any(
+                    not isinstance(argument, str) or len(argument) > 4096
+                    for argument in arguments
+                )
+            ):
+                raise ValueError("command arguments are invalid")
+            if not ID_PATTERN.fullmatch(client_id) or not ID_PATTERN.fullmatch(
+                request_id
+            ):
+                raise ValueError("command invocation identity is invalid")
+            if not ui_locale or len(ui_locale) > 24 or any(
+                ord(character) < 32 for character in ui_locale
+            ):
+                raise ValueError("command locale is invalid")
+            if (
+                not isinstance(context_generation, int)
+                or isinstance(context_generation, bool)
+                or context_generation < 1
+            ):
+                raise ValueError("command context generation is invalid")
+
+            session_id = str(request.match_info.get("session_id") or "")
+            session = self.session_store.get_session(
+                session_id, owner_id=owner, include_deleted=False
+            )
+            if int(session.get("context_generation") or 0) != context_generation:
+                raise SessionConflict("session context changed before command admission")
+            runtime = self._runtime_map().get(str(session.get("agent_id") or ""))
+            if runtime is None:
+                raise SessionNotFound("agent runtime not found")
+
+            request_metadata = payload.get("request_metadata")
+            connector_claims = None
+            if request_metadata is not None:
+                if not isinstance(request_metadata, Mapping):
+                    raise ValueError("command request metadata is invalid")
+                if set(request_metadata) - {CONNECTOR_EVIDENCE_METADATA_KEY}:
+                    raise ValueError("command request metadata contains unsupported fields")
+                evidence = request_metadata.get(CONNECTOR_EVIDENCE_METADATA_KEY)
+                if evidence is not None:
+                    from orchestrator.message_context import verify_connector_evidence
+
+                    prompt_binding = json.dumps(
+                        {"command": command, "arguments": arguments},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    connector_claims = verify_connector_evidence(
+                        self.config_path.parent,
+                        evidence=evidence,
+                        prompt=prompt_binding,
+                    )
+                    origin = (
+                        connector_claims.get("_origin_instance_evidence")
+                        if isinstance(connector_claims, Mapping)
+                        else None
+                    )
+                    if (
+                        not isinstance(connector_claims, Mapping)
+                        or connector_claims.get("_message_source_reserved") != "tui"
+                        or not isinstance(origin, Mapping)
+                        or origin.get("assurance") != "shared_network_hmac"
+                        or not re.fullmatch(
+                            r"[A-Z0-9][A-Z0-9_-]{0,31}",
+                            str(origin.get("id") or "").strip().upper(),
+                        )
+                    ):
+                        return self._v1_error(
+                            ValueError("TUI command relay evidence is invalid"),
+                            status=403,
+                        )
+
+            if command == "telegram":
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "accepted": False,
+                        "slash_command": False,
+                        "command_compatibility_required": True,
+                        "code": "command_compatibility_required",
+                    }
+                )
+            from orchestrator.slash_command_audit import is_supported_slash_command
+
+            if not is_supported_slash_command(runtime, command):
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "accepted": False,
+                        "slash_command": False,
+                        "command_not_found": True,
+                        "code": "command_not_found",
+                    }
+                )
+
+            actor = getattr(self.global_config, "authorized_id", None)
+            checker = getattr(runtime, "_is_authorized_user", None)
+            if type(actor) is not int or (
+                callable(checker) and not checker(actor)
+            ):
+                return self._v1_error(
+                    ValueError("command actor is not authorized"), status=403
+                )
+            from orchestrator import command_interaction_bridge
+            from orchestrator.admin_local_testing import _format_slash_command_line
+
+            instance_id = str(
+                getattr(self.global_config, "instance_id", "") or ""
+            ).strip().upper()
+            connection_binding = hashlib.sha256(
+                f"tui-session-command-v1\0{instance_id}\0{session_id}\0{client_id}".encode(
+                    "utf-8"
+                )
+            ).hexdigest()
+            operation = {
+                "version": 1,
+                "op": "open",
+                "client_id": client_id,
+                "request_id": request_id,
+                "ui_locale": ui_locale,
+                "command": _format_slash_command_line(command, arguments),
+            }
+            metadata = {
+                "actor_id": actor,
+                "instance_id": instance_id,
+                "session_surface": "tui",
+                "session_channel_key": client_id,
+                "owner_id": owner,
+                "session_id": session_id,
+                "context_generation": context_generation,
+                "connection_binding": connection_binding,
+                "connector_id": "tui",
+                "ingress_transport": "tui-session-command",
+                "source_channel": "tui_session_command",
+            }
+            if connector_claims is not None:
+                metadata["origin_instance"] = str(
+                    connector_claims["_origin_instance_evidence"]["id"]
+                ).strip().upper()
+            command_invocation = (
+                command_interaction_bridge.build_frontend_command_invocation(
+                    {"client_id": client_id, "request_id": request_id},
+                    metadata,
+                    actor=actor,
+                    command_name=command,
+                    arguments=arguments,
+                )
+            )
+            request_digest = hashlib.sha256(
+                json.dumps(
+                    {
+                        "arguments": arguments,
+                        "client_id": client_id,
+                        "command": command,
+                        "context_generation": context_generation,
+                        "origin_instance": metadata.get("origin_instance")
+                        or instance_id,
+                        "session_id": session_id,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            reservation = self.session_store.reserve_frontend_command_invocation(
+                session_id=session_id,
+                owner_id=owner,
+                client_id=client_id,
+                request_id=request_id,
+                request_digest=request_digest,
+                context_generation=context_generation,
+                invocation=command_invocation,
+            )
+            if reservation["state"] == "completed":
+                replay = dict(reservation["response"])
+                replay["command_event_id"] = reservation.get("event_id")
+                replay["replayed"] = True
+                replay_status = int(replay.get("http_status") or 200)
+                return web.json_response(replay, status=replay_status)
+            if reservation["state"] == "pending":
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "accepted": None,
+                        "slash_command": True,
+                        "outcome_unknown": True,
+                        "code": "command_outcome_unknown",
+                        "command": command,
+                        "session_id": session_id,
+                        "context_generation": context_generation,
+                    },
+                    status=409,
+                )
+            result = await command_interaction_bridge.dispatch_command_interaction(
+                runtime, operation, metadata
+            )
+            response = dict(result) if isinstance(result, Mapping) else {
+                "ok": False,
+                "error_code": "command_invocation_response_invalid",
+            }
+            response.update(
+                {
+                    "slash_command": True,
+                    "command": command,
+                    "agent": str(session.get("agent_id") or ""),
+                    "session_id": session_id,
+                    "context_generation": context_generation,
+                }
+            )
+            response.setdefault("command_invocation", command_invocation)
+            completion = self.session_store.complete_frontend_command_invocation(
+                session_id=session_id,
+                owner_id=owner,
+                client_id=client_id,
+                request_id=request_id,
+                request_digest=request_digest,
+                response=response,
+            )
+            response = dict(completion["response"])
+            response["command_event_id"] = completion.get("event_id")
+            response["replayed"] = bool(completion.get("replayed"))
+            status = int(response.get("http_status") or 200)
+            if status < 200 or status > 599:
+                status = 200 if response.get("ok") else 400
+            return web.json_response(response, status=status)
         except Exception as exc:
             return self._v1_error(exc)
 
@@ -5927,6 +6358,7 @@ class WorkbenchApiServer:
                 owner_id=owner,
                 after_sequence=int(request.query.get("after_sequence") or 0),
                 limit=int(request.query.get("limit") or 500),
+                run_id=request.query.get("run_id"),
             )
             snapshot = self.session_store.snapshot(
                 request.match_info["session_id"], owner_id=owner
@@ -5992,64 +6424,111 @@ class WorkbenchApiServer:
         except Exception as exc:
             return self._v1_error(exc)
 
+    def _v1_stage_attachment(
+        self, *, session_id: str, owner_id: str, payload: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Apply the same Session retention policy to upload and Workzone media."""
+
+        media_type = str(payload.get("media_type") or "application/octet-stream")
+        session = self.session_store.get_session(
+            session_id, owner_id=owner_id, include_deleted=False
+        )
+        default_retention: int | str = getattr(
+            self.global_config, "native_audio_retention_seconds", 3600
+        )
+        runtime = self._runtime_map().get(session["agent_id"])
+        manager = getattr(runtime, "voice_manager", None)
+        policy_resolver = getattr(manager, "native_policy_for_terminal", None)
+        policy = (
+            policy_resolver(str(session.get("surface") or "session-api"))
+            if callable(policy_resolver)
+            else getattr(manager, "native_policy", None)
+        )
+        if isinstance(policy, Mapping):
+            default_retention = policy.get("retention_seconds", default_retention)
+        requested_retention = payload.get("retention_seconds", default_retention)
+        retention_indefinite = bool(
+            payload.get("retention_indefinite", False)
+        ) or str(requested_retention).strip().casefold() in {
+            "indefinite",
+            "forever",
+        }
+        retention_seconds = (
+            3600 if retention_indefinite
+            else max(60, int(requested_retention or 3600))
+        )
+        return self.session_store.stage_attachment(
+            session_id=session_id,
+            owner_id=owner_id,
+            filename=str(payload.get("filename") or "attachment"),
+            media_type=media_type,
+            size_bytes=int(payload.get("size_bytes") or 0),
+            sha256=str(payload.get("sha256") or ""),
+            semantic_role=str(payload.get("semantic_role") or ""),
+            duration_ms=payload.get("duration_ms"),
+            retention_seconds=retention_seconds,
+            retention_indefinite=retention_indefinite,
+            idempotency_key=str(payload.get("idempotency_key") or "") or None,
+        )
+
     async def handle_v1_attachment_stage(self, request):
         owner = self._v1_owner_id(request)
         if owner is None:
             return self._v1_error(ValueError("not authenticated"), status=401)
         try:
             payload = await request.json()
-            media_type = str(
-                payload.get("media_type") or "application/octet-stream"
-            )
-            session = self.session_store.get_session(
-                request.match_info["session_id"],
-                owner_id=owner,
-                include_deleted=False,
-            )
-            default_retention: int | str = getattr(
-                self.global_config, "native_audio_retention_seconds", 3600
-            )
-            runtime = self._runtime_map().get(session["agent_id"])
-            manager = getattr(runtime, "voice_manager", None)
-            policy_resolver = getattr(
-                manager, "native_policy_for_terminal", None
-            )
-            policy = (
-                policy_resolver(str(session.get("surface") or "session-api"))
-                if callable(policy_resolver)
-                else getattr(manager, "native_policy", None)
-            )
-            if isinstance(policy, Mapping):
-                default_retention = policy.get(
-                    "retention_seconds", default_retention
-                )
-            requested_retention = payload.get(
-                "retention_seconds", default_retention
-            )
-            retention_indefinite = bool(
-                payload.get("retention_indefinite", False)
-            ) or str(requested_retention).strip().casefold() in {
-                "indefinite",
-                "forever",
-            }
-            retention_seconds = (
-                3600
-                if retention_indefinite
-                else max(60, int(requested_retention or 3600))
-            )
-            attachment = self.session_store.stage_attachment(
+            attachment = self._v1_stage_attachment(
                 session_id=request.match_info["session_id"],
                 owner_id=owner,
-                filename=str(payload.get("filename") or "attachment"),
-                media_type=media_type,
-                size_bytes=int(payload.get("size_bytes") or 0),
-                sha256=str(payload.get("sha256") or ""),
-                semantic_role=str(payload.get("semantic_role") or ""),
-                duration_ms=payload.get("duration_ms"),
-                retention_seconds=retention_seconds,
-                retention_indefinite=retention_indefinite,
+                payload=payload,
             )
             return web.json_response({"ok": True, "attachment": attachment}, status=201)
+        except Exception as exc:
+            return self._v1_error(exc)
+
+    async def handle_v1_workzone_attachment_stage(self, request):
+        """Resolve a target Agent Workzone reference into one managed Session asset."""
+
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        try:
+            payload = await request.json()
+            if not isinstance(payload, Mapping):
+                raise ValueError("workzone attachment payload must be an object")
+            reference = str(payload.get("reference") or "")
+            if len(reference.encode("utf-8")) > 4096 or "\x00" in reference:
+                raise ValueError("invalid Workzone attachment reference")
+            session_id = request.match_info["session_id"]
+            session = self.session_store.get_session(
+                session_id, owner_id=owner, include_deleted=False
+            )
+            runtime = self._runtime_map().get(session["agent_id"])
+            if runtime is None:
+                raise SessionNotFound("agent not found")
+            content, filename, media_type = self._resolve_workzone_attachment(
+                runtime, reference
+            )
+            attachment = self._v1_stage_attachment(
+                session_id=session_id,
+                owner_id=owner,
+                payload={
+                    "filename": filename,
+                    "media_type": media_type,
+                    "size_bytes": len(content),
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                },
+            )
+            attachment_id = str(attachment["attachment_id"])
+            self.session_store.upload_attachment_bytes(
+                session_id=session_id, owner_id=owner,
+                attachment_id=attachment_id, payload=content,
+            )
+            committed = self.session_store.commit_attachment(
+                session_id=session_id, owner_id=owner,
+                attachment_id=attachment_id,
+            )
+            return web.json_response({"ok": True, "attachment": committed}, status=201)
         except Exception as exc:
             return self._v1_error(exc)
 
@@ -6161,11 +6640,17 @@ class WorkbenchApiServer:
             decision = str(payload.get("decision") or "").strip().casefold()
             if decision not in {"confirm", "discard"}:
                 raise ValueError("decision must be confirm or discard")
+            context_generation = payload.get("session_context_generation")
+            if not isinstance(context_generation, int) or isinstance(
+                context_generation, bool
+            ) or context_generation < 1:
+                raise ValueError("session_context_generation must be a positive integer")
             transcript = self.session_store.decide_voice_transcript_by_id(
                 session_id=request.match_info["session_id"],
                 owner_id=owner,
                 transcript_id=request.match_info["transcript_id"],
                 confirmed=decision == "confirm",
+                expected_context_generation=context_generation,
             )
             session = self.session_store.get_session(
                 request.match_info["session_id"],
@@ -6185,6 +6670,12 @@ class WorkbenchApiServer:
                 return web.json_response(
                     {
                         "ok": True,
+                        "state": "confirmed" if decision == "confirm" else "discarded",
+                        "accepted": decision == "confirm",
+                        "request_id": str(transcript.get("request_id") or ""),
+                        "run_id": str(transcript.get("run_id") or ""),
+                        "session_id": str(session["session_id"]),
+                        "context_generation": int(session["context_generation"]),
                         "transcript": {
                             "transcript_id": transcript["transcript_id"],
                             "safe_voice_state": transcript["safe_voice_state"],
@@ -6218,6 +6709,12 @@ class WorkbenchApiServer:
             return web.json_response(
                 {
                     "ok": True,
+                    "state": "confirmed" if decision == "confirm" else "discarded",
+                    "accepted": decision == "confirm",
+                    "request_id": str(transcript.get("request_id") or ""),
+                    "run_id": str(transcript.get("run_id") or ""),
+                    "session_id": str(session["session_id"]),
+                    "context_generation": int(session["context_generation"]),
                     "transcript": {
                         "transcript_id": transcript["transcript_id"],
                         "safe_voice_state": transcript["safe_voice_state"],
@@ -6734,7 +7231,15 @@ class WorkbenchApiServer:
                     },
                     status=400,
                 )
-            telegram_mirror = bool(normalized_policy["telegram"]["mirror"])
+            telegram_mirror = next(
+                (
+                    bool(target["enabled"])
+                    for target in normalized_policy["targets"]
+                    if target["connector_id"] == "telegram"
+                    and target["role"] == "mirror"
+                ),
+                True,
+            )
             response_preferences = session_metadata.get("response_preferences")
             response_preferences = (
                 dict(response_preferences)

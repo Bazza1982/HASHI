@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 from datetime import timedelta
 from pathlib import Path
@@ -73,6 +74,185 @@ async def test_send_long_message_skips_when_telegram_disconnected(tmp_path):
     assert (elapsed, chunks) == (0.0, 0)
     assert runtime.app.bot.messages == []
     assert "Telegram disconnected" in runtime.logger.messages[0][1]
+
+
+@pytest.mark.asyncio
+async def test_telegram_adapter_persists_endpoint_receipt_for_canonical_event(
+    tmp_path, monkeypatch
+):
+    from orchestrator.frontend_connector_registry import endpoint_id_for
+    from orchestrator.session_store import SessionStore
+
+    store = SessionStore(
+        tmp_path / "state" / "sessions.sqlite3",
+        instance_id="HASHI1",
+    )
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="test-agent")
+    message = store.append_presentation_message(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="test-agent",
+        role="assistant",
+        text="meter card",
+        source="meter-cost",
+        idempotency_key="meter:req-receipt",
+        presentation_channel="meter",
+    )
+    runtime = _runtime(tmp_path)
+    runtime.session_store = store
+    audit_records = []
+    runtime.canonical_audit = SimpleNamespace(
+        record=lambda *args, **kwargs: audit_records.append((args, kwargs))
+    )
+
+    async def send_message(**kwargs):
+        runtime.app.bot.messages.append(kwargs)
+        return SimpleNamespace(message_id=9876)
+
+    async def no_wait(*_args, **_kwargs):
+        return None
+
+    async def not_blocked(*_args, **_kwargs):
+        return False
+
+    runtime.app.bot.send_message = send_message
+    monkeypatch.setattr(runtime_delivery.runtime_delivery_order, "wait_for_turn", no_wait)
+    monkeypatch.setattr(
+        runtime_delivery.telegram_delivery_failover,
+        "handle_blocked_send",
+        not_blocked,
+    )
+
+    _elapsed, chunks = await runtime_delivery.send_long_message(
+        runtime,
+        chat_id=99,
+        text="meter card",
+        request_id="req-meter",
+        purpose="meter-cost",
+        frontend_event_id=message["delivery_event_id"],
+        frontend_session_id=session["session_id"],
+        frontend_owner_id=owner,
+    )
+
+    receipts = store.frontend_delivery_receipts(
+        session_id=session["session_id"],
+        owner_id=owner,
+        event_id=message["delivery_event_id"],
+    )
+    assert chunks == 1
+    assert len(receipts) == 1
+    assert receipts[0]["endpoint_id"] == endpoint_id_for(
+        "telegram",
+        ingress_transport="telegram",
+        channel_key="99",
+    )
+    assert receipts[0]["status"] == "delivered"
+    assert receipts[0]["proof"]["type"] == "telegram-api-accepted"
+    assert receipts[0]["endpoint_id"] != "99"
+    assert receipts[0]["proof"]["value"] != "99"
+    assert "chat_id" not in receipts[0]
+    audit_payload = audit_records[0][0][1]
+    assert audit_payload["connector_id"] == "telegram"
+    assert audit_payload["endpoint_id"] == receipts[0]["endpoint_id"]
+    assert audit_payload["content_sha256"] == hashlib.sha256(
+        b"meter card"
+    ).hexdigest()
+    assert "chat_id" not in audit_payload
+    assert "text" not in audit_payload
+    assert "meter card" not in str(audit_records)
+
+
+@pytest.mark.asyncio
+async def test_canonical_background_reply_uses_outbox_and_does_not_double_send(
+    tmp_path, monkeypatch
+):
+    from orchestrator.frontend_delivery import freeze_run_delivery_route
+    from orchestrator.session_store import SessionStore
+
+    store = SessionStore(
+        tmp_path / "state" / "sessions.sqlite3",
+        instance_id="HASHI1",
+    )
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="test-agent")
+    route = freeze_run_delivery_route(
+        message_source_id="telegram",
+        session_surface="telegram",
+        session_channel_key="7",
+        chat_id=7,
+        telegram_requested=False,
+    )
+    accepted = store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="test-agent",
+        request_id="req-outbox-send",
+        text="question",
+        source="telegram",
+        idempotency_key="outbox-send-key",
+        delivery_route=route,
+    )
+    store.mark_request_running(accepted.request_id, worker_id="test-worker")
+    store.finish_request(
+        accepted.request_id,
+        success=True,
+        assistant_text="answer",
+    )
+    runtime = _runtime(tmp_path)
+    runtime.session_store = store
+    runtime.global_config.authorized_id = 7
+
+    async def no_wait(*_args, **_kwargs):
+        return None
+
+    async def not_blocked(*_args, **_kwargs):
+        return False
+
+    monkeypatch.setattr(runtime_delivery.runtime_delivery_order, "wait_for_turn", no_wait)
+    monkeypatch.setattr(
+        runtime_delivery.telegram_delivery_failover,
+        "handle_blocked_send",
+        not_blocked,
+    )
+
+    first = await runtime_delivery.send_long_message(
+        runtime,
+        chat_id=7,
+        text="answer",
+        request_id=accepted.request_id,
+        purpose="bg-response",
+        frontend_outbox=True,
+    )
+    replay = await runtime_delivery.send_long_message(
+        runtime,
+        chat_id=7,
+        text="answer",
+        request_id=accepted.request_id,
+        purpose="bg-response",
+        frontend_outbox=True,
+    )
+
+    assert first[1] == 1
+    assert replay == (0.0, 0)
+    assert len(runtime.app.bot.messages) == 1
+    event = next(
+        item for item in store.events(session["session_id"], owner_id=owner)
+        if item["kind"] == "run.completed"
+    )
+    receipt = store.frontend_delivery_receipts(
+        session_id=session["session_id"],
+        owner_id=owner,
+        event_id=event["event_id"],
+    )
+    assert len(receipt) == 1
+    assert receipt[0]["status"] == "delivered"
+    with store._connection() as connection:
+        state = connection.execute(
+            "SELECT state FROM delivery_outbox WHERE event_id=?",
+            (event["event_id"],),
+        ).fetchone()[0]
+    assert state == "completed"
 
 
 @pytest.mark.asyncio

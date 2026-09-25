@@ -31,11 +31,20 @@ def _running_session(tmp_path):
     return store, owner, session, accepted
 
 
-def _registry(tmp_path, store, owner, session, *, surface="generic-desktop"):
+def _registry(
+    tmp_path,
+    store,
+    owner,
+    session,
+    *,
+    surface="generic-desktop",
+    access_root=None,
+    workspace_dir=None,
+):
     return ToolRegistry(
         allowed_tools=["frontend_send_attachments"],
-        access_root=tmp_path,
-        workspace_dir=tmp_path,
+        access_root=access_root or tmp_path,
+        workspace_dir=workspace_dir or tmp_path,
         secrets={},
         audit_context={
             "agent_name": "agent1",
@@ -88,6 +97,9 @@ async def test_agent_publishes_ordered_multi_attachment_as_one_assistant_message
     assert published["ok"] is True
     assert published["attachment_count"] == 2
     assert published["replayed"] is False
+    assert published["media_group"]["retention_class"] == "message_bound"
+    assert published["media_group"]["group_id"] == published["group_id"]
+    assert [item["ordinal"] for item in published["media_group"]["attachments"]] == [0, 1]
     assert [part["filename"] for part in published["attachments"]] == [
         "first.png",
         "notes.txt",
@@ -98,6 +110,7 @@ async def test_agent_publishes_ordered_multi_attachment_as_one_assistant_message
     )
     assert replay.is_error is False
     assert json.loads(replay.output)["replayed"] is True
+    assert json.loads(replay.output)["group_id"] == published["group_id"]
     assert [
         part["attachment_id"] for part in json.loads(replay.output)["attachments"]
     ] == [part["attachment_id"] for part in published["attachments"]]
@@ -154,7 +167,7 @@ async def test_bound_output_audio_is_promoted_to_durable_message_retention(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_frontend_attachment_publish_is_idempotent_and_tui_is_separate(tmp_path):
+async def test_frontend_attachment_publish_is_idempotent_across_connectors(tmp_path):
     store, owner, session, _accepted = _running_session(tmp_path)
     target = tmp_path / "proof.png"
     target.write_bytes(b"\x89PNG\r\n\x1a\nproof")
@@ -173,11 +186,11 @@ async def test_frontend_attachment_publish_is_idempotent_and_tui_is_separate(tmp
     assert "idempotency" in conflict.output.casefold()
 
     tui = _registry(tmp_path, store, owner, session, surface="tui")
-    rejected = await tui.execute(
+    accepted = await tui.execute(
         "frontend_send_attachments", arguments, tool_call_id="tui-output-call"
     )
-    assert rejected.is_error is True
-    assert "built-in tui" in rejected.output.casefold()
+    assert accepted.is_error is False
+    assert json.loads(accepted.output)["ok"] is True
 
     # Unified attachment delivery contract: Telegram turns may bind to the
     # canonical Session (push stays the caller's concern).
@@ -187,3 +200,29 @@ async def test_frontend_attachment_publish_is_idempotent_and_tui_is_separate(tmp
     )
     assert bound.is_error is False
     assert '"ok": true' in bound.output
+
+
+@pytest.mark.asyncio
+async def test_frontend_attachment_rejects_files_outside_authorized_roots(tmp_path):
+    store, owner, session, _accepted = _running_session(tmp_path)
+    authorized = tmp_path / "authorized"
+    authorized.mkdir()
+    outside = tmp_path / "private.txt"
+    outside.write_text("not an authorized attachment", encoding="utf-8")
+    registry = _registry(
+        tmp_path,
+        store,
+        owner,
+        session,
+        access_root=authorized,
+        workspace_dir=authorized,
+    )
+
+    result = await registry.execute(
+        "frontend_send_attachments",
+        {"attachments": [{"path": str(outside)}]},
+        tool_call_id="outside-root-output",
+    )
+
+    assert result.is_error is True
+    assert "authorized" in result.output.casefold() or "access" in result.output.casefold()

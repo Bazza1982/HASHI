@@ -3,9 +3,17 @@
 | Field | Value |
 |---|---|
 | Status | **Authoritative Frontend Connector module specification** |
-| Effective date | 2026-09-01 |
+| Effective date | 2026-09-25 |
 | Parent architecture | [HASHI System Architecture](../ARCHITECTURE.md) |
 | Scope | Built-in TUI, messaging connectors, Backend API, Persistent Session API, Remote projection, and compatible external clients |
+| Implementation status | Connector-neutral v2 groundwork exists; end-to-end connector adoption is still in progress |
+
+As of 2026-09-25, Functions contains versioned connector-neutral contracts,
+a capability catalog, generic delivery-preference migration, and selected
+canonical-event/outbox integrations. These are migration foundations, not proof
+that every ingress, event, destination, tool, Remote/Exchange route, or client
+uses one dispatcher. The authoritative rollout status and remaining gates are
+tracked in [the unified I/O repair plan](HASHI_FRONTEND_CONNECTOR_UNIFIED_IO_REPAIR_PLAN.md).
 
 ## 1. Definition
 
@@ -77,8 +85,11 @@ bounded projections. They must not:
 - maintain a competing authoritative sent-message archive;
 - resend client-owned chat history as if it were canonical HASHI Context;
 - infer authorization from possession of an opaque identifier;
-- expose provider-native thread or request IDs as Session authority; or
-- let a late client or worker overwrite a fenced or terminal Run.
+- expose provider-native thread or request IDs as Session authority;
+- let a late client or worker overwrite a fenced or terminal Run; or
+- turn a confirmation-gated action into ordinary Session text. Such flows need
+  a typed, owner-/Session-/generation-bound admission and decision contract so
+  moving connectors cannot weaken the confirmation boundary.
 
 ## 5. Built-in TUI
 
@@ -87,7 +98,22 @@ supports local operation and trusted instance switching through Hashi Remote.
 
 Current implementation boundary:
 
-- the TUI uses the basic Backend API chat and transcript routes;
+- when the explicit TUI Session ingress capability is advertised, TUI ordinary text resolves the
+  owner-scoped primary Session and enters through Session Runs, locally or via
+  authenticated Remote proxy; older instances and proxy generations retain
+  the basic Backend API chat fallback before submission only. Single-file
+  attachments use Session stage/upload/commit followed by one Run when explicitly
+  advertised, locally or through the authenticated Remote proxy. Only a proxy
+  rejection before canonical admission permits legacy fallback. Target-relative
+  Workzone references are read only by the selected Agent's enabled Workzone
+  adapter and committed as managed Session attachments. Commands still use
+  compatibility chat routes, and display still polls
+  transcript while canonical feed migration is pending;
+- a write timeout or a connection loss after a request may have been sent is
+  an unknown outcome: the TUI must not replay that write against another
+  fallback URL or the legacy chat route. Direct writes pin the verified Session
+  host; authenticated Remote proxy writes verify the target's local instance
+  before submission and never replay an uncertain local or peer write;
 - those routes keep the established `workbench/default` Conversation binding,
   so a TUI window is a projection of the same formal Conversation rather than
   the owner of a private TUI Session;
@@ -154,33 +180,28 @@ This current limitation must be stated plainly. Future TUI development should
 adopt the richer Session/Event contract without changing the rule that the TUI
 stays inside HASHI.
 
-### 5.1 TUI per-Run Telegram projection
+### 5.1 Connector-neutral delivery intent
 
-The TUI may disable only the Telegram projection of a newly submitted TUI Run.
-The public `delivery_policy` wire value is complete, versioned and client-bound:
+Frontend delivery is a versioned, server-owned intent over one or more
+connector endpoints. The canonical form identifies connector and opaque
+endpoint IDs, delivery role, enabled state, and retry policy; it does not use a
+Telegram-shaped field as the generic model. The intent is frozen when a Run is
+admitted so later preference changes cannot redirect an in-flight reply.
 
-```json
-{
-  "type": "hashi.frontend-delivery",
-  "version": 1,
-  "scope": "run",
-  "frontend": "tui",
-  "client_id": "tui-<ephemeral-window-id>",
-  "telegram": {"mirror": false}
-}
-```
+The former TUI-only `hashi.frontend-delivery` version 1 value remains an input
+compatibility format. The Backend API validates and binds it to the submitting
+TUI client, then normalizes it to the connector-neutral version 2 form. New
+preference writes use `frontend_delivery_preferences.json`; reads lazily
+recognize `workbench_telegram_state.json` without rewriting it, and the first
+successful write migrates the value under revision checking. A damaged or
+conflicting document is not overwritten.
 
-The Backend API validates that value for `source=tui`, binds it to the same
-ephemeral TUI client identity, and snapshots the canonical form into the
-admitted Run metadata. Invalid or incomplete policy cannot create a hidden
-Turn. Legacy callers and all non-TUI sources remain visible by default.
-
-`telegram.mirror=false` prevents Telegram typing, commentary, final and error
-delivery for that Run. It does not disconnect the Bot, fork Context, change the
-Conversation binding, suppress the TUI projection, or affect Telegram-native,
-Scheduler, HChat, API, another client, or another already-open TUI window.
-Changing the local preference affects future submissions only. Re-enabling it
-does not replay Turns completed while the projection was disabled.
+An owner's Telegram mirror preference applies to future Runs admitted from
+other frontend connectors. It never suppresses a Telegram-origin reply,
+internal event route, or the connector's primary endpoint. TUI may still choose
+a per-Run Telegram mirror target through its client-bound compatibility
+setting; that choice cannot redirect the primary response or affect another
+TUI window. Changes do not replay already completed Runs.
 
 TUI queue/typing state is an ephemeral Connector projection fenced by instance
 generation, Agent, Session, Run and request identity. Durable Run status and
@@ -296,13 +317,14 @@ and uses the tool-call identity for replay-safe idempotency. A reused identity
 with different bytes is rejected. Multiple tool calls may contribute ordered
 attachments to one reply, but the total limits still apply to the Message.
 
-The public `frontend_connector` capability version 1.1 advertises
-`assistant_multi_attachment=true` and
-`assistant_attachment_delivery=terminal-message-projection`. This is not a
-Workbench contract: any future external frontend must render the canonical
-Message attachment projection. Telegram retains its established
-`telegram_send_file` transport path, and the built-in TUI retains its deeper
-HASHI-owned attachment path; neither is silently redirected through this tool.
+The public `frontend_connector` capability snapshot includes the
+connector-neutral registry and versioned FC contract families. The standard
+`frontend_send_attachments` tool accepts any active Session delivery route,
+including Telegram, TUI and Backend API, while checking every source file
+against authorized access roots. Media groups retain declared order, content
+digests and Session retention policy. Explicit `telegram_send_file` remains a
+Telegram-targeted compatibility action; it is not the generic multi-connector
+attachment contract.
 
 ## 7. Retired Workbench boundary
 
@@ -352,8 +374,8 @@ into HASHI Functions or Core.
 
 - The TUI has trusted multi-instance switching but still uses basic Backend API
   chat/transcript routes.
-- Some orchestrator modules directly depend on Telegram types rather than a
-  transport-neutral event interface.
+- Some orchestrator modules still directly depend on Telegram types rather
+  than a transport-neutral delivery dispatcher and durable endpoint receipts.
 - Retired Workbench compatibility names remain in source and configuration.
 - Persistent Session API v1 remains fail-closed when its runtime qualification
   evidence is absent, even though qualified personal instances enable it by
@@ -503,6 +525,10 @@ shared-ingress protocol is introduced.
 
 ### Targeted Workbench Safe Voice adoption (2026-09-13)
 
+> Historical migration note: this admin-command transport was the first
+> Workbench adapter and is superseded for Safe Voice by the Session API path
+> documented below. Do not add new Safe Voice reads or decisions to this route.
+
 The existing authenticated admin-command transport may carry the reserved
 `__hashi_voice_confirmation_v1__:` envelope through the unchanged
 `runtime.slash` RPC. This lets one selected Agent Worker adopt Workbench Safe
@@ -538,6 +564,34 @@ Implementation and offline validation are scoped to the local candidate branch
 feature/chat-connector-ux-20260912. Shared API source adoption, Worker source
 adoption, qualified artifacts, current STT dependencies and terminal delivery are
 separate facts. This task did not adopt a running generation or restart production.
+
+### Workbench Safe Voice through canonical Session Runs (2026-09-25)
+
+New Workbench voice recordings enter the selected owner-scoped Session as an
+audio attachment with `semantic_role=voice_message`, then one idempotent Session
+Run. The route verifies the Session's Agent and context generation before
+staging bytes. It reads the durable transcript event filtered by that Run ID;
+Safe Voice still presents a confirmation preview, and confirm/discard use the
+typed Session voice-transcript decision endpoint. The audio is never converted
+to plain text by the connector, and no decision is automatic.
+
+Attachment stage retries are bound to a client idempotency key and canonical
+metadata digest. Identical retries reuse the same attachment; changed metadata
+conflicts. Uploading the identical bytes and committing an already committed
+attachment are safe replays, while expired or otherwise unavailable assets
+cannot be revived. The Session API publishes this capability explicitly, and
+Workbench fails closed for file delivery when it is absent.
+
+Safe Voice confirmation is fenced atomically against both the originating Run
+generation and the Session's current generation. Session events support a Run-ID
+filter so a replay can find its own durable transcript event without mixing in
+other messages. The Session API does not currently expose a durable transcript
+expiry, so the Workbench does not invent one in its presentation contract.
+
+The changes are source-only and offline-validated. Running Function adoption,
+real microphone/file delivery, confirmation in the external Workbench, and the
+remaining live acceptance manifest are separate pending checks; no runtime was
+restarted as part of this slice.
 
 ### Targeted Worker chat-projection adoption (2026-09-12)
 

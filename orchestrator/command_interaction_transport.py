@@ -97,6 +97,9 @@ async def try_dispatch_command_interaction_transport(
                     owner_id=runtime_session.owner_id(runtime),
                     session_id=str(session["session_id"]),
                     context_generation=int(session["context_generation"]),
+                    _durable_command_invocation=True,
+                    connector_id="workbench",
+                    ingress_transport="workbench-command-ui",
                 )
             except Exception:
                 raise InteractionError("command_menu_session_unavailable", 503) from None
