@@ -166,6 +166,7 @@
     "menu.provider.call_providers": "个调用服务方",
     "menu.provider.modes_label": "模式",
     "menu.provider.modes": "单一服务方，或混合 Quick/Pro 目标",
+    "menu.provider.available_label": "可用",
     "menu.provider.unavailable_label": "不可用",
     "menu.provider.effect": "选择服务方时，会同时为两个模型槽位原子设置有效默认值。混合模式会打开草稿，让每个目标分别使用不同的服务方与模型；任务阶段推理和 HER 执行强度保持不变。",
     "menu.provider.choose": "请在下方选择调用服务方。",

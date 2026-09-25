@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-from orchestrator import runtime_menu_views
+from orchestrator import runtime_menu_views, ui_language
 
 
 class _Slots:
@@ -135,6 +135,19 @@ def test_backend_and_model_cards_share_standard_order_and_escape_values() -> Non
     assert "model&amp;a" in picker and "model&amp;a" in model
     assert "provider&lt;one&gt;" in model
     assert "<code>/model &lt;name&gt;</code>" in model
+
+
+def test_her_v3_provider_card_localizes_available_count() -> None:
+    for locale, label in (("en", "Available"), ("zh-CN", "可用")):
+        with ui_language.language_scope(SimpleNamespace(), locale=locale):
+            text = runtime_menu_views.her_v3_provider_menu_text(
+                current_provider="deepseek-api",
+                available=["deepseek-api"],
+                unavailable=[],
+            )
+
+        assert label in text
+        assert "menu.provider.available_label" not in text
 
 
 def test_skill_detail_escapes_reference_and_reports_standard_package() -> None:

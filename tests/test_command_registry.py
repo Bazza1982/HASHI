@@ -81,6 +81,9 @@ class _RuntimeWithNativeCommands:
     async def cmd_brain(self, update, context):
         await update.message.reply_text("brain ok")
 
+    async def cmd_meter(self, update, context):
+        await update.message.reply_text("meter " + " ".join(context.args))
+
 
 def test_runtime_command_registry_loads_external_private_commands(monkeypatch, tmp_path):
     private_dir = tmp_path / "private_commands"
@@ -352,6 +355,21 @@ def test_admin_supported_commands_include_runtime_bound_native_commands():
     assert "mode" in commands
     assert "notepad" in commands
     assert "brain" in commands
+
+
+@pytest.mark.asyncio
+async def test_admin_local_command_supports_declared_native_alias(tmp_path):
+    runtime = _RuntimeWithNativeCommands()
+    runtime.workspace_dir = tmp_path
+
+    commands = supported_commands(runtime)
+    result = await execute_local_command(runtime, "/metre status", chat_id=123)
+
+    assert "meter" in commands
+    assert "metre" in commands
+    assert result["ok"] is True
+    assert result["command"] == "metre"
+    assert result["messages"][0]["text"] == "meter status"
 
 
 @pytest.mark.asyncio

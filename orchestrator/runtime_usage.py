@@ -4,6 +4,7 @@ import datetime
 from typing import Any
 
 from orchestrator import ui_language
+from orchestrator.flexible_backend_registry import public_backend_engine
 
 
 _USAGE_TOTAL_NUMERIC_FIELDS = (
@@ -252,7 +253,7 @@ async def cmd_token(runtime: Any, update: Any, context: Any) -> None:
             continue
         total_agents += 1
         manager = getattr(agent_runtime, "backend_manager", None)
-        backend = (
+        backend = public_backend_engine(
             getattr(manager, "active_backend", None)
             or getattr(getattr(agent_runtime, "config", None), "active_backend", None)
             or "unknown"

@@ -166,6 +166,7 @@
     "menu.provider.call_providers": "call providers",
     "menu.provider.modes_label": "Modes",
     "menu.provider.modes": "one provider, or Hybrid Quick/Pro targets",
+    "menu.provider.available_label": "Available",
     "menu.provider.unavailable_label": "Unavailable",
     "menu.provider.effect": "A provider selection atomically assigns valid defaults to both model slots. Hybrid opens a draft where each target can use a different provider/model. Task-stage reasoning and HER effort stay untouched.",
     "menu.provider.choose": "Choose a call provider below.",
