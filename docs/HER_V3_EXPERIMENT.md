@@ -123,9 +123,27 @@ answered using that result with the same HER v3 provenance. An intervening
 tool Run failed because Windows PowerShell did not support `Get-Date -AsUTC`;
 the Agent reported that error honestly, and the corrected command succeeded.
 
-This proves the real main-model/tool loop on one HASHI3 Agent. It is not the
-full external-frontend acceptance suite, nor proof for all providers, effort
-levels, Strategy Cards, Agent Companion, long-running processes, or Habit
+Later on 2026-09-25 the `email-agent-1` instance configuration was given an
+explicit HER v3 `main` target, `deepseek-api / deepseek-v4-pro`, replacing its
+implicit fallback to the legacy premium profile. Its pre-existing DeepSeek
+credential was present; other Agents were not reconfigured. Agent-scoped hot
+adoption receipt `aad9494d2f99491484ab1587acb63bf0` succeeded. The
+Agent-owned `/effort high` command also persisted `high` in its workspace
+state, while its declared main profile uses DeepSeek reasoning `high`.
+Request `req-email-agent-1-2026-09-25_190631-0001` returned
+`DEEPSEEK_HERV3_LIVE_OK`. Requests
+`req-email-agent-1-2026-09-25_190631-0002` and
+`req-email-agent-1-2026-09-25_190631-0003` each executed a
+read-only UTC-time shell Tool; their activity origin was
+`her_v2:deepseek-api`, the Tool returned `status=success`, and the final answer
+carried `provenance=her_v3_single_loop`. The last request ran after effort was
+set to `high` and included DeepSeek thinking deltas. All three Runs disabled
+Telegram mirroring and performed no mailbox actions.
+
+This proves the real main-model/tool loop with HASHI API and DeepSeek on two
+HASHI3 Agents. It is not the full external-frontend acceptance suite, nor proof
+for all providers, effort levels, Strategy Cards, Agent Companion, long-running
+processes, or Habit
 Reflection. The shared `/api/backends/catalogue` process still serves its old
 HER row (`HER`, three v2 efforts) because an Agent-scoped reboot does not
 replace shared Functions. Full Workbench catalogue adoption would require a
