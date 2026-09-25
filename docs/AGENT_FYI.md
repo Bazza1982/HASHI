@@ -112,20 +112,21 @@ no Tool authority, only typed Engine events and PAO gates do.
 ## Engines, tools, and recovery
 
 HASHI3's `experiment/her-v3-hashi3` branch is a local HER v3 engine experiment
-based on current `main`; it is not the active `main` engine or a live Worker
-adoption. Its foreground path uses one main-model/tool loop, keeps PCM and
-delivery ownership, and leaves optional JEV Agent Companion disabled by
-default. See [HER v3 experiment](HER_V3_EXPERIMENT.md). Do not treat this note
-as permission to merge, deploy, or change another instance. The branch's
-single-loop assertions and full isolated offline suite pass (708 passed,
-1 skipped); real-provider and live Worker adoption remain unverified.
+based on current `main`; it does not change GitHub `main` or other instances.
+Its foreground path uses one main-model/tool loop, keeps PCM and delivery
+ownership, and leaves optional JEV Agent Companion disabled by default.
+The stored Engine ID remains `her-v2`; `/model` and `/provider` show the real
+single `main` target and `/effort` changes model reasoning, not workflow.
+See [HER v3 experiment](HER_V3_EXPERIMENT.md). The 708-pass result was the
+curated Core gate, not the full product suite. Live Worker and real-provider
+adoption require separate verification; this note is not merge permission.
 
-Engine and Model Provider differ. HER v2 modes are Direct (`zero`), Strategic
-(`low`), and Planned (`medium`); Fixed/Flex and Memory+ are independent.
-`/backend` selects Engine, `/model` model routing, `/effort` HER mode on HER or
-model effort elsewhere. Agent creation uses these modes, not provider bundles.
-HER's Direct routing card reads `DIRECT`/`Direct (no triage)`; Triage shows its
-validated class. `UNKNOWN` is only a legacy/malformed fallback.
+Engine and Model Provider differ. In this experiment HER v3 has one main model
+at every effort level; effort controls provider reasoning, not Direct/Strategic/
+Planned workflow. Fixed/Flex and Memory+ remain independent. `/backend`
+selects Engine, `/model` inspects the effective main target, and `/effort`
+controls reasoning depth. Legacy v2 stage names may still exist in stored
+compatibility data but are not foreground execution stages here.
 The main branch includes strategy playbook version `2026-09-24.1`. The separate
 JEV strategy-card selection experiment is not part of this branch.
 

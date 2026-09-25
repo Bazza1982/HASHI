@@ -38,10 +38,10 @@ async def test_backend_catalogue_exposes_public_selectable_registry(tmp_path):
     assert payload["source"] == "hashi_backend_registry"
     assert payload["backends"]["her-v2"] == {
         "engine": "her-v2",
-        "label": "HER",
+        "label": "HER v3 (experiment)",
         "models": ["role-configured"],
         "default_model": "role-configured",
-        "efforts": ["zero", "low", "medium"],
+        "efforts": ["none", "low", "medium", "high", "xhigh", "max"],
         "default_effort": "medium",
         "privacy_levels": [0, 1],
         "creation": {"mode": "effort"},

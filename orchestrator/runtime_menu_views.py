@@ -409,16 +409,14 @@ def her_commentary_text(*, enabled: bool, effort: str) -> str:
 
     return setting_card(
         "🌿",
-        "HER commentary",
+        _tr("menu.commentary.her_v3_title"),
         current=f"<b>{status_label(enabled)}</b>",
         facts=[
             _fact(
                 "menu.commentary.execution_mode",
                 f"<code>{html.escape(effort)}</code>",
             ),
-            f"<b>{html.escape(_tr('menu.commentary.level.direct'))}</b> · <code>zero</code> · {html.escape(_tr('menu.commentary.direct'))}",
-            f"<b>{html.escape(_tr('menu.commentary.level.planned'))}</b> · <code>medium</code> · {html.escape(_tr('menu.commentary.planned'))}",
-            f"<b>{html.escape(_tr('menu.commentary.level.adaptive'))}</b> · <code>high+</code> · {html.escape(_tr('menu.commentary.adaptive'))}",
+            html.escape(_tr("menu.commentary.her_v3_policy")),
             _fact(
                 "menu.commentary.delivery_label",
                 html.escape(_tr("menu.commentary.delivery")),
@@ -572,6 +570,22 @@ def her_v2_model_menu_text(
         action=(
             _tr("menu.her.review_apply") if draft else _tr("menu.her.choose_target")
         ),
+    )
+
+
+def her_v3_model_menu_text(*, provider: str, model: str, effort: str) -> str:
+    """Project the active single-model HER runtime without legacy route controls."""
+
+    return setting_card(
+        "🧠",
+        _tr("menu.her_v3.title"),
+        current=f"<code>{html.escape(provider)} / {html.escape(model)}</code>",
+        facts=[
+            _fact("common.effort", f"<code>{html.escape(effort)}</code>"),
+            _fact("common.backend", "<code>her-v2</code>"),
+        ],
+        consequence=_tr("menu.her_v3.effect"),
+        action=_tr("menu.her_v3.action"),
     )
 
 
@@ -769,7 +783,7 @@ def backend_switch_notice_text(
 def her_v2_backend_selected_text(*, with_context: bool) -> str:
     return setting_card(
         "✅",
-        "HER v2 selected",
+        _tr("menu.her_v3.selected"),
         current="<code>her-v2</code>",
         facts=[
             _fact(

@@ -111,7 +111,7 @@ BACKEND_REGISTRY: dict[str, dict] = {
         "secret_keys": ["codex-cli_key"],
     },
     "her-v2": {
-        "label": "HER",
+        "label": "HER v3 (experiment)",
         "privacy_levels": [0, 1],
         "models": ["role-configured"],
         "default_model": "role-configured",

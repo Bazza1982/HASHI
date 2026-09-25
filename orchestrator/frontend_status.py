@@ -41,21 +41,15 @@ def runtime_presentation_status(runtime: Any) -> dict[str, Any]:
         return result
 
     manager = getattr(runtime, "backend_manager", None)
-    getter = getattr(manager, "get_her_v2_configuration", None)
-    if not callable(getter):
-        return result
-    try:
-        selected = getter()
-        quick = selected.target_for_slot("quick")
-        pro = selected.target_for_slot("pro")
-    except (AttributeError, RuntimeError, TypeError, ValueError):
-        return result
-    result["her_v2"] = {
-        "routing_mode": str(selected.routing_mode),
-        "quick": {"provider": str(quick.provider), "model": str(quick.model)},
-        "pro": {"provider": str(pro.provider), "model": str(pro.model)},
-        "routing_revision": int(selected.routing_revision),
-    }
+    backend = getattr(manager, "current_backend", None)
+    config = getattr(backend, "_v2_config", None)
+    profiles = getattr(config, "profiles", None)
+    main = profiles.get("main") if isinstance(profiles, dict) else None
+    if main is not None:
+        provider = str(getattr(main, "engine", "") or "")
+        model = str(getattr(main, "model", "") or "")
+        if provider and model:
+            result["her_v3"] = {"main": {"provider": provider, "model": model}}
     return result
 
 

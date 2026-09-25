@@ -1404,6 +1404,9 @@ class FlexibleAgentRuntime:
         return "🤖"
 
     def get_current_model(self) -> str:
+        if self.config.active_backend == HER_V2_ENGINE:
+            profile = runtime_model_selection.her_v3_main_profile(self)
+            return str(getattr(profile, "model", "") or "unknown")
         if self.backend_manager.current_backend:
             return getattr(self.backend_manager.current_backend.config, "model", "unknown")
         for backend in self.config.allowed_backends:
@@ -1413,7 +1416,8 @@ class FlexibleAgentRuntime:
 
     def get_current_provider(self) -> str | None:
         if self.config.active_backend == HER_V2_ENGINE:
-            return self.backend_manager.get_her_v2_configuration().provider
+            profile = runtime_model_selection.her_v3_main_profile(self)
+            return str(getattr(profile, "engine", "") or "") or None
         return None
 
     def reload_post_turn_observers(self) -> None:
@@ -7190,11 +7194,10 @@ class FlexibleAgentRuntime:
                 f"<code>{html.escape(provider)}</code>"
             )
         if self.config.active_backend == HER_V2_ENGINE:
-            selected = self.backend_manager.get_her_v2_configuration()
             facts.extend(
                 [
-                    f"<b>Quick</b> · <code>{html.escape(selected.fast_model)}</code>",
-                    f"<b>Pro</b> · <code>{html.escape(selected.pro_model)}</code>",
+                    f"<b>{html.escape(ui_language.tr('common.model'))}</b> · "
+                    f"<code>{html.escape(self.get_current_model())}</code>",
                 ]
             )
         else:
@@ -7206,7 +7209,7 @@ class FlexibleAgentRuntime:
             from orchestrator.her_v2.models import effort_display_label
 
             current_display = effort_display_label(current)
-            title = "HER execution mode"
+            title = ui_language.tr("menu.effort.her_title")
             action = ui_language.tr("menu.effort.her_action")
         else:
             current_display = current
@@ -7223,7 +7226,7 @@ class FlexibleAgentRuntime:
 
     def _build_model_configuration_summary(self) -> str:
         if self.config.active_backend == HER_V2_ENGINE:
-            return runtime_model_selection.her_v2_model_menu_text(self)
+            return runtime_model_selection.her_v3_model_menu_text(self)
         effort = self._get_current_effort() if self._get_available_efforts() else None
         lines = [
             card_title("✅", "Model configuration"),
@@ -7449,10 +7452,9 @@ class FlexibleAgentRuntime:
         else:
             consequence = ui_language.tr("menu.effort.standard_effect_direct")
         if self.config.active_backend == HER_V2_ENGINE:
-            selected = self.backend_manager.get_her_v2_configuration()
             effort_facts = [
-                f"<b>Quick</b> · <code>{html.escape(selected.fast_model)}</code>",
-                f"<b>Pro</b> · <code>{html.escape(selected.pro_model)}</code>",
+                f"<b>{html.escape(ui_language.tr('common.model'))}</b> · "
+                f"<code>{html.escape(self.get_current_model())}</code>",
             ]
         else:
             effort_facts = [
@@ -7462,7 +7464,7 @@ class FlexibleAgentRuntime:
         if self.config.active_backend == HER_V2_ENGINE:
             from orchestrator.her_v2.models import effort_display_label
 
-            effort_title = "HER execution mode"
+            effort_title = ui_language.tr("menu.effort.her_title")
             current_display = effort_display_label(current_effort)
         else:
             effort_title = "Model effort"

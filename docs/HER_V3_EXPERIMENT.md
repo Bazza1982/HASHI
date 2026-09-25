@@ -6,12 +6,13 @@ This experiment is isolated on HASHI3 branch `experiment/her-v3-hashi3`, based o
 the current `main` at `6a36caf5`. It carries only the HER v3 engine/harness
 change from `exp-herv3`; the branch's earlier JEV style experiment and unrelated
 changes are excluded. HASHI1, HASHI2, HASHI4, GitHub `main`, and the running
-HASHI3 Worker are unchanged. Source checks do not prove live adoption.
+HASHI3 Worker were unchanged when this branch was staged. Source checks do not
+prove live adoption.
 
 The 2026-09-25 approval covered this HASHI3-only transplant and continued
-testing, not a merge into `main` or a restart of the running Worker. The
-implementation is local to this experimental branch. Offline verification is
-recorded below; live verification remains pending.
+testing through a live HER v3 run, not a merge into `main`. The implementation
+is local to this experimental branch. Offline and live verification are
+recorded separately below.
 
 HER v3 deliberately removes mandatory cognitive orchestration from the foreground path.
 The model owns reasoning, planning, adaptation and verification inside one continuous
@@ -50,6 +51,12 @@ backend/session migration is required. New configurations may use:
 }
 ```
 
+`/model` and `/provider` show the effective `main` target, rather than the
+retired Quick/Pro route editor. This experimental menu is read-only: change the
+main target in local configuration. The Frontend presentation status reports
+`her_v3.main`, while the backend ID remains `her-v2` for stored compatibility.
+Old route buttons are rejected rather than allowed to change ignored settings.
+
 `/effort` is model reasoning only. The accepted HER wire values are `none`, `low`,
 `medium`, `high`, `xhigh`, and `max`; provider adapters map them to the actual API
 capability. For example DeepSeek currently reduces intermediate values to its supported
@@ -85,14 +92,15 @@ of this HASHI3 engine transplant.
 
 ## Local verification and next testing
 
-The HER adapter, core, and model-catalogue assertions have been updated for
-the single main-model/tool loop; assertions for removed foreground stages and
-two tests of dormant v2 effort policy were retired. A fake-provider fixed-Session
-PCM path and HER v3 contract tests pass. The full offline suite passed on
-HASHI3 with `python -I -m pytest -q --tb=short`: 708 passed, 1 skipped.
-The isolated Python invocation matches the isolated child used by the runtime
-dependency check.
-These checks validate source behaviour, not a running Worker or real provider.
+The HER adapter, core gate, and model-catalogue assertions were updated for
+the single main-model/tool loop. A fake-provider fixed-Session PCM path and
+HER v3 contract tests pass. The earlier `python -I -m pytest -q --tb=short`
+result (708 passed, 1 skipped) was the **curated Core gate**, not the full
+offline product suite. Explicit old HER v2 runtime tests still fail because
+they expect removed Triage/Planning/Quick/Pro stages; they are not evidence of
+HER v3 correctness. Focused HER v3 presentation, Frontend, command, locale,
+adapter, and contract tests pass. These source checks do not establish a live
+Worker or real-provider run.
 
 Before merging or adopting anywhere, test real providers on an isolated HASHI3
 experimental runtime: fixed Session PCM deltas, model/tool continuity,

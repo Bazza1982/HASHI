@@ -224,6 +224,24 @@ def _her_v2_edit_configuration(runtime):
     return runtime.backend_manager.get_her_v2_edit_configuration()
 
 
+def her_v3_main_profile(runtime):
+    """Read the model actually selected by the active HER v3 adapter."""
+
+    backend = getattr(runtime.backend_manager, "current_backend", None)
+    config = getattr(backend, "_v2_config", None)
+    profiles = getattr(config, "profiles", None) or {}
+    return profiles.get("main")
+
+
+def her_v3_model_menu_text(runtime) -> str:
+    profile = her_v3_main_profile(runtime)
+    return runtime_menu_views.her_v3_model_menu_text(
+        provider=str(getattr(profile, "engine", "") or "unavailable"),
+        model=str(getattr(profile, "model", "") or "unavailable"),
+        effort=str(runtime._get_current_effort() or "n/a"),
+    )
+
+
 def backend_keyboard(runtime) -> InlineKeyboardMarkup:
     current = runtime.config.active_backend
     buttons = []
@@ -1205,6 +1223,9 @@ def set_backend_model(runtime, engine: str, requested: str) -> None:
 async def cmd_provider(runtime, update, context: Any) -> None:
     if not runtime._is_authorized_user(update.effective_user.id):
         return
+    if runtime.config.active_backend == HER_V2_ENGINE:
+        await _cmd_her_v3_model(runtime, update, list(context.args or []))
+        return
     if runtime.config.active_backend != HER_V2_ENGINE:
         await runtime._reply_text(
             update,
@@ -1543,6 +1564,18 @@ async def _cmd_her_v2_model(runtime, update, args: list[str]) -> None:
     )
 
 
+async def _cmd_her_v3_model(runtime, update, args: list[str]) -> None:
+    if args:
+        await runtime._reply_text(update, ui_language.tr("menu.her_v3.read_only"))
+        return
+    await runtime._reply_text(
+        update,
+        her_v3_model_menu_text(runtime),
+        parse_mode="HTML",
+        reply_markup=None,
+    )
+
+
 async def cmd_model(runtime, update, context: Any) -> None:
     if not runtime._is_authorized_user(update.effective_user.id):
         return
@@ -1568,7 +1601,7 @@ async def cmd_model(runtime, update, context: Any) -> None:
         return
 
     if runtime.config.active_backend == HER_V2_ENGINE:
-        await _cmd_her_v2_model(runtime, update, list(context.args or []))
+        await _cmd_her_v3_model(runtime, update, list(context.args or []))
         return
 
     current_model = runtime.backend_manager.current_backend.config.model
@@ -1628,6 +1661,26 @@ async def callback_model(runtime, update, context: Any) -> None:
     if not runtime._is_authorized_user(query.from_user.id):
         return
     data = query.data
+    if getattr(runtime.config, "active_backend", None) == HER_V2_ENGINE and (
+        data.startswith(
+            (
+                "her_adv",
+                "her_advanced",
+                "her_execution",
+                "her_provider",
+                "her_model",
+                "her_route",
+                "her_reasoning",
+                "her_target",
+            )
+        )
+        or data == "her_routes"
+    ):
+        await query.answer(
+            ui_language.tr("menu.her_v3.old_controls_retired"),
+            show_alert=True,
+        )
+        return
     her_v2_control = data.startswith(
         (
             "her_adv",
@@ -2325,9 +2378,9 @@ async def callback_model(runtime, update, context: Any) -> None:
         elif data == "model_menu":
             if runtime.config.active_backend == HER_V2_ENGINE:
                 await query.edit_message_text(
-                    her_v2_model_menu_text(runtime),
+                    her_v3_model_menu_text(runtime),
                     parse_mode="HTML",
-                    reply_markup=her_v2_model_keyboard(runtime),
+                    reply_markup=None,
                 )
                 await query.answer()
                 return
