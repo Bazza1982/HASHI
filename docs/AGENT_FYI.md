@@ -116,7 +116,9 @@ based on current `main`; it is not the active `main` engine or a live Worker
 adoption. Its foreground path uses one main-model/tool loop, keeps PCM and
 delivery ownership, and leaves optional JEV Agent Companion disabled by
 default. See [HER v3 experiment](HER_V3_EXPERIMENT.md). Do not treat this note
-as permission to merge, deploy, or change another instance.
+as permission to merge, deploy, or change another instance. The branch's
+single-loop assertions and full isolated offline suite pass (708 passed,
+1 skipped); real-provider and live Worker adoption remain unverified.
 
 Engine and Model Provider differ. HER v2 modes are Direct (`zero`), Strategic
 (`low`), and Planned (`medium`); Fixed/Flex and Memory+ are independent.

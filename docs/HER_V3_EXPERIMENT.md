@@ -8,6 +8,11 @@ change from `exp-herv3`; the branch's earlier JEV style experiment and unrelated
 changes are excluded. HASHI1, HASHI2, HASHI4, GitHub `main`, and the running
 HASHI3 Worker are unchanged. Source checks do not prove live adoption.
 
+The 2026-09-25 approval covered this HASHI3-only transplant and continued
+testing, not a merge into `main` or a restart of the running Worker. The
+implementation is local to this experimental branch. Offline verification is
+recorded below; live verification remains pending.
+
 HER v3 deliberately removes mandatory cognitive orchestration from the foreground path.
 The model owns reasoning, planning, adaptation and verification inside one continuous
 model/tool conversation. HASHI continues to own PCM, Session continuity, tools,
@@ -78,11 +83,19 @@ Habit/Meditation reflection remains a post-delivery background learning path.
 The separate JEV style-finalisation experiment from `exp-herv2j` is not part
 of this HASHI3 engine transplant.
 
-## Local testing priority
+## Local verification and next testing
 
-Compile/import, HER v3 contract tests, and a fake-provider fixed-Session PCM
-path have passed. Existing HER v2 tests that assert removed staged routing still
-need migration or replacement; they are not evidence of HER v3 behaviour.
-Before merging anywhere, test real providers locally: fixed Session PCM deltas,
-model/tool continuity, `/effort`, Strategy on/off, AC 5/10-minute behaviour,
-commentary cadence, long-running managed processes and Habit Reflection.
+The HER adapter, core, and model-catalogue assertions have been updated for
+the single main-model/tool loop; assertions for removed foreground stages and
+two tests of dormant v2 effort policy were retired. A fake-provider fixed-Session
+PCM path and HER v3 contract tests pass. The full offline suite passed on
+HASHI3 with `python -I -m pytest -q --tb=short`: 708 passed, 1 skipped.
+The isolated Python invocation matches the isolated child used by the runtime
+dependency check.
+These checks validate source behaviour, not a running Worker or real provider.
+
+Before merging or adopting anywhere, test real providers on an isolated HASHI3
+experimental runtime: fixed Session PCM deltas, model/tool continuity,
+`/effort`, Strategy on/off, AC 5/10-minute behaviour, commentary cadence,
+long-running managed processes, and Habit Reflection. Do not infer that a hot
+reboot of the existing HASHI3 Worker will load this separate worktree.

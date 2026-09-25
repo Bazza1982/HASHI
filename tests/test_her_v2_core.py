@@ -27,7 +27,7 @@ from orchestrator.her_v2.models import (
     effort_display_label,
     parse_effort,
 )
-from orchestrator.her_v2.policy import resolve_policy, terminal_for_execution
+from orchestrator.her_v2.policy import terminal_for_execution
 from orchestrator.her_v2.progress import ProgressTracker
 from orchestrator.her_v2.retry import ProviderRetryPolicy
 from orchestrator.her_v2.structured import extract_json_object
@@ -210,54 +210,16 @@ def test_legacy_terminal_ledgers_load_into_current_plan_b_states(legacy, current
     assert ledger.terminal_reason == "legacy_terminal"
 
 
-def test_effort_is_orchestration_policy_not_provider_reasoning():
-    cases = [
-        (Effort.ZERO, True, False, False, False, False, False, 0),
-        (Effort.LOW, False, False, False, False, True, False, 0),
-        (Effort.MEDIUM, False, True, False, False, False, True, 0),
-        (Effort.HIGH, False, True, True, False, True, False, 0),
-        (Effort.XHIGH, False, True, True, True, True, False, 1),
-        (Effort.MAX, False, True, True, True, True, False, 1),
-    ]
-    for (
-        effort,
-        direct,
-        planning,
-        replanning,
-        review,
-        strategy_tools,
-        planning_tools,
-        reviews,
-    ) in cases:
-        policy = resolve_policy(effort, review_limit=reviews)
-        assert (
-            policy.direct,
-            policy.planning,
-            policy.replanning,
-            policy.review,
-        ) == (
-            direct,
-            planning,
-            replanning,
-            review,
-        ), effort
-        assert policy.strategy_tools is strategy_tools, effort
-        assert policy.planning_tools is planning_tools, effort
-        assert not hasattr(policy, "max_replans"), effort
-        assert not hasattr(policy, "assurance"), effort
-        assert not hasattr(policy, "max_verifications"), effort
-        assert policy.max_reviews == reviews, effort
-
-
-def test_her_execution_mode_labels_and_aliases_keep_canonical_wire_values():
+def test_her_model_effort_labels_and_legacy_aliases_keep_canonical_wire_values():
     assert [effort_display_label(item) for item in Effort] == [
-        "Direct (zero)",
-        "Strategic (low)",
-        "Planned (medium)",
-        "Adaptive (high)",
-        "Reviewed (xhigh)",
-        "Assured (max)",
+        "None (zero)",
+        "Low (low)",
+        "Medium (medium)",
+        "High (high)",
+        "Extra High (xhigh)",
+        "Maximum (max)",
     ]
+    assert parse_effort("none") is Effort.ZERO
     assert parse_effort("direct") is Effort.ZERO
     assert parse_effort("zero orchestration") is Effort.ZERO
     assert parse_effort("reviewed") is Effort.XHIGH
@@ -266,14 +228,7 @@ def test_her_execution_mode_labels_and_aliases_keep_canonical_wire_values():
     assert parse_effort("Fast path") is Effort.LOW
 
 
-def test_max_review_is_enabled_without_a_verification_policy():
-    policy = resolve_policy(Effort.MAX, review_limit=1)
-
-    assert policy.review is True
-    assert not hasattr(policy, "assurance")
-
-
-def test_direct_route_uses_quick_model_and_high_reasoning_by_default():
+def test_legacy_routes_collapse_to_one_main_model():
     config = HERv2Config.from_mapping(
         {
             "profiles": _profiles(),
@@ -286,11 +241,12 @@ def test_direct_route_uses_quick_model_and_high_reasoning_by_default():
 
     direct = config.profile_for(Stage.DIRECT)
 
-    assert direct.model == "quick-model"
-    assert direct.reasoning == "high"
+    assert direct.model == "pro-model"
+    assert direct.reasoning == "provider-setting"
+    assert config.profile_for(Stage.EXECUTION).model == direct.model
     assert config.direct_strategy_self_selection is False
-    assert config.strategy_tools_enabled is True
-    assert config.planning_tools_enabled is True
+    assert config.strategy_tools_enabled is False
+    assert config.planning_tools_enabled is False
     assert not hasattr(config, "cognitive_control_enabled")
 
 
@@ -313,7 +269,7 @@ def test_direct_strategy_self_selection_is_an_explicit_boolean_experiment():
         )
 
 
-def test_strategy_and_planning_tool_access_are_explicit_boolean_controls():
+def test_retired_strategy_and_planning_tool_controls_cannot_reenable_stages():
     config = HERv2Config.from_mapping(
         {
             "profiles": _profiles(),
@@ -323,7 +279,7 @@ def test_strategy_and_planning_tool_access_are_explicit_boolean_controls():
     )
 
     assert config.strategy_tools_enabled is False
-    assert config.planning_tools_enabled is True
+    assert config.planning_tools_enabled is False
 
     for field in ("strategy_tools_enabled", "planning_tools_enabled"):
         with pytest.raises(HERv2ConfigurationError):
@@ -344,7 +300,7 @@ def test_cognitive_control_switch_is_removed_and_rejected(value):
         )
 
 
-def test_direct_route_reasoning_can_be_explicitly_overridden_but_model_stays_quick():
+def test_explicit_main_model_is_not_overridden_by_legacy_direct_route():
     config = HERv2Config.from_mapping(
         {
             "profiles": _profiles(),
@@ -354,22 +310,19 @@ def test_direct_route_reasoning_can_be_explicitly_overridden_but_model_stays_qui
             },
             "route_reasoning": {"direct": "xhigh"},
             "route_model_slots": {"direct": "fast"},
+            "main": {
+                "provider": "provider-api",
+                "model": "chosen-main",
+                "reasoning": "medium",
+            },
         }
     )
 
     direct = config.profile_for(Stage.DIRECT)
 
-    assert direct.model == "quick-model"
-    assert direct.reasoning == "xhigh"
-
-    with pytest.raises(HERv2ConfigurationError, match="always uses the Quick"):
-        HERv2Config.from_mapping(
-            {
-                "profiles": _profiles(),
-                "slot_models": {"fast": "quick-model", "pro": "pro-model"},
-                "route_model_slots": {"direct": "pro"},
-            }
-        )
+    assert direct.model == "chosen-main"
+    assert direct.reasoning == "medium"
+    assert config.profile_for(Stage.EXECUTION).model == direct.model
 
 
 def test_terminal_truth_table():
@@ -390,38 +343,31 @@ def test_terminal_truth_table():
 
 
 def test_provider_profiles_route_by_configuration_and_cannot_recurse_into_her():
-    config = HERv2Config.from_mapping({"profiles": _profiles()})
+    config = HERv2Config.from_mapping({
+        "profiles": _profiles(),
+        "auxiliary": {
+            "provider": "provider-api",
+            "model": "model-lightweight",
+            "reasoning": "low",
+        },
+    })
     assert config.shadow_mode is False
-    assert config.profile_for(Stage.TRIAGE).model == "model-triage"
+    assert config.profile_for(Stage.TRIAGE).model == "model-premium"
     assert config.profile_for(Stage.TRIAGE).reasoning == "provider-setting"
     meditation = config.profile_for(Stage.MEDITATION)
     premium = config.profile_for(Stage.EXECUTION)
-    assert meditation.name == "lightweight"
+    assert meditation.name == "auxiliary"
     assert meditation.engine == premium.engine
     assert meditation.model == "model-lightweight"
     assert meditation.model != premium.model
-    assert config.execution_profile_for(TriageClassification.SIMPLE_TASK).name == "lightweight"
-    configured = HERv2Config.from_mapping(
-        {
-            "profiles": _profiles(),
-            "stage_roles": {"meditation": "premium"},
-        }
-    )
-    assert configured.profile_for(Stage.MEDITATION).name == "premium"
+    assert config.execution_profile_for(TriageClassification.SIMPLE_TASK).name == "main"
     with pytest.raises(HERv2ConfigurationError, match="frozen rejected source"):
         config.profile_for(Stage.JSON_REPAIR)
-    with pytest.raises(HERv2ConfigurationError, match="internal specialist"):
-        HERv2Config.from_mapping(
-            {
-                "profiles": _profiles(),
-                "stage_roles": {"json_repair": "premium"},
-            }
-        )
     with pytest.raises(HERv2ConfigurationError, match="non-HER"):
         ProviderProfile("bad", "her-v2", "recursive")
 
 
-def test_stage_reasoning_override_is_provider_configuration_not_effort():
+def test_legacy_execution_reasoning_migrates_to_the_main_model():
     config = HERv2Config.from_mapping(
         {
             "profiles": {
@@ -454,19 +400,14 @@ def test_stage_reasoning_override_is_provider_configuration_not_effort():
         }
     )
 
-    assert config.profile_for(Stage.TRIAGE).reasoning == "low"
-    assert (
-        config.execution_profile_for(TriageClassification.SIMPLE_TASK).reasoning
-        == "xhigh"
-    )
-    assert config.profile_for(Stage.REVIEW).reasoning == "max"
-    replanning = config.profile_for(Stage.REPLANNING)
-    assert replanning.name == "premium"
-    assert replanning.reasoning == "high"
+    assert config.profile_for(Stage.DIRECT).reasoning == "xhigh"
+    assert config.profile_for(Stage.TRIAGE).reasoning == "xhigh"
+    assert config.profile_for(Stage.REVIEW).reasoning == "xhigh"
+    assert config.profile_for(Stage.REPLANNING).reasoning == "xhigh"
     assert Effort.HIGH.value == "high"
 
 
-def test_effective_routes_choose_model_slot_and_reasoning_independently():
+def test_legacy_route_variants_cannot_redirect_foreground_calls():
     config = HERv2Config.from_mapping(
         {
             "profiles": _profiles(),
@@ -493,44 +434,14 @@ def test_effective_routes_choose_model_slot_and_reasoning_independently():
         TriageClassification.HIGH_VOLUME_TASK
     )
 
-    assert planning.name == "premium"
-    assert planning.model == "quick-model"
-    assert planning.reasoning == "low"
-    assert simple.name == "lightweight"
+    assert planning.name == "main"
+    assert planning.model == "pro-model"
+    assert planning.reasoning == "provider-setting"
+    assert simple.name == "main"
     assert simple.model == "pro-model"
-    assert simple.reasoning == "max"
+    assert simple.reasoning == "provider-setting"
     assert complex_task.model == "pro-model"
-    assert high_volume.model == "quick-model"
-
-    with pytest.raises(HERv2ConfigurationError, match="invalid model slot"):
-        HERv2Config.from_mapping(
-            {
-                "profiles": _profiles(),
-                "route_model_slots": {"review": "inherit"},
-            }
-        )
-    with pytest.raises(HERv2ConfigurationError, match="undefined model slot"):
-        HERv2Config.from_mapping(
-            {
-                "profiles": _profiles(),
-                "route_model_slots": {"review": "fast"},
-            }
-        )
-
-    profiles_without_orchestrator = _profiles()
-    profiles_without_orchestrator.pop("orchestrator")
-    fallback = HERv2Config.from_mapping(
-        {
-            "profiles": profiles_without_orchestrator,
-            "slot_models": {"fast": "quick-model", "pro": "pro-model"},
-            "route_model_slots": {"execution_high_volume": "fast"},
-        }
-    )
-    high_volume_fallback = fallback.execution_profile_for(
-        TriageClassification.HIGH_VOLUME_TASK
-    )
-    assert high_volume_fallback.name == "premium"
-    assert high_volume_fallback.model == "quick-model"
+    assert high_volume.model == "pro-model"
 
 
 def test_safety_configuration_rejects_ambiguous_or_unsafe_values():

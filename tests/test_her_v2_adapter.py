@@ -274,6 +274,13 @@ class _DirectProvider:
 
     async def invoke(self, profile, request):
         self.requests.append((profile, request))
+        if request.stage is Stage.DIRECT:
+            return StageResponse(
+                text="Hello from HER v2.",
+                provider=profile.engine,
+                model=profile.model,
+                reasoning_trace=None,
+            )
         if request.stage is Stage.IMMEDIATE_RESPONSE:
             data = {"message": "Hello from HER v2."}
         elif request.stage is Stage.TRIAGE:
@@ -756,6 +763,13 @@ class _WorkAndMeditationProvider(_DirectProvider):
 
     async def invoke(self, profile, request):
         self.requests.append((profile, request))
+        if request.stage is Stage.DIRECT:
+            return StageResponse(
+                text="Verified and completed the requested work.",
+                provider=profile.engine,
+                model=profile.model,
+                reasoning_trace="trace:direct",
+            )
         strategy_payload = _strategy_payload("SIMPLE_TASK", request.goal)
         if self.strategy_commentary:
             strategy_payload["commentary"] = self.strategy_commentary
@@ -813,7 +827,7 @@ class _SideEffectFailureProvider(_DirectProvider):
             payload = {"message": "I have it."}
         elif request.stage is Stage.TRIAGE:
             payload = _strategy_payload("SIMPLE_TASK", request.goal)
-        elif request.stage is Stage.EXECUTION:
+        elif request.stage in {Stage.DIRECT, Stage.EXECUTION}:
             request.provider_activity_callback(
                 {
                     "kind": "shell_exec",
@@ -1017,9 +1031,7 @@ def test_public_her_alias_resolves_forward_and_claw_id_is_removed():
     assert "her" not in BACKEND_REGISTRY
     assert "claw-cli" not in BACKEND_REGISTRY
     assert BACKEND_REGISTRY["her-v2"]["efforts"] == [
-        "zero",
-        "low",
-        "medium",
+        "none", "low", "medium", "high", "xhigh", "max"
     ]
     assert BACKEND_REGISTRY["her-v2"]["secret_keys"] == []
 
@@ -1067,8 +1079,8 @@ async def test_adapter_direct_response_uses_final_lane_once(tmp_path):
     assert response.is_success is True
     assert response.text == "Hello from HER v2."
     assert response.stop_reason == "completed"
-    assert response.stream_metadata["her_v2"]["classification"] == "DIRECT_RESPONSE"
-    assert response.stream_metadata["her_v2"]["final_was_immediate"] is True
+    assert response.stream_metadata["her_v2"]["classification"] is None
+    assert [request.stage for _profile, request in provider.requests] == [Stage.DIRECT]
     final_events = [event for event in events if event.delivery_class == DELIVERY_FINAL]
     assert len(final_events) == 1
     assert final_events[0].summary == response.text
@@ -1081,6 +1093,7 @@ async def test_adapter_direct_response_uses_final_lane_once(tmp_path):
     delivery = next(row for row in audit_rows if row["event"] == "delivery_result")
     assert delivery["payload"] == {
         "kind": "final",
+        "provenance": "her_v3_single_loop",
         "accepted": True,
         "delivered": False,
         "disposition": "deferred_to_final_boundary",
@@ -1137,7 +1150,7 @@ async def test_adapter_zero_effort_is_one_direct_call_and_question_is_completed(
     assert response.stream_metadata["her_v2"]["effort"] == {
         "configured": "zero",
         "effective": "zero",
-        "reason": "agent_default",
+        "reason": "model_reasoning_effort",
     }
     assert len(provider.requests) == 1
     profile, request = provider.requests[0]
@@ -1145,13 +1158,13 @@ async def test_adapter_zero_effort_is_one_direct_call_and_question_is_completed(
     assert request.allow_tools is True
     assert request.allow_side_effects is True
     assert [item["id"] for item in request.context["skills_catalogue"]] == ["reports"]
-    assert profile.name == "lightweight"
-    assert profile.reasoning == "high"
+    assert profile.name == "main"
+    assert profile.reasoning == "off"
     await adapter.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_scheduler_direct_policy_is_request_scoped_and_preserves_instruction(
+async def test_scheduler_preserves_selected_model_effort_and_instruction(
     tmp_path,
 ):
     provider = _EffortPolicyProvider()
@@ -1185,17 +1198,16 @@ async def test_scheduler_direct_policy_is_request_scoped_and_preserves_instructi
     scheduled_profile, scheduled_request = provider.requests[0]
     assert scheduled_request.goal == original_instruction
     assert scheduled_request.classification is None
-    assert scheduled.stream_metadata["her_v2"]["execution_route"] == "DIRECT"
     assert scheduled.stream_metadata["her_v2"]["effort"] == {
         "configured": "max",
-        "effective": "zero",
-        "reason": "scheduled_direct_policy",
+        "effective": "max",
+        "reason": "model_reasoning_effort",
         "scheduler_kind": "cron",
         "scheduler_task_id": "nightly-report",
         "scheduler_trigger": "scheduled",
     }
-    assert scheduled_profile.model == "configured/lightweight"
-    assert scheduled_profile.reasoning == "high"
+    assert scheduled_profile.model == "configured/premium"
+    assert scheduled_profile.reasoning == "max"
 
     provider.requests.clear()
     runtime_context.current_request_meta = {
@@ -1209,20 +1221,15 @@ async def test_scheduler_direct_policy_is_request_scoped_and_preserves_instructi
 
     assert ordinary.is_success is True
     ordinary_stages = [request.stage for _profile, request in provider.requests]
-    assert Stage.PLANNING in ordinary_stages
-    assert Stage.REVIEW in ordinary_stages
+    assert ordinary_stages == [Stage.DIRECT]
     assert ordinary.stream_metadata["her_v2"]["effort"] == {
         "configured": "max",
         "effective": "max",
-        "reason": "agent_default",
+        "reason": "model_reasoning_effort",
     }
-    ordinary_execution_profile = next(
-        profile
-        for profile, request in provider.requests
-        if request.stage is Stage.EXECUTION
-    )
-    assert ordinary_execution_profile.model == "configured/lightweight"
-    assert ordinary_execution_profile.reasoning == "provider-lightweight"
+    ordinary_profile = provider.requests[0][0]
+    assert ordinary_profile.model == "configured/premium"
+    assert ordinary_profile.reasoning == "max"
     assert adapter.effort == "max"
     await adapter.shutdown()
 
@@ -1267,8 +1274,8 @@ async def test_hchat_policy_uses_one_direct_call_without_early_delivery(
     assert provider.requests[0][1].allow_side_effects is True
     assert response.stream_metadata["her_v2"]["effort"] == {
         "configured": "max",
-        "effective": "zero",
-        "reason": "hchat_direct_policy",
+        "effective": "max",
+        "reason": "model_reasoning_effort",
     }
     assert not any(event.delivery_class == DELIVERY_USER_COMMENTARY for event in events)
     assert [
@@ -1337,12 +1344,20 @@ async def test_adapter_correlates_ordinary_transport_receipt_with_stable_deliver
 
 
 @pytest.mark.asyncio
-async def test_adapter_accepts_primary_execution_natural_language_without_finalisation(
+async def test_adapter_accepts_main_model_natural_language_without_finalisation(
     tmp_path,
 ):
     class _MalformedExecutionProvider(_DirectProvider):
         async def invoke(self, profile, request):
             self.requests.append((profile, request))
+            if request.stage is Stage.DIRECT:
+                return StageResponse(
+                    text="execution reply without valid JSON",
+                    reasoning_trace="main model trace",
+                    provider=profile.engine,
+                    model=profile.model,
+                    evidence_refs=("hashi-tools:uncertain",),
+                )
             if request.stage is Stage.IMMEDIATE_RESPONSE:
                 payload = {"message": "I have it."}
             elif request.stage is Stage.TRIAGE:
@@ -1387,14 +1402,7 @@ async def test_adapter_accepts_primary_execution_natural_language_without_finali
     assert response.error is None
     assert response.stream_metadata["her_v2"]["terminal_state"] == "COMPLETED"
     assert response.text == "execution reply without valid JSON"
-    assert (
-        sum(request.stage is Stage.EXECUTION for _profile, request in provider.requests)
-        == 1
-    )
-    assert all(
-        request.stage is not Stage.FINALISATION
-        for _profile, request in provider.requests
-    )
+    assert [request.stage for _profile, request in provider.requests] == [Stage.DIRECT]
 
 
 @pytest.mark.asyncio
@@ -1448,45 +1456,10 @@ async def test_adapter_exposes_primary_failure_recovery_decision_and_cleanup(tmp
         row
         for row in rows
         if row["event"] == "stage_attempt_failed"
-        and row["stage"] == Stage.EXECUTION.value
+        and row["stage"] == Stage.DIRECT.value
     )
     assert failed["payload"]["error_code"] == primary_code
     assert failed["payload"]["recovery_decision"]["code"] == recovery_code
-
-
-@pytest.mark.asyncio
-async def test_adapter_delivers_stage_authored_strategy_commentary_without_repackaging(
-    tmp_path,
-):
-    strategy_commentary = (
-        "Captain, the verified strategy is ready; execution comes next."
-    )
-    provider = _WorkAndMeditationProvider(
-        strategy_commentary=strategy_commentary
-    )
-    packager = _StaticPersonaPackager()
-    config = _agent_config(tmp_path, effort="low")
-    setattr(config, "_her_v2_stage_provider", provider)
-    setattr(config, "_her_v2_persona_packager", packager)
-    adapter = HERv2Adapter(config, _global_config(tmp_path))
-    events = []
-
-    async def capture(event):
-        events.append(event)
-
-    assert await adapter.initialize() is True
-    response = await adapter.generate_response(
-        "Complete and verify it", "request-commentary-events", on_stream_event=capture
-    )
-
-    assert response.is_success is True
-    commentary = [event for event in events if event.kind == KIND_COMMENTARY]
-    assert [(event.phase, event.provenance) for event in commentary] == [
-        ("triage", "stage_authored_persona"),
-    ]
-    assert commentary[0].detail == "persona_packaging_fallback=false"
-    assert commentary[0].summary == strategy_commentary
-    assert packager.commentaries == []
 
 
 @pytest.mark.asyncio
@@ -1544,7 +1517,7 @@ async def test_adapter_binds_provider_commentary_to_persona_pipeline(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_adapter_uses_combined_finalisation_without_required_persona_renderer(
+async def test_adapter_delivers_main_model_final_without_required_persona_renderer(
     tmp_path,
 ):
     provider = _WorkAndMeditationProvider()
@@ -1571,15 +1544,15 @@ async def test_adapter_uses_combined_finalisation_without_required_persona_rende
     final_events = [event for event in events if event.delivery_class == DELIVERY_FINAL]
     assert len(final_events) == 1
     assert final_events[0].summary == response.text
-    assert final_events[0].provenance == "primary_execution_natural_language"
+    assert final_events[0].provenance == "her_v3_single_loop"
     assert final_events[0].detail == (
-        "execution_workflow_completed=true; finalisation_invoked=false"
+        "single_main_loop=true; planner=false; replanner=false; reviewer=false"
     )
     assert response.stream_metadata["her_v2"]["delivery"]["delivery_id"]
 
 
 @pytest.mark.asyncio
-async def test_adapter_marks_direct_answer_delivered_when_immediate_lane_is_accepted(
+async def test_adapter_never_sends_provisional_answer_in_single_loop(
     tmp_path,
 ):
     provider = _ImmediateFirstDirectProvider()
@@ -1600,18 +1573,13 @@ async def test_adapter_marks_direct_answer_delivered_when_immediate_lane_is_acce
     )
 
     assert response.is_success is True
-    assert response.stream_metadata["her_v2"]["final_already_delivered"] is True
+    assert response.stream_metadata["her_v2"]["final_already_delivered"] is False
     user_events = [
         event for event in events if event.delivery_class != DELIVERY_TECHNICAL
     ]
-    assert [event.delivery_class for event in user_events] == [
-        DELIVERY_USER_COMMENTARY,
-        DELIVERY_INTERNAL,
-    ]
+    assert [event.delivery_class for event in user_events] == [DELIVERY_FINAL]
     assert user_events[0].summary == response.text
-    assert user_events[1].kind == KIND_INITIAL_RESOLUTION
-    assert user_events[1].resolution == "final"
-    assert user_events[1].target_event_id == user_events[0].event_id
+    assert all(event.kind != KIND_INITIAL_RESOLUTION for event in user_events)
     assert events[-1].metadata["lifecycle_state"] == "COMPLETED"
 
 
@@ -1842,6 +1810,11 @@ async def test_adapter_runs_durable_meditation_after_completed_turn(tmp_path):
     provider = _WorkAndMeditationProvider()
     raw = {
         "profiles": _profiles(),
+        "auxiliary": {
+            "provider": "openrouter-api",
+            "model": "configured/lightweight",
+            "reasoning": "provider-lightweight",
+        },
         "meditation_enabled": True,
         "shadow_mode": False,
     }
@@ -1878,11 +1851,11 @@ async def test_adapter_runs_durable_meditation_after_completed_turn(tmp_path):
         for profile, request in provider.requests
         if request.stage is Stage.MEDITATION
     )
-    premium_profile = adapter._v2_config.profiles["premium"]
-    assert meditation_profile.name == "lightweight"
-    assert meditation_profile.engine == premium_profile.engine
+    main_profile = adapter._v2_config.profiles["main"]
+    assert meditation_profile.name == "auxiliary"
+    assert meditation_profile.engine == main_profile.engine
     assert meditation_profile.model == "configured/lightweight"
-    assert meditation_profile.model != premium_profile.model
+    assert meditation_profile.model != main_profile.model
     assert meditation_request.allow_tools is False
     assert meditation_request.allow_side_effects is False
     meditation_input = json.loads(meditation_request.context["meditation_input"])
@@ -1893,7 +1866,7 @@ async def test_adapter_runs_durable_meditation_after_completed_turn(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_request_scoped_ineligibility_disables_planning_and_meditation(
+async def test_request_scoped_ineligibility_disables_habits_and_meditation(
     tmp_path, monkeypatch
 ):
     provider = _PlannedWorkAndMeditationProvider()
@@ -1919,13 +1892,8 @@ async def test_request_scoped_ineligibility_disables_planning_and_meditation(
     await asyncio.sleep(0)
 
     assert response.is_success is True
-    planning_request = next(
-        request
-        for _profile, request in provider.requests
-        if request.stage is Stage.PLANNING
-    )
-    assert "habits" not in planning_request.context
-    assert "habits_are_advisory" not in planning_request.context
+    assert [request.stage for _profile, request in provider.requests] == [Stage.DIRECT]
+    assert provider.requests[0][1].context["habit_catalogue"] == []
     assert not any(
         request.stage is Stage.MEDITATION for _profile, request in provider.requests
     )
