@@ -118,8 +118,11 @@ ownership, and leaves optional JEV Agent Companion disabled by default.
 The stored Engine ID remains `her-v2`; `/model` and `/provider` show the real
 single `main` target and `/effort` changes model reasoning, not workflow.
 See [HER v3 experiment](HER_V3_EXPERIMENT.md). The 708-pass result was the
-curated Core gate, not the full product suite. Live Worker and real-provider
-adoption require separate verification; this note is not merge permission.
+curated Core gate, not the full product suite. One HASHI3 Agent (`phd_1`) has
+now passed real-provider and read-only tool-loop Runs after a successful
+Agent-scoped hot adoption. The shared backend catalogue still shows old HER v2
+choices until a separately scoped shared-Function replacement. This note is
+not merge permission.
 
 Engine and Model Provider differ. In this experiment HER v3 has one main model
 at every effort level; effort controls provider reasoning, not Direct/Strategic/

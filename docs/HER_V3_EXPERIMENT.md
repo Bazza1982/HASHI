@@ -6,8 +6,8 @@ This experiment is isolated on HASHI3 branch `experiment/her-v3-hashi3`, based o
 the current `main` at `6a36caf5`. It carries only the HER v3 engine/harness
 change from `exp-herv3`; the branch's earlier JEV style experiment and unrelated
 changes are excluded. HASHI1, HASHI2, HASHI4, GitHub `main`, and the running
-HASHI3 Worker were unchanged when this branch was staged. Source checks do not
-prove live adoption.
+HASHI3 Worker were unchanged when this branch was staged. Source checks alone
+do not prove live adoption; the later scoped adoption is recorded below.
 
 The 2026-09-25 approval covered this HASHI3-only transplant and continued
 testing through a live HER v3 run, not a merge into `main`. The implementation
@@ -99,11 +99,41 @@ result (708 passed, 1 skipped) was the **curated Core gate**, not the full
 offline product suite. Explicit old HER v2 runtime tests still fail because
 they expect removed Triage/Planning/Quick/Pro stages; they are not evidence of
 HER v3 correctness. Focused HER v3 presentation, Frontend, command, locale,
-adapter, and contract tests pass. These source checks do not establish a live
-Worker or real-provider run.
+adapter, and contract tests pass. These source checks alone do not establish a
+live Worker or real-provider run.
 
-Before merging or adopting anywhere, test real providers on an isolated HASHI3
-experimental runtime: fixed Session PCM deltas, model/tool continuity,
+## HASHI3 live verification (2026-09-25)
+
+The HASHI3 root checkout now runs local branch `experiment/her-v3-live-hashi3`;
+the adopted Worker source was `ba5eab45`. `main` remains at `6a36caf5`, and
+GitHub `main` was not changed.
+After all nine HASHI3 Agents were observed idle, only `phd_1` received an
+Agent-scoped hot `/reboot min` (receipt `22df43de1dc042b9834390c29705448a`,
+status `succeeded`). The adopted Worker presents `her_v3.main` as
+`hashi-api / gpt-6-astra`; `/model` and `/effort` show the single main target and
+six reasoning choices. Its pre-existing `low` effort was not changed.
+
+Two real-provider Runs through the HASHI3 Backend API completed without
+Telegram mirroring. Request `req-phd_1-2026-09-25_175648-0001` returned the
+requested `HER_V3_LIVE_OK`; its final activity had
+`provenance=her_v3_single_loop` and `planner=false; replanner=false;
+reviewer=false`. Request `req-phd_1-2026-09-25_175648-0003` called the
+read-only PowerShell UTC-time tool, received `status=success`, and then
+answered using that result with the same HER v3 provenance. An intervening
+tool Run failed because Windows PowerShell did not support `Get-Date -AsUTC`;
+the Agent reported that error honestly, and the corrected command succeeded.
+
+This proves the real main-model/tool loop on one HASHI3 Agent. It is not the
+full external-frontend acceptance suite, nor proof for all providers, effort
+levels, Strategy Cards, Agent Companion, long-running processes, or Habit
+Reflection. The shared `/api/backends/catalogue` process still serves its old
+HER row (`HER`, three v2 efforts) because an Agent-scoped reboot does not
+replace shared Functions. Full Workbench catalogue adoption would require a
+separate broad HASHI3 shared-Function replacement; do not imply that it has
+already happened.
+
+Before merging or adopting elsewhere, test more real-provider cases on this
+HASHI3 experiment: fixed Session PCM deltas, model/tool continuity,
 `/effort`, Strategy on/off, AC 5/10-minute behaviour, commentary cadence,
-long-running managed processes, and Habit Reflection. Do not infer that a hot
-reboot of the existing HASHI3 Worker will load this separate worktree.
+long-running managed processes, and Habit Reflection. An Agent-scoped hot
+reboot adopts source from the HASHI3 root checkout, not a separate worktree.
