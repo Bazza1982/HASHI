@@ -107,6 +107,9 @@ by the reboot receipt ID and start/final kind. Failures log safe codes and
 retry delays; Bot credentials and raw transport exceptions stay out of logs.
 When its Telegram ingress is initialized, an operational notice reuses that
 Bot; opening a fresh Bot also performs `getMe` and can fail during recovery.
+The default Telegram command menu sync retries independently of the connected
+Worker; a menu timeout must not put the Agent into local-only mode. Notice
+credential lookup uses the Agent name when no token key is configured.
 
 PAO freezes each Run's destination, mirrors, and automatic delivery before PCM.
 Queue acceptance is not delivery: `sent` needs a Connector receipt; failure

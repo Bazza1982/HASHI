@@ -393,6 +393,11 @@ new status request may safely render the same text with newly issued actions.
 Native callback wrappers preserve the Connector-requested UI locale. Native
 Telegram text also retains `telegram` as its admission source so its automatic
 reply destination cannot be lost by generic text normalization.
+Telegram command-menu registration is presentation setup after Bot connection.
+A timeout or rate limit while setting the default menu must not demote a
+connected Agent to local-only mode. The Worker records the failed stage and
+retries menu registration independently until success or a permanent rejection;
+shutdown cancels the retry task.
 
 Final replies from standard non-Telegram Runs publish enabled meter and HER
 presentations after the final Message through the same Session Event boundary.

@@ -232,3 +232,14 @@ post-reboot moment while preserving the existing fallback and persisted retry
 contract. The attempt log records which transport was used. A focused test
 failed before this correction because the notice opened a second Bot despite
 an active ingress, then passed after the correction.
+
+The next HASHI1 adoption exposed the startup failure behind the initiating
+Bot's absence. The Lily Worker log showed `getMe` returning 200 on all three
+attempts, followed each time by a five-second timeout while setting the
+default command menu. The Worker then reported `local` and had no Telegram
+ingress, even though its Agent remained otherwise ready. Command-menu setup
+now retries independently after Bot startup, so a transient menu timeout
+cannot disable the Telegram transport. The same diagnosis found that notice
+credential lookup did not apply the configuration loader's default token key
+(the Agent name) when an ingress was absent. It now uses that default before
+considering another Bot. Both defects have focused red/green cases.

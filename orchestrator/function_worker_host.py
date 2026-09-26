@@ -46,6 +46,8 @@ logger = logging.getLogger("BridgeU.FunctionWorker")
 WORKER_PREPARE_TIMEOUT_SECONDS = 180.0
 WORKER_DRAIN_TIMEOUT_SECONDS = 120.0
 LOCAL_MODE_TOKEN = "WORKBENCH_ONLY_NO_TOKEN"
+MENU_SYNC_RETRY_INITIAL_SECONDS = 5.0
+MENU_SYNC_RETRY_MAX_SECONDS = 60.0
 
 
 class FunctionWorkerStateError(RuntimeError):
@@ -814,6 +816,7 @@ class FunctionWorkerHost:
         self.stop_event = asyncio.Event()
         self.audio_transcript_tasks: set[asyncio.Task[Any]] = set()
         self.legacy_reboot_bridge_task: asyncio.Task[Any] | None = None
+        self.command_menu_task: asyncio.Task[Any] | None = None
         self.generation_finder: _GenerationModuleFinder | None = None
 
     async def prepare(self) -> None:
@@ -1096,6 +1099,50 @@ class FunctionWorkerHost:
                 exc,
             )
 
+    async def _sync_telegram_command_menus(self, runtime: Any) -> None:
+        """Retry presentation setup without demoting a connected Telegram Worker."""
+
+        from orchestrator.runtime_command_binding import (
+            register_flexible_bot_commands,
+        )
+        from orchestrator.telegram_delivery_errors import (
+            classify_telegram_delivery_error,
+        )
+
+        delay = MENU_SYNC_RETRY_INITIAL_SECONDS
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                await register_flexible_bot_commands(runtime)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                failure = classify_telegram_delivery_error(exc)
+                wait = max(delay, failure.retry_after_s or 0)
+                logger.warning(
+                    "Telegram command menu sync failed for %s: attempt=%s "
+                    "code=%s error_type=%s retry_after_s=%s next_attempt_s=%s",
+                    self.agent_name,
+                    attempt,
+                    failure.code,
+                    failure.error_type,
+                    failure.retry_after_s,
+                    None if failure.permanent else wait,
+                )
+                if failure.permanent:
+                    return
+                await asyncio.sleep(wait)
+                delay = min(delay * 2, MENU_SYNC_RETRY_MAX_SECONDS)
+            else:
+                if attempt > 1:
+                    logger.info(
+                        "Telegram command menu sync recovered for %s after %s attempts",
+                        self.agent_name,
+                        attempt,
+                    )
+                return
+
     async def _prepare_telegram_application(self) -> bool:
         """Validate and start handlers; Core alone owns long polling."""
 
@@ -1104,16 +1151,18 @@ class FunctionWorkerHost:
             runtime.telegram_connected = False
             return False
         last_error: Exception | None = None
+        last_stage = "initialize"
         for attempt in range(1, 4):
             try:
+                last_stage = "initialize"
                 await runtime.app.initialize()
+                last_stage = "start"
                 await runtime.app.start()
                 runtime.telegram_connected = True
-                from orchestrator.runtime_command_binding import (
-                    register_flexible_bot_commands,
+                self.command_menu_task = asyncio.create_task(
+                    self._sync_telegram_command_menus(runtime),
+                    name=f"telegram-command-menu:{self.agent_name}",
                 )
-
-                await register_flexible_bot_commands(runtime)
                 return True
             except Exception as exc:
                 last_error = exc
@@ -1126,10 +1175,18 @@ class FunctionWorkerHost:
                 if attempt < 3:
                     await asyncio.sleep(5)
         runtime.telegram_connected = False
+        from orchestrator.telegram_delivery_errors import (
+            classify_telegram_delivery_error,
+        )
+
+        failure = classify_telegram_delivery_error(last_error)
         logger.warning(
-            "Telegram application unavailable for %s; entering local mode: %s",
+            "Telegram application unavailable for %s; entering local mode: "
+            "stage=%s code=%s error_type=%s",
             self.agent_name,
-            last_error,
+            last_stage,
+            failure.code,
+            failure.error_type,
         )
         return False
 
@@ -1281,6 +1338,11 @@ class FunctionWorkerHost:
             return {"ok": True}
         self.phase = "STOPPING"
         self.accepting = False
+        command_menu_task = getattr(self, "command_menu_task", None)
+        if command_menu_task is not None:
+            command_menu_task.cancel()
+            await asyncio.gather(command_menu_task, return_exceptions=True)
+            self.command_menu_task = None
         if self.legacy_reboot_bridge_task is not None:
             self.legacy_reboot_bridge_task.cancel()
             await asyncio.gather(

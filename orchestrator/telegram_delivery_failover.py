@@ -556,10 +556,11 @@ async def send_runtime_notice(
     health = load_health_state(kernel)
 
     def token_for(name):
+        token_key = configs.get(name, {}).get("telegram_token_key") or name
         return str(
             getattr(ingresses.get(name), "token", "")
             or (getattr(kernel, "secrets", {}) or {}).get(
-                configs.get(name, {}).get("telegram_token_key"), ""
+                token_key, ""
             )
         )
 

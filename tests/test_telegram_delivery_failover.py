@@ -890,7 +890,8 @@ def test_status_summary_reports_delivery_block_and_typing(tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "availability", ["source", "fallback", "blocked", "rate_limited", "none"]
+    "availability",
+    ["source", "default_key", "fallback", "blocked", "rate_limited", "none"],
 )
 async def test_runtime_notice_uses_original_bot_without_worker_then_same_destination_fallback(
     tmp_path, monkeypatch, caplog, availability
@@ -943,11 +944,17 @@ async def test_runtime_notice_uses_original_bot_without_worker_then_same_destina
             },
         ],
     }
+    if availability == "default_key":
+        config["agents"][0].pop("telegram_token_key")
     kernel = SimpleNamespace(
         global_cfg=SimpleNamespace(project_root=tmp_path, instance_id="HASHI2"),
         _runtime_map=lambda: {},  # no Worker exists, including the initiator
         _load_raw_config=lambda: config,
-        secrets={"s": "source-test-token", "b": "backup-test-token"},
+        secrets={
+            "s": "source-test-token",
+            "source": "source-test-token",
+            "b": "backup-test-token",
+        },
     )
     if availability == "blocked":
         _write_delivery_state(
@@ -988,7 +995,7 @@ async def test_runtime_notice_uses_original_bot_without_worker_then_same_destina
     assert result["sent"] is (availability != "none")
     if availability in {"fallback", "blocked", "rate_limited"}:
         assert result["sender"] == "backup" and "backup" in calls[-1][1]["text"]
-    elif availability == "source":
+    elif availability in {"source", "default_key"}:
         assert result["sender"] == "source" and len(calls) == 1
     else:
         assert len(calls) == 2  # aliases sharing a token are tried once

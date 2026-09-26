@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from telegram.error import TimedOut
 
 from orchestrator.function_generation import (
     CandidateProbeReceipt,
@@ -429,6 +430,71 @@ async def test_core_proxy_routes_external_stop_through_worker_control_protocol()
             "session_metadata": {"session_surface": "workbench"},
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_menu_timeout_does_not_demote_telegram_worker_and_retries(
+    monkeypatch,
+):
+    from orchestrator import function_worker_host, runtime_command_binding
+
+    attempts = 0
+
+    class _Bot:
+        async def set_my_commands(self, *_args, **_kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise TimedOut()
+            return True
+
+    class _App:
+        def __init__(self):
+            self.bot = _Bot()
+            self.running = False
+            self.starts = 0
+            self.stops = 0
+
+        async def initialize(self):
+            pass
+
+        async def start(self):
+            self.running = True
+            self.starts += 1
+
+        async def stop(self):
+            self.running = False
+            self.stops += 1
+
+        async def shutdown(self):
+            pass
+
+    monkeypatch.setattr(
+        runtime_command_binding, "get_flexible_bot_commands", lambda *_a, **_k: []
+    )
+    monkeypatch.setattr(
+        runtime_command_binding.ui_language, "configured_default_locale", lambda _r: "en"
+    )
+    monkeypatch.setattr(
+        runtime_command_binding.ui_language, "saved_user_locales", lambda _r: {}
+    )
+    monkeypatch.setattr(
+        function_worker_host, "MENU_SYNC_RETRY_INITIAL_SECONDS", 0.01, raising=False
+    )
+    app = _App()
+    runtime = SimpleNamespace(
+        token="test-token", app=app, telegram_connected=False
+    )
+    host = FunctionWorkerHost.__new__(FunctionWorkerHost)
+    host.agent_name = "lily"
+    host.runtime = runtime
+    host.command_menu_task = None
+
+    assert await host._prepare_telegram_application() is True
+    assert runtime.telegram_connected is True
+    assert app.starts == 1 and app.stops == 0
+    await asyncio.wait_for(host.command_menu_task, timeout=1)
+    assert attempts == 2
 
 
 @pytest.mark.asyncio
