@@ -15,7 +15,18 @@ from orchestrator.session_store import SessionStore
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("source", ["protocol:message", "protocol:reply", "api", "handoff", "tui"])
+@pytest.mark.parametrize(
+    "source",
+    [
+        "protocol:message",
+        "protocol:reply",
+        "hchat-reply:peer",
+        "api",
+        "handoff",
+        "browser:headless",
+        "tui",
+    ],
+)
 async def test_legacy_hidden_request_is_admitted_as_visible(tmp_path, monkeypatch, source):
     runtime = object.__new__(FlexibleAgentRuntime)
     runtime.name = "visibility"
@@ -27,7 +38,12 @@ async def test_legacy_hidden_request_is_admitted_as_visible(tmp_path, monkeypatc
     runtime.queue = asyncio.Queue()
     monkeypatch.setattr(runtime_session, "accept_request", lambda *args, **kwargs: (
         {"session_id": "session-visible", "context_generation": 1},
-        SimpleNamespace(replayed=False, run_id="run-visible", message_id="message-visible"),
+        SimpleNamespace(
+            replayed=False,
+            run_id="run-visible",
+            message_id="message-visible",
+            request_id="req-visible",
+        ),
         "user:123", "workbench", "default",
     ))
     monkeypatch.setattr(runtime_session, "resolve_request_session", lambda *args, **kwargs: (
@@ -50,8 +66,10 @@ async def test_legacy_hidden_request_is_admitted_as_visible(tmp_path, monkeypatc
     expected_source = {
         "protocol:message": "hchat",
         "protocol:reply": "hchat",
+        "hchat-reply:peer": "hchat",
         "api": "api",
         "handoff": "telegram",
+        "browser:headless": "telegram",
         "tui": "tui",
     }[source]
     assert item.request_metadata["message_context_snapshot"]["message_source"][
@@ -76,7 +94,12 @@ async def test_typed_tui_run_policy_can_disable_only_telegram_mirroring(
     runtime.queue = asyncio.Queue()
     monkeypatch.setattr(runtime_session, "accept_request", lambda *args, **kwargs: (
         {"session_id": "session-shared", "context_generation": 1},
-        SimpleNamespace(replayed=False, run_id="run-tui", message_id="message-tui"),
+        SimpleNamespace(
+            replayed=False,
+            run_id="run-tui",
+            message_id="message-tui",
+            request_id="req-tui",
+        ),
         "user:123", "workbench", "default",
     ))
     monkeypatch.setattr(runtime_session, "resolve_request_session", lambda *args, **kwargs: (
@@ -200,6 +223,7 @@ async def test_private_proof_is_kept_out_of_persisted_request_metadata(
                 replayed=False,
                 run_id="run-private",
                 message_id="message-private",
+                request_id="req-private",
             ),
             "user:123",
             "workbench",

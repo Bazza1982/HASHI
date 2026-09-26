@@ -9,6 +9,7 @@ import pytest
 from orchestrator import voice_manager as voice_manager_module
 from orchestrator.config_json import read_config_json, write_config_json
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+from orchestrator.session_store import SessionStore
 from orchestrator.voice_manager import VoiceManager
 from orchestrator.voice_synthesizer import VoiceAsset
 
@@ -41,6 +42,29 @@ def _manager(tmp_path: Path) -> VoiceManager:
             }
         ],
     )
+
+
+def _prepare_runtime_for_fc(runtime, tmp_path: Path) -> None:
+    runtime.name = "voice-test"
+    runtime.workspace_dir = tmp_path / "workspace"
+    runtime.media_dir = tmp_path / "media"
+    runtime.global_config = SimpleNamespace(
+        authorized_id=7,
+        instance_id="HASHI1",
+        project_root=tmp_path,
+    )
+    runtime.config = SimpleNamespace(
+        active_backend="codex-cli",
+        telegram_token_key="voice-test",
+        extra={"agent_lifecycle_id": "a" * 32},
+    )
+    runtime.session_store = SessionStore(
+        tmp_path / "state" / "sessions.sqlite3",
+        instance_id="HASHI1",
+    )
+    runtime.telegram_connected = True
+    runtime._notify_enabled = False
+    runtime.token = "test-token"
 
 
 def test_piper_preset_uses_standalone_executable_without_python_module(
@@ -233,6 +257,7 @@ async def test_voice_profile_callback_updates_both_renderers_without_growing_men
     runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
     runtime.voice_manager = manager
     runtime._is_authorized_user = lambda _user_id: True
+    _prepare_runtime_for_fc(runtime, tmp_path)
     sent_previews = []
 
     for renderer in ("native", "tts"):
@@ -313,6 +338,7 @@ async def test_voice_mode_callback_sends_only_matching_current_profile_preview(
     runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
     runtime.voice_manager = manager
     runtime._is_authorized_user = lambda _user_id: True
+    _prepare_runtime_for_fc(runtime, tmp_path)
     runtime.app = SimpleNamespace(bot=Bot())
     runtime.telegram_logger = SimpleNamespace(warning=lambda *_args: None)
     runtime.error_logger = SimpleNamespace(error=lambda *_args: None)

@@ -56,6 +56,22 @@ def _runtime(tmp_path: Path, name: str, *, preview_default: bool = True):
         startup_success=True,
         token=f"token-{name}",
     )
+
+    async def send_via_fc_adapter(chat_id, text, **kwargs):
+        for key in (
+            "_delivery_mode",
+            "_purpose",
+            "_raise_delivery_error",
+            "_request_id",
+        ):
+            kwargs.pop(key, None)
+        return await runtime.app.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            **kwargs,
+        )
+
+    runtime._send_text = send_via_fc_adapter
     return runtime
 
 

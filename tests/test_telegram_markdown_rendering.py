@@ -37,6 +37,9 @@ def _runtime() -> SimpleNamespace:
         handoff_builder=_Transcript(),
     )
     runtime.append_conversation_entry = runtime.handoff_builder.append_transcript
+    runtime.send_long_message = FlexibleAgentRuntime.send_long_message.__get__(
+        runtime, FlexibleAgentRuntime
+    )
     return runtime
 
 

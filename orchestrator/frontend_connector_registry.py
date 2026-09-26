@@ -537,6 +537,7 @@ _INTERNAL_SOURCE_IDS = {
     "startup",
     "system",
     "session_reset",
+    "handoff",
 }
 
 
@@ -583,7 +584,9 @@ def canonical_connector_id(
     if normalized_surface in _DYNAMIC_CONNECTORS:
         return normalized_surface
 
-    if source in _INTERNAL_SOURCE_IDS or source.startswith(("hashi.internal", "scheduler:", "cron:", "heartbeat:", "proactive:", "bridge:")):
+    if source.startswith(("protocol:message", "protocol:reply", "hchat-reply:")):
+        return "hchat"
+    if source in _INTERNAL_SOURCE_IDS or source.startswith(("hashi.internal", "scheduler:", "cron:", "heartbeat:", "proactive:", "bridge:", "browser:")):
         return "internal"
     if source == "telegram" or source.startswith("telegram."):
         return "telegram"

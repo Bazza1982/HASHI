@@ -521,14 +521,27 @@ def telegram_delivery_for_admission(
     metadata = request_metadata if isinstance(request_metadata, Mapping) else {}
     from orchestrator.frontend_connector_registry import canonical_connector_id
 
-    connector_id = canonical_connector_id(
-        str(source or ""),
-        ingress_transport=str(metadata.get("ingress_transport") or ""),
-        surface=str(metadata.get("session_surface") or ""),
+    frontend = metadata.get(FRONTEND_CLIENT_METADATA_KEY)
+    frontend_kind = (
+        str(frontend.get("kind") or "").strip().casefold()
+        if isinstance(frontend, Mapping)
+        else ""
+    )
+    # A TUI may use the established Backend API wire surface without becoming
+    # a Backend API Connector. Its server-bound client identity controls only
+    # this per-Run mirror choice and is validated again below.
+    connector_id = (
+        TUI_FRONTEND_KIND
+        if str(source or "").strip().casefold() == "tui"
+        and frontend_kind == TUI_FRONTEND_KIND
+        else canonical_connector_id(
+            str(source or ""),
+            ingress_transport=str(metadata.get("ingress_transport") or ""),
+            surface=str(metadata.get("session_surface") or ""),
+        )
     )
     if connector_id in {"telegram", "internal"}:
         return True
-    frontend = metadata.get(FRONTEND_CLIENT_METADATA_KEY)
     if connector_id not in {TUI_FRONTEND_KIND, "session_api"}:
         return _owner_telegram_mirror_for_admission(
             request_metadata=request_metadata,
@@ -539,7 +552,6 @@ def telegram_delivery_for_admission(
             request_metadata=request_metadata,
             state_root=state_root,
         )
-    frontend_kind = str(frontend.get("kind") or "").strip().casefold()
     if frontend_kind != connector_id:
         return _owner_telegram_mirror_for_admission(
             request_metadata=request_metadata,

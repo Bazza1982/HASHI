@@ -1034,13 +1034,20 @@ def _make_background_runtime(
     sent = []
     voices = []
 
-    async def send_long_message(chat_id, text, request_id=None, purpose=None):
+    async def send_long_message(
+        chat_id,
+        text,
+        request_id=None,
+        purpose=None,
+        **delivery_options,
+    ):
         sent.append(
             {
                 "chat_id": chat_id,
                 "text": text,
                 "request_id": request_id,
                 "purpose": purpose,
+                **delivery_options,
             }
         )
         return 0.0, 1
