@@ -370,3 +370,52 @@ async def test_pao_persists_the_same_route_projected_into_pcm(
     assert item.request_metadata[RUN_DELIVERY_ROUTE_METADATA_KEY]["primary"][
         "surface"
     ] == surface
+
+
+@pytest.mark.asyncio
+async def test_idempotent_frontend_retry_reuses_the_original_pcm_request_identity(
+    tmp_path,
+    monkeypatch,
+):
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.name = "visibility"
+    runtime.global_config = SimpleNamespace(
+        project_root=tmp_path,
+        bridge_home=tmp_path,
+        instance_id="HASHI2",
+        authorized_id=123,
+    )
+    runtime.next_request_id = Mock(side_effect=["req-original", "req-retry"])
+    runtime.session_store = SessionStore(
+        tmp_path / "state" / "sessions.sqlite3", instance_id="HASHI2"
+    )
+    runtime.message_logger = Mock()
+    runtime.request_activity = Mock()
+    runtime.queue = asyncio.Queue()
+    monkeypatch.setattr(
+        runtime_session, "session_workzone_state", lambda *args, **kwargs: {}
+    )
+    monkeypatch.setattr(
+        runtime_delivery_order, "register_turn", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        runtime_cross_session, "capture_reply_target", lambda *args, **kwargs: None
+    )
+
+    first = await runtime.enqueue_request(
+        0,
+        "one frontend action",
+        "session-api",
+        "one frontend action",
+        idempotency_key="stable-frontend-action",
+    )
+    replay = await runtime.enqueue_request(
+        0,
+        "one frontend action",
+        "session-api",
+        "one frontend action",
+        idempotency_key="stable-frontend-action",
+    )
+
+    assert first == replay == "req-original"
+    assert runtime.queue.qsize() == 1

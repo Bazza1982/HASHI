@@ -1045,7 +1045,6 @@ class FlexibleAgentRuntime:
                     parse_mode="HTML",
                 )
             return None
-        request_id = self.next_request_id()
         # PAO owns one immutable current-message fact snapshot.  Always rebuild
         # it at admission so request text or a stale/forged prior snapshot can
         # neither assert a frontend identity nor inherit authorization.
@@ -1111,6 +1110,19 @@ class FlexibleAgentRuntime:
             source=source,
             chat_id=chat_id,
             metadata=metadata,
+        )
+        existing_idempotent_run = None
+        if idempotency_key:
+            existing_idempotent_run = await asyncio.to_thread(
+                runtime_session.ensure_store(self).find_run_by_idempotency,
+                session_id=resolved_session["session_id"],
+                owner_id=resolved_owner,
+                idempotency_key=str(idempotency_key),
+            )
+        request_id = (
+            str(existing_idempotent_run["request_id"])
+            if existing_idempotent_run is not None
+            else self.next_request_id()
         )
         metadata.update(
             {
