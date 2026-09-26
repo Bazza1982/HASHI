@@ -42,8 +42,8 @@ cached mutable modules in Core under a different filename.
 
 ### Agent-only replacement
 
-`/reboot min`, a numbered target, and an explicit `group` qualify real candidate
-Agent Workers, close only selected route gates, drain, activate, atomically
+`/reboot min`, `/reboot same`, a numbered target, and an explicit `group`
+qualify real candidate Agent Workers, close only selected route gates, drain, activate, atomically
 publish selected pointers and retire old Workers. Candidate failure resumes the
 old selected Workers; unselected Agents, shared services and Core remain online.
 No malformed or targeted request silently widens into shared replacement.
@@ -55,7 +55,7 @@ until an explicitly authorized shared replacement.
 
 ### Whole-Function replacement
 
-`/reboot same` and `/reboot max` are the normal broad entries. They submit one
+Only `/reboot max` is a broad entry. It submits one
 durable request to the already-running Core handoff protocol; acceptance is not
 a completion receipt. `python main.py --replace-functions`, using the normal
 `--bridge-home` when needed, remains an operator recovery entry to the same
@@ -65,8 +65,8 @@ never authorize themselves from a code-edit request.
 1. Qualify and hash the complete candidate closure and assets out of process.
 2. Verify the artifact and prepare a new shared process without binding ports
    or initializing providers.
-3. Reject new external work, pause scheduling and finish the accepted Telegram
-   batch, preserving its update offset.
+3. Reject new external work, pause scheduling and finish accepted Telegram
+   updates, preserving their offset. Cancel an idle long poll immediately.
 4. Drain active API requests, Agent work and background jobs. Busy/failed drain
    rejects replacement and resumes the existing process. Jobs are not killed
    to force an upgrade through.
@@ -74,8 +74,9 @@ never authorize themselves from a code-edit request.
    instance lock. Start the candidate from its pinned artifact, with exactly the
    previously running Agent set and preserved Telegram offsets.
 6. Commit the replacement and reopen intake. The successor verifies every
-   running Agent Worker and reloads enabled Remote from current source. Only
-   then does the broad reboot receipt become successful. A later
+   running Agent Worker. Remote remains in its independent process and does
+   not participate in this handoff. Only then does the broad reboot receipt
+   become successful. A later
    observability/transport error is a post-commit fault, not a claim that the
    old generation resumed.
 
@@ -89,7 +90,7 @@ recovery. This mechanism does not reverse an incompatible database migration.
 Whole-Function replacement has a service gap while processes and listeners transfer;
 it is **not zero downtime**, and existing streaming/client connections may need
 to reconnect. It does not cold-restart Core. Keep Agent-local feature updates
-targeted whenever shared Functions and Remote do not need adoption.
+targeted; use a separate Remote lifecycle action for Remote code changes.
 
 `state/instance/kernel.json` records Core PID, shared PID, shared generation and
 outcome. `replacement-<request-id>.json` records completion. Backend API health

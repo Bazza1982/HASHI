@@ -217,3 +217,54 @@ async def test_shared_handoff_finishes_acceptance_before_preserving_offset():
     await asyncio.wait_for(pause, timeout=1)
     assert ingress.offset == 8
     assert not ingress.is_running
+
+
+@pytest.mark.asyncio
+async def test_idle_long_poll_does_not_delay_shared_handoff():
+    bot = _Bot("token")
+    checkpointed = asyncio.Event()
+
+    class Handle:
+        async def deliver_telegram_update(self, _payload):
+            return True
+
+    ingress = CoreTelegramIngress(
+        agent_name="alpha",
+        token="token",
+        handle_lookup=lambda _: Handle(),
+        checkpoint_callback=lambda _offset: checkpointed.set(),
+        bot_factory=lambda _: bot,
+    )
+    await ingress.start(drop_pending_updates=False)
+    await asyncio.wait_for(checkpointed.wait(), timeout=1)
+    assert ingress.offset == 8
+    for _ in range(100):
+        if ("get_updates", 8) in bot.calls:
+            break
+        await asyncio.sleep(0.001)
+
+    await asyncio.wait_for(ingress.pause(), timeout=0.2)
+
+    assert not ingress.is_running
+    assert bot.calls[-1] == "shutdown"
+
+
+@pytest.mark.asyncio
+async def test_reboot_gate_does_not_hold_telegram_handoff_open():
+    bot = _Bot("token")
+
+    class Handle:
+        route_is_gated = True
+
+        async def deliver_telegram_update(self, _payload):
+            raise AssertionError("A fenced Worker received a new update")
+
+    ingress = CoreTelegramIngress(
+        agent_name="alpha", token="token",
+        handle_lookup=lambda _: Handle(), bot_factory=lambda _: bot,
+    )
+    await ingress.start(drop_pending_updates=False)
+    await asyncio.wait_for(ingress.pause(), timeout=0.2)
+
+    assert ingress.offset is None
+    assert not ingress.is_running

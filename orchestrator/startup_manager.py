@@ -249,6 +249,10 @@ class StartupManager:
         }
 
     async def _ensure_remote_lifecycle(self, global_config=None) -> None:
+        if getattr(self.kernel, "_shared_replacement_candidate", False):
+            # Remote is an independent process; a hot shared handoff never
+            # installs, probes, starts, or restarts its lifecycle.
+            return
         if global_config is None:
             global_config = getattr(self.kernel, "global_cfg", None) or getattr(
                 self.kernel,

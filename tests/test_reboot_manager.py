@@ -3,12 +3,12 @@ from __future__ import annotations
 from types import SimpleNamespace
 import asyncio
 import json
-from unittest.mock import AsyncMock
 
 import pytest
 
 from orchestrator.function_worker_supervisor import (
     AgentRuntimeHandle,
+    FunctionWorkerDisconnected,
     FunctionWorkerError,
     FunctionWorkerSupervisor,
 )
@@ -420,7 +420,8 @@ async def test_receipt_delivery_survives_origin_worker_loss_and_does_not_repeat_
     recovered.receipts.recover()
 
     async def recovered_send(_kernel, **kwargs):
-        assert "补发" in kwargs["render_text"]("sunny", "备用名称")
+        text = kwargs["render_text"]("sunny", "备用名称")
+        assert "补发" not in text and "热重启成功" in text
         return {"sent": True, "sender": "sunny", "message_id": 2}
 
     monkeypatch.setattr(
@@ -439,7 +440,7 @@ async def test_receipt_delivery_survives_origin_worker_loss_and_does_not_repeat_
     [
         ({"mode": "min", "agent_name": "zelda"}, ("zelda",)),
         ({"mode": "number", "agent_number": 3}, ("offline",)),
-        ({"mode": "same"}, ("zelda", "sunny")),
+        ({"mode": "same", "agent_name": "zelda"}, ("zelda",)),
         ({"mode": "max"}, ("zelda", "sunny")),
     ],
 )
@@ -456,6 +457,7 @@ def test_restart_scope_is_explicit_and_immutable(restart, expected):
     "restart",
     [
         {"mode": "min"},
+        {"mode": "same"},
         {"mode": "number", "agent_number": 0},
         {"mode": "number", "agent_number": 4},
         {"mode": "number", "agent_number": "2"},
@@ -507,15 +509,14 @@ async def test_uncommitted_function_source_has_actionable_reboot_notice(tmp_path
     assert record["reason"] == "source_update_incomplete"
     english = render_notice(record, locale="en")
     chinese = render_notice(record, locale="zh-CN")
-    assert "software update that is still in progress" in english
-    assert "saved settings are safe" in english
+    assert "software update incomplete" in english
     assert "程序更新尚未完成" in chinese
-    assert "已经保存的设置不会丢失" in chinese
     assert "启动检查未通过" not in chinese
 
 
 @pytest.mark.asyncio
-async def test_targeted_reboot_switches_only_selected_worker_in_multi_agent_core():
+@pytest.mark.parametrize("mode", ["min", "same"])
+async def test_targeted_reboot_switches_only_selected_worker_in_multi_agent_core(mode):
     kernel = _Kernel()
     core_identity = id(kernel)
     fingerprint_identity = id(kernel.runtime_fingerprint)
@@ -530,7 +531,7 @@ async def test_targeted_reboot_switches_only_selected_worker_in_multi_agent_core
     candidates = kernel.queue_generation("a", names=("zelda",))
     manager = RebootManager(kernel, None)
 
-    result = await manager.hot_restart({"mode": "min", "agent_name": "zelda"})
+    result = await manager.hot_restart({"mode": mode, "agent_name": "zelda"})
 
     handles = kernel._runtime_map()
     assert result is True
@@ -547,6 +548,54 @@ async def test_targeted_reboot_switches_only_selected_worker_in_multi_agent_core
         id(kernel.scheduler),
         id(kernel.background_job_manager),
     ) == core_service_identities
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["min", "same", "max"])
+async def test_reboot_admission_queues_only_selected_routes(tmp_path, mode):
+    kernel, manager, request = _notice_manager(tmp_path)
+    kernel.api_gateway = SimpleNamespace(_accepting_requests=True)
+    request["mode"] = mode
+    handles = kernel._runtime_map()
+    old = {name: handle.client for name, handle in handles.items()}
+
+    assert manager.submit(request)["accepted"]
+    assert handles["zelda"]._cutover
+    assert handles["sunny"]._cutover is (mode == "max")
+    assert kernel.api_gateway._accepting_requests is (mode != "max")
+
+    blocked = None
+    if mode == "max":
+        with pytest.raises(FunctionWorkerDisconnected, match="rebooting"):
+            await handles["zelda"]._route("runtime.probe")
+    else:
+        blocked = asyncio.create_task(handles["zelda"]._route("runtime.probe"))
+        await asyncio.sleep(0)
+        assert not blocked.done()
+    assert "zelda:101:runtime.probe" not in kernel.events
+
+    if mode == "max":
+        with pytest.raises(FunctionWorkerDisconnected, match="rebooting"):
+            await handles["sunny"]._route("runtime.probe")
+        assert "sunny:102:runtime.probe" not in kernel.events
+        await manager._release_reboot_fences({"targets": ["sunny"]})
+        await handles["sunny"]._route("runtime.probe")
+    else:
+        await handles["sunny"]._route("runtime.probe")
+        assert "sunny:102:runtime.probe" in kernel.events
+
+    await handles["zelda"].begin_cutover()
+    replacement = _Client("zelda", 201, _Generation("a"), kernel.events)
+    await handles["zelda"].commit_cutover(
+        replacement, _metadata("zelda", 201, replacement.generation, telegram=True)
+    )
+    if blocked is not None:
+        await blocked
+    else:
+        await handles["zelda"]._route("runtime.probe")
+    assert "zelda:201:runtime.probe" in kernel.events
+    assert "zelda:101:runtime.probe" not in kernel.events
+    assert handles["sunny"].client is old["sunny"]
 
 
 @pytest.mark.asyncio
@@ -658,13 +707,12 @@ async def test_explicit_group_success_commits_every_route_and_then_retires_old_w
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["same", "max"])
-async def test_broad_reboot_submits_one_whole_function_replacement(tmp_path, mode):
+async def test_max_reboot_submits_one_shared_function_replacement(tmp_path):
     kernel = _Kernel()
     kernel.paths = SimpleNamespace(bridge_home=tmp_path)
     manager = RebootManager(kernel, None)
 
-    result = await manager.hot_restart({"mode": mode, "agent_name": "zelda"})
+    result = await manager.hot_restart({"mode": "max", "agent_name": "zelda"})
 
     assert result is True
     record = manager.receipts.records()[-1]
@@ -681,7 +729,7 @@ async def test_broad_reboot_submits_one_whole_function_replacement(tmp_path, mod
 
 
 @pytest.mark.asyncio
-async def test_successor_reconciles_whole_function_and_remote_adoption(
+async def test_successor_reconciles_shared_function_without_touching_remote(
     tmp_path,
     monkeypatch,
 ):
@@ -714,18 +762,6 @@ async def test_successor_reconciles_whole_function_and_remote_adoption(
         ),
         encoding="utf-8",
     )
-    remote_reload = AsyncMock(
-        return_value={
-            "ok": True,
-            "action": "remote_reloaded",
-            "old_pid": 41,
-            "new_pid": 42,
-        }
-    )
-    monkeypatch.setattr(
-        "orchestrator.reboot_manager.remote_lifecycle.reload_remote_for_reboot",
-        remote_reload,
-    )
     monkeypatch.setattr(
         "orchestrator.reboot_manager.os.getpid",
         lambda: int(pending["shared_replacement"]["old_shared_pid"]) + 1,
@@ -738,18 +774,10 @@ async def test_successor_reconciles_whole_function_and_remote_adoption(
     record = successor.receipts.get(pending["id"])
     assert record["status"] == "succeeded"
     assert record["shared_replacement"]["status"] == "committed"
-    assert record["shared_replacement"]["remote"] == {
-        "status": "adopted",
-        "action": "remote_reloaded",
-        "old_pid": 41,
-        "new_pid": 42,
-        "ready": True,
-        "reason": "",
-    }
+    assert "remote" not in record["shared_replacement"]
     assert all(record["online"].values())
     assert {item["old_pid"] for item in record["workers"].values()} == {101, 102}
     assert {item["new_pid"] for item in record["workers"].values()} == {201, 202}
-    remote_reload.assert_awaited_once_with(tmp_path)
 
 
 @pytest.mark.asyncio
@@ -837,18 +865,6 @@ async def test_successor_promotes_completed_legacy_broad_reboot_after_core_commi
                 _metadata(name, client.pid, shared_generation, telegram=True),
             )
         )
-    remote_reload = AsyncMock(
-        return_value={
-            "ok": True,
-            "action": "remote_reloaded",
-            "old_pid": 51,
-            "new_pid": 52,
-        }
-    )
-    monkeypatch.setattr(
-        "orchestrator.reboot_manager.remote_lifecycle.reload_remote_for_reboot",
-        remote_reload,
-    )
     monkeypatch.setattr("orchestrator.reboot_manager.os.getpid", lambda: 42)
 
     successor = RebootManager(new_kernel, None)
@@ -863,7 +879,6 @@ async def test_successor_promotes_completed_legacy_broad_reboot_after_core_commi
     assert set(promoted["generations"].values()) == {shared_generation_id}
     assert promoted["shared_replacement"]["generation_id"] == shared_generation_id
     assert not marker_dir.joinpath(f"{record['id']}.json").exists()
-    remote_reload.assert_awaited_once_with(tmp_path)
 
 
 def test_legacy_broad_receipt_is_not_promoted_before_core_commit(
@@ -934,52 +949,25 @@ def test_legacy_broad_receipt_is_not_promoted_before_core_commit(
 
 
 @pytest.mark.asyncio
-async def test_successor_records_remote_reload_exception_without_retry(
-    tmp_path,
-    monkeypatch,
-):
-    old_kernel = _Kernel()
-    old_kernel.paths = SimpleNamespace(bridge_home=tmp_path)
-    old_manager = RebootManager(old_kernel, None)
-    assert await old_manager.hot_restart({"mode": "max"})
-    pending = old_manager.receipts.records()[-1]
-
-    generation = _Generation("a")
-    new_kernel = _Kernel()
-    new_kernel.paths = SimpleNamespace(bridge_home=tmp_path)
-    new_kernel.shared_generation_id = generation.manifest.generation_id
+async def test_failed_shared_replacement_reopens_all_agent_routes(tmp_path):
+    kernel, manager, _request = _notice_manager(tmp_path)
+    kernel.api_gateway = SimpleNamespace(_accepting_requests=True)
+    accepted = manager.submit({"mode": "max", "agent_name": "zelda"})
+    assert accepted["accepted"]
+    assert all(handle._cutover for handle in kernel.runtimes)
+    assert await manager.hot_restart(kernel._restart_request)
+    record = manager.receipts.get(accepted["record"]["id"])
     state_dir = tmp_path / "state" / "instance"
-    (state_dir / "kernel-requests" / f"{pending['id']}.json").unlink()
-    (state_dir / f"replacement-{pending['id']}.json").write_text(
-        json.dumps(
-            {"ok": True, "generation_id": generation.manifest.generation_id}
-        ),
-        encoding="utf-8",
-    )
-    remote_reload = AsyncMock(side_effect=RuntimeError("reload failed"))
-    monkeypatch.setattr(
-        "orchestrator.reboot_manager.remote_lifecycle.reload_remote_for_reboot",
-        remote_reload,
-    )
-    monkeypatch.setattr(
-        "orchestrator.reboot_manager.os.getpid",
-        lambda: int(pending["shared_replacement"]["old_shared_pid"]) + 1,
+    (state_dir / "kernel-requests" / f"{record['id']}.json").unlink()
+    (state_dir / f"replacement-{record['id']}.json").write_text(
+        json.dumps({"ok": False, "generation_id": ""}), encoding="utf-8"
     )
 
-    successor = RebootManager(new_kernel, None)
-    successor.receipts.recover()
-    await successor.reconcile_shared_replacements()
-    await successor.reconcile_shared_replacements()
+    await manager.reconcile_shared_replacements()
 
-    record = successor.receipts.get(pending["id"])
-    assert (record["status"], record["reason"]) == (
-        "unconfirmed",
-        "remote_reload_failed",
-    )
-    assert record["shared_replacement"]["remote"]["action"] == (
-        "remote_reload_exception"
-    )
-    remote_reload.assert_awaited_once_with(tmp_path)
+    assert manager.receipts.get(record["id"])["status"] == "failed"
+    assert all(not handle._cutover for handle in kernel.runtimes)
+    assert kernel.api_gateway._accepting_requests
 
 
 @pytest.mark.asyncio
@@ -1031,6 +1019,7 @@ async def test_pending_capacity_recovery_and_bounded_delivery_never_rerun(
     for key in ("one", "two"):
         assert manager.submit({**request, "request_key": key})["accepted"]
         kernel._restart_request = None  # simulate loss before execution
+        await manager._release_reboot_fences({"targets": ["zelda"]})
     assert manager.submit({**request, "request_key": "three"}) == {
         "accepted": False,
         "reason": "storage",
@@ -1201,9 +1190,9 @@ def test_reboot_notices_use_names_for_one_target_and_counts_for_many():
         "lifecycle_state": "online",
         "locale": "en",
     }
-    assert "Zelda" in render_notice(single, starting=True)
+    assert render_notice(single, starting=True) == "🔄 Starting hot reboot…"
     assert "Zelda" in render_notice(single)
-    assert render_notice(single, locale="zh-CN") == "✅ Zelda已经在线。"
+    assert render_notice(single, locale="zh-CN") == "✅ Zelda热重启成功，耗时0秒。"
 
     many = {
         **single,
@@ -1213,8 +1202,8 @@ def test_reboot_notices_use_names_for_one_target_and_counts_for_many():
     }
     starting = render_notice(many, starting=True)
     completed = render_notice(many)
-    assert "20" in starting and "shared Functions" in starting and "Agent 0" not in starting
-    assert "20" in completed and "enabled Remote" in completed and "Agent 0" not in completed
+    assert starting == "🔄 Starting hot reboot…"
+    assert "20 agents online" in completed and "Remote" not in completed
     assert "/reboot status" not in starting
 
     partial = {
@@ -1465,5 +1454,5 @@ async def test_unreadable_activity_retains_worker_and_actionable_receipt(tmp_pat
     assert record["reason"] == "activity_unavailable"
     assert old.process.alive and not kernel.events
     rendered = render_status(record, locale="en")
-    assert "retry through another online agent" in rendered
+    assert "Agent activity is unavailable; retry later." in rendered
     assert "/reboot status" not in rendered

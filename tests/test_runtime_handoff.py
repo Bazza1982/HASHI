@@ -163,6 +163,7 @@ async def test_runtime_host_retains_artifact_source_commit(tmp_path, monkeypatch
 
     await host.prepare()
 
+    assert app._shared_replacement_candidate is True
     startup_generation, startup_root = app._startup_artifact
     assert startup_root == qualified.generation_root
     assert (

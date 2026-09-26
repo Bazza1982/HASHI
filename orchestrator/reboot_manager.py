@@ -11,7 +11,7 @@ from typing import Any
 
 from orchestrator.reboot_receipts import RebootReceipts, ACTIVE, MAX_DELIVERY_ATTEMPTS
 from orchestrator.reboot_ui import render_notice
-from orchestrator import remote_lifecycle, runtime_session, ui_language
+from orchestrator import runtime_session, ui_language
 from orchestrator.telegram_delivery_failover import send_runtime_notice
 from orchestrator.kernel_process import instance_runtime_dir, write_record
 from orchestrator.reboot_adoption_bridge import legacy_handoff_markers
@@ -33,8 +33,8 @@ REBOOT_DRAIN_TIMEOUT_SECONDS = 10.0
 # Core receipt unconfirmed; this timeout never changes Core's own transaction.
 SHARED_REPLACEMENT_TIMEOUT_SECONDS = 1200.0
 
-TARGETED_REBOOT_MODES = frozenset({"min", "number"})
-BROAD_REBOOT_MODES = frozenset({"same", "max"})
+TARGETED_REBOOT_MODES = frozenset({"min", "same", "number"})
+BROAD_REBOOT_MODES = frozenset({"max"})
 
 
 def _resolve_restart_targets(kernel, restart: Mapping[str, Any]) -> tuple[str, ...]:
@@ -43,9 +43,9 @@ def _resolve_restart_targets(kernel, restart: Mapping[str, Any]) -> tuple[str, .
     mode = restart.get("mode", "same")
     requesting_agent = restart.get("agent_name")
     agent_number = restart.get("agent_number")
-    if mode == "min":
+    if mode in {"min", "same"}:
         if not isinstance(requesting_agent, str) or not requesting_agent.strip():
-            raise ValueError("min reboot requires a requesting agent")
+            raise ValueError("agent reboot requires a requesting agent")
         targets = (requesting_agent,)
     elif mode == "number":
         if not isinstance(agent_number, int) or isinstance(agent_number, bool):
@@ -134,15 +134,26 @@ class RebootManager:
             return {"accepted": False, "reason": "busy"}
         try:
             targets = _resolve_restart_targets(self.kernel, restart)
-            self._target_handles(targets)
+            handles = self._target_handles(targets)
             if not targets:
                 raise ValueError("empty reboot scope")
         except ValueError:
             return {"accepted": False, "reason": "invalid_scope"}
+        if any(handle._cutover for handle in handles.values()):
+            return {"accepted": False, "reason": "busy"}
         try:
             record = self._new_receipt(restart, targets)
         except (OSError, ValueError):
             return {"accepted": False, "reason": "storage"}
+        # Admission closes only the selected routes. Existing calls may finish.
+        # Targeted calls wait for the new route; max rejects new shared-process
+        # calls while Telegram retains unaccepted updates at its server.
+        for handle in handles.values():
+            handle.fence_for_reboot(reject_new=restart.get("mode") in BROAD_REBOOT_MODES)
+        if restart.get("mode") in BROAD_REBOOT_MODES:
+            gateway = getattr(self.kernel, "api_gateway", None)
+            if gateway is not None and hasattr(gateway, "_accepting_requests"):
+                gateway._accepting_requests = False
         self.kernel._restart_request = {
             **restart,
             "operation_id": record["id"],
@@ -306,7 +317,6 @@ class RebootManager:
             "requested_at": time.time(),
             "old_shared_pid": os.getpid(),
             "generation_id": None,
-            "remote": {},
         }
         self.receipts.update(
             record["id"],
@@ -331,28 +341,6 @@ class RebootManager:
         bridge_logger.info(
             "Whole-Function replacement submitted: operation=%s", request_id
         )
-
-    @staticmethod
-    def _remote_pid(result: Mapping[str, Any] | None) -> int | None:
-        health = (result or {}).get("health") or {}
-        instance = health.get("instance") or {}
-        claim = instance.get("runtime_claim") or {}
-        try:
-            pid = int(claim.get("pid") or 0)
-        except (TypeError, ValueError):
-            return None
-        return pid or None
-
-    @staticmethod
-    def _remote_evidence(result: Mapping[str, Any]) -> dict[str, Any]:
-        return {
-            "status": "adopted" if result.get("ok") else "failed",
-            "action": str(result.get("action") or "unknown"),
-            "old_pid": result.get("old_pid"),
-            "new_pid": result.get("new_pid") or RebootManager._remote_pid(result),
-            "ready": bool(result.get("ok")),
-            "reason": str(result.get("reason") or ""),
-        }
 
     async def _replacement_worker_evidence(
         self,
@@ -404,6 +392,7 @@ class RebootManager:
                     and moment - requested_at > SHARED_REPLACEMENT_TIMEOUT_SECONDS
                     and not request_path.exists()
                 ):
+                    await self._release_reboot_fences(record)
                     failed = {
                         **shared,
                         "status": "unconfirmed",
@@ -425,6 +414,7 @@ class RebootManager:
                 ):
                     raise ValueError("invalid shared replacement receipt")
             except (OSError, ValueError, TypeError) as exc:
+                await self._release_reboot_fences(record)
                 failed = {**shared, "status": "unconfirmed"}
                 self._finish(
                     record,
@@ -440,6 +430,7 @@ class RebootManager:
                 continue
             generation_id = str(replacement.get("generation_id") or "")
             if not replacement["ok"]:
+                await self._release_reboot_fences(record)
                 rolled_back = {
                     **shared,
                     "status": "rolled_back",
@@ -458,6 +449,7 @@ class RebootManager:
                 getattr(self.kernel, "shared_generation_id", "") or ""
             )
             if not generation_id or generation_id != current_generation:
+                await self._release_reboot_fences(record)
                 unconfirmed = {
                     **shared,
                     "status": "unconfirmed",
@@ -472,39 +464,11 @@ class RebootManager:
                 )
                 continue
 
-            try:
-                remote_result = await remote_lifecycle.reload_remote_for_reboot(
-                    self.kernel.paths.bridge_home
-                )
-            except Exception as exc:
-                bridge_logger.exception(
-                    "Enabled Remote adoption failed unexpectedly: operation=%s",
-                    request_id,
-                )
-                remote_result = {
-                    "ok": False,
-                    "action": "remote_reload_exception",
-                    "reason": f"{type(exc).__name__}: {exc}",
-                }
-            remote = self._remote_evidence(remote_result)
             shared_result = {
                 **shared,
-                "status": "committed" if remote_result.get("ok") else "unconfirmed",
+                "status": "committed",
                 "generation_id": generation_id,
-                "remote": remote,
             }
-            if not remote_result.get("ok"):
-                self._finish(
-                    record,
-                    "unconfirmed",
-                    committed=True,
-                    reason="remote_reload_failed",
-                    shared_replacement={**shared_result, "status": "unconfirmed"},
-                )
-                continue
-            # Persist the one-shot Remote adoption before Worker verification.
-            # A successor crash now becomes unconfirmed on recovery instead of
-            # repeating a destructive Remote stop/start loop.
             self.receipts.update(
                 record["id"],
                 phase="verifying",
@@ -544,7 +508,6 @@ class RebootManager:
                 not missing
                 and len(evidence) == len(record["targets"])
                 and all(online.values())
-                and bool(remote_result.get("ok"))
                 and os.getpid() != shared.get("old_shared_pid")
             )
             if adopted:
@@ -585,7 +548,7 @@ class RebootManager:
                 continue
             shared = record.get("shared_replacement") or {}
             if (
-                record.get("mode") not in BROAD_REBOOT_MODES
+                record.get("mode") not in BROAD_REBOOT_MODES | {"same"}
                 or record.get("status") != "succeeded"
                 or shared.get("status") != "not_requested"
                 or marker.get("old_shared_pid") == os.getpid()
@@ -654,7 +617,6 @@ class RebootManager:
                 "requested_at": marker["requested_at"],
                 "old_shared_pid": marker["old_shared_pid"],
                 "generation_id": None,
-                "remote": {},
             }
             self.receipts.update(
                 operation_id,
@@ -710,6 +672,11 @@ class RebootManager:
             self.delivery_task = None
 
     def _finish(self, record, status, **fields):
+        finished_at = time.time()
+        duration_seconds = round(
+            max(0.0, finished_at - float(record.get("created_at") or finished_at)),
+            1,
+        )
         lifecycle_state = fields.pop("lifecycle_state", None)
         if lifecycle_state is None:
             if status == "succeeded":
@@ -728,6 +695,8 @@ class RebootManager:
                 status=status,
                 phase="finished",
                 lifecycle_state=lifecycle_state,
+                finished_at=finished_at,
+                duration_seconds=duration_seconds,
                 **fields,
             )
             bridge_logger.info(
@@ -838,6 +807,22 @@ class RebootManager:
                 f"reboot targets are not isolated Function Workers: {invalid}"
             )
         return handles
+
+    async def _release_reboot_fences(self, record: Mapping[str, Any]) -> None:
+        runtime_map = self.kernel._runtime_map()
+        await asyncio.gather(
+            *(
+                runtime_map[name].release_reboot_fence()
+                for name in record.get("targets", ())
+                if name in runtime_map
+            )
+        )
+        if record.get("mode") in BROAD_REBOOT_MODES and not getattr(
+            self.kernel, "_handoff_draining", False
+        ):
+            gateway = getattr(self.kernel, "api_gateway", None)
+            if gateway is not None and hasattr(gateway, "_accepting_requests"):
+                gateway._accepting_requests = True
 
     async def _prepare_candidates(
         self,
@@ -994,6 +979,7 @@ class RebootManager:
                 try:
                     self._publish_shared_replacement(staged_shared)
                 except Exception:
+                    await self._release_reboot_fences(record)
                     failed = {**staged_shared, "status": "unconfirmed"}
                     self._finish(
                         record,
@@ -1005,6 +991,8 @@ class RebootManager:
                         "Whole-Function replacement request could not be published"
                     )
                     result = False
+            else:
+                await self._release_reboot_fences(record)
             try:
                 await self.send_pending()
             except Exception as exc:

@@ -59,7 +59,7 @@ def render_notice(
     key = "reboot.notice." + (
         "source_update_incomplete" if source_update_incomplete else status
     )
-    broad = mode in {"same", "max"}
+    broad = mode == "max"
     if broad and not source_update_incomplete and status in {
         "starting",
         "candidate_rejected",
@@ -81,7 +81,14 @@ def render_notice(
         locale=language,
         scope=scope,
         agents=target,
-        count=total_count,
+        count=(
+            sum(bool(value) for value in record.get("online", {}).values())
+            if not starting and record.get("status") == "succeeded" and record.get("online")
+            else total_count
+        ),
+        duration=(
+            f"{float(record.get('duration_seconds') or 0):.1f}".rstrip("0").rstrip(".")
+        ),
         online_count=len(recovered_targets),
         failed_count=len(targets),
     )
@@ -99,8 +106,6 @@ def render_notice(
             locale=language,
             reason=ui_language.tr("reboot.reason." + reason, locale=language),
         )
-    if record.get("recovered") and not starting:
-        text = ui_language.tr("reboot.delayed_notice", locale=language) + "\n" + text
     if sender and sender != record.get("source_agent"):
         text += "\n" + ui_language.tr(
             "reboot.sent_by",

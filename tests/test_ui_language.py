@@ -47,7 +47,6 @@ def test_catalogs_are_complete_and_keep_formal_chinese_agent_term() -> None:
 
     assert chinese.commands["agents"] == "查看和管理代理"
     assert chinese.strings["reboot.all_active"] == "全部 Functions"
-    assert chinese.strings["reboot.all_running"] == "全部 Functions · 当前运行集"
     assert all(
         "agent"
         not in re.sub(

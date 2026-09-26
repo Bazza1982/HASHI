@@ -103,12 +103,6 @@ async def show_menu(runtime, update, *, status_only=False, query=None):
                         callback_data="tgl:reboot:max",
                     ),
                 ],
-                [
-                    InlineKeyboardButton(
-                        ui_language.tr("reboot.all_running"),
-                        callback_data="tgl:reboot:same",
-                    )
-                ],
             ]
         )
         for i, name in enumerate(orchestrator.configured_agent_names(), 1):

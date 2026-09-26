@@ -37,7 +37,6 @@ def _default_shared_replacement():
         "requested_at": None,
         "old_shared_pid": None,
         "generation_id": None,
-        "remote": {},
     }
 
 
@@ -183,6 +182,15 @@ def validate_record(record):
                 )
             )
             and isinstance(record["shared_replacement"].get("remote", {}), dict)
+            and (
+                record.get("duration_seconds") is None
+                or (
+                    isinstance(record["duration_seconds"], (int, float))
+                    and not isinstance(record["duration_seconds"], bool)
+                    and math.isfinite(record["duration_seconds"])
+                    and record["duration_seconds"] >= 0
+                )
+            )
             and record["delivery"]["status"]
             in {"pending", "sent", "exhausted", "not_requested"}
             and isinstance(record["delivery"]["attempts"], int)

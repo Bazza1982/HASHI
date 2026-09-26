@@ -22,9 +22,10 @@ bump, `core-change-approved`, and independent review. Flags only record approval
 Core owns no product policy; each registry/state writer has one owner.
 
 Source, artifacts, clients, Workers, and delivery are separate facts. `/reboot
-min` replaces one Worker; `same|max` adopts shared Functions, Workers, and
-Remote while Core stays live. Legacy bridges promote only after validation and
-commit. Adoption needs matching PID, identity, generation, health, and receipts.
+min|same` replaces only the selected Agent Worker; `/reboot max` adopts shared
+Functions and all running Workers while Core and Remote stay live. Legacy
+bridges promote only after validation and commit. Adoption needs matching PID,
+identity, generation, health, and receipts.
 Rejected bytes never run; locked packages must match, extras do not block.
 
 Agent tools cannot alter live Core/Python, read secrets, kill, or raw-control
@@ -108,9 +109,11 @@ diagnosis, with no retry, repair, or completion to the source Agent; exclude
 HChat errors to prevent loops.
 
 Remote trust retains accepted peers until definitive revalidation. Health
-clears recovered Remote warnings, not other problems. Broad Function reboot
-allows supervised Remote a 20-second cold start; command acceptance is not
-adoption evidence.
+clears recovered Remote warnings, not other problems. Remote has a separate
+lifecycle and does not restart during `/reboot`. Reboot admission fences new
+messages only for its targets; Telegram idle polling never delays handoff.
+Workbench retains its Agent list and conversation view through a shared API
+gap, marking cached Agents temporarily offline until reconnection.
 Telegram reboot notice attempts belong in persistent `logs/bridge.log`, keyed
 by the reboot receipt ID and start/final kind. Failures log safe codes and
 retry delays; Bot credentials and raw transport exceptions stay out of logs.

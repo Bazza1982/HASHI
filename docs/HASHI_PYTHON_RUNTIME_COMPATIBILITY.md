@@ -155,7 +155,7 @@ candidate cannot fetch, acknowledge or process it early.
 
 ## Transactional `/reboot`
 
-For `min`, a number, `same`, or `max`, the shared Function supervisor performs:
+For `min`, a number, `same`, or an explicit group, the shared Function supervisor performs:
 
 1. Resolve an immutable target set. Invalid input fails without widening it.
 2. Require every file in the Function manifest to be clean in local Git HEAD,
@@ -163,8 +163,9 @@ For `min`, a number, `same`, or `max`, the shared Function supervisor performs:
    process. Dirty files outside the manifest do not block qualification.
 3. Materialize and verify a content-addressed immutable artifact carrying that
    source commit and the probe receipt.
-4. Spawn one READY candidate Worker for every selected Agent.
-5. Close only those stable route gates and wait for in-flight shared route calls.
+4. Fence only selected route gates at admission; unrelated Agents keep working.
+   Spawn one READY candidate Worker for every selected Agent.
+5. Wait for previously accepted shared route calls to finish.
 6. Quiesce the selected old Workers and their Agent-local ingress.
 7. Reverify runtime, Core and generation fingerprints.
 8. Activate all candidates and require their health receipts.
@@ -172,8 +173,13 @@ For `min`, a number, `same`, or `max`, the shared Function supervisor performs:
    await point, then open the gates together.
 10. Publish topology and retire the old Workers after commit.
 
+`/reboot max` instead fences every Agent route and uses Core's existing shared
+Functions handoff. New requests cannot enter old Workers; Telegram retains
+unaccepted updates for the successor. It replaces shared Functions and the
+running Agent Workers while Core and Remote keep their own lifecycles.
+
 Before step 9, any failure terminates all candidates and resumes every old
-Worker that was quiesced. Core objects, unselected Agents, services and route
+Worker that was quiesced, then reopens only the selected routes. Core objects, unselected Agents, services and route
 pointers retain identity. After step 9, diagnostic publication failures are
 logged but cannot falsely report that an already committed pointer swap was
 rolled back.
@@ -186,7 +192,7 @@ that aggregate state as `mixed`.
 ## Failure and recovery rules
 
 - Candidate import, contract, construction or readiness failure: discard it;
-  old Workers are never gated.
+  reopen selected routes to their unchanged old Workers.
 - Drain or activation failure: discard every candidate in that transaction,
   resume old Workers and reopen the same routes.
 - Candidate loses a previously working Telegram capability: reject it and

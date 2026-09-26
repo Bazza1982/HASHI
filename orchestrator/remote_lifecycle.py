@@ -517,12 +517,16 @@ async def _start_child_remote(
     log_path = settings.root / "tmp" / "hashi_remote_startup.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_handle = log_path.open("ab")
+    # The shared Functions process owns its process group during hot handoff.
+    # A bundled Remote must outlive that group just like a supervised Remote.
+    process_options = {"start_new_session": True} if os.name != "nt" else {}
     try:
         process = await asyncio.create_subprocess_exec(
             *cmd,
             cwd=str(settings.root),
             stdout=log_handle,
             stderr=log_handle,
+            **process_options,
         )
     finally:
         log_handle.close()
@@ -847,100 +851,6 @@ def _owned_remote_pid(result: dict[str, Any] | None) -> int | None:
     except (TypeError, ValueError):
         return None
     return pid or None
-
-
-async def reload_remote_for_reboot(
-    root: Path | str | None = None,
-) -> dict[str, Any]:
-    """Adopt current Remote source as part of a broad Function reboot.
-
-    Persisted off/disabled state is authoritative.  An enabled Remote is
-    stopped only through its exact per-instance ownership claim and is then
-    brought back through the configured supervisor or bundled child lifecycle.
-    """
-
-    settings = load_settings(root)
-    disabled = read_disabled_state(settings.root)
-    if not settings.enabled or disabled:
-        return {
-            "ok": True,
-            "action": "skipped_disabled",
-            "reason": (
-                "remote_enabled=false"
-                if not settings.enabled
-                else "remote explicitly disabled"
-            ),
-            "old_pid": None,
-            "new_pid": None,
-            "settings": settings,
-        }
-
-    before = await inspect_remote(settings.root)
-    old_pid = _owned_remote_pid(before)
-    if before.get("action") != "not_running":
-        stopped = await stop_remote(settings.root)
-        if not stopped.get("ok"):
-            return {
-                **stopped,
-                "ok": False,
-                "action": "remote_reload_stop_failed",
-                "old_pid": old_pid,
-                "new_pid": None,
-            }
-
-    activation = None
-    if settings.supervised:
-        activation = await activate_remote_supervisor(settings.root)
-    if activation and activation.get("ok"):
-        owned = await _wait_for_owned_remote(settings)
-        if owned and owned.get("remote_ready") is not False:
-            started = {
-                **activation,
-                "ok": True,
-                "action": "started_supervisor",
-                "settings": settings,
-                **owned,
-            }
-        else:
-            started = {
-                **activation,
-                "ok": False,
-                "action": "supervisor_started_unhealthy",
-                "reason": (
-                    "refreshed Remote supervisor did not publish ready owned health "
-                    f"on configured port {settings.port}"
-                ),
-                "settings": settings,
-            }
-    else:
-        started = await ensure_remote_started(settings.root)
-        if activation is not None:
-            started["supervisor_refresh"] = activation
-    new_pid = _owned_remote_pid(started)
-    if not started.get("ok"):
-        return {
-            **started,
-            "ok": False,
-            "action": "remote_reload_start_failed",
-            "old_pid": old_pid,
-            "new_pid": new_pid,
-        }
-    if old_pid is not None and (new_pid is None or new_pid == old_pid):
-        return {
-            **started,
-            "ok": False,
-            "action": "remote_reload_unconfirmed",
-            "reason": "Remote did not publish a distinct successor process",
-            "old_pid": old_pid,
-            "new_pid": new_pid,
-        }
-    return {
-        **started,
-        "ok": True,
-        "action": "remote_reloaded" if old_pid is not None else "remote_started",
-        "old_pid": old_pid,
-        "new_pid": new_pid,
-    }
 
 
 async def _find_owned_remote(settings: RemoteLifecycleSettings) -> dict[str, Any] | None:

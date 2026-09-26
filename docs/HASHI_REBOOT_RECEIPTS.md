@@ -14,11 +14,13 @@ retry, model, command or presentation policy. See
 [Minimal Core](HASHI_SLIM_CORE_ARCHITECTURE.md) and
 [Layered Runtime Boundaries](HASHI_LAYERED_RUNTIME_BOUNDARIES.md).
 
-Targeted `/reboot min`, numbered, and group scopes replace only selected Agent
-Workers. Broad `/reboot same|max` replaces shared Functions and every running
-Agent Worker through the existing Core handoff, then reloads enabled Remote.
-Neither scope replaces Core. This supersedes the original Agent-only limitation;
-see [Function Adoption and Remote Restart](HASHI3_FUNCTION_ADOPTION_AND_REMOTE_RESTART_2026-09-19.md).
+`/reboot min` and `/reboot same` replace only the requesting Agent Worker;
+numbered and group scopes replace exactly their selected Workers. Only
+`/reboot max` replaces shared Functions and all running Agent Workers through
+the existing Core handoff. No `/reboot` mode replaces Core or Remote. The new
+shared process skips Remote lifecycle setup. Remote has its own lifecycle;
+`/restart` is the comprehensive instance operation.
+See [Function Adoption and Remote Restart](HASHI3_FUNCTION_ADOPTION_AND_REMOTE_RESTART_2026-09-19.md).
 
 ## Observable contract
 
@@ -32,8 +34,17 @@ see [Function Adoption and Remote Restart](HASHI3_FUNCTION_ADOPTION_AND_REMOTE_R
 3. Runtime sends one concise start notice and one final outcome; the command
    path does not add a redundant acceptance reply. Multi-Agent success notices
    show counts instead of name lists, while failures retain actionable target
-   names. The verified candidate/drain/atomic route-switch transaction and
-   target membership are unchanged.
+   names and success includes elapsed seconds. Admission closes only selected
+   Agent routes. During `min|same` other Agents continue on their old Workers;
+   during `max` all Agent routes close until the successor commits. No new
+   message reaches an old Worker after admission. During `max`, new requests
+   into the old shared process are rejected for retry; Telegram leaves new
+   updates queued at its server. Telegram's idle long poll is interrupted
+   immediately, while already accepted updates finish and checkpoint.
+Workbench's Connector keeps the last verified Agent list and conversation
+projection while the shared API is briefly unavailable, marks cached Agents
+offline, and replaces the list on reconnection. A deliberate instance switch
+clears this cache so one instance cannot display another's Agents.
 4. The terminal outcome is saved before notification delivery. Delivery never
    changes that outcome and never runs the operation again.
 
@@ -47,8 +58,9 @@ see [Function Adoption and Remote Restart](HASHI3_FUNCTION_ADOPTION_AND_REMOTE_R
 | `unconfirmed` | Observation was interrupted, a rollback was incomplete, or a committed switch lacks verified readiness | Result must not be claimed as success or rollback |
 
 Broad receipts additionally persist the shared request identity, old/new shared
-process evidence, committed generation, per-Worker evidence, and Remote adoption
-result. A Core handoff receipt alone is not broad reboot success.
+process evidence, committed generation, and per-Worker evidence. Remote health
+is independent of reboot success. A Core handoff receipt alone is not broad
+reboot success.
 
 The compatibility `status` field remains for existing clients, while
 `lifecycle_state` carries the precise state above. Each committed/final receipt
@@ -64,10 +76,9 @@ route gates and checks the old Workers rather than assuming restoration.
 
 Chinese examples (runtime messages have no persona greeting):
 
-- `🔄 正在热重启 月如…`
-- `✅ 月如已经在线。`
-- `🔄 正在热重启 20 个在线代理…`
-- `✅ 热重启完成：20 个代理已经在线。`
+- `🔄 开始热重启…`
+- `✅ 月如热重启成功，耗时3秒。`
+- `✅ 完整热重启成功，耗时12秒，20个代理在线。`
 - `❌ 系统最小热重启失败，月如已恢复原状态。`
 - `❌ 系统最小热重启失败，月如暂未恢复在线。`
 
@@ -106,10 +117,10 @@ are never discarded to admit a new request; full or invalid storage rejects a
 new reboot without interrupting healthy services.
 
 On shared-process recovery, an inherited broad receipt with a published handoff
-request remains active so the successor can reconcile Core, Worker, and Remote
-evidence. Other inherited accepted/running receipts become unconfirmed. Pending
-terminal notices are retried within their existing budget and labeled as delayed
-historical results. Recovery does not rerun a targeted reboot or infer success
+request remains active so the successor can reconcile Core and Worker evidence.
+Other inherited accepted/running receipts become unconfirmed. Pending terminal
+notices retain their delivery budget without an extra delayed-result label.
+Recovery does not rerun a targeted reboot or infer success
 merely because an Agent is online.
 
 For the one-generation transition from legacy Worker-only `same|max`, a newly
@@ -243,3 +254,20 @@ cannot disable the Telegram transport. The same diagnosis found that notice
 credential lookup did not apply the configuration loader's default token key
 (the Agent name) when an ingress was absent. It now uses that default before
 considering another Bot. Both defects have focused red/green cases.
+
+## HASHI1 scope correction — 2026-09-27
+
+The user directed a lightweight `/reboot`: `min|same` affects only the selected
+Agent, `max` replaces shared Functions and running Workers, and Remote remains
+independent. The source change closes selected routes at admission, rejects
+new old-process requests during `max`, and leaves Telegram updates queued on
+its server. Empty Telegram polling is interrupted; accepted updates finish and
+checkpoint. Workbench's Connector retains its last verified Agent list and
+conversation projection during the shared API gap. The start and final notices
+are short; success includes measured elapsed seconds. The obsolete Remote reboot
+helper and assertions were removed.
+
+Implementation and focused offline checks are recorded in the HASHI1 source
+checkout and Workbench Connector checkout. No instance reboot, Remote restart,
+or live frontend acceptance was authorized for this correction; source, tests,
+and live adoption are separate facts.
