@@ -6,14 +6,15 @@
 | Effective date | 2026-09-25 |
 | Parent architecture | [HASHI System Architecture](../ARCHITECTURE.md) |
 | Scope | Built-in TUI, messaging connectors, Backend API, Persistent Session API, Remote projection, and compatible external clients |
-| Implementation status | Connector-neutral v2 groundwork exists; end-to-end connector adoption is still in progress |
+| Implementation status | Standard FC source converged and adopted on HASHI1; connector-specific live acceptance remains scoped |
 
-As of 2026-09-25, Functions contains versioned connector-neutral contracts,
-a capability catalog, generic delivery-preference migration, and selected
-canonical-event/outbox integrations. These are migration foundations, not proof
-that every ingress, event, destination, tool, Remote/Exchange route, or client
-uses one dispatcher. The authoritative rollout status and remaining gates are
-tracked in [the unified I/O repair plan](HASHI_FRONTEND_CONNECTOR_UNIFIED_IO_REPAIR_PLAN.md).
+As of 2026-09-26, Functions contains the versioned connector-neutral contracts,
+capability catalog, common ingress, canonical Event/Message projection, media
+ownership, and per-endpoint outbox used by the production adapters in scope.
+The qualified source has been adopted on HASHI1. This is not proof that every
+configured external destination or physical device has passed live acceptance;
+the authoritative rollout evidence and remaining gates are tracked in
+[the standard-interface execution plan](HASHI_FC_STANDARD_INTERFACE_EXECUTION_PLAN_2026-09-25.md).
 
 ## 1. Definition
 
@@ -386,6 +387,20 @@ and transport APIs are thin Connector adapters around FC; a normal FC change
 does not require editing Telegram, an external Workbench application, or HASHI
 business behavior merely to reproduce the same command/card for another UI.
 
+Each command-menu response binds its Session presentation identity to the
+canonical command invocation, not to fallback text or a transport message
+number. A replay of the same client/request returns the saved non-action result
+and requires a refresh; it never reissues stale legacy or standard actions. A
+new status request may safely render the same text with newly issued actions.
+Native callback wrappers preserve the Connector-requested UI locale. Native
+Telegram text also retains `telegram` as its admission source so its automatic
+reply destination cannot be lost by generic text normalization.
+
+Final replies from standard non-Telegram Runs publish enabled meter and HER v2
+presentations after the final Message through the same Session Event boundary.
+Telegram mirroring is a destination choice, not a prerequisite for creating
+those canonical display events.
+
 ## 9. Engineering-layer placement
 
 Connector business behaviour belongs in the Functions layer. Stable process
@@ -409,8 +424,9 @@ into HASHI Functions or Core.
   evidence is absent, even though qualified personal instances enable it by
   default.
 - Source convergence and live adoption are separate. The 2026-09-26 FC source
-  candidate still requires a clean committed generation and live acceptance
-  before it can be described as adopted.
+  is adopted on HASHI1; Telegram, Relay, physical microphone and any other
+  unavailable or unauthorized destination remain explicitly outside the
+  completed Workbench live subset.
 
 These are current implementation facts, not target architecture exceptions.
 

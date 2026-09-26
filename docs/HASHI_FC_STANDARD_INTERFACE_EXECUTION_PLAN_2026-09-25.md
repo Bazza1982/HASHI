@@ -406,3 +406,44 @@ Function generation、Worker、reboot、minimal-Core 与 runtime handoff 定向�
 因此候选资格与历史失败结论已闭合，M1/M2 进入可采用状态。M3 仍完全未执行：
 运行 Worker 尚未加载候选，真实 Telegram/外部前端/Relay、断线恢复、受管回滚
 及 30 分钟观察均没有现场证据。
+
+### 2026-09-26 HASHI1 运行采用与 Workbench 现场复核
+
+离线候选后的现场复核发现并关闭了四个边界。标准非 Telegram Run 原先只保存
+final，没有在 mirror 关闭时发布启用的 meter/HER 展示事件；聚焦测试先复现
+空事件，再验证 final 后各有一份标准展示。随后，重复打开内容相同的命令状态
+菜单暴露了本地命令缺少稳定调用身份的问题；运行审计记录的失败是
+`presentation idempotency key is bound to different content`。修复后，Session
+展示身份绑定标准 command invocation，新请求可产生新动作，同一请求仍按原
+身份防重。最后，英文菜单按钮曾被原生 callback wrapper 改回 Agent 的中文
+默认语言；红灯得到 `zh-CN`，修复后保持 Connector 请求的 `en`。原生 Telegram
+文字同时恢复为 `telegram` 接纳来源，避免被通用 `text` 归一化后丢失自动回复
+目的地。同一命令请求在 Worker 内快速重放时，虽然没有重复执行，却会再次返回
+首次签发的旧按钮并标成非重放；修复后返回同一持久结果和事件 ID、明确标记
+`replayed`，同时移除 legacy `command_ui` 与标准 action blocks，要求客户端刷新。
+
+相关提交为 `54affd75`、`4ee668ea`、`f70dcbf3`、`2d939cfc` 和 `8e09e116`。
+命令重放红灯先得到 `replayed=false`；修复后的命令交互集合为
+**60 passed / 4 subtests passed**，相关生产集合为 **163 passed**；每次
+共享运行边界提交后的 Core gate 均为 **712 passed / 0 failed / 0 skipped**，
+Protected Core 检查通过。
+
+第一次共享 Functions 采用在真实 zhaojun 请求仍运行时达到静默超时，回执为
+`rolled_back`，旧共享进程和全部 Worker 保持权威；该请求随后自然成功结束，
+没有取消或重复。再次采用后，Workbench 标准 Run 持久化了一份 final，随后
+依次一份 meter 和一份 HER v2，Telegram mirror 为关闭。重启独立 Workbench
+服务后，历史仍恢复；以同一幂等键重发得到同一 request/run，四类消息计数均
+未增加。旧连接菜单在服务/连接变化后被明确拒绝，没有跨连接执行。
+
+重放修复前的干净候选通过受管 `/reboot same` 采用为 generation
+`sha256:d868aaf032f80b35dc5f861906524a81c47fcaf421df37243ec37ac14263f04d`：
+共享 Functions、六个 Worker 与 Remote 同代次在线，运行 source commit 为
+`2d939cfc`，Core PID 保持 `910`。真实 Workbench 中 `/meter status` 和
+`/herv2 status` 可连续打开；英文 meter 菜单的开启、关闭、通知和刷新都保持
+英文，测试 Agent 的 meter/HER v2 偏好最终恢复为默认关闭。
+
+这构成 L01、Workbench 范围的 L02/L03/L04（已有三文件上传、下载）、L05
+重连/幂等恢复，以及 L08 自动回退边界的现场证据。`8e09e116` 的最终采用和
+30 分钟观察将在下一条终态记录补齐。真实 Telegram 目的地、已授权
+Relay peer、多目的地故障注入、物理麦克风和浏览器可见截图没有当前授权或可用
+能力，因此仍标为未验收，不能据此把总清单改成 10/10 或完整 M3。

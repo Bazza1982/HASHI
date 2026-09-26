@@ -109,12 +109,12 @@ wins conflicting flags. Do not duplicate automatic delivery. Recall terminalizes
 eligible READY direct Runs. Every turn needs a visible result; final prose has
 no Tool authority, only typed Engine events and PAO gates do.
 
-FC standardizes messages, commands/actions, cards, media, and receipts. PAO
-persists ingress, outputs, routes, and idempotency; Connectors authenticate,
-translate, render, and record receipts. Commands reserve Session/client/request;
-completed replays return saved results without stale actions, while conflicts
-and pending/unknown never execute again. Local exceptions require registry
-entries; never inject frontend business behavior into the runtime.
+FC standardizes messages, commands/actions, cards, media, and receipts. PAO owns
+durable ingress/routes/idempotency; Connectors authenticate/render/receipt.
+Commands bind Session/client/request/invocation; only saved non-action results
+replay, and conflict/pending/unknown never runs. Callbacks keep requested locale;
+Telegram keeps its destination; meter/HER follow standard finals. Register
+local exceptions; never add frontend policy to runtime.
 
 ## Engines, tools, and recovery
 
