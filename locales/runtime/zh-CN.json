@@ -2288,6 +2288,7 @@
     "jobs.running_kind": "正在立即运行 {kind} 任务：{task_id}",
     "jobs.no_prompt": "任务 {task_id} 没有提示词。",
     "runtime.logo_displayed": "已在终端显示标志。",
+    "runtime.logo_terminal_only": "此命令仅在本地终端中可用。",
     "backend.provider_not_selectable": "{provider} 是 HER v2 服务提供方，不是可直接选择的后端。请使用 /backend her-v2，再通过 /model 选择服务提供方。",
     "backend.not_allowed": "不允许使用此后端：{backend}",
     "backend.her_single_model_invalid": "HER v2 不直接选择单一后端模型。请使用 /backend her-v2 [+]，再通过 /model 配置快速模型、专业模型和任务路线。",

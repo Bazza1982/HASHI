@@ -312,6 +312,20 @@ async def test_telegram_adapter_persists_endpoint_receipt_for_canonical_event(
     assert "chat_id" not in audit_payload
     assert "text" not in audit_payload
     assert "meter card" not in str(audit_records)
+    reference = store.resolve_frontend_transport_reference(
+        session_id=session["session_id"],
+        owner_id=owner,
+        connector_id="telegram",
+        endpoint_id=receipts[0]["endpoint_id"],
+        transport_message_id="9876",
+    )
+    assert reference == {
+        "event_id": message["delivery_event_id"],
+        "message_id": message["message_id"],
+        "role": "assistant",
+        "text": "meter card",
+        "created_at": message["created_at"],
+    }
 
 
 @pytest.mark.asyncio

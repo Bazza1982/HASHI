@@ -2288,6 +2288,7 @@
     "jobs.running_kind": "Running {kind} job now: {task_id}",
     "jobs.no_prompt": "Job {task_id} has no prompt.",
     "runtime.logo_displayed": "Logo displayed in the terminal.",
+    "runtime.logo_terminal_only": "This command is only available in the local terminal.",
     "backend.provider_not_selectable": "{provider} is a HER v2 provider, not a selectable backend. Use /backend her-v2, then choose the provider with /model.",
     "backend.not_allowed": "Backend not allowed: {backend}",
     "backend.her_single_model_invalid": "HER v2 does not select a single backend model. Use /backend her-v2 [+], then configure Quick/Pro and task routes with /model.",

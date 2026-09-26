@@ -72,7 +72,6 @@ def test_parameterized_menu_commands_publish_typed_input_guidance():
         "terminate",
         "retry",
         "jobs",
-        "logo",
         "wa_on",
         "wa_off",
         "end",

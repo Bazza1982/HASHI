@@ -40,12 +40,15 @@ async def test_native_telegram_text_message_enters_admission_as_telegram(
         def _should_redirect_after_transfer(self):
             return False
 
-        async def enqueue_request(self, chat_id, prompt, source, summary):
+        async def enqueue_request(
+            self, chat_id, prompt, source, summary, *, reply_to_message_id=None
+        ):
             accepted.update(
                 chat_id=chat_id,
                 prompt=prompt,
                 source=source,
                 summary=summary,
+                reply_to_message_id=reply_to_message_id,
                 telegram_requested=telegram_delivery_for_admission(
                     source=source,
                     request_metadata=None,
@@ -84,6 +87,7 @@ async def test_native_telegram_text_message_enters_admission_as_telegram(
     assert accepted["telegram_requested"] is True
     assert accepted["chat_id"] == 99
     assert accepted["prompt"] == "hello from Telegram"
+    assert accepted["reply_to_message_id"] is None
 
 
 def test_frontend_delivery_policy_is_connector_neutral_client_bound_and_fail_visible():

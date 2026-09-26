@@ -323,7 +323,7 @@ class SessionStore:
     per-Session working files are derived state used by Memory+ and Compact.
     """
 
-    SCHEMA_VERSION = 10
+    SCHEMA_VERSION = 11
 
     def __init__(
         self,
@@ -781,6 +781,23 @@ class SessionStore:
                     FOREIGN KEY(event_id) REFERENCES run_events(event_id),
                     FOREIGN KEY(session_id) REFERENCES sessions(session_id)
                 );
+
+                CREATE TABLE IF NOT EXISTS frontend_transport_references (
+                    connector_id TEXT NOT NULL,
+                    endpoint_id TEXT NOT NULL,
+                    transport_message_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    event_id TEXT NOT NULL,
+                    message_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(connector_id, endpoint_id, transport_message_id),
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE,
+                    FOREIGN KEY(event_id) REFERENCES run_events(event_id) ON DELETE CASCADE,
+                    FOREIGN KEY(message_id) REFERENCES messages(message_id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS frontend_transport_references_session
+                    ON frontend_transport_references(session_id, owner_id, event_id);
 
                 CREATE TABLE IF NOT EXISTS session_attachments (
                     attachment_id TEXT PRIMARY KEY,
@@ -2129,6 +2146,37 @@ class SessionStore:
                         raise SessionConflict(
                             "media content requires attachment identity"
                         )
+                elif block_type == "reply_ref":
+                    event_id = str(block.get("event_id") or "").strip()
+                    if not event_id or len(event_id) > 512:
+                        raise ValueError("reply references require a valid Event ID")
+                    reference = connection.execute(
+                        """
+                        SELECT message.message_id
+                        FROM run_events AS e
+                        JOIN sessions AS s ON s.session_id=e.session_id
+                        LEFT JOIN frontend_message_events AS fme
+                          ON fme.event_id=e.event_id AND fme.session_id=e.session_id
+                        LEFT JOIN runs AS target_run
+                          ON target_run.run_id=e.run_id
+                         AND target_run.session_id=e.session_id
+                        JOIN messages AS message
+                          ON message.message_id=COALESCE(
+                              fme.message_id, target_run.final_message_id
+                          )
+                         AND message.session_id=e.session_id
+                        WHERE e.event_id=? AND e.session_id=?
+                          AND s.owner_id=? AND s.instance_id=?
+                          AND message.role='assistant'
+                          AND message.visibility='visible'
+                        """,
+                        (event_id, str(session_id), str(owner_id), self.instance_id),
+                    ).fetchone()
+                    if reference is None:
+                        raise SessionConflict(
+                            "reply reference is not a visible assistant Event in this Session"
+                        )
+                    block = {"type": "reply_ref", "event_id": event_id}
                 elif not block_type:
                     raise ValueError("message content parts require a type")
                 else:
@@ -7539,6 +7587,77 @@ class SessionStore:
             result.append(item)
         return result
 
+    def frontend_event_reference(
+        self,
+        *,
+        session_id: str,
+        owner_id: str,
+        event_id: str,
+    ) -> dict[str, Any] | None:
+        """Return the visible assistant message bound to one Session Event."""
+
+        resolved_session_id = str(session_id or "").strip()
+        resolved_owner_id = str(owner_id or "").strip()
+        resolved_event_id = str(event_id or "").strip()
+        self.get_session(resolved_session_id, owner_id=resolved_owner_id)
+        if not resolved_event_id or len(resolved_event_id) > 512:
+            return None
+        with self._lock, self._connection() as connection:
+            event = connection.execute(
+                """
+                SELECT e.detail_json,
+                       fme.message_id AS presentation_message_id,
+                       r.final_message_id
+                FROM run_events AS e
+                JOIN sessions AS s ON s.session_id=e.session_id
+                LEFT JOIN frontend_message_events AS fme
+                  ON fme.event_id=e.event_id AND fme.session_id=e.session_id
+                LEFT JOIN runs AS r
+                  ON r.run_id=e.run_id AND r.session_id=e.session_id
+                WHERE e.event_id=? AND e.session_id=?
+                  AND s.owner_id=? AND s.instance_id=?
+                """,
+                (
+                    resolved_event_id,
+                    resolved_session_id,
+                    resolved_owner_id,
+                    self.instance_id,
+                ),
+            ).fetchone()
+            if event is None:
+                return None
+            detail = _json_object(event["detail_json"] or "{}")
+            message_id = str(
+                event["presentation_message_id"]
+                or event["final_message_id"]
+                or detail.get("message_id")
+                or ""
+            ).strip()
+            if not message_id:
+                return None
+            message = connection.execute(
+                """
+                SELECT message_id, role, text, created_at,
+                       context_generation, visibility
+                FROM messages WHERE message_id=? AND session_id=?
+                """,
+                (message_id, resolved_session_id),
+            ).fetchone()
+        if (
+            message is None
+            or str(message["role"] or "").casefold() != "assistant"
+            or str(message["visibility"] or "").casefold() != "visible"
+        ):
+            return None
+        return {
+            "event_id": resolved_event_id,
+            "message_id": str(message["message_id"]),
+            "role": str(message["role"]),
+            "text": str(message["text"] or ""),
+            "created_at": str(message["created_at"] or ""),
+            "context_generation": int(message["context_generation"] or 1),
+        }
+
     def record_frontend_delivery_receipt(
         self,
         *,
@@ -8367,6 +8486,175 @@ class SessionStore:
             )
             result.append(item)
         return result
+
+    def record_frontend_transport_reference(
+        self,
+        *,
+        session_id: str,
+        owner_id: str,
+        connector_id: str,
+        endpoint_id: str,
+        transport_message_id: str,
+        event_id: str,
+    ) -> dict[str, Any]:
+        """Bind one delivered transport message to its canonical assistant Event."""
+
+        values = {
+            "connector_id": str(connector_id or "").strip().casefold(),
+            "endpoint_id": str(endpoint_id or "").strip(),
+            "transport_message_id": str(transport_message_id or "").strip(),
+            "event_id": str(event_id or "").strip(),
+        }
+        if any(not value or len(value) > 512 for value in values.values()):
+            raise ValueError("frontend transport reference identity is invalid")
+        resolved_session_id = str(session_id or "").strip()
+        resolved_owner_id = str(owner_id or "").strip()
+        self.get_session(resolved_session_id, owner_id=resolved_owner_id)
+
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                """
+                SELECT event_id FROM frontend_transport_references
+                WHERE connector_id=? AND endpoint_id=? AND transport_message_id=?
+                """,
+                (
+                    values["connector_id"],
+                    values["endpoint_id"],
+                    values["transport_message_id"],
+                ),
+            ).fetchone()
+            if existing is not None:
+                if str(existing["event_id"]) != values["event_id"]:
+                    raise SessionConflict(
+                        "transport message reference is already bound to another Event"
+                    )
+                return {
+                    "event_id": values["event_id"],
+                    "duplicate": True,
+                }
+
+            event = connection.execute(
+                """
+                SELECT e.event_id, e.detail_json,
+                       fme.message_id AS presentation_message_id,
+                       r.final_message_id
+                FROM run_events AS e
+                JOIN sessions AS s ON s.session_id=e.session_id
+                LEFT JOIN frontend_message_events AS fme
+                  ON fme.event_id=e.event_id AND fme.session_id=e.session_id
+                LEFT JOIN runs AS r
+                  ON r.run_id=e.run_id AND r.session_id=e.session_id
+                WHERE e.event_id=? AND e.session_id=?
+                  AND s.owner_id=? AND s.instance_id=?
+                """,
+                (
+                    values["event_id"],
+                    resolved_session_id,
+                    resolved_owner_id,
+                    self.instance_id,
+                ),
+            ).fetchone()
+            if event is None:
+                raise SessionNotFound("frontend Event not found")
+            detail = _json_object(event["detail_json"] or "{}")
+            message_id = str(
+                event["presentation_message_id"]
+                or event["final_message_id"]
+                or detail.get("message_id")
+                or ""
+            ).strip()
+            if not message_id:
+                raise SessionConflict(
+                    "frontend Event is not bound to a canonical message"
+                )
+            message = connection.execute(
+                """
+                SELECT role, visibility FROM messages
+                WHERE message_id=? AND session_id=?
+                """,
+                (message_id, resolved_session_id),
+            ).fetchone()
+            if (
+                message is None
+                or str(message["role"] or "").casefold() != "assistant"
+                or str(message["visibility"] or "").casefold() != "visible"
+            ):
+                raise SessionConflict(
+                    "frontend Event is not a visible assistant message"
+                )
+            connection.execute(
+                """
+                INSERT INTO frontend_transport_references(
+                    connector_id, endpoint_id, transport_message_id,
+                    session_id, owner_id, event_id, message_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    values["connector_id"],
+                    values["endpoint_id"],
+                    values["transport_message_id"],
+                    resolved_session_id,
+                    resolved_owner_id,
+                    values["event_id"],
+                    message_id,
+                    _utc_now(),
+                ),
+            )
+        return {
+            "event_id": values["event_id"],
+            "message_id": message_id,
+            "duplicate": False,
+        }
+
+    def resolve_frontend_transport_reference(
+        self,
+        *,
+        session_id: str,
+        owner_id: str,
+        connector_id: str,
+        endpoint_id: str,
+        transport_message_id: str,
+    ) -> dict[str, Any] | None:
+        """Resolve a quoted external message only in its owner and endpoint scope."""
+
+        resolved_session_id = str(session_id or "").strip()
+        resolved_owner_id = str(owner_id or "").strip()
+        self.get_session(resolved_session_id, owner_id=resolved_owner_id)
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT ref.event_id, ref.message_id, message.role,
+                       message.text, message.created_at, message.visibility
+                FROM frontend_transport_references AS ref
+                JOIN messages AS message
+                  ON message.message_id=ref.message_id
+                 AND message.session_id=ref.session_id
+                WHERE ref.session_id=? AND ref.owner_id=?
+                  AND ref.connector_id=? AND ref.endpoint_id=?
+                  AND ref.transport_message_id=?
+                """,
+                (
+                    resolved_session_id,
+                    resolved_owner_id,
+                    str(connector_id or "").strip().casefold(),
+                    str(endpoint_id or "").strip(),
+                    str(transport_message_id or "").strip(),
+                ),
+            ).fetchone()
+        if (
+            row is None
+            or str(row["role"] or "").casefold() != "assistant"
+            or str(row["visibility"] or "").casefold() != "visible"
+        ):
+            return None
+        return {
+            "event_id": str(row["event_id"]),
+            "message_id": str(row["message_id"]),
+            "role": str(row["role"]),
+            "text": str(row["text"] or ""),
+            "created_at": str(row["created_at"] or ""),
+        }
 
     def create_event_consumer(
         self,

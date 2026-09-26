@@ -210,3 +210,7 @@ scope, not live adoption; preserve user work and report failures.
 
 HCC is optional, non-authoritative PCM context; `/hcc` and `hcc-refresh`
 refresh sources; do not rewrite PCM or retry.
+
+### FC terminal-only command boundary (2026-09-26)
+
+/logo affects the HASHI server terminal, so it is hidden from the shared command menus and registered as Connector-local for non-TUI built-in Connectors. Telegram's direct handler returns a localized unsupported notice. The TUI compatibility route remains available. See [Frontend Connector Architecture](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md#terminal-only-slash-commands) and the three-frontend live test record.

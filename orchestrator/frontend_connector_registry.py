@@ -436,6 +436,16 @@ _COMPATIBILITY_ADAPTERS: tuple[dict[str, str], ...] = (
     },
 )
 
+_TERMINAL_LOCAL_COMMAND_CUSTOMIZATIONS: tuple[dict[str, str], ...] = (
+    {
+        "kind": "command_override",
+        "key": "logo",
+        "route": "connector_local",
+        "semantic": "terminal_logo_display",
+        "reason": "local_presentation",
+    },
+)
+
 _CONNECTORS: tuple[dict[str, Any], ...] = (
     {
         "id": "telegram",
@@ -443,7 +453,10 @@ _CONNECTORS: tuple[dict[str, Any], ...] = (
         "ingress": ["message", "command", "callback", "media", "voice"],
         "egress": ["text", "media", "voice", "command_result"],
         "canonical_feed": "persistent_session_events",
-        "customizations": _TELEGRAM_PRESENTATION_CUSTOMIZATIONS,
+        "customizations": (
+            *_TELEGRAM_PRESENTATION_CUSTOMIZATIONS,
+            *_TERMINAL_LOCAL_COMMAND_CUSTOMIZATIONS,
+        ),
     },
     {
         "id": "tui",
@@ -459,6 +472,7 @@ _CONNECTORS: tuple[dict[str, Any], ...] = (
         "ingress": ["message", "command", "media"],
         "egress": ["text", "media", "status", "approval"],
         "canonical_feed": "persistent_session_events",
+        "customizations": _TERMINAL_LOCAL_COMMAND_CUSTOMIZATIONS,
     },
     {
         "id": "session_api",
@@ -466,6 +480,7 @@ _CONNECTORS: tuple[dict[str, Any], ...] = (
         "ingress": ["message", "command", "media", "voice"],
         "egress": ["text", "media", "voice", "status", "approval"],
         "canonical_feed": "persistent_session_events",
+        "customizations": _TERMINAL_LOCAL_COMMAND_CUSTOMIZATIONS,
     },
     {
         "id": "hchat",
@@ -473,6 +488,7 @@ _CONNECTORS: tuple[dict[str, Any], ...] = (
         "ingress": ["message", "command", "media"],
         "egress": ["text", "media", "receipt"],
         "canonical_feed": "persistent_session_events",
+        "customizations": _TERMINAL_LOCAL_COMMAND_CUSTOMIZATIONS,
     },
     {
         "id": "remote",
@@ -480,6 +496,7 @@ _CONNECTORS: tuple[dict[str, Any], ...] = (
         "ingress": ["message", "command", "media", "receipt"],
         "egress": ["text", "media", "receipt"],
         "canonical_feed": "persistent_session_events",
+        "customizations": _TERMINAL_LOCAL_COMMAND_CUSTOMIZATIONS,
     },
     {
         "id": "exchange",
@@ -487,6 +504,7 @@ _CONNECTORS: tuple[dict[str, Any], ...] = (
         "ingress": ["message", "command", "media", "receipt"],
         "egress": ["text", "media", "receipt"],
         "canonical_feed": "persistent_session_events",
+        "customizations": _TERMINAL_LOCAL_COMMAND_CUSTOMIZATIONS,
     },
     {
         "id": "whatsapp",
@@ -494,7 +512,10 @@ _CONNECTORS: tuple[dict[str, Any], ...] = (
         "ingress": ["message", "command", "media"],
         "egress": ["text", "receipt"],
         "canonical_feed": "persistent_session_events",
-        "customizations": _WHATSAPP_COMMAND_CUSTOMIZATIONS,
+        "customizations": (
+            *_WHATSAPP_COMMAND_CUSTOMIZATIONS,
+            *_TERMINAL_LOCAL_COMMAND_CUSTOMIZATIONS,
+        ),
     },
     {
         "id": "external",
@@ -502,6 +523,7 @@ _CONNECTORS: tuple[dict[str, Any], ...] = (
         "ingress": ["message", "command", "media"],
         "egress": ["text", "media", "status", "approval"],
         "canonical_feed": "persistent_session_events",
+        "customizations": _TERMINAL_LOCAL_COMMAND_CUSTOMIZATIONS,
     },
     {
         "id": "internal",
@@ -516,6 +538,7 @@ _CONNECTORS: tuple[dict[str, Any], ...] = (
         "ingress": ["message", "command", "callback", "media", "voice", "control", "approval", "ack"],
         "egress": ["text", "media", "voice", "command_result", "status", "card", "receipt"],
         "canonical_feed": "persistent_session_events",
+        "customizations": _TERMINAL_LOCAL_COMMAND_CUSTOMIZATIONS,
     },
 )
 

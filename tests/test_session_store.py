@@ -2771,3 +2771,60 @@ def test_agent_restart_reconciliation_does_not_interrupt_other_agents(tmp_path):
     assert len(terminal) == 1
     assert terminal[0]["detail"]["agent_id"] == "alpha"
     assert terminal[0]["detail"]["recovery_scope"] == "agent"
+
+def test_frontend_transport_references_resolve_only_inside_their_endpoint(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    publication = store.append_presentation_message(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="lily",
+        role="assistant",
+        text="Quoted answer FC-LIVE-REFERENCE",
+        source="test",
+        idempotency_key="reply-target-1",
+        outbox=True,
+    )
+    event_id = publication["delivery_event_id"]
+
+    store.record_frontend_transport_reference(
+        session_id=session["session_id"],
+        owner_id=owner,
+        connector_id="telegram",
+        endpoint_id="ep_telegram_test",
+        transport_message_id="7788",
+        event_id=event_id,
+    )
+
+    resolved = store.resolve_frontend_transport_reference(
+        session_id=session["session_id"],
+        owner_id=owner,
+        connector_id="telegram",
+        endpoint_id="ep_telegram_test",
+        transport_message_id="7788",
+    )
+    assert resolved == {
+        "event_id": event_id,
+        "message_id": publication["message_id"],
+        "role": "assistant",
+        "text": "Quoted answer FC-LIVE-REFERENCE",
+        "created_at": publication["created_at"],
+    }
+    assert store.resolve_frontend_transport_reference(
+        session_id=session["session_id"],
+        owner_id=owner,
+        connector_id="telegram",
+        endpoint_id="ep_telegram_other",
+        transport_message_id="7788",
+    ) is None
+
+    with pytest.raises(SessionConflict, match="already bound"):
+        store.record_frontend_transport_reference(
+            session_id=session["session_id"],
+            owner_id=owner,
+            connector_id="telegram",
+            endpoint_id="ep_telegram_test",
+            transport_message_id="7788",
+            event_id="evt_other",
+        )

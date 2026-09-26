@@ -684,3 +684,7 @@ the guard was tightened. Focused validation passed: 76 cases across
 command-audit/admin consumers passed separately. The protected-Core guard and
 whitespace check passed. Live Worker generation and user-terminal delivery remain
 separate acceptance evidence.
+
+### Terminal-only slash commands
+
+The shared command catalogue contains /logo, whose effect targets the HASHI server terminal. It is not a portable Frontend Connector display event. Keep it out of shared command menus (menu_visible=False) and register it as connector_local for non-TUI built-in Connectors, including Telegram, Backend API, Session API, and relay/messaging Connectors. Compatibility adapters reject it before runtime execution. Telegram's native handler checks the same registered exception and returns a localized notice; it does not run the terminal animation. The TUI compatibility route remains available.

@@ -467,3 +467,11 @@ Linux 将 Windows 路径当相对路径。本次末尾只修改测试与本文�
 真实 Telegram 目的地、已授权
 Relay peer、多目的地故障注入、物理麦克风和浏览器可见截图没有当前授权或可用
 能力，因此仍标为未验收，不能据此把总清单改成 10/10 或完整 M3。
+
+### 2026-09-26 三端现场修复批次
+
+测试期间发现的三项问题已进入同一修复批次：Telegram 原生回复没有 Session 引用关系；Workbench 丢失普通换行；/logo 作为共享命令泄露了 终端专用行为并产生额外回复。源码已将 Telegram message ID 绑定到标准 Session Event，将引用关系作为 typed reply_ref 持久化并投影为 Workbench 引用卡；Workbench 明确保留 Markdown 单换行；/logo 隐藏于共享命令菜单，并登记为所有非 TUI 内建 Connector 的本地命令，由 Telegram 原生命令处理器明确拒绝。
+
+离线验证：HASHI1 相关组合 302 passed / 11 subtests passed；Workbench 展示 19/19 passed；命令目录回归另有 9 passed；Python 编译、中英文目录解析、Protected Core 与 whitespace 检查通过。
+
+现场采用尚未完成。授权的 /reboot min 被安全拒绝，原因是 Functions 源码仍未提交（source_update_incomplete）；Test Worker 仍运行旧代次，没有发生切换。下一步只提交本批自有文件，再重试获准的 Test 最小 Worker 重启，然后复测 TUI、Workbench、Telegram 中的回复引用、换行和 /logo。语音输入仍不在本轮范围。

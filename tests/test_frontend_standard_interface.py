@@ -516,3 +516,82 @@ async def test_dispatcher_leaves_pull_tasks_for_feed_and_isolates_adapter_except
     )
     assert ambiguous_receipts[0]["status"] == "unknown"
     assert ambiguous_receipts[0]["proof"] is None
+
+def test_runtime_ingress_keeps_reply_reference_typed_in_request_and_session(tmp_path, monkeypatch):
+    from orchestrator import frontend_ingress
+    from orchestrator.frontend_ingress import accept_runtime_ingress
+    from orchestrator.frontend_contracts import normalize_frontend_request
+
+    runtime, store, owner, session = _setup_runtime(tmp_path)
+    target = store.append_presentation_message(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="test-agent",
+        role="assistant",
+        text="Quoted answer from the same Session",
+        source="test",
+        idempotency_key="reply-target",
+        outbox=True,
+    )
+    envelope = build_frontend_ingress_envelope(
+        source_id="workbench",
+        ingress_transport="session-api",
+        surface="workbench",
+        channel_key="default",
+        instance_id="HASHI1",
+        principal={"kind": "human_or_client", "assurance": "runtime_observed"},
+        network_authentication="not_applicable",
+        relay_chain=[],
+        request_id="req-reply-reference",
+        idempotency_key="key-reply-reference",
+        session_id=session["session_id"],
+        agent_id="test-agent",
+    )
+    observed = {}
+    original_normalize = frontend_ingress.normalize_frontend_request
+
+    def capture_request(value):
+        observed["operation"] = value["operation"]
+        return normalize_frontend_request(value)
+
+    monkeypatch.setattr(frontend_ingress, "normalize_frontend_request", capture_request)
+    metadata = {
+        "session_id": session["session_id"],
+        "reply_to_event_id": target["delivery_event_id"],
+    }
+    _session, accepted, _owner, _surface, _channel = accept_runtime_ingress(
+        runtime,
+        envelope,
+        request_id="req-reply-reference",
+        chat_id=None,
+        prompt="What did I quote?",
+        source="session-api",
+        request_metadata=metadata,
+        request_content=None,
+        idempotency_key="key-reply-reference",
+    )
+
+    assert observed["operation"]["content"] == [
+        {"type": "reply_ref", "event_id": target["delivery_event_id"]},
+        {"type": "text", "text": "What did I quote?"},
+    ]
+    stored = store.get_message(
+        accepted.message_id,
+        session_id=session["session_id"],
+        owner_id=owner,
+    )
+    assert stored["content"] == observed["operation"]["content"]
+    assert stored["message_context"]["reply_reference"] == {
+        "event_id": target["delivery_event_id"],
+        "message_ref": target["delivery_event_id"],
+        "session_id": session["session_id"],
+        "context_generation": 1,
+        "role": "assistant",
+        "author": "test-agent",
+        "timestamp": target["created_at"],
+        "text": "Quoted answer from the same Session",
+    }
+    from orchestrator.chat_transcript_projection import _canonical_projection_row
+
+    projected = _canonical_projection_row(store, stored, owner_id=owner)
+    assert projected["reply_reference"] == stored["message_context"]["reply_reference"]

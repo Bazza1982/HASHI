@@ -49,6 +49,7 @@ def accept_runtime_ingress(
     """Validate the standard envelope, then use PAO's sole Run writer."""
 
     normalized = normalize_frontend_ingress_envelope(envelope)
+    metadata = dict(request_metadata or {})
     operation_content: list[dict[str, Any]] = []
     canonical_parts = (
         request_content.get("parts")
@@ -73,16 +74,36 @@ def accept_runtime_ingress(
                         "caption": str(part.get("caption") or "") or None,
                     }
                 )
+    existing_session_content = metadata.get("session_message_content")
+    if not operation_content and isinstance(existing_session_content, (list, tuple)):
+        for block in existing_session_content:
+            if not isinstance(block, Mapping):
+                continue
+            block_type = str(block.get("type") or "").strip().casefold()
+            if block_type == "text" and str(block.get("text") or ""):
+                operation_content.append(
+                    {"type": "text", "text": str(block["text"])}
+                )
+            elif block_type in {"media", "attachment", "audio"} and str(
+                block.get("attachment_id") or ""
+            ):
+                operation_content.append(
+                    {
+                        "type": "attachment_ref",
+                        "attachment_id": str(block["attachment_id"]),
+                        "ordinal": len(operation_content),
+                        "caption": str(block.get("caption") or "") or None,
+                    }
+                )
+            elif block_type == "reply_ref":
+                operation_content.append(
+                    {
+                        "type": "reply_ref",
+                        "event_id": str(block.get("event_id") or ""),
+                    }
+                )
     if not operation_content and str(prompt or ""):
         operation_content.append({"type": "text", "text": str(prompt)})
-    normalize_frontend_request(
-        {
-            "type": FRONTEND_REQUEST_TYPE,
-            "version": FRONTEND_REQUEST_VERSION,
-            "ingress": normalized,
-            "operation": {"kind": "message", "content": operation_content},
-        }
-    )
     expected_idempotency_digest = "sha256:" + hashlib.sha256(
         str(idempotency_key or request_id).encode("utf-8")
     ).hexdigest()
@@ -97,11 +118,103 @@ def accept_runtime_ingress(
         raise SessionConflict("frontend ingress Agent changed during admission")
     if normalized["message"]["request_id"] != str(request_id):
         raise SessionConflict("frontend ingress request changed during admission")
-    metadata = dict(request_metadata or {})
     if normalized["target"]["session_id"] != str(
         metadata.get("session_id") or ""
     ):
         raise SessionConflict("frontend ingress Session changed during admission")
+
+    reply_event_id = str(metadata.get("reply_to_event_id") or "").strip()
+    if reply_event_id:
+        store = ensure_store(runtime)
+        reference = store.frontend_event_reference(
+            session_id=normalized["target"]["session_id"],
+            owner_id=owner_id(runtime, str(metadata.get("owner_id") or "") or None),
+            event_id=reply_event_id,
+        )
+        if reference is None:
+            raise SessionConflict("frontend reply reference is not visible in this Session")
+        reply_block = {"type": "reply_ref", "event_id": reply_event_id}
+        operation_content = [
+            item
+            for item in operation_content
+            if str(item.get("type") or "").casefold() != "reply_ref"
+        ]
+        operation_content.insert(0, reply_block)
+        for ordinal, item in enumerate(operation_content):
+            if str(item.get("type") or "").casefold() == "attachment_ref":
+                item["ordinal"] = ordinal
+
+        raw_session_content = metadata.get("session_message_content")
+        if isinstance(raw_session_content, (list, tuple)):
+            session_content = [
+                dict(block)
+                for block in raw_session_content
+                if isinstance(block, Mapping)
+            ]
+        else:
+            session_content = []
+            for item in operation_content:
+                item_type = str(item.get("type") or "").casefold()
+                if item_type == "text":
+                    session_content.append(
+                        {"type": "text", "text": str(item.get("text") or "")}
+                    )
+                elif item_type == "attachment_ref":
+                    session_content.append(
+                        {
+                            "type": "media",
+                            "attachment_id": str(item.get("attachment_id") or ""),
+                            **(
+                                {"caption": str(item["caption"])}
+                                if item.get("caption")
+                                else {}
+                            ),
+                        }
+                    )
+                elif item_type == "reply_ref":
+                    session_content.append(dict(reply_block))
+        existing_refs = [
+            str(block.get("event_id") or "")
+            for block in session_content
+            if str(block.get("type") or "").casefold() == "reply_ref"
+        ]
+        if any(event_id != reply_event_id for event_id in existing_refs):
+            raise SessionConflict("frontend reply reference changed during admission")
+        session_content = [
+            block
+            for block in session_content
+            if str(block.get("type") or "").casefold() != "reply_ref"
+        ]
+        session_content.insert(0, dict(reply_block))
+        metadata["session_message_content"] = session_content
+
+        quote_text = str(reference.get("text") or "")[:4000]
+        safe_reference = {
+            "event_id": reply_event_id,
+            "message_ref": reply_event_id,
+            "session_id": normalized["target"]["session_id"],
+            "context_generation": int(reference["context_generation"]),
+            "role": "assistant",
+            "author": str(runtime.name),
+            "timestamp": str(reference.get("created_at") or ""),
+            "text": quote_text or "[Referenced Agent message]",
+        }
+        snapshot = metadata.get("message_context_snapshot")
+        if isinstance(snapshot, Mapping):
+            snapshot = dict(snapshot)
+        else:
+            snapshot = {}
+        snapshot["reply_reference"] = safe_reference
+        metadata["message_context_snapshot"] = snapshot
+
+    normalize_frontend_request(
+        {
+            "type": FRONTEND_REQUEST_TYPE,
+            "version": FRONTEND_REQUEST_VERSION,
+            "ingress": normalized,
+            "operation": {"kind": "message", "content": operation_content},
+        }
+    )
 
     from orchestrator import runtime_session
 

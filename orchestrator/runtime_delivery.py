@@ -770,7 +770,33 @@ async def _send_long_message_transport(
             sent_message = await runtime.app.bot.send_message(**kwargs)
             message_id = getattr(sent_message, "message_id", None)
             if message_id is not None:
-                accepted_message_ids.append(str(message_id))
+                stable_message_id = str(message_id)
+                accepted_message_ids.append(stable_message_id)
+                if (
+                    frontend_event_id
+                    and frontend_session_id
+                    and frontend_owner_id
+                ):
+                    store = getattr(runtime, "session_store", None)
+                    recorder = getattr(
+                        store, "record_frontend_transport_reference", None
+                    )
+                    if callable(recorder):
+                        try:
+                            recorder(
+                                session_id=str(frontend_session_id),
+                                owner_id=str(frontend_owner_id),
+                                connector_id="telegram",
+                                endpoint_id=audit_endpoint_id,
+                                transport_message_id=stable_message_id,
+                                event_id=str(frontend_event_id),
+                            )
+                        except Exception as exc:
+                            runtime.logger.warning(
+                                "Telegram reply-reference persistence failed for %s (%s)",
+                                request_id or "<none>",
+                                type(exc).__name__,
+                            )
             if outbox_outcome is not None:
                 outbox_outcome["accepted_effect_count"] = int(
                     outbox_outcome.get("accepted_effect_count") or 0
