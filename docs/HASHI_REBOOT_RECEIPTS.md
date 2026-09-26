@@ -189,3 +189,21 @@ Validation: five focused regression cases failed on the preceding patch (generic
 switch reason and missing actionable status guidance), then passed. Real manager,
 route gate, persistent receipts and renderer are exercised with deterministic
 process boundaries. Live restart and terminal delivery remain separate acceptance.
+
+## HASHI1 notification diagnosis (2026-09-27)
+
+On HASHI1, two of the latest three Telegram broad-reboot final notices used a
+different Agent's Bot from the initiating Agent. The receipt retained the
+initiating Agent and original destination, but the prior runtime did not log
+whether the initiating Bot was skipped, rate limited or rejected by transport.
+The existing fallback therefore made the failure invisible and the visible
+sender surprising.
+
+Frontend Connector Functions now logs each reboot notice attempt with its
+operation ID, notice kind, source Agent, candidate Agent, safe delivery error
+code/type and retry delay. Skipped source credentials and active delivery blocks
+are logged too. Bot tokens, request URLs and raw exception text are excluded.
+PAO passes the operation ID and notice kind from the owning receipt; the
+persisted delivery outcome and retry budget are unchanged. Focused tests cover
+the previously silent rate-limit and blocked-source paths. Live adoption and
+root-cause verification are recorded separately after the authorized reboot.

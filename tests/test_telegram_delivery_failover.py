@@ -888,9 +888,11 @@ def test_status_summary_reports_delivery_block_and_typing(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("availability", ["source", "fallback", "blocked", "none"])
+@pytest.mark.parametrize(
+    "availability", ["source", "fallback", "blocked", "rate_limited", "none"]
+)
 async def test_runtime_notice_uses_original_bot_without_worker_then_same_destination_fallback(
-    tmp_path, monkeypatch, availability
+    tmp_path, monkeypatch, caplog, availability
 ):
     from orchestrator.reboot_ui import render_notice
 
@@ -912,6 +914,8 @@ async def test_runtime_notice_uses_original_bot_without_worker_then_same_destina
                 availability == "fallback" and self.token == "source-test-token"
             ):
                 raise OSError("unavailable")
+            if availability == "rate_limited" and self.token == "source-test-token":
+                raise RetryAfter(timedelta(seconds=9))
             return SimpleNamespace(message_id=19)
 
     monkeypatch.setattr("telegram.Bot", DirectBot)
@@ -969,6 +973,8 @@ async def test_runtime_notice_uses_original_bot_without_worker_then_same_destina
     result = await failover.send_runtime_notice(
         kernel,
         source_agent="source",
+        operation_id="reboot-test-operation",
+        notice_kind="final",
         chat_id=-42,
         thread_id=7,
         render_text=lambda name, display: render_notice(
@@ -976,7 +982,7 @@ async def test_runtime_notice_uses_original_bot_without_worker_then_same_destina
         ),
     )
     assert result["sent"] is (availability != "none")
-    if availability in {"fallback", "blocked"}:
+    if availability in {"fallback", "blocked", "rate_limited"}:
         assert result["sender"] == "backup" and "backup" in calls[-1][1]["text"]
     elif availability == "source":
         assert result["sender"] == "source" and len(calls) == 1
@@ -988,3 +994,20 @@ async def test_runtime_notice_uses_original_bot_without_worker_then_same_destina
             "显示&lt;&amp;&gt;名称" in kwargs["text"] and kwargs["parse_mode"] == "HTML"
         )
     assert len(closed) == len(calls)
+    if availability == "rate_limited":
+        assert any(
+            "reboot-test-operation" in message
+            and "source" in message
+            and "retry_after" in message
+            and "9" in message
+            for message in caplog.messages
+        )
+    if availability == "blocked":
+        assert any(
+            "reboot-test-operation" in message
+            and "source" in message
+            and "active_delivery_block" in message
+            for message in caplog.messages
+        )
+    assert "source-test-token" not in caplog.text
+    assert "backup-test-token" not in caplog.text

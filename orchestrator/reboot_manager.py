@@ -198,6 +198,8 @@ class RebootManager:
             result = await send_runtime_notice(
                 self.kernel,
                 source_agent=record["source_agent"],
+                operation_id=record["id"],
+                notice_kind="starting" if starting else "final",
                 chat_id=origin["chat_id"],
                 thread_id=origin.get("thread_id"),
                 render_text=render,

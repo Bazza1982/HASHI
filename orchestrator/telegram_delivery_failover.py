@@ -516,7 +516,14 @@ async def _send_direct(runtime: Any, *, chat_id: int, text: str) -> None:
 
 
 async def send_runtime_notice(
-    kernel, *, source_agent, chat_id, thread_id=None, render_text
+    kernel,
+    *,
+    source_agent,
+    chat_id,
+    thread_id=None,
+    render_text,
+    operation_id=None,
+    notice_kind="runtime",
 ):
     """Send an operational notice without depending on any Agent Worker.
 
@@ -593,13 +600,38 @@ async def send_runtime_notice(
         async with asyncio.timeout(15):
             for name in names:
                 if name in blocked:
+                    if name == source_agent:
+                        logger.warning(
+                            "Runtime notice attempt: operation=%s kind=%s source=%s "
+                            "candidate=%s result=skipped reason=active_delivery_block",
+                            operation_id,
+                            notice_kind,
+                            source_agent,
+                            name,
+                        )
                     continue
                 token = token_for(name)
-                if (
-                    not token
-                    or token in tried_tokens
-                    or token == "WORKBENCH_ONLY_NO_TOKEN"
-                ):
+                if not token or token == "WORKBENCH_ONLY_NO_TOKEN":
+                    if name == source_agent:
+                        logger.warning(
+                            "Runtime notice attempt: operation=%s kind=%s source=%s "
+                            "candidate=%s result=skipped reason=token_unavailable",
+                            operation_id,
+                            notice_kind,
+                            source_agent,
+                            name,
+                        )
+                    continue
+                if token in tried_tokens:
+                    if name == source_agent:
+                        logger.warning(
+                            "Runtime notice attempt: operation=%s kind=%s source=%s "
+                            "candidate=%s result=skipped reason=blocked_bot_identity",
+                            operation_id,
+                            notice_kind,
+                            source_agent,
+                            name,
+                        )
                     continue
                 tried_tokens.add(token)
                 handle = runtime_map.get(name)
@@ -613,20 +645,53 @@ async def send_runtime_notice(
                                 text=render_text(name, display),
                                 parse_mode="HTML",
                             )
+                    logger.info(
+                        "Runtime notice attempt: operation=%s kind=%s source=%s "
+                        "candidate=%s result=sent message_id=%s",
+                        operation_id,
+                        notice_kind,
+                        source_agent,
+                        name,
+                        message.message_id,
+                    )
                     return {
                         "sent": True,
                         "sender": name,
                         "message_id": message.message_id,
                     }
-                except RetryAfter as exc:
-                    retry_delay = max(retry_delay, retry_after_seconds(exc))
                 except Exception as exc:
                     # Raw transport errors may contain the bot's request URL.
+                    failure = classify_telegram_delivery_error(exc)
+                    if failure.retry_after_s is not None:
+                        retry_delay = max(retry_delay, failure.retry_after_s)
                     logger.warning(
-                        "Runtime notice via %s failed (%s)", name, type(exc).__name__
+                        "Runtime notice attempt: operation=%s kind=%s source=%s "
+                        "candidate=%s result=failed code=%s error_type=%s retry_after_s=%s",
+                        operation_id,
+                        notice_kind,
+                        source_agent,
+                        name,
+                        failure.code,
+                        failure.error_type,
+                        failure.retry_after_s,
                     )
     except TimeoutError:
-        pass
+        logger.warning(
+            "Runtime notice round: operation=%s kind=%s source=%s "
+            "result=timeout retry_after_s=%s",
+            operation_id,
+            notice_kind,
+            source_agent,
+            retry_delay,
+        )
+    logger.warning(
+        "Runtime notice round: operation=%s kind=%s source=%s "
+        "result=unsent retry_after_s=%s",
+        operation_id,
+        notice_kind,
+        source_agent,
+        retry_delay,
+    )
     return {"sent": False, "retry_after": retry_delay}
 
 
