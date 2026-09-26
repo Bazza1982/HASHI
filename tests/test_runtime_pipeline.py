@@ -3756,7 +3756,9 @@ async def test_handle_success_delivery_sends_response_and_routes_hchat(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_tui_mirror_off_persists_final_without_any_telegram_delivery(monkeypatch):
+async def test_tui_mirror_off_persists_final_and_presentations_without_telegram(
+    monkeypatch,
+):
     runtime = _runtime()
     item = _item(
         prompt="TUI-only projection",
@@ -3764,6 +3766,17 @@ async def test_tui_mirror_off_persists_final_without_any_telegram_delivery(monke
         deliver_to_telegram=False,
     )
     outcomes = []
+    meter_tails = []
+    herv2_cards = []
+
+    async def _send_meter_cost_tail(current_item, **timing):
+        meter_tails.append((current_item, timing))
+
+    async def _send_herv2_card(current_item, **fields):
+        herv2_cards.append((current_item, fields))
+
+    runtime._send_meter_cost_tail = _send_meter_cost_tail
+    runtime._send_herv2_card = _send_herv2_card
     monkeypatch.setattr(
         runtime_cross_session,
         "record_turn_result",
@@ -3787,6 +3800,18 @@ async def test_tui_mirror_off_persists_final_without_any_telegram_delivery(monke
     assert runtime.last_response["text"] == "canonical response"
     assert not hasattr(runtime, "sent_message")
     assert runtime.voice_replies == []
+    assert meter_tails[0][0] is item
+    assert meter_tails[0][1]["total_elapsed_s"] >= 0
+    assert meter_tails[0][1]["stage_timings_s"] == {}
+    assert herv2_cards == [
+        (
+            item,
+            {
+                "response": SimpleNamespace(text="canonical response"),
+                "stage_timings_s": {},
+            },
+        )
+    ]
     assert outcomes == [
         {
             "delivered": False,
@@ -4796,11 +4821,16 @@ async def test_handle_success_delivery_promotes_streamed_final_after_wrapper_tex
     runtime = _runtime()
     item = _item(prompt="user text")
     meter_tails = []
+    herv2_cards = []
 
     async def _send_meter_cost_tail(item, **timing):
         meter_tails.append((item.request_id, timing))
 
+    async def _send_herv2_card(item, **fields):
+        herv2_cards.append((item.request_id, fields))
+
     runtime._send_meter_cost_tail = _send_meter_cost_tail
+    runtime._send_herv2_card = _send_herv2_card
     queued_monotonic = time.monotonic() - 1.0
     stream_state = runtime_pipeline.StreamedAnswerState(
         request_id=item.request_id,
@@ -4847,6 +4877,12 @@ async def test_handle_success_delivery_promotes_streamed_final_after_wrapper_tex
     assert meter_tails[0][0] == "req-1"
     assert meter_tails[0][1]["total_elapsed_s"] >= 1.0
     assert meter_tails[0][1]["stage_timings_s"] == {
+        "triage": 0.2,
+        "execution": 0.7,
+    }
+    assert len(herv2_cards) == 1
+    assert herv2_cards[0][0] == "req-1"
+    assert herv2_cards[0][1]["stage_timings_s"] == {
         "triage": 0.2,
         "execution": 0.7,
     }

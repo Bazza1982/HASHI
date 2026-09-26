@@ -4198,6 +4198,38 @@ def _run_delivery_primary_surface(item) -> str:
     return "telegram"
 
 
+async def _publish_post_final_presentations(
+    runtime,
+    item,
+    response,
+    *,
+    queued_at: datetime,
+    queued_monotonic: float | None,
+) -> None:
+    """Commit request-local meter and HER cards after the canonical final."""
+
+    stage_timings_s = _her_v2_stage_timings_s(response)
+    send_meter_cost_tail = getattr(runtime, "_send_meter_cost_tail", None)
+    if callable(send_meter_cost_tail):
+        meter_elapsed_s = (
+            max(0.0, time.monotonic() - queued_monotonic)
+            if queued_monotonic is not None
+            else max(0.0, (datetime.now() - queued_at).total_seconds())
+        )
+        await send_meter_cost_tail(
+            item,
+            total_elapsed_s=meter_elapsed_s,
+            stage_timings_s=stage_timings_s,
+        )
+    send_herv2_card = getattr(runtime, "_send_herv2_card", None)
+    if callable(send_herv2_card):
+        await send_herv2_card(
+            item,
+            response=response,
+            stage_timings_s=stage_timings_s,
+        )
+
+
 async def handle_success_delivery(
     runtime,
     item,
@@ -4275,6 +4307,13 @@ async def handle_success_delivery(
                 if hchat_delivered
                 else "telegram_delivery_not_requested"
             ),
+        )
+        await _publish_post_final_presentations(
+            runtime,
+            item,
+            response,
+            queued_at=queued_at,
+            queued_monotonic=queued_monotonic,
         )
         return
 
@@ -4556,22 +4595,13 @@ async def handle_success_delivery(
             await runtime._send_voice_reply(
                 item.chat_id, response_text, item.request_id
             )
-    if final_delivered and callable(getattr(runtime, "_send_meter_cost_tail", None)):
-        meter_elapsed_s = (
-            max(0.0, time.monotonic() - queued_monotonic)
-            if queued_monotonic is not None
-            else max(0.0, (datetime.now() - queued_at).total_seconds())
-        )
-        await runtime._send_meter_cost_tail(
+    if final_delivered:
+        await _publish_post_final_presentations(
+            runtime,
             item,
-            total_elapsed_s=meter_elapsed_s,
-            stage_timings_s=_her_v2_stage_timings_s(response),
-        )
-    if final_delivered and callable(getattr(runtime, "_send_herv2_card", None)):
-        await runtime._send_herv2_card(
-            item,
-            response=response,
-            stage_timings_s=_her_v2_stage_timings_s(response),
+            response,
+            queued_at=queued_at,
+            queued_monotonic=queued_monotonic,
         )
     runtime._schedule_audit_followup(
         item,

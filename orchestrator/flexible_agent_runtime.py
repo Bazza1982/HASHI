@@ -11384,9 +11384,9 @@ class FlexibleAgentRuntime:
         """Send the per-turn HER v2 routing card after the answer is delivered.
 
         Uses request-local ``herv2_at_start`` so a mid-flight toggle never changes
-        an in-progress turn.  Never writes to LLM prompt/memory history
-        (history_eligible=False) and is skipped for silent, non-Telegram,
-        transfer-buffered, or non-HER turns.
+        an in-progress turn. Never writes to LLM prompt/memory history
+        (history_eligible=False). The canonical presentation is retained for
+        non-Telegram Runs; only the optional Telegram projection is skipped.
         """
         request_meta = runtime_pipeline.request_meta_for(self, item.request_id)
         if request_meta.get("herv2_at_start") is not True:
