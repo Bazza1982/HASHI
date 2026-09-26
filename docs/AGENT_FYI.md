@@ -118,71 +118,34 @@ local exceptions; never add frontend policy to runtime.
 
 ## Engines, tools, and recovery
 
-HER v3 began on HASHI3's `experiment/her-v3-hashi3` branch and was promoted
-as a harness-only series into HASHI1's local `main` on 2026-09-26 alongside
-the independently developed standard FC structure. HASHI3 remains unchanged;
-HASHI2, HASHI4, and GitHub `main` are outside that local adoption scope. Its
-foreground path uses one main-model/tool loop, keeps PCM and delivery ownership,
-and leaves optional JEV Agent Companion disabled by default.
-The public Engine ID is `her-v3`; the internal `her-v2` name remains only at
-the adapter/storage compatibility boundary. `/provider` and `/model` switch the
-real single `main` target, and `/effort` changes model reasoning, not workflow.
-All nine HASHI3 Agents expose DeepSeek models `deepseek-flash` and
-`deepseek-v4-pro` with reasoning efforts `off`, `high`, and `max`. Public
-commands and Session/token projections use `her-v3`; `/herv2` is retired, and
-`/metre` is a working alias. Live acceptance proved Flash/off, Pro/max,
-cross-Engine `/backend` switching, durable token accounting, and meter output.
-Workbench request-activity origins also project the public `her-v3` Engine ID.
-Historical usage without a model attribution is shown as `历史未归属`, not the
-retired storage placeholder `role-configured`.
-HER v3 model/provider cards and callback dispatch share one callback contract;
-validate the generated buttons themselves, not only text-form commands.
-See [HER v3 experiment](HER_V3_EXPERIMENT.md) for request receipts and the
-recovered HASHI3 adoption failure and the separate HASHI1 promotion record.
+HER v3 began on HASHI3 and was promoted as a harness-only series into HASHI1's
+local `main` on 2026-09-26 beside the independent FC work. HASHI3, HASHI2,
+HASHI4, and GitHub `main` remain outside that adoption. It stays inside the HER
+functional owner: public Engine ID `her-v3`, internal `her-v2` adapter/storage
+compatibility only, one main-model/tool loop, and optional JEV companion off by
+default.
 
-Engine and Model Provider differ. HER v3 has one selected main model at every
-effort level; effort controls Provider reasoning, not Direct/Strategic/Planned
-workflow. Fixed/Flex and Memory+ remain independent. `/backend` selects Engine,
-`/provider` selects Provider, `/model` selects its model, and `/effort` controls
-reasoning depth. Legacy v2 stage names may still exist only in internal stored
-compatibility data; they are not public controls or foreground execution stages.
-The main branch includes strategy playbook version `2026-09-24.1`. The separate
-JEV strategy-card selection experiment is not part of this branch.
+Engine and Model Provider differ. `/backend` selects Engine, `/provider`
+Provider, `/model` model, and `/effort` Provider reasoning; Fixed/Flex and
+Memory+ remain independent. Old v2 stages and `/herv2` are not public v3
+controls; `/metre` aliases `/meter`. Model/provider cards and callbacks share
+one contract, so test generated buttons, not only text commands. HASHI3 live
+acceptance covered real switching, reasoning, Session identity, usage, and
+metering; see [HER v3 experiment](HER_V3_EXPERIMENT.md) for evidence and the
+separate HASHI1 promotion record.
 
 Use current metadata for context, price, effort, and modality. Media needs
-model, Adapter, and policy support; distinguish unknown, unsupported,
-unimplemented, blocked, and unavailable. Provider cost wins; catalogue cost
-is estimated, unknown is not zero. Only OpenRouter auto-sources public prices.
-
-HER fallback is opt-in and request-observed: one safe same-target recovery,
-then configured same-/cross-Provider levels; never downgrade Pro. The
-meaningful-output read guard applies per SSE call, ignores heartbeats and Tool
-execution, never a whole stage/Turn. Warn before switches, block uncertain
+model, Adapter, and policy support; unknown is not unsupported or zero cost.
+Fallback is opt-in and request-observed; warn before switching, block uncertain
 effect replay, and meter every physical call.
 
-Tool-enabled HER Direct/Primary Execution may propose interim commentary, but
-only typed Persona-packaged output is user-facing. Raw, packaging-failed, and
-other-stage provider progress stay internal. Backend API may expose only the
-typed ephemeral `answer_preview` after visibility checks; raw `text_delta` and
-control stages stay private, final response authoritative. Suppress DeepSeek
-AntML after commentary; repair through native `tool_calls`, never run it.
-
-HER Agents manage Cron, Heartbeat, and Nudge through typed
-`hashi_scheduler_create/update/delete` and Superloops through
-`hashi_superloop_*`. Backend API binds reads/writes to the current Agent;
-deletion needs explicit authorization. Never edit `tasks.json` or Superloop
-files directly. These Functions need normal Worker/Function adoption checks.
-
-Validate a Tool batch before effects. Malformed batches execute zero calls;
-completed calls never replay. Repair preserves Provider fields, identity,
-finish/error, and retry count. Continuation is not retry, prose “stop” is not a
-typed stop, and degraded intent cannot complete a request without native repair.
-
-Capture each request through terminal receipt, keeping restricted originals
-separate from safe projections; partial evidence is not empty. `/stop`,
-`/retry`, `/resend`, and `/steer` keep distinct contracts. Recovery never
-duplicates a Cron Run, replays effects, restores revoked authority, or accepts
-unknown effects. See [HER v2](HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md).
+Only typed Persona-packaged progress is user-facing; raw deltas and control
+stages stay private, with final response authoritative. Scheduler and Superloop
+writes use their typed tools, never direct state-file edits. Validate a Tool
+batch before effects; malformed batches execute nothing and completed effects
+never replay. Terminal receipts keep restricted originals separate from safe
+projections. `/stop`, `/retry`, `/resend`, and `/steer` remain distinct;
+recovery never restores revoked authority or accepts unknown effects.
 
 ## TUI, Workbench, and media
 
@@ -235,12 +198,7 @@ refresh sources; do not rewrite PCM or retry.
 
 ### FC terminal-only command boundary (2026-09-26)
 
-`/logo` is TUI-only, hidden from shared command menus and disabled for every
-non-TUI Connector, including new third-party registrations. The shared registry
-projects this mandatory restriction into admission and capability discovery;
-Connector overrides cannot enable it. The handler uses the normalized local
-Connector identity so TUI execution remains available while native Telegram
-gets a localized unsupported notice. Scope: HASHI1
-`feature/fc-unified-io-20260925`; source/offline proof is recorded separately
-from pending live adoption. See [Frontend Connector Architecture](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md#terminal-only-slash-commands)
-and the three-frontend live test record.
+`/logo` is TUI-only: hidden and denied on every other Connector, including
+third parties, while normalized TUI admission remains available. Scope is
+HASHI1 local `main`; source, offline proof, and live adoption remain separate.
+See [Frontend Connector Architecture](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md#terminal-only-slash-commands).

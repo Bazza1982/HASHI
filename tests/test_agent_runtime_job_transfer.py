@@ -177,6 +177,7 @@ def test_jobs_panel_uses_short_tokenized_callbacks_for_long_job_ids(tmp_path):
     text, markup = runtime_jobs._build_jobs_with_buttons(runtime, runtime.name, runtime.skill_manager, filter_agent=runtime.name)
 
     assert long_id in text
+    assert "inherit current model effort" in text
     callbacks = [
         button.callback_data
         for row in markup.inline_keyboard
