@@ -317,7 +317,19 @@ async def dispatch_command_interaction(runtime, payload: Mapping, metadata: Mapp
                             revision=int(payload["revision"]),
                         )
                     )
-                    update = _FakeUpdate(actor, actor, capture, "", session_metadata=metadata)
+                    update = _FakeUpdate(
+                        actor,
+                        actor,
+                        capture,
+                        "",
+                        session_metadata={
+                            **dict(metadata),
+                            "ui_locale": locale,
+                            "frontend_invocation_id": typed_invocations[-1][
+                                "invocation_id"
+                            ],
+                        },
+                    )
                     update.message = None
                     update.callback_query = query
                     update.effective_message = query.message

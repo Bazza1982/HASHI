@@ -622,7 +622,11 @@ class FlexibleAgentRuntime:
                 chat_id=chat_id,
             )
             try:
-                with ui_language.language_scope(self, update):
+                with ui_language.language_scope(
+                    self,
+                    update,
+                    locale=getattr(update, "_hashi_ui_locale", None),
+                ):
                     if not self._is_authorized_user(actor_id):
                         session.deny("unauthorized")
                         if query is not None:

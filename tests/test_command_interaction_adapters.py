@@ -47,6 +47,44 @@ def test_local_command_update_carries_frontend_invocation_identity():
 
 
 @pytest.mark.asyncio
+async def test_non_telegram_callback_preserves_connector_locale(tmp_path):
+    observed_locales = []
+    runtime = NS(
+        name="agent",
+        workspace_dir=tmp_path,
+        global_config=NS(authorized_id=7, ui_language="zh-CN"),
+        _is_authorized_user=lambda actor: actor == 7,
+    )
+
+    async def handler(update, context):
+        del update, context
+        observed_locales.append(orchestrator.ui_language.current_locale())
+
+    query = NS(
+        data="tgl:meter:off",
+        from_user=NS(id=7),
+        message=NS(chat=NS(id=7)),
+    )
+    update = NS(
+        callback_query=query,
+        effective_user=query.from_user,
+        effective_chat=query.message.chat,
+        _hashi_session_surface="workbench",
+        _hashi_ui_locale="en",
+    )
+    wrapped = FlexibleAgentRuntime._wrap_callback(runtime, "native", handler)
+
+    with patch.object(
+        FlexibleAgentRuntime,
+        "_telegram_channel_allowed",
+        new=AsyncMock(return_value=True),
+    ):
+        await wrapped(update, NS())
+
+    assert observed_locales == ["en"]
+
+
+@pytest.mark.asyncio
 class DispatcherTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.metadata = {'actor_id': 7, 'instance_id': 'test', 'session_id': 'canonical',
