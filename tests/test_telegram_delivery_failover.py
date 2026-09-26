@@ -1017,3 +1017,58 @@ async def test_runtime_notice_uses_original_bot_without_worker_then_same_destina
         )
     assert "source-test-token" not in caplog.text
     assert "backup-test-token" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_runtime_notice_reuses_initialized_source_ingress_bot(
+    tmp_path, monkeypatch
+):
+    sent = []
+
+    class IngressBot:
+        async def send_message(self, **kwargs):
+            sent.append(kwargs)
+            return SimpleNamespace(message_id=31)
+
+    def no_new_bot(_token):
+        raise AssertionError("notice opened a second Telegram Bot connection")
+
+    monkeypatch.setattr("telegram.Bot", no_new_bot)
+    ingress = SimpleNamespace(
+        token="source-test-token", bot=IngressBot(), connected=True, is_running=True
+    )
+    kernel = SimpleNamespace(
+        global_cfg=SimpleNamespace(project_root=tmp_path, instance_id="HASHI2"),
+        function_workers=SimpleNamespace(_telegram_ingress={"source": ingress}),
+        _runtime_map=lambda: {},
+        _load_raw_config=lambda: {
+            "global": {"instance_id": "HASHI2"},
+            "agents": [
+                {
+                    "name": "source",
+                    "telegram_token_key": "s",
+                    "agent_lifecycle_id": "1" * 32,
+                }
+            ],
+        },
+        secrets={"s": "source-test-token"},
+    )
+
+    result = await failover.send_runtime_notice(
+        kernel,
+        source_agent="source",
+        operation_id="reboot-live-source",
+        notice_kind="final",
+        chat_id=42,
+        render_text=lambda _name, _display: "done",
+    )
+
+    assert result == {"sent": True, "sender": "source", "message_id": 31}
+    assert sent == [
+        {
+            "chat_id": 42,
+            "message_thread_id": None,
+            "text": "done",
+            "parse_mode": "HTML",
+        }
+    ]

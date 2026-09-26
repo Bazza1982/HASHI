@@ -637,22 +637,38 @@ async def send_runtime_notice(
                 tried_tokens.add(token)
                 handle = runtime_map.get(name)
                 display = handle.get_display_name() if handle else name
+                ingress = ingresses.get(name)
+                active_bot = (
+                    getattr(ingress, "bot", None)
+                    if ingress is not None
+                    and (
+                        getattr(ingress, "connected", False)
+                        or getattr(ingress, "is_running", False)
+                    )
+                    else None
+                )
+                transport = "ingress" if active_bot is not None else "fresh_bot"
                 try:
                     async with asyncio.timeout(5):
-                        async with Bot(token) as bot:
-                            message = await bot.send_message(
-                                chat_id=chat_id,
-                                message_thread_id=thread_id,
-                                text=render_text(name, display),
-                                parse_mode="HTML",
-                            )
+                        payload = {
+                            "chat_id": chat_id,
+                            "message_thread_id": thread_id,
+                            "text": render_text(name, display),
+                            "parse_mode": "HTML",
+                        }
+                        if active_bot is not None:
+                            message = await active_bot.send_message(**payload)
+                        else:
+                            async with Bot(token) as bot:
+                                message = await bot.send_message(**payload)
                     bridge_logger.info(
                         "Runtime notice attempt: operation=%s kind=%s source=%s "
-                        "candidate=%s result=sent message_id=%s",
+                        "candidate=%s via=%s result=sent message_id=%s",
                         operation_id,
                         notice_kind,
                         source_agent,
                         name,
+                        transport,
                         message.message_id,
                     )
                     return {
@@ -667,11 +683,12 @@ async def send_runtime_notice(
                         retry_delay = max(retry_delay, failure.retry_after_s)
                     bridge_logger.warning(
                         "Runtime notice attempt: operation=%s kind=%s source=%s "
-                        "candidate=%s result=failed code=%s error_type=%s retry_after_s=%s",
+                        "candidate=%s via=%s result=failed code=%s error_type=%s retry_after_s=%s",
                         operation_id,
                         notice_kind,
                         source_agent,
                         name,
+                        transport,
                         failure.code,
                         failure.error_type,
                         failure.retry_after_s,

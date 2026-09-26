@@ -214,3 +214,21 @@ dedicated `BridgeU.Bridge` logger with propagation disabled. Notice attempts
 now use that persistent bridge audit logger. A focused red/green check verifies
 that the rate-limit and blocked-source entries reach the same logger as reboot
 acceptance and outcome records.
+
+After that adoption, an authorized, read-only Telegram probe reproduced a
+fresh Bot initialization failure for the initiating Agent's credentials:
+`Bot.__aenter__()` calls `getMe`, and its new connection failed before the
+actual destination or message was tested. The other initiating Bot completed
+the same read-only checks. Both affected reboot results had been emitted after
+their initiating ingress had started, yet the notice path created another Bot
+connection instead of using the initialized ingress Bot. The prior two failure
+classes cannot be reconstructed from the missing logs, but this is a live
+reproduction of an avoidable failure in the same path.
+
+The notice sender now reuses an initialized, active ingress Bot for that Agent.
+Only when no initialized ingress is available does it create a short-lived Bot.
+This removes an unnecessary `getMe` and connection setup at the vulnerable
+post-reboot moment while preserving the existing fallback and persisted retry
+contract. The attempt log records which transport was used. A focused test
+failed before this correction because the notice opened a second Bot despite
+an active ingress, then passed after the correction.
