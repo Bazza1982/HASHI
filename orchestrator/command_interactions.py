@@ -62,6 +62,41 @@ def validate_operation(payload: Any) -> None:
         raise InteractionError("command_menu_command_invalid", 400)
 
 
+def replay_without_actions(result: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a saved outcome without reissuing now-stale interaction actions."""
+
+    replay = copy.deepcopy(dict(result))
+    replay["replayed"] = True
+    messages = replay.get("messages")
+    if not isinstance(messages, list):
+        return replay
+    sanitized = []
+    for message in messages:
+        if not isinstance(message, Mapping):
+            sanitized.append(message)
+            continue
+        item = dict(message)
+        item.pop("command_ui", None)
+        presentation = item.get("presentation")
+        if isinstance(presentation, Mapping):
+            projected = dict(presentation)
+            blocks = projected.get("content_blocks")
+            if isinstance(blocks, list):
+                projected["content_blocks"] = [
+                    block
+                    for block in blocks
+                    if not (
+                        isinstance(block, Mapping)
+                        and str(block.get("type") or "") == "action"
+                    )
+                ]
+            item["presentation"] = projected
+        sanitized.append(item)
+    replay["messages"] = sanitized
+    replay["refresh_required"] = True
+    return replay
+
+
 @dataclass(frozen=True)
 class Binding:
     """Identity must be supplied by an authenticated ingress, never a button."""
@@ -200,7 +235,7 @@ class MenuStore:
                 prior_digest, result, _ = self.requests[key]
                 if prior_digest != digest:
                     raise InteractionError("command_menu_request_conflict")
-                return copy.deepcopy(result)
+                return replay_without_actions(result)
             if len(self.requests) >= self.max_requests:
                 raise InteractionError("command_menu_request_capacity", 429)
             uncertain = InteractionError("command_menu_outcome_unknown").result()

@@ -251,6 +251,17 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(command_events), 1)
             self.assertEqual(command_events[0]['detail']['command_invocation']['command'], 'example')
 
+            local_replay = await self.dispatch(request, metadata)
+            self.assertTrue(local_replay['replayed'])
+            self.assertTrue(local_replay['refresh_required'])
+            self.assertEqual(local_replay['command_event_id'], first['command_event_id'])
+            self.assertNotIn('command_ui', local_replay['messages'][0])
+            self.assertFalse(any(
+                block.get('type') == 'action'
+                for block in local_replay['messages'][0]['presentation']['content_blocks']
+            ))
+            self.assertEqual(len(self.executions), 1)
+
             # Simulate Worker-local menu state being lost while the Session DB survives.
             del self.runtime._command_interaction_store
             replay = await self.dispatch(request, metadata)
@@ -329,10 +340,12 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
                                  revision=menu['revision'], button_id=menu['rows'][0][0]['button_id'])
         first = await self.dispatch(operation)
         second = await self.dispatch(operation)
-        self.assertEqual(first, second)
+        self.assertFalse(first.get('replayed', False))
+        self.assertTrue(second['replayed'])
+        self.assertEqual(first['error_code'], second['error_code'])
         self.assertEqual(self.actions, ['begun'])
         self.assertEqual(first['error_code'], 'command_menu_outcome_unknown')
-        self.assertNotIn('sensitive-path', json.dumps(first))
+        self.assertNotIn('sensitive-path', json.dumps([first, second]))
         self.assertIs(self.runtime._send_text, self.original_send)
 
 

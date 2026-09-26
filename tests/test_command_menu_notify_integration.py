@@ -60,7 +60,15 @@ class NotifyIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result['messages'][0]['command_ui']['revision'], 2)
                 self.assertIn('QUIET', result['messages'][0]['text'])
                 replay = await dispatch_command_interaction(runtime, action, metadata)
-                self.assertEqual(replay, result)
+                self.assertTrue(replay['replayed'])
+                self.assertTrue(replay['refresh_required'])
+                self.assertEqual(replay['messages'][0]['message_ref'], card['message_ref'])
+                self.assertEqual(replay['messages'][0]['text'], result['messages'][0]['text'])
+                self.assertNotIn('command_ui', replay['messages'][0])
+                self.assertFalse(any(
+                    block.get('type') == 'action'
+                    for block in replay['messages'][0]['presentation']['content_blocks']
+                ))
                 self.assertEqual(writes, ['quiet'])
 
 

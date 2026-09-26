@@ -10,7 +10,7 @@ from typing import Mapping
 
 from orchestrator.command_interactions import (
     Binding, Capture, CapturedQuery, InteractionError, MenuStore, VERSION,
-    perform_action, validate_operation,
+    perform_action, replay_without_actions, validate_operation,
 )
 
 logger = logging.getLogger("HASHI.CommandInteractions")
@@ -447,21 +447,8 @@ async def dispatch_command_interaction(runtime, payload: Mapping, metadata: Mapp
                 raise InteractionError("command_menu_stale", 409) from exc
 
             if ticket.state == "completed":
-                replay = dict(ticket.response or {})
-                if isinstance(replay.get("messages"), list):
-                    replay["messages"] = [
-                        {
-                            key: value
-                            for key, value in message.items()
-                            if key != "command_ui"
-                        }
-                        if isinstance(message, Mapping)
-                        else message
-                        for message in replay["messages"]
-                    ]
-                    replay["refresh_required"] = True
+                replay = replay_without_actions(ticket.response or {})
                 replay["command_event_id"] = ticket.event_id
-                replay["replayed"] = True
                 return replay
             if ticket.state != "reserved":
                 return {
