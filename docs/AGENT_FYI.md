@@ -109,21 +109,12 @@ wins conflicting flags. Do not duplicate automatic delivery. Recall terminalizes
 eligible READY direct Runs. Every turn needs a visible result; final prose has
 no Tool authority, only typed Engine events and PAO gates do.
 
-Frontend command menus use a typed, privacy-bounded invocation identity.
-Workbench menu dispatch reserves its Session/client/request before running a
-handler and stores completion with a canonical Session event. Pending/unknown
-results must never be replayed; after Worker-local state loss, replay the saved
-result without stale buttons and require refresh.
-
-Frontend Connector is one semantic boundary across frontends: message,
-command, display/card, button/action, media and receipt meanings do not change
-with Telegram, TUI, Backend API, an external desktop client, or a future
-Connector. PAO persists normal ingress and durable output before transport;
-Connectors own authentication, wire conversion, local rendering and receipts.
-Do not add frontend-specific business cards or direct runtime injection.
-Connector-local behavior is allowed only when registered in the FC registry;
-unregistered overrides and compatibility routes fail closed. Existing frontend
-programs keep their native standards and normally require only a thin adapter.
+FC standardizes messages, commands/actions, cards, media, and receipts. PAO
+persists ingress, outputs, routes, and idempotency; Connectors authenticate,
+translate, render, and record receipts. Commands reserve Session/client/request;
+completed replays return saved results without stale actions, while conflicts
+and pending/unknown never execute again. Local exceptions require registry
+entries; never inject frontend business behavior into the runtime.
 
 ## Engines, tools, and recovery
 
@@ -173,66 +164,34 @@ unknown effects. See [HER v2](HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.m
 
 ## TUI, Workbench, and media
 
-TUI is a Frontend Connector; renderers and catalogues own its text. `/language`
-changes shared UI, `/tui language` only local TUI. Neither translates replies,
-IDs, commands, paths, logs, or transcripts.
+TUI renderers/catalogues own interface text. `/language` changes shared UI and
+`/tui language` only local TUI; neither translates replies, IDs, commands,
+paths, logs, or transcripts. Its highest scope is the selected instance:
+switching binds generation, Agent, target, capabilities, logs, and sends, and
+submission freezes them with the Session. Remote requires an authenticated
+handshake; cached liveness grants nothing. Persist preferences only after
+success.
 
-The selected instance is TUI's highest scope. Switching atomically binds
-generation, Agent directory, target, capabilities, logs, and sends; submission
-freezes instance, Agents, Session, and generation. Remote needs a completed
-authenticated handshake; cached liveness grants nothing. Persist preferences
-only after success; saved state starts nothing.
+`/telegram off` affects only that TUI Run. `/think` controls provider reasoning
+and `/commentary` explicit Engine commentary. Media are committed Session
+assets bound to one draft, instance, Agent, and Run; Remote sends managed bytes,
+references stay inside enabled Workzones, and uncertain writes never switch
+routes. HER carries authorised manifests as native content or exact managed
+references without widening authority. External adapters use Session Runs for
+text, media, Canvas, approvals, and voice. Safe Voice requires typed
+`voice_message` confirm/discard; missing idempotency fails before upload. Late
+or cancelled media is discarded, and optional STT stays in an isolated sidecar.
 
-`/telegram off` stops Telegram only for the scoped TUI Run; the Bot and other
-sources stay unchanged. `/think` controls genuine provider reasoning;
-`/commentary` controls explicit Engine commentary. Attachments bind to one
-draft, instance, Agent, and submission. Remote sends managed bytes, never
-origin paths. When the TUI Session capability is present, local and Remote
-single-file messages stage, upload, commit, then bind one Run; uncertain writes
-never replay on another route. Target-relative Workzone references are resolved
-by the selected Agent's enabled Workzone and committed into the same Session.
-Speech stays local; late or cancelled media is discarded.
+Commands follow the [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md); `/help` derives
+from metadata. Workbench and Telegram share a Session while UI rows stay out of
+model history. Durable command reservation returns saved completions, never
+replays pending/unknown, and does not overstate `not_observed` as delivery;
+non-Telegram callbacks keep their own Connector fence.
 
-The external Frontend Connector adapter routes ordinary text, committed files,
-Canvas handoffs, approval notices, and voice audio through Session Runs. Voice
-uses `semantic_role=voice_message`; the durable Safe Voice transcript event is
-read by Run ID and confirm/discard use the typed Session decision endpoint.
-Keep the explicit user confirmation: never downgrade voice to ordinary text or
-auto-confirm it. Attachment stage retries require the advertised idempotency
-capability; a missing capability fails closed before writing bytes.
-
-HER v2 carries authorised attachment manifests through Planning, Execution,
-Replanning, Review, and Finalisation. Native providers get native content;
-fallbacks get exact managed references, never guessed workspace copies. Tool,
-filesystem, and sub-agent authority do not widen.
-
-Commands follow the [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md): localize,
-escape, state plain outcomes, and keep internals in diagnostics. Obey PAO
-budgets, reconcile outcome-unknown lifecycle operations, and never replay.
-`/help` derives from metadata. Workbench and Telegram share a Session while
-presentation rows stay out of model history; menus use authenticated paths and
-server state.
-
-`/new` selects a fresh primary Session without deleting old Conversations.
-History is owner/Agent scoped; old messages stay read-only and attachments use
-their original Session. A current transcript does not prove an empty archive.
-
-PAO owns Agent deletion; it is default-on only with `agent_deletion`, and its
-preview, blockers, and cleanup receipts bind. Workbench `/telegram` persists
-per owner; the TUI preference remains a separate per-Run choice.
-
-Workbench voice is transcript-first; Safe Voice on requires **Confirm and send**
-and discard/expiry/Session change/disable sends nothing. Optional STT stays in
-an isolated UTF-8 sidecar.
-
-Native Telegram slash commands and callbacks use the shared durable frontend
-command reservation helper. A stable Telegram Update/Callback identity is
-bound to the endpoint and request digest before the handler runs; completed
-replays do not execute again, conflicts are rejected, and pending/unknown
-outcomes are never retried automatically. The result event records
-transport_delivery_state=not_observed, not a claim that Telegram delivered a
-reply. Workbench-origin callbacks keep their own connector fence and are not
-double-reserved as Telegram.
+`/new` selects a fresh primary Session without deleting owner/Agent history;
+old messages stay read-only and attachments keep their original Session. PAO
+owns Agent deletion with preview, blockers, and cleanup receipts. Workbench
+`/telegram` persists per owner; TUI preference is per Run.
 
 ## Move, Clone, jobs, and HCC
 
