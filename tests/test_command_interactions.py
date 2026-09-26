@@ -87,10 +87,19 @@ class MenuTests(unittest.IsolatedAsyncioTestCase):
         _, menu = await self.open()
         payload = self.payload(menu)
         a, b = await asyncio.gather(self.action(menu, payload=payload), self.action(menu, payload=payload))
-        self.assertEqual(a, b)
+        fresh = next(result for result in (a, b) if not result.get('replayed', False))
+        replay = next(result for result in (a, b) if result.get('replayed', False))
         self.assertEqual(len(self.calls), 1)
-        a['messages'][0]['text'] = 'consumer mutation'
+        self.assertTrue(replay['refresh_required'])
+        self.assertNotIn('command_ui', replay['messages'][0])
+        self.assertFalse(any(
+            block.get('type') == 'action'
+            for block in replay['messages'][0]['presentation']['content_blocks']
+        ))
+        fresh['messages'][0]['text'] = 'consumer mutation'
+        replay['messages'][0]['text'] = 'consumer replay mutation'
         c = await self.action(menu, payload=payload)
+        self.assertTrue(c['replayed'])
         self.assertEqual(c['messages'][0]['text'], 'Updated ✓')
 
     async def test_stale_revision_fails_before_second_execution(self):

@@ -442,8 +442,28 @@ Protected Core 检查通过。
 `/herv2 status` 可连续打开；英文 meter 菜单的开启、关闭、通知和刷新都保持
 英文，测试 Agent 的 meter/HER v2 偏好最终恢复为默认关闭。
 
+`8e09e116` 与文档提交后的干净候选再次通过 Core gate **712 passed**，并采用为
+generation `sha256:00be86a9ae4525ed1d3fe2495d0307b6a1dd6cb69754b6998003f1a00b70abbd`；
+运行 source commit 为 `f5895b9e`，六个 Worker、共享 Functions 与 Remote
+同代次在线，Core PID 仍为 `910`。真实 Workbench 立即重放同一 `/herv2 status`
+请求时，第二次响应与第一次具有相同 event/invocation，`replayed=true`、
+`refresh_required=true`，不含 legacy menu，标准 action 数为零；设置保持 OFF。
+
 这构成 L01、Workbench 范围的 L02/L03/L04（已有三文件上传、下载）、L05
-重连/幂等恢复，以及 L08 自动回退边界的现场证据。`8e09e116` 的最终采用和
-30 分钟观察将在下一条终态记录补齐。真实 Telegram 目的地、已授权
+重连/幂等恢复，以及 L08 自动回退边界的现场证据。最终代次从 12:43:42 到
+13:14:25 AEST 连续观察超过 30 分钟；逐分钟采样始终为 `ready`、无 degraded、
+六个 Worker 全部 ACTIVE/accepting/alive 且代次一致，Remote 始终 ready/accepted。
+终态 Core PID 仍为 `910`，Core source digest 未变；HASHI2 与 Workbench 也保持
+在线。
+
+最终显式离线产品套件为 **5417 passed / 3 failed / 15 skipped /
+191 deselected / 11 subtests passed**。其中一项失败是旧测试仍要求并发重放响应
+逐字相等；断言改为验证“一次执行、一份新响应、一份无动作重放响应、消费者
+修改互不污染”后，相关集合 **39 passed / 11 subtests passed**。余下两项仍是
+此前已在 `origin/main` 复现的非 FC 基线：旧 onboarding 模型默认断言，以及
+Linux 将 Windows 路径当相对路径。本次末尾只修改测试与本文档，运行 Function
+源码未再变化，因此不需要重复采用。
+
+真实 Telegram 目的地、已授权
 Relay peer、多目的地故障注入、物理麦克风和浏览器可见截图没有当前授权或可用
 能力，因此仍标为未验收，不能据此把总清单改成 10/10 或完整 M3。
