@@ -207,3 +207,10 @@ PAO passes the operation ID and notice kind from the owning receipt; the
 persisted delivery outcome and retry budget are unchanged. Focused tests cover
 the previously silent rate-limit and blocked-source paths. Live adoption and
 root-cause verification are recorded separately after the authorized reboot.
+
+The first HASHI1 adoption exposed a second logging fault: the notice logger
+propagated only to console output, while `logs/bridge.log` is attached to the
+dedicated `BridgeU.Bridge` logger with propagation disabled. Notice attempts
+now use that persistent bridge audit logger. A focused red/green check verifies
+that the rate-limit and blocked-source entries reach the same logger as reboot
+acceptance and outcome records.

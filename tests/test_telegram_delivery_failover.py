@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -897,6 +898,9 @@ async def test_runtime_notice_uses_original_bot_without_worker_then_same_destina
     from orchestrator.reboot_ui import render_notice
 
     calls, closed = [], []
+    bridge_audit = logging.getLogger("BridgeU.Bridge")
+    monkeypatch.setattr(bridge_audit, "propagate", True)
+    monkeypatch.setattr(bridge_audit, "level", logging.INFO)
 
     class DirectBot:
         def __init__(self, token):
@@ -996,18 +1000,20 @@ async def test_runtime_notice_uses_original_bot_without_worker_then_same_destina
     assert len(closed) == len(calls)
     if availability == "rate_limited":
         assert any(
-            "reboot-test-operation" in message
-            and "source" in message
-            and "retry_after" in message
-            and "9" in message
-            for message in caplog.messages
+            entry.name == "BridgeU.Bridge"
+            and "reboot-test-operation" in entry.message
+            and "source" in entry.message
+            and "retry_after" in entry.message
+            and "9" in entry.message
+            for entry in caplog.records
         )
     if availability == "blocked":
         assert any(
-            "reboot-test-operation" in message
-            and "source" in message
-            and "active_delivery_block" in message
-            for message in caplog.messages
+            entry.name == "BridgeU.Bridge"
+            and "reboot-test-operation" in entry.message
+            and "source" in entry.message
+            and "active_delivery_block" in entry.message
+            for entry in caplog.records
         )
     assert "source-test-token" not in caplog.text
     assert "backup-test-token" not in caplog.text

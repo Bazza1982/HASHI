@@ -102,6 +102,9 @@ Remote trust retains accepted peers until definitive revalidation. Health
 clears recovered Remote warnings, not other problems. Broad Function reboot
 allows supervised Remote a 20-second cold start; command acceptance is not
 adoption evidence.
+Telegram reboot notice attempts belong in persistent `logs/bridge.log`, keyed
+by the reboot receipt ID and start/final kind. Failures log safe codes and
+retry delays; Bot credentials and raw transport exceptions stay out of logs.
 
 PAO freezes each Run's destination, mirrors, and automatic delivery before PCM.
 Queue acceptance is not delivery: `sent` needs a Connector receipt; failure

@@ -37,6 +37,7 @@ MAX_RECOVERY_ATTEMPTS = 3
 RECOVERY_ATTEMPT_LEASE_SECONDS = 300
 
 logger = logging.getLogger("BridgeU.TelegramDeliveryFailover")
+bridge_logger = logging.getLogger("BridgeU.Bridge")
 
 
 def _now() -> datetime:
@@ -601,7 +602,7 @@ async def send_runtime_notice(
             for name in names:
                 if name in blocked:
                     if name == source_agent:
-                        logger.warning(
+                        bridge_logger.warning(
                             "Runtime notice attempt: operation=%s kind=%s source=%s "
                             "candidate=%s result=skipped reason=active_delivery_block",
                             operation_id,
@@ -613,7 +614,7 @@ async def send_runtime_notice(
                 token = token_for(name)
                 if not token or token == "WORKBENCH_ONLY_NO_TOKEN":
                     if name == source_agent:
-                        logger.warning(
+                        bridge_logger.warning(
                             "Runtime notice attempt: operation=%s kind=%s source=%s "
                             "candidate=%s result=skipped reason=token_unavailable",
                             operation_id,
@@ -624,7 +625,7 @@ async def send_runtime_notice(
                     continue
                 if token in tried_tokens:
                     if name == source_agent:
-                        logger.warning(
+                        bridge_logger.warning(
                             "Runtime notice attempt: operation=%s kind=%s source=%s "
                             "candidate=%s result=skipped reason=blocked_bot_identity",
                             operation_id,
@@ -645,7 +646,7 @@ async def send_runtime_notice(
                                 text=render_text(name, display),
                                 parse_mode="HTML",
                             )
-                    logger.info(
+                    bridge_logger.info(
                         "Runtime notice attempt: operation=%s kind=%s source=%s "
                         "candidate=%s result=sent message_id=%s",
                         operation_id,
@@ -664,7 +665,7 @@ async def send_runtime_notice(
                     failure = classify_telegram_delivery_error(exc)
                     if failure.retry_after_s is not None:
                         retry_delay = max(retry_delay, failure.retry_after_s)
-                    logger.warning(
+                    bridge_logger.warning(
                         "Runtime notice attempt: operation=%s kind=%s source=%s "
                         "candidate=%s result=failed code=%s error_type=%s retry_after_s=%s",
                         operation_id,
@@ -676,7 +677,7 @@ async def send_runtime_notice(
                         failure.retry_after_s,
                     )
     except TimeoutError:
-        logger.warning(
+        bridge_logger.warning(
             "Runtime notice round: operation=%s kind=%s source=%s "
             "result=timeout retry_after_s=%s",
             operation_id,
@@ -684,7 +685,7 @@ async def send_runtime_notice(
             source_agent,
             retry_delay,
         )
-    logger.warning(
+    bridge_logger.warning(
         "Runtime notice round: operation=%s kind=%s source=%s "
         "result=unsent retry_after_s=%s",
         operation_id,
