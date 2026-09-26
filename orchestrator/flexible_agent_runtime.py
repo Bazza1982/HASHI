@@ -10429,7 +10429,12 @@ class FlexibleAgentRuntime:
         if await runtime_scheduler_recovery.handle_reply(self, text=text, chat_id=update.effective_chat.id):
             return
         _print_user_message(self.name, text)
-        await self.enqueue_request(update.effective_chat.id, text, "text", _safe_excerpt(text))
+        await self.enqueue_request(
+            update.effective_chat.id,
+            text,
+            "telegram",
+            _safe_excerpt(text),
+        )
 
     # ------------------------------------------------------------------
     # Media handlers (photo, voice, audio, document, video, sticker)

@@ -17,6 +17,75 @@ from orchestrator.frontend_delivery import (
 from orchestrator.frontend_status import runtime_presentation_status
 
 
+@pytest.mark.asyncio
+async def test_native_telegram_text_message_enters_admission_as_telegram(
+    tmp_path, monkeypatch
+):
+    from orchestrator import flexible_agent_runtime as runtime_module
+    from orchestrator import runtime_long, runtime_scheduler_recovery, runtime_workzone
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    accepted = {}
+
+    class _TelegramRuntime:
+        name = "testing"
+        global_config = SimpleNamespace(authorized_id=42, bridge_home=tmp_path)
+
+        def _is_authorized_user(self, user_id):
+            return user_id == 42
+
+        def _record_active_chat(self, _update):
+            return None
+
+        def _should_redirect_after_transfer(self):
+            return False
+
+        async def enqueue_request(self, chat_id, prompt, source, summary):
+            accepted.update(
+                chat_id=chat_id,
+                prompt=prompt,
+                source=source,
+                summary=summary,
+                telegram_requested=telegram_delivery_for_admission(
+                    source=source,
+                    request_metadata=None,
+                    state_root=tmp_path,
+                ),
+            )
+            return "req-testing"
+
+    async def allow_channel(_runtime, _update, *, source_channel):
+        return source_channel == "telegram"
+
+    async def no_pending_path(_runtime, _update):
+        return False
+
+    async def no_recovery(_runtime, *, text, chat_id):
+        return False
+
+    monkeypatch.setattr(
+        FlexibleAgentRuntime, "_telegram_channel_allowed", allow_channel
+    )
+    monkeypatch.setattr(runtime_workzone, "handle_pending_path_reply", no_pending_path)
+    monkeypatch.setattr(runtime_long, "collect_text", lambda *_args: False)
+    monkeypatch.setattr(runtime_scheduler_recovery, "handle_reply", no_recovery)
+    monkeypatch.setattr(runtime_module, "_print_user_message", lambda *_args: None)
+
+    message = SimpleNamespace(text="hello from Telegram")
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=42),
+        effective_chat=SimpleNamespace(id=99),
+        message=message,
+    )
+
+    await FlexibleAgentRuntime.handle_message(_TelegramRuntime(), update, None)
+
+    assert accepted["source"] == "telegram"
+    assert accepted["telegram_requested"] is True
+    assert accepted["chat_id"] == 99
+    assert accepted["prompt"] == "hello from Telegram"
+
+
 def test_frontend_delivery_policy_is_connector_neutral_client_bound_and_fail_visible():
     policy = tui_run_delivery_policy(
         telegram_mirror=False,
