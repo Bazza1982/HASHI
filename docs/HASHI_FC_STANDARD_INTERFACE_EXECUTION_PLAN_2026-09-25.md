@@ -398,6 +398,11 @@ Function generation、Worker、reboot、minimal-Core 与 runtime handoff 定向�
 测试把 Windows 路径当相对路径，均在未包含 FC 提交的 `origin/main` 上原样失败。
 它们已作为非 FC 基线问题记录，不计作通过，也未在本候选中越界修正。
 
+外部前端的唯一未并入远端 FC 提交另在临时分离工作树验证：服务端
+**396 passed / 0 failed / 0 skipped**，UI policy **383 passed / 0 failed /
+0 skipped**，生产构建成功。其默认工作树另有 Remote/UI 未提交开发，验证和
+清理均未触碰这些修改；运行采用时必须冻结已提交候选，不能从该脏工作树构建。
+
 因此候选资格与历史失败结论已闭合，M1/M2 进入可采用状态。M3 仍完全未执行：
 运行 Worker 尚未加载候选，真实 Telegram/外部前端/Relay、断线恢复、受管回滚
 及 30 分钟观察均没有现场证据。
