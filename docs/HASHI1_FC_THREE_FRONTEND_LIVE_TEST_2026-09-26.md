@@ -112,3 +112,13 @@
 - /logo 修复：共享命令菜单隐藏该命令；所有非 TUI 内建 Connector 注册 connector_local 例外；Telegram 原生入口只返回本地终端限制说明，不会运行终端动画。
 - 定向与组合证据：首次红测暴露了 /logo 菜单/入口策略缺失和引用提示字符串语法错误；修复后 HASHI1 相关组合 302 passed / 11 subtests passed，独立命令目录回归 9 passed，Workbench 展示 19/19 passed。Python 编译、中英文目录解析、Protected Core 与 whitespace 检查通过。
 - 现场采用待完成：/reboot min testing@HASHI1 因额外 Agent 参数被语法拒绝；随后有效的 /reboot min 被正确阻止，原因是 Functions 源码尚未提交（source_update_incomplete）。Test Worker 继续使用旧代次，没有发生运行态切换；语音输入未测试。
+
+## TUI-only 规则补齐与问题说明（2026-09-26）
+
+- 本轮用户明确要求 `/logo` 仅供 TUI 使用，其它平台禁用；其余两项是修复难度与影响说明。范围为 HASHI1 `feature/fc-unified-io-20260925`，功能所有者 Frontend Connector、工程层 Functions。
+- 核对已有提交：Telegram 引用已增加外部消息与 Session Event 的关联、引用上下文与显示投影；Workbench 已保留 Markdown 单换行。已测换行问题属于聊天内容显示，明确复现于 Agent 回复；当时的多行输入成功传入，没有输入文字丢失证据。
+- `/logo` 旧修正仍有两处缺口：新注册 Connector 可以进入命令执行；TUI 虽通过入口校验，处理函数却把它按 Telegram 拒绝。已在共享 registry 派生所有非 TUI Connector 的强制限制，并让处理函数使用入口规范化的 Connector 身份。菜单隐藏、原生 Telegram 拒绝规则继续保留。
+- 定向红测：`.venv/bin/python -m pytest -q tests/test_frontend_terminal_local_commands.py --tb=short`，修正前 **3 failed / 10 passed**，分别复现 TUI 未调用动画及新 Connector 在默认/显式 standard 配置下错误接纳。修复后的组合验证：`.venv/bin/python -m pytest -q tests/test_frontend_terminal_local_commands.py tests/test_frontend_contracts.py tests/test_frontend_design_conformance.py tests/test_frontend_standard_interface.py tests/test_command_interactions.py tests/test_command_interaction_adapters.py tests/test_command_interaction_transport.py tests/test_command_ui.py`，**102 passed / 11 subtests passed**，无失败或跳过。
+- 既有修正复核：引用上下文与命令绑定组合 **66 passed**；Workbench `node --test src/features/chat-panel/chatMessagePresentation.test.js` **19 passed**，无失败或跳过。
+- 核心门禁 `.venv/bin/python -m pytest -q`：**709 passed / 3 failed**。三个失败均为真实版本资格检查拒绝尚未提交的两个源码文件（`UncommittedFunctionSourceError`），并非行为断言失败；提交后只复核这三个受影响的资格检查。Protected Core 和 `git diff --check` 通过。
+- 运行采用与现场复测：本轮尚未执行；上述自动测试不代表 Telegram、Workbench 或 TUI 的现场界面已采用此版本。没有扩大 testing Agent 的生命周期操作权限。

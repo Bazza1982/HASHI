@@ -7250,8 +7250,11 @@ class FlexibleAgentRuntime:
             get_connector_customization,
         )
 
+        # Local command admission supplies the verified Connector identity;
+        # native Telegram callbacks have no such local command context.
+        connector_id = getattr(context, "frontend_connector_id", None) or "telegram"
         customization = get_connector_customization(
-            "telegram",
+            connector_id,
             kind="command_override",
             key="logo",
         )

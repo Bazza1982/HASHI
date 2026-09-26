@@ -213,4 +213,12 @@ refresh sources; do not rewrite PCM or retry.
 
 ### FC terminal-only command boundary (2026-09-26)
 
-/logo affects the HASHI server terminal, so it is hidden from the shared command menus and registered as Connector-local for non-TUI built-in Connectors. Telegram's direct handler returns a localized unsupported notice. The TUI compatibility route remains available. See [Frontend Connector Architecture](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md#terminal-only-slash-commands) and the three-frontend live test record.
+`/logo` is TUI-only, hidden from shared command menus and disabled for every
+non-TUI Connector, including new third-party registrations. The shared registry
+projects this mandatory restriction into admission and capability discovery;
+Connector overrides cannot enable it. The handler uses the normalized local
+Connector identity so TUI execution remains available while native Telegram
+gets a localized unsupported notice. Scope: HASHI1
+`feature/fc-unified-io-20260925`; source/offline proof is recorded separately
+from pending live adoption. See [Frontend Connector Architecture](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md#terminal-only-slash-commands)
+and the three-frontend live test record.

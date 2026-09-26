@@ -687,4 +687,15 @@ separate acceptance evidence.
 
 ### Terminal-only slash commands
 
-The shared command catalogue contains /logo, whose effect targets the HASHI server terminal. It is not a portable Frontend Connector display event. Keep it out of shared command menus (menu_visible=False) and register it as connector_local for non-TUI built-in Connectors, including Telegram, Backend API, Session API, and relay/messaging Connectors. Compatibility adapters reject it before runtime execution. Telegram's native handler checks the same registered exception and returns a localized notice; it does not run the terminal animation. The TUI compatibility route remains available.
+The shared command catalogue contains `/logo`, whose effect targets the HASHI
+server terminal. The command is TUI-only and stays out of shared command menus
+(`menu_visible=False`). The Connector registry projects the mandatory
+`connector_local` restriction for every non-TUI Connector, including dynamically
+registered third-party Connectors; a registration cannot override it with
+`route=standard`. Admission, compatibility adapters, capability responses and
+registry snapshots all derive this restriction from the same owner.
+
+External calls are rejected before terminal execution. The native Telegram
+handler returns a localized unsupported notice. The TUI compatibility route
+passes its normalized Connector identity to the handler and retains terminal
+execution; a handler must not mistake that call for a native Telegram update.

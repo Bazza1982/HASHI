@@ -720,6 +720,20 @@ def _descriptor(connector_id: str) -> Mapping[str, Any]:
     raise ValueError(f"unknown connector: {cid}")
 
 
+def _effective_customizations(descriptor: Mapping[str, Any]) -> list[dict[str, str]]:
+    """Project mandatory terminal restrictions for every non-TUI Connector."""
+
+    rules = {
+        (item["kind"], item["key"]): item
+        for item in _normalize_customizations(descriptor.get("customizations"))
+    }
+    if descriptor["id"] != "tui":
+        # Third-party registration cannot opt back into server-terminal effects.
+        for item in _TERMINAL_LOCAL_COMMAND_CUSTOMIZATIONS:
+            rules[(item["kind"], item["key"])] = dict(item)
+    return list(rules.values())
+
+
 def get_connector_customization(
     connector_id: str,
     *,
@@ -731,7 +745,7 @@ def get_connector_customization(
     wanted_kind = str(kind or "").strip().casefold()
     wanted_key = str(key or "").strip().casefold().lstrip("/")
     descriptor = _descriptor(connector_id)
-    for item in _normalize_customizations(descriptor.get("customizations")):
+    for item in _effective_customizations(descriptor):
         if item["kind"] == wanted_kind and item["key"] == wanted_key:
             return dict(item)
     return None
@@ -931,9 +945,7 @@ def get_connector_capabilities(
         "egress": list(descriptor.get("egress", [])),
         "standard_ingress": sorted(STANDARD_INGRESS_OPERATIONS),
         "standard_egress": sorted(STANDARD_EGRESS_SEMANTICS),
-        "customizations": _normalize_customizations(
-            descriptor.get("customizations")
-        ),
+        "customizations": _effective_customizations(descriptor),
         "canonical_feed": descriptor.get("canonical_feed", "persistent_session_events"),
         "ready": bool(endpoint_registered and runtime["ready"]),
         "health": runtime["health"] if endpoint_registered else "unobserved",
@@ -949,9 +961,7 @@ def connector_registry_snapshot() -> dict[str, Any]:
             **item,
             "ingress": list(item["ingress"]),
             "egress": list(item["egress"]),
-            "customizations": _normalize_customizations(
-                item.get("customizations")
-            ),
+            "customizations": _effective_customizations(item),
             "runtime": _normalize_runtime_facts(item.get("runtime")),
         }
         for item in _CONNECTORS
@@ -962,9 +972,7 @@ def connector_registry_snapshot() -> dict[str, Any]:
                 **dyn,
                 "ingress": list(dyn.get("ingress", [])),
                 "egress": list(dyn.get("egress", [])),
-                "customizations": _normalize_customizations(
-                    dyn.get("customizations")
-                ),
+                "customizations": _effective_customizations(dyn),
             }
         )
     return {
