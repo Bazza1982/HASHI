@@ -156,6 +156,8 @@ switching binds generation, Agent, target, capabilities, logs, and sends, and
 submission freezes them with the Session. Remote requires an authenticated
 handshake; cached liveness grants nothing. Persist preferences only after
 success.
+Remote's optional `instances.json` compatibility view writes only when its
+projected peer state changes; absent and empty optional fields compare equal.
 
 `/telegram off` affects only that TUI Run. `/think` controls provider reasoning
 and `/commentary` explicit Engine commentary. Media are committed Session

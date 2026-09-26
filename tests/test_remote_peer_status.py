@@ -27,6 +27,7 @@ sys.modules.setdefault(
 )
 
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+import remote.peer.registry as peer_registry_module
 from remote.peer.base import PeerInfo
 from remote.peer.lan import LanDiscovery, _service_info_to_peer
 from remote.peer.registry import PeerRegistry
@@ -2589,6 +2590,45 @@ def test_registry_keeps_current_peer_even_when_legacy_timestamp_is_old(tmp_path)
     instances = json.loads((hashi_root / "instances.json").read_text(encoding="utf-8"))["instances"]
     assert "intel" in instances
     assert instances["intel"]["live_status"] == "online"
+
+
+def test_registry_sync_skips_unchanged_optional_fields_but_persists_live_changes(tmp_path, monkeypatch):
+    hashi_root = tmp_path / "hashi"
+    hashi_root.mkdir()
+    (hashi_root / "instances.json").write_text(
+        json.dumps({"instances": {"hashi1": {"instance_id": "HASHI1", "platform": "wsl"}}}),
+        encoding="utf-8",
+    )
+    state_home = tmp_path / "state-home"
+    state_home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: state_home))
+    registry = PeerRegistry(hashi_root, "HASHI1")
+    peer = PeerInfo(
+        instance_id="INTEL", display_name="INTEL", host="192.168.50.6",
+        port=8766, workbench_port=18802, platform="windows",
+        properties={"discovery": "lan", "live_status": "online", "last_seen_ok": int(time.time())},
+    )
+    registry._peers = {"INTEL": peer}
+    registry._observations = {"INTEL": {"lan": peer}}
+    registry._sync_to_instances_json()
+
+    writes = []
+    original_write = peer_registry_module._write_json_atomic
+
+    def recording_write(path, payload):
+        writes.append(path)
+        original_write(path, payload)
+
+    monkeypatch.setattr(peer_registry_module, "_write_json_atomic", recording_write)
+    registry._sync_to_instances_json()
+    assert writes == []
+
+    peer.properties["live_status"] = "offline"
+    peer.properties["consecutive_failures"] = 2
+    registry._sync_to_instances_json()
+    assert writes == [hashi_root / "instances.json"]
+    saved = json.loads((hashi_root / "instances.json").read_text(encoding="utf-8"))
+    assert saved["instances"]["intel"]["live_status"] == "offline"
 
 
 def test_registry_sync_salvages_and_rewrites_malformed_instances_json(tmp_path):
