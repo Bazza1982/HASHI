@@ -11,7 +11,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from orchestrator import ui_language
-from orchestrator.flexible_backend_registry import is_cli_backend
+from orchestrator.flexible_backend_registry import is_cli_backend, public_backend_engine
 from orchestrator.session_store import SessionConflict, SessionNotFound, SessionStore
 
 logger = logging.getLogger("HASHI.RuntimeSession")
@@ -1061,7 +1061,7 @@ def finish_request_from_listener(runtime: Any, request_id: str, payload: Mapping
             if isinstance(payload.get("content"), (list, tuple))
             else None
         ),
-        assistant_source=_active_engine(runtime) or runtime.name,
+        assistant_source=public_backend_engine(_active_engine(runtime)) or runtime.name,
         error_text=str(payload.get("error") or "") or None,
     )
     capture_backend_binding(runtime, request_id=request_id)

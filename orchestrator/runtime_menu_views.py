@@ -409,16 +409,14 @@ def her_commentary_text(*, enabled: bool, effort: str) -> str:
 
     return setting_card(
         "🌿",
-        "HER commentary",
+        _tr("menu.commentary.her_v3_title"),
         current=f"<b>{status_label(enabled)}</b>",
         facts=[
             _fact(
                 "menu.commentary.execution_mode",
                 f"<code>{html.escape(effort)}</code>",
             ),
-            f"<b>{html.escape(_tr('menu.commentary.level.direct'))}</b> · <code>zero</code> · {html.escape(_tr('menu.commentary.direct'))}",
-            f"<b>{html.escape(_tr('menu.commentary.level.planned'))}</b> · <code>medium</code> · {html.escape(_tr('menu.commentary.planned'))}",
-            f"<b>{html.escape(_tr('menu.commentary.level.adaptive'))}</b> · <code>high+</code> · {html.escape(_tr('menu.commentary.adaptive'))}",
+            html.escape(_tr("menu.commentary.her_v3_policy")),
             _fact(
                 "menu.commentary.delivery_label",
                 html.escape(_tr("menu.commentary.delivery")),
@@ -524,7 +522,7 @@ def her_v2_provider_menu_text(
 def her_v2_provider_unavailable_text(*, backend: str) -> str:
     return setting_card(
         "🔌",
-        "HER v2 provider",
+        "HER v3 Provider",
         current=_state("common.unavailable"),
         facts=[
             _fact("common.backend", f"<code>{html.escape(backend)}</code>"),
@@ -571,6 +569,58 @@ def her_v2_model_menu_text(
         consequence=_tr("menu.her.model_effect"),
         action=(
             _tr("menu.her.review_apply") if draft else _tr("menu.her.choose_target")
+        ),
+    )
+
+
+def her_v3_model_menu_text(*, provider: str, model: str, effort: str) -> str:
+    """Project the selectable single-model HER v3 runtime."""
+
+    return setting_card(
+        "🧠",
+        _tr("menu.her_v3.title"),
+        current=f"<code>{html.escape(provider)} / {html.escape(model)}</code>",
+        facts=[
+            _fact("common.effort", f"<code>{html.escape(effort)}</code>"),
+            _fact("common.backend", "<code>her-v3</code>"),
+        ],
+        consequence=_tr("menu.her_v3.effect"),
+        action=_tr("menu.her_v3.action"),
+    )
+
+
+def her_v3_provider_menu_text(
+    *,
+    current_provider: str,
+    available: list[str],
+    unavailable: list[tuple[str, str]],
+) -> str:
+    facts = [
+        _fact("common.backend", "<code>her-v3</code>"),
+        _fact(
+            "menu.provider.available_label",
+            f"<code>{len(available)}</code>",
+        ),
+    ]
+    if unavailable:
+        facts.append(
+            _label("menu.provider.unavailable_label")
+            + " · "
+            + ", ".join(
+                f"{html.escape(name)} ({html.escape(reason)})"
+                for name, reason in unavailable
+            )
+        )
+    return setting_card(
+        "🔌",
+        _tr("menu.her_v3.provider_title"),
+        current=f"<code>{html.escape(current_provider)}</code>",
+        facts=facts,
+        consequence=_tr("menu.her_v3.provider_effect"),
+        action=(
+            _tr("menu.her_v3.provider_action")
+            if available
+            else _tr("menu.provider.none")
         ),
     )
 
@@ -769,8 +819,8 @@ def backend_switch_notice_text(
 def her_v2_backend_selected_text(*, with_context: bool) -> str:
     return setting_card(
         "✅",
-        "HER v2 selected",
-        current="<code>her-v2</code>",
+        _tr("menu.her_v3.selected"),
+        current="<code>her-v3</code>",
         facts=[
             _fact(
                 "common.context",

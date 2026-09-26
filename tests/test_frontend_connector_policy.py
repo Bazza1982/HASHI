@@ -272,21 +272,17 @@ def test_internal_run_without_a_connector_target_is_explicitly_nonautomatic():
     }
 
 
-def test_runtime_presentation_status_reports_structured_her_quick_and_pro():
-    selected = SimpleNamespace(
-        routing_mode="hybrid",
-        routing_revision=7,
-        target_for_slot=lambda slot: (
-            SimpleNamespace(provider="openai", model="gpt-quick")
-            if slot == "quick"
-            else SimpleNamespace(provider="anthropic", model="claude-pro")
-        ),
-    )
+def test_runtime_presentation_status_reports_her_v3_main_model():
+    main = SimpleNamespace(engine="anthropic", model="claude-pro")
     runtime = SimpleNamespace(
         config=SimpleNamespace(active_backend="her-v2"),
-        backend_manager=SimpleNamespace(get_her_v2_configuration=lambda: selected),
-        get_current_model=lambda: "mixed",
-        _get_current_effort=lambda: "planned",
+        backend_manager=SimpleNamespace(
+            current_backend=SimpleNamespace(
+                _v2_config=SimpleNamespace(profiles={"main": main})
+            )
+        ),
+        get_current_model=lambda: "claude-pro",
+        _get_current_effort=lambda: "high",
         _think=True,
         _verbose=False,
         _commentary=True,
@@ -294,14 +290,10 @@ def test_runtime_presentation_status_reports_structured_her_quick_and_pro():
 
     status = runtime_presentation_status(runtime)
 
-    assert status["engine"] == "her-v2"
-    assert status["her_v2"] == {
-        "routing_mode": "hybrid",
-        "quick": {"provider": "openai", "model": "gpt-quick"},
-        "pro": {"provider": "anthropic", "model": "claude-pro"},
-        "routing_revision": 7,
-    }
-    assert status["effort"] == "planned"
+    assert status["engine"] == "her-v3"
+    assert status["her_v3"] == {"main": {"provider": "anthropic", "model": "claude-pro"}}
+    assert "her_v2" not in status
+    assert status["effort"] == "high"
 
 
 def test_runtime_presentation_status_omits_provider_for_other_engines():

@@ -202,10 +202,18 @@ may change Model Provider, model, reasoning setting, or process while
 preserving its logical Session.
 
 HER v2 does not own the enclosing HASHI Conversation Session, frontend state,
-or provider-native thread state. Its current production surface has exactly
-three modes: Direct (`zero`), Strategic (`low`), and Planned (`medium`). The
+or provider-native thread state. Its retained v2 surface has exactly three
+modes: Direct (`zero`), Strategic (`low`), and Planned (`medium`). The
 retained `high`, `xhigh`, and `max` implementations are dormant regression and
-future-design material, not selectable product modes.
+future-design material, not selectable v2 product modes.
+
+The main Functions baseline also carries the experimental HER v3 harness inside
+this same functional owner. HER v3 exposes public Engine ID `her-v3` and uses
+one selected Model Provider/model/tool loop; its effort setting controls model
+reasoning rather than selecting a cognitive workflow. The internal `her-v2`
+adapter name and `her_v2` configuration key remain temporary compatibility
+boundaries, not public v3 identity. Promotion and live-adoption evidence are
+recorded in [HER v3 experimental runtime](docs/HER_V3_EXPERIMENT.md).
 
 The detailed lifecycle is defined in
 [HER v2 Product Requirements and Technical Design](docs/HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md),

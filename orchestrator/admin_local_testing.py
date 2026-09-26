@@ -181,11 +181,12 @@ def supported_commands(runtime) -> list[str]:
         provider = getattr(runtime, "supported_commands", None)
         if callable(provider):
             return sorted(set(str(item) for item in provider()))
-    names = [binding.name for binding in COMMAND_BINDINGS]
     supported = []
-    for name in names:
-        if hasattr(runtime, f"cmd_{name}"):
-            supported.append(name)
+    for binding in COMMAND_BINDINGS:
+        if hasattr(runtime, f"cmd_{binding.name}") or hasattr(
+            runtime, binding.method_name
+        ):
+            supported.append(binding.name)
     supported.extend(runtime_command_map().keys())
     return sorted(set(supported))
 
@@ -492,7 +493,18 @@ async def execute_local_command(
                 "error_code": "frontend_adapter_rejected",
                 "error": str(exc),
             }
-        method_name = f"cmd_{command_name}"
+        binding = next(
+            (item for item in COMMAND_BINDINGS if item.name == command_name),
+            None,
+        )
+        conventional_method_name = f"cmd_{command_name}"
+        method_name = (
+            conventional_method_name
+            if hasattr(runtime, conventional_method_name)
+            else binding.method_name
+            if binding
+            else conventional_method_name
+        )
         method = getattr(runtime, method_name, None)
         registry_command = None
         if method is None:

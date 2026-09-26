@@ -40,6 +40,13 @@ from orchestrator.flexible_backend_registry import (
     normalize_effort,
 )
 from orchestrator.her_v2.config import HERv2Config
+from orchestrator.her_v2.v3_config import (
+    HER_V3_CONFIGURATION_STATE_KEY,
+    HERv3ModelTarget,
+    apply_v3_target,
+    build_v3_provider_options,
+    resolve_v3_target,
+)
 from orchestrator.her_v2.models import Route
 from orchestrator.her_v2.runtime_configuration import (
     HER_V2_CONFIGURATION_DRAFT_STATE_KEY,
@@ -137,6 +144,7 @@ class FlexibleBackendManager:
 
     def _load_state(self):
         self._active_model_override = None
+        self._her_v3_configuration_override: dict[str, Any] | None = None
         self._her_v2_configuration_override: dict[str, Any] | None = None
         self._her_v2_configuration_draft: dict[str, Any] | None = None
         self.agent_mode = self._mode_for_backend(
@@ -150,20 +158,17 @@ class FlexibleBackendManager:
             for backend_cfg in self.config.allowed_backends
             if backend_cfg.get("engine")
         }
-        # Keep ordinary Agent configuration inside the currently supported
-        # three-mode HER product surface.  The runtime still understands the
-        # retired higher values for historical artifacts and isolated tests.
+        # HER v3 effort is Provider reasoning.  Preserve the configured value;
+        # its concrete Provider/model capability is validated by the runtime
+        # once the main target has been resolved.
         for backend_cfg in self.config.allowed_backends:
             engine = canonical_backend_engine(backend_cfg.get("engine"))
             raw_effort = backend_cfg.get("effort")
             if engine == HER_V2_ENGINE and isinstance(raw_effort, str):
-                normalized = normalize_effort(
-                    engine,
-                    raw_effort,
-                    backend_cfg.get("model"),
-                )
-                if normalized:
-                    backend_cfg["effort"] = normalized
+                backend_cfg["effort"] = {
+                    "none": "off",
+                    "zero": "off",
+                }.get(raw_effort.strip().casefold(), raw_effort.strip().casefold())
         if self.state_file.exists():
             try:
                 state = self.state_store.read()
@@ -174,7 +179,13 @@ class FlexibleBackendManager:
                 connection_revision = (self.config.extra or {}).get("connection_revision")
                 if connection_revision and state.get("connection_revision") != connection_revision:
                     state["active_backend"] = configured_backend
-                    for key in ("active_model", "active_provider", HER_V2_CONFIGURATION_STATE_KEY, HER_V2_CONFIGURATION_DRAFT_STATE_KEY):
+                    for key in (
+                        "active_model",
+                        "active_provider",
+                        HER_V3_CONFIGURATION_STATE_KEY,
+                        HER_V2_CONFIGURATION_STATE_KEY,
+                        HER_V2_CONFIGURATION_DRAFT_STATE_KEY,
+                    ):
                         state.pop(key, None)
                     state["connection_revision"] = connection_revision
                     state_needs_repair = True
@@ -218,6 +229,9 @@ class FlexibleBackendManager:
                     self._her_v2_configuration_draft = dict(
                         persisted_her_v2_draft
                     )
+                persisted_her_v3 = state.get(HER_V3_CONFIGURATION_STATE_KEY)
+                if isinstance(persisted_her_v3, dict):
+                    self._her_v3_configuration_override = dict(persisted_her_v3)
                 if (
                     restore_backend_overrides
                     and self.config.active_backend != HER_V2_ENGINE
@@ -349,10 +363,8 @@ class FlexibleBackendManager:
                         if isinstance(effort, str) and effort.strip():
                             raw_effort = effort.strip().lower()
                             normalized = (
-                                normalize_effort(
-                                    canonical_engine,
-                                    raw_effort,
-                                    backend_cfg.get("model"),
+                                {"none": "off", "zero": "off"}.get(
+                                    raw_effort, raw_effort
                                 )
                                 if canonical_engine == HER_V2_ENGINE
                                 else raw_effort
@@ -577,6 +589,163 @@ class FlexibleBackendManager:
         if not isinstance(raw, dict):
             raise ValueError("HER v2 backend has no her_v2 provider configuration")
         return raw
+
+    def _her_v3_base_config(self) -> dict[str, Any]:
+        """Return the HER v3 source while keeping the storage key compatible."""
+
+        return self._her_v2_base_config()
+
+    def get_her_v3_provider_options(self) -> list[dict[str, Any]]:
+        options = build_v3_provider_options(
+            self.config.allowed_backends,
+            self._her_provider_profiles(),
+            resolve_v3_target(
+                self._her_v3_base_config(),
+                self._her_v3_configuration_override,
+            ),
+        )
+        for option in options:
+            if not option.get("available"):
+                continue
+            try:
+                require_level_available(self.privacy_level)
+                require_backend_compatibility(
+                    str(option.get("engine") or ""),
+                    self.privacy_level,
+                )
+            except PrivacyPolicyError as exc:
+                option["available"] = False
+                option["reason"] = str(exc)
+        return options
+
+    def _her_v3_provider_option(self, requested: str) -> dict[str, Any] | None:
+        value = str(requested or "").strip().casefold()
+        return next(
+            (
+                option
+                for option in self.get_her_v3_provider_options()
+                if value
+                in {
+                    str(option.get("name") or "").casefold(),
+                    str(option.get("engine") or "").casefold(),
+                    str(option.get("label") or "").casefold(),
+                }
+            ),
+            None,
+        )
+
+    def _validate_her_v3_target(self, target: HERv3ModelTarget) -> None:
+        require_level_available(self.privacy_level)
+        require_backend_compatibility(target.provider, self.privacy_level)
+        option = self._her_v3_provider_option(target.provider)
+        if option is None or not option.get("available"):
+            raise ValueError(
+                f"HER v3 Provider {target.provider!r} is unavailable on this instance"
+            )
+        if target.model not in option.get("models", []):
+            raise ValueError(
+                f"model {target.model!r} is not available from {target.provider!r}"
+            )
+
+    def get_her_v3_target(self) -> HERv3ModelTarget:
+        try:
+            target = resolve_v3_target(
+                self._her_v3_base_config(),
+                self._her_v3_configuration_override,
+            )
+            self._validate_her_v3_target(target)
+            return target
+        except (TypeError, ValueError) as exc:
+            if self._her_v3_configuration_override is None:
+                raise
+            self.logger.warning(
+                "Ignoring invalid persisted HER v3 model target: %s",
+                exc,
+            )
+            self._her_v3_configuration_override = None
+            target = resolve_v3_target(self._her_v3_base_config())
+            self._validate_her_v3_target(target)
+            return target
+
+    def prepare_her_v3_provider(self, provider: str) -> HERv3ModelTarget:
+        option = self._her_v3_provider_option(provider)
+        if option is None:
+            raise ValueError(f"unknown HER v3 Provider: {provider}")
+        if not option.get("available"):
+            raise ValueError(str(option.get("reason") or "Provider is unavailable"))
+        current = self.get_her_v3_target()
+        models = list(option.get("models") or [])
+        if option.get("engine") == current.provider and current.model in models:
+            model = current.model
+        else:
+            model = str(
+                option.get("pro_model")
+                or option.get("fast_model")
+                or next(iter(models), "")
+            )
+        target = HERv3ModelTarget(str(option["engine"]), model)
+        self._validate_her_v3_target(target)
+        return target
+
+    def prepare_her_v3_model(self, model: str) -> HERv3ModelTarget:
+        current = self.get_her_v3_target()
+        target = HERv3ModelTarget(current.provider, model)
+        self._validate_her_v3_target(target)
+        return target
+
+    def apply_her_v3_target(self, target: HERv3ModelTarget) -> None:
+        """Persist one main target and refresh future turns immediately."""
+
+        if self.config.active_backend != HER_V2_ENGINE:
+            raise ValueError("HER v3 model settings are available only while HER v3 is active")
+        self._validate_her_v3_target(target)
+        effective = apply_v3_target(self._her_v3_base_config(), target)
+        parsed = HERv2Config.from_mapping(effective)
+        preflight: dict[str, Any] = {
+            "status": "runtime_unavailable",
+            "targets": [],
+            "insufficient_targets": [],
+        }
+        if self.runtime is not None:
+            from orchestrator.context_compaction import preflight_route_context_fit
+
+            preflight = preflight_route_context_fit(
+                self.runtime,
+                target,
+                targets=(target,),
+            )
+            insufficient = list(preflight.get("insufficient_targets") or [])
+            if insufficient:
+                item = insufficient[0]
+                raise ValueError(
+                    "Target model context is too small for this Session "
+                    f"({target.provider}/{target.model}: "
+                    f"{int(item.get('current_context_tokens') or 0):,} > "
+                    f"{int(item.get('usable_input_tokens') or 0):,} tokens). "
+                    "Run /compact after the active Turn settles, then retry."
+                )
+        serialized = target.to_dict()
+
+        def update_state(state: dict[str, Any]) -> dict[str, Any]:
+            state[HER_V3_CONFIGURATION_STATE_KEY] = serialized
+            state["her_v3_last_model_preflight"] = preflight
+            for key in (
+                HER_V2_CONFIGURATION_STATE_KEY,
+                HER_V2_CONFIGURATION_DRAFT_STATE_KEY,
+                HER_V2_CONFIGURATION_PRESETS_STATE_KEY,
+            ):
+                state.pop(key, None)
+            self._apply_managed_state_fields(state)
+            return state
+
+        try:
+            self.state_store.update(update_state)
+        except Exception as exc:
+            raise OSError(f"failed to persist HER v3 model target: {exc}") from exc
+        self._her_v3_configuration_override = serialized
+        self._her_v2_configuration_override = None
+        self._her_v2_configuration_draft = None
+        self._refresh_live_her_v2_configuration(effective, parsed)
 
     def get_her_v2_provider_options(self) -> list[dict[str, Any]]:
         options = build_her_v2_provider_options(
@@ -1112,14 +1281,13 @@ class FlexibleBackendManager:
             raw_her_v2 = extra.get("her_v2")
             if isinstance(raw_her_v2, dict):
                 try:
-                    selected = self.get_her_v2_configuration()
-                    extra["her_v2"] = apply_her_v2_runtime_configuration(
+                    extra["her_v2"] = apply_v3_target(
                         raw_her_v2,
-                        selected,
+                        self.get_her_v3_target(),
                     )
                 except (TypeError, ValueError) as exc:
                     self.logger.warning(
-                        "Ignoring invalid HER v2 runtime override while building adapter config: %s",
+                        "Ignoring invalid HER v3 model target while building adapter config: %s",
                         exc,
                     )
         habit_override = self.get_habit_meditation_override()
@@ -1245,9 +1413,9 @@ class FlexibleBackendManager:
         *,
         target_model: str | None,
     ) -> dict[str, Any] | None:
-        """Build an internal call config from an instance-level HER provider."""
+        """Build an internal call config from an instance-level HER v3 Provider."""
 
-        option = self._her_v2_provider_option(engine)
+        option = self._her_v3_provider_option(engine)
         if option is None or not option.get("available"):
             return None
         models = list(option.get("models") or [])

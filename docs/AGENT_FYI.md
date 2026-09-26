@@ -118,12 +118,34 @@ local exceptions; never add frontend policy to runtime.
 
 ## Engines, tools, and recovery
 
-Engine and Model Provider differ. HER v2 modes are Direct (`zero`), Strategic
-(`low`), and Planned (`medium`); Fixed/Flex and Memory+ are independent.
-`/backend` selects Engine, `/model` model routing, `/effort` HER mode on HER or
-model effort elsewhere. Agent creation uses these modes, not provider bundles.
-HER's Direct routing card reads `DIRECT`/`Direct (no triage)`; Triage shows its
-validated class. `UNKNOWN` is only a legacy/malformed fallback.
+HER v3 began on HASHI3's `experiment/her-v3-hashi3` branch and was promoted
+as a harness-only series into HASHI1's local `main` on 2026-09-26 alongside
+the independently developed standard FC structure. HASHI3 remains unchanged;
+HASHI2, HASHI4, and GitHub `main` are outside that local adoption scope. Its
+foreground path uses one main-model/tool loop, keeps PCM and delivery ownership,
+and leaves optional JEV Agent Companion disabled by default.
+The public Engine ID is `her-v3`; the internal `her-v2` name remains only at
+the adapter/storage compatibility boundary. `/provider` and `/model` switch the
+real single `main` target, and `/effort` changes model reasoning, not workflow.
+All nine HASHI3 Agents expose DeepSeek models `deepseek-flash` and
+`deepseek-v4-pro` with reasoning efforts `off`, `high`, and `max`. Public
+commands and Session/token projections use `her-v3`; `/herv2` is retired, and
+`/metre` is a working alias. Live acceptance proved Flash/off, Pro/max,
+cross-Engine `/backend` switching, durable token accounting, and meter output.
+Workbench request-activity origins also project the public `her-v3` Engine ID.
+Historical usage without a model attribution is shown as `历史未归属`, not the
+retired storage placeholder `role-configured`.
+HER v3 model/provider cards and callback dispatch share one callback contract;
+validate the generated buttons themselves, not only text-form commands.
+See [HER v3 experiment](HER_V3_EXPERIMENT.md) for request receipts and the
+recovered HASHI3 adoption failure and the separate HASHI1 promotion record.
+
+Engine and Model Provider differ. HER v3 has one selected main model at every
+effort level; effort controls Provider reasoning, not Direct/Strategic/Planned
+workflow. Fixed/Flex and Memory+ remain independent. `/backend` selects Engine,
+`/provider` selects Provider, `/model` selects its model, and `/effort` controls
+reasoning depth. Legacy v2 stage names may still exist only in internal stored
+compatibility data; they are not public controls or foreground execution stages.
 The main branch includes strategy playbook version `2026-09-24.1`. The separate
 JEV strategy-card selection experiment is not part of this branch.
 

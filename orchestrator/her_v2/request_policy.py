@@ -1,10 +1,8 @@
 """Request-scoped HER v2 execution policy for deterministic HASHI actions.
 
-Cron, heartbeat, and explicit HChat commands enter HER v2 through Direct mode
-so their authoritative instruction reaches the capable Quick agent without
-Immediate Response or Triage pre-processing.  This policy controls
-orchestration stages only.  It must never be reused as a provider reasoning
-setting or stored back into the owning Agent's global configuration.
+HER v3 has one foreground execution path. Request metadata may explain why a
+turn exists, but it must never override the Agent's selected model reasoning
+effort. Scheduled and HChat work therefore preserve the configured effort.
 """
 
 from __future__ import annotations
@@ -17,8 +15,6 @@ from .models import Effort, parse_effort
 
 
 HER_V2_JOB_EFFORT_FIELD = "her_v2_effort"
-HER_V2_SCHEDULED_EFFORT = Effort.ZERO
-HER_V2_HCHAT_EFFORT = Effort.ZERO
 HCHAT_REQUEST_SOURCES = frozenset({"bridge:hchat", "bridge:hchat-draft"})
 SCHEDULED_JOB_KINDS = frozenset({"cron", "heartbeat"})
 SCHEDULER_TRIGGERS = frozenset({"scheduled", "manual", "recovery"})
@@ -79,8 +75,8 @@ def job_effort_policy(job: Mapping[str, Any]) -> dict[str, str]:
     """Describe the effective HER v2 policy represented by a job record."""
 
     return {
-        "effective": HER_V2_SCHEDULED_EFFORT.value,
-        "source": "scheduled_direct_policy",
+        "effective": "inherit",
+        "source": "herv3_model_reasoning",
         "applies_to": "her-v2",
     }
 
@@ -113,7 +109,7 @@ def resolve_request_effort(
     configured_effort: Effort | str,
     request_meta: Mapping[str, Any] | None,
 ) -> EffortResolution:
-    """Resolve one HER v2 request without mutating Agent configuration."""
+    """Preserve the selected model reasoning effort for every HER v3 request."""
 
     configured = (
         configured_effort
@@ -121,40 +117,17 @@ def resolve_request_effort(
         else parse_effort(str(configured_effort))
     )
     meta = request_meta if isinstance(request_meta, Mapping) else {}
-    source = str(meta.get("source") or "").strip().casefold()
-    if source in HCHAT_REQUEST_SOURCES:
-        return EffortResolution(
-            configured=configured,
-            effective=HER_V2_HCHAT_EFFORT,
-            reason="hchat_direct_policy",
-        )
-
     raw_context = meta.get("scheduler_context")
-    if not isinstance(raw_context, Mapping):
-        return EffortResolution(
-            configured=configured,
-            effective=configured,
-            reason="agent_default",
-        )
-
-    kind = str(raw_context.get("kind") or "").strip().lower()
-    task_id = str(raw_context.get("task_id") or "").strip()
-    trigger = str(raw_context.get("trigger") or "").strip().lower()
-    if (
-        kind not in SCHEDULED_JOB_KINDS
-        or not task_id
-        or trigger not in SCHEDULER_TRIGGERS
-    ):
-        return EffortResolution(
-            configured=configured,
-            effective=configured,
-            reason="agent_default",
-        )
-
+    if isinstance(raw_context, Mapping):
+        kind = str(raw_context.get("kind") or "").strip().lower() or None
+        task_id = str(raw_context.get("task_id") or "").strip() or None
+        trigger = str(raw_context.get("trigger") or "").strip().lower() or None
+    else:
+        kind = task_id = trigger = None
     return EffortResolution(
         configured=configured,
-        effective=HER_V2_SCHEDULED_EFFORT,
-        reason="scheduled_direct_policy",
+        effective=configured,
+        reason="model_reasoning_effort",
         scheduler_kind=kind,
         scheduler_task_id=task_id,
         scheduler_trigger=trigger,

@@ -277,6 +277,25 @@ def test_her_v2_callbacks_are_bound_to_exactly_one_runtime_handler(
 @pytest.mark.parametrize(
     "callback_data",
     [
+        "herv3_provider_menu",
+        "herv3_provider:0:abcdef",
+        "herv3_provider_locked:0:abcdef",
+        "herv3_model:0:abcdef",
+    ],
+)
+def test_her_v3_model_picker_callbacks_are_bound_to_runtime_handler(callback_data):
+    matches = [
+        binding.method_name
+        for binding in runtime_command_binding.CALLBACK_BINDINGS
+        if re.match(binding.pattern, callback_data)
+    ]
+
+    assert matches == ["callback_model"]
+
+
+@pytest.mark.parametrize(
+    "callback_data",
+    [
         "fallback:refresh",
         "fallback:toggle",
         "fallback:slot:1:light",

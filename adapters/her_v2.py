@@ -63,6 +63,7 @@ from orchestrator.her_v2.retry import (
     ProviderRetryPolicy,
 )
 from orchestrator.her_v2.runtime import HERv2Runtime
+from orchestrator.her_v2.v3_config import normalise_v3_config
 from orchestrator.her_v2.wip_journal import WIPJournal
 from orchestrator.multimodal_contract import (
     media_failure_code,
@@ -840,6 +841,17 @@ class HERv2Adapter(BaseBackend):
                 raise HERv2ConfigurationError(
                     "HER v2 requires a her_v2 object containing provider profiles"
                 )
+            # HER v3 persists one concrete Provider/model target.  Function
+            # Workers must be able to bootstrap directly from that public
+            # shape even when an older manager did not pre-expand the internal
+            # compatibility profiles before constructing this adapter.
+            profiles = raw.get("profiles")
+            if (
+                (not isinstance(profiles, Mapping) or not profiles)
+                and isinstance(raw.get("main"), Mapping)
+            ):
+                raw = normalise_v3_config(raw)
+                self._extra["her_v2"] = raw
             self._v2_config = HERv2Config.from_mapping(raw)
             requested_effort = (
                 str(self._extra.get("effort") or raw.get("effort") or "medium")
@@ -1474,10 +1486,12 @@ class HERv2Adapter(BaseBackend):
     ) -> BackendResponse:
         del is_retry
         started = time.perf_counter()
+        original_request = str(prompt or "")
         fixed_turn: AcceptedHerTurn | None = None
         frozen_route: dict[str, Any] = {}
         wip_parity: dict[str, Any] = {}
         canonical_recovery_context: dict[str, Any] | None = None
+        pcm_runtime_context: dict[str, Any] = {}
         if (
             not self._initialized
             or not self._v2_config
@@ -1529,6 +1543,25 @@ class HERv2Adapter(BaseBackend):
             effort_resolution.scheduler_kind or "none",
             effort_resolution.scheduler_task_id or "none",
             effort_resolution.scheduler_trigger or "none",
+        )
+        # HER v3 /effort is the selected model's reasoning level, never a
+        # routing or orchestration policy.  Zero is retained as the wire value
+        # for the user-facing `none` level.
+        turn_reasoning = (
+            "off"
+            if effort_resolution.effective is Effort.ZERO
+            else effort_resolution.effective.value
+        )
+        turn_config = replace(
+            turn_config,
+            stage_reasoning={
+                **dict(turn_config.stage_reasoning),
+                Stage.DIRECT: turn_reasoning,
+            },
+            route_reasoning={
+                **dict(turn_config.route_reasoning),
+                Route.DIRECT: turn_reasoning,
+            },
         )
         if str(prompt or "").startswith(HER_FIXED_ENVELOPE_PREFIX):
             if self._session_coordinator is None:
@@ -1602,6 +1635,9 @@ class HERv2Adapter(BaseBackend):
                     error=exc,
                 )
             if canonical_recovery_context:
+                pcm_runtime_context["active_turn_recovery"] = dict(
+                    canonical_recovery_context
+                )
                 prompt += (
                     "\n\n--- HER CANONICAL ACTIVE-TURN RECOVERY — CONTEXT ONLY ---\n\n"
                     "This state survived a process interruption. Investigate unresolved "
@@ -1652,6 +1688,7 @@ class HERv2Adapter(BaseBackend):
             },
         )
         if prior_wip and canonical_recovery_context is None:
+            pcm_runtime_context["prior_wip"] = prior_wip
             prompt = f"{prompt}\n\n{prior_wip}"
             self._record_wip_lifecycle(
                 "wip_journal_context_injected",
@@ -1763,6 +1800,7 @@ class HERv2Adapter(BaseBackend):
             if frozen_route.get("rebuild_from_checkpoint"):
                 checkpoint = dict(frozen_route.get("checkpoint") or {})
                 checkpoint.pop("recent_settled_exchanges", None)
+                pcm_runtime_context["settled_checkpoint"] = dict(checkpoint)
                 prompt += (
                     "\n\n--- HER PROVIDER CONTEXT REBUILD — SETTLED CHECKPOINT ---\n\n"
                     "The provider/model route changed for this Turn. Continue the same "
@@ -1887,8 +1925,46 @@ class HERv2Adapter(BaseBackend):
                     {Stage.TRIAGE, Stage.PLANNING}
                 ),
             )
+        turn_services = None
         if isinstance(provider, HashiStageProvider):
-            provider.bind_commentary_port(commentary)
+            from orchestrator.her_v2.turn_services import HEALTH_QUESTION, TurnServices
+
+            if runtime_config.agent_companion.enabled:
+                from adapters.her_jev import judge as jev_judge
+
+            companion_serial = 0
+
+            async def _judge_companion(snapshot):
+                nonlocal companion_serial
+                companion_serial += 1
+                return await jev_judge(
+                    provider=provider,
+                    config=runtime_config.agent_companion,
+                    state=snapshot,
+                    questions={"health": HEALTH_QUESTION},
+                    turn_id=(fixed_turn.turn_id if fixed_turn is not None else request_id),
+                    request_ref=request_ref,
+                    phase="agent_companion",
+                    serial=companion_serial,
+                )
+
+            turn_services = TurnServices(
+                turn_id=(fixed_turn.turn_id if fixed_turn is not None else request_id),
+                downstream=commentary,
+                commentary_interval_s=runtime_config.commentary_interval_s,
+                companion_enabled=runtime_config.agent_companion.enabled,
+                companion_interval_s=(
+                    runtime_config.agent_companion.interval_minutes * 60.0
+                ),
+                companion_judge=(
+                    _judge_companion
+                    if runtime_config.agent_companion.enabled
+                    else None
+                ),
+            )
+            turn_services.start()
+            provider.bind_commentary_port(turn_services)
+            provider.bind_turn_services(turn_services)
 
         required_persona = getattr(
             self.config, "_her_v2_required_persona_renderer", None
@@ -1918,7 +1994,7 @@ class HERv2Adapter(BaseBackend):
             ledger_store=self._ledger_store,
             audit_log=self._audit_log,
             delivery=delivery,
-            commentary=commentary,
+            commentary=(turn_services or commentary),
             required_persona=required_persona,
             habits=habit_advisor,
             meditation=(
@@ -1935,6 +2011,19 @@ class HERv2Adapter(BaseBackend):
             workzone_ref=str(self.effective_workdir.resolve()),
             skills_catalogue=self._direct_skill_catalogue(),
             capability_cache_path=self._model_capability_cache_path(),
+            pcm_input={
+                **(
+                    dict(fixed_turn.pcm_input)
+                    if fixed_turn is not None
+                    else {
+                        "sections": [],
+                        "history": [],
+                        "current_request": original_request,
+                    }
+                ),
+                "runtime_context": pcm_runtime_context,
+            },
+            turn_services=turn_services,
         )
         if wip_journal is not None:
             self._wip_active_journals[request_ref] = wip_journal
@@ -1991,6 +2080,8 @@ class HERv2Adapter(BaseBackend):
                     )
             raise
         finally:
+            if turn_services is not None:
+                await turn_services.close()
             self._active_runtimes.pop(request_id, None)
             self._wip_active_journals.pop(request_ref, None)
             self._canonical_active_turns.pop(request_ref, None)

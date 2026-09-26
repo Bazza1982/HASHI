@@ -164,12 +164,10 @@ Current implementation boundary:
   loops to the top; manual navigation temporarily pauses it. The panel remains
   an information surface only: actions stay as slash commands in the input,
   and the panel owns no competing state;
-- the connection footer projects live Agent metadata for Engine, model, effort,
-  Think, Verbose, Commentary and Connector state. Model Provider and structured
-  Quick/Pro routing are shown only for HER v2. Identical HER Quick/Pro Provider
-  IDs are rendered once; their model is also rendered once only when both model
-  IDs are identical. Distinct Provider routes retain their complete Q/P pairing.
-  The footer intentionally omits
+- the connection footer projects live Agent metadata for Engine, Provider,
+  model, effort, Think, Verbose, Commentary and Connector state. HER v3 shows
+  its one selected Provider/model target and model-reasoning effort; historical
+  Quick/Pro routing is not a public v3 projection. The footer intentionally omits
   working mode; `/mode` remains its authoritative control surface;
 - its cross-instance path proxies only a small named operation set through
   authenticated Hashi Remote peers. Side-panel reads use explicit, Agent-scoped
@@ -396,7 +394,7 @@ Native callback wrappers preserve the Connector-requested UI locale. Native
 Telegram text also retains `telegram` as its admission source so its automatic
 reply destination cannot be lost by generic text normalization.
 
-Final replies from standard non-Telegram Runs publish enabled meter and HER v2
+Final replies from standard non-Telegram Runs publish enabled meter and HER
 presentations after the final Message through the same Session Event boundary.
 Telegram mirroring is a destination choice, not a prerequisite for creating
 those canonical display events.
@@ -482,10 +480,10 @@ The local `/connect` page and `hashi onboard` compatibility route use masked
 secret controls and explicit consent. Discovery lists same-environment CLI
 executables and catalogue models without claiming authentication. The selected
 backend is probed through FlexibleBackendManager and its real adapter in a
-disposable workspace. API choices configure HER v2 and its internal provider
-profiles; a model-list response is not success. Unavailable models and failed
-streams remain errors. Probe, save, reload request and actual chat readiness are
-separate facts.
+disposable workspace. API choices configure HER v3's selected Provider/model
+through its internal compatibility storage boundary; a model-list response is
+not success. Unavailable models and failed streams remain errors. Probe, save,
+reload request and actual chat readiness are separate facts.
 
 Only Hashiko's connection fields and scoped credential references are merged.
 Existing Agents, identities, history, optional integrations and TUI mirroring

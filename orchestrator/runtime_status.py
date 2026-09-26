@@ -9,9 +9,9 @@ from orchestrator import telegram_stream_policy
 from orchestrator.audit_mode import load_audit_config, visible_audit_criteria
 from orchestrator.command_ui import card_title
 from orchestrator.config import DEFAULT_AGENT_MODE
+from orchestrator.flexible_backend_registry import public_backend_engine
 from orchestrator.memory_plus_mode import get_memory_plus_status, is_memory_plus_enabled
 from orchestrator.wrapper_mode import load_wrapper_config, visible_wrapper_slots
-from orchestrator.her_v2.models import effort_display_label
 
 
 def compute_status_string(runtime) -> str:
@@ -283,15 +283,7 @@ def build_status_text(runtime, detailed: bool = False, *, update: Any | None = N
     else:
         memory_plus = get_memory_plus_status(runtime.workspace_dir)
     current_effort = runtime._get_current_effort() or "n/a"
-    her_backend = str(runtime.config.active_backend) == "her-v2"
-    if her_backend and current_effort != "n/a":
-        try:
-            current_effort = effort_display_label(current_effort)
-        except ValueError:
-            pass
-    effort_heading = ui_language.tr(
-        "status.her_execution_mode" if her_backend else "common.effort"
-    )
+    effort_heading = ui_language.tr("common.effort")
     session_id_short = (
         str(hashi_session["session_id"])
         if hashi_session is not None
@@ -322,7 +314,7 @@ def build_status_text(runtime, detailed: bool = False, *, update: Any | None = N
         f"<b>{html.escape(ui_language.tr('common.mode'))}</b> · "
         f"<code>{html.escape(str(mode_str))}</code>",
         f"<b>{html.escape(ui_language.tr('common.backend'))}</b> · "
-        f"<code>{html.escape(str(runtime.config.active_backend))}</code>",
+        f"<code>{html.escape(public_backend_engine(runtime.config.active_backend))}</code>",
     ]
     provider_getter = getattr(runtime, "get_current_provider", None)
     provider = provider_getter() if callable(provider_getter) else None
