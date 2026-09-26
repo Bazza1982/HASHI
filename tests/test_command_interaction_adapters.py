@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, patch
 
 import orchestrator
 import pytest
+from orchestrator.admin_local_testing import _CaptureStore, _FakeUpdate
 from orchestrator import command_interaction_bridge as bridge
 from orchestrator.command_interactions import Binding, Capture, MenuStore
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
@@ -27,6 +28,22 @@ def module(name, **values):
     result = types.ModuleType(name)
     result.__dict__.update(values)
     return result
+
+
+def test_local_command_update_carries_frontend_invocation_identity():
+    update = _FakeUpdate(
+        7,
+        7,
+        _CaptureStore(messages=[]),
+        "/meter status",
+        session_metadata={
+            "session_surface": "workbench",
+            "session_channel_key": "default",
+            "frontend_invocation_id": "cmd_meter_status_001",
+        },
+    )
+
+    assert update.update_id == "cmd_meter_status_001"
 
 
 @pytest.mark.asyncio
@@ -132,6 +149,17 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.wrapped, ['callback_example'])
         self.assertEqual(len(self.executions), 1)
         self.assertIs(self.runtime._send_text, self.original_send)
+
+    async def test_open_passes_typed_invocation_identity_to_local_command(self):
+        payload = self.payload(request_id="request-meter-status-002")
+
+        opened = await self.dispatch(payload)
+
+        self.assertTrue(opened["ok"], opened)
+        self.assertEqual(
+            self.executions[0][2]["frontend_invocation_id"],
+            opened["command_invocation"]["invocation_id"],
+        )
 
     async def test_opening_another_menu_does_not_expire_the_first_before_its_ttl(self):
         first = await self.dispatch(self.payload(request_id='firstrequestabcdefgh'))

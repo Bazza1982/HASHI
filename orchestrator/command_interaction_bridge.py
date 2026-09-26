@@ -268,7 +268,13 @@ async def dispatch_command_interaction(runtime, payload: Mapping, metadata: Mapp
                             metadata.get("source_channel")
                             or "workbench_command_ui"
                         ),
-                        session_metadata={**dict(metadata), "ui_locale": locale},
+                        session_metadata={
+                            **dict(metadata),
+                            "ui_locale": locale,
+                            "frontend_invocation_id": typed_invocations[0][
+                                "invocation_id"
+                            ],
+                        },
                         capture_store=capture,
                     )
                     if not result.get("ok"):
