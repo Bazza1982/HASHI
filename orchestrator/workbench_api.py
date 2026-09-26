@@ -5122,9 +5122,18 @@ class WorkbenchApiServer:
             "agent_id": run["agent_id"],
             "context_generation": int(run["context_generation"]),
         }
+        failure = (
+            self.session_store.request_failure_detail(
+                request_id, owner_id=owner_id, agent_id=name,
+            )
+            if result.get("state") == "failed" or run.get("state") == "failed"
+            else None
+        )
         if result.get("ok"):
             result = _public_request_activity(runtime, result)
             result.update(identity)
+            if failure is not None:
+                result["failure"] = failure
             return web.json_response(result)
 
         def _epoch(value: object) -> float | None:
@@ -5154,6 +5163,8 @@ class WorkbenchApiServer:
             "presentation_available": False,
             "expects_final": bool(run.get("final_message_id")) if terminal else None,
         }
+        if failure is not None:
+            recovered["failure"] = failure
         return web.json_response(recovered)
 
     async def handle_project_chat_log(self, request):

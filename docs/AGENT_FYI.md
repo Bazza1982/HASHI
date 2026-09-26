@@ -49,6 +49,15 @@ persist until retired.
 Codex CLI 0.156.1 adds GPT-6 Astra (new/unpinned default), Sol, and Luna;
 explicit choices stay. Astra/Sol reach `ultra`, Luna `max`; normalize effort.
 
+HASHI1 HER v3 defaults to `deepseek-api/deepseek-flash` for every configured
+Agent and limits v3 Provider choices to DeepSeek. Legacy HER v2 profiles do not
+select the v3 main model. On load, an effort unsupported by the selected v3
+Provider/model is repaired to a compatible configured effort. Backend failure
+details are stored on the Run failure Event and exposed only through an
+owner-scoped request activity read so external clients can show an expandable
+error without parsing diagnostic logs. The 2026-09-27 correction has offline
+qualification; live Worker adoption is a separate operational step.
+
 Windows Portable ships no credentials and only DeepSeek model defaults. Users
 supply all others; validation fails closed.
 

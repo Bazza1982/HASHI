@@ -365,6 +365,44 @@ async def test_workbench_request_activity_recovers_terminal_run_after_store_loss
 
 
 @pytest.mark.asyncio
+async def test_workbench_request_activity_exposes_durable_failure_live_and_recovered(tmp_path: Path) -> None:
+    server = WorkbenchApiServer.__new__(WorkbenchApiServer)
+    server.global_config = SimpleNamespace(
+        instance_id="HASHI1", authorized_id=7, deployment_profile="personal"
+    )
+    server.session_store = SessionStore(tmp_path / "sessions.sqlite3", instance_id="HASHI1")
+    session = server.session_store.ensure_default_session(owner_id="user:7", agent_id="akane")
+    server.session_store.accept_run(
+        session_id=session["session_id"], owner_id="user:7", agent_id="akane",
+        request_id="req-failed-provider", text="hello", source="api",
+        idempotency_key="activity-failed-provider",
+    )
+    server.session_store.finish_request(
+        "req-failed-provider", success=False,
+        error_text="[PROVIDER_BAD_REQUEST] Invalid request",
+        error_context={
+            "backend": "her-v3", "error_code": "PROVIDER_BAD_REQUEST",
+            "http_status": 400, "provider_request_id": "apireq-example",
+        },
+    )
+    activity = RequestActivityStore()
+    activity.start("req-failed-provider")
+    activity.complete("req-failed-provider", success=False, error="Invalid request")
+    request = SimpleNamespace(
+        match_info={"name": "akane", "request_id": "req-failed-provider"}, query={},
+    )
+    server._runtime_map = lambda: {"akane": SimpleNamespace(request_activity=activity)}
+    live = json.loads((await server.handle_request_activity(request)).text)
+    assert live["failure"]["http_status"] == 400
+    assert live["failure"]["provider_request_id"] == "apireq-example"
+
+    server._runtime_map = lambda: {"akane": SimpleNamespace(request_activity=RequestActivityStore())}
+    recovered = json.loads((await server.handle_request_activity(request)).text)
+    assert recovered["recovered_from"] == "session_store"
+    assert recovered["failure"] == live["failure"]
+
+
+@pytest.mark.asyncio
 async def test_workbench_request_activity_recovers_interrupted_run_after_agent_restart(
     tmp_path: Path,
 ) -> None:

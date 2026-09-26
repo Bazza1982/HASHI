@@ -72,6 +72,7 @@ from orchestrator.privacy_levels import (
     require_backend_compatibility,
     require_level_available,
 )
+from orchestrator.runtime_effort_options import get_available_efforts as runtime_available_efforts
 from orchestrator.workspace_state import WorkspaceStateStore
 from orchestrator import workzone as workzone_module
 
@@ -369,6 +370,26 @@ class FlexibleBackendManager:
                                 if canonical_engine == HER_V2_ENGINE
                                 else raw_effort
                             )
+                            if canonical_engine == HER_V2_ENGINE:
+                                target = self.get_her_v3_target()
+                                choices = runtime_available_efforts(
+                                    target.provider,
+                                    target.model,
+                                    allowed_backends=self.config.allowed_backends,
+                                    provider=True,
+                                )
+                                if normalized not in choices:
+                                    main = self._her_v3_base_config().get("main") or {}
+                                    configured = str(main.get("reasoning") or "").strip().lower()
+                                    normalized = (
+                                        configured if configured in choices
+                                        else "high" if "high" in choices
+                                        else next(iter(choices), "")
+                                    )
+                                    self.logger.warning(
+                                        "Repaired unsupported HER v3 effort %r for %s/%s to %r",
+                                        raw_effort, target.provider, target.model, normalized,
+                                    )
                             if normalized:
                                 backend_cfg["effort"] = normalized
                             if canonical_engine == HER_V2_ENGINE and (
@@ -603,6 +624,7 @@ class FlexibleBackendManager:
                 self._her_v3_base_config(),
                 self._her_v3_configuration_override,
             ),
+            allowed_providers=self._her_v3_base_config().get("v3_provider_allowlist"),
         )
         for option in options:
             if not option.get("available"):

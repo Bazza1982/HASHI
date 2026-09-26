@@ -2826,10 +2826,25 @@ class SessionStore:
         assistant_content: Iterable[Mapping[str, Any]] | None = None,
         assistant_source: str = "",
         error_text: str | None = None,
+        error_context: Mapping[str, Any] | None = None,
         failure_state: str = "failed",
         fencing_token: int | None = None,
     ) -> dict[str, Any] | None:
         now = _utc_now()
+        public_error_context: dict[str, Any] = {}
+        if isinstance(error_context, Mapping):
+            for key in ("error_code", "provider_request_id", "backend", "diagnostic_log"):
+                value = error_context.get(key)
+                if isinstance(value, str) and value.strip():
+                    public_error_context[key] = value.strip()[:4096 if key == "diagnostic_log" else 160]
+            for key in ("error_retryable", "side_effects_possible"):
+                value = error_context.get(key)
+                if isinstance(value, bool):
+                    public_error_context[key] = value
+            for key in ("http_status", "retry_after_s"):
+                value = error_context.get(key)
+                if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= 86400:
+                    public_error_context[key] = value
         clean = str(assistant_text or "").strip()
         supplied_content = list(assistant_content or ())
         if contains_persistent_inline_media(supplied_content):
@@ -3006,7 +3021,10 @@ class SessionStore:
                 else str(error_text or "Run failed"),
                 detail={"message_id": final_message_id}
                 if success
-                else {"error": str(error_text or "run failed")},
+                else {
+                    "error": str(error_text or "run failed"),
+                    "error_context": public_error_context,
+                },
                 # A first-ready native output Event already owns delivery of
                 # a reused Message.  The terminal Event remains in the feed,
                 # but must not enqueue the same text/audio a second time.
@@ -5334,6 +5352,32 @@ class SessionStore:
         if row is None:
             raise SessionNotFound(str(request_id))
         return self._run_dict(row)
+
+    def request_failure_detail(
+        self,
+        request_id: str,
+        *,
+        owner_id: str,
+        agent_id: str,
+    ) -> dict[str, Any] | None:
+        """Return the owner-scoped, durable user-safe terminal failure fields."""
+        run = self.get_run_by_request(request_id, owner_id=owner_id, agent_id=agent_id)
+        if run.get("state") != "failed":
+            return None
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """SELECT detail_json FROM run_events
+                   WHERE run_id = ? AND kind = 'run.failed'
+                   ORDER BY sequence DESC LIMIT 1""",
+                (run["run_id"],),
+            ).fetchone()
+        detail = _json_object(row["detail_json"]) if row is not None else {}
+        context = detail.get("error_context")
+        return {
+            "request_id": run["request_id"],
+            "error": str(run.get("error_text") or detail.get("error") or "Run failed"),
+            **(dict(context) if isinstance(context, Mapping) else {}),
+        }
 
     def update_session(
         self,

@@ -13,6 +13,7 @@ from orchestrator.her_v2.v3_config import (
     HER_V3_CONFIGURATION_STATE_KEY,
     HERv3ModelTarget,
     apply_v3_target,
+    normalise_v3_config,
     resolve_v3_target,
 )
 
@@ -86,6 +87,37 @@ def test_v3_target_replaces_old_route_matrix_with_one_main_model():
     assert effective["routing_mode"] == "single"
 
 
+def test_v3_deepseek_allowlist_overrides_legacy_openai_profiles(tmp_path):
+    manager = _manager(tmp_path)
+    config = manager.config.allowed_backends[0]["her_v2"]
+    config.update({
+        "profiles": {"premium": {"engine": "hashi-api", "model": "gpt-5.6-sol"}},
+        "main": {"provider": "deepseek-api", "model": "deepseek-flash", "reasoning": "high"},
+        "auxiliary": {"provider": "deepseek-api", "model": "deepseek-flash", "reasoning": "high"},
+        "v3_provider_allowlist": ["deepseek-api"],
+    })
+    manager.config.allowed_backends.append({"engine": "hashi-api", "model": "gpt-5.6-sol"})
+
+    assert resolve_v3_target(config) == HERv3ModelTarget("deepseek-api", "deepseek-flash")
+    assert {item["engine"] for item in manager.get_her_v3_provider_options()} == {"deepseek-api"}
+    assert manager.get_her_v3_target().model == "deepseek-flash"
+    with pytest.raises(ValueError, match="allowlist"):
+        normalise_v3_config({**config, "main": {"provider": "hashi-api", "model": "gpt-5.6-sol"}})
+
+
+def test_v3_repairs_persisted_effort_incompatible_with_deepseek(tmp_path):
+    manager = _manager(tmp_path)
+    manager.state_store.update(lambda state: {
+        **state, "backend_efforts": {"her-v2": "medium"},
+    })
+
+    manager._load_state()
+
+    backend = manager.config.allowed_backends[0]
+    assert backend["effort"] == "high"
+    assert manager.state_store.read()["backend_efforts"]["her-v2"] == "high"
+
+
 def test_v3_manager_persists_and_live_refreshes_model_target(tmp_path):
     manager = _manager(tmp_path)
     live_config = SimpleNamespace(engine="her-v2", extra={"her_v2": _raw_config()})
@@ -123,6 +155,10 @@ async def test_v3_manager_initializes_from_public_main_target_without_v2_profile
     tmp_path,
 ):
     manager = _manager(tmp_path)
+    manager.config.allowed_backends[0]["her_v2"].update({
+        "profiles": {"premium": {"engine": "hashi-api", "model": "gpt-5.6-sol"}},
+        "v3_provider_allowlist": ["deepseek-api"],
+    })
     manager.runtime = SimpleNamespace(backend_manager=manager)
 
     assert await manager.initialize_active_backend() is True

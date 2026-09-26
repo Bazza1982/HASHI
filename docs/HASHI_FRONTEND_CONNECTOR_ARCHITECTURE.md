@@ -64,6 +64,19 @@ An external client owns:
 - product-specific data and final product-domain authorization; and
 - disposable caches that can be rebuilt from HASHI state.
 
+Terminal backend failures retain bounded user-safe provider fields on the
+canonical Run failure Event. The owner-scoped request activity API exposes the
+same durable fields to clients, including code, HTTP status, provider request ID,
+retryability, and diagnostic log reference. Clients may collapse the error
+summary but must allow the user to inspect those fields. Existing failure Events
+written before this contract retain only the text that was originally stored.
+The 2026-09-27 Lily failure demonstrated the gap: Telegram had HTTP 400 and a
+provider request ID while the Run Event retained only its generic error text,
+leaving Workbench with a one-error count. Focused regression now verifies that
+the structured fields survive a SessionStore reopen and remain owner-scoped;
+Workbench's request digest test verifies expansion and the bad-request advice.
+Live adoption and a real browser click remain separate acceptance evidence.
+
 No external client name, repository revision, installer, or private release
 channel may be compiled into general HASHI admission policy. Compatibility is
 defined by protocol conformance and declared limits.

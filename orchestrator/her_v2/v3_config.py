@@ -95,6 +95,13 @@ def normalise_v3_config(raw: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError(f"{key} must be a boolean (retired in HER v3)")
     if raw.get("auxiliary") is not None and not isinstance(raw["auxiliary"], Mapping):
         raise ValueError("HER auxiliary must be an object")
+    provider_allowlist = raw.get("v3_provider_allowlist")
+    if provider_allowlist is not None:
+        if not isinstance(provider_allowlist, list) or not provider_allowlist or any(
+            not isinstance(value, str) or not value.strip() for value in provider_allowlist
+        ):
+            raise ValueError("HER v3 provider allowlist must be a nonempty list of Providers")
+        provider_allowlist = [canonical_backend_engine(value) for value in provider_allowlist]
 
     profiles = raw.get("profiles") or {}
     roles = raw.get("stage_roles") or {}
@@ -137,6 +144,8 @@ def normalise_v3_config(raw: Mapping[str, Any]) -> dict[str, Any]:
     for profile in (primary, auxiliary):
         if not str(profile.get("engine") or "").strip() or not str(profile.get("model") or "").strip():
             raise ValueError("HER v3 model targets require provider and model")
+        if provider_allowlist is not None and canonical_backend_engine(profile["engine"]) not in provider_allowlist:
+            raise ValueError("HER v3 model target is outside the configured Provider allowlist")
         for key in ("provider_reasoning", "reasoning_effort", "_native_audio_route"):
             profile.pop(key, None)
 
@@ -211,6 +220,7 @@ def build_v3_provider_options(
     allowed_backends: Sequence[Mapping[str, Any]],
     provider_profiles: Mapping[str, Mapping[str, Any]],
     target: HERv3ModelTarget,
+    allowed_providers: Sequence[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Derive HER v3 Provider/model choices without the v2 route matrix."""
 
@@ -244,7 +254,10 @@ def build_v3_provider_options(
             ordered.append(engine)
 
     options: list[dict[str, Any]] = []
+    allowed = {canonical_backend_engine(value) for value in allowed_providers} if allowed_providers is not None else None
     for engine in ordered:
+        if allowed is not None and engine not in allowed:
+            continue
         name, profile = metadata.get(engine, (engine.removesuffix("-api"), {}))
         rows = rows_by_engine.get(engine, [])
         values: list[Any] = []

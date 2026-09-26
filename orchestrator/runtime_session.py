@@ -1052,6 +1052,20 @@ def finish_request_from_listener(runtime: Any, request_id: str, payload: Mapping
     if not isinstance(store, SessionStore):
         return
     success = bool(payload.get("success"))
+    failure_context = None
+    if not success:
+        failure_context = {
+            key: payload[key]
+            for key in (
+                "error_code", "error_retryable", "http_status",
+                "provider_request_id", "retry_after_s", "side_effects_possible",
+            )
+            if key in payload
+        }
+        failure_context["backend"] = public_backend_engine(_active_engine(runtime))
+        session_dir = getattr(runtime, "session_dir", None)
+        if session_dir is not None:
+            failure_context["diagnostic_log"] = str(Path(session_dir) / "errors.log")
     store.finish_request(
         request_id,
         success=success,
@@ -1063,6 +1077,7 @@ def finish_request_from_listener(runtime: Any, request_id: str, payload: Mapping
         ),
         assistant_source=public_backend_engine(_active_engine(runtime)) or runtime.name,
         error_text=str(payload.get("error") or "") or None,
+        error_context=failure_context,
     )
     capture_backend_binding(runtime, request_id=request_id)
 

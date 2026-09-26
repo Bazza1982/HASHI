@@ -21,6 +21,46 @@ def _store(tmp_path) -> SessionStore:
     return SessionStore(tmp_path / "state" / "sessions.sqlite3", instance_id="HASHI1")
 
 
+def test_failed_run_retains_owner_scoped_provider_details_after_reopen(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    session = store.ensure_default_session(owner_id="user:7", agent_id="lily")
+    store.accept_run(
+        session_id=session["session_id"], owner_id="user:7", agent_id="lily",
+        request_id="req-provider-failure", text="hello", source="workbench",
+        idempotency_key="provider-failure",
+    )
+    store.mark_request_running("req-provider-failure", worker_id="test-worker")
+    monkeypatch.setattr(runtime_session, "capture_backend_binding", lambda *args, **kwargs: None)
+    runtime = SimpleNamespace(
+        session_store=store, config=SimpleNamespace(active_backend="her-v2"),
+        session_dir=tmp_path / "logs" / "lily" / "run",
+    )
+    runtime_session.finish_request_from_listener(
+        runtime, "req-provider-failure", {
+            "success": False,
+            "error": "[PROVIDER_BAD_REQUEST] The provider rejected the request as invalid.",
+            "error_code": "PROVIDER_BAD_REQUEST", "http_status": 400,
+            "provider_request_id": "apireq-example", "error_retryable": False,
+            "raw_provider_response": "must not be published",
+        },
+    )
+    reopened = _store(tmp_path)
+    detail = reopened.request_failure_detail(
+        "req-provider-failure", owner_id="user:7", agent_id="lily",
+    )
+    assert detail["request_id"] == "req-provider-failure"
+    assert detail["error_code"] == "PROVIDER_BAD_REQUEST"
+    assert detail["http_status"] == 400
+    assert detail["provider_request_id"] == "apireq-example"
+    assert detail["backend"] == "her-v3"
+    assert detail["diagnostic_log"] == str(runtime.session_dir / "errors.log")
+    assert "raw_provider_response" not in detail
+    with pytest.raises(SessionNotFound):
+        reopened.request_failure_detail(
+            "req-provider-failure", owner_id="user:other", agent_id="lily",
+        )
+
+
 def test_attachment_stage_idempotency_reuses_metadata_and_rejects_conflicts(tmp_path):
     store = _store(tmp_path)
     owner = "user:7"
