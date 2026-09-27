@@ -73,13 +73,6 @@ _TUI_COMMAND_CUSTOMIZATIONS: tuple[dict[str, str], ...] = (
     },
     {
         "kind": "command_override",
-        "key": "telegram",
-        "route": "connector_local",
-        "semantic": "delivery_mirror_preference",
-        "reason": "local_presentation",
-    },
-    {
-        "kind": "command_override",
         "key": "sidepanel",
         "route": "connector_local",
         "semantic": "local_information_panel",

@@ -13,7 +13,7 @@ import aiohttp
 
 from orchestrator.frontend_delivery import (
     TUI_MUTATING_PROXY_OPERATIONS,
-    tui_run_delivery_policy,
+    frontend_run_delivery_policy,
 )
 from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_LOCALHOST_URL
 from orchestrator.slash_command_audit import parse_slash_command_text
@@ -418,10 +418,10 @@ class TuiApiClient:
         ui_locale: str = "en",
     ) -> dict:
         """Send a text message without bypassing the selected transport."""
+        del telegram_mirror  # Legacy caller argument; FC owns mirror preferences.
         policy = (
-            tui_run_delivery_policy(
-                telegram_mirror=telegram_mirror,
-                client_id=client_id,
+            frontend_run_delivery_policy(
+                connector_id="tui", client_id=client_id, targets=[]
             )
             if client_id
             else None
@@ -446,7 +446,6 @@ class TuiApiClient:
                     or (
                         tui_ingress.get("command_invocations") is True
                         and bool(command_name)
-                        and command_name != "telegram"
                     )
                 )
             )
@@ -622,11 +621,11 @@ class TuiApiClient:
         ui_locale: str = "en",
     ) -> dict:
         """Submit one caption and one immutable attachment as one request."""
+        del telegram_mirror  # Legacy caller argument; FC owns mirror preferences.
         if bool(attachment) == bool(workzone_ref):
             return {"ok": False, "code": "invalid_attachment", "error": "exactly one attachment source is required"}
-        policy = tui_run_delivery_policy(
-            telegram_mirror=telegram_mirror,
-            client_id=str(client_id or "tui-client"),
+        policy = frontend_run_delivery_policy(
+            connector_id="tui", client_id=str(client_id or "tui-client"), targets=[],
         )
         if attachment is not None:
             capabilities = await self.capabilities_info()

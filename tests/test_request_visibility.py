@@ -78,7 +78,7 @@ async def test_legacy_hidden_request_is_admitted_as_visible(tmp_path, monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_typed_tui_run_policy_can_disable_only_telegram_mirroring(
+async def test_typed_tui_run_policy_cannot_disable_central_telegram_mirroring(
     tmp_path,
     monkeypatch,
 ):
@@ -125,15 +125,15 @@ async def test_typed_tui_run_policy_can_disable_only_telegram_mirroring(
 
     item = runtime.queue.get_nowait()
     assert result == item.request_id == "req-tui"
-    assert item.deliver_to_telegram is False
+    assert item.deliver_to_telegram is True
     assert item.silent is False
     assert item.session_id == "session-shared"
     assert item.request_metadata["frontend_delivery_policy"]["scope"] == "run"
     context = item.request_metadata["message_context_snapshot"]
     assert context["message_source"]["id"] == "tui"
-    assert context["output_destination"]["telegram_mirror"] is False
+    assert context["output_destination"]["telegram_mirror"] is True
     assert context["output_destination"]["surface"] == "tui"
-    assert context["output_destination"]["mirrors"] == []
+    assert context["output_destination"]["mirrors"] == ["telegram"]
     assert context["output_destination"]["automatic"] is True
 
 
@@ -303,8 +303,8 @@ async def test_private_proof_is_kept_out_of_persisted_request_metadata(
             "whatsapp",
             "human_or_client",
             "whatsapp",
-            [],
-            False,
+            ["telegram"],
+            True,
         ),
     ],
 )
@@ -370,6 +370,57 @@ async def test_pao_persists_the_same_route_projected_into_pcm(
     assert item.request_metadata[RUN_DELIVERY_ROUTE_METADATA_KEY]["primary"][
         "surface"
     ] == surface
+
+
+@pytest.mark.asyncio
+async def test_pao_uses_central_mirror_switches_for_tui_admission(tmp_path, monkeypatch):
+    from orchestrator.connector_delivery_preferences import set_connector_preference
+    from orchestrator.frontend_delivery import tui_request_metadata
+
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.name = "visibility"
+    runtime.global_config = SimpleNamespace(
+        project_root=tmp_path, bridge_home=tmp_path,
+        instance_id="HASHI2", authorized_id=123,
+        whatsapp={"allowed_numbers": ["+61400111222"]},
+    )
+    runtime.next_request_id = lambda: "req-central-mirrors"
+    runtime.session_store = SessionStore(
+        tmp_path / "state" / "sessions.sqlite3", instance_id="HASHI2"
+    )
+    runtime.message_logger = Mock()
+    runtime.request_activity = Mock()
+    runtime.queue = asyncio.Queue()
+    monkeypatch.setattr(runtime_session, "session_workzone_state", lambda *args, **kwargs: {})
+    monkeypatch.setattr(runtime_delivery_order, "register_turn", lambda *args, **kwargs: None)
+    monkeypatch.setattr(runtime_cross_session, "capture_reply_target", lambda *args, **kwargs: None)
+    set_connector_preference(tmp_path, "user:123", "telegram", "mirror", False)
+    set_connector_preference(tmp_path, "user:123", "whatsapp", "mirror", True)
+
+    await runtime.enqueue_request(
+        123, "central switch", "tui", "route test", deliver_to_telegram=True,
+        request_metadata={
+            "session_surface": "workbench", "session_channel_key": "default",
+            **tui_request_metadata(telegram_mirror=True, client_id="tui-a"),
+        },
+    )
+    item = runtime.queue.get_nowait()
+    route = item.request_metadata[RUN_DELIVERY_ROUTE_METADATA_KEY]
+    assert item.deliver_to_telegram is False
+    assert route["primary"]["surface"] == "tui"
+    assert route["mirrors"] == [
+        {"surface": "whatsapp", "channel_key": "61400111222@s.whatsapp.net"}
+    ]
+    assert item.request_metadata["message_context_snapshot"]["output_destination"]["mirrors"] == ["whatsapp"]
+
+    runtime.next_request_id = lambda: "req-central-internal"
+    await runtime.enqueue_request(
+        123, "scheduled status", "background-job-event", "route test",
+        request_metadata=None,
+    )
+    internal = runtime.queue.get_nowait()
+    assert internal.deliver_to_telegram is False
+    assert internal.request_metadata[RUN_DELIVERY_ROUTE_METADATA_KEY]["primary"] is None
 
 
 @pytest.mark.asyncio

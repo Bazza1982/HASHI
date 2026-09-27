@@ -76,6 +76,13 @@ def render_notice(
         key += "_broad"
     elif total_count == 1 and status in {"starting", "online", "succeeded"}:
         key += "_single"
+    adoption = (record.get("shared_replacement") or {}).get("adoption") or {}
+    fallback = adoption.get("status") == "fallback"
+    fallback_reason_code = str(adoption.get("reason_code") or "qualification_failed")
+    if fallback_reason_code not in {"source_uncommitted", "qualification_failed"}:
+        fallback_reason_code = "qualification_failed"
+    if fallback and not starting and record.get("status") == "succeeded":
+        key = "reboot.notice.fallback_broad" if broad else "reboot.notice.fallback"
     text = ui_language.tr(
         key,
         locale=language,
@@ -91,7 +98,18 @@ def render_notice(
         ),
         online_count=len(recovered_targets),
         failed_count=len(targets),
+        fallback_reason=ui_language.tr(
+            "reboot.fallback_reason." + fallback_reason_code, locale=language
+        ),
     )
+    if fallback and not starting and record.get("status") != "succeeded":
+        text += "\n" + ui_language.tr(
+            "reboot.notice.fallback_detail",
+            locale=language,
+            fallback_reason=ui_language.tr(
+                "reboot.fallback_reason." + fallback_reason_code, locale=language
+            ),
+        )
     if recovered_targets and not partial:
         text += "\n" + ui_language.tr(
             "reboot.restored_targets",

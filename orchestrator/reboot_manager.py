@@ -468,6 +468,9 @@ class RebootManager:
                 **shared,
                 "status": "committed",
                 "generation_id": generation_id,
+                "adoption": dict(
+                    getattr(self.kernel, "function_release_adoption", None) or {}
+                ),
             }
             self.receipts.update(
                 record["id"],

@@ -87,6 +87,9 @@ class RuntimeAppHost:
         self.app._load_config_bundle()
         self.app.kernel_pid = self.bootstrap["kernel_pid"]
         self.app.shared_generation_id = manifest["generation_id"]
+        self.app.function_release_adoption = dict(
+            self.bootstrap.get("adoption") or {"status": "unknown", "reason_code": None}
+        )
         from orchestrator.function_worker_supervisor import (
             generation_artifact_source_commit,
             generation_from_dict,

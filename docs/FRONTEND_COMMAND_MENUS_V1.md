@@ -118,13 +118,12 @@ Transport compatibility does not prove that every existing command has been
 qualified on this surface. Start with the supplied real `/notify` integration
 test and a read-only navigation canary.
 
-`/telegram` is a compatibility command for the owner-scoped Telegram mirror
-preference, not a Workbench-specific setting. Its handler and callback reuse
-the server-authoritative connector-delivery preference and localized card
-contract. The `api_chat` text route remains a compatibility entry point.
-Telegram-origin replies continue to their originating endpoint; the preference
-controls whether other frontend connectors add Telegram as a mirror. TUI
-per-Run delivery targets remain explicit, client-bound overrides.
+`/telegram` and `/whatsapp` control owner-scoped FC mirror preferences from any
+authenticated frontend. Their handlers and callbacks use the same persisted
+connector-delivery state and localized card contract. The `api_chat` text route
+remains a compatibility entry point. Origin-platform replies continue to their
+original endpoints; legacy TUI per-Run delivery values cannot override the
+central switch.
 
 ## Source, qualification and live adoption
 

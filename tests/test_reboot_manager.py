@@ -743,6 +743,10 @@ async def test_successor_reconciles_shared_function_without_touching_remote(
     new_kernel = _Kernel()
     new_kernel.paths = SimpleNamespace(bridge_home=tmp_path)
     new_kernel.shared_generation_id = generation.manifest.generation_id
+    new_kernel.function_release_adoption = {
+        "status": "fallback",
+        "reason_code": "source_uncommitted",
+    }
     new_kernel.runtimes = []
     for index, name in enumerate(("zelda", "sunny"), start=1):
         client = _Client(name, 200 + index, generation, new_kernel.events)
@@ -774,6 +778,9 @@ async def test_successor_reconciles_shared_function_without_touching_remote(
     record = successor.receipts.get(pending["id"])
     assert record["status"] == "succeeded"
     assert record["shared_replacement"]["status"] == "committed"
+    assert record["shared_replacement"]["adoption"] == new_kernel.function_release_adoption
+    assert "New code was not adopted" in render_notice(record, locale="en")
+    assert "新代码未采用" in render_notice(record, locale="zh-CN")
     assert "remote" not in record["shared_replacement"]
     assert all(record["online"].values())
     assert {item["old_pid"] for item in record["workers"].values()} == {101, 102}

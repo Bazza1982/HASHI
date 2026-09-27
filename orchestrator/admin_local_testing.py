@@ -242,19 +242,15 @@ async def try_execute_slash_command_text(
             session_metadata=session_metadata,
         )
     command_name, args = parse_slash_command_text(text)
-    if command_name == "telegram":
-        # The /telegram slash alias is exposed by the Backend API command route.
-        # Its persisted owner preference applies across frontend connectors;
-        # command-menu callbacks are dispatched before this text-command path.
-        if str(source_channel or "").strip() == "api_chat":
-            return await _execute_workbench_telegram_command(
-                runtime,
-                args,
-                chat_id=chat_id,
-                source_channel=source_channel,
-                session_metadata=session_metadata,
-            )
-        return None
+    if command_name in {"telegram", "whatsapp"}:
+        return await _execute_connector_mirror_command(
+            runtime,
+            command_name,
+            args,
+            chat_id=chat_id,
+            source_channel=source_channel,
+            session_metadata=session_metadata,
+        )
     if not is_supported_slash_command(runtime, command_name):
         return None
 
@@ -292,21 +288,21 @@ async def try_execute_slash_command_text(
     )
 
 
-async def _execute_workbench_telegram_command(
+async def _execute_connector_mirror_command(
     runtime,
+    connector_id: str,
     args: list[str],
     *,
     chat_id: int | str | None = None,
     source_channel: str = "api_chat",
     session_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Handle /telegram on|off for Workbench (api_chat) sessions.
+    """Handle an owner-scoped mirror switch from any authenticated surface."""
 
-    The mirror state is server-owned and scoped per Session owner.  The TUI
-    keeps its own client-side /telegram command and per-Run delivery policy;
-    this handler never runs for source_channel=tui and leaves every other
-    channel's command surface unchanged.
-    """
+    from orchestrator import runtime_session
+    from orchestrator.connector_delivery_preferences import (
+        get_connector_preference, load_preferences, set_connector_preference,
+    )
 
     bridge_home = getattr(
         getattr(runtime, "global_config", None), "bridge_home", None
@@ -317,47 +313,42 @@ async def _execute_workbench_telegram_command(
     session = SlashCommandAuditSession(
         audit_path=_runtime_audit_path(runtime),
         agent=_runtime_agent_name(runtime),
-        command_name="telegram",
+        command_name=connector_id,
         args=list(args or []),
         source_channel=source_channel,
-        handler_kind=resolve_handler_kind(runtime, "telegram"),
+        handler_kind=resolve_handler_kind(runtime, connector_id),
         actor_id=getattr(
             getattr(runtime, "global_config", None), "authorized_id", None
         ),
         chat_id=local_chat_id,
     )
-    base_result = {"command": "telegram", "args": list(args or [])}
+    base_result = {"command": connector_id, "args": list(args or [])}
     try:
         is_allowed = getattr(runtime, "_is_command_allowed", None)
-        if callable(is_allowed) and not is_allowed("telegram"):
+        if callable(is_allowed) and not is_allowed(connector_id):
             session.block("command_disabled")
             return {
                 **base_result,
                 "ok": False,
-                "error": "/telegram is disabled for this agent.",
+                "error": f"/{connector_id} is disabled for this agent.",
             }
         if bridge_home is None:
-            session.fail("workbench telegram state unavailable")
+            session.fail("connector delivery state unavailable")
             return {
                 **base_result,
                 "ok": False,
-                "error": "Workbench Telegram state is unavailable on this instance.",
+                "error": "Connector delivery state is unavailable on this instance.",
             }
         metadata = (
             dict(session_metadata) if isinstance(session_metadata, Mapping) else {}
         )
-        owner_id = str(metadata.get("owner_id") or "").strip()
-        if not owner_id:
-            session.fail("session owner unavailable")
-            return {
-                **base_result,
-                "ok": False,
-                "error": "Session owner is unavailable; cannot resolve Workbench Telegram state.",
-            }
+        owner_id = runtime_session.owner_id(runtime, str(metadata.get("owner_id") or "").strip() or None)
 
-        def _telegram_card_text(mirror: bool) -> str:
+        def _mirror_card_text(mirror: bool) -> str:
             with ui_language.language_scope(runtime, actor_id=owner_id):
-                return runtime_menu_views.telegram_menu_text(enabled=mirror)
+                if connector_id == "telegram":
+                    return runtime_menu_views.telegram_menu_text(enabled=mirror)
+                return runtime_menu_views.whatsapp_menu_text(enabled=mirror)
 
         try:
             requested = workbench_telegram_state.parse_mirror_arg(args)
@@ -366,30 +357,32 @@ async def _execute_workbench_telegram_command(
             return {
                 **base_result,
                 "ok": False,
-                "error": str(exc),
-                "usage": "/telegram on|off",
+                "error": f"Usage: /{connector_id} on|off",
+                "usage": f"/{connector_id} on|off",
             }
         if requested is None:
-            snapshot = workbench_telegram_state.load_state(bridge_home)
-            mirror = workbench_telegram_state.mirror_enabled(
-                bridge_home, owner_id, default=True
+            snapshot = load_preferences(bridge_home)
+            mirror = get_connector_preference(
+                bridge_home, owner_id, connector_id, "mirror",
+                default=connector_id == "telegram",
             )
             return {
                 **base_result,
                 "ok": True,
-                "telegram_mirror": mirror,
+                "mirror_enabled": mirror,
+                f"{connector_id}_mirror": mirror,
                 "owner_id": owner_id,
                 "revision": int(snapshot.get("revision") or 0),
                 "messages": [
                     {
                         "channel": "reply",
-                        "text": _telegram_card_text(mirror),
+                        "text": _mirror_card_text(mirror),
                     }
                 ],
             }
         try:
-            snapshot = workbench_telegram_state.set_mirror(
-                bridge_home, owner_id, bool(requested)
+            snapshot = set_connector_preference(
+                bridge_home, owner_id, connector_id, "mirror", bool(requested)
             )
         except (OSError, ValueError) as exc:
             session.fail(exc)
@@ -398,17 +391,18 @@ async def _execute_workbench_telegram_command(
                 "ok": False,
                 "error": f"{type(exc).__name__}: {exc}",
             }
-        mirror = bool(snapshot["owners"].get(owner_id, True))
+        mirror = bool(snapshot["owners"][owner_id]["connectors"][connector_id]["mirror"])
         return {
             **base_result,
             "ok": True,
-            "telegram_mirror": mirror,
+            "mirror_enabled": mirror,
+            f"{connector_id}_mirror": mirror,
             "owner_id": owner_id,
             "revision": int(snapshot.get("revision") or 0),
             "messages": [
                 {
                     "channel": "reply",
-                    "text": _telegram_card_text(mirror),
+                    "text": _mirror_card_text(mirror),
                 }
             ],
         }

@@ -64,7 +64,7 @@ HASHI 需要把 FC 从“Telegram 适配器加若干兼容 API”升级为**所�
 1. **Telegram 仍是部分运行时输出的隐式中心。** 普通回复、后台通知、meter cost tail、HER v2 card 等路径仍直接调用 Telegram 发送函数；meter 还受 `deliver_to_telegram` 条件控制，并在 Telegram 发送后才补记 presentation message。于是 Telegram 可见并不保证 Workbench/TUI 可见，反之亦然。
 2. **持久 delivery outbox 尚未成为发送中枢。** SessionStore 会写 `delivery_outbox`，但当前主发送链仍在运行时内联完成；该表没有形成统一的 claim、dispatch、retry、receipt 消费循环。
 3. **Workbench 输入是双轨的。** 当前纯文本仍走兼容 `/api/chat`，文件消息才走 Persistent Session API；两条路径的 source、idempotency、session addressing、错误和投递行为并不完全相同。
-4. **TUI 仍有独立策略。** 它有单独的 `hashi.frontend-delivery` 策略和本地 Telegram mirror 开关，并通过兼容绑定共享 `workbench/default` Session。正确体验应保留，但意图、作用域和状态所有者需要类型化，而不是靠前端名称分支。
+4. **历史上的 TUI 独立策略。** 它曾有单独的 `hashi.frontend-delivery` 策略和本地 Telegram mirror 开关，并通过兼容绑定共享 `workbench/default` Session。现行目标是由 FC 按 owner 统一控制各外部平台镜像，旧客户端策略只读兼容且不决定投递。
 5. **命令入口不统一。** Telegram slash/callback、`/api/chat`、admin command、agent command 和命令卡 transport 都能进入命令系统，但接纳、幂等、身份、作用域和回执模型不同。
 6. **前端展示由多个源拼接。** 基本 transcript projection 合并 JSONL 和 Session Message；live activity 又来自独立的内存 store。Workbench 还需在客户端合并 transcript、activity 和直接响应。最终消息、临时进度与卡片没有一个统一的顺序协议。
 7. **来源身份仍含历史推断。** `source`、`chat_id`、`session_surface` 和名称前缀仍参与来源判断。Connector evidence 已存在，但只覆盖部分 Remote/Workbench hop，尚未成为所有入口的标准证明。
@@ -370,9 +370,9 @@ Persistent Session API 下一版本提供统一 snapshot + event feed：
 ### 8.2 TUI
 
 - TUI 迁移到 Session/Event API，显式持有 Session id 和 consumer cursor；
-- 当前草稿、历史、附件、mirror 开关和本地偏好继续保留；
+- 当前草稿、历史、附件和本地展示偏好继续保留；镜像开关归 FC；
 - `workbench/default` 兼容绑定在过渡期保留，但不再是 TUI 的隐式身份；
-- TUI 的 Telegram mirror 解释为明确 scope 的 DeliveryPreference，不与 owner default 混为一谈；
+- TUI 与 Backend API 共用 owner 范围的 FC 镜像偏好，没有独立开关；
 - TUI 不再有专用附件发送语义，使用同一个 MediaGroup admission；
 - 断线恢复靠 snapshot + ACK，不靠读取另一个前端的 transcript 文件。
 
@@ -474,7 +474,7 @@ Persistent Session API 下一版本提供统一 snapshot + event feed：
 | Telegram media/voice | 图片、文件、视频、音频、caption、voice transcript 与回复 | MediaGroup + Telegram adapter |
 | Telegram commands | 当前有效命令、callback、菜单、locale、确认与 lifecycle scope | Command Admission + renderer |
 | TUI chat | 发送、取消、历史、状态、附件和自然完成 | Session/Event client |
-| TUI mirror | 用户可选择是否 Telegram 镜像，重启后偏好正确 | scoped DeliveryPreference |
+| 外部平台镜像 | 用户从任一入口切换 Telegram/WhatsApp 镜像，重启后偏好正确；平台自身回复照常 | FC owner 范围的 DeliveryPreference |
 | Backend API | 现有认证、Agent 路由、错误码与兼容请求 | compatibility ingress adapter |
 | Persistent Session API | snapshot、events、ACK、fencing、幂等、附件原子接纳 | 新标准协议的基础 |
 | Workbench chat | 文本、附件、语音、进度、历史、搜索、命令卡 | conforming external client |

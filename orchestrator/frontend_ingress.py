@@ -609,14 +609,40 @@ def admit_frontend_ingress(
 
     # 4. Message intent (Turn / Run admission)
     require_connector_operation(connector_id, "ingress", "message")
+    from orchestrator.frontend_delivery import (
+        configured_whatsapp_mirror_channel,
+        owner_mirror_for_admission,
+        telegram_delivery_for_admission,
+    )
+
+    delivery_metadata = {"owner_id": resolved_owner}
+    state_root = getattr(runtime.global_config, "bridge_home", None)
+    whatsapp_channel = (
+        configured_whatsapp_mirror_channel(runtime.global_config)
+        if resolved_owner == owner_id(runtime)
+        else None
+    )
     delivery_route = freeze_run_delivery_route(
         message_source_id=connector_id,
         session_surface=connector_id,
         session_channel_key=str(chat_id or "default"),
-        chat_id=chat_id,
-        telegram_requested=bool(
-            delivery_preference and delivery_preference.get("telegram_mirror")
+        chat_id=(
+            getattr(runtime.global_config, "authorized_id", None)
+            if connector_id == "whatsapp"
+            else chat_id
         ),
+        telegram_requested=telegram_delivery_for_admission(
+            source=connector_id,
+            request_metadata=delivery_metadata,
+            state_root=state_root,
+        ),
+        whatsapp_requested=bool(whatsapp_channel) and owner_mirror_for_admission(
+            request_metadata=delivery_metadata,
+            state_root=state_root,
+            connector_id="whatsapp",
+            default=False,
+        ),
+        whatsapp_channel_key=whatsapp_channel,
     )
 
     request_id = normalized_env["message"]["request_id"]

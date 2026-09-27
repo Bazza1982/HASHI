@@ -4,7 +4,11 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from orchestrator import ui_language, workbench_telegram_state
+from orchestrator import ui_language, runtime_session
+from orchestrator.connector_delivery_preferences import (
+    get_connector_preference,
+    set_connector_preference,
+)
 from orchestrator.command_registry import RuntimeCallback, RuntimeCommand
 from orchestrator.command_ui import selected_label, setting_card, status_label
 
@@ -26,64 +30,54 @@ def _bridge_home(runtime: Any) -> Any:
 
 def _owner_id(runtime: Any, update: Any) -> str:
     owner = getattr(update, "_hashi_session_owner_id", None)
-    if owner is not None and str(owner).strip():
-        return str(owner).strip()
-    user = getattr(update, "effective_user", None)
-    user_id = getattr(user, "id", None)
-    if user_id is not None:
-        return str(user_id)
-    query = getattr(update, "callback_query", None)
-    query_user = getattr(query, "from_user", None)
-    query_id = getattr(query_user, "id", None)
-    if query_id is not None:
-        return str(query_id)
-    global_config = getattr(runtime, "global_config", None)
-    return str(getattr(global_config, "authorized_id", "default") or "default")
+    return runtime_session.owner_id(runtime, str(owner).strip() if owner else None)
 
 
-def _enabled(runtime: Any, update: Any) -> bool:
+def _enabled(runtime: Any, update: Any, connector_id: str = "telegram") -> bool:
     home = _bridge_home(runtime)
     if home is None:
-        return True
-    return workbench_telegram_state.mirror_enabled(
-        home, _owner_id(runtime, update), default=True
+        return connector_id == "telegram"
+    return get_connector_preference(
+        home, _owner_id(runtime, update), connector_id, "mirror",
+        default=connector_id == "telegram",
     )
 
 
-def _menu_text(runtime: Any, update: Any, *, notice: str | None = None) -> str:
-    enabled = _enabled(runtime, update)
+def _menu_text(runtime: Any, update: Any, *, connector_id: str = "telegram", notice: str | None = None) -> str:
+    enabled = _enabled(runtime, update, connector_id)
+    prefix = f"menu.{connector_id}"
     facts = [
         f"<b>{ui_language.tr('common.scope')}</b> · "
-        f"{ui_language.tr('menu.telegram.scope')}"
+        f"{ui_language.tr(prefix + '.scope')}"
     ]
     if notice:
         facts.insert(0, f"✅ {notice}")
     return setting_card(
         "📡",
-        ui_language.tr("menu.telegram.title"),
+        ui_language.tr(prefix + ".title"),
         current=f"<b>{status_label(enabled)}</b>",
         facts=facts,
         consequence=(
-            ui_language.tr("menu.telegram.enabled")
+            ui_language.tr(prefix + ".enabled")
             if enabled
-            else ui_language.tr("menu.telegram.disabled")
+            else ui_language.tr(prefix + ".disabled")
         ),
-        action=ui_language.tr("menu.telegram.action"),
+        action=ui_language.tr(prefix + ".action"),
     )
 
 
-def _keyboard(runtime: Any, update: Any) -> InlineKeyboardMarkup:
-    enabled = _enabled(runtime, update)
+def _keyboard(runtime: Any, update: Any, connector_id: str = "telegram") -> InlineKeyboardMarkup:
+    enabled = _enabled(runtime, update, connector_id)
     return InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(
                     selected_label(ui_language.tr("common.on"), enabled),
-                    callback_data="telegram:set:on",
+                    callback_data=f"{connector_id}:set:on",
                 ),
                 InlineKeyboardButton(
                     selected_label(ui_language.tr("common.off"), not enabled),
-                    callback_data="telegram:set:off",
+                    callback_data=f"{connector_id}:set:off",
                 ),
             ]
         ]
@@ -108,12 +102,12 @@ async def _send(runtime: Any, update: Any, text: str, *, reply_markup=None) -> N
         )
 
 
-async def telegram_command(runtime: Any, update: Any, context: Any) -> None:
+async def _mirror_command(runtime: Any, update: Any, context: Any, connector_id: str) -> None:
     if not _is_authorized(runtime, update):
         return
     home = _bridge_home(runtime)
     if home is None:
-        await _send(runtime, update, ui_language.tr("menu.telegram.unavailable"))
+        await _send(runtime, update, ui_language.tr(f"menu.{connector_id}.unavailable"))
         return
     args = [
         str(arg).strip().lower()
@@ -124,40 +118,47 @@ async def telegram_command(runtime: Any, update: Any, context: Any) -> None:
         await _send(
             runtime,
             update,
-            _menu_text(runtime, update),
-            reply_markup=_keyboard(runtime, update),
+            _menu_text(runtime, update, connector_id=connector_id),
+            reply_markup=_keyboard(runtime, update, connector_id),
         )
         return
     value = args[0]
-    if value == "on":
-        workbench_telegram_state.set_mirror(home, _owner_id(runtime, update), True)
+    if len(args) == 1 and value in {"on", "off"}:
+        set_connector_preference(home, _owner_id(runtime, update), connector_id, "mirror", value == "on")
         await _send(
             runtime,
             update,
-            _menu_text(runtime, update, notice=ui_language.tr("menu.telegram.notice.on")),
-            reply_markup=_keyboard(runtime, update),
+            _menu_text(runtime, update, connector_id=connector_id, notice=ui_language.tr(f"menu.{connector_id}.notice.{value}")),
+            reply_markup=_keyboard(runtime, update, connector_id),
         )
         return
-    if value == "off":
-        workbench_telegram_state.set_mirror(home, _owner_id(runtime, update), False)
-        await _send(
-            runtime,
-            update,
-            _menu_text(runtime, update, notice=ui_language.tr("menu.telegram.notice.off")),
-            reply_markup=_keyboard(runtime, update),
-        )
-        return
-    await _send(runtime, update, ui_language.tr("menu.telegram.usage"))
+    await _send(runtime, update, ui_language.tr(f"menu.{connector_id}.usage"))
+
+
+async def telegram_command(runtime: Any, update: Any, context: Any) -> None:
+    await _mirror_command(runtime, update, context, "telegram")
+
+
+async def whatsapp_command(runtime: Any, update: Any, context: Any) -> None:
+    await _mirror_command(runtime, update, context, "whatsapp")
 
 
 async def telegram_callback(runtime: Any, update: Any, context: Any) -> None:
+    await _mirror_callback(runtime, update, context, "telegram")
+
+
+async def whatsapp_callback(runtime: Any, update: Any, context: Any) -> None:
+    await _mirror_callback(runtime, update, context, "whatsapp")
+
+
+async def _mirror_callback(runtime: Any, update: Any, context: Any, connector_id: str) -> None:
     query = update.callback_query
     if not _is_authorized(runtime, update):
         await query.answer()
         return
     home = _bridge_home(runtime)
     if home is None:
-        await query.answer(ui_language.tr("menu.telegram.unavailable"), show_alert=True)
+        await query.answer(ui_language.tr(f"menu.{connector_id}.unavailable"), show_alert=True)
         return
     data = query.data or ""
     parts = data.split(":", 2)
@@ -165,16 +166,16 @@ async def telegram_callback(runtime: Any, update: Any, context: Any) -> None:
     value = parts[2] if len(parts) > 2 else ""
     notice = None
     if action == "set" and value in {"on", "off"}:
-        workbench_telegram_state.set_mirror(
-            home, _owner_id(runtime, update), value == "on"
+        set_connector_preference(
+            home, _owner_id(runtime, update), connector_id, "mirror", value == "on"
         )
         notice = ui_language.tr(
-            "menu.telegram.notice.on" if value == "on" else "menu.telegram.notice.off"
+            f"menu.{connector_id}.notice.{value}"
         )
     await query.edit_message_text(
-        _menu_text(runtime, update, notice=notice),
+        _menu_text(runtime, update, connector_id=connector_id, notice=notice),
         parse_mode="HTML",
-        reply_markup=_keyboard(runtime, update),
+        reply_markup=_keyboard(runtime, update, connector_id),
     )
     await query.answer()
 
@@ -185,6 +186,14 @@ COMMANDS = [
         description="Toggle Telegram mirror for other connectors [on|off]",
         callback=telegram_command,
     ),
+    RuntimeCommand(
+        name="whatsapp",
+        description="Toggle WhatsApp mirror for other connectors [on|off]",
+        callback=whatsapp_command,
+    ),
 ]
 
-CALLBACKS = [RuntimeCallback(pattern=r"^telegram:", callback=telegram_callback)]
+CALLBACKS = [
+    RuntimeCallback(pattern=r"^telegram:", callback=telegram_callback),
+    RuntimeCallback(pattern=r"^whatsapp:", callback=whatsapp_callback),
+]

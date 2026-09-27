@@ -129,6 +129,11 @@ def validate_record(record):
             and record["lifecycle_state"] in LIFECYCLE_STATES
             and isinstance(record["workers"], dict)
             and isinstance(record["shared_replacement"], dict)
+            and isinstance(record["shared_replacement"].get("adoption", {}), dict)
+            and record["shared_replacement"].get("adoption", {}).get("status")
+            in {None, "qualified", "fallback", "unknown"}
+            and record["shared_replacement"].get("adoption", {}).get("reason_code")
+            in {None, "source_uncommitted", "qualification_failed"}
             and record["shared_replacement"].get("status")
             in {
                 "not_requested",

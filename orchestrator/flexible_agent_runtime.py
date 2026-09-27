@@ -992,15 +992,16 @@ class FlexibleAgentRuntime:
         idempotency_key: str | None = None,
         reply_to_message_id: Any | None = None,
     ):
-        # Agent turns are always observable, including legacy IPC callers that
-        # request hidden delivery.  The sole narrow exception is a complete,
-        # typed TUI per-Run delivery policy.  Resolve it before admission so the
-        # immutable QueuedRequest snapshots the choice for the full Turn.
+        # Mirror targets are server-owned. Legacy client delivery flags cannot
+        # override the owner's persistent connector preference.
+        from orchestrator import runtime_session
         from orchestrator.frontend_delivery import telegram_delivery_for_admission
 
+        admission_metadata = dict(request_metadata or {})
+        admission_metadata.setdefault("owner_id", runtime_session.owner_id(self))
         telegram_requested = telegram_delivery_for_admission(
             source=source,
-            request_metadata=request_metadata,
+            request_metadata=admission_metadata,
             state_root=getattr(
                 getattr(self, "global_config", None), "bridge_home", None
             ),
@@ -1071,7 +1072,9 @@ class FlexibleAgentRuntime:
         )
         from orchestrator.frontend_delivery import (
             RUN_DELIVERY_ROUTE_METADATA_KEY,
+            configured_whatsapp_mirror_channel,
             freeze_run_delivery_route,
+            owner_mirror_for_admission,
             route_destination,
         )
 
@@ -1138,6 +1141,11 @@ class FlexibleAgentRuntime:
                 "session_surface": resolved_surface,
                 "session_channel_key": resolved_channel_key,
             }
+        )
+        telegram_requested = telegram_delivery_for_admission(
+            source=source,
+            request_metadata=metadata,
+            state_root=getattr(self.global_config, "bridge_home", None),
         )
         from orchestrator.session_store import SessionConflict
 
@@ -1210,12 +1218,27 @@ class FlexibleAgentRuntime:
             primary_channel_key = (
                 f"{from_agent}@{from_instance}" if from_instance else from_agent
             )
+        whatsapp_channel = (
+            configured_whatsapp_mirror_channel(self.global_config)
+            if resolved_owner == runtime_session.owner_id(self)
+            else None
+        )
+        whatsapp_requested = bool(whatsapp_channel) and owner_mirror_for_admission(
+            request_metadata=metadata,
+            state_root=getattr(self.global_config, "bridge_home", None),
+            connector_id="whatsapp",
+            default=False,
+        )
+        if source_fact["id"] == "whatsapp" and telegram_requested:
+            chat_id = int(getattr(self.global_config, "authorized_id", 0) or 0)
         metadata[RUN_DELIVERY_ROUTE_METADATA_KEY] = freeze_run_delivery_route(
             message_source_id=str(source_fact["id"]),
             session_surface=resolved_surface,
             session_channel_key=resolved_channel_key,
             chat_id=chat_id,
             telegram_requested=telegram_requested,
+            whatsapp_requested=whatsapp_requested,
+            whatsapp_channel_key=whatsapp_channel,
             primary_channel_key=primary_channel_key,
             terminal_exchange=bool(metadata.get("system_exchange_terminal")),
         )
@@ -1468,11 +1491,20 @@ class FlexibleAgentRuntime:
         callbacks = self._request_listeners.pop(request_id, [])
         if not callbacks:
             self._pending_request_results[request_id] = payload
-            return
         for callback in callbacks:
             result = callback(payload)
             if inspect.isawaitable(result):
                 await result
+        try:
+            from orchestrator.frontend_whatsapp_mirror import deliver_whatsapp_mirror
+
+            await deliver_whatsapp_mirror(self, request_id)
+        except Exception as exc:
+            self.logger.warning(
+                "WhatsApp mirror delivery failed for %s (%s)",
+                request_id,
+                type(exc).__name__,
+            )
 
     async def enqueue_startup_bootstrap(self, chat_id: int):
         if self.backend_manager.current_backend:

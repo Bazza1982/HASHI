@@ -813,7 +813,7 @@ async def test_tui_command_invocation_rejects_untrusted_request_metadata(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_session_run_tui_policy_is_validated_and_frozen_at_admission(tmp_path):
+async def test_session_run_tui_policy_is_validated_but_cannot_override_central_mirror(tmp_path):
     from orchestrator.frontend_delivery import (
         telegram_delivery_for_admission,
         tui_run_delivery_policy,
@@ -845,17 +845,15 @@ async def test_session_run_tui_policy_is_validated_and_frozen_at_admission(tmp_p
     assert runtime.last_request_metadata["frontend_client"] == {
         "kind": "tui", "client_id": "tui-window-7"
     }
-    assert runtime.last_request_metadata["frontend_delivery_policy"] == policy
-    assert runtime.last_request_metadata["response_preferences"][
-        "frontend_delivery_policy"
-    ] == policy
+    assert "frontend_delivery_policy" not in runtime.last_request_metadata
+    assert "frontend_delivery_policy" not in runtime.last_request_metadata["response_preferences"]
     assert runtime.last_request_metadata["ui_locale"] == "zh-CN"
     assert runtime.last_source == "tui"
     assert telegram_delivery_for_admission(
         source=runtime.last_source,
         request_metadata=runtime.last_request_metadata,
         state_root=tmp_path,
-    ) is False
+    ) is True
     assert resolve_message_source_fact(
         source=runtime.last_source,
         chat_id=123,
@@ -879,7 +877,7 @@ async def test_session_run_tui_policy_is_validated_and_frozen_at_admission(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_session_api_external_delivery_policy_is_bound_and_can_suppress_private_mirror(tmp_path):
+async def test_session_api_external_delivery_policy_is_validated_but_cannot_suppress_mirror(tmp_path):
     from orchestrator.frontend_delivery import (
         frontend_run_delivery_policy,
         telegram_delivery_for_admission,
@@ -915,12 +913,12 @@ async def test_session_api_external_delivery_policy_is_bound_and_can_suppress_pr
         "kind": "session_api",
         "client_id": "hashi-workbench-v2",
     }
-    assert runtime.last_request_metadata["frontend_delivery_policy"] == policy
+    assert "frontend_delivery_policy" not in runtime.last_request_metadata
     assert telegram_delivery_for_admission(
         source=runtime.last_source,
         request_metadata=runtime.last_request_metadata,
         state_root=tmp_path,
-    ) is False
+    ) is True
 
     invalid_policy = frontend_run_delivery_policy(
         connector_id="session_api",
@@ -1085,13 +1083,13 @@ async def test_tui_attachment_bytes_and_caption_enter_one_media_request(tmp_path
     assert len(runtime.api_media_calls) == 1
     call = runtime.api_media_calls[0]
     assert call["caption"] == "describe this"
-    assert call["deliver_to_telegram"] is False
+    assert call["deliver_to_telegram"] is True
     assert call["local_path"].read_bytes() == content
     assert call["filename"] == "image.png"
 
 
 @pytest.mark.asyncio
-async def test_tui_chat_snapshots_typed_mirror_policy_without_forking_conversation(
+async def test_tui_chat_ignores_legacy_mirror_policy_without_forking_conversation(
     tmp_path,
 ):
     from orchestrator.frontend_delivery import tui_run_delivery_policy
@@ -1117,11 +1115,8 @@ async def test_tui_chat_snapshots_typed_mirror_policy_without_forking_conversati
     payload = json.loads(response.text)
 
     assert response.status == 200
-    assert payload["delivery_policy"] == {
-        "scope": "run",
-        "telegram_mirror": False,
-    }
-    assert runtime.api_delivery_flags[-1] is False
+    assert "delivery_policy" not in payload
+    assert runtime.api_delivery_flags[-1] is True
     metadata = runtime.api_request_metadata[-1]
     assert metadata["session_surface"] == "workbench"
     assert metadata["session_channel_key"] == "default"
@@ -1129,8 +1124,8 @@ async def test_tui_chat_snapshots_typed_mirror_policy_without_forking_conversati
         "kind": "tui",
         "client_id": "tui-window-7",
     }
-    assert metadata["frontend_delivery_policy"] == policy
-    assert metadata["response_preferences"]["frontend_delivery_policy"] == policy
+    assert "frontend_delivery_policy" not in metadata
+    assert "frontend_delivery_policy" not in metadata["response_preferences"]
 
 
 @pytest.mark.asyncio

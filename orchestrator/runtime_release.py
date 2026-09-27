@@ -6,7 +6,10 @@ import logging
 from pathlib import Path
 from types import SimpleNamespace
 
-from orchestrator.function_generation import probe_function_generation
+from orchestrator.function_generation import (
+    UncommittedFunctionSourceError,
+    probe_function_generation,
+)
 from orchestrator.function_worker_supervisor import (
     load_bootable_generation_cache,
     materialize_generation_artifact,
@@ -23,6 +26,7 @@ def qualify_release(payload: dict) -> dict:
     bridge_home = Path(payload["bridge_home"]).resolve()
     runtime = RuntimeFingerprint.from_mapping(payload["runtime"])
     paths = build_bridge_paths(root, bridge_home, canonical_home=True)
+    adoption = {"status": "qualified", "reason_code": None}
     try:
         generation = probe_function_generation(
             SimpleNamespace(
@@ -45,6 +49,14 @@ def qualify_release(payload: dict) -> dict:
         if cached is None:
             raise
         generation, artifact = cached
+        adoption = {
+            "status": "fallback",
+            "reason_code": (
+                "source_uncommitted"
+                if isinstance(candidate_error, UncommittedFunctionSourceError)
+                else "qualification_failed"
+            ),
+        }
         logger.warning(
             "New Function generation was rejected; continuing startup with the last "
             "verified generation: %s: %s",
@@ -56,4 +68,5 @@ def qualify_release(payload: dict) -> dict:
         "runtime": runtime.to_dict(),
         "generation_root": str(artifact),
         "entrypoint": payload["entrypoint"],
+        "adoption": adoption,
     }

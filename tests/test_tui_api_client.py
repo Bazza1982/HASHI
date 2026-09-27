@@ -187,7 +187,7 @@ async def test_direct_tui_chat_preserves_legacy_fallback_without_session_capabil
     assert [call["path"] for call in calls] == ["/api/v1/capabilities", "/api/chat"]
     assert calls[-1]["method"] == "POST"
     assert calls[-1]["json"]["source"] == "tui"
-    assert calls[-1]["json"]["delivery_policy"]["targets"][0]["enabled"] is False
+    assert calls[-1]["json"]["delivery_policy"]["targets"] == []
     assert calls[-1]["json"]["delivery_policy"]["scope"] == "run"
     assert calls[-1]["json"]["ui_locale"] == "zh-CN"
 
@@ -257,7 +257,7 @@ async def test_direct_tui_text_uses_canonical_session_run_when_available(monkeyp
     assert run["surface"] == "tui"
     assert run["client_id"] == "tui-window-1"
     assert run["message"]["content"] == [{"type": "text", "text": "hello"}]
-    assert run["delivery_policy"]["targets"][0]["enabled"] is False
+    assert run["delivery_policy"]["targets"] == []
     assert run["idempotency_key"]
 
 
@@ -382,7 +382,8 @@ async def test_direct_tui_command_uses_session_bound_typed_invocation(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_tui_telegram_command_remains_on_compatibility_endpoint(monkeypatch):
+@pytest.mark.parametrize("command", ["/telegram", "/whatsapp"])
+async def test_tui_mirror_command_uses_central_session_command(monkeypatch, command):
     client = TuiApiClient("http://127.0.0.1:18800")
     calls = []
 
@@ -400,13 +401,21 @@ async def test_tui_telegram_command_remains_on_compatibility_endpoint(monkeypatc
                     "command_invocations": True,
                 },
             }
-        return {"ok": True, "slash_command": True}
+        if path == "/api/v1/agents/akane/primary-session":
+            return {"ok": True, "session": {
+                "session_id": "ses-1", "context_generation": 1,
+            }}
+        return {"ok": True, "command_invocation": True}
 
     monkeypatch.setattr(client, "_direct_request", _request)
-    result = await client.send_chat("akane", "/telegram", client_id="tui-1")
+    result = await client.send_chat("akane", command, client_id="tui-1")
 
-    assert result["slash_command"] is True
-    assert calls == ["/api/v1/capabilities", "/api/chat"]
+    assert result["command_invocation"] is True
+    assert calls == [
+        "/api/v1/capabilities",
+        "/api/v1/agents/akane/primary-session",
+        "/api/v1/sessions/ses-1/commands",
+    ]
 
 
 @pytest.mark.asyncio
@@ -504,7 +513,7 @@ async def test_remote_tui_text_uses_session_run_over_authenticated_proxy(monkeyp
         "capabilities", "primary_session", "session_run"
     ]
     assert calls[-1][1]["session_id"] == "ses-remote"
-    assert calls[-1][1]["delivery_policy"]["targets"][0]["enabled"] is False
+    assert calls[-1][1]["delivery_policy"]["targets"] == []
     assert calls[-1][1]["idempotency_key"]
 
 
@@ -639,7 +648,7 @@ async def test_direct_tui_attachment_sends_bytes_and_caption_in_one_request(monk
     assert captured["path"] == "/api/chat"
     assert captured["body"]["text"] == "describe it"
     assert captured["body"]["attachment"] == attachment
-    assert captured["body"]["delivery_policy"]["targets"][0]["enabled"] is False
+    assert captured["body"]["delivery_policy"]["targets"] == []
 
 
 @pytest.mark.asyncio
@@ -710,7 +719,7 @@ async def test_direct_tui_attachment_uses_session_asset_and_run_when_advertised(
         {"type": "text", "text": "describe it"},
         {"type": "attachment", "attachment_id": "att-1"},
     ]
-    assert calls[-1][2]["delivery_policy"]["targets"][0]["enabled"] is False
+    assert calls[-1][2]["delivery_policy"]["targets"] == []
 
 
 @pytest.mark.asyncio
@@ -763,7 +772,7 @@ async def test_remote_tui_attachment_uses_one_canonical_session_operation(monkey
     assert submitted["session_id"] == "ses-2"
     assert submitted["attachment"] == original_attachment
     assert submitted["idempotency_key"].startswith("tui-")
-    assert submitted["delivery_policy"]["targets"][0]["enabled"] is False
+    assert submitted["delivery_policy"]["targets"] == []
     assert "workzone_ref" not in submitted
 
 

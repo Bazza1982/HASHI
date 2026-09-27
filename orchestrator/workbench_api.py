@@ -109,11 +109,9 @@ from orchestrator.flexible_backend_registry import (
 )
 from orchestrator.frontend_delivery import (
     FRONTEND_CLIENT_METADATA_KEY,
-    FRONTEND_DELIVERY_METADATA_KEY,
     RUN_DELIVERY_ROUTE_METADATA_KEY,
     normalize_frontend_run_delivery_policy,
     normalize_tui_run_delivery_policy,
-    tui_request_metadata,
 )
 from orchestrator.frontend_compatibility import (
     normalize_compatibility_operation,
@@ -6045,22 +6043,12 @@ class WorkbenchApiServer:
                 policy = normalize_tui_run_delivery_policy(
                     supplied_delivery_policy, client_id=client_id
                 )
-                mirror = next(
-                    (
-                        target["enabled"]
-                        for target in policy["targets"]
-                        if target["connector_id"] == "telegram"
-                        and target["role"] == "mirror"
-                    ),
-                    True,
-                )
                 tui_metadata = {
-                    **tui_request_metadata(
-                        telegram_mirror=mirror, client_id=client_id
-                    ),
+                    FRONTEND_CLIENT_METADATA_KEY: {
+                        "kind": "tui", "client_id": client_id,
+                    },
                     "ui_locale": normalize_locale(payload.get("ui_locale")),
                 }
-                response_preferences["frontend_delivery_policy"] = policy
             elif supplied_delivery_policy is not None:
                 if surface not in {"workbench", "external", "session-api"}:
                     raise ValueError(
@@ -6085,9 +6073,7 @@ class WorkbenchApiServer:
                 }
                 tui_metadata = {
                     FRONTEND_CLIENT_METADATA_KEY: frontend_metadata,
-                    FRONTEND_DELIVERY_METADATA_KEY: policy,
                 }
-                response_preferences[FRONTEND_DELIVERY_METADATA_KEY] = policy
             canonical_parts: list[dict[str, Any]] = []
             total_attachment_bytes = 0
             for item_index, block in enumerate(content, start=1):
@@ -7741,35 +7727,24 @@ class WorkbenchApiServer:
                     },
                     status=400,
                 )
-            telegram_mirror = next(
-                (
-                    bool(target["enabled"])
-                    for target in normalized_policy["targets"]
-                    if target["connector_id"] == "telegram"
-                    and target["role"] == "mirror"
-                ),
-                True,
-            )
             response_preferences = session_metadata.get("response_preferences")
             response_preferences = (
                 dict(response_preferences)
                 if isinstance(response_preferences, Mapping)
                 else {}
             )
-            response_preferences["frontend_delivery_policy"] = normalized_policy
             # The TUI continues to use the established shared Workbench
-            # Conversation binding.  Client identity scopes presentation and
-            # delivery only; it never creates a private or competing Session.
+            # Conversation binding. Client identity scopes presentation only;
+            # FC applies the owner mirror switch to every ingress.
             session_metadata.update(
                 {
                     "session_surface": "workbench",
                     "session_channel_key": "default",
                     "ui_locale": normalize_locale(payload.get("ui_locale")),
                     "response_preferences": response_preferences,
-                    **tui_request_metadata(
-                        telegram_mirror=telegram_mirror,
-                        client_id=client_id,
-                    ),
+                    FRONTEND_CLIENT_METADATA_KEY: {
+                        "kind": "tui", "client_id": client_id,
+                    },
                     MESSAGE_SOURCE_RESERVED_METADATA_KEY: "tui",
                 }
             )
@@ -7889,11 +7864,6 @@ class WorkbenchApiServer:
             idempotency_key=str(payload.get("idempotency_key") or "").strip() or None,
         )
         response_payload = {"ok": True, "request_id": request_id}
-        if source.casefold() == "tui":
-            response_payload["delivery_policy"] = {
-                "scope": "run",
-                "telegram_mirror": telegram_mirror,
-            }
         if request_id:
             try:
                 run = self.session_store.get_run_by_request(request_id)
@@ -9644,6 +9614,29 @@ class WorkbenchApiServer:
             "generation_id": getattr(orchestrator, "shared_generation_id", None),
             "adopted_at": getattr(orchestrator, "shared_adopted_at", None),
         }
+        adoption = getattr(orchestrator, "function_release_adoption", None)
+        if isinstance(adoption, dict):
+            payload["shared_functions"]["adoption"] = dict(adoption)
+            if adoption.get("status") == "fallback":
+                reason_code = adoption.get("reason_code")
+                reason = (
+                    "source changes are uncommitted"
+                    if reason_code == "source_uncommitted"
+                    else "the new code failed startup checks"
+                )
+                payload["degraded"] = True
+                payload["status"] = "degraded"
+                payload["issues"].insert(
+                    0,
+                    {
+                        "code": "function_release_fallback",
+                        "severity": "warning",
+                        "summary": (
+                            "New code was not adopted because " + reason
+                            + "; the previous version is online."
+                        ),
+                    },
+                )
         generation = getattr(orchestrator, "function_generation", None)
         if isinstance(generation, dict):
             payload["function_generation"] = dict(generation)

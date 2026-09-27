@@ -179,7 +179,9 @@ success.
 Remote's optional `instances.json` compatibility view writes only when its
 projected peer state changes; absent and empty optional fields compare equal.
 
-`/telegram off` affects only that TUI Run. `/think` controls provider reasoning
+`/telegram off` stops future Telegram mirrors for the owner from every frontend;
+Telegram-origin conversations still receive their normal replies. `/whatsapp`
+uses the same central rule for WhatsApp. `/think` controls provider reasoning
 and `/commentary` explicit Engine commentary. Media are committed Session
 assets bound to one draft, instance, Agent, and Run; Remote sends managed bytes,
 references stay inside enabled Workzones, and uncertain writes never switch
@@ -198,7 +200,13 @@ non-Telegram callbacks keep their own Connector fence.
 `/new` selects a fresh primary Session without deleting owner/Agent history;
 old messages stay read-only and attachments keep their original Session. PAO
 owns Agent deletion with preview, blockers, and cleanup receipts. Workbench
-`/telegram` persists per owner; TUI preference is per Run.
+`/telegram` and `/whatsapp` persist per owner in FC; TUI and Backend API have no
+separate mirror switches. A Run retains its admission-time destinations.
+
+HASHI1 `main`, 2026-09-27: the user approved this centralized mirror behavior,
+including normal origin-platform replies while mirroring is off. The Functions
+source and focused offline tests were updated. No HASHI process was rebooted;
+running Worker adoption and live frontend delivery remain unverified.
 
 ## Move, Clone, jobs, and HCC
 

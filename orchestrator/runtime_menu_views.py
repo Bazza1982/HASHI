@@ -1335,6 +1335,19 @@ def telegram_menu_text(*, enabled: bool) -> str:
     )
 
 
+def whatsapp_menu_text(*, enabled: bool) -> str:
+    return setting_card(
+        "📱",
+        _tr("menu.whatsapp.title"),
+        current=f"<b>{status_label(enabled)}</b>",
+        facts=[_fact("common.scope", html.escape(_tr("menu.whatsapp.scope")))],
+        consequence=(
+            _tr("menu.whatsapp.enabled") if enabled else _tr("menu.whatsapp.disabled")
+        ),
+        action=_tr("menu.whatsapp.action"),
+    )
+
+
 def telegram_keyboard(*, enabled: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [

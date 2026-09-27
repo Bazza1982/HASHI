@@ -184,6 +184,30 @@ async def test_personal_health_keeps_legacy_shape_without_enterprise_block(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_health_warns_when_online_after_function_release_fallback(tmp_path):
+    server = _server(tmp_path, profile="personal")
+    server.orchestrator = SimpleNamespace(
+        instance_id="HASHI1",
+        api_gateway=None,
+        runtimes=[],
+        startup_status={"ready": True, "degraded": False, "phase": "ready", "issues": []},
+        shared_generation_id="sha256:previous",
+        function_release_adoption={
+            "status": "fallback",
+            "reason_code": "source_uncommitted",
+        },
+    )
+
+    payload = json.loads((await server.handle_health(_FakeRequest())).text)
+
+    assert payload["ready"] is True
+    assert payload["degraded"] is True
+    assert payload["shared_functions"]["adoption"]["status"] == "fallback"
+    assert payload["issues"][0]["code"] == "function_release_fallback"
+    assert "New code was not adopted" in payload["issues"][0]["summary"]
+
+
+@pytest.mark.asyncio
 async def test_health_exposes_runtime_contract_and_active_generation(tmp_path):
     server = _server(tmp_path, profile="personal")
     runtime = SimpleNamespace(

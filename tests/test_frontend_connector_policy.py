@@ -113,7 +113,7 @@ def test_frontend_delivery_policy_is_connector_neutral_client_bound_and_fail_vis
     assert telegram_delivery_for_admission(
         source="tui",
         request_metadata=metadata,
-    ) is False
+    ) is True
     assert telegram_delivery_for_admission(
         source="api",
         request_metadata=metadata,
@@ -184,7 +184,7 @@ def test_legacy_tui_delivery_policy_is_normalized_to_generic_contract():
         ("tui", "workbench", True, "tui", ["telegram"]),
         ("api", "workbench", True, "workbench", ["telegram"]),
         ("hchat", "workbench", True, "hchat", ["telegram"]),
-        ("whatsapp", "whatsapp", True, "whatsapp", []),
+        ("whatsapp", "whatsapp", True, "whatsapp", ["telegram"]),
         ("hashi.internal", "scheduled", True, "telegram", []),
     ],
 )

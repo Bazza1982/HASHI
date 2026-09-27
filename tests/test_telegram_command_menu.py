@@ -28,7 +28,7 @@ def test_telegram_menu_text_off_state_english():
     with ui_language.language_scope(None, locale="en"):
         text = runtime_menu_views.telegram_menu_text(enabled=False)
     assert "<b>Current</b> · <b>OFF</b>" in text
-    assert "selected connector" in text
+    assert "other sources do not mirror messages to Telegram" in text
 
 
 def test_telegram_menu_text_chinese_resolves_no_key_fallback():

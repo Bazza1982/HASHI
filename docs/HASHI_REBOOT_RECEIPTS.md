@@ -271,3 +271,20 @@ Implementation and focused offline checks are recorded in the HASHI1 source
 checkout and Workbench Connector checkout. No instance reboot, Remote restart,
 or live frontend acceptance was authorized for this correction; source, tests,
 and live adoption are separate facts.
+
+## HASHI1 release adoption warning — 2026-09-27
+
+The user observed that `/reboot max` and `/restart` both reported success while
+the changed Functions source had not been adopted. Source qualification requires
+the exact Function manifest to be committed in Git. When qualification fails,
+the last verified generation can restore availability, but process liveness
+must not be presented as adoption of the candidate code.
+
+PAO passes a bounded adoption result (`qualified` or `fallback`, with a reason
+code) from release qualification into the shared Function process. A broad
+reboot receipt records that result, and the Frontend Connector shows an explicit
+warning when a successful process replacement used the previous generation.
+The Backend API health result exposes the same status as a warning issue, so
+Remote's existing degraded-restart notification explicitly warns after a cold
+restart too. Recovery still completes and the previous generation remains
+usable. Neither notice claims that new source was adopted without evidence.

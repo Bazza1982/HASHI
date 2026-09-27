@@ -201,7 +201,6 @@ def test_resolver_preserves_direct_routes_and_applies_external_connector_prefere
         "telegram.command",
         "telegram.reply",
         "telegram.send",
-        "scheduler",
     )
     for source in sources:
         assert (
@@ -214,6 +213,14 @@ def test_resolver_preserves_direct_routes_and_applies_external_connector_prefere
         )
     assert (
         telegram_delivery_for_admission(
+            source="scheduler",
+            request_metadata={"owner_id": "owner-a"},
+            state_root=tmp_path,
+        )
+        is False
+    )
+    assert (
+        telegram_delivery_for_admission(
             source="hchat",
             request_metadata={"owner_id": "owner-a"},
             state_root=tmp_path,
@@ -222,7 +229,7 @@ def test_resolver_preserves_direct_routes_and_applies_external_connector_prefere
     )
 
 
-def test_resolver_tui_policy_still_authoritative(tmp_path):
+def test_resolver_tui_policy_cannot_override_central_preference(tmp_path):
     set_mirror(tmp_path, "owner-a", False)
     assert (
         telegram_delivery_for_admission(
@@ -233,7 +240,7 @@ def test_resolver_tui_policy_still_authoritative(tmp_path):
             },
             state_root=tmp_path,
         )
-        is True
+        is False
     )
     assert (
         telegram_delivery_for_admission(
@@ -246,6 +253,15 @@ def test_resolver_tui_policy_still_authoritative(tmp_path):
         )
         is False
     )
+    set_mirror(tmp_path, "owner-a", True)
+    assert telegram_delivery_for_admission(
+        source="tui",
+        request_metadata={
+            **_workbench_metadata(),
+            **tui_request_metadata(telegram_mirror=False, client_id="tui-a"),
+        },
+        state_root=tmp_path,
+    ) is True
 
 
 def test_resolver_missing_metadata_keeps_default(tmp_path):
@@ -261,7 +277,7 @@ def test_resolver_missing_metadata_keeps_default(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# api_chat /telegram command
+# Central connector mirror commands
 # --------------------------------------------------------------------------
 
 def _fake_runtime(tmp_path: Path, *, allowed: bool = True) -> SimpleNamespace:
@@ -362,7 +378,7 @@ def test_command_writes_audit_record(tmp_path, no_transport_dispatch):
     assert lines[-1]["source_channel"] == "api_chat"
 
 
-def test_command_ignored_for_other_channels(tmp_path, no_transport_dispatch):
+def test_command_updates_same_owner_from_other_channels(tmp_path, no_transport_dispatch):
     runtime = _fake_runtime(tmp_path)
     result = asyncio.run(
         alt.try_execute_slash_command_text(
@@ -372,4 +388,45 @@ def test_command_ignored_for_other_channels(tmp_path, no_transport_dispatch):
             session_metadata={"owner_id": "owner-a"},
         )
     )
-    assert result is None
+    assert result["ok"] is True
+    assert result["telegram_mirror"] is False
+    assert mirror_enabled(tmp_path, "owner-a") is False
+
+
+def test_whatsapp_switch_is_central_and_independent(tmp_path, no_transport_dispatch):
+    from orchestrator.connector_delivery_preferences import get_connector_preference
+
+    runtime = _fake_runtime(tmp_path)
+    changed = asyncio.run(alt.execute_local_command(
+        runtime, "/whatsapp on", source_channel="tui",
+        session_metadata={"owner_id": "owner-a"},
+    ))
+    assert changed["ok"] is True
+    assert get_connector_preference(tmp_path, "owner-a", "whatsapp", "mirror", default=False) is True
+    status = asyncio.run(alt.try_execute_slash_command_text(
+        runtime, "/whatsapp", source_channel="whatsapp_forwarded",
+        session_metadata={"owner_id": "owner-a"},
+    ))
+    assert status["whatsapp_mirror"] is True
+    assert _run_command(runtime, "/telegram")["telegram_mirror"] is True
+
+
+@pytest.mark.asyncio
+async def test_native_telegram_switch_uses_same_default_owner(tmp_path):
+    from orchestrator.commands.telegram import telegram_command, whatsapp_command
+    from orchestrator.connector_delivery_preferences import get_connector_preference
+
+    runtime = _fake_runtime(tmp_path)
+    runtime._is_authorized_user = lambda actor: actor == 12345
+    replies = []
+
+    async def reply(_update, text, **_kwargs):
+        replies.append(text)
+
+    runtime._reply_text = reply
+    update = SimpleNamespace(effective_user=SimpleNamespace(id=12345))
+    await telegram_command(runtime, update, SimpleNamespace(args=["off"]))
+    await whatsapp_command(runtime, update, SimpleNamespace(args=["on"]))
+    assert get_connector_preference(tmp_path, "user:12345", "telegram", "mirror", default=True) is False
+    assert get_connector_preference(tmp_path, "user:12345", "whatsapp", "mirror", default=False) is True
+    assert len(replies) == 2

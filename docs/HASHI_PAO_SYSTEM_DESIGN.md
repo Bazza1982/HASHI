@@ -245,19 +245,13 @@ may cache projections but must reconstruct them from PAO-owned state.
 
 PAO also owns the admission-time delivery decision for each Run. A Connector
 may request a projection policy only through a typed, versioned contract. The
-current TUI contract is `hashi.frontend-delivery` version 1, has `scope=run`, is
-bound to an ephemeral TUI client identity, and contains the boolean
-`telegram.mirror` projection choice. PAO validates and snapshots it before the
-Run enters the queue; changing frontend preferences later cannot mutate an
-in-flight Run. Missing, malformed, forged, legacy, or non-TUI suppression input
-fails visible.
-
-Turning off that projection does not create a new Conversation authority. The
-TUI continues to use the shared Conversation Session and PAO still commits its
-Message, Run, Events and terminal result. Only the Telegram delivery projector
-is skipped for that TUI-origin Run; Telegram-native input, Scheduler, HChat,
-other clients and other Runs retain their own admission decisions. PAO does not
-replay skipped projections when a later Run enables Telegram mirroring.
+The former TUI `hashi.frontend-delivery` version 1 per-Run value is read-only
+compatibility input. FC owns one mirror switch per owner and external platform.
+PAO validates legacy client input but freezes the central FC preference when
+it admits each Run. TUI remains in the shared Conversation Session, and
+changing a switch cannot redirect or replay an existing Run. Turning a mirror
+off affects every non-origin source for that owner, including scheduled work;
+conversations started on the platform retain their primary reply route.
 
 PAO projects live presentation facts through Agent metadata. Engine, model,
 effort and current switches come from the active runtime; HER v2 alone supplies

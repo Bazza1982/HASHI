@@ -1,10 +1,8 @@
-"""Typed per-Run delivery policy for HASHI Frontend Connectors.
+"""Typed per-Run delivery routes for HASHI Frontend Connectors.
 
-The legacy ``deliver_to_telegram`` boolean is deliberately not a public
-suppression switch.  A TUI may opt one newly submitted Run out of Telegram
-mirroring only by supplying this complete, typed policy together with its
-ephemeral client identity.  The policy is copied into request metadata at
-admission, so later preference changes cannot alter an in-flight Run.
+Mirror preferences belong to the server and are frozen at Run admission.
+Legacy client-supplied delivery policies remain readable but cannot override
+the owner's connector preferences.
 """
 from __future__ import annotations
 
@@ -128,6 +126,8 @@ def freeze_run_delivery_route(
     session_channel_key: str,
     chat_id: Any,
     telegram_requested: bool,
+    whatsapp_requested: bool = False,
+    whatsapp_channel_key: Any | None = None,
     primary_channel_key: Any | None = None,
     terminal_exchange: bool = False,
 ) -> dict[str, Any]:
@@ -186,16 +186,19 @@ def freeze_run_delivery_route(
 
     mirrors: list[dict[str, str]] = []
     primary_surface = primary["surface"] if primary is not None else ""
-    # WhatsApp owns its authenticated reply callback and must never inherit the
-    # legacy Telegram visibility default.  TUI, HChat and API-compatible
-    # clients preserve their established optional Telegram mirror.
     if (
         telegram_requested
         and primary_surface != "telegram"
-        and source_id != "whatsapp"
         and not terminal_exchange
     ):
         mirrors.append(_destination("telegram", telegram_channel))
+    if (
+        whatsapp_requested
+        and whatsapp_channel_key
+        and primary_surface != "whatsapp"
+        and not terminal_exchange
+    ):
+        mirrors.append(_destination("whatsapp", whatsapp_channel_key))
 
     return normalize_run_delivery_route(
         {
@@ -457,7 +460,7 @@ def tui_request_metadata(
     telegram_mirror: bool,
     client_id: str,
 ) -> dict[str, Any]:
-    """Return the server-owned metadata snapshot for one TUI submission."""
+    """Build legacy TUI metadata; its mirror target is non-authoritative."""
 
     normalized_client_id = _client_id(client_id)
     return {
@@ -472,23 +475,21 @@ def tui_request_metadata(
     }
 
 
-def _owner_telegram_mirror_for_admission(
+def owner_mirror_for_admission(
     *,
     request_metadata: Mapping[str, Any] | None,
     state_root: Any | None,
+    connector_id: str,
+    default: bool,
 ) -> bool:
-    """Resolve the server-authoritative owner mirror preference.
-
-    The preference applies to non-Telegram frontend connectors for the owner.
-    Read failures keep the historical visible default (mirror on).
-    """
+    """Resolve one owner-scoped mirror preference without trusting client policy."""
 
     if state_root is None:
-        return True
+        return default
     metadata = request_metadata if isinstance(request_metadata, Mapping) else {}
     owner_id = str(metadata.get("owner_id") or "").strip()
     if not owner_id:
-        return True
+        return default
     try:
         from orchestrator.connector_delivery_preferences import (
             get_connector_preference,
@@ -497,12 +498,12 @@ def _owner_telegram_mirror_for_admission(
         return get_connector_preference(
             state_root,
             owner_id,
-            "telegram",
+            connector_id,
             "mirror",
-            default=True,
+            default=default,
         )
     except Exception:
-        return True
+        return default
 
 
 def telegram_delivery_for_admission(
@@ -511,70 +512,39 @@ def telegram_delivery_for_admission(
     request_metadata: Mapping[str, Any] | None,
     state_root: Any | None = None,
 ) -> bool:
-    """Resolve the Telegram adapter target without honoring hidden-turn flags.
-
-    Replies stay on Telegram for Telegram-origin Runs, and internal sources
-    retain their explicit route. TUI may set a per-Run Telegram target; other
-    authenticated frontend connectors use the server-owned owner preference.
-    """
+    """Preserve Telegram primary replies; resolve mirrors from central state."""
 
     metadata = request_metadata if isinstance(request_metadata, Mapping) else {}
     from orchestrator.frontend_connector_registry import canonical_connector_id
 
-    frontend = metadata.get(FRONTEND_CLIENT_METADATA_KEY)
-    frontend_kind = (
-        str(frontend.get("kind") or "").strip().casefold()
-        if isinstance(frontend, Mapping)
-        else ""
+    connector_id = canonical_connector_id(
+        str(source or ""),
+        ingress_transport=str(metadata.get("ingress_transport") or ""),
+        surface=str(metadata.get("session_surface") or ""),
     )
-    # A TUI may use the established Backend API wire surface without becoming
-    # a Backend API Connector. Its server-bound client identity controls only
-    # this per-Run mirror choice and is validated again below.
-    connector_id = (
-        TUI_FRONTEND_KIND
-        if str(source or "").strip().casefold() == "tui"
-        and frontend_kind == TUI_FRONTEND_KIND
-        else canonical_connector_id(
-            str(source or ""),
-            ingress_transport=str(metadata.get("ingress_transport") or ""),
-            surface=str(metadata.get("session_surface") or ""),
-        )
-    )
-    if connector_id in {"telegram", "internal"}:
+    if connector_id == "telegram":
         return True
-    if connector_id not in {TUI_FRONTEND_KIND, "session_api"}:
-        return _owner_telegram_mirror_for_admission(
-            request_metadata=request_metadata,
-            state_root=state_root,
-        )
-    if not isinstance(frontend, Mapping):
-        return _owner_telegram_mirror_for_admission(
-            request_metadata=request_metadata,
-            state_root=state_root,
-        )
-    if frontend_kind != connector_id:
-        return _owner_telegram_mirror_for_admission(
-            request_metadata=request_metadata,
-            state_root=state_root,
-        )
-    try:
-        client_id = _client_id(frontend.get("client_id"))
-        policy = normalize_frontend_run_delivery_policy(
-            metadata.get(FRONTEND_DELIVERY_METADATA_KEY),
-            connector_id=connector_id,
-            client_id=client_id,
-        )
-    except ValueError:
-        return True
-    mirror = next(
-        (
-            item["enabled"]
-            for item in policy["targets"]
-            if item["connector_id"] == "telegram" and item["role"] == "mirror"
-        ),
-        True,
+    return owner_mirror_for_admission(
+        request_metadata=metadata,
+        state_root=state_root,
+        connector_id="telegram",
+        default=True,
     )
-    return bool(mirror)
+
+
+def configured_whatsapp_mirror_channel(global_config: Any) -> str | None:
+    """Use only one explicitly allowed personal recipient for automatic mirrors."""
+
+    config = getattr(global_config, "whatsapp", None)
+    if not isinstance(config, Mapping):
+        return None
+    numbers = config.get("allowed_numbers")
+    if not isinstance(numbers, (list, tuple)) or len(numbers) != 1:
+        return None
+    digits = str(numbers[0]).strip().removeprefix("+")
+    if not digits.isdigit() or not 7 <= len(digits) <= 15:
+        return None
+    return f"{digits}@s.whatsapp.net"
 
 
 __all__ = [
@@ -587,10 +557,12 @@ __all__ = [
     "RUN_DELIVERY_ROUTE_VERSION",
     "freeze_run_delivery_route",
     "delivery_intent_from_run_route",
+    "configured_whatsapp_mirror_channel",
     "frontend_run_delivery_policy",
     "normalize_frontend_run_delivery_policy",
     "normalize_tui_run_delivery_policy",
     "normalize_run_delivery_route",
+    "owner_mirror_for_admission",
     "project_run_delivery_route",
     "route_destination",
     "telegram_delivery_for_admission",

@@ -162,8 +162,9 @@ Current implementation boundary:
   available semantic profiles are discovered from the Agent voice owner and
   profile changes use that existing revision-safe state rather than a second
   TUI voice configuration;
-- language, layout, sounds, auto-read, the TUI typing indicator, and the default Telegram
-  mirror choice are local persisted Connector preferences;
+- language, layout, sounds, auto-read, and the TUI typing indicator are local
+  persisted Connector preferences. External platform mirrors use the FC owner
+  setting shared by every ingress;
 - the side panel is closed by default. `/sidepanel` opens the TUI's persisted,
   read-only information panel;
   `/sidepanel off` closes it and `/sidepanel refresh` refreshes it. The panel
@@ -208,12 +209,17 @@ recognize `workbench_telegram_state.json` without rewriting it, and the first
 successful write migrates the value under revision checking. A damaged or
 conflicting document is not overwritten.
 
-An owner's Telegram mirror preference applies to future Runs admitted from
-other frontend connectors. It never suppresses a Telegram-origin reply,
-internal event route, or the connector's primary endpoint. TUI may still choose
-a per-Run Telegram mirror target through its client-bound compatibility
-setting; that choice cannot redirect the primary response or affect another
-TUI window. Changes do not replay already completed Runs.
+The Frontend Connector owns one persistent mirror switch per owner and external
+destination. `/telegram on|off` and `/whatsapp on|off` update those switches
+from any authenticated frontend, including Telegram and WhatsApp themselves.
+TUI and Backend API submit no separate mirror choice; old client-bound delivery
+policies remain readable but cannot override the central switch. A switch
+applies to future Runs regardless of their ingress. Turning a mirror off never
+suppresses a reply to a conversation initiated on that destination, nor does it
+disable the destination's transport. A Run's destinations are frozen at
+admission, so switching later does not replay or redirect it. Automatic
+WhatsApp mirrors require exactly one configured allowed personal number; the
+transport's ordinary replies still use their original chat endpoint.
 
 TUI queue/typing state is an ephemeral Connector projection fenced by instance
 generation, Agent, Session, Run and request identity. Durable Run status and
@@ -504,7 +510,7 @@ not success. Unavailable models and failed streams remain errors. Probe, save,
 reload request and actual chat readiness are separate facts.
 
 Only Hashiko's connection fields and scoped credential references are merged.
-Existing Agents, identities, history, optional integrations and TUI mirroring
+Existing Agents, identities, history, optional integrations and FC mirror preferences
 are retained. A connection revision is consumed once by the backend state
 owner to supersede old overrides. New Hashiko uses workspace access and the
 PAO-owned open HASHI Tool default; the disposable connection probe remains
@@ -514,7 +520,7 @@ whole-instance restart, and does not report ready.
 
 Optional Telegram setup uses a separate masked Bot Token and positive numeric
 user ID, verifies getMe, refuses conflicting existing ownership, and saves no
-open-to-everyone fallback. It does not send a test message or change TUI mirror
+open-to-everyone fallback. It does not send a test message or change FC mirror
 preferences. Real Telegram round trips require their own authorized evidence.
 
 Fresh TUI startup focuses the chat input, so typing starts work immediately.
