@@ -301,6 +301,7 @@ def test_frontend_event_envelope_validates_durable_and_ephemeral_lanes():
             "type": "hashi.frontend-event",
             "version": 2,
             "event_id": "evt-10",
+            "message_id": "msg-10",
             "session_id": "ses-1",
             "sequence": 5,
             "run_id": "run-1",
@@ -318,6 +319,7 @@ def test_frontend_event_envelope_validates_durable_and_ephemeral_lanes():
         }
     )
     assert durable["durability"] == "durable"
+    assert durable["message_id"] == "msg-10"
     assert durable["sequence"] == 5
     assert len(durable["content_blocks"]) == 2
 

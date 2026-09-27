@@ -796,6 +796,9 @@ def normalize_frontend_event(value: Any) -> dict[str, Any]:
         "type": FRONTEND_EVENT_TYPE,
         "version": FRONTEND_EVENT_VERSION,
         "event_id": event_id,
+        "message_id": _token(raw.get("message_id"), "message_id")
+        if raw.get("message_id")
+        else None,
         "session_id": session_id,
         "sequence": sequence,
         "run_id": _token(raw.get("run_id"), "run_id") if raw.get("run_id") else None,

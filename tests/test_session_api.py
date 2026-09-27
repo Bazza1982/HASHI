@@ -395,6 +395,13 @@ async def test_personal_instance_enables_standard_frontend_attachments_by_defaul
     assert capabilities["frontend_connector"]["multi_attachment"] is True
     assert capabilities["frontend_connector"]["atomic_run_admission"] is True
     assert capabilities["frontend_connector"]["attachment_stage_idempotency"] is True
+    assert capabilities["frontend_connector"]["feed"] == {
+        "version": "2.0",
+        "transport": "cursor-polling",
+        "durable": True,
+        "ephemeral": True,
+        "answer_preview": True,
+    }
     assert capabilities["frontend_contract_versions"] == {
         "ingress": 2,
         "delivery_intent": 2,
@@ -1557,6 +1564,9 @@ async def test_frontend_feed_projects_final_message_and_accepts_exact_endpoint(t
         and event["semantic_kind"] == "final"
     )
     assert terminal["semantic_kind"] == "final"
+    assert terminal["message_id"] == finished["final_message_id"]
+    assert terminal["request_id"] == accepted.request_id
+    assert terminal["run_id"] == accepted.run_id
     assert terminal["content_blocks"][0]["text"] == "canonical final answer"
     assert payload["ephemeral_epoch"] == 17
     assert [
@@ -1566,6 +1576,14 @@ async def test_frontend_feed_projects_final_message_and_accepts_exact_endpoint(t
     assert [
         event["semantic_kind"] for event in payload["ephemeral_events"]
     ] == ["commentary", "answer_preview"]
+    assert all(
+        event["request_id"] == accepted.request_id
+        and event["run_id"] == accepted.run_id
+        for event in payload["ephemeral_events"]
+    )
+    answer_preview = payload["ephemeral_events"][1]
+    assert answer_preview["presentation_channel"] == "answer"
+    assert answer_preview["content_blocks"][0]["format"] == "markdown"
     assert payload["ephemeral_watermark"] == 5
     assert terminal["event_id"] in payload["accepted_event_ids"]
     receipts = server.session_store.frontend_delivery_receipts(

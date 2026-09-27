@@ -444,6 +444,26 @@ returned as the canonical command response and durable
 draft conflicts may still block the local control until their own outcome is
 known; an unrelated active Agent Run may not.
 
+### 8.3 Backend API answer preview feed (2026-09-27)
+
+Provider text deltas remain internal. HER v2 may classify a safe visible delta
+as `answer_preview`; FC then projects it as a typed, ephemeral `answer` event on
+the v2 Session feed. Each projected event carries the canonical Session, Run,
+and request identities. The durable terminal Event additionally carries the
+canonical Message identity and is the only authoritative final answer.
+
+Pull clients consume both lanes through
+`/api/v2/frontend/sessions/{session_id}/feed` using independent durable and
+ephemeral cursors. They may render a preview progressively, but must discard it
+after an incomplete replay or gap and wait for the durable final. The final
+replaces the preview rather than creating a second answer. Raw provider deltas
+and the legacy request-activity endpoint are not alternate answer outputs.
+
+This capability is additive to the Backend API Connector. It does not change
+Telegram presentation or delivery. Source and focused offline validation are
+recorded separately from running-Function adoption; this change did not restart
+or replace a running HASHI generation.
+
 ## 9. Engineering-layer placement
 
 Connector business behaviour belongs in the Functions layer. Stable process

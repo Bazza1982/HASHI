@@ -105,6 +105,7 @@ def project_frontend_event(
     raw: Mapping[str, Any],
     *,
     message_map: Mapping[str, Any] | None = None,
+    request_id: str | None = None,
 ) -> dict[str, Any]:
     """Convert an internal SessionStore event row or dict into a standard FrontendEvent."""
     event_id = str(raw.get("event_id") or "")
@@ -308,10 +309,11 @@ def project_frontend_event(
             "type": FRONTEND_EVENT_TYPE,
             "version": FRONTEND_EVENT_VERSION,
             "event_id": event_id,
+            "message_id": str(detail.get("message_id") or "") or None,
             "session_id": session_id,
             "sequence": sequence,
             "run_id": run_id,
-            "request_id": str(detail.get("request_id") or "") or None,
+            "request_id": str(detail.get("request_id") or request_id or "") or None,
             "durability": "durable",
             "epoch": None,
             "ephemeral_sequence": None,
@@ -335,6 +337,8 @@ def project_ephemeral_event(
     raw_activity: Mapping[str, Any],
     *,
     epoch: int = 1,
+    request_id: str | None = None,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
     """Convert a volatile RequestActivity item into an ephemeral FrontendEvent."""
     seq = int(raw_activity.get("sequence", 0))
@@ -374,10 +378,13 @@ def project_ephemeral_event(
             "type": FRONTEND_EVENT_TYPE,
             "version": FRONTEND_EVENT_VERSION,
             "event_id": f"eph:{epoch}:{seq}",
+            "message_id": None,
             "session_id": session_id,
             "sequence": None,
-            "run_id": str(raw_activity.get("run_id") or "") or None,
-            "request_id": str(raw_activity.get("request_id") or "") or None,
+            "run_id": str(raw_activity.get("run_id") or run_id or "") or None,
+            "request_id": str(
+                raw_activity.get("request_id") or request_id or ""
+            ) or None,
             "durability": "ephemeral",
             "epoch": epoch,
             "ephemeral_sequence": seq,
@@ -385,7 +392,13 @@ def project_ephemeral_event(
             "visibility": "ephemeral_preview",
             "semantic_kind": semantic_kind,
             "presentation_channel": presentation_channel,
-            "content_blocks": [{"type": "text", "text": text, "format": "plain"}],
+            "content_blocks": [{
+                "type": "text",
+                "text": text,
+                "format": (
+                    "markdown" if presentation_channel == "answer" else "plain"
+                ),
+            }],
             "delivery_intent_ref": None,
             "replaces_event_id": str(raw_activity.get("replaces_id") or "") or None,
             "superseded_by": None,
@@ -401,6 +414,8 @@ def project_ephemeral_feed(
     *,
     after_ephemeral_sequence: int = 0,
     epoch_reset: bool = False,
+    request_id: str | None = None,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
     """Project only visibility-checked RequestActivity events for one feed.
 
@@ -427,7 +442,13 @@ def project_ephemeral_feed(
             continue
         if channel == "answer" and not bool(raw.get("answer_ephemeral")):
             continue
-        event = project_ephemeral_event(session_id, raw, epoch=epoch)
+        event = project_ephemeral_event(
+            session_id,
+            raw,
+            epoch=epoch,
+            request_id=request_id,
+            run_id=run_id,
+        )
         if not event["content_blocks"][0].get("text"):
             continue
         projected.append(event)
@@ -518,6 +539,7 @@ def poll_frontend_feed(
         run_id=run_id,
     )
     msgs: dict[str, Any] = {}
+    request_ids: dict[str, str] = {}
     for raw_event in raw_events:
         detail = raw_event.get("detail")
         if not isinstance(detail, Mapping):
@@ -533,7 +555,25 @@ def poll_frontend_feed(
             )
         except Exception:
             continue
-    projected = [project_frontend_event(e, message_map=msgs) for e in raw_events]
+    for raw_event in raw_events:
+        raw_run_id = str(raw_event.get("run_id") or "").strip()
+        if not raw_run_id or raw_run_id in request_ids:
+            continue
+        try:
+            run = store.get_run(raw_run_id, owner_id=owner_id)
+            resolved_request_id = str(run.get("request_id") or "").strip()
+            if resolved_request_id:
+                request_ids[raw_run_id] = resolved_request_id
+        except Exception:
+            continue
+    projected = [
+        project_frontend_event(
+            event,
+            message_map=msgs,
+            request_id=request_ids.get(str(event.get("run_id") or "")),
+        )
+        for event in raw_events
+    ]
     watermark = (
         max(e["sequence"] for e in projected)
         if projected

@@ -5461,6 +5461,13 @@ class WorkbenchApiServer:
                         "attachment_upload_transport": (
                             "direct-multipart-or-octet-stream"
                         ),
+                        "feed": {
+                            "version": "2.0",
+                            "transport": "cursor-polling",
+                            "durable": True,
+                            "ephemeral": True,
+                            "answer_preview": True,
+                        },
                     },
                 }
             )
@@ -6729,6 +6736,8 @@ class WorkbenchApiServer:
                             activity,
                             after_ephemeral_sequence=(0 if epoch_reset else after_ephemeral),
                             epoch_reset=epoch_reset,
+                            request_id=request_id,
+                            run_id=str(run["run_id"]),
                         ),
                         "ephemeral_available": True,
                     }
