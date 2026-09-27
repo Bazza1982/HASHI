@@ -214,6 +214,13 @@ model history. Durable command reservation returns saved completions, never
 replays pending/unknown, and does not overstate `not_observed` as delivery;
 non-Telegram callbacks keep their own Connector fence.
 
+An active Run does not close FC command ingress. Frontends must still submit a
+typed slash command while the Agent is generating; the owning command decides
+whether it applies immediately or rejects the busy state. Do not turn commands
+into ordinary queued chat Runs, and do not duplicate a frontend-side safe-command
+list. Local submission, cancellation, attachment, or draft conflicts remain
+valid UI blockers.
+
 `/new [title]` selects a fresh primary Session without deleting owner/Agent
 history; it preserves Agent Workzones and the independently persisted recent-
 turn/saved-memory switches. A successful Session boundary discards unfinished

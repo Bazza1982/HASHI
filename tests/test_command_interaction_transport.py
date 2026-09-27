@@ -101,7 +101,7 @@ async def test_unchanged_shared_command_path_routes_to_rebooted_worker(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_worker_derives_canonical_session_for_mutating_menu_operation(monkeypatch):
+async def test_busy_worker_accepts_fc_command_with_canonical_session(monkeypatch):
     observed = []
 
     async def dispatch(runtime, payload, metadata):
@@ -121,11 +121,15 @@ async def test_worker_derives_canonical_session_for_mutating_menu_operation(monk
     )
     monkeypatch.setattr("orchestrator.runtime_session.owner_id", lambda runtime: "canonical-owner")
 
+    runtime = _runtime()
+    runtime.is_generating = True
+
     result = await try_execute_slash_command_text(
-        _runtime(), _wire("open", command="/model"), source_channel="workbench_api"
+        runtime, _wire("open", command="/model"), source_channel="workbench_api"
     )
 
     assert result["ok"] is True
+    assert runtime.is_generating is True
     assert observed[0]["owner_id"] == "canonical-owner"
     assert observed[0]["session_id"] == "canonical-session"
     assert observed[0]["context_generation"] == 4

@@ -429,6 +429,21 @@ presentations after the final Message through the same Session Event boundary.
 Telegram mirroring is a destination choice, not a prerequisite for creating
 those canonical display events.
 
+### 8.2 Commands during an active Run
+
+An active Agent Run does not close FC command ingress. A conforming frontend
+must not suppress the command catalogue or a typed command invocation solely
+because the Agent is generating. It submits the command through the same FC
+adapter and lets the owning command decide whether it can apply immediately,
+must reject while busy, or requires a separate lifecycle operation.
+
+Commands never become ordinary chat Messages or queued Runs as a workaround.
+The typed invocation keeps its Session and generation fence, and its result is
+returned as the canonical command response and durable
+`frontend.command_result` Event. Connector-local submission, cancellation, and
+draft conflicts may still block the local control until their own outcome is
+known; an unrelated active Agent Run may not.
+
 ## 9. Engineering-layer placement
 
 Connector business behaviour belongs in the Functions layer. Stable process
