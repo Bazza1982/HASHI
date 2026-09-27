@@ -100,11 +100,19 @@ this way; an undeclared model retains its previous Provider behavior.
 
 Only the Llama 3.1 Euryale model currently advertises tool parameters. The
 other four are suitable for conversations that do not require model tool calls.
+OpenRouter returned HTTP 404 for those four when HASHI attached its tool
+catalogue; the provider's routing error specifically reported no endpoint
+supporting tool use. Every HASHI1 Agent's OpenRouter `allowed_backends` row now
+sets `model_tool_support` to `false` for those four and `true` for Llama 3.1
+Euryale. HER's Direct request omits tool definitions and side-effect authority
+for a chat-only model, and tells the model to disclose that limit for tasks
+requiring tools. A tool-required non-Direct stage rejects that model explicitly.
 MythoMax advertises an 8,192-token model context, while its current top
 OpenRouter endpoint reports 4,096; request planning should use the effective
-endpoint limit. The source change and ignored instance configuration were
-verified offline. Running Worker adoption and live Provider use require
-separate verification after an authorized Function replacement.
+endpoint limit. A focused test failed before the tool-capability correction and
+passed afterward. Source and ignored instance configuration were checked
+offline; running Worker adoption and live Provider use require separate
+verification after an authorized Function replacement.
 
 ## Strategy Cards
 

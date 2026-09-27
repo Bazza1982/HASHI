@@ -170,6 +170,10 @@ Provider request; models without that explicit declaration keep existing
 behavior. Only Llama 3.1 Euryale currently advertises tool calls. Source and
 configuration checks are offline evidence until a separately authorized
 Function replacement and live check establish running adoption.
+OpenRouter returned 404 when the other four were sent tool definitions.
+Their `allowed_backends.model_tool_support` entries now mark them chat-only;
+HER omits tools for Direct conversations and discloses the limit when a task
+needs actions. A tool-required internal stage rejects them explicitly.
 
 Use current metadata for context, price, effort, and modality. Media needs
 model, Adapter, and policy support; unknown is not unsupported or zero cost.

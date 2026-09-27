@@ -3263,6 +3263,25 @@ class HashiStageProvider(StageProvider):
         # HER effort label.  Adapters may consume either the explicit option or
         # their established provider-specific compatibility field.
         backend_extra = dict(getattr(backend.config, "extra", None) or {})
+        model_tool_support = backend_extra.get("model_tool_support")
+        if (
+            isinstance(model_tool_support, Mapping)
+            and model_tool_support.get(profile.model) is False
+            and request.allow_tools
+        ):
+            if request.stage not in {Stage.DIRECT, Stage.IMMEDIATE_RESPONSE}:
+                self._untrack_active_backend(backend)
+                await backend.shutdown()
+                raise StageInvocationError(
+                    f"model {profile.model!r} cannot satisfy the stage tool contract",
+                    retryable=False,
+                    code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+                    human_description=(
+                        "The selected model is configured for conversation only; "
+                        "choose a tool-capable model for this stage."
+                    ),
+                )
+            request = replace(request, allow_tools=False, allow_side_effects=False)
         if profile.reasoning is not None:
             backend_extra["provider_reasoning"] = profile.reasoning
             backend_extra["reasoning_effort"] = profile.reasoning
@@ -4067,6 +4086,7 @@ class HashiStageProvider(StageProvider):
                                 fallback_request=request.goal,
                                 context=request.context,
                                 fallback_persona=(source.guidance if source.usable else ""),
+                                tools_available=request.allow_tools,
                             )
                         else:
                             system_prompt = _direct_system_prompt(

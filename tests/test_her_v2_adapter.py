@@ -2165,15 +2165,18 @@ class _FakeBackend:
 
 
 class _FakeManager:
-    def __init__(self, system_md=None):
+    def __init__(self, system_md=None, model_tool_support=None):
         self.backends = []
         self.privacy_level = 1
         self.system_md = system_md
+        self.model_tool_support = model_tool_support
 
     def create_ephemeral_backend(self, engine, target_model=None):
         assert engine == "openrouter-api"
         assert target_model == "configured/model"
         backend = _FakeBackend(self.system_md)
+        if self.model_tool_support is not None:
+            backend.config.extra["model_tool_support"] = self.model_tool_support
         self.backends.append(backend)
         return backend
 
@@ -3193,7 +3196,7 @@ async def test_hashi_stage_provider_records_exact_completed_tool_evidence_receip
 
 @pytest.mark.asyncio
 async def test_hashi_stage_provider_installs_full_direct_contract_and_tools():
-    manager = _FakeManager()
+    manager = _FakeManager(model_tool_support={"configured/model": True})
     registry = _BaseToolRegistry()
     events = []
 
@@ -3261,6 +3264,54 @@ async def test_hashi_stage_provider_installs_full_direct_contract_and_tools():
     assert backend.reasoning_enabled is True
     assert [event.kind for event in events] == [KIND_THINKING, KIND_TOOL_START]
     assert all(event.kind != KIND_COMMENTARY for event in events)
+
+
+@pytest.mark.asyncio
+async def test_her_v3_chat_only_model_omits_tools_from_provider():
+    manager = _FakeManager(model_tool_support={"configured/model": False})
+    provider = HashiStageProvider(
+        backend_manager=manager,
+        tool_registry=_BaseToolRegistry(),
+    )
+    base = _stage_request(
+        Stage.DIRECT,
+        allow_tools=True,
+        allow_side_effects=True,
+    )
+    request = StageRequest(
+        **{
+            **base.__dict__,
+            "context": {"her_v3": True, "pcm_input": {"current_request": "Hello"}},
+        }
+    )
+
+    await provider.invoke(
+        ProviderProfile("main", "openrouter-api", "configured/model"),
+        request,
+    )
+
+    backend = manager.backends[-1]
+    assert backend.tool_registry is None
+    assert provider.tool_call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_chat_only_model_rejects_stage_that_requires_tools():
+    manager = _FakeManager(model_tool_support={"configured/model": False})
+    provider = HashiStageProvider(
+        backend_manager=manager,
+        tool_registry=_BaseToolRegistry(),
+    )
+
+    with pytest.raises(
+        StageInvocationError, match="cannot satisfy the stage tool contract"
+    ):
+        await provider.invoke(
+            ProviderProfile("execution", "openrouter-api", "configured/model"),
+            _stage_request(Stage.EXECUTION, allow_tools=True),
+        )
+
+    assert manager.backends[-1].shutdown_called is True
 
 
 @pytest.mark.asyncio
