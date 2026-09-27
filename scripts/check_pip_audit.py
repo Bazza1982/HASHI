@@ -6,12 +6,14 @@ Purpose:
   - Keep daily patrol output deterministic.
   - Distinguish "no vulnerabilities found" from "audit timed out/failed".
   - Prefer requirement-file audit when available, fall back to environment audit.
+  - Fall back to `python -m pip_audit` when the `pip-audit` executable is not on PATH.
 """
 
 from __future__ import annotations
 
 import argparse
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -63,6 +65,24 @@ def main() -> int:
             "off",
         ]
     )
+    # Fallbacks via the interpreter that runs this script, so the audit still
+    # works when the `pip-audit` executable is not on PATH (module install).
+    if req is not None:
+        commands.append(
+            [
+                sys.executable,
+                "-m",
+                "pip_audit",
+                "-r",
+                str(req),
+                "--desc",
+                "--progress-spinner",
+                "off",
+            ]
+        )
+    commands.append(
+        [sys.executable, "-m", "pip_audit", "--desc", "--progress-spinner", "off"]
+    )
 
     saw_timeout = False
     failures: list[str] = []
@@ -73,6 +93,9 @@ def main() -> int:
         except subprocess.TimeoutExpired:
             saw_timeout = True
             failures.append(f"timed out: {' '.join(cmd)}")
+            continue
+        except (FileNotFoundError, OSError) as exc:
+            failures.append(f"not available: {' '.join(cmd)} ({exc})")
             continue
 
         combined = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
