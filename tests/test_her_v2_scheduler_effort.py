@@ -15,10 +15,15 @@ from orchestrator.her_v2.request_policy import (
 )
 
 
-@pytest.mark.parametrize("kind", ["cron", "heartbeat"])
-@pytest.mark.parametrize("trigger", ["scheduled", "manual", "recovery"])
-@pytest.mark.parametrize("configured", list(Effort))
-def test_scheduled_job_is_forced_to_direct_execution_effort(
+@pytest.mark.parametrize(
+    ("kind", "trigger", "configured"),
+    [
+        ("cron", "scheduled", Effort.ZERO),
+        ("cron", "manual", Effort.HIGH),
+        ("heartbeat", "recovery", Effort.MAX),
+    ],
+)
+def test_scheduled_job_preserves_selected_model_reasoning(
     kind,
     trigger,
     configured,
@@ -35,14 +40,14 @@ def test_scheduled_job_is_forced_to_direct_execution_effort(
     )
 
     assert resolution.configured is configured
-    assert resolution.effective is Effort.ZERO
-    assert resolution.reason == "scheduled_direct_policy"
+    assert resolution.effective is configured
+    assert resolution.reason == "model_reasoning_effort"
     assert resolution.scheduler_kind == kind
     assert resolution.scheduler_trigger == trigger
 
 
-@pytest.mark.parametrize("legacy_effort", [item.value for item in Effort] + ["turbo"])
-def test_legacy_job_override_cannot_bypass_direct_policy(legacy_effort):
+@pytest.mark.parametrize("legacy_effort", ["zero", "turbo"])
+def test_legacy_job_override_cannot_replace_selected_model_reasoning(legacy_effort):
     job = {"id": "nightly", "her_v2_effort": legacy_effort}
     context = build_scheduler_request_context(
         job,
@@ -55,7 +60,7 @@ def test_legacy_job_override_cannot_bypass_direct_policy(legacy_effort):
         "trigger": "manual",
     }
 
-    # Metadata from a pre-policy scheduler must also be harmless.
+    # Metadata from a retired scheduler policy must also be harmless.
     context["her_v2_effort_override"] = legacy_effort
 
     resolution = resolve_request_effort(
@@ -64,13 +69,13 @@ def test_legacy_job_override_cannot_bypass_direct_policy(legacy_effort):
     )
 
     assert resolution.configured is Effort.MAX
-    assert resolution.effective is Effort.ZERO
-    assert resolution.reason == "scheduled_direct_policy"
+    assert resolution.effective is Effort.MAX
+    assert resolution.reason == "model_reasoning_effort"
     assert "job_override" not in resolution.metadata()
     assert job == {"id": "nightly", "her_v2_effort": legacy_effort}
 
 
-def test_recovery_keeps_job_identity_but_forces_direct():
+def test_recovery_keeps_job_identity_and_selected_model_reasoning():
     context = build_scheduler_request_context(
         {"id": "replay", "her_v2_effort": "high"},
         kind="heartbeat",
@@ -82,7 +87,7 @@ def test_recovery_keeps_job_identity_but_forces_direct():
         {"scheduler_context": context},
     )
 
-    assert resolution.effective is Effort.ZERO
+    assert resolution.effective is Effort.MEDIUM
     assert resolution.scheduler_task_id == "replay"
     assert resolution.scheduler_trigger == "recovery"
 
@@ -94,24 +99,26 @@ def test_scheduler_source_without_explicit_job_context_keeps_agent_effort():
     )
 
     assert resolution.effective is Effort.XHIGH
-    assert resolution.reason == "agent_default"
+    assert resolution.reason == "model_reasoning_effort"
 
 
-@pytest.mark.parametrize("source", ["bridge:hchat", "bridge:hchat-draft"])
-@pytest.mark.parametrize("configured", list(Effort))
-def test_hchat_request_is_forced_to_direct_without_mutating_agent_effort(
+@pytest.mark.parametrize(
+    ("source", "configured"),
+    [("bridge:hchat", Effort.ZERO), ("bridge:hchat-draft", Effort.MAX)],
+)
+def test_hchat_request_preserves_selected_model_reasoning(
     source,
     configured,
 ):
     resolution = resolve_request_effort(configured, {"source": source})
 
     assert resolution.configured is configured
-    assert resolution.effective is Effort.ZERO
-    assert resolution.reason == "hchat_direct_policy"
+    assert resolution.effective is configured
+    assert resolution.reason == "model_reasoning_effort"
     assert resolution.metadata() == {
         "configured": configured.value,
-        "effective": "zero",
-        "reason": "hchat_direct_policy",
+        "effective": configured.value,
+        "reason": "model_reasoning_effort",
     }
 
 
@@ -122,7 +129,7 @@ def test_hchat_reply_is_not_mistaken_for_an_outbound_hchat_command():
     )
 
     assert resolution.effective is Effort.MEDIUM
-    assert resolution.reason == "agent_default"
+    assert resolution.reason == "model_reasoning_effort"
 
 
 @pytest.mark.parametrize(
@@ -142,14 +149,27 @@ def test_incomplete_or_non_job_context_cannot_change_agent_effort(
     )
 
     assert resolution.effective is Effort.MAX
-    assert resolution.reason == "agent_default"
+    assert resolution.reason == "model_reasoning_effort"
 
 
 def test_ordinary_and_delayed_requests_keep_agent_effort():
     for source in ("text", "bridge:api", "delay"):
         resolution = resolve_request_effort(Effort.HIGH, {"source": source})
         assert resolution.effective is Effort.HIGH
-        assert resolution.reason == "agent_default"
+        assert resolution.reason == "model_reasoning_effort"
+
+
+@pytest.mark.parametrize("source", ["text", "bridge:hchat", "scheduler"])
+def test_binary_provider_reasoning_stays_enabled_for_every_source(source):
+    resolution = resolve_request_effort("enabled", {"source": source})
+
+    assert resolution.effective is Effort.HIGH
+    assert resolution.model_reasoning == "enabled"
+    assert resolution.metadata() == {
+        "configured": "enabled",
+        "effective": "enabled",
+        "reason": "model_reasoning_effort",
+    }
 
 
 def test_retired_job_override_is_ignored_without_blocking_dispatch():
@@ -164,17 +184,17 @@ def test_retired_job_override_is_ignored_without_blocking_dispatch():
     }
 
 
-def test_job_policy_reports_fixed_direct_policy_for_user_surfaces():
+def test_job_policy_reports_inherited_model_reasoning_for_user_surfaces():
     assert job_effort_policy({"id": "default"}) == {
-        "effective": "zero",
-        "source": "scheduled_direct_policy",
+        "effective": "inherit",
+        "source": "herv3_model_reasoning",
         "applies_to": "her-v2",
     }
     assert job_effort_policy(
         {"id": "override", "her_v2_effort": "medium"}
     ) == {
-        "effective": "zero",
-        "source": "scheduled_direct_policy",
+        "effective": "inherit",
+        "source": "herv3_model_reasoning",
         "applies_to": "her-v2",
     }
 

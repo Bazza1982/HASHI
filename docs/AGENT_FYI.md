@@ -51,13 +51,17 @@ Codex CLI 0.156.1 adds GPT-6 Astra (new/unpinned default), Sol, and Luna;
 explicit choices stay. Astra/Sol reach `ultra`, Luna `max`; normalize effort.
 
 HASHI1 HER v3 defaults to `deepseek-api/deepseek-flash` for every configured
-Agent and limits v3 Provider choices to DeepSeek. Legacy HER v2 profiles do not
-select the v3 main model. On load, an effort unsupported by the selected v3
-Provider/model is repaired to a compatible configured effort. Backend failure
-details are stored on the Run failure Event and exposed only through an
+Agent; Agent-specific opt-ins may add other Provider/model choices. Legacy HER
+v2 profiles do not select the v3 main model. On load, an effort unsupported by
+the selected v3 Provider/model is repaired to a compatible configured effort.
+Backend failure details are stored on the Run failure Event and exposed through an
 owner-scoped request activity read so external clients can show an expandable
 error without parsing diagnostic logs. The 2026-09-27 correction has offline
 qualification; live Worker adoption is a separate operational step.
+
+HER v3 Provider/model reasoning may be binary (`off`/`enabled`). Preserve
+`enabled` through persisted configuration, request execution, and Run metadata;
+the retained internal HER Effort enum cannot reject a valid Provider setting.
 
 Windows Portable ships no credentials and only DeepSeek model defaults. Users
 supply all others; validation fails closed.
@@ -138,6 +142,8 @@ Commands bind Session/client/request/invocation; only saved non-action results
 replay, and conflict/pending/unknown never runs. Callbacks keep requested locale;
 Telegram keeps its destination; meter/HER follow standard finals. Register
 local exceptions; never add frontend policy to runtime.
+Command-created continuations preserve the originating Session and Connector
+surface. Mark `/load` complete only after its continuation is queued.
 
 ## Engines, tools, and recovery
 

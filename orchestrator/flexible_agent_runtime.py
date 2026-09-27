@@ -7655,7 +7655,6 @@ class FlexibleAgentRuntime:
             )
             return
 
-        self.parked_topics.mark_loaded(slot_id)
         title = topic.get("title") or ui_language.tr(
             "park.topic_default", slot=slot_id
         )
@@ -7663,6 +7662,16 @@ class FlexibleAgentRuntime:
         summary_long = topic.get("summary_long") or ""
         recent_context = topic.get("recent_context") or ""
         last_exchange = topic.get("last_exchange_text") or ""
+        prior_recall = (
+            getattr(self, "_pending_auto_recall_context", None),
+            getattr(self, "_pending_auto_recall_session_id", None),
+        )
+        prior_primer = (
+            getattr(self, "_pending_session_primer", None),
+            getattr(self, "_pending_session_primer_session_id", None),
+        )
+        active_session = runtime_session.current_session_for_update(self, update)
+        active_session_id = active_session["session_id"]
         self._pending_auto_recall_context = (
             "Restore the parked topic below as active continuity context. "
             "Use it as current working context for this session.\n\n"
@@ -7673,28 +7682,52 @@ class FlexibleAgentRuntime:
             f"Last Exchange:\n{last_exchange or '(none)'}\n\n"
             f"{recent_context}"
         )
-        active_session_id = runtime_session.current_session_for_update(
-            self, update
-        )["session_id"]
         self._pending_auto_recall_session_id = active_session_id
-        self._arm_session_primer(
-            f"Loading parked topic [{slot_id}] {title}. Resume it as the active working context.",
-            session_id=active_session_id,
+        chat_id = update.effective_chat.id
+        surface = str(getattr(update, "_hashi_session_surface", None) or "telegram")
+        channel_key = str(
+            getattr(update, "_hashi_session_channel_key", None)
+            or (chat_id if surface in {"telegram", "whatsapp"} else "default")
         )
+        request_id = None
+        try:
+            self._arm_session_primer(
+                f"Loading parked topic [{slot_id}] {title}. Resume it as the active working context.",
+                session_id=active_session_id,
+            )
+            request_id = await self.enqueue_request(
+                chat_id,
+                (
+                    "SYSTEM: Resume the parked topic that was just restored into context. "
+                    "Continue naturally from the most relevant unfinished point. "
+                    "Do not explain the restore process at length.\n\n"
+                    "Resume the topic now."
+                ),
+                "park-load",
+                f"Parked topic load [{slot_id}]",
+                request_metadata={
+                    "session_id": active_session_id,
+                    "owner_id": active_session["owner_id"],
+                    "session_surface": surface,
+                    "session_channel_key": channel_key,
+                },
+            )
+        finally:
+            if not request_id:
+                (
+                    self._pending_auto_recall_context,
+                    self._pending_auto_recall_session_id,
+                ) = prior_recall
+                (
+                    self._pending_session_primer,
+                    self._pending_session_primer_session_id,
+                ) = prior_primer
+        if not request_id:
+            raise RuntimeError("parked topic continuation was not queued")
+        self.parked_topics.mark_loaded(slot_id)
         await self._reply_text(
             update,
             ui_language.tr("park.loading", slot=slot_id, title=title),
-        )
-        await self.enqueue_request(
-            update.effective_chat.id,
-            (
-                "SYSTEM: Resume the parked topic that was just restored into context. "
-                "Continue naturally from the most relevant unfinished point. "
-                "Do not explain the restore process at length.\n\n"
-                "Resume the topic now."
-            ),
-            "park-load",
-            f"Parked topic load [{slot_id}]",
         )
 
     async def cmd_active(self, update: Update, context: Any):

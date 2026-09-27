@@ -81,6 +81,12 @@ No external client name, repository revision, installer, or private release
 channel may be compiled into general HASHI admission policy. Compatibility is
 defined by protocol conformance and declared limits.
 
+Command-triggered continuations such as `/load` retain the authenticated
+command's Session, owner, surface, and channel when they enter the normal Run
+queue. The continuation's internal source names its purpose; it is not a new
+frontend. A parked topic is marked loaded only after its continuation has been
+accepted by the queue, so an admission failure leaves the topic available.
+
 ## 4. Authority and projection
 
 ```text

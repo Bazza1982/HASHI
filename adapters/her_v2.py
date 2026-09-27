@@ -858,9 +858,12 @@ class HERv2Adapter(BaseBackend):
                 .strip()
                 .lower()
             )
-            from orchestrator.her_v2.models import parse_effort
-
-            self.effort = parse_effort(requested_effort).value
+            effort_resolution = resolve_request_effort(requested_effort, None)
+            self.effort = (
+                "enabled"
+                if effort_resolution.model_reasoning == "enabled"
+                else effort_resolution.configured.value
+            )
             injected = getattr(self.config, "_her_v2_stage_provider", None)
             if injected is None and self._backend_manager() is None:
                 raise HERv2ConfigurationError(
@@ -1547,11 +1550,7 @@ class HERv2Adapter(BaseBackend):
         # HER v3 /effort is the selected model's reasoning level, never a
         # routing or orchestration policy.  Zero is retained as the wire value
         # for the user-facing `none` level.
-        turn_reasoning = (
-            "off"
-            if effort_resolution.effective is Effort.ZERO
-            else effort_resolution.effective.value
-        )
+        turn_reasoning = effort_resolution.model_reasoning
         turn_config = replace(
             turn_config,
             stage_reasoning={

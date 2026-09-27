@@ -47,6 +47,100 @@ def test_local_command_update_carries_frontend_invocation_identity():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("surface", "channel_key", "connector_id"),
+    [("workbench", "default", "backend_api"), ("telegram", "7", "telegram")],
+)
+async def test_parked_topic_load_admits_continuation_on_its_command_surface(
+    monkeypatch, surface, channel_key, connector_id,
+):
+    from orchestrator import runtime_session
+    from orchestrator.frontend_connector_registry import canonical_connector_id
+
+    loaded = []
+    topics = NS(
+        get_topic=lambda slot: {"title": "Topic 2"} if slot == 2 else None,
+        mark_loaded=lambda slot: loaded.append(slot),
+    )
+    update = _FakeUpdate(
+        7, 7, _CaptureStore(messages=[]), "/load 2",
+        session_metadata={
+            "session_surface": surface,
+            "session_channel_key": channel_key,
+            "session_id": "session-1",
+        },
+    )
+    runtime = NS(
+        _is_authorized_user=lambda actor: actor == 7,
+        _backend_busy=lambda: False,
+        _reply_text=AsyncMock(),
+        _arm_session_primer=lambda *args, **kwargs: None,
+        parked_topics=topics,
+        _pending_auto_recall_context=None,
+        _pending_auto_recall_session_id=None,
+    )
+    monkeypatch.setattr(
+        runtime_session, "current_session_for_update",
+        lambda *args: {"session_id": "session-1", "owner_id": "owner-7"},
+    )
+    admitted = []
+
+    async def enqueue(chat_id, prompt, source, summary, **kwargs):
+        metadata = kwargs.get("request_metadata") or {}
+        assert canonical_connector_id(
+            source, surface=metadata.get("session_surface", "")
+        ) == connector_id
+        admitted.append((chat_id, metadata))
+        return "request-1"
+
+    runtime.enqueue_request = enqueue
+    await FlexibleAgentRuntime.cmd_load(runtime, update, NS(args=["2"]))
+
+    assert loaded == [2]
+    assert admitted == [(7, {
+        "session_id": "session-1",
+        "owner_id": "owner-7",
+        "session_surface": surface,
+        "session_channel_key": channel_key,
+    })]
+
+
+@pytest.mark.asyncio
+async def test_parked_topic_load_keeps_topic_available_when_enqueue_fails(monkeypatch):
+    from orchestrator import runtime_session
+
+    loaded = []
+    runtime = NS(
+        _is_authorized_user=lambda actor: actor == 7,
+        _backend_busy=lambda: False,
+        _reply_text=AsyncMock(),
+        _arm_session_primer=lambda *args, **kwargs: None,
+        parked_topics=NS(
+            get_topic=lambda slot: {"title": "Topic 2"},
+            mark_loaded=lambda slot: loaded.append(slot),
+        ),
+        enqueue_request=AsyncMock(return_value=None),
+        _pending_auto_recall_context="previous recall",
+        _pending_auto_recall_session_id="previous session",
+    )
+    monkeypatch.setattr(
+        runtime_session, "current_session_for_update",
+        lambda *args: {"session_id": "session-1", "owner_id": "owner-7"},
+    )
+    update = _FakeUpdate(
+        7, 7, _CaptureStore(messages=[]), "/load 2",
+        session_metadata={"session_surface": "workbench"},
+    )
+
+    with pytest.raises(RuntimeError, match="not queued"):
+        await FlexibleAgentRuntime.cmd_load(runtime, update, NS(args=["2"]))
+
+    assert loaded == []
+    assert runtime._pending_auto_recall_context == "previous recall"
+    assert runtime._pending_auto_recall_session_id == "previous session"
+
+
+@pytest.mark.asyncio
 async def test_non_telegram_callback_preserves_connector_locale(tmp_path):
     observed_locales = []
     runtime = NS(

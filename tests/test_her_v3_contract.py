@@ -131,6 +131,29 @@ async def test_high_effort_keeps_one_main_model_call(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_boolean_provider_reasoning_is_preserved_for_her_v3(tmp_path):
+    provider = _MainProvider()
+    adapter = _adapter(tmp_path, provider)
+    adapter.config.extra["effort"] = "enabled"
+    adapter.config.extra["her_v2"] = {
+        "main": {
+            "provider": "openrouter-api",
+            "model": "deepseek/deepseek-v3.2-exp",
+            "reasoning": "enabled",
+        }
+    }
+
+    assert await adapter.initialize()
+    response = await adapter.generate_response("Answer directly", "request-enabled")
+
+    assert response.is_success
+    assert len(provider.calls) == 1
+    profile, request = provider.calls[0]
+    assert request.stage is Stage.DIRECT
+    assert profile.reasoning == "enabled"
+
+
+@pytest.mark.asyncio
 async def test_fixed_session_pcm_reaches_single_main_call(tmp_path):
     """Current user text must survive fixed-Session materialisation."""
     provider = _MainProvider()

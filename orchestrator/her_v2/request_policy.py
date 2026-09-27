@@ -24,7 +24,7 @@ def discard_legacy_job_effort_in_place(job: dict[str, Any]) -> bool:
     """Remove the retired per-job override and report whether it was present.
 
     Older task files remain loadable, but their override cannot bypass the
-    compulsory Direct policy.  Mutation boundaries use this helper to migrate
+    selected model reasoning policy. Mutation boundaries use this helper to migrate
     those records opportunistically.
     """
 
@@ -72,7 +72,7 @@ def build_scheduler_request_context(
 
 
 def job_effort_policy(job: Mapping[str, Any]) -> dict[str, str]:
-    """Describe the effective HER v2 policy represented by a job record."""
+    """Describe the selected model reasoning policy for a job record."""
 
     return {
         "effective": "inherit",
@@ -86,14 +86,24 @@ class EffortResolution:
     configured: Effort
     effective: Effort
     reason: str
+    model_reasoning: str
     scheduler_kind: str | None = None
     scheduler_task_id: str | None = None
     scheduler_trigger: str | None = None
 
     def metadata(self) -> dict[str, Any]:
+        # The retained Effort enum represents the binary Provider option as
+        # HIGH internally; report the configured Provider value to callers.
+        configured_value = (
+            self.model_reasoning if self.model_reasoning == "enabled"
+            else self.configured.value
+        )
         payload: dict[str, Any] = {
-            "configured": self.configured.value,
-            "effective": self.effective.value,
+            "configured": configured_value,
+            "effective": (
+                self.model_reasoning if self.model_reasoning == "enabled"
+                else self.effective.value
+            ),
             "reason": self.reason,
         }
         if self.scheduler_kind:
@@ -111,10 +121,19 @@ def resolve_request_effort(
 ) -> EffortResolution:
     """Preserve the selected model reasoning effort for every HER v3 request."""
 
-    configured = (
-        configured_effort
+    raw_effort = (
+        configured_effort.value
         if isinstance(configured_effort, Effort)
-        else parse_effort(str(configured_effort))
+        else str(configured_effort).strip().casefold()
+    )
+    # A binary Provider reasoning switch is a valid HER v3 model setting.
+    # HER's retained internal Effort enum needs a nonzero value for its Direct
+    # turn bookkeeping, while the Provider must still receive "enabled".
+    configured = Effort.HIGH if raw_effort == "enabled" else parse_effort(raw_effort)
+    model_reasoning = (
+        "enabled" if raw_effort == "enabled"
+        else "off" if configured is Effort.ZERO
+        else configured.value
     )
     meta = request_meta if isinstance(request_meta, Mapping) else {}
     raw_context = meta.get("scheduler_context")
@@ -128,6 +147,7 @@ def resolve_request_effort(
         configured=configured,
         effective=configured,
         reason="model_reasoning_effort",
+        model_reasoning=model_reasoning,
         scheduler_kind=kind,
         scheduler_task_id=task_id,
         scheduler_trigger=trigger,

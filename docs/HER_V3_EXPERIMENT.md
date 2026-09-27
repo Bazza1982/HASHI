@@ -66,14 +66,21 @@ DeepSeek request's thinking mode and never select a HASHI workflow. The Backend
 catalogue exposes Provider-specific models and effort choices rather than copied
 HER-wide placeholders.
 
+Some Provider/model pairs use a binary reasoning option, such as `off` or
+`enabled`. The selected value must reach that Provider unchanged, including
+after a Worker loads persisted Agent settings. The retained internal HER effort
+enum is bookkeeping only and must not reject a valid Provider option or replace
+`enabled` with `high` in the Provider request or reported Run metadata.
+
 ### HASHI1 correction, 2026-09-27
 
 HASHI1's prior `her_v2` entries had no explicit v3 `main`, so the compatibility
 normalizer inherited legacy execution profiles. Lily, Sunny, Momo, Feiyan and
 Testing consequently selected GPT models; a retained `off` effort produced an
 HTTP 400 on a GPT model that does not support it. The HASHI1 instance configuration
-now gives every HER v3 Agent an explicit `deepseek-api/deepseek-flash` main and
-auxiliary at `high`, with a DeepSeek-only v3 Provider allowlist. Other Engines
+now gives every HER v3 Agent an explicit `deepseek-api/deepseek-flash` default
+main and auxiliary at `high`. Agent-specific opt-ins may also allow other
+Provider/model pairs, including Testing's OpenRouter model. Other Engines
 retain their own settings. The Function loader repairs a persisted HER v3 effort
 that is unsupported by the selected Provider/model to the configured compatible
 effort. Source, instance configuration, and live Worker adoption are separate;
