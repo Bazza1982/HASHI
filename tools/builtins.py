@@ -1500,9 +1500,19 @@ async def execute_background_job_start(
         return f"Error: cwd is not a directory: {cwd}"
 
     context = audit_context or {}
+    activity_context = context.get("agent_activity_context")
+    activity_context = (
+        activity_context if isinstance(activity_context, Mapping) else {}
+    )
     origin = {
         "chat_id": _coerce_chat_id(context.get("chat_id")),
         "request_id": context.get("request_id"),
+        "session_id": (
+            activity_context.get("origin_session_id")
+            or context.get("hashi_session_id")
+        ),
+        "owner_id": context.get("owner_id"),
+        "session_surface": context.get("session_surface"),
         "source": context.get("request_source") or "tool:background_job_start",
         "summary": context.get("request_summary"),
         "tool": "background_job_start",

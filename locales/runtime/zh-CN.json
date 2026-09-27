@@ -1849,6 +1849,7 @@
     "bg.task": "任务",
     "bg.request": "请求",
     "bg.queued_effect": "您已明确使用 /bg，因此仅本次请求可以创建受管理的后台任务；其他代理工作仍在前台执行。",
+    "activity.started": "⏳ 已开始：{task}",
     "bg.manager_missing": "当前运行环境没有启动后台任务管理器。",
     "bg.scope.processes": "受管理的后台进程",
     "bg.none": "尚无后台任务记录。",

@@ -44,6 +44,11 @@ MAX_CONTINUITY_SESSIONS = 500
 MAX_CONTINUITY_MESSAGES = 100_000
 PRIMARY_CONVERSATION_SURFACE = "conversation"
 PRIMARY_CONVERSATION_CHANNEL = "main"
+SESSION_KIND_CONVERSATION = "conversation"
+SESSION_KIND_AGENT_ACTIVITY = "agent_activity"
+SESSION_KINDS = frozenset(
+    {SESSION_KIND_CONVERSATION, SESSION_KIND_AGENT_ACTIVITY}
+)
 MAX_SESSION_ATTACHMENTS_PER_MESSAGE = 16
 MAX_SESSION_ATTACHMENT_BYTES = 64 * 1024 * 1024
 MAX_SESSION_ATTACHMENT_TOTAL_BYTES = 64 * 1024 * 1024
@@ -323,7 +328,7 @@ class SessionStore:
     per-Session working files are derived state used by Memory+ and Compact.
     """
 
-    SCHEMA_VERSION = 12
+    SCHEMA_VERSION = 13
 
     def __init__(
         self,
@@ -408,6 +413,7 @@ class SessionStore:
                     owner_id TEXT NOT NULL,
                     agent_id TEXT NOT NULL,
                     title TEXT NOT NULL,
+                    session_kind TEXT NOT NULL DEFAULT 'conversation',
                     title_source TEXT NOT NULL DEFAULT 'system',
                     status TEXT NOT NULL DEFAULT 'active',
                     is_default INTEGER NOT NULL DEFAULT 0,
@@ -1048,6 +1054,16 @@ class SessionStore:
                     "ALTER TABLE sessions ADD COLUMN "
                     "history_generation INTEGER NOT NULL DEFAULT 1"
                 )
+            if "session_kind" not in session_columns:
+                connection.execute(
+                    "ALTER TABLE sessions ADD COLUMN "
+                    "session_kind TEXT NOT NULL DEFAULT 'conversation'"
+                )
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS one_active_agent_activity_session "
+                "ON sessions(instance_id, owner_id, agent_id, session_kind) "
+                "WHERE session_kind = 'agent_activity' AND status = 'active'"
+            )
             # One-time compatibility projection.  The former scalar Workzone
             # becomes the enabled ``main`` slot without changing the Session's
             # effective working directory.
@@ -1464,11 +1480,17 @@ class SessionStore:
         agent_id: str,
         title: str | None = None,
         is_default: bool = False,
+        session_kind: str = SESSION_KIND_CONVERSATION,
     ) -> dict[str, Any]:
         owner_id = str(owner_id).strip()
         agent_id = str(agent_id).strip().lower()
+        session_kind = str(session_kind or "").strip().casefold()
         if not owner_id or not agent_id:
             raise ValueError("owner_id and agent_id are required")
+        if session_kind not in SESSION_KINDS:
+            raise ValueError("unsupported Session kind")
+        if is_default and session_kind != SESSION_KIND_CONVERSATION:
+            raise ValueError("only a conversation Session can be the default")
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             if is_default:
@@ -1481,17 +1503,40 @@ class SessionStore:
                 ).fetchone()
                 if row is not None:
                     return self._session_dict(row)
+            if session_kind == SESSION_KIND_AGENT_ACTIVITY:
+                row = connection.execute(
+                    """
+                    SELECT * FROM sessions
+                    WHERE instance_id = ? AND owner_id = ? AND agent_id = ?
+                      AND session_kind = ? AND status = 'active'
+                    """,
+                    (
+                        self.instance_id,
+                        owner_id,
+                        agent_id,
+                        SESSION_KIND_AGENT_ACTIVITY,
+                    ),
+                ).fetchone()
+                if row is not None:
+                    return self._session_dict(row)
             session_id = _new_id("ses")
             now = _utc_now()
             resolved_title = str(
-                title or (f"{agent_id} default" if is_default else "New session")
+                title
+                or (
+                    f"{agent_id} activity"
+                    if session_kind == SESSION_KIND_AGENT_ACTIVITY
+                    else f"{agent_id} default"
+                    if is_default
+                    else "New session"
+                )
             ).strip()
             connection.execute(
                 """
                 INSERT INTO sessions(
                     session_id, instance_id, owner_id, agent_id, title,
-                    is_default, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    session_kind, is_default, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
@@ -1499,6 +1544,7 @@ class SessionStore:
                     owner_id,
                     agent_id,
                     resolved_title,
+                    session_kind,
                     int(is_default),
                     now,
                     now,
@@ -1522,7 +1568,11 @@ class SessionStore:
                 kind="session.created",
                 status="active",
                 summary="Session created",
-                detail={"is_default": bool(is_default), "agent_id": agent_id},
+                detail={
+                    "is_default": bool(is_default),
+                    "agent_id": agent_id,
+                    "session_kind": session_kind,
+                },
             )
             row = connection.execute(
                 "SELECT * FROM sessions WHERE session_id = ?", (session_id,)
@@ -1535,6 +1585,21 @@ class SessionStore:
             agent_id=agent_id,
             title=f"{str(agent_id).strip().lower()} default",
             is_default=True,
+        )
+
+    def ensure_agent_activity_session(
+        self,
+        *,
+        owner_id: str,
+        agent_id: str,
+    ) -> dict[str, Any]:
+        """Return the Agent-owned internal Session used for independent Runs."""
+
+        return self.create_session(
+            owner_id=owner_id,
+            agent_id=agent_id,
+            title=f"{str(agent_id).strip().lower()} activity",
+            session_kind=SESSION_KIND_AGENT_ACTIVITY,
         )
 
     def get_session(
@@ -1569,6 +1634,7 @@ class SessionStore:
         owner_id: str,
         agent_id: str | None = None,
         include_archived: bool = False,
+        include_internal: bool = False,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         clauses = ["instance_id = ?", "owner_id = ?", "status != 'deleted'"]
@@ -1578,6 +1644,8 @@ class SessionStore:
             params.append(str(agent_id).lower())
         if not include_archived:
             clauses.append("status = 'active'")
+        if not include_internal:
+            clauses.append("session_kind = 'conversation'")
         params.append(max(1, min(int(limit), 500)))
         with self._lock, self._connection() as connection:
             rows = connection.execute(
@@ -1873,6 +1941,17 @@ class SessionStore:
     ) -> dict[str, Any]:
         """Select one shared personal conversation for interactive frontends."""
 
+        selected = self.get_session(
+            session_id,
+            owner_id=owner_id,
+            agent_id=agent_id,
+            include_deleted=False,
+        )
+        if selected.get("session_kind") != SESSION_KIND_CONVERSATION:
+            raise SessionConflict(
+                "the primary frontend can select only a conversation Session"
+            )
+
         return self.bind_channel(
             owner_id=owner_id,
             agent_id=agent_id,
@@ -1905,6 +1984,7 @@ class SessionStore:
                 JOIN sessions AS s ON s.session_id = b.session_id
                 WHERE b.instance_id = ? AND b.owner_id = ? AND b.agent_id = ?
                   AND b.surface = ? AND b.channel_key = ?
+                  AND s.session_kind = 'conversation'
                   AND s.status = 'active'
                 """,
                 (
@@ -1926,6 +2006,7 @@ class SessionStore:
                     b.surface = 'telegram'
                     OR (b.surface = 'workbench' AND b.channel_key = 'default')
                   )
+                  AND s.session_kind = 'conversation'
                   AND s.status = 'active'
                 ORDER BY s.updated_at DESC, b.updated_at DESC, s.session_id ASC
                 LIMIT 1
@@ -1945,6 +2026,7 @@ class SessionStore:
                 JOIN sessions AS s ON s.session_id = b.session_id
                 WHERE b.instance_id = ? AND b.owner_id = ? AND b.agent_id = ?
                   AND b.surface = ? AND b.channel_key = ?
+                  AND s.session_kind = 'conversation'
                   AND s.status = 'active'
                 """,
                 (
@@ -1982,6 +2064,7 @@ class SessionStore:
                 JOIN sessions AS s ON s.session_id = b.session_id
                 WHERE b.instance_id = ? AND b.owner_id = ? AND b.agent_id = ?
                   AND b.surface = ? AND b.channel_key = ?
+                  AND s.session_kind = 'conversation'
                   AND s.status = 'active'
                 """,
                 (
@@ -5615,6 +5698,7 @@ class SessionStore:
                 FROM messages AS m
                 JOIN sessions AS s ON s.session_id = m.session_id
                 WHERE s.instance_id = ? AND s.owner_id = ? AND s.agent_id = ?
+                  AND s.session_kind = 'conversation'
                   AND s.status != 'deleted' AND m.session_id = ? AND m.ordinal = ?
                   AND m.visibility = 'visible'
                 """,
@@ -5654,6 +5738,7 @@ class SessionStore:
             "s.instance_id = ?",
             "s.owner_id = ?",
             "s.agent_id = ?",
+            "s.session_kind = 'conversation'",
             "s.status != 'deleted'",
             "m.visibility = 'visible'",
         ]
@@ -5838,6 +5923,7 @@ class SessionStore:
                 FROM messages AS m
                 JOIN sessions AS s ON s.session_id = m.session_id
                 WHERE s.instance_id = ? AND s.owner_id = ? AND s.agent_id = ?
+                  AND s.session_kind = 'conversation'
                   AND s.status != 'deleted' AND m.message_id = ?
                   AND m.visibility = 'visible'
                 """,
@@ -6960,10 +7046,14 @@ class SessionStore:
         session_id: str,
         *,
         context_generation: int | None = None,
+        max_user_ordinal: int | None = None,
         limit: int = 8,
     ) -> list[dict[str, Any]]:
         session = self.get_session(session_id)
         generation = int(context_generation or session["context_generation"])
+        high_water = (
+            None if max_user_ordinal is None else max(0, int(max_user_ordinal))
+        )
         with self._lock, self._connection() as connection:
             rows = connection.execute(
                 """
@@ -6987,9 +7077,16 @@ class SessionStore:
                   AND r.state = 'completed'
                   AND u.visibility = 'visible' AND a.visibility = 'visible'
                   AND u.history_eligible = 1 AND a.history_eligible = 1
+                  AND (? IS NULL OR u.ordinal <= ?)
                 ORDER BY u.ordinal DESC LIMIT ?
                 """,
-                (str(session_id), generation, max(1, min(int(limit), 100))),
+                (
+                    str(session_id),
+                    generation,
+                    high_water,
+                    high_water,
+                    max(1, min(int(limit), 100)),
+                ),
             ).fetchall()
         return [dict(row) for row in reversed(rows)]
 
@@ -7054,6 +7151,7 @@ class SessionStore:
                 JOIN messages AS u ON u.message_id = r.user_message_id
                 JOIN messages AS a ON a.message_id = r.final_message_id
                 WHERE s.instance_id = ? AND s.owner_id = ? AND s.agent_id = ?
+                  AND s.session_kind = 'conversation'
                   AND s.status != 'deleted'
                   AND r.state = 'completed'
                   AND u.visibility = 'visible' AND a.visibility = 'visible'
@@ -7075,6 +7173,7 @@ class SessionStore:
         clauses = [
             "s.instance_id = ?",
             "s.agent_id = ?",
+            "s.session_kind = 'conversation'",
             "m.role = 'user'",
         ]
         params: list[Any] = [self.instance_id, str(agent_id)]
@@ -9284,7 +9383,12 @@ class SessionStore:
         session_ids: Iterable[str] | None = None,
         limit: int = 1000,
     ) -> list[dict[str, Any]]:
-        clauses = ["r.agent_id = ?", "r.state = 'completed'", "p.run_id IS NULL"]
+        clauses = [
+            "r.agent_id = ?",
+            "r.state = 'completed'",
+            "p.run_id IS NULL",
+            "s.session_kind = 'conversation'",
+        ]
         params: list[Any] = [str(agent_id).lower()]
         selected = [str(item) for item in (session_ids or ()) if str(item)]
         if selected:
@@ -9300,6 +9404,7 @@ class SessionStore:
                        u.created_at AS user_ts, a.created_at AS assistant_ts,
                        u.source, u.text AS user_text, a.text AS assistant_text
                 FROM runs AS r
+                JOIN sessions AS s ON s.session_id = r.session_id
                 JOIN messages AS u ON u.message_id = r.user_message_id
                 JOIN messages AS a ON a.message_id = r.final_message_id
                 LEFT JOIN agent_memory_records AS p ON p.run_id = r.run_id

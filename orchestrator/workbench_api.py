@@ -9041,11 +9041,14 @@ class WorkbenchApiServer:
 
         runs = []
         for receipt in reversed(runtime_cross_session.load_receipts(runtime)):
-            if not str(receipt.get("source") or "").startswith("scheduler"):
-                continue
-            receipt_kind, receipt_job_id = self._scheduler_job_kind_from_summary(
-                str(receipt.get("summary") or "")
-            )
+            receipt_kind = str(receipt.get("activity_kind") or "").strip().lower()
+            receipt_job_id = str(receipt.get("task_id") or "").strip()
+            if receipt_kind not in {"cron", "heartbeat", "nudge"} or not receipt_job_id:
+                if not str(receipt.get("source") or "").startswith("scheduler"):
+                    continue
+                receipt_kind, receipt_job_id = self._scheduler_job_kind_from_summary(
+                    str(receipt.get("summary") or "")
+                )
             if not receipt_kind:
                 continue
             if kind != "all" and receipt_kind != kind:

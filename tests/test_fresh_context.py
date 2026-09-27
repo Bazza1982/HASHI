@@ -134,6 +134,28 @@ def test_bridge_context_assembler_splits_turn_and_saved_memory_flags():
     assert store.recent_calls == 0
     assert store.memory_calls == 0
 
+    explicit_history = [
+        {
+            "sequence": 7,
+            "exchange_id": 7,
+            "user_ts": "2026-09-28T00:00:00Z",
+            "assistant_ts": "2026-09-28T00:00:01Z",
+            "user_text": "ORIGIN CONVERSATION",
+            "assistant_text": "ORIGIN ANSWER",
+        }
+    ]
+    payload = assembler.build_prompt_payload(
+        "background follow-up",
+        "deepseek-api",
+        inject_memory=False,
+        recent_exchanges=explicit_history,
+        explicit_history_context=True,
+    )
+    assert "ORIGIN CONVERSATION" in payload["final_prompt"]
+    assert "OPTIONAL SEARCHED LONG-TERM MEMORY" not in payload["final_prompt"]
+    assert store.recent_calls == 0
+    assert store.memory_calls == 0
+
 
 def test_managed_prompt_preserves_typed_authority_without_flat_position_assertions(tmp_path):
     from orchestrator.context_compaction import MANAGED_HISTORY_TITLE
@@ -790,7 +812,7 @@ def test_pending_primer_is_consumed_only_by_its_session(tmp_path):
     assert "SESSION_A_RECALL" in rendered
 
 
-def test_command_sources_follow_telegram_session_and_scheduled_work_uses_default(tmp_path):
+def test_command_sources_follow_conversation_and_agent_work_uses_internal_session(tmp_path):
     runtime, default, _replies, _resets = _session_command_runtime(tmp_path)
     other = runtime.session_store.create_session(
         owner_id="user:123", agent_id="arale", title="Other"
@@ -806,12 +828,34 @@ def test_command_sources_follow_telegram_session_and_scheduled_work_uses_default
     skill_session, *_ = runtime_session.resolve_request_session(
         runtime, source="skill:research", chat_id=456
     )
-    scheduled_session, *_ = runtime_session.resolve_request_session(
+    loop_session, *_ = runtime_session.resolve_request_session(
+        runtime, source="loop_skill", chat_id=456
+    )
+    scheduled_session, scheduled_owner, scheduled_surface, scheduled_channel = (
+        runtime_session.resolve_request_session(
         runtime, source="scheduler-skill", chat_id=456
+        )
+    )
+    repeated_session, *_ = runtime_session.resolve_request_session(
+        runtime, source="background-job-event", chat_id=456
     )
 
     assert skill_session["session_id"] == other["session_id"]
-    assert scheduled_session["session_id"] == default["session_id"]
+    assert loop_session["session_id"] == other["session_id"]
+    assert scheduled_session["session_id"] not in {
+        default["session_id"],
+        other["session_id"],
+    }
+    assert scheduled_session["session_kind"] == "agent_activity"
+    assert repeated_session["session_id"] == scheduled_session["session_id"]
+    assert scheduled_owner == "user:123"
+    assert (scheduled_surface, scheduled_channel) == ("agent-activity", "runs")
+    assert [
+        session["session_id"]
+        for session in runtime.session_store.list_sessions(
+            owner_id="user:123", agent_id="arale"
+        )
+    ] == [default["session_id"], other["session_id"]]
 
 
 def test_promotion_unifies_completed_session_exchanges_idempotently(tmp_path):
@@ -855,6 +899,140 @@ def test_promotion_unifies_completed_session_exchanges_idempotently(tmp_path):
     rendered = "\n".join(row["content"] for row in memories)
     assert "DEFAULT_MEMORY" in rendered
     assert "OTHER_MEMORY" in rendered
+
+
+def test_agent_activity_runs_are_not_promoted_as_conversation_memory(tmp_path):
+    runtime, default, _replies, _resets = _session_command_runtime(tmp_path)
+    activity = runtime.session_store.ensure_agent_activity_session(
+        owner_id="user:123",
+        agent_id="arale",
+    )
+    for session, marker, source in (
+        (default, "CONVERSATION_MEMORY", "text"),
+        (activity, "INTERNAL_JOB_PROMPT", "scheduler"),
+    ):
+        request_id = f"req-{marker.lower()}"
+        runtime.session_store.accept_run(
+            session_id=session["session_id"],
+            owner_id="user:123",
+            agent_id="arale",
+            request_id=request_id,
+            text=marker,
+            source=source,
+            idempotency_key=request_id,
+        )
+        runtime.session_store.mark_request_running(request_id, worker_id="test")
+        runtime.session_store.finish_request(
+            request_id,
+            success=True,
+            assistant_text=f"answer {marker}",
+            assistant_source="test",
+        )
+
+    result = runtime_session.promote_sessions(runtime, trigger="test")
+    memories = runtime.memory_store.retrieve_memories(
+        "CONVERSATION_MEMORY INTERNAL_JOB_PROMPT",
+        limit=10,
+    )
+    rendered = "\n".join(row["content"] for row in memories)
+    history = runtime.session_store.agent_history_page(
+        owner_id="user:123",
+        agent_id="arale",
+    )
+    recent = runtime.session_store.recent_agent_exchanges(
+        owner_id="user:123",
+        agent_id="arale",
+    )
+    conversation_user = runtime.session_store.messages(default["session_id"])[0]
+
+    assert result["promoted_count"] == 1
+    assert "CONVERSATION_MEMORY" in rendered
+    assert "INTERNAL_JOB_PROMPT" not in rendered
+    assert "INTERNAL_JOB_PROMPT" not in "\n".join(
+        message["text"] for message in history["messages"]
+    )
+    assert [exchange["user_text"] for exchange in recent] == [
+        "CONVERSATION_MEMORY"
+    ]
+    assert runtime.session_store.last_user_message_at(
+        agent_id="arale",
+        owner_id="user:123",
+    ) == conversation_user["created_at"]
+
+
+def test_agent_activity_uses_frozen_origin_context_without_joining_conversation(tmp_path):
+    runtime, conversation, _replies, _resets = _session_command_runtime(tmp_path)
+    accepted = runtime.session_store.accept_run(
+        session_id=conversation["session_id"],
+        owner_id="user:123",
+        agent_id="arale",
+        request_id="req-origin-conversation",
+        text="ORIGIN USER CONTEXT",
+        source="text",
+        idempotency_key="origin-conversation",
+    )
+    runtime.session_store.mark_request_running(accepted.request_id, worker_id="test")
+    runtime.session_store.finish_request(
+        accepted.request_id,
+        success=True,
+        assistant_text="ORIGIN ASSISTANT CONTEXT",
+        assistant_source="test",
+    )
+    activity, *_ = runtime_session.resolve_request_session(
+        runtime,
+        source="background:prompt",
+        chat_id=456,
+    )
+    origin = runtime.session_store.get_session(conversation["session_id"])
+    item = SimpleNamespace(
+        source="background:prompt",
+        owner_id="user:123",
+        session_id=activity["session_id"],
+        context_generation=activity["context_generation"],
+        request_metadata={
+            "agent_activity_context": {
+                "kind": "background_request",
+                "trigger": "user",
+                "origin_session_id": conversation["session_id"],
+                "origin_context_generation": conversation["context_generation"],
+                "origin_message_ordinal": origin["next_message_ordinal"] - 1,
+            }
+        },
+    )
+    later = runtime.session_store.accept_run(
+        session_id=conversation["session_id"],
+        owner_id="user:123",
+        agent_id="arale",
+        request_id="req-later-conversation",
+        text="LATER USER CONTEXT",
+        source="text",
+        idempotency_key="later-conversation",
+    )
+    runtime.session_store.mark_request_running(later.request_id, worker_id="test")
+    runtime.session_store.finish_request(
+        later.request_id,
+        success=True,
+        assistant_text="LATER ASSISTANT CONTEXT",
+        assistant_source="test",
+    )
+
+    exchanges = runtime_session.agent_activity_origin_exchanges(
+        runtime,
+        item,
+        limit=8,
+    )
+
+    assert item.session_id == activity["session_id"]
+    assert item.session_id != conversation["session_id"]
+    assert [exchange["user_text"] for exchange in exchanges] == [
+        "ORIGIN USER CONTEXT"
+    ]
+    assert [exchange["assistant_text"] for exchange in exchanges] == [
+        "ORIGIN ASSISTANT CONTEXT"
+    ]
+
+    item.owner_id = "user:other"
+    assert runtime_session.agent_activity_origin_exchanges(runtime, item, limit=8) == []
 
 
 def test_fresh_boundary_filters_cross_session_receipts_by_request_start(tmp_path):

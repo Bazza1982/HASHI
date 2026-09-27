@@ -2144,6 +2144,7 @@ class FlexibleBackendManager:
         request_metadata = request_meta.get("request_metadata")
         context.pop("memory_search_authorization", None)
         context.pop("request_tool_allowlist", None)
+        context.pop("agent_activity_context", None)
         for key in (
             "system_exchange",
             "system_exchange_kind",
@@ -2155,6 +2156,9 @@ class FlexibleBackendManager:
         ):
             context.pop(key, None)
         if isinstance(request_metadata, dict):
+            activity_context = request_metadata.get("agent_activity_context")
+            if isinstance(activity_context, dict):
+                context["agent_activity_context"] = dict(activity_context)
             for key in (
                 "system_exchange",
                 "system_exchange_kind",

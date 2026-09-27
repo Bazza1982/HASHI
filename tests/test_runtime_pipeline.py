@@ -789,9 +789,33 @@ def test_begin_queue_item_marks_typed_scheduled_jobs_isolated():
     )
 
 
-def test_begin_queue_item_does_not_isolate_untyped_scheduler_source():
+@pytest.mark.parametrize(
+    "source",
+    [
+        "scheduler",
+        "scheduler-skill",
+        "background:prompt",
+        "background-job-event",
+        "heartbeat",
+        "cron",
+        "proactive",
+    ],
+)
+def test_begin_queue_item_isolates_every_agent_activity_source(source):
     runtime = _runtime()
-    item = _item(source="scheduler")
+    item = _item(source=source)
+
+    runtime_pipeline.begin_queue_item(runtime, item)
+
+    assert (
+        runtime.current_request_meta["session_scope"]
+        == runtime_pipeline.SESSION_SCOPE_ISOLATED
+    )
+
+
+def test_begin_queue_item_keeps_interactive_loop_setup_in_conversation():
+    runtime = _runtime()
+    item = _item(source="loop_skill")
 
     runtime_pipeline.begin_queue_item(runtime, item)
 
@@ -1011,6 +1035,94 @@ async def test_her_fixed_backend_replaces_assembled_pcm_with_typed_transport(
     assert observed["request_id"] == "req-1"
     assert prompt.prompt_audit["her_fixed_backend"]["operation"] == "append_turn"
     assert captured_bindings == ["req-1"]
+
+
+@pytest.mark.asyncio
+async def test_agent_activity_her_preparation_opens_fresh_provider_session(
+    monkeypatch,
+):
+    runtime = _runtime()
+    runtime.config.active_backend = "her-v2"
+    runtime.backend_manager.agent_mode = "fixed"
+    captured_bindings = []
+    monkeypatch.setattr(
+        runtime_session,
+        "capture_backend_binding",
+        lambda _runtime, *, request_id: captured_bindings.append(request_id),
+    )
+
+    class _HERAssembler:
+        turns_injection_enabled = True
+        saved_memory_injection_enabled = True
+        MAX_RECENT_EXCHANGES = 8
+
+        def build_prompt_payload(self, prompt, backend, **_kwargs):
+            return {
+                "final_prompt": prompt,
+                "audit": {"incremental": False, "sections": []},
+                "envelope": {"version": 1, "sections": []},
+            }
+
+    class _HERBackend:
+        def __init__(self):
+            self._session_id = "closed-conversation-provider-session"
+            self.persistent_session_busy = False
+            self.seen_session_ids = []
+            self.capabilities = SimpleNamespace(
+                supports_sessions=True,
+                supports_thinking_stream=True,
+            )
+
+        def prepare_fixed_turn_input(self, **_kwargs):
+            self.seen_session_ids.append(self._session_id)
+            operation = "open_session" if self._session_id is None else "append_turn"
+            if self._session_id is None:
+                self._session_id = "activity-provider-session"
+            return (
+                f'HASHI_HER_FIXED_ENVELOPE_V1\n{{"operation":"{operation}"}}',
+                {
+                    "operation": operation,
+                    "incremental": operation == "append_turn",
+                    "transport_chars": 80,
+                },
+            )
+
+    backend = _HERBackend()
+    runtime.context_assembler = _HERAssembler()
+    runtime.backend_manager.current_backend = backend
+    item = _item(source="scheduler")
+    runtime_pipeline.begin_queue_item(runtime, item)
+
+    prompt = await runtime_pipeline.build_turn_prompt(
+        runtime,
+        item,
+        is_bridge_request=False,
+    )
+
+    assert backend.seen_session_ids == [None]
+    assert backend._session_id == "closed-conversation-provider-session"
+    assert prompt.prompt_audit["her_fixed_backend"]["operation"] == "open_session"
+    assert prompt.incremental is False
+    assert captured_bindings == []
+    assert item._isolated_provider_session_id == "activity-provider-session"
+
+    generation_session_ids = []
+
+    async def generate_response(*_args, **_kwargs):
+        generation_session_ids.append(backend._session_id)
+        return SimpleNamespace(is_success=True, text="done")
+
+    runtime.backend_manager.generate_response = generate_response
+    await runtime_pipeline.run_backend_generation(
+        runtime,
+        item,
+        prompt.final_prompt,
+        on_stream_event=lambda _event: None,
+        audit_active=False,
+    )
+
+    assert generation_session_ids == ["activity-provider-session"]
+    assert backend._session_id == "closed-conversation-provider-session"
 
 
 @pytest.mark.asyncio
@@ -1716,6 +1828,46 @@ async def test_setup_interactive_feedback_creates_placeholder_and_cleanup_tasks(
     assert callable(feedback.on_stream_event)
     feedback.stop_typing.set()
     await feedback.typing_task
+    await feedback.escalation_task
+    await feedback.think_flush_task
+    runtime_pipeline.release_display_preference_event(
+        runtime,
+        feedback.preference_event,
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_activity_start_is_visible_when_typing_is_disabled():
+    runtime = _runtime()
+    telegram_stream_policy.set_typing_enabled(runtime, False)
+    runtime.get_agent_activity_start_placeholder = lambda item: (
+        f"started: {item.summary}",
+        None,
+    )
+    item = _item(
+        source="scheduler",
+        summary="Cron Task [morning-report]",
+        session_surface="agent-activity",
+    )
+
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        item,
+        audit_active=False,
+        audit_collector=None,
+    )
+
+    assert runtime.app.bot.sent == [
+        {
+            "chat_id": 123,
+            "text": "started: Cron Task [morning-report]",
+            "parse_mode": None,
+            "disable_notification": True,
+        }
+    ]
+    assert feedback.placeholder.message_id == 77
+    assert feedback.typing_task is None
+    feedback.stop_typing.set()
     await feedback.escalation_task
     await feedback.think_flush_task
     runtime_pipeline.release_display_preference_event(

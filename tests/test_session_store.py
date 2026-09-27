@@ -21,6 +21,43 @@ def _store(tmp_path) -> SessionStore:
     return SessionStore(tmp_path / "state" / "sessions.sqlite3", instance_id="HASHI1")
 
 
+def test_schema_12_sessions_migrate_to_conversations_and_hide_activity(tmp_path):
+    store = _store(tmp_path)
+    conversation = store.ensure_default_session(owner_id="user:7", agent_id="lily")
+    db_path = store.db_path
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("DROP INDEX one_active_agent_activity_session")
+        connection.execute("ALTER TABLE sessions DROP COLUMN session_kind")
+        connection.execute(
+            "UPDATE schema_metadata SET value='12' WHERE key='schema_version'"
+        )
+
+    migrated = _store(tmp_path)
+    visible = migrated.list_sessions(owner_id="user:7", agent_id="lily")
+    activity = migrated.ensure_agent_activity_session(
+        owner_id="user:7",
+        agent_id="lily",
+    )
+    all_sessions = migrated.list_sessions(
+        owner_id="user:7",
+        agent_id="lily",
+        include_internal=True,
+    )
+    with sqlite3.connect(db_path) as connection:
+        schema_version = connection.execute(
+            "SELECT value FROM schema_metadata WHERE key='schema_version'"
+        ).fetchone()[0]
+
+    assert schema_version == str(SessionStore.SCHEMA_VERSION)
+    assert visible == [migrated.get_session(conversation["session_id"])]
+    assert visible[0]["session_kind"] == "conversation"
+    assert activity["session_kind"] == "agent_activity"
+    assert {session["session_id"] for session in all_sessions} == {
+        conversation["session_id"],
+        activity["session_id"],
+    }
+
+
 def test_agent_workzones_are_independent_of_legacy_session_rows(tmp_path):
     store = _store(tmp_path)
     session = store.ensure_default_session(owner_id="user:7", agent_id="lily")

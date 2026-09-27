@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from orchestrator import command_registry
+from orchestrator import command_registry, runtime_session
 from orchestrator.admin_local_testing import execute_local_command, supported_commands
 from orchestrator.command_registry import (
     RuntimeCallback,
@@ -310,6 +310,12 @@ async def test_bg_command_defaults_to_run_and_preserves_task_text():
     assert runtime.queued[0]["chat_id"] == 123
     assert runtime.queued[0]["source"] == "background:prompt"
     assert runtime.queued[0]["summary"] == "Background task: full citalio service for paper 3"
+    assert runtime.queued[0]["request_metadata"] == {
+        "agent_activity_context": {
+            "kind": "background_request",
+            "trigger": "user",
+        }
+    }
     assert "--- USER TASK ---\nfull citalio service for paper 3" in runtime.queued[0]["prompt"]
     assert "BackgroundJobManager" in runtime.queued[0]["prompt"]
 
@@ -322,7 +328,37 @@ async def test_bg_command_run_alias_matches_default_run():
 
     assert result["ok"] is True
     assert runtime.queued[0]["source"] == "background:prompt"
+    assert runtime.queued[0]["request_metadata"]["agent_activity_context"][
+        "kind"
+    ] == "background_request"
     assert "--- USER TASK ---\nquoted task" in runtime.queued[0]["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_bg_command_freezes_origin_conversation_generation(tmp_path):
+    runtime = _FakeRuntime()
+    runtime.name = "lily"
+    runtime.workspace_dir = tmp_path / "workspaces" / "lily"
+    runtime.workspace_dir.mkdir(parents=True)
+    runtime.global_config = SimpleNamespace(
+        authorized_id=1,
+        bridge_home=tmp_path,
+        project_root=tmp_path,
+        instance_id="HASHI1",
+    )
+    conversation = runtime_session.initialize_runtime_sessions(runtime)
+
+    result = await execute_local_command(runtime, "/bg continue this work", chat_id=123)
+
+    assert result["ok"] is True
+    activity_context = runtime.queued[0]["request_metadata"][
+        "agent_activity_context"
+    ]
+    assert activity_context["origin_session_id"] == conversation["session_id"]
+    assert activity_context["origin_context_generation"] == conversation[
+        "context_generation"
+    ]
+    assert activity_context["origin_message_ordinal"] == 0
 
 
 @pytest.mark.asyncio

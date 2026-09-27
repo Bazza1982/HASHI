@@ -146,6 +146,17 @@ local exceptions; never add frontend policy to runtime.
 Command-created continuations preserve the originating Session and Connector
 surface. Mark `/load` complete only after its continuation is queued.
 
+Autonomous Agent activity (cron, heartbeat, nudge, scheduler recovery, `/bg`,
+and background completion) is Agent-owned and runs as a distinct Run in the
+owner/Agent's hidden activity Session. Never bind its lifecycle or provider
+thread to a Conversation Session. Show a concise start and terminal result,
+persist execution and delivery separately, and project typed same-owner
+receipts into the current Conversation for natural follow-up. `/bg` may read
+only its admission-time bounded origin snapshot; scheduled work receives no
+implicit Conversation history. Internal activity is excluded from user Session
+lists and Conversation-memory promotion. `/delay` and interactive `/loop`
+remain Conversation continuations.
+
 ## Engines, tools, and recovery
 
 HERV3 began on HASHI3 and was promoted as a harness-only series into HASHI1's

@@ -12,24 +12,49 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from orchestrator import ui_language
 from orchestrator.flexible_backend_registry import is_cli_backend, public_backend_engine
-from orchestrator.session_store import SessionConflict, SessionNotFound, SessionStore
+from orchestrator.session_store import (
+    SESSION_KIND_AGENT_ACTIVITY,
+    SESSION_KIND_CONVERSATION,
+    SessionConflict,
+    SessionNotFound,
+    SessionStore,
+)
 
 logger = logging.getLogger("HASHI.RuntimeSession")
 _SHARED_PRIMARY_SURFACES = frozenset({"telegram", "workbench"})
 _INTERNAL_NON_CHAT_SOURCES = frozenset({"startup", "system", "session_reset"})
-_SCHEDULED_SOURCES = frozenset(
+AGENT_ACTIVITY_SURFACE = "agent-activity"
+AGENT_ACTIVITY_CHANNEL = "runs"
+_AGENT_ACTIVITY_SOURCES = frozenset(
     {
         "scheduler",
         "scheduler-retry",
         "scheduler-skill",
-        "loop_skill",
         "heartbeat",
         "cron",
         "proactive",
+        "background:prompt",
         "background-job-event",
         "background_job_event",
     }
 )
+
+
+def is_agent_activity_source(source: Any) -> bool:
+    """Return whether a request is Agent-owned work outside user chat history."""
+
+    normalized = str(source or "").strip().casefold()
+    return normalized in _AGENT_ACTIVITY_SOURCES or normalized.startswith(
+        ("scheduler:", "cron:", "heartbeat:", "proactive:", "background:")
+    )
+
+
+def is_agent_activity_request(item: Any) -> bool:
+    return (
+        str(getattr(item, "session_surface", "") or "").strip().casefold()
+        == AGENT_ACTIVITY_SURFACE
+        or is_agent_activity_source(getattr(item, "source", ""))
+    )
 
 
 def _active_engine(runtime: Any) -> str:
@@ -97,11 +122,8 @@ def _surface_and_channel(
     explicit_surface = str(metadata.get("session_surface") or "").strip().lower()
     explicit_channel = str(metadata.get("session_channel_key") or "").strip()
     normalized = str(source or "").strip().lower()
-    scheduled = normalized in _SCHEDULED_SOURCES or normalized.startswith(
-        ("scheduler:", "cron:", "heartbeat:", "proactive:")
-    )
-    if scheduled:
-        return "scheduled", "default", True
+    if is_agent_activity_source(normalized):
+        return AGENT_ACTIVITY_SURFACE, AGENT_ACTIVITY_CHANNEL, False
     if explicit_surface:
         return explicit_surface, explicit_channel or "default", False
     if "whatsapp" in normalized or normalized.startswith("wa:"):
@@ -143,7 +165,19 @@ def resolve_request_session(
     )
     store = ensure_store(runtime)
     explicit_session_id = str(metadata.get("session_id") or "") or None
-    if surface in _SHARED_PRIMARY_SURFACES:
+    if surface == AGENT_ACTIVITY_SURFACE:
+        session = store.ensure_agent_activity_session(
+            owner_id=resolved_owner,
+            agent_id=runtime.name,
+        )
+        if (
+            explicit_session_id is not None
+            and explicit_session_id != session["session_id"]
+        ):
+            raise SessionConflict("Agent activity Session changed during admission")
+        if session.get("session_kind") != SESSION_KIND_AGENT_ACTIVITY:
+            raise SessionConflict("Agent activity resolved to a conversation Session")
+    elif surface in _SHARED_PRIMARY_SURFACES:
         session = store.resolve_primary_session(
             owner_id=resolved_owner,
             agent_id=runtime.name,
@@ -842,6 +876,61 @@ def recent_exchanges(
     return ensure_store(runtime).recent_exchanges(
         session_id,
         context_generation=int(getattr(item, "context_generation", 0) or 0) or None,
+        limit=limit,
+    )
+
+
+def agent_activity_origin_exchanges(
+    runtime: Any,
+    item: Any,
+    *,
+    limit: int = 8,
+) -> list[dict[str, Any]]:
+    """Return the bounded Conversation snapshot attached to an Agent activity Run.
+
+    The activity keeps its own Session and provider lifecycle.  The origin
+    reference supplies read-only conversational context captured at admission.
+    """
+
+    if not is_agent_activity_request(item):
+        return []
+    metadata = getattr(item, "request_metadata", None)
+    if not isinstance(metadata, Mapping):
+        return []
+    activity_context = metadata.get("agent_activity_context")
+    if not isinstance(activity_context, Mapping):
+        return []
+    origin_session_id = str(activity_context.get("origin_session_id") or "").strip()
+    try:
+        origin_generation = int(activity_context.get("origin_context_generation"))
+        origin_ordinal = int(activity_context.get("origin_message_ordinal"))
+    except (TypeError, ValueError):
+        return []
+    if not origin_session_id or origin_generation < 1 or origin_ordinal < 0:
+        return []
+    resolved_owner = owner_id(
+        runtime,
+        str(getattr(item, "owner_id", "") or "").strip() or None,
+    )
+    store = ensure_store(runtime)
+    try:
+        origin = store.get_session(
+            origin_session_id,
+            owner_id=resolved_owner,
+            agent_id=runtime.name,
+            include_deleted=False,
+        )
+    except SessionNotFound:
+        return []
+    if (
+        origin.get("session_kind") != SESSION_KIND_CONVERSATION
+        or origin_generation > int(origin.get("context_generation") or 0)
+    ):
+        return []
+    return store.recent_exchanges(
+        origin_session_id,
+        context_generation=origin_generation,
+        max_user_ordinal=origin_ordinal,
         limit=limit,
     )
 

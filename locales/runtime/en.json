@@ -1849,6 +1849,7 @@
     "bg.task": "Task",
     "bg.request": "Request",
     "bg.queued_effect": "This request may use managed background jobs because you explicitly started it with /bg. Other agent work remains foreground.",
+    "activity.started": "⏳ Started: {task}",
     "bg.manager_missing": "BackgroundJobManager is not running in this runtime.",
     "bg.scope.processes": "managed background processes",
     "bg.none": "No background jobs are recorded.",

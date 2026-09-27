@@ -1628,6 +1628,11 @@ class TaskScheduler:
                         prompt=prompt,
                         source="scheduler",
                         summary=f"Nudge Task [{task_id}]",
+                        scheduler_context={
+                            "kind": "nudge",
+                            "task_id": task_id,
+                            "trigger": "scheduled",
+                        },
                     )
                     self._register_nudge_completion_listener(rt, task_id, request_id)
                     meta["count"] = count

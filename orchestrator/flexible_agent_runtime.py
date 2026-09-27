@@ -3059,6 +3059,18 @@ class FlexibleAgentRuntime:
         emoji = self.get_agent_emoji()
         return f"_{emoji}{display_name} is working..._", constants.ParseMode.MARKDOWN
 
+    def get_agent_activity_start_placeholder(
+        self,
+        item: QueuedRequest,
+    ) -> tuple[str, str | None]:
+        return (
+            ui_language.tr(
+                "activity.started",
+                task=str(getattr(item, "summary", "") or "Task"),
+            ),
+            None,
+        )
+
     def _build_media_prompt(self, media_kind: str, filename: str, caption: str = "", emoji: str = "") -> tuple[str, str]:
         return runtime_media.build_media_prompt(media_kind, filename, caption=caption, emoji=emoji)
 

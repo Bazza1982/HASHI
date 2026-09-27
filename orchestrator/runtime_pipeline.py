@@ -812,19 +812,17 @@ async def record_her_v2_transport_receipt(
 
 def _resolve_session_scope(item) -> str:
     explicit = str(getattr(item, "session_scope", None) or "").strip().lower()
-    if explicit in {
-        SESSION_SCOPE_PERSISTENT,
-        SESSION_SCOPE_ISOLATED,
-        SESSION_SCOPE_ISOLATED_RESUME,
-    }:
+    if explicit in {SESSION_SCOPE_ISOLATED, SESSION_SCOPE_ISOLATED_RESUME}:
         return explicit
+    if runtime_session.is_agent_activity_request(item):
+        return SESSION_SCOPE_ISOLATED
     scheduler_context = getattr(item, "scheduler_context", None)
     if isinstance(scheduler_context, Mapping):
         kind = str(scheduler_context.get("kind") or "").strip().lower()
         task_id = str(scheduler_context.get("task_id") or "").strip()
         trigger = str(scheduler_context.get("trigger") or "").strip().lower()
         if (
-            kind in {"cron", "heartbeat"}
+            kind in {"cron", "heartbeat", "nudge"}
             and task_id
             and trigger in {"scheduled", "manual", "recovery"}
         ):
@@ -832,6 +830,8 @@ def _resolve_session_scope(item) -> str:
             # the ordinary chat timeline would let a preceding job masquerade
             # as context for the current authoritative task prompt.
             return SESSION_SCOPE_ISOLATED
+    if explicit == SESSION_SCOPE_PERSISTENT:
+        return explicit
     return SESSION_SCOPE_PERSISTENT
 
 
@@ -846,14 +846,7 @@ def _begin_provider_session_isolation(
     runtime: Any,
     item: Any,
 ) -> ProviderSessionIsolation:
-    """Start one fixed-backend request without resuming its owning Session.
-
-    Scheduled work is admitted through the ordinary HASHI Session so delivery,
-    auditing, and reply binding retain their normal ownership.  A fixed CLI
-    backend must nevertheless use a fresh provider thread for the run; otherwise
-    the provider can see the previous chat even after HASHI prompt history has
-    been removed.
-    """
+    """Start one independent Agent activity without resuming a provider thread."""
 
     request_meta = request_meta_for(runtime, item.request_id)
     if (
@@ -877,12 +870,14 @@ def _begin_provider_session_isolation(
         )
 
     original_session_id = getattr(backend, "_session_id", None)
-    backend._session_id = None
+    prepared_session_id = getattr(item, "_isolated_provider_session_id", None)
+    backend._session_id = prepared_session_id
     runtime.logger.info(
-        "Provider session isolated for scheduled request %s via %s "
-        "(original_session_present=%s)",
+        "Provider session isolated for Agent activity %s via %s "
+        "(prepared_session_present=%s, original_session_present=%s)",
         item.request_id,
         runtime.config.active_backend,
+        bool(prepared_session_id),
         bool(original_session_id),
     )
     return ProviderSessionIsolation(
@@ -904,7 +899,7 @@ def _restore_provider_session_isolation(
     isolated_session_id = getattr(isolation.backend, "_session_id", None)
     isolation.backend._session_id = isolation.original_session_id
     runtime.logger.info(
-        "Provider session restored after scheduled request %s via %s "
+        "Provider session restored after Agent activity %s via %s "
         "(isolated_session_created=%s, original_session_present=%s)",
         item.request_id,
         runtime.config.active_backend,
@@ -1152,7 +1147,7 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
     )
     provider_session_id = getattr(backend, "_session_id", None)
     session_scope = str(request_meta.get("session_scope") or SESSION_SCOPE_PERSISTENT)
-    isolated_scheduler_run = session_scope == SESSION_SCOPE_ISOLATED
+    isolated_activity_run = session_scope == SESSION_SCOPE_ISOLATED
     incremental = (
         supports_sessions
         and provider_session_id is not None
@@ -1164,13 +1159,24 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
         incremental = bool(callable(can_resume) and can_resume())
     continuity_enabled = (
         is_memory_plus_enabled(runtime.workspace_dir)
-        and not isolated_scheduler_run
+        and not isolated_activity_run
     )
     session_scoped = bool(str(getattr(item, "session_id", "") or ""))
     session_workspace = runtime_session.item_session_workspace(runtime, item)
+    activity_origin_history = (
+        runtime_session.agent_activity_origin_exchanges(
+            runtime,
+            item,
+            limit=int(
+                getattr(runtime.context_assembler, "MAX_RECENT_EXCHANGES", 8)
+            ),
+        )
+        if isolated_activity_run and runtime_session.is_agent_activity_request(item)
+        else []
+    )
     session_history = (
-        []
-        if isolated_scheduler_run
+        activity_origin_history
+        if isolated_activity_run
         else runtime_session.recent_exchanges(
             runtime,
             item,
@@ -1209,7 +1215,7 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
             "session_workspace": str(session_workspace),
             "engine": runtime.config.active_backend,
         }
-    if not isolated_scheduler_run:
+    if not isolated_activity_run:
         extra_sections += await pre_turn_builder(
             item, effective_prompt, **pre_turn_kwargs
         )
@@ -1221,7 +1227,7 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
     prompt_kwargs = {
         "extra_sections": extra_sections,
         "inject_memory": (
-            not item.skip_memory_injection and not isolated_scheduler_run
+            not item.skip_memory_injection and not isolated_activity_run
         ),
         "incremental": incremental,
     }
@@ -1232,6 +1238,12 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
         and "recent_exchanges" in inspect.signature(prompt_builder).parameters
     ):
         prompt_kwargs["recent_exchanges"] = session_history
+    if (
+        activity_origin_history
+        and "explicit_history_context"
+        in inspect.signature(prompt_builder).parameters
+    ):
+        prompt_kwargs["explicit_history_context"] = True
     if "prompt_budget_tokens" in inspect.signature(prompt_builder).parameters:
         backend_extra = getattr(getattr(backend, "config", None), "extra", None)
         if isinstance(backend_extra, dict):
@@ -1245,7 +1257,7 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
         runtime.config.active_backend == "her-v2"
         and not incremental
         and not item.skip_memory_injection
-        and not isolated_scheduler_run
+        and not isolated_activity_run
         and not is_bridge_request
         and bool(
             getattr(
@@ -1362,12 +1374,33 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
             raise RuntimeError(
                 "HER v2 fixed mode requires the fixed-backend transport contract"
             )
-        fixed_prompt, fixed_audit = prepare_fixed(
-            prompt_payload=prompt_payload,
-            user_message=effective_prompt,
-            request_id=item.request_id,
-            request_meta=request_meta,
-        )
+        preparation_isolation = _begin_provider_session_isolation(runtime, item)
+        isolated_provider_session_id = None
+        try:
+            fixed_prompt, fixed_audit = prepare_fixed(
+                prompt_payload=prompt_payload,
+                user_message=effective_prompt,
+                request_id=item.request_id,
+                request_meta=request_meta,
+            )
+            if preparation_isolation.active:
+                isolated_provider_session_id = getattr(
+                    preparation_isolation.backend,
+                    "_session_id",
+                    None,
+                )
+        finally:
+            _restore_provider_session_isolation(
+                runtime,
+                item,
+                preparation_isolation,
+            )
+        if preparation_isolation.active:
+            if not isolated_provider_session_id:
+                raise RuntimeError(
+                    "HER fixed Agent activity did not open an isolated provider session"
+                )
+            item._isolated_provider_session_id = isolated_provider_session_id
         prompt_payload["final_prompt"] = fixed_prompt
         prompt_payload.setdefault("audit", {})["her_fixed_backend"] = dict(
             fixed_audit
@@ -1378,10 +1411,11 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
         # model or tool work. A process replacement during the first turn can
         # therefore recover the same durable HER session instead of opening a
         # competing logical thread.
-        runtime_session.capture_backend_binding(
-            runtime,
-            request_id=item.request_id,
-        )
+        if session_scope == SESSION_SCOPE_PERSISTENT:
+            runtime_session.capture_backend_binding(
+                runtime,
+                request_id=item.request_id,
+            )
 
     _canonical_record(
         runtime,
@@ -2609,6 +2643,11 @@ async def setup_interactive_feedback(
     )
     verbose_delivery_enabled = delivery_requested and runtime._verbose and not delivery_blocked
     think_delivery_enabled = delivery_requested and runtime._think and not delivery_blocked
+    activity_start_delivery_enabled = (
+        delivery_requested
+        and runtime_session.is_agent_activity_request(item)
+        and not delivery_blocked
+    )
     backend = runtime.backend_manager.current_backend
     normalized_backend = canonical_backend_engine(
         getattr(runtime.config, "active_backend", "")
@@ -2619,11 +2658,16 @@ async def setup_interactive_feedback(
         runtime.logger.info(
             f"Telegram display policy {item.request_id}: "
             f"typing={typing_delivery_enabled}, verbose={verbose_delivery_enabled}, "
-            f"think={think_delivery_enabled}, source={display_policy.source}, "
+            f"think={think_delivery_enabled}, activity_start={activity_start_delivery_enabled}, "
+            f"source={display_policy.source}, "
             f"blocked={delivery_blocked}"
         )
 
-    if typing_delivery_enabled or verbose_delivery_enabled:
+    if (
+        typing_delivery_enabled
+        or verbose_delivery_enabled
+        or activity_start_delivery_enabled
+    ):
         from orchestrator.frontend_connector_registry import (
             require_connector_presentation_override,
         )
@@ -2631,7 +2675,11 @@ async def setup_interactive_feedback(
         require_connector_presentation_override(
             "telegram", "ephemeral_progress"
         )
-        if typing_delivery_enabled:
+        if activity_start_delivery_enabled:
+            placeholder_text, placeholder_parse_mode = (
+                runtime.get_agent_activity_start_placeholder(item)
+            )
+        elif typing_delivery_enabled:
             placeholder_text, placeholder_parse_mode = runtime.get_typing_placeholder()
         else:
             placeholder_text, placeholder_parse_mode = runtime.get_progress_placeholder()
@@ -2678,6 +2726,9 @@ async def setup_interactive_feedback(
         typing_delivery_enabled = typing_delivery_enabled and not delivery_blocked
         verbose_delivery_enabled = verbose_delivery_enabled and not delivery_blocked
         think_delivery_enabled = think_delivery_enabled and not delivery_blocked
+        activity_start_delivery_enabled = (
+            activity_start_delivery_enabled and not delivery_blocked
+        )
     capabilities = getattr(backend, "capabilities", None)
     runtime.logger.info(
         f"Verbose event eligibility {item.request_id}: enabled={verbose_delivery_enabled}, "
@@ -2737,7 +2788,7 @@ async def setup_interactive_feedback(
                 event_queue=stream_queue,
                 backend=backend,
                 display_state=verbose_display_state,
-                seed_placeholder=placeholder,
+                seed_placeholder=(placeholder if verbose_delivery_enabled else None),
             ),
             name=f"live-verbose-supervisor-{item.request_id}",
         )

@@ -255,7 +255,12 @@ async def test_background_job_start_requires_explicit_user_bg_request(
 async def test_background_job_completion_enqueues_agent_event_once(tmp_path: Path):
     queued: list[dict] = []
 
-    async def enqueue_api_text(text: str, source: str = "api", deliver_to_telegram: bool = True):
+    async def enqueue_api_text(
+        text: str,
+        source: str = "api",
+        deliver_to_telegram: bool = True,
+        **kwargs,
+    ):
         request_id = f"queued-{len(queued) + 1}"
         queued.append(
             {
@@ -263,6 +268,7 @@ async def test_background_job_completion_enqueues_agent_event_once(tmp_path: Pat
                 "text": text,
                 "source": source,
                 "deliver_to_telegram": deliver_to_telegram,
+                **kwargs,
             }
         )
         return request_id
@@ -276,7 +282,11 @@ async def test_background_job_completion_enqueues_agent_event_once(tmp_path: Pat
         agent="zelda",
         cwd=tmp_path,
         argv=[sys.executable, "-c", "print('agent event done')"],
-        origin={"summary": "background event smoke"},
+        origin={
+            "summary": "background event smoke",
+            "request_id": "req-origin",
+            "session_id": "ses-origin",
+        },
         notify_on_complete=False,
     )
     await manager._monitor_tasks[record.job_id]
@@ -289,6 +299,16 @@ async def test_background_job_completion_enqueues_agent_event_once(tmp_path: Pat
     assert len(queued) == 1
     assert queued[0]["source"] == "background-job-event"
     assert queued[0]["deliver_to_telegram"] is True
+    assert queued[0]["request_metadata"]["agent_activity_context"] == {
+        "kind": "background_job",
+        "task_id": record.job_id,
+        "trigger": "completion",
+        "origin_request_id": "req-origin",
+        "origin_session_id": "ses-origin",
+    }
+    assert queued[0]["idempotency_key"] == (
+        f"background-job-event:{record.job_id}:succeeded"
+    )
     assert f"job_id: {record.job_id}" in queued[0]["text"]
     assert "event: succeeded" in queued[0]["text"]
     assert "background event smoke" in queued[0]["text"]
@@ -300,10 +320,22 @@ async def test_background_job_completion_enqueues_agent_event_once(tmp_path: Pat
 
 @pytest.mark.asyncio
 async def test_background_job_failure_enqueues_agent_event(tmp_path: Path):
-    queued: list[str] = []
+    queued: list[dict] = []
 
-    async def enqueue_api_text(text: str, source: str = "api", deliver_to_telegram: bool = True):
-        queued.append(text)
+    async def enqueue_api_text(
+        text: str,
+        source: str = "api",
+        deliver_to_telegram: bool = True,
+        **kwargs,
+    ):
+        queued.append(
+            {
+                "text": text,
+                "source": source,
+                "deliver_to_telegram": deliver_to_telegram,
+                **kwargs,
+            }
+        )
         return "queued-failure"
 
     runtime = SimpleNamespace(name="zelda", enqueue_api_text=enqueue_api_text)
@@ -325,6 +357,12 @@ async def test_background_job_failure_enqueues_agent_event(tmp_path: Path):
     assert saved.notification["agent_event_enqueued"] is True
     assert saved.notification["agent_event_request_id"] == "queued-failure"
     assert len(queued) == 1
-    assert "event: failed" in queued[0]
-    assert "returncode: 3" in queued[0]
-    assert "agent event failed" in queued[0]
+    assert "event: failed" in queued[0]["text"]
+    assert "returncode: 3" in queued[0]["text"]
+    assert "agent event failed" in queued[0]["text"]
+    assert queued[0]["request_metadata"]["agent_activity_context"]["task_id"] == (
+        record.job_id
+    )
+    assert queued[0]["idempotency_key"] == (
+        f"background-job-event:{record.job_id}:failed"
+    )
