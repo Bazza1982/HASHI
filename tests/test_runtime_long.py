@@ -84,6 +84,32 @@ def test_text_only_batch_preserves_original_prompt_shape():
     assert submission.line_count == 3
 
 
+@pytest.mark.asyncio
+async def test_discard_batch_cancels_timers_and_invalidates_late_media():
+    runtime = _runtime()
+    runtime_long.begin_batch(runtime, 123, "draft")
+    reservation_id = runtime_long.reserve_media(runtime, 123, "photo", "pending")
+    timeout_task = asyncio.create_task(asyncio.sleep(60))
+    finalize_task = asyncio.create_task(asyncio.sleep(60))
+    runtime._long_buffer_timeout_task = timeout_task
+    runtime._long_finalize_task = finalize_task
+
+    report = runtime_long.discard_batch(runtime)
+    await asyncio.sleep(0)
+
+    assert report == {
+        "active": True,
+        "items": 2,
+        "pending_media": 1,
+        "pending_voice": 0,
+    }
+    assert timeout_task.cancelled()
+    assert finalize_task.cancelled()
+    assert runtime_long.is_batch_active(runtime) is False
+    assert runtime_long.complete_media(runtime, reservation_id, "late") is False
+    assert runtime.enqueued == []
+
+
 def test_multimodal_batch_preserves_item_order_and_requests_one_response():
     runtime = _runtime()
     runtime_long.begin_batch(runtime, 123)

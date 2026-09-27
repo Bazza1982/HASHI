@@ -323,7 +323,7 @@ class SessionStore:
     per-Session working files are derived state used by Memory+ and Compact.
     """
 
-    SCHEMA_VERSION = 11
+    SCHEMA_VERSION = 12
 
     def __init__(
         self,
@@ -442,6 +442,48 @@ class SessionStore:
                 );
                 CREATE INDEX IF NOT EXISTS session_workzones_session_enabled
                     ON session_workzones(session_id, enabled, slot_id);
+
+                CREATE TABLE IF NOT EXISTS agent_workzone_profiles (
+                    instance_id TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    revision INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(instance_id, owner_id, agent_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS agent_workzones (
+                    instance_id TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    slot_id TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    label TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(instance_id, owner_id, agent_id, slot_id),
+                    FOREIGN KEY(instance_id, owner_id, agent_id)
+                        REFERENCES agent_workzone_profiles(instance_id, owner_id, agent_id)
+                        ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS agent_workzones_enabled
+                    ON agent_workzones(instance_id, owner_id, agent_id, enabled, slot_id);
+
+                CREATE TABLE IF NOT EXISTS agent_workzone_events (
+                    event_id TEXT PRIMARY KEY,
+                    instance_id TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    kind TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    detail_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS agent_workzone_events_owner_agent
+                    ON agent_workzone_events(instance_id, owner_id, agent_id, created_at);
 
                 CREATE TABLE IF NOT EXISTS session_participants (
                     session_id TEXT NOT NULL,
@@ -7152,6 +7194,365 @@ class SessionStore:
 
         with self._lock, self._connection() as connection:
             return self._workzone_set_from_connection(connection, str(session_id))
+
+    @staticmethod
+    def _agent_workzone_identity(owner_id: str, agent_id: str) -> tuple[str, str]:
+        owner = str(owner_id or "").strip()
+        agent = str(agent_id or "").strip().lower()
+        if not owner or not agent:
+            raise ValueError("owner_id and agent_id are required")
+        return owner, agent
+
+    def _agent_workzone_set_from_connection(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        owner_id: str,
+        agent_id: str,
+    ) -> dict[str, Any]:
+        owner, agent = self._agent_workzone_identity(owner_id, agent_id)
+        profile = connection.execute(
+            """
+            SELECT revision FROM agent_workzone_profiles
+            WHERE instance_id = ? AND owner_id = ? AND agent_id = ?
+            """,
+            (self.instance_id, owner, agent),
+        ).fetchone()
+        rows = connection.execute(
+            """
+            SELECT slot_id, path, enabled, label, created_at, updated_at
+            FROM agent_workzones
+            WHERE instance_id = ? AND owner_id = ? AND agent_id = ?
+            """,
+            (self.instance_id, owner, agent),
+        ).fetchall()
+        slots = []
+        for row in sorted(
+            rows,
+            key=lambda item: self._workzone_slot_sort_key(str(item["slot_id"])),
+        ):
+            item = dict(row)
+            item["enabled"] = bool(item.get("enabled"))
+            slots.append(item)
+        return {
+            "owner_id": owner,
+            "agent_id": agent,
+            "revision": int(profile["revision"] if profile is not None else 0),
+            "slots": slots,
+        }
+
+    def get_agent_workzone_set(
+        self, *, owner_id: str, agent_id: str
+    ) -> dict[str, Any]:
+        """Return the sole Agent-scoped Workzone profile; Session rows are ignored."""
+
+        with self._lock, self._connection() as connection:
+            return self._agent_workzone_set_from_connection(
+                connection, owner_id=owner_id, agent_id=agent_id
+            )
+
+    @staticmethod
+    def _check_agent_workzone_revision(
+        profile: sqlite3.Row | None, expected_revision: int | None
+    ) -> int:
+        actual = int(profile["revision"] if profile is not None else 0)
+        if expected_revision is not None and actual != int(expected_revision):
+            raise SessionConflict(
+                f"Workzone menu is stale (expected revision {expected_revision}, current {actual})"
+            )
+        return actual
+
+    def _append_agent_workzone_event(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        owner_id: str,
+        agent_id: str,
+        revision: int,
+        kind: str,
+        source: str,
+        detail: Mapping[str, Any],
+        created_at: str,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO agent_workzone_events(
+                event_id, instance_id, owner_id, agent_id, revision,
+                kind, source, detail_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _new_id("wze"),
+                self.instance_id,
+                owner_id,
+                agent_id,
+                int(revision),
+                str(kind),
+                str(source),
+                _json(detail),
+                created_at,
+            ),
+        )
+
+    def set_agent_workzone_slot(
+        self,
+        *,
+        owner_id: str,
+        agent_id: str,
+        slot_id: str,
+        path: str | None = None,
+        enabled: bool | None = None,
+        label: str | None = None,
+        expected_revision: int | None = None,
+        source: str = "telegram",
+    ) -> dict[str, Any]:
+        """Atomically create or update one Agent-scoped Workzone slot."""
+
+        owner, agent = self._agent_workzone_identity(owner_id, agent_id)
+        slot = self._require_workzone_slot(slot_id)
+        now = _utc_now()
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            profile = connection.execute(
+                """
+                SELECT revision FROM agent_workzone_profiles
+                WHERE instance_id = ? AND owner_id = ? AND agent_id = ?
+                """,
+                (self.instance_id, owner, agent),
+            ).fetchone()
+            actual_revision = self._check_agent_workzone_revision(
+                profile, expected_revision
+            )
+            existing = connection.execute(
+                """
+                SELECT * FROM agent_workzones
+                WHERE instance_id = ? AND owner_id = ? AND agent_id = ? AND slot_id = ?
+                """,
+                (self.instance_id, owner, agent, slot),
+            ).fetchone()
+            before = None
+            if existing is not None:
+                before = {
+                    "path": str(existing["path"]),
+                    "enabled": bool(existing["enabled"]),
+                    "label": str(existing["label"] or ""),
+                }
+            resolved_path = str(path).strip() if path is not None else ""
+            if not resolved_path and existing is not None:
+                resolved_path = str(existing["path"])
+            if not resolved_path:
+                raise ValueError("path is required for an empty workzone slot")
+            after = {
+                "path": resolved_path,
+                "enabled": (
+                    bool(enabled)
+                    if enabled is not None
+                    else bool(existing["enabled"] if existing is not None else True)
+                ),
+                "label": (
+                    str(label).strip()
+                    if label is not None
+                    else str(existing["label"] or "") if existing is not None else ""
+                ),
+            }
+            if before == after:
+                return self._agent_workzone_set_from_connection(
+                    connection, owner_id=owner, agent_id=agent
+                )
+            if profile is None:
+                connection.execute(
+                    """
+                    INSERT INTO agent_workzone_profiles(
+                        instance_id, owner_id, agent_id, revision, created_at, updated_at
+                    ) VALUES (?, ?, ?, 1, ?, ?)
+                    """,
+                    (self.instance_id, owner, agent, now, now),
+                )
+                revision = 1
+            else:
+                revision = actual_revision + 1
+                connection.execute(
+                    """
+                    UPDATE agent_workzone_profiles SET revision = ?, updated_at = ?
+                    WHERE instance_id = ? AND owner_id = ? AND agent_id = ?
+                    """,
+                    (revision, now, self.instance_id, owner, agent),
+                )
+            connection.execute(
+                """
+                INSERT INTO agent_workzones(
+                    instance_id, owner_id, agent_id, slot_id, path,
+                    enabled, label, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(instance_id, owner_id, agent_id, slot_id) DO UPDATE SET
+                    path = excluded.path,
+                    enabled = excluded.enabled,
+                    label = excluded.label,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    self.instance_id,
+                    owner,
+                    agent,
+                    slot,
+                    after["path"],
+                    int(after["enabled"]),
+                    after["label"],
+                    now,
+                    now,
+                ),
+            )
+            self._append_agent_workzone_event(
+                connection,
+                owner_id=owner,
+                agent_id=agent,
+                revision=revision,
+                kind="agent.workzone_slot_changed",
+                source=source,
+                detail={"slot": slot, "before": before, "after": after},
+                created_at=now,
+            )
+            return self._agent_workzone_set_from_connection(
+                connection, owner_id=owner, agent_id=agent
+            )
+
+    def delete_agent_workzone_slot(
+        self,
+        *,
+        owner_id: str,
+        agent_id: str,
+        slot_id: str,
+        expected_revision: int | None = None,
+        source: str = "telegram",
+    ) -> dict[str, Any]:
+        owner, agent = self._agent_workzone_identity(owner_id, agent_id)
+        slot = self._require_workzone_slot(slot_id)
+        now = _utc_now()
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            profile = connection.execute(
+                """SELECT revision FROM agent_workzone_profiles
+                   WHERE instance_id = ? AND owner_id = ? AND agent_id = ?""",
+                (self.instance_id, owner, agent),
+            ).fetchone()
+            actual_revision = self._check_agent_workzone_revision(
+                profile, expected_revision
+            )
+            existing = connection.execute(
+                """SELECT * FROM agent_workzones
+                   WHERE instance_id = ? AND owner_id = ? AND agent_id = ? AND slot_id = ?""",
+                (self.instance_id, owner, agent, slot),
+            ).fetchone()
+            if existing is None:
+                return self._agent_workzone_set_from_connection(
+                    connection, owner_id=owner, agent_id=agent
+                )
+            revision = actual_revision + 1
+            connection.execute(
+                """DELETE FROM agent_workzones
+                   WHERE instance_id = ? AND owner_id = ? AND agent_id = ? AND slot_id = ?""",
+                (self.instance_id, owner, agent, slot),
+            )
+            connection.execute(
+                """UPDATE agent_workzone_profiles SET revision = ?, updated_at = ?
+                   WHERE instance_id = ? AND owner_id = ? AND agent_id = ?""",
+                (revision, now, self.instance_id, owner, agent),
+            )
+            before = {
+                "path": str(existing["path"]),
+                "enabled": bool(existing["enabled"]),
+                "label": str(existing["label"] or ""),
+            }
+            self._append_agent_workzone_event(
+                connection,
+                owner_id=owner,
+                agent_id=agent,
+                revision=revision,
+                kind="agent.workzone_slot_deleted",
+                source=source,
+                detail={"slot": slot, "before": before},
+                created_at=now,
+            )
+            return self._agent_workzone_set_from_connection(
+                connection, owner_id=owner, agent_id=agent
+            )
+
+    def disable_all_agent_workzones(
+        self,
+        *,
+        owner_id: str,
+        agent_id: str,
+        expected_revision: int | None = None,
+        source: str = "telegram",
+    ) -> dict[str, Any]:
+        owner, agent = self._agent_workzone_identity(owner_id, agent_id)
+        now = _utc_now()
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            profile = connection.execute(
+                """SELECT revision FROM agent_workzone_profiles
+                   WHERE instance_id = ? AND owner_id = ? AND agent_id = ?""",
+                (self.instance_id, owner, agent),
+            ).fetchone()
+            actual_revision = self._check_agent_workzone_revision(
+                profile, expected_revision
+            )
+            changed = connection.execute(
+                """UPDATE agent_workzones SET enabled = 0, updated_at = ?
+                   WHERE instance_id = ? AND owner_id = ? AND agent_id = ? AND enabled != 0""",
+                (now, self.instance_id, owner, agent),
+            )
+            if changed.rowcount:
+                revision = actual_revision + 1
+                connection.execute(
+                    """UPDATE agent_workzone_profiles SET revision = ?, updated_at = ?
+                       WHERE instance_id = ? AND owner_id = ? AND agent_id = ?""",
+                    (revision, now, self.instance_id, owner, agent),
+                )
+                self._append_agent_workzone_event(
+                    connection,
+                    owner_id=owner,
+                    agent_id=agent,
+                    revision=revision,
+                    kind="agent.workzones_disabled",
+                    source=source,
+                    detail={"changed": int(changed.rowcount)},
+                    created_at=now,
+                )
+            return self._agent_workzone_set_from_connection(
+                connection, owner_id=owner, agent_id=agent
+            )
+
+    def record_agent_workzone_reload(
+        self,
+        *,
+        owner_id: str,
+        agent_id: str,
+        slots: Iterable[str],
+        source: str = "telegram",
+    ) -> None:
+        owner, agent = self._agent_workzone_identity(owner_id, agent_id)
+        now = _utc_now()
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            profile = connection.execute(
+                """SELECT revision FROM agent_workzone_profiles
+                   WHERE instance_id = ? AND owner_id = ? AND agent_id = ?""",
+                (self.instance_id, owner, agent),
+            ).fetchone()
+            revision = int(profile["revision"] if profile is not None else 0)
+            self._append_agent_workzone_event(
+                connection,
+                owner_id=owner,
+                agent_id=agent,
+                revision=revision,
+                kind="agent.workzones_reloaded",
+                source=source,
+                detail={
+                    "slots": [self._require_workzone_slot(slot) for slot in slots]
+                },
+                created_at=now,
+            )
 
     @staticmethod
     def _require_workzone_slot(slot_id: str) -> str:

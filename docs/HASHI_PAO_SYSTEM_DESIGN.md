@@ -34,6 +34,8 @@ PAO owns the following product domains.
 
 - Agent identity, directory, lifecycle, and active runtime binding;
 - Engine Provider discovery, selection, availability, and migration aliases;
+- one revisioned Workzone profile per authenticated owner and Agent, independent
+  of Conversation Session selection;
 - startup, stop, restart, hot-reload coordination, and runtime health; and
 - Fixed/Flex working-mode policy, retired outer-composition migration, and any
   future runtime composition that spans Engines.
@@ -66,11 +68,16 @@ PAO is the sole owner of:
 - Agent and frontend/channel binding;
 - Messages, Runs, attempts, Events, consumer acknowledgements, and fencing;
 - context generation, archive, fresh, fork, promotion, and recovery controls;
-- Workzone state and revision; and
 - the stable Conversation-to-Engine Session binding.
 
 An Engine may own its internal Engine Session but must not become a second
 owner of the enclosing Conversation Session.
+
+Workzone configuration is Agent control state, not Conversation Session state.
+`/new`, `/use`, `/fresh`, and `/archive` therefore cannot replace it. PAO freezes
+the current Agent Workzone revision into each admitted Run so an in-flight Run
+cannot observe a later menu change. Legacy Session Workzone rows remain inert
+compatibility records and are not silently migrated or merged.
 
 ### 2.3 Outer orchestration
 
@@ -327,7 +334,7 @@ Commands are connector entry points into domain contracts.
 |---|---|---|
 | `/new`, `/fresh`, `/sessions`, `/use`, `/current`, `/archive`, `/fork` | Conversation Session lifecycle and selection | PCM supplies the resulting Context projection |
 | `/backend` and compatible Engine selection | Engine Provider binding and migration | Selected Engine owns its internal Session |
-| `/workzone` | Workzone state, validation, and revision | PCM projects enabled Workzones |
+| `/workzone` | Owner/Agent Workzone state, validation, and revision | PCM projects the admitted Run snapshot |
 | `/handoff` | Session continuity operation | PCM assembles the continuity payload |
 | `/clear` | Coordinate Session/media/Engine cleanup | Connector media and selected Engine participate |
 | `/jobs`, `/loop`, `/bg` | Job and outer orchestration lifecycle | Connector renders status |

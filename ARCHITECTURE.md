@@ -254,7 +254,8 @@ The connector boundary is defined in
 
 | State boundary | Authoritative owner | Meaning |
 |---|---|---|
-| HASHI Conversation Session | PAO | User/Agent/client binding, Messages, Runs, Events, Workzones, context generation, and Engine binding |
+| Agent Workzone profile | PAO | One owner/Agent-scoped, revisioned set of working roots shared by every Conversation Session; each admitted Run freezes a snapshot |
+| HASHI Conversation Session | PAO | User/Agent/client binding, Messages, Runs, Events, context generation, and Engine binding |
 | HER Engine Session | HER v2 | Durable HER logical thread, accepted Turns, materialised PCM/resources, plans, Tool evidence, recovery, Compact, and Engine meter |
 | Other Engine Session | Selected Engine Provider | Provider-specific logical thread under the PAO binding contract |
 | Provider Context | No persistent product authority | Rebuildable model transport, response-chain, thread, cache, or process state |
@@ -284,8 +285,10 @@ module reload is forbidden. Contributor workflow and required checks are in
 Shared Frontend Function ingress for Telegram and the Backend API sends slash control through the
 versioned Function Worker RPC. Each Worker also owns a dedicated out-of-band
 provider-interrupt lane, so stop, steer, focus, and retry can terminate active
-CLI work before normal event-loop cleanup. Session Workzone slots publish only
-their exact enabled roots to backends and tools; implementations must not widen
-multiple roots to their common parent. HASHI Remote rescue remains a separately
+CLI work before normal event-loop cleanup. Agent Workzone slots publish only
+their exact enabled roots to backends and tools; `/new`, `/use`, and context
+generation changes never replace them. Each Run retains its admission-time
+Workzone snapshot, and implementations must not widen multiple roots to their
+common parent. HASHI Remote rescue remains a separately
 deployed `L3_RESTART` sidecar, and its local hot-reboot hop must use the
 token-protected Backend API admin command endpoint.

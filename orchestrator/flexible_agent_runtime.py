@@ -121,7 +121,7 @@ from orchestrator.flexible_backend_registry import (
 )
 from orchestrator.runtime_effort_options import get_available_efforts, normalize_effort
 from orchestrator.memory_index import MemoryIndex
-from orchestrator.memory_search_mode import apply_memory_search_preference
+from orchestrator.memory_search_mode import apply_memory_injection_preferences
 from orchestrator.handoff_builder import HandoffBuilder
 from orchestrator.media_utils import is_image_file, normalize_image_file
 from orchestrator.parked_topics import ParkedTopicStore
@@ -158,7 +158,6 @@ from orchestrator.telegram_notifications import (
     notification_mode,
 )
 from orchestrator.voice_manager import VoiceManager
-from orchestrator.workzone import load_workzone
 from orchestrator.wrapper_mode import SESSION_RESET_SOURCE, load_wrapper_config, visible_wrapper_slots
 from orchestrator.audit_mode import (
     AuditTelemetryCollector,
@@ -334,21 +333,11 @@ class FlexibleAgentRuntime:
         self.runtime_session_path = self.workspace_dir / ".runtime_session.json"
         self.transfer_state_path = self.workspace_dir / "active_transfer.json"
         self._cos_enabled: bool = (self.workspace_dir / ".cos_on").exists()
-        default_session = runtime_session.initialize_runtime_sessions(self)
-        legacy_workzone = load_workzone(self.workspace_dir)
-        workzone_state = self.session_store.get_workzone_set(
-            default_session["session_id"]
+        runtime_session.initialize_runtime_sessions(self)
+        workzone_state = self.session_store.get_agent_workzone_set(
+            owner_id=runtime_session.owner_id(self),
+            agent_id=self.name,
         )
-        if not workzone_state["slots"] and legacy_workzone is not None:
-            # One-time compatibility migration: the old Agent-wide value
-            # becomes only the permanent default Session's main Workzone.
-            workzone_state = self.session_store.set_workzone_slot(
-                default_session["session_id"],
-                "main",
-                path=str(legacy_workzone),
-                enabled=True,
-                source="legacy_workzone_json",
-            )
         runtime_workzone.install_runtime_state(self, workzone_state)
         self._sync_workzone_to_backend_config()
         self.voice_manager = VoiceManager(
@@ -423,7 +412,7 @@ class FlexibleAgentRuntime:
             skill_catalog_provider=self._get_available_skill_catalogue,
             tool_catalog_provider=self._get_available_tool_catalogue,
         )
-        apply_memory_search_preference(self.context_assembler, self.workspace_dir)
+        apply_memory_injection_preferences(self.context_assembler, self.workspace_dir)
         # Initialize FlexibleBackendManager
         self.backend_manager = FlexibleBackendManager(config, global_config, secrets)
         self.backend_manager.runtime = self

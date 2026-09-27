@@ -3,9 +3,12 @@ from types import SimpleNamespace
 import pytest
 
 from orchestrator.memory_search_mode import (
+    apply_memory_injection_preferences,
     apply_memory_search_preference,
     is_memory_search_enabled,
+    is_memory_turns_enabled,
     set_memory_search_enabled,
+    set_memory_turns_enabled,
 )
 from orchestrator.runtime_workspace import cmd_memory
 
@@ -27,6 +30,27 @@ def test_memory_search_defaults_off_and_persists_user_setting(tmp_path):
     third = SimpleNamespace(saved_memory_injection_enabled=True)
     assert apply_memory_search_preference(third, workspace) is False
     assert third.saved_memory_injection_enabled is False
+
+
+def test_turn_and_saved_memory_preferences_persist_independently(tmp_path):
+    workspace = tmp_path / "agent"
+    workspace.mkdir()
+
+    assert is_memory_turns_enabled(workspace) is True
+    assert is_memory_search_enabled(workspace) is False
+    set_memory_turns_enabled(workspace, False)
+    set_memory_search_enabled(workspace, True)
+
+    assembler = SimpleNamespace(
+        turns_injection_enabled=True,
+        saved_memory_injection_enabled=False,
+    )
+    assert apply_memory_injection_preferences(assembler, workspace) == {
+        "turns": False,
+        "saved": True,
+    }
+    assert assembler.turns_injection_enabled is False
+    assert assembler.saved_memory_injection_enabled is True
 
 
 @pytest.mark.asyncio

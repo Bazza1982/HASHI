@@ -21,6 +21,34 @@ def _store(tmp_path) -> SessionStore:
     return SessionStore(tmp_path / "state" / "sessions.sqlite3", instance_id="HASHI1")
 
 
+def test_agent_workzones_are_independent_of_legacy_session_rows(tmp_path):
+    store = _store(tmp_path)
+    session = store.ensure_default_session(owner_id="user:7", agent_id="lily")
+    legacy_path = tmp_path / "legacy-session-zone"
+    agent_path = tmp_path / "agent-zone"
+    legacy_path.mkdir()
+    agent_path.mkdir()
+    store.set_workzone_slot(session["session_id"], "main", path=str(legacy_path))
+
+    assert store.get_agent_workzone_set(owner_id="user:7", agent_id="lily") == {
+        "owner_id": "user:7",
+        "agent_id": "lily",
+        "revision": 0,
+        "slots": [],
+    }
+    updated = store.set_agent_workzone_slot(
+        owner_id="user:7",
+        agent_id="lily",
+        slot_id="main",
+        path=str(agent_path),
+    )
+    assert updated["revision"] == 1
+    assert updated["slots"][0]["path"] == str(agent_path)
+    assert store.get_workzone_set(session["session_id"])["slots"][0]["path"] == str(
+        legacy_path
+    )
+
+
 def test_failed_run_retains_owner_scoped_provider_details_after_reopen(tmp_path, monkeypatch):
     store = _store(tmp_path)
     session = store.ensure_default_session(owner_id="user:7", agent_id="lily")

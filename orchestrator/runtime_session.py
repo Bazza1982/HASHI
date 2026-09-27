@@ -1216,22 +1216,49 @@ def capture_backend_binding(runtime: Any, *, request_id: str) -> None:
     )
 
 
-def _session_workzone_path(session: Mapping[str, Any]) -> Path | None:
-    value = str(session.get("workzone") or "").strip()
-    return Path(value) if value else None
-
-
 def session_workzone(runtime: Any, item: Any | None = None, *, update: Any | None = None) -> Path | None:
+    from orchestrator.workzone import primary_workzone_path
+
+    return primary_workzone_path(
+        agent_workzone_state(runtime, item, update=update)
+    )
+
+
+def agent_workzone_state(
+    runtime: Any,
+    item: Any | None = None,
+    *,
+    owner: str | None = None,
+    update: Any | None = None,
+) -> dict[str, Any]:
+    """Resolve the Agent-scoped Workzone profile or an admitted Run snapshot."""
+
+    from orchestrator.workzone import normalize_workzone_state
+
+    metadata = getattr(item, "request_metadata", None)
+    if isinstance(metadata, Mapping):
+        snapshot = metadata.get("workzone_snapshot")
+        if isinstance(snapshot, Mapping):
+            return normalize_workzone_state(snapshot)
+    resolved_owner = str(owner or "").strip()
+    if not resolved_owner and item is not None:
+        resolved_owner = str(getattr(item, "owner_id", "") or "").strip()
+    if not resolved_owner and isinstance(metadata, Mapping):
+        resolved_owner = str(metadata.get("owner_id") or "").strip()
+    if not resolved_owner and update is not None:
+        try:
+            resolved_owner = str(current_session_for_update(runtime, update)["owner_id"])
+        except (AttributeError, SessionNotFound):
+            resolved_owner = ""
+    resolved_owner = resolved_owner or owner_id(runtime)
     try:
-        if item is not None and getattr(item, "session_id", None):
-            session = ensure_store(runtime).get_session(item.session_id)
-        elif update is not None:
-            session = current_session_for_update(runtime, update)
-        else:
-            session = ensure_store(runtime).get_session(runtime.default_session_id)
+        state = ensure_store(runtime).get_agent_workzone_set(
+            owner_id=resolved_owner,
+            agent_id=runtime.name,
+        )
     except (AttributeError, SessionNotFound):
-        return None
-    return _session_workzone_path(session)
+        return {"revision": 0, "slots": []}
+    return normalize_workzone_state(state)
 
 
 def session_workzone_state(
@@ -1241,48 +1268,39 @@ def session_workzone_state(
     session_id: str | None = None,
     update: Any | None = None,
 ) -> dict[str, Any]:
-    from orchestrator.workzone import normalize_workzone_state
-
-    metadata = getattr(item, "request_metadata", None)
-    if isinstance(metadata, Mapping):
-        snapshot = metadata.get("workzone_snapshot")
-        if isinstance(snapshot, Mapping):
-            return normalize_workzone_state(snapshot)
-    resolved_session_id = str(session_id or getattr(item, "session_id", "") or "")
-    try:
-        if not resolved_session_id and update is not None:
-            resolved_session_id = str(current_session_for_update(runtime, update)["session_id"])
-        if not resolved_session_id:
-            resolved_session_id = str(runtime.default_session_id)
-        store = ensure_store(runtime)
-        getter = getattr(store, "get_workzone_set", None)
-        if callable(getter):
-            return normalize_workzone_state(getter(resolved_session_id))
-        session = store.get_session(resolved_session_id)
-    except (AttributeError, SessionNotFound):
-        return {"session_id": resolved_session_id, "revision": 0, "slots": []}
-    value = str(session.get("workzone") or "").strip()
-    return normalize_workzone_state(
-        {
-            "session_id": resolved_session_id,
-            "slots": (
-                [{"slot_id": "main", "path": value, "enabled": True}]
-                if value
-                else []
-            ),
-        }
+    resolved_owner = ""
+    if session_id:
+        try:
+            resolved_owner = str(ensure_store(runtime).get_session(session_id)["owner_id"])
+        except SessionNotFound:
+            pass
+    return agent_workzone_state(
+        runtime,
+        item,
+        owner=resolved_owner or None,
+        update=update,
     )
 
 
-def apply_session_workzones(runtime: Any, session_id: str) -> dict[str, Any]:
+def apply_agent_workzones(runtime: Any, *, owner: str | None = None) -> dict[str, Any]:
     from orchestrator import runtime_workzone
 
-    state = session_workzone_state(runtime, session_id=str(session_id))
+    state = agent_workzone_state(runtime, owner=owner)
     runtime_workzone.install_runtime_state(runtime, state)
     sync = getattr(runtime, "_sync_workzone_to_backend_config", None)
     if callable(sync):
         sync()
     return state
+
+
+def apply_session_workzones(runtime: Any, session_id: str) -> dict[str, Any]:
+    """Compatibility wrapper; Session selection never changes Workzones."""
+
+    try:
+        resolved_owner = str(ensure_store(runtime).get_session(session_id)["owner_id"])
+    except SessionNotFound:
+        resolved_owner = None
+    return apply_agent_workzones(runtime, owner=resolved_owner)
 
 
 def apply_item_workzone(runtime: Any, item: Any) -> None:
@@ -1301,9 +1319,6 @@ def _prepare_clean_context(
     clear_session_primer: bool = False,
 ) -> None:
     del disable_saved_memory
-    clear_transfer_state = getattr(runtime, "_clear_transfer_state", None)
-    if callable(clear_transfer_state):
-        clear_transfer_state()
     runtime._pending_auto_recall_context = None
     runtime._pending_auto_recall_session_id = None
     if clear_session_primer:
@@ -1311,8 +1326,37 @@ def _prepare_clean_context(
         runtime._pending_session_primer_session_id = None
     assembler = getattr(runtime, "context_assembler", None)
     if assembler is not None:
-        assembler.turns_injection_enabled = True
-        assembler.saved_memory_injection_enabled = True
+        from orchestrator.memory_search_mode import apply_memory_injection_preferences
+
+        apply_memory_injection_preferences(assembler, runtime.workspace_dir)
+
+
+def _discard_session_transients(runtime: Any) -> dict[str, int | bool]:
+    """Discard unfinished inputs only after a Session boundary commits."""
+
+    from orchestrator import runtime_long, runtime_media
+
+    report: dict[str, int | bool] = {
+        "long_active": False,
+        "long_items": 0,
+        "voice": 0,
+        "transfer": False,
+        "workzone_path": 0,
+    }
+    long_report = runtime_long.discard_batch(runtime)
+    report["long_active"] = bool(long_report["active"])
+    report["long_items"] = int(long_report["items"])
+    report["voice"] = int(runtime_media.discard_pending_safe_voice_inputs(runtime))
+    pending_paths = getattr(runtime, "_pending_workzone_paths", None)
+    if isinstance(pending_paths, dict):
+        report["workzone_path"] = len(pending_paths)
+        pending_paths.clear()
+    transfer_state = getattr(runtime, "_transfer_state", None)
+    report["transfer"] = bool(transfer_state)
+    clear_transfer_state = getattr(runtime, "_clear_transfer_state", None)
+    if callable(clear_transfer_state):
+        clear_transfer_state()
+    return report
 
 
 async def _reset_cli_backend(runtime: Any, *, reason: str) -> str:
@@ -1335,10 +1379,15 @@ async def _reset_cli_backend(runtime: Any, *, reason: str) -> str:
 
 async def reset_for_retry(runtime: Any) -> str:
     engine = _active_engine(runtime)
-    _prepare_clean_context(runtime, disable_saved_memory=False, clear_session_primer=True)
     if _uses_cli_session_semantics(engine):
         await _reset_cli_backend(runtime, reason="cmd_retry_cli_reset")
+        _discard_session_transients(runtime)
+        _prepare_clean_context(
+            runtime, disable_saved_memory=False, clear_session_primer=True
+        )
         return "new"
+    _discard_session_transients(runtime)
+    _prepare_clean_context(runtime, disable_saved_memory=False, clear_session_primer=True)
     return "fresh"
 
 
@@ -1367,7 +1416,6 @@ async def _bind_session(runtime: Any, update: Any, session_id: str) -> None:
 
 
 async def cmd_new(runtime: Any, update: Any, context: Any) -> None:
-    del context
     if not runtime._is_authorized_user(update.effective_user.id):
         return
     if runtime_busy(runtime):
@@ -1376,34 +1424,23 @@ async def cmd_new(runtime: Any, update: Any, context: Any) -> None:
     _surface, _channel_key, resolved_owner, _explicit_session_id = (
         _update_session_route(runtime, update)
     )
+    title = " ".join(
+        str(value).strip()
+        for value in (getattr(context, "args", None) or [])
+        if str(value).strip()
+    ).strip()
     session = ensure_store(runtime).create_session(
-        owner_id=resolved_owner, agent_id=runtime.name, title="New session"
+        owner_id=resolved_owner,
+        agent_id=runtime.name,
+        title=title or "New session",
     )
-    previous_workzones = getattr(runtime, "_workzone_state", None)
-    sync = getattr(runtime, "_sync_workzone_to_backend_config", None)
     logger = getattr(runtime, "logger", None)
     try:
         await _reset_cli_backend(runtime, reason="cmd_new_session")
-        _prepare_clean_context(
-            runtime, disable_saved_memory=False, clear_session_primer=True
-        )
-        apply_session_workzones(runtime, session["session_id"])
         await _bind_session(runtime, update, session["session_id"])
     except Exception:  # noqa: BLE001 - backend adapters expose heterogeneous failures
         if logger is not None:
             logger.exception("Could not activate new Session safely")
-        from orchestrator import runtime_workzone
-
-        runtime_workzone.install_runtime_state(runtime, previous_workzones)
-        if callable(sync):
-            try:
-                sync()
-            except Exception:  # noqa: BLE001 - best-effort runtime state restoration
-                if logger is not None:
-                    logger.warning(
-                        "Could not restore the previous Workzone after Session failure",
-                        exc_info=True,
-                    )
         try:
             ensure_store(runtime).archive_session(
                 session["session_id"], deleted=True
@@ -1419,6 +1456,10 @@ async def cmd_new(runtime: Any, update: Any, context: Any) -> None:
             ui_language.tr("session.new_failed"),
         )
         return
+    _discard_session_transients(runtime)
+    _prepare_clean_context(
+        runtime, disable_saved_memory=False, clear_session_primer=True
+    )
     await runtime._reply_text(
         update,
         ui_language.tr(
@@ -1436,10 +1477,21 @@ async def cmd_fresh(runtime: Any, update: Any, context: Any) -> None:
         await runtime._reply_text(update, ui_language.tr("session.fresh_busy"))
         return
     session = current_session_for_update(runtime, update)
-    updated = ensure_store(runtime).start_fresh_generation(
-        session["session_id"], reason="user_fresh"
+    try:
+        await _reset_cli_backend(runtime, reason="cmd_fresh_context_generation")
+        updated = ensure_store(runtime).start_fresh_generation(
+            session["session_id"], reason="user_fresh"
+        )
+    except Exception as exc:
+        logger = getattr(runtime, "logger", None)
+        if logger is not None:
+            logger.exception("Could not activate fresh Session generation: %s", exc)
+        await runtime._reply_text(update, ui_language.tr("session.fresh_failed"))
+        return
+    _discard_session_transients(runtime)
+    _prepare_clean_context(
+        runtime, disable_saved_memory=False, clear_session_primer=True
     )
-    _prepare_clean_context(runtime, disable_saved_memory=False, clear_session_primer=True)
     try:
         from orchestrator.context_compaction import cancel_runtime_compaction
 
@@ -1448,7 +1500,6 @@ async def cmd_fresh(runtime: Any, update: Any, context: Any) -> None:
         logger = getattr(runtime, "logger", None)
         if logger is not None:
             logger.warning("Could not cancel old Session compaction on /fresh: %s", exc)
-    await _reset_cli_backend(runtime, reason="cmd_fresh_context_generation")
     await runtime._reply_text(
         update,
         ui_language.tr(
@@ -1528,10 +1579,19 @@ async def cmd_use(runtime: Any, update: Any, context: Any) -> None:
     except SessionNotFound:
         await runtime._reply_text(update, ui_language.tr("session.not_found"))
         return
-    await _bind_session(runtime, update, session["session_id"])
-    _prepare_clean_context(runtime, disable_saved_memory=False, clear_session_primer=True)
-    await _reset_cli_backend(runtime, reason="cmd_use_session")
-    apply_session_workzones(runtime, session["session_id"])
+    try:
+        await _reset_cli_backend(runtime, reason="cmd_use_session")
+        await _bind_session(runtime, update, session["session_id"])
+    except Exception:  # noqa: BLE001 - provider and store failures share one boundary
+        logger = getattr(runtime, "logger", None)
+        if logger is not None:
+            logger.exception("Could not activate selected Session safely")
+        await runtime._reply_text(update, ui_language.tr("session.use_failed"))
+        return
+    _discard_session_transients(runtime)
+    _prepare_clean_context(
+        runtime, disable_saved_memory=False, clear_session_primer=True
+    )
     await runtime._reply_text(
         update,
         ui_language.tr(
@@ -1564,20 +1624,31 @@ async def cmd_archive(runtime: Any, update: Any, context: Any) -> None:
     if not runtime._is_authorized_user(update.effective_user.id):
         return
     session = current_session_for_update(runtime, update)
+    if bool(session.get("is_default")):
+        await runtime._reply_text(
+            update, "the permanent default Session cannot be archived"
+        )
+        return
     try:
+        await _reset_cli_backend(runtime, reason="cmd_archive_session")
         ensure_store(runtime).archive_session(session["session_id"])
+        default = ensure_store(runtime).ensure_default_session(
+            owner_id=_update_session_route(runtime, update)[2], agent_id=runtime.name
+        )
+        await _bind_session(runtime, update, default["session_id"])
     except SessionConflict as exc:
         await runtime._reply_text(update, str(exc))
         return
-    default = ensure_store(runtime).ensure_default_session(
-        owner_id=_update_session_route(runtime, update)[2], agent_id=runtime.name
-    )
-    await _bind_session(runtime, update, default["session_id"])
+    except Exception:  # noqa: BLE001 - provider and store failures share one boundary
+        logger = getattr(runtime, "logger", None)
+        if logger is not None:
+            logger.exception("Could not archive Session safely")
+        await runtime._reply_text(update, ui_language.tr("session.archive_failed"))
+        return
+    _discard_session_transients(runtime)
     _prepare_clean_context(
         runtime, disable_saved_memory=False, clear_session_primer=True
     )
-    await _reset_cli_backend(runtime, reason="cmd_archive_session")
-    apply_session_workzones(runtime, default["session_id"])
     await runtime._reply_text(
         update,
         ui_language.tr("session.archived"),
@@ -1779,6 +1850,8 @@ def start_automatic_promotion(runtime: Any) -> None:
 __all__ = [
     "accept_request",
     "activate_backend_binding",
+    "agent_workzone_state",
+    "apply_agent_workzones",
     "apply_item_workzone",
     "apply_session_workzones",
     "bridge_recent_exchanges",

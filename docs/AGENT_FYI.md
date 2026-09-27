@@ -66,7 +66,10 @@ An active Agent needs a PAO-started Worker. Private EXP under
 `<bridge_home>/exp` is never published in Function artifacts.
 
 Tool wildcard grants permission, not capability. Workzones expose exact enabled
-roots; naming a path does not authorize recursive access. Keep secrets, media
+roots. Their sole writable source is the owner/Agent profile, so Session
+selection and context-generation commands never replace them; every admitted
+Run freezes its Workzone revision. Legacy Session rows are inert and are not
+automatically migrated. Naming a path does not authorize recursive access. Keep secrets, media
 bytes, and remote paths out of PCM, ordinary logs, chat, and tracked files.
 
 JSON writers validate private candidates under locks, revisions, and atomic
@@ -197,8 +200,12 @@ model history. Durable command reservation returns saved completions, never
 replays pending/unknown, and does not overstate `not_observed` as delivery;
 non-Telegram callbacks keep their own Connector fence.
 
-`/new` selects a fresh primary Session without deleting owner/Agent history;
-old messages stay read-only and attachments keep their original Session. PAO
+`/new [title]` selects a fresh primary Session without deleting owner/Agent
+history; it preserves Agent Workzones and the independently persisted recent-
+turn/saved-memory switches. A successful Session boundary discards unfinished
+`/long`, Safe Voice, Transfer, and pending Workzone path input; a failed Engine
+reset changes none of them. Old messages stay read-only and attachments keep
+their original Session. PAO
 owns Agent deletion with preview, blockers, and cleanup receipts. Workbench
 `/telegram` and `/whatsapp` persist per owner in FC; TUI and Backend API have no
 separate mirror switches. A Run retains its admission-time destinations.

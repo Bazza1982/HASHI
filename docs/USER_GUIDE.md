@@ -29,7 +29,7 @@ does not make all engines share one native conversation thread.
 | Restore task focus | /focus | Refocus work on the original request |
 | Withdraw queued work | /recall or /queue | Inspect or remove waiting requests |
 | Send a message later | /delay | Persist a delayed message for the normal queue |
-| Start a conversation | /new | Create/select a new HASHI conversation session |
+| Start a conversation | /new [title] | Create/select a new HASHI conversation session; an optional multi-word title is retained |
 | Replay a delivered result | /resend | Repeat output without new model work |
 | Retry a request | /retry | Reset the execution context and rerun the last retryable prompt |
 
@@ -41,9 +41,11 @@ for persistence and failure behavior.
 
 ## Projects and Workzones
 
-Use /workzone to attach a project to the current conversation. Backends and
-HASHI tools receive the exact enabled roots. Attaching several projects does
-not implicitly authorize their common parent directory.
+Use /workzone to attach projects to the current agent. The same revisioned
+Workzone set remains active across /new, /use, /fresh, and /archive. Backends
+and HASHI tools receive the exact enabled roots frozen when each request is
+accepted. Attaching several projects does not implicitly authorize their
+common parent directory.
 
 The agent's own workspace contains identity and continuity data; a project
 Workzone is where the requested project work belongs. Available filesystem
@@ -74,10 +76,14 @@ and the [HER three-mode decision](https://github.com/Bazza1982/HASHI/blob/main/d
 continuity layer; /notepad shows its current work card and archived pointers.
 /handoff restores recent completed exchanges for explicit context recovery.
 
-On HER v2, /fresh creates a durable context boundary and stops pre-boundary
-history and automatic continuity sources from entering new prompts. It
-preserves underlying records and files. Explicitly re-enable the desired
-memory or Habit source when needed.
+`/memory on` enables both recent-turn and saved-memory injection; `/memory
+pause` disables both. `/memory search on|off` changes only saved-memory search.
+The two choices persist independently and are reapplied by every Session
+command instead of being reset by a conversation change.
+
+On HER v2, /fresh creates a durable context boundary for Session history while
+preserving underlying records and files. It retains the user's two memory
+injection choices rather than silently enabling them.
 
 Use /sys for Agent-local instructions. Instance-global slots apply across
 agents in that instance and show confirmation for broad changes. A running

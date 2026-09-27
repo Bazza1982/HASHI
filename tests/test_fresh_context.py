@@ -13,8 +13,11 @@ sys.modules.setdefault("edge_tts", types.ModuleType("edge_tts"))
 
 from orchestrator import (
     runtime_cross_session,
+    runtime_long,
     runtime_scheduler_recovery,
     runtime_session,
+    runtime_transfer,
+    runtime_workzone,
 )
 from orchestrator.admin_local_testing import execute_local_command
 from orchestrator.bridge_memory import BridgeContextAssembler, BridgeMemoryStore
@@ -29,6 +32,10 @@ from orchestrator.fresh_context import (
 )
 from orchestrator.pcm import render_pcm_document
 from orchestrator.runtime_common import QueuedRequest
+from orchestrator.memory_search_mode import (
+    set_memory_search_enabled,
+    set_memory_turns_enabled,
+)
 from orchestrator.session_store import SessionConflict
 from orchestrator.workspace_state import WorkspaceStateStore
 
@@ -235,7 +242,7 @@ async def test_new_creates_and_binds_a_hashi_session_for_any_backend(tmp_path):
         assistant_source="test-backend",
     )
 
-    await runtime.cmd_new(update, fake_context())
+    await runtime.cmd_new(update, fake_context("Research", "notes"))
 
     current = runtime_session.current_session_for_update(runtime, update)
     assert current["session_id"] != default["session_id"]
@@ -246,6 +253,7 @@ async def test_new_creates_and_binds_a_hashi_session_for_any_backend(tmp_path):
     )
     assert workbench["session_id"] == current["session_id"]
     assert current["context_generation"] == 1
+    assert current["title"] == "Research notes"
     assert len(runtime.session_store.list_sessions(
         owner_id="user:123", agent_id="arale"
     )) == 2
@@ -264,6 +272,78 @@ async def test_new_creates_and_binds_a_hashi_session_for_any_backend(tmp_path):
         "retained Bridge history",
         "retained answer",
     ]
+
+
+@pytest.mark.asyncio
+async def test_new_preserves_agent_workzones_and_memory_preferences(tmp_path):
+    runtime, _default, _replies, _resets = _session_command_runtime(tmp_path)
+    runtime._sync_workzone_to_backend_config = (
+        lambda: runtime_workzone.sync_workzone_to_backend_config(runtime)
+    )
+    runtime.config.extra = {}
+    runtime.backend_manager.current_backend.config = SimpleNamespace(
+        extra={}, resolve_access_root=lambda: tmp_path
+    )
+    runtime.backend_manager.current_backend.tool_registry = SimpleNamespace(
+        workspace_dir=runtime.workspace_dir,
+        access_root=tmp_path,
+    )
+    runtime.backend_manager.current_backend.capabilities.supports_files = True
+    zone = tmp_path / "repo"
+    zone.mkdir()
+    update = fake_update()
+
+    await runtime_workzone.cmd_workzone(
+        runtime, update, fake_context(str(zone))
+    )
+    set_memory_turns_enabled(runtime.workspace_dir, False)
+    set_memory_search_enabled(runtime.workspace_dir, True)
+    runtime.context_assembler.turns_injection_enabled = True
+    runtime.context_assembler.saved_memory_injection_enabled = False
+
+    await runtime.cmd_new(update, fake_context())
+
+    assert runtime._workzone_state["slots"][0]["path"] == str(zone.resolve())
+    assert runtime.context_assembler.turns_injection_enabled is False
+    assert runtime.context_assembler.saved_memory_injection_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_new_discards_unfinished_long_voice_and_transfer_inputs(tmp_path):
+    runtime, _default, _replies, _resets = _session_command_runtime(tmp_path)
+    runtime._suppressed_transfer_results = []
+    runtime._transfer_state = {"status": "pending", "transfer_id": "trf-test"}
+    runtime.transfer_state_path = tmp_path / "active_transfer.json"
+    runtime._persist_transfer_state = lambda: runtime_transfer.persist_transfer_state(runtime)
+    runtime._clear_transfer_state = lambda: runtime_transfer.clear_transfer_state(runtime)
+    runtime._workbench_voice_confirmations = {
+        "voice-test": {
+            "pending_id": "voice-test",
+            "state": "pending",
+            "created_at": 1.0,
+            "expires_at": 999.0,
+            "prompt": "draft",
+            "transcript": "draft",
+            "request_metadata": {},
+        }
+    }
+    runtime._voice_confirmation_clock = lambda: 10.0
+    runtime._pending_voice = {}
+    runtime_long.begin_batch(runtime, 456, "half finished")
+    runtime._pending_voice["456"] = {
+        "prompt": "voice draft",
+        "transcript": "voice draft",
+        "summary": "voice",
+        "chat_id": 456,
+        "long_batch": False,
+    }
+
+    await runtime.cmd_new(fake_update(), fake_context())
+
+    assert runtime_long.is_batch_active(runtime) is False
+    assert runtime._pending_voice == {}
+    assert runtime._workbench_voice_confirmations["voice-test"]["state"] == "discarded"
+    assert runtime._transfer_state is None
 
 
 @pytest.mark.asyncio
@@ -317,6 +397,150 @@ async def test_new_backend_reset_failure_keeps_previous_channel_binding(tmp_path
     assert replies[-1] == (
         "Could not start a new Session. The previous channel binding remains active."
     )
+
+
+@pytest.mark.asyncio
+async def test_use_backend_reset_failure_keeps_binding_and_unfinished_inputs(tmp_path):
+    runtime, default, replies, _resets = _session_command_runtime(
+        tmp_path, engine="codex-cli", supports_sessions=True
+    )
+    target = runtime.session_store.create_session(
+        owner_id="user:123", agent_id="arale", title="Target"
+    )
+    runtime.backend_manager.current_backend.handle_new_session = AsyncMock(
+        side_effect=RuntimeError("reset failed")
+    )
+    runtime.logger = SimpleNamespace(exception=lambda *_args, **_kwargs: None)
+    runtime._pending_voice = {"456": {"prompt": "voice draft"}}
+    runtime_long.begin_batch(runtime, 456, "text draft")
+
+    await runtime.cmd_use(fake_update(), fake_context(target["session_id"]))
+
+    assert runtime_session.current_session_for_update(runtime, fake_update())[
+        "session_id"
+    ] == default["session_id"]
+    assert runtime_long.is_batch_active(runtime) is True
+    assert runtime._pending_voice == {"456": {"prompt": "voice draft"}}
+    assert replies[-1] == (
+        "Could not switch Sessions. The previous channel binding remains active."
+    )
+
+
+@pytest.mark.asyncio
+async def test_use_preserves_agent_workzones_and_memory_preferences(tmp_path):
+    runtime, _default, _replies, _resets = _session_command_runtime(tmp_path)
+    target = runtime.session_store.create_session(
+        owner_id="user:123", agent_id="arale", title="Target"
+    )
+    zone = tmp_path / "use-zone"
+    zone.mkdir()
+    state = runtime.session_store.set_agent_workzone_slot(
+        owner_id="user:123",
+        agent_id="arale",
+        slot_id="main",
+        path=str(zone),
+    )
+    runtime_workzone.install_runtime_state(runtime, state)
+    set_memory_turns_enabled(runtime.workspace_dir, False)
+    set_memory_search_enabled(runtime.workspace_dir, True)
+    runtime.context_assembler.turns_injection_enabled = True
+    runtime.context_assembler.saved_memory_injection_enabled = False
+
+    await runtime.cmd_use(fake_update(), fake_context(target["session_id"]))
+
+    assert runtime._workzone_state["slots"][0]["path"] == str(zone.resolve())
+    assert runtime.context_assembler.turns_injection_enabled is False
+    assert runtime.context_assembler.saved_memory_injection_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_fresh_backend_reset_failure_keeps_generation_and_inputs(tmp_path):
+    runtime, session, replies, _resets = _session_command_runtime(
+        tmp_path, engine="codex-cli", supports_sessions=True
+    )
+    runtime.backend_manager.current_backend.handle_new_session = AsyncMock(
+        side_effect=RuntimeError("reset failed")
+    )
+    runtime.logger = SimpleNamespace(exception=lambda *_args, **_kwargs: None)
+    runtime._pending_voice = {"456": {"prompt": "voice draft"}}
+    runtime_long.begin_batch(runtime, 456, "text draft")
+
+    await runtime.cmd_fresh(fake_update(), fake_context())
+
+    assert runtime.session_store.get_session(session["session_id"])[
+        "context_generation"
+    ] == 1
+    assert runtime_long.is_batch_active(runtime) is True
+    assert runtime._pending_voice == {"456": {"prompt": "voice draft"}}
+    assert replies[-1] == (
+        "Could not start a fresh context. The previous Session generation remains active."
+    )
+
+
+@pytest.mark.asyncio
+async def test_archive_preserves_agent_preferences_and_discards_unfinished_inputs(tmp_path):
+    runtime, default, _replies, _resets = _session_command_runtime(tmp_path)
+    current = runtime.session_store.create_session(
+        owner_id="user:123", agent_id="arale", title="Current"
+    )
+    runtime.session_store.bind_primary_session(
+        owner_id="user:123", agent_id="arale", session_id=current["session_id"]
+    )
+    zone = tmp_path / "archive-zone"
+    zone.mkdir()
+    runtime.session_store.set_agent_workzone_slot(
+        owner_id="user:123",
+        agent_id="arale",
+        slot_id="main",
+        path=str(zone),
+    )
+    set_memory_turns_enabled(runtime.workspace_dir, False)
+    set_memory_search_enabled(runtime.workspace_dir, True)
+    runtime.context_assembler.turns_injection_enabled = True
+    runtime.context_assembler.saved_memory_injection_enabled = False
+    runtime._pending_voice = {}
+    runtime_long.begin_batch(runtime, 456, "unfinished")
+
+    await runtime.cmd_archive(fake_update(), fake_context())
+
+    assert runtime.session_store.get_session(current["session_id"])["status"] == "archived"
+    assert runtime_session.current_session_for_update(runtime, fake_update())[
+        "session_id"
+    ] == default["session_id"]
+    assert runtime.session_store.get_agent_workzone_set(
+        owner_id="user:123", agent_id="arale"
+    )["slots"][0]["path"] == str(zone)
+    assert runtime.context_assembler.turns_injection_enabled is False
+    assert runtime.context_assembler.saved_memory_injection_enabled is True
+    assert runtime_long.is_batch_active(runtime) is False
+
+
+@pytest.mark.asyncio
+async def test_archive_backend_reset_failure_keeps_session_and_inputs(tmp_path):
+    runtime, _default, replies, _resets = _session_command_runtime(
+        tmp_path, engine="codex-cli", supports_sessions=True
+    )
+    current = runtime.session_store.create_session(
+        owner_id="user:123", agent_id="arale", title="Current"
+    )
+    runtime.session_store.bind_primary_session(
+        owner_id="user:123", agent_id="arale", session_id=current["session_id"]
+    )
+    runtime.backend_manager.current_backend.handle_new_session = AsyncMock(
+        side_effect=RuntimeError("reset failed")
+    )
+    runtime.logger = SimpleNamespace(exception=lambda *_args, **_kwargs: None)
+    runtime._pending_voice = {}
+    runtime_long.begin_batch(runtime, 456, "unfinished")
+
+    await runtime.cmd_archive(fake_update(), fake_context())
+
+    assert runtime.session_store.get_session(current["session_id"])["status"] == "active"
+    assert runtime_session.current_session_for_update(runtime, fake_update())[
+        "session_id"
+    ] == current["session_id"]
+    assert runtime_long.is_batch_active(runtime) is True
+    assert replies[-1] == "Could not archive the Session safely. Its records were retained."
 
 
 @pytest.mark.asyncio
@@ -502,6 +726,10 @@ async def test_fresh_starts_new_generation_without_deleting_session_or_agent_mem
     runtime.memory_store.record_memory(
         "episodic", "promoted", "PROMOTED AGENT MEMORY"
     )
+    set_memory_turns_enabled(runtime.workspace_dir, False)
+    set_memory_search_enabled(runtime.workspace_dir, True)
+    runtime.context_assembler.turns_injection_enabled = True
+    runtime.context_assembler.saved_memory_injection_enabled = False
 
     await runtime.cmd_fresh(fake_update(), fake_context())
 
@@ -514,6 +742,8 @@ async def test_fresh_starts_new_generation_without_deleting_session_or_agent_mem
     ]
     assert runtime.memory_store.retrieve_memories("PROMOTED AGENT MEMORY")
     assert accepted.context_generation == 1
+    assert runtime.context_assembler.turns_injection_enabled is False
+    assert runtime.context_assembler.saved_memory_injection_enabled is True
     assert replies[-1].startswith("Fresh context generation 2 started")
 
 
