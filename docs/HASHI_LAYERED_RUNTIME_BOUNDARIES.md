@@ -22,7 +22,7 @@ land in replaceable shared/per-Agent Function processes or configuration layers.
 Pulling from `main` must not erase local platform or instance configuration.
 
 These are **engineering layers**, not HASHI's functional modules. The
-orthogonal functional dimension is PCM, PAO, HER v2, and Frontend Connectors.
+orthogonal functional dimension is PCM, PAO, HERV3, and Frontend Connectors.
 Every product capability must have one functional owner and one primary
 engineering-layer placement. Most module behaviour belongs in Layer 2;
 cross-module Core utilities may remain module-neutral only while they own no

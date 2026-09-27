@@ -2,7 +2,7 @@
 
 Converts a public creation intent (name / display_name / backend / model /
 effort / is_active) into the internal ``agents.json`` row.  HASHI is the only
-authority for validation, backend resolution, HER v3 target construction,
+authority for validation, backend resolution, HERV3 target construction,
 workspace creation, lifecycle identity and configuration publication.
 Workbench and other callers never build raw HASHI configuration.
 
@@ -158,10 +158,10 @@ def _provider_profiles(global_config: Any) -> dict[str, dict[str, Any]]:
 def _tier_choice(
     provider_profiles: dict[str, dict[str, Any]],
 ) -> tuple[str, str, str]:
-    """Resolve one default HER v3 Provider/model from instance configuration."""
+    """Resolve one default HERV3 Provider/model from instance configuration."""
     if not provider_profiles:
         raise CreationFailedError(
-            "no available HER v3 Provider is configured on this instance"
+            "no available HERV3 Provider is configured on this instance"
         )
     seed: HERv3ModelTarget | None = None
     for name, profile in provider_profiles.items():
@@ -190,20 +190,20 @@ def _tier_choice(
             break
     if seed is None:
         raise CreationFailedError(
-            "no usable HER v3 Provider model is configured on this instance"
+            "no usable HERV3 Provider model is configured on this instance"
         )
     options = build_v3_provider_options([], provider_profiles, seed)
     available = [option for option in options if option.get("available")]
     if not available:
         raise CreationFailedError(
-            "no available HER v3 Provider is configured on this instance"
+            "no available HERV3 Provider is configured on this instance"
         )
     chosen = available[0]
     engine = str(chosen.get("engine") or "").strip()
     model = str(chosen.get("default_model") or "").strip()
     if not engine or not model:
         raise CreationFailedError(
-            "no usable HER v3 Provider model is available"
+            "no usable HERV3 Provider model is available"
         )
     return engine, model, model
 
@@ -213,7 +213,7 @@ def build_her_backend_row(
     provider_profiles: dict[str, dict[str, Any]],
     model: str | None = None,
 ) -> dict:
-    """Build a HER v3 row with one Provider, model and reasoning effort."""
+    """Build a HERV3 row with one Provider, model and reasoning effort."""
 
     engine, fast_model, pro_model = _tier_choice(provider_profiles)
     del fast_model
@@ -229,7 +229,7 @@ def build_her_backend_row(
         ]
         if not matches:
             raise InvalidModelError(
-                f"model {requested_model!r} is not available from a configured HER v3 Provider"
+                f"model {requested_model!r} is not available from a configured HERV3 Provider"
             )
         selected = HERv3ModelTarget(str(matches[0]["engine"]), requested_model)
 
@@ -250,7 +250,7 @@ def build_her_backend_row(
         requested_effort = "off" if "off" in choices else "none"
     if choices and requested_effort not in choices:
         raise InvalidEffortError(
-            f"HER v3 model effort must be one of: {', '.join(choices)}"
+            f"HERV3 model effort must be one of: {', '.join(choices)}"
         )
     row = apply_backend_policy_defaults(
         {"engine": HER_V2_ENGINE, "model": selected.model}

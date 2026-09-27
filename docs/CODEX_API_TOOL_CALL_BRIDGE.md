@@ -79,7 +79,7 @@ content-free Chat Completions chunk:
 ```
 
 The `hashi-api` adapter converts this private extension into an internal
-`provider_activity` stream event. HER v2 can therefore refresh its provider
+`provider_activity` stream event. HERV3 can therefore refresh its provider
 activity tracker, and the upstream HTTP read deadline is refreshed, even when
 Codex has not produced user-visible text or a caller-owned tool call yet.
 

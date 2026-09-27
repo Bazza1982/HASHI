@@ -13,7 +13,7 @@ Parent specifications:
 PAO owns the derived, cache-backed fact for an exact Engine Provider/model
 selection. An Engine Adapter owns whether it has a physical transport for a
 modality. Instance configuration owns media policy and an exact manual
-override. A Frontend Connector renders the resulting rejection. HER v2
+override. A Frontend Connector renders the resulting rejection. HERV3
 consumes the same resolver independently for each configured stage model.
 
 All implementation is in the replaceable Functions layer. Core owns none of
@@ -104,13 +104,13 @@ so a former image model's startup snapshot cannot reopen a text-only route.
 
 Model selection/configuration schedules a best-effort asynchronous refresh
 after the selection is durably accepted. Startup loading, direct model
-changes, API Gateway configured/default models, and every HER v2 stage target
+changes, API Gateway configured/default models, and the selected HERV3 main target
 use the same cache path. Message admission and Provider invocation never wait
 for a capability network request.
 
 After refresh, direct adapters, Telegram media intake, API Gateway structured
-conversation validation, and HER stage resolution all read the same exact
-fact revision. HER's per-turn stage cache includes that fact identity, so an
+conversation validation, and HERV3 main-target resolution all read the same exact
+fact revision. HER's per-Turn capability cache includes that fact identity, so an
 unknown-to-known transition or a new content revision invalidates the old
 projection. Every caller joining one asynchronous refresh retains its own
 completion callback. A callback updates the still-current Adapter snapshot

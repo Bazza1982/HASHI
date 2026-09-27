@@ -11,7 +11,7 @@
 
 实现无需安装/账户的临时纯文字体验：一台隔离 VM、一个 HASHI instance、最多 200 个有效匿名访客、每人一个真实 Agent、最多三个原生 Conversation Sessions。外部受限网页客户端只使用 Demo Connector。托管控制平台、独立 Gateway 产品、每访客 VM/container、Redis、账户服务和跨 Agent 可变 Worker 池均不在范围。
 
-保留 PAO、PCM 和 HER 的实际运行链；禁止直接在 Connector 调模型来冒充 HASHI。默认 HER Direct/zero，工具及长期自主行为硬禁用。单个访客的不同 Session 也不共享可变对话上下文。
+保留 PAO、PCM 和 HERV3 的实际运行链；禁止直接在 Connector 调模型来冒充 HASHI。默认使用 HERV3 单模型循环并关闭模型推理，工具及长期自主行为硬禁用。单个访客的不同 Session 也不共享可变对话上下文；内部兼容值 `zero` 不代表 Direct 路由。
 
 ## 2. 基线事实和需要落实的边界
 
@@ -85,8 +85,8 @@ demo:
   idle_ttl_seconds: 1800
   max_sessions_per_visitor: 3
   runtime:
-    engine: her-v2
-    orchestration_effort: zero
+    engine: her-v3
+    model_effort: off
     max_running_agent_workers: 12
     max_concurrent_generations: 8
     max_starting_workers: 2
@@ -187,7 +187,7 @@ H0 确定精确调用点后，只在各自 owner 加一个可验证的 policy �
 
 - 使用公共 seed，经既有 canonical agent.md parser 校验；不复制个人 Agent、EXP、Memory+、宿主路径、secret 或真实任务。
 - PCM 仅组装固定公共说明及当前 Session 的许可上下文；禁止全局 Agent topology、其他访客和其他 Session 内容进入 prompt。
-- engine 固定 HER；Direct=zero；provider/model 来自兼容的实例选择，不让用户通过正文/slash/请求 JSON 改。
+- engine 固定 HERV3；Provider/model 来自兼容的实例选择，模型推理关闭，不让用户通过正文/slash/请求 JSON 改。既有 `zero` 字段仅作兼容输入。
 - tool catalogue 为空且 PAO/HER 最后执行点拒绝；验证模型返回伪造 tool_calls 仍无副作用。仅依赖 prompt 的测试不通过。
 - 默认的 memory_policy=promote 必须被受限策略替换，并验证观察者、meditation/habit、恢复/收尾和异常路径不会晋升。
 - 普通文本 `/reboot` 等不进入控制解释器；可能出现代码样式文字不等于有权执行，禁止用简单关键词检测代替执行授权。

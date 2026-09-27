@@ -320,18 +320,18 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
     CommandSpec(
         "provider",
         "cmd_provider",
-        "Choose HER v2 provider or Hybrid",
+        "Choose HERV3 Model Provider",
         "models",
         guide=CommandGuide(
-            "/provider [provider|hybrid]",
+            "/provider [provider]",
             choice_source="providers",
-            example="/provider hybrid",
+            example="/provider deepseek-api",
         ),
     ),
     CommandSpec(
         "fallback",
         "cmd_fallback",
-        "Configure HER v2 provider fallback",
+        "Configure HERV3 provider fallback",
         "models",
         guide=CommandGuide(
             "/fallback [on|off|clear|[l1|l2] <provider> <model> <light|pro>]",

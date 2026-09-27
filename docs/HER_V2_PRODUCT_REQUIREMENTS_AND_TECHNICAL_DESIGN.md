@@ -1,10 +1,12 @@
+> **Legacy HERV2 archive — non-normative.** This document records the retired staged runtime. HERV3 uses one continuous main-model/tool loop with no Triage, Strategy, Planning, Replanning, Review, or stage-based Finalisation routing. Strategy Cards and Habit/Meditation remain optional. See [HERV3 upgrade](HERV3_UPGRADE.md).
+
 # Hashi Engine Runtime v2
 
 ## Product Requirements and Technical Design Specification
 
 | Field | Value |
 |---|---|
-| Status | Authoritative HER v2 module specification, subject to current accepted decision overrides |
+| Status | Authoritative HERV2 module specification, subject to current accepted decision overrides |
 | Version | 1.4 |
 | Date | 2026-09-01 |
 | Product | Hashi Engine Runtime (HER) |
@@ -18,7 +20,7 @@
 > Adaptive, Reviewed, and Assured below describe retained dormant implementation,
 > not current product choices.
 >
-> **Terminology and Session boundary:** HER v2 is an Engine (Harness) Provider
+> **Terminology and Session boundary:** HERV2 is an Engine (Harness) Provider
 > selected by PAO. In this document, an unqualified Provider means a **Model
 > Provider** inside HER unless explicitly stated otherwise. PAO owns the HASHI
 > Conversation Session; HER owns its durable HER Engine Session; provider-native
@@ -54,7 +56,7 @@ HER does not optimise for a single measure such as speed or maximum quality. It 
 
 ## 2. Re-engineering Objective
 
-HER v2 replaces the current tightly coupled HER workflow with a smaller, modular runtime built around:
+HERV2 replaces the current tightly coupled HER workflow with a smaller, modular runtime built around:
 
 - an authoritative triage decision;
 - an explicit lifecycle state machine;
@@ -64,7 +66,7 @@ HER v2 replaces the current tightly coupled HER workflow with a smaller, modular
 - PAO-owned HASHI tools, permissions, delivery coordination, logging, and audit;
 - conversational recovery instead of restoring a failed execution stack.
 
-HER v2 is the sole supported HER Engine. The former monolithic HER
+HERV2 is the sole supported HER Engine. The former monolithic HER
 implementation is retired and must never be selected as an initialization,
 switching, preflight, recovery, or runtime fallback. The historical public ID
 `her` resolves forward to `her-v2`; the unrelated `claw-cli` ID is removed and
@@ -98,7 +100,7 @@ limit. No current production mode enters that path.
 
 #### 3.2.1 No unauthorised execution ceilings
 
-HER v2 has no turn-count, elapsed-time, wall-clock, stage, provider-attempt,
+HERV2 has no turn-count, elapsed-time, wall-clock, stage, provider-attempt,
 tool-round, sub-agent-count, call-count, step-count, cumulative-token, or
 output-token execution ceiling at any stage. This rule applies equally to
 Immediate Response, Triage, Planning, Execution, Replanning, Review,
@@ -141,14 +143,14 @@ The only already-authorised controls that may stop or bound work are:
 No implementation, adapter option, compatibility field, test fixture, or audit
 label may introduce an equivalent limit under another name such as `budget`,
 `lease`, `window`, `deadline`, `max_tokens`, `max_turns`, or `max_loops`.
-Legacy HER/Claw fields representing those ceilings remain invalid HER v2
+Legacy HER/Claw fields representing those ceilings remain invalid HERV2
 configuration and must be rejected rather than silently applied. Any new
 execution limit requires explicit user authorisation and an approved amendment
 to this section before implementation or supporting tests are added.
 
 #### 3.2.2 Lifecycle-wide cognitive control
 
-Every tool-enabled HER v2 stage must use the same provider-neutral cognitive
+Every tool-enabled HERV2 stage must use the same provider-neutral cognitive
 control. This includes Direct, tool-enabled Strategy/Triage, Planning,
 Execution, Replanning, Review, and delegated execution. The mechanism is a
 permanent Engine safety invariant for every Agent: it has no enable/disable
@@ -202,7 +204,7 @@ tool conversation and retains normal `/stop`, cancellation, audit, and
 lifecycle authority.
 
 This permanent decision is recorded in
-[HER v2 Mandatory Cognitive Control Decision](HER_V2_MANDATORY_COGNITIVE_CONTROL_DECISION.md).
+[HERV2 Mandatory Cognitive Control Decision](HER_V2_MANDATORY_COGNITIVE_CONTROL_DECISION.md).
 
 Provider-specific request construction belongs in provider adapters, not in the HER orchestration core.
 
@@ -317,7 +319,7 @@ receive the same immutable Execution evidence.
 
 ### 3.6 Work, commentary, Persona packaging, and delivery
 
-HER v2 keeps five boundaries distinct:
+HERV2 keeps five boundaries distinct:
 
 1. Planning, Execution, Review, and non-cadence Replanning may
    include one optional neutral `commentary` string in a successful structured
@@ -504,12 +506,12 @@ path" belong to the superseded six-mode design retained later in this document.
 They are historical or dormant implementation vocabulary, not current product
 behaviour or acceptance criteria.
 
-HER v2 does not impose a tool-call round or turn ceiling on tool-enabled
+HERV2 does not impose a tool-call round or turn ceiling on tool-enabled
 Execution or delegated sub-agent invocations. Once tools are authorised for a
 stage, the provider loop continues until the model completes, the invocation
 fails, or the request is cancelled. Agent-level Tool Registry permissions and
 safety policy still apply, but a generic registry `max_loops` value is not a
-HER v2 termination condition. Effort never changes this rule.
+HERV2 termination condition. Effort never changes this rule.
 
 Execution mode determines the maximum orchestration path available. Triage classifications `DIRECT_RESPONSE` and `CONFIRMATION_REQUIRED` terminate through their dedicated paths without unnecessary planning, regardless of the selected mode.
 
@@ -532,7 +534,7 @@ model names.
 
 ### 5.1 Runtime configuration command boundary
 
-HER v2 presents two reusable task model slots, Quick and Pro. `/provider`
+HERV2 presents two reusable task model slots, Quick and Pro. `/provider`
 selects the concrete Model Provider route that carries them. The normal
 `/model` menu exposes Direct, Strategy, Planning, and grouped Execution so it
 matches the public Direct/Strategic/Planned execution design. Execution Auto
@@ -569,7 +571,7 @@ Non-HER Engines retain their established `/model` behaviour.
 
 ### 5.2 Scheduled-job execution policy
 
-Cron and heartbeat prompt work always uses HER v2 Direct (`zero`) execution
+Cron and heartbeat prompt work always uses HERV2 Direct (`zero`) execution
 mode. Direct passes the authoritative job instruction to one fully capable
 Quick-model agent without Triage pre-processing, preventing a preprocessing
 stage from dropping or reframing original instruction details.
@@ -736,7 +738,7 @@ Execution follows the active plan when a formal plan exists. Fast path (`low`)
 execution follows a minimal execution directive derived from the immutable
 Triage result.
 
-Primary Execution uses one dedicated, dynamically rendered HER v2 system
+Primary Execution uses one dedicated, dynamically rendered HERV2 system
 prompt. It receives the complete request context, optional active plan, the
 authoritative `real_goal`, Triage-selected `relevant_habits`, actual narrowed
 tool catalogue, and only the explicit Persona guidance. It
@@ -750,7 +752,7 @@ objective necessarily succeeded. Provider, permission, tool-infrastructure,
 and empty-response failures that Runtime can identify remain technical
 `ERROR`. Those failures retain the existing replay-safe transient recovery,
 and Runtime logs and renders the complete final error after recovery is
-exhausted. Execution cannot request Replanning; HER v2 imposes Replanning only
+exhausted. Execution cannot request Replanning; HERV2 imposes Replanning only
 through the configured execution-mode assurance policy.
 
 ### 8.1 Simple tasks
@@ -829,7 +831,7 @@ The cadence does not consume the xhigh Review-remediation allowance, has no
 Replan-count ceiling, and does not impose a time, token,
 turn, tool-round, provider-attempt, or whole-workflow limit. The normative
 detailed contract is the
-[HER v2 Compulsory Replanning Repair Plan](HER_V2_COMPULSORY_REPLAN_REPAIR_PLAN.md).
+[HERV2 Compulsory Replanning Repair Plan](HER_V2_COMPULSORY_REPLAN_REPAIR_PLAN.md).
 
 ## 9. Stage 4: Replanning
 
@@ -1236,7 +1238,7 @@ An invalid transition is a technical `ERROR`. The turn terminates immediately. C
 
 ## 15. Terminal States
 
-HER v2 uses the following unified terminal states:
+HERV2 uses the following unified terminal states:
 
 | State | Meaning |
 |---|---|
@@ -1435,7 +1437,7 @@ remains one.
 
 #### 18.1.1 Opt-in model fallback transition
 
-HER v2 may opt an Agent into model fallback through its own typed
+HERV2 may opt an Agent into model fallback through its own typed
 configuration. The mechanism observes the real request and never issues a
 separate health-check call. For an OpenAI-compatible streaming transport, the
 Adapter applies a 300-second meaningful-output inactivity guard to each
@@ -1613,7 +1615,7 @@ bound it.
 ### 19.4 Auto Compact maintenance-call exception
 
 Auto Compact is HASHI-owned context capacity maintenance, not a principal HER
-lifecycle stage. It invokes the initiating Agent's active HER v2 Quick/Light
+lifecycle stage. It invokes the initiating Agent's active HERV2 Quick/Light
 provider and model at fixed high HER effort through an isolated, tool-free
 maintenance boundary. It has no independent provider/model route and cannot
 fall back to Pro, a global default, or a different provider. Gemini remains
@@ -1626,7 +1628,7 @@ Journal snapshot into an idempotent quoted recovery turn in the current Session
 and compare-and-swap clears that Journal only after the Session write is
 durable. This phase runs at any token count. A write or compare-and-swap failure
 preserves the Journal and stops the ordinary conversation compaction phase.
-Every later HER v2 request that sees previous-turn WIP emits a mandatory visible
+Every later HERV2 request that sees previous-turn WIP emits a mandatory visible
 warning independently of `/verbose`; only bounded deterministic recovery
 context, never raw Journal JSONL or a recursively assembled provider request,
 may reach the provider.
@@ -1717,7 +1719,7 @@ HASHI remains responsible for:
 
 ### 21.2 HER-owned responsibilities
 
-HER v2 owns:
+HERV2 owns:
 
 - Triage;
 - execution-mode policy resolution;
@@ -1730,7 +1732,7 @@ HER v2 owns:
 - deterministic completion of a normally returned Execution workflow, plus
   technical runtime terminal states.
 
-HER v2 may validate and publish optional neutral commentary returned by a
+HERV2 may validate and publish optional neutral commentary returned by a
 successful reasoning stage. Compulsory Replanning instead requires one update
 and deterministically reconstructs it from validated fields when necessary.
 HASHI extracts Persona guidance and supplies only the explicit marker block to isolated presentation invocations. Applicable
@@ -1739,7 +1741,7 @@ one call. A pre-execution Triage clarification uses
 the same Persona Commentary Agent as interim commentary, then returns to its
 typed required-message delivery path.
 
-HER v2 prompt prose is stored as versioned UTF-8 assets under
+HERV2 prompt prose is stored as versioned UTF-8 assets under
 `orchestrator/her_v2/prompt_assets/`. The loader resolves those assets relative
 to its module, never the process working directory, and validates the complete
 asset inventory plus each template's exact placeholder set before a prompt may
@@ -1752,7 +1754,7 @@ Habits, Meditation, Dream, and optional native executors connect through explici
 
 ### 21.4 Compatibility facade
 
-HER v2 remains registered through a thin HASHI compatibility facade. Internally
+HERV2 remains registered through a thin HASHI compatibility facade. Internally
 it behaves as an orchestration policy over provider and tool interfaces rather
 than reproducing the retired monolithic backend design. Compatibility is limited
 to forward ID aliases and approved Habit, Meditation, and Dream data formats;
@@ -1761,7 +1763,7 @@ it is not execution fallback compatibility.
 The facade in `adapters/her_v2.py` owns HASHI lifecycle integration only.
 Provider invocation, delivery, and Persona bridges live in
 `adapters/her_v2_provider.py`; stage invocation/recovery and
-lifecycle/delivery/audit support live in the dedicated HER v2 runtime modules.
+lifecycle/delivery/audit support live in the dedicated HERV2 runtime modules.
 `HERv2Adapter`, `HashiStageProvider`, and the established test-facing bridge
 exports remain available from the compatibility facade.
 
@@ -1786,13 +1788,13 @@ The migration sequence is:
 11. canary selected agents;
 12. expand rollout only after certification;
 13. remove every old-HER registration and prove historical IDs resolve only
-    forward to HER v2.
+    forward to HERV2.
 
-Existing HER code, local experimental commits, and uncommitted Task Control work are reference material. They are not the implementation foundation of HER v2 and must be ported only when a v2 requirement and test justify them.
+Existing HER code, local experimental commits, and uncommitted Task Control work are reference material. They are not the implementation foundation of HERV2 and must be ported only when a v2 requirement and test justify them.
 
 ## 23. Acceptance Criteria
 
-HER v2 is ready for production rollout only when:
+HERV2 is ready for production rollout only when:
 
 - every Triage classification has deterministic transition tests;
 - a recorded Triage classification cannot be mutated within the turn;
@@ -1843,7 +1845,7 @@ HER v2 is ready for production rollout only when:
 - all available reasoning traces are logged and correlated to the turn;
 - tools and permissions remain HASHI-owned;
 - provider model names are configurable rather than hard-coded in HER core;
-- Compact resolves the initiating Agent's active HER v2 provider and
+- Compact resolves the initiating Agent's active HERV2 provider and
   Quick/Light model at high HER effort, supports Tier 2/Tier 3 watchdog
   isolation, keeps Gemini stateless, and leaves ordinary provider tool loops
   unchanged;
@@ -1857,7 +1859,7 @@ HER v2 is ready for production rollout only when:
 - reporting failure preserves completed execution evidence;
 - stop terminates primary and sub-agent activity;
 - the retired HER implementation is unreachable through backend switching,
-  startup preflight, and initialization failure; `her` resolves to HER v2 and
+  startup preflight, and initialization failure; `her` resolves to HERV2 and
   `claw-cli` is rejected;
 - lifecycle and workflow events cannot generate Persona commentary;
 - tool-enabled Direct and Execution provider commentary reaches the user only
@@ -1868,12 +1870,12 @@ HER v2 is ready for production rollout only when:
   complete execution evidence but only the marked Persona block from
   `system_md`; it preserves required-delivery identity;
 - commentary packaging and delivery failures cannot alter workflow outcome;
-- failed HER v2 initialization fails closed or uses an explicitly selected
+- failed HERV2 initialization fails closed or uses an explicitly selected
   non-HER backend; it never rolls back to retired HER.
 
 ## 24. Locked Runtime Invariants
 
-The following decisions are authoritative for HER v2:
+The following decisions are authoritative for HERV2:
 
 1. Triage-derived `real_goal`, stored as `state.goal`, is the authoritative
    operational expression of user intent for the active turn.

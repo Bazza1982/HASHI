@@ -710,16 +710,16 @@ def render_direct_system_prompt(
     persona_block_begin: str,
     persona_block_end: str,
 ) -> str:
-    """Render the complete zero-orchestration Direct contract."""
+    """Render the complete HERV3 single-loop main-model contract."""
 
     direct_strategy_block = ""
     if strategy_playbook:
         direct_strategy_block = (
-            """## Direct Strategy Playbook self-selection
+            """## Strategy Card advisory self-selection
 
-This invocation is the Direct + Playbook experimental condition. You remain the
-sole Direct agent in one invocation; this is not a separate Strategist, Triage,
-Planning, Review, or other orchestration stage.
+This invocation includes the retained Strategy Card experiment. You remain the
+sole HERV3 main model in one continuous loop. The cards are advisory context,
+not a separate Strategist, Triage, Planning, Review, or other routing stage.
 
 Before making the first task tool call:
 

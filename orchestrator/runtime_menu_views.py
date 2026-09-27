@@ -486,7 +486,7 @@ def her_v2_provider_menu_text(
     unavailable: Sequence[tuple[str, str]] = (),
 ) -> str:
     facts = [
-        _fact("common.backend", "<code>her-v2</code>"),
+        _fact("common.backend", "<code>her-v3</code>"),
         _fact(
             "menu.provider.instance_configured",
             f"<code>{available_count}</code> {html.escape(_tr('menu.provider.call_providers'))}",
@@ -507,7 +507,7 @@ def her_v2_provider_menu_text(
         )
     return setting_card(
         "🔌",
-        "HER v2 provider",
+        "HERV3 provider",
         current=f"<code>{html.escape(current_provider)}</code>",
         facts=facts,
         consequence=_tr("menu.provider.effect"),
@@ -522,7 +522,7 @@ def her_v2_provider_menu_text(
 def her_v2_provider_unavailable_text(*, backend: str) -> str:
     return setting_card(
         "🔌",
-        "HER v3 Provider",
+        "HERV3 Provider",
         current=_state("common.unavailable"),
         facts=[
             _fact("common.backend", f"<code>{html.escape(backend)}</code>"),
@@ -547,7 +547,7 @@ def her_v2_model_menu_text(
     pro_provider = pro_provider or provider
     return setting_card(
         "🧠",
-        "HER v2 model settings",
+        "HERV3 model settings",
         current=(
             f"<code>{html.escape(routing_mode.upper())}</code>"
             + (f" · {_state('common.draft')}" if draft else "")
@@ -574,7 +574,7 @@ def her_v2_model_menu_text(
 
 
 def her_v3_model_menu_text(*, provider: str, model: str, effort: str) -> str:
-    """Project the selectable single-model HER v3 runtime."""
+    """Project the selectable single-model HERV3 runtime."""
 
     return setting_card(
         "🧠",
@@ -655,7 +655,7 @@ def her_v2_routes_text(
 ) -> str:
     return setting_card(
         "🧭",
-        "HER v2 task stages",
+        "HERV3 task stages",
         current=(
             f"<code>4</code> {html.escape(_tr('menu.her.visible_stages'))}"
             + (f" · {_state('common.draft')}" if draft else "")
@@ -686,7 +686,7 @@ def her_v2_execution_text(
 ) -> str:
     return setting_card(
         "🛠️",
-        "HER v2 execution settings",
+        "HERV3 execution settings",
         current=(
             f"<code>{html.escape(mode)}</code> · <code>{html.escape(reasoning)}</code>"
             + (f" · {_state('common.draft')}" if draft else "")
@@ -714,7 +714,7 @@ def her_v2_advanced_text(
 ) -> str:
     return setting_card(
         "⚙️",
-        "HER v2 advanced model settings",
+        "HERV3 advanced model settings",
         current=(
             f"<code>{html.escape(routing_mode.upper())}</code>"
             + (f" · {_state('common.draft')}" if draft else "")
@@ -739,7 +739,7 @@ def her_v2_advanced_routes_text(
 ) -> str:
     return setting_card(
         "🧩",
-        "HER v2 advanced task targets",
+        "HERV3 advanced task targets",
         current=(
             f"<code>{html.escape(routing_mode.upper())}</code>"
             + (f" · {_state('common.draft')}" if draft else "")

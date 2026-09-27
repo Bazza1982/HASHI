@@ -4,7 +4,7 @@ Before editing, read `ARCHITECTURE.md`, `docs/HASHI_LAYERED_RUNTIME_BOUNDARIES.m
 and `docs/TESTING_POLICY.md`; for command/UI work also read
 `docs/HASHI_COMMAND_UI_STYLE_GUIDE.md`.
 
-- Before editing, state the functional owner (PCM, PAO, HER v2, or Frontend
+- Before editing, state the functional owner (PCM, PAO, HERV3, or Frontend
   Connector), engineering layer, and focused validation.
 - Normal features belong in Functions or platform/instance configuration. Use
   the narrowest owner; derive views instead of copying model/effort lists,

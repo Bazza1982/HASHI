@@ -2,15 +2,15 @@
 
 ## Status and boundary
 
-Habit learning is an optional capability of the HER v2 backend only. It is not a
+Habit learning is an optional capability of the HERV3 backend only. It is not a
 HASHI orchestration feature, a Skill, a Dream extension, a shared registry, or a
 cross-backend protocol.
 
-This document describes the **HER v2 learning-service-owned JSON path**
+This document describes the **HERV3 learning-service-owned JSON path**
 implemented by `orchestrator/her_v2/learning.py` and controlled by `/habit`.
 The service reuses the validated records, journals, parsers, and atomic storage
-primitives in `adapters/her_habits.py`; it does not import or revive the retired
-HER execution backend. It is the only active HER Planning/Meditation writer in
+primitives in `adapters/her_habits.py`; it does not revive the retired staged
+HERV2 routing pipeline. It is the active HER Habit/Meditation writer in
 standalone HASHI. The adapter exposes an explicit ownership marker so
 compatibility code can suppress older pipelines instead of running two learning
 lifecycles. Consequently `/habit off` means the HER Habit loop is fully off.
@@ -18,7 +18,7 @@ lifecycles. Consequently `/habit off` means the HER Habit loop is fully off.
 The lifecycle is:
 
 ```text
-Initial Planning → Execution → Final delivery boundary → Meditation → Write
+Main model/tool loop → Final delivery boundary → Meditation → Write
 ```
 
 Each agent owns only the Habit files in its own workspace. Relevance, rather
@@ -30,7 +30,7 @@ The default is disabled. Configuration is resolved in this order:
 
 1. `global.her_providers.habit_meditation` supplies the HASHI instance default.
 2. `her_v2.habit_meditation` and `her_v2.meditation_enabled` in an individual
-   HER v2 backend entry override it.
+   HERV3 backend entry override it.
 3. The owning agent's persisted `/habit on|off` override supersedes configuration.
 4. `HASHI_HER_HABIT_MEDITATION=on|off` is the final operational override.
 
@@ -74,7 +74,7 @@ Example instance configuration:
 }
 ```
 
-Example complete HER v2 backend entry with a disabled backend override:
+Example complete HERV3 backend entry with a disabled backend override:
 
 ```json
 {
@@ -82,37 +82,20 @@ Example complete HER v2 backend entry with a disabled backend override:
   "model": "role-configured",
   "her_v2": {
     "meditation_enabled": false,
-    "profiles": {
-      "lightweight": {
-        "engine": "deepseek-api",
-        "model": "deepseek-v4-flash"
-      },
-      "triage": {
-        "engine": "deepseek-api",
-        "model": "deepseek-v4-flash"
-      },
-      "premium": {
-        "engine": "deepseek-api",
-        "model": "deepseek-v4-pro"
-      },
-      "reviewer": {
-        "engine": "deepseek-api",
-        "model": "deepseek-v4-pro"
-      },
-      "orchestrator": {
-        "engine": "deepseek-api",
-        "model": "deepseek-v4-pro"
-      }
+    "main": {
+      "provider": "deepseek-api",
+      "model": "deepseek-flash",
+      "reasoning": "high"
     }
   }
 }
 ```
 
-When disabled, HER v2 preserves the original execution path: it does not create a
-Habit directory, add Habit fields to the Planning envelope, acquire the Habit
-execution lock, or start a Meditation model call. This invariant applies to
-every HER effort level.
-Internal one-shot/ephemeral HER v2 backends are always ineligible, including when
+When disabled, HERV3 preserves the original execution path: it does not create
+a Habit directory, add advisory Habit context to the main-model request,
+acquire the Habit execution lock, or start a Meditation model call. This
+invariant applies to every Provider/model reasoning level.
+Internal one-shot/ephemeral HERV3 backends are always ineligible, including when
 the process-wide environment override is on, so health probes and sidecars
 cannot recursively learn Habits.
 
@@ -121,7 +104,7 @@ The foreground adapter also honors HASHI's request-scoped
 uses the exact original prompt and schedules no Meditation even when the
 agent-wide `/habit` state is on.
 
-## Planning
+## Foreground advisory context
 
 Habit files contain a short title, compact natural-language metadata, and an
 actionable body. Retrieval scores only the title and metadata. The query is the
@@ -129,13 +112,11 @@ bounded current authoritative request after the final Bridge current-request
 marker; Bridge conversation background is never retrieval input. The body is
 read only for the small set of matches selected for the current request.
 
-Matched records are rendered into a bounded, request-scoped advisory input for
-initial HER v2 Planning only. Execution, Replanning, Review, and Finalisation do
-not receive or re-read Habits. `low` effort has no Planning stage and therefore
-does not retrieve Habits, but a successfully completed `low` execution remains
-eligible for turn-based Meditation. Habit content is never appended to the
-authoritative user goal and is explicitly subordinate to the current request,
-policies, permissions, and exact-output requirements.
+Matched records are rendered into a bounded, request-scoped advisory catalogue
+for HERV3's one main-model/tool loop. There is no separate Planning,
+Replanning, Review, or Finalisation route. Habit content is never appended to
+the authoritative user goal and is explicitly subordinate to the current
+request, policies, permissions, and exact-output requirements.
 
 Retrieval and use are deliberately different observations. Recording a selected
 Habit ID proves retrieval only when the same ID is present in the executed
@@ -145,8 +126,8 @@ assertion. A conflicting Habit must lose to the current request.
 
 ## Execution and turn evidence
 
-The main HER v2 run is unchanged except for the optional initial-Planning
-advisory. After a completed eligible execution, Meditation receives a bounded
+The main HERV3 run is unchanged except for the optional advisory Habit
+catalogue. After a completed eligible execution, Meditation receives a bounded
 turn capsule containing:
 
 - the current authoritative request, without Bridge conversation background;
@@ -156,7 +137,7 @@ turn capsule containing:
 - the completed terminal state.
 
 Provider-visible reasoning traces and provider/tool audit details remain in the
-HER v2 audit trail; they are not silently copied out of the audit boundary into
+HERV3 audit trail; they are not silently copied out of the audit boundary into
 the Meditation prompt. No design assumption requires unavailable private
 chain-of-thought. Common credential-shaped values are redacted before a queued
 Meditation prompt is stored. This is a narrow leakage guard, not a
@@ -167,13 +148,12 @@ general-purpose deterministic judgement of arbitrary natural-language safety.
 Meditation is scheduled without progress chatter only after the final response
 has been accepted by HASHI's ordinary final-delivery boundary and the completed
 terminal state has been persisted. The later transport receipt is separate
-audit truth and is not a prerequisite for background learning. The HER v2
-`meditation` stage role uses its explicitly configured and Agent-granted
-provider profile. It runs in an isolated, tool-free, side-effect-free stage
-with a bounded timeout. It may use the same provider backend or profile as a
-foreground HER stage; neither backend separation nor a literal profile name
-is the safety boundary. Meditation has no execution authority and cannot alter
-the completed turn or replace any live execution state.
+audit truth and is not a prerequisite for background learning. The HERV3
+Meditation maintenance call uses its configured and Agent-granted Provider
+target. It runs in an isolated, tool-free, side-effect-free call with a bounded
+timeout. It may use the same Provider/model as the foreground loop; backend
+separation is not the safety boundary. Meditation has no execution authority
+and cannot alter the completed Turn or replace any live execution state.
 
 The model may return `create`, `update`, or `delete` actions. An empty action list
 is valid and preferred when the run did not contain a reusable learning event.
@@ -203,7 +183,7 @@ workspaces/<agent>/backend_state/her_habit_meditation/*.json
 ```
 
 HASHI's `request_id` remains a trace field and may repeat after a process
-restart. Each HER v2 turn has a unique `turn_id`; Meditation derives one stable
+restart. Each HERV3 turn has a unique `turn_id`; Meditation derives one stable
 32-hex `job_id` from that turn identity. Every success, failure, timeout, and
 cancellation exit for the turn reuses the same `job_id`; the journal filename,
 recovery, model-decision deduplication, and Write idempotency use it instead of
@@ -302,7 +282,7 @@ and existing legacy Dream files remain untouched historical data.
 
 Before enabling `habit_meditation.enabled` for an agent:
 
-1. verify the active HER v2 adapter declares
+1. verify the active HERV3 adapter declares
    `habit_pipeline_owner=her_v2_runtime`;
 2. do not treat legacy Dream snapshots or general memory as HER Habit Dream
    state;

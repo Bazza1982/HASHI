@@ -30,7 +30,7 @@ macOS support and portable profiles have their own validation scope in the
 ## First connection
 
 The current local connection page selects a CLI engine or a model provider
-inside HER v2. Telegram is optional:
+inside HERV3. Telegram is optional:
 
 ~~~bash
 python -m onboarding.onboarding_main

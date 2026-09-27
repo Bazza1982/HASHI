@@ -154,7 +154,8 @@ Expected behavior:
 
 Verify that the request metadata shows:
 - surface `hashi-demo`
-- execution mode `zero`
+- compatibility field `execution_mode=zero`, meaning model reasoning off in the
+  HERV3 single loop rather than a Direct route
 - explicit Demo owner/session
 - no memory injection
 - habit learning ineligible

@@ -114,7 +114,7 @@ BACKEND_REGISTRY: dict[str, dict] = {
         "secret_keys": ["codex-cli_key"],
     },
     "her-v2": {
-        "label": "HER v3",
+        "label": "HERV3",
         "privacy_levels": [0, 1],
         # Provider, model and reasoning choices are instance-derived. Keeping
         # placeholders here would leak the retired HER v2 route matrix.

@@ -245,22 +245,22 @@ background job, but the resulting process instance must be owned by
 `BackgroundJobManager`. Cron/heartbeat/nudge definitions and process execution
 records are separate concepts.
 
-HER v2 adds one request policy at this boundary for Agent-backed prompt work:
+HERV3 adds one request policy at this boundary for Agent-backed prompt work:
 
-- cron and heartbeat prompt/skill invocations always use Direct (`zero`) HER
-  execution effort so the persisted authoritative instruction reaches one
-  capable Quick-model agent without Triage pre-processing;
+- cron and heartbeat prompt/skill invocations use the same one
+  main-model/tool loop as ordinary HERV3 Turns; there is no Direct, Quick, or
+  Triage route;
 - per-job `her_v2_effort` overrides are retired; legacy fields are ignored at
   dispatch and removed opportunistically at mutation boundaries;
 - scheduled occurrences, recovery replays, and manual Run actions use the same
   job policy;
 - the scheduler passes explicit nested request metadata instead of changing
   the Agent's global adapter setting or inferring policy from summary text;
-- provider reasoning is independent and unchanged;
+- Provider/model reasoning is inherited from the Agent and unchanged;
 - nudge continuations, delayed messages, and ordinary user requests are not
   scheduled prompt jobs and retain the Agent's configured effort;
 - deterministic automation, transcript export, and HER Dream actions bypass
-  this prompt policy because they do not enter the ordinary HER v2 turn.
+  this prompt policy because they do not enter the ordinary HERV3 turn.
 
 ### HASHI Remote Terminal Execution
 

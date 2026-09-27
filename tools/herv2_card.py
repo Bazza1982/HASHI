@@ -1,9 +1,9 @@
-"""herv2_card.py — Deterministic HER v2 routing and strategy card rendering.
+"""HERV3 runtime-report rendering under a retained compatibility module name.
 
-Provides structured data extraction and dual-surface (Telegram HTML and
-plain text / TUI / Workbench) formatting for the HER v2 turn report.
-This module is model-free and provider-free: it only inspects turn metadata
-and line items.
+The ``herv2_card`` import path and metadata readers remain stable while public
+copy describes HERV3. The formatter exposes model reasoning, optional Strategy
+Cards, model usage, and terminal state; it never recreates retired route or
+cognitive-stage presentation.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from typing import Any
 
 @dataclass(frozen=True)
 class Herv2StageItem:
-    """One executed stage within a HER v2 turn."""
+    """One legacy-compatible usage item within a HERV3 Turn."""
 
     stage: str
     slot: str  # "Quick", "Pro", "Custom", or "n/a"
@@ -30,7 +30,7 @@ class Herv2StageItem:
 
 @dataclass(frozen=True)
 class Herv2CardData:
-    """Structured facts extracted from a HER v2 turn."""
+    """Structured facts extracted from HERV3 compatibility metadata."""
 
     turn_id: str
     classification: str
@@ -383,141 +383,75 @@ def format_herv2_card(
     locale: str | None = "zh-CN",
     surface: str = "telegram",
 ) -> str:
-    """Format HER v2 routing and strategy facts into a clean card.
-
-    surface: "telegram" (Telegram HTML) or "plain" (Plain text / TUI / Workbench).
-    """
+    """Format a HERV3 runtime report for Telegram or plain-text surfaces."""
     is_zh = _is_zh(locale)
-    is_tg = (surface == "telegram")
-
-    # Titles & Labels
-    title = "🧭 <b>HER v2 路由与策略卡</b>" if (is_zh and is_tg) else (
-        "🧭 <b>HER v2 Routing Card</b>" if is_tg else (
-            "🧭 HER v2 路由与策略卡" if is_zh else "🧭 HER v2 Routing Card"
-        )
-    )
-
+    is_tg = surface == "telegram"
+    title_text = "HERV3 运行报告" if is_zh else "HERV3 Runtime Report"
+    title = f"🧭 <b>{title_text}</b>" if is_tg else f"🧭 {title_text}"
     label_sep = "：" if is_zh else ": "
-    route_lbl = "路由" if is_zh else "Route"
-    cards_lbl = "策略" if is_zh else "Strategy"
-    stages_lbl = "阶段与模型" if is_zh else "Stages & Models"
-    final_lbl = "收尾" if is_zh else "Finalisation"
-    run_lbl = "运行" if is_zh else "Run"
-    review_lbl = "评审" if is_zh else "Reviews"
-    replan_lbl = "重规划" if is_zh else "Replans"
-    chk_lbl = "检查点" if is_zh else "Checkpoints"
-    state_lbl = "最终状态" if is_zh else "State"
+    reasoning_label = "模型推理" if is_zh else "Model reasoning"
+    cards_label = "策略卡（可选参考）" if is_zh else "Strategy Cards (optional)"
+    models_label = "模型调用" if is_zh else "Model calls"
+    state_label = "最终状态" if is_zh else "State"
 
-    lines: list[str] = [title]
-    if is_tg:
-        lines.append("")
-    else:
-        lines.append("─" * 40)
-
-    # Route
-    route_val = data.classification or data.execution_route or "UNKNOWN"
-    route_note = ""
-    if not data.classification and data.execution_route == "DIRECT":
-        route_note = (
-            " \u00b7 \u76f4\u8fbe\uff08\u672a\u5206\u8bca\uff09"
-            if is_zh
-            else " · Direct (no triage)"
-        )
-    effort_suffix = f" · {data.effort}" if data.effort else ""
+    lines: list[str] = [title, "" if is_tg else "─" * 40]
+    reasoning = data.effort or ("未报告" if is_zh else "not reported")
     if is_tg:
         lines.append(
-            f"<b>{route_lbl}{label_sep}</b>"
-            f"<code>{html.escape(route_val)}</code>"
-            f"{html.escape(route_note)}{html.escape(effort_suffix)}"
+            f"<b>{reasoning_label}{label_sep}</b><code>{html.escape(reasoning)}</code>"
         )
     else:
-        lines.append(
-            f"{route_lbl}{label_sep}{route_val}{route_note}{effort_suffix}"
-        )
+        lines.append(f"{reasoning_label}{label_sep}{reasoning}")
 
-    # Strategy cards (localized titles only; uppercase ids dropped)
     if data.strategy_card_details:
         titles = [
-            str(cd.get("title") or "").strip()
-            for cd in data.strategy_card_details
-            if str(cd.get("title") or "").strip()
+            str(card.get("title") or "").strip()
+            for card in data.strategy_card_details
+            if str(card.get("title") or "").strip()
         ]
         cards_text = " · ".join(titles)
     elif data.strategy_cards:
-        cards_text = " · ".join(str(c) for c in data.strategy_cards)
+        cards_text = " · ".join(str(card) for card in data.strategy_cards)
     else:
-        cards_text = "直接响应 (无特定策略卡)" if is_zh else "Direct (None)"
-
+        cards_text = "无" if is_zh else "None"
     if is_tg:
-        lines.append(f"<b>{cards_lbl}{label_sep}</b>{html.escape(cards_text)}")
+        lines.append(f"<b>{cards_label}{label_sep}</b>{html.escape(cards_text)}")
     else:
-        lines.append(f"{cards_lbl}{label_sep}{cards_text}")
+        lines.append(f"{cards_label}{label_sep}{cards_text}")
 
-    # Stages & Model Slots (aggregated by stage+slot+model)
-    if data.stages:
+    model_rows: dict[tuple[str, str], dict[str, float | int]] = {}
+    for item in data.stages:
+        key = (item.engine, item.model)
+        row = model_rows.setdefault(key, {"calls": 0, "elapsed_s": 0.0, "tokens": 0})
+        row["calls"] = int(row["calls"]) + 1
+        row["elapsed_s"] = float(row["elapsed_s"]) + float(item.elapsed_s or 0.0)
+        row["tokens"] = int(row["tokens"]) + int(item.tokens or 0)
+    if model_rows:
         lines.append("")
-        if is_tg:
-            lines.append(f"<b>{stages_lbl}{label_sep}</b>")
-        else:
-            lines.append(f"{stages_lbl}{label_sep}")
-
-        for row in _aggregate_stages(data.stages):
-            parts = _stage_parts(row, is_zh=is_zh)
+        lines.append(f"<b>{models_label}{label_sep}</b>" if is_tg else f"{models_label}{label_sep}")
+        for (engine, model), row in model_rows.items():
+            target = " / ".join(part for part in (engine, model) if part) or "unknown"
+            calls = int(row["calls"])
+            segments = [target]
+            if calls > 1:
+                segments.append(f"{calls} 次" if is_zh else f"{calls} calls")
+            duration = _fmt_duration(float(row["elapsed_s"]), is_zh=is_zh)
+            if duration:
+                segments.append(duration)
+            tokens = _fmt_tokens(int(row["tokens"]), is_zh=is_zh)
+            if tokens:
+                segments.append(tokens)
             if is_tg:
-                seg = [
-                    f"<b>{html.escape(parts['stage'])}</b>",
-                    f"<b>{html.escape(parts['slot'])}</b>",
-                ]
-                if parts["model"]:
-                    seg.append(f"<code>{html.escape(parts['model'])}</code>")
-                for key in ("rounds", "duration", "tokens"):
-                    if parts[key]:
-                        seg.append(html.escape(parts[key]))
-                lines.append("• " + " · ".join(seg))
+                escaped = [html.escape(segment) for segment in segments]
+                escaped[0] = f"<code>{escaped[0]}</code>"
+                lines.append("• " + " · ".join(escaped))
             else:
-                seg = [parts["stage"], parts["slot"]]
-                if parts["model"]:
-                    seg.append(parts["model"])
-                for key in ("rounds", "duration", "tokens"):
-                    if parts[key]:
-                        seg.append(parts[key])
-                lines.append("• " + " · ".join(seg))
+                lines.append("• " + " · ".join(segments))
 
-    # Finalisation
-    has_finalisation = any(st.stage == "finalisation" for st in data.stages)
-    final_text = _finalisation_text(has_finalisation, is_zh=is_zh)
     lines.append("")
+    state = data.terminal_state or "UNKNOWN"
     if is_tg:
-        lines.append(f"<b>{final_lbl}{label_sep}</b>{html.escape(final_text)}")
+        lines.append(f"<b>{state_label}{label_sep}</b><code>{html.escape(state)}</code>")
     else:
-        lines.append(f"{final_lbl}{label_sep}{final_text}")
-
-    # Run metrics
-    metrics_parts: list[str] = []
-    metrics_parts.append(
-        f"{review_lbl}: {data.review_count}"
-        if not is_tg
-        else f"<b>{review_lbl}</b>: <code>{data.review_count}</code>"
-    )
-    metrics_parts.append(
-        f"{replan_lbl}: {data.replan_count}"
-        if not is_tg
-        else f"<b>{replan_lbl}</b>: <code>{data.replan_count}</code>"
-    )
-    if data.checkpoint_count > 0:
-        metrics_parts.append(
-            f"{chk_lbl}: {data.checkpoint_count}"
-            if not is_tg
-            else f"<b>{chk_lbl}</b>: <code>{data.checkpoint_count}</code>"
-        )
-    metrics_parts.append(
-        f"{state_lbl}: {data.terminal_state}"
-        if not is_tg
-        else f"<b>{state_lbl}</b>: <code>{html.escape(data.terminal_state)}</code>"
-    )
-    if is_tg:
-        lines.append(f"<b>{run_lbl}{label_sep}</b>{' · '.join(metrics_parts)}")
-    else:
-        lines.append(f"{run_lbl}{label_sep}{' · '.join(metrics_parts)}")
-
+        lines.append(f"{state_label}{label_sep}{state}")
     return "\n".join(lines)

@@ -3251,12 +3251,12 @@ async def test_hashi_stage_provider_installs_full_direct_contract_and_tools():
     backend = manager.backends[-1]
     assert response.text
     assert backend.prompt == "Do the requested work"
-    assert "zero-orchestration Direct route" in backend.sys_prompt
+    assert "HERV3's single continuous main-model/tool loop" in backend.sys_prompt
     assert "Never hand the task off" in backend.sys_prompt
     assert '"name": "file_write"' in backend.sys_prompt
     assert '"id": "reports"' in backend.sys_prompt
     assert "Verify before reporting success." in backend.sys_prompt
-    assert "Direct Strategy Playbook self-selection" in backend.sys_prompt
+    assert "Strategy Card advisory self-selection" in backend.sys_prompt
     assert '"id": "TEST_QA"' in backend.sys_prompt
     assert backend.tool_registry.is_allowed("file_write") is True
     assert backend.tool_registry.max_loops is None
@@ -4329,7 +4329,7 @@ async def test_subagent_receives_only_explicitly_delegated_tools():
 
     delegated = manager.backends[-1].tool_registry
     assert manager.backends[-1].sys_prompt.startswith(
-        "You are a bounded HER v2 sub-agent."
+        "You are a bounded compatibility sub-agent."
     )
     assert "Bounded assignment and authority envelope" in (
         manager.backends[-1].sys_prompt

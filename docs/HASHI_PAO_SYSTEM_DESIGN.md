@@ -22,7 +22,7 @@ back through Frontend Connectors.
 
 PAO is agnostic to both. Its outer selection is normally an Engine Provider.
 Model Provider routing normally belongs inside the selected Engine, especially
-HER v2. PAO may store or forward a Model Provider preference through a typed
+HERV3. PAO may store or forward a Model Provider preference through a typed
 Engine contract, but it must not absorb provider-specific request, thread, or
 reasoning semantics.
 
@@ -91,9 +91,10 @@ instances, including:
 - transfers, queues, callbacks, cancellation, and delivery coordination; and
 - outer approvals, policy, audit, and operational governance.
 
-HER v2's Strategy, Planning, Execution, Tool loop, and recovery inside one HER
-Engine Session are **inner orchestration** owned by HER v2. The shared word
-`orchestration` does not transfer that lifecycle to PAO.
+HERV3's continuous main-model/tool loop and recovery inside one HER Engine
+Session are **inner orchestration** owned by HERV3. The shared word
+`orchestration` does not transfer that lifecycle to PAO. Optional Strategy
+Cards and Habits are advisory context, not PAO routes.
 
 #### Scheduler time contract
 
@@ -118,7 +119,7 @@ PAO owns the HASHI-level capability registry and execution authority:
 - preserve PAO-level execution and side-effect evidence; and
 - stop, fence, or reconcile work when required.
 
-PCM projects the authorised catalogue into an Engine request. HER v2 decides
+PCM projects the authorised catalogue into an Engine request. HERV3 decides
 when to request an available Tool during its Turn and preserves HER-level Tool
 evidence. Neither PCM nor HER may grant a capability withheld by PAO.
 
@@ -137,7 +138,7 @@ PAO does not own:
 
 - Persona, Context, or Memory content assembly, which belongs to PCM;
 - an Engine's internal Strategy/Planning/Execution lifecycle;
-- HER v2's Engine Session, checkpoints, Compact, or Model Provider routing;
+- HERV3's Engine Session, checkpoints, Compact, or Model Provider routing;
 - provider-native thread, response-chain, cache, or hidden state;
 - frontend window state, layout, unsent drafts, or product-specific data; or
 - platform- and instance-specific values that belong in configuration layers.
@@ -200,7 +201,7 @@ The Conversation Session is durable across frontend reconnects and may outlive
 an Engine process. A Run is accepted at most once for one idempotency boundary.
 Late writers and superseded attempts fail closed.
 
-When HER v2 is selected, PAO binds the Conversation Session and context
+When HERV3 is selected, PAO binds the Conversation Session and context
 generation to one HER Engine Session. PAO sends a complete PCM snapshot at
 open/rebase and authoritative deltas thereafter. HER owns the logical thread
 inside that binding; PAO retains outer Message, Run, Event, and delivery
@@ -261,9 +262,10 @@ off affects every non-origin source for that owner, including scheduled work;
 conversations started on the platform retain their primary reply route.
 
 PAO projects live presentation facts through Agent metadata. Engine, model,
-effort and current switches come from the active runtime; HER v2 alone supplies
-its structured Quick/Pro Model Provider routing. Frontends may format these
-facts but must not infer them from files or become another catalogue owner.
+effort and current switches come from the active runtime; HERV3 supplies its
+one selected Model Provider/model target and supported reasoning values.
+Frontends may format these facts but must not infer them from files or become
+another catalogue owner.
 
 ### 6.4 Per-message source and private authorization
 
@@ -362,7 +364,7 @@ strict-debug Skill behavior.
 request's fail-open terminal projection with the existing Tool audit/Smart Tool
 ledger and BackgroundJob receipts. It reports Provider request/response IDs,
 wire references, observed writes/effects, final state, and whether safe retry
-evidence is present, absent, or unknown. It never retries work, changes HER v2
+evidence is present, absent, or unknown. It never retries work, changes HERV3
 control flow, or makes diagnostic persistence a completion condition.
 
 ### HASHI1 automatic debug-reporting trial (2026-09-13)

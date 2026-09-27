@@ -22,6 +22,6 @@ HER_V3_MODEL_CALLBACK_PATTERN = (
 
 def her_v3_callback_data(name: str, *parts: object) -> str:
     if name not in HER_V3_MODEL_CALLBACK_NAMES:
-        raise ValueError(f"unknown HER v3 callback name: {name}")
+        raise ValueError(f"unknown HERV3 callback name: {name}")
     values = (name, *(str(part) for part in parts))
     return ":".join(values)

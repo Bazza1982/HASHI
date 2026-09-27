@@ -1661,7 +1661,7 @@ class _CognitiveControlToolRegistry:
                 if str((item.get("function") or {}).get("name") or "") in allowed
             ]
         )
-        # HER v3 does not force the model to maintain a parallel TaskState on
+        # HERV3 does not force the model to maintain a parallel TaskState on
         # every tool call. The deterministic cycle detector still observes the
         # real tool/result stream, and legacy deltas remain accepted if supplied.
         return selected
@@ -2379,7 +2379,7 @@ class HashiStageProvider(StageProvider):
         self._commentary_port = commentary
 
     def bind_turn_services(self, services: Any | None) -> None:
-        """Bind request-local HER v3 observability/liveness sidecars."""
+        """Bind request-local HERV3 observability/liveness sidecars."""
 
         self._turn_services = services
 

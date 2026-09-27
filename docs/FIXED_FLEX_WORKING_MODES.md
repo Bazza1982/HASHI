@@ -13,7 +13,7 @@ modes.
 |---|---|---|
 | Configured Agent runtime | `type: "flex"` for normal Agents | One workspace, identity, backend manager, and command surface |
 | Agent working mode | Fixed or Flex | Native-session continuation versus bridge-managed context |
-| HER execution mode | Direct, Strategic, or Planned | How much HER orchestration one task receives |
+| HERV3 model reasoning | Provider/model-supported values | Reasoning intensity inside the same one-loop HERV3 runtime; never a workflow selector |
 | Memory+ | On or Off | Optional compact continuity, independent of working mode |
 
 Fixed does not restore the retired legacy `type: "fixed"` runtime. It is a
@@ -31,7 +31,8 @@ session-preserving working mode inside `FlexibleAgentRuntime`.
 
 The session-capable backend set is owned by
 `orchestrator.config.SESSION_MODE_BACKENDS`. It currently contains
-`claude-cli`, `codex-cli`, `grok-cli`, `her-v2`, and `antigravity-cli`.
+`claude-cli`, `codex-cli`, `grok-cli`, the HERV3 adapter (internal ID
+`her-v2`), and `antigravity-cli`.
 Backend capability checks still run when a user selects Fixed; a backend whose
 runtime capabilities report no session support is rejected without changing
 state.

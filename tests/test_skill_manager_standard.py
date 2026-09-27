@@ -509,19 +509,19 @@ def test_legacy_job_effort_is_removed_on_import_and_enable(tmp_path: Path):
     assert "her_v2_effort" not in imported_heartbeat
 
 
-def test_active_heartbeat_describes_fixed_direct_policy_before_and_after_creation(
+def test_active_heartbeat_describes_inherited_herv3_effort_before_and_after_creation(
     tmp_path: Path,
 ):
     manager = SkillManager(tmp_path, tmp_path / "tasks.json")
 
-    assert "HER execution mode: Direct (zero) (fixed scheduler policy)" in (
+    assert "HERV3 model effort: inherit current model effort" in (
         manager.describe_active_heartbeat("momo")
     )
 
     ok, _message = manager.set_active_heartbeat("momo", enabled=True, minutes=15)
 
     assert ok is True
-    assert "HER execution mode: Direct (zero) (fixed scheduler policy)" in (
+    assert "HERV3 model effort: inherit current model effort" in (
         manager.describe_active_heartbeat("momo")
     )
 

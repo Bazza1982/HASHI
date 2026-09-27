@@ -26,8 +26,8 @@ Status: integrated into `main` for the HASHI v4 Beta source line
 
 ### Native HASHI execution
 - real AgentCreationService
-- HER v2 only
-- effort `zero`
+- HERV3 only
+- model reasoning off (persisted compatibility value `zero`)
 - empty Tool permission list
 - inactive Agent provisioning
 - on-demand Function Worker start

@@ -13,7 +13,8 @@ and [testing policy](TESTING_POLICY.md). Old examples grant no authority.
   or Runs.
 - **PAO** owns Agents, Conversations, Messages, Runs, Engines, Workzones, jobs,
   routing, outer recovery, and delivery.
-- **HER v2** owns Engine Sessions/Turns, routing, execution, recovery, and cost.
+- **HERV3** owns Engine Sessions/Turns, the continuous main-model/tool loop,
+  Model Provider selection, recovery, and cost.
 - **Connectors** project Telegram, WhatsApp, TUI, API, HChat, and Remote.
 
 Use the narrowest Function/configuration owner. `CORE_SOURCE_PATHS` defines
@@ -50,16 +51,16 @@ persist until retired.
 Codex CLI 0.156.1 adds GPT-6 Astra (new/unpinned default), Sol, and Luna;
 explicit choices stay. Astra/Sol reach `ultra`, Luna `max`; normalize effort.
 
-HASHI1 HER v3 defaults to `deepseek-api/deepseek-flash` for every configured
-Agent; Agent-specific opt-ins may add other Provider/model choices. Legacy HER
-v2 profiles do not select the v3 main model. On load, an effort unsupported by
+HASHI1 HERV3 defaults to `deepseek-api/deepseek-flash` for every configured
+Agent; Agent-specific opt-ins may add other Provider/model choices. Legacy
+HERV2 profiles do not select the HERV3 main model. On load, an effort unsupported by
 the selected v3 Provider/model is repaired to a compatible configured effort.
 Backend failure details are stored on the Run failure Event and exposed through an
 owner-scoped request activity read so external clients can show an expandable
 error without parsing diagnostic logs. The 2026-09-27 correction has offline
 qualification; live Worker adoption is a separate operational step.
 
-HER v3 Provider/model reasoning may be binary (`off`/`enabled`). Preserve
+HERV3 Provider/model reasoning may be binary (`off`/`enabled`). Preserve
 `enabled` through persisted configuration, request execution, and Run metadata;
 the retained internal HER Effort enum cannot reject a valid Provider setting.
 
@@ -147,7 +148,7 @@ surface. Mark `/load` complete only after its continuation is queued.
 
 ## Engines, tools, and recovery
 
-HER v3 began on HASHI3 and was promoted as a harness-only series into HASHI1's
+HERV3 began on HASHI3 and was promoted as a harness-only series into HASHI1's
 local `main` on 2026-09-26 beside the independent FC work. HASHI3, HASHI2,
 HASHI4, and GitHub `main` remain outside that adoption. It stays inside the HER
 functional owner: public Engine ID `her-v3`, internal `her-v2` adapter/storage
@@ -156,24 +157,24 @@ default.
 
 Engine and Model Provider differ. `/backend` selects Engine, `/provider`
 Provider, `/model` model, and `/effort` Provider reasoning; Fixed/Flex and
-Memory+ remain independent. Old v2 stages and `/herv2` are not public v3
+Memory+ remain independent. Old HERV2 stages and `/herv2` are not public HERV3
 controls; `/metre` aliases `/meter`. Model/provider cards and callbacks share
 one contract, so test generated buttons, not only text commands. HASHI3 live
 acceptance covered real switching, reasoning, Session identity, usage, and
-metering; see [HER v3 experiment](HER_V3_EXPERIMENT.md) for evidence and the
+metering; see [HERV3 upgrade](HERV3_UPGRADE.md) for evidence and the
 separate HASHI1 promotion record.
 
 HASHI1's 2026-09-27 instance configuration opts all 18 Agents into five exact
 OpenRouter conversation models (Venice, Cydonia, both Euryales, MythoMax).
-Their empty per-model effort declarations mean HER v3 omits reasoning on the
+Their empty per-model effort declarations mean HERV3 omits reasoning on the
 Provider request; models without that explicit declaration keep existing
 behavior. Only Llama 3.1 Euryale currently advertises tool calls. Source and
 configuration checks are offline evidence until a separately authorized
 Function replacement and live check establish running adoption.
 OpenRouter returned 404 when the other four were sent tool definitions.
 Their `allowed_backends.model_tool_support` entries now mark them chat-only;
-HER omits tools for Direct conversations and discloses the limit when a task
-needs actions. A tool-required internal stage rejects them explicitly.
+HERV3 omits tools for chat-only models and discloses the limit when a task
+needs actions. It does not route those requests into another cognitive stage.
 
 Use current metadata for context, price, effort, and modality. Media needs
 model, Adapter, and policy support; unknown is not unsupported or zero cost.

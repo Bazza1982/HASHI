@@ -1,4 +1,6 @@
-# HER v2 Triage-to-Strategy Rewiring Plan
+> **Legacy HERV2 archive — non-normative.** This document records the retired staged runtime. HERV3 uses one continuous main-model/tool loop with no Triage, Strategy, Planning, Replanning, Review, or stage-based Finalisation routing. Strategy Cards and Habit/Meditation remain optional. See [HERV3 upgrade](HERV3_UPGRADE.md).
+
+# HERV2 Triage-to-Strategy Rewiring Plan
 
 | Field | Value |
 |---|---|
@@ -7,7 +9,7 @@
 | Experiment environment | Originally validated on HASHI3; no longer an instance-specific architecture boundary |
 | Current production effect | Strategic (`low`) and Planned (`medium`) are active production paths |
 | Core change | Replace prompt-only Triage with a tool-capable Strategy stage that classifies the request, selects Strategy Cards, and prepares a concise execution brief |
-| Activation | Implemented; current activation and mode surface follow [HER v2 Three-Mode Decision](HER_V2_THREE_MODE_DECISION.md) |
+| Activation | Implemented; current activation and mode surface follow [HERV2 Three-Mode Decision](HER_V2_THREE_MODE_DECISION.md) |
 | Parent architecture | [HASHI System Architecture](../ARCHITECTURE.md) |
 
 This document preserves the original HASHI3 experiment and implementation
@@ -32,11 +34,11 @@ The first experimental slice is implemented in HASHI3:
   read-only Planning, then fully capable Execution boundary;
 - High and higher paths retain their existing stage-tool behaviour until they
   are evaluated independently; and
-- the HER v2 regression suite passes before activation.
+- the HERV2 regression suite passes before activation.
 
 ## 1. Purpose
 
-This document defines the implementation plan for upgrading the existing HER v2
+This document defines the implementation plan for upgrading the existing HERV2
 Triage stage into a Strategy stage in HASHI3.
 
 The new Strategist is not a renamed classifier and is not a detailed Planning
@@ -473,7 +475,7 @@ path and actual tool attachment.
 
 | Field | Contract |
 |---|---|
-| `classification` | One existing HER v2 classification; classification remains immutable after validation |
+| `classification` | One existing HERV2 classification; classification remains immutable after validation |
 | `real_goal` | Concise resolved operational goal; required for every resolved request |
 | `selected_strategy_cards` | Unique list of exact card IDs selected from the supplied frozen Playbook; no hard-coded schema enum |
 | `relevant_habits` | Existing Habit-reference representation selected from the supplied catalogue |
@@ -854,7 +856,7 @@ That decision does not require adding sub-agent fields to schema v3 now.
 1. Preserve the user-authored untracked Strategy prompt.
 2. Record the current Git revision, prompt hash, stage routes, models, and
    reasoning settings.
-3. Run the current focused HER v2 prompt/structured/runtime tests before
+3. Run the current focused HERV2 prompt/structured/runtime tests before
    changing behaviour.
 4. Capture representative baseline traces for Direct, Simple, Complex,
    High-volume, Confirmation, and tool-using tasks.
@@ -916,7 +918,7 @@ That decision does not require adding sub-agent fields to schema v3 now.
 
 1. Present the role as Strategy/Strategist in HASHI3 UI and audit summaries.
 2. Retain compatible internal Triage route/state values.
-3. Update the canonical HER v2 design and testing documents after behaviour is
+3. Update the canonical HERV2 design and testing documents after behaviour is
    verified.
 4. Record the experiment and any deviations from this plan.
 

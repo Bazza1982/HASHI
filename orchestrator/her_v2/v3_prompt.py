@@ -1,4 +1,4 @@
-"""Deterministic PCM-to-model projection for HER v3."""
+"""Deterministic PCM-to-model projection for HERV3."""
 from __future__ import annotations
 import json
 from collections.abc import Mapping

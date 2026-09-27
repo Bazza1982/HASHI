@@ -10,14 +10,14 @@
 
 ## 1. Overview
 
-PCM is one of HASHI's four functional modules, alongside PAO, HER v2, and
+PCM is one of HASHI's four functional modules, alongside PAO, HERV3, and
 Frontend Connectors. It owns the definition, authority order, retrieval,
 assembly, versioning, and typed projection of Persona, Context, and Memory.
 
 PAO owns Agent and Conversation Session control and selects an Engine Provider.
 PCM supplies that Engine with a full authoritative projection at the required
 bootstrap or rebase boundary and with typed deltas thereafter when the Engine
-contract supports them. HER v2 consumes PCM inside its HER Engine Session but
+contract supports them. HERV3 consumes PCM inside its HER Engine Session but
 does not become PCM authority.
 
 PCM is held primarily in `agent.md` and is supplemented by runtime Context,
@@ -64,7 +64,7 @@ Permanent system instructions.
 [sys_end]
 ```
 
-Content inside this block is treated as a system prompt by HER v2 and other
+Content inside this block is treated as a system prompt by HERV3 and other
 compatible Engines. It can only be changed by editing `agent.md` directly.
 
 #### Dynamic system prompts
@@ -128,12 +128,16 @@ these controls are separate from Workzone.
 | Codex CLI    | \--dangerously-bypass-approvals-and-sandbox                                                 |
 | Claude CLI   | \--dangerously-skip-permissions                                                             |
 | Grok CLI     | Uses bypassPermissions and --always-approve by default, subject to configuration            |
-| HER-V2       | Uses its own Tool Gateway, tool permissions and permission\_mode                            |
+| HERV3       | Uses its own Tool Gateway, tool permissions and permission\_mode                            |
 | API Engine adapters | Depend on PAO-provided Tool catalogues and permissions; there is no common YOLO parameter |
 
 ### 4.3 Time information
 
-HASHI injects accurate time information into the top-level request assembled for each external user turn. This gives the model a reliable sense of time and supports time-based questions. It does not automatically inject time into every internal HER-V2 Planning, Execution, Review or Finalisation model call.
+HASHI injects accurate time information into the top-level request assembled
+for each external user turn. This gives the model a reliable sense of time and
+supports time-based questions. HERV3 receives it in the one foreground
+main-model request; separate Planning, Review, and Finalisation calls do not
+exist in the HERV3 foreground path.
 
 The current projection includes local date, seconds, named time zone, UTC
 offset, and relevant previous-message timing.
@@ -155,8 +159,8 @@ Tool and its Engine-level evidence. Catalogue metadata never grants access.
 
 | **Catalogue**    | **Current implementation status**                                                              | **Target treatment**                                                         |
 | ---------------- | ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| Skills catalogue | Partly available through the HER v2 Direct route; not supplied to every Engine on every turn. | Expose a concise HASHI-level catalogue to all permitted Agents and Engines. |
-| Tools catalogue  | Provided to HER v2 by phase rather than as a uniform concise catalogue.                      | Expose a concise HASHI-level catalogue to all permitted Agents and Engines. |
+| Skills catalogue | Available to the HERV3 main-model loop when permitted; not supplied to every Engine on every turn. | Expose a concise HASHI-level catalogue to all permitted Agents and Engines. |
+| Tools catalogue  | Available to the HERV3 main-model loop when permitted.                                          | Expose a concise HASHI-level catalogue to all permitted Agents and Engines. |
 
 ### 4.6 Cross-session context
 
@@ -164,7 +168,7 @@ PAO allows an Agent to switch between permitted Engine Providers. When binding
 to a fixed Engine, the user may choose whether PCM sends cross-Session Context.
 This Context consists of the last ten completed user-assistant exchanges and is
 sent at the applicable bootstrap boundary rather than repeatedly as flat
-history. A fixed Engine such as HER v2 thereafter receives authoritative PCM
+history. A fixed Engine such as HERV3 thereafter receives authoritative PCM
 deltas while preserving its Engine Session.
 
 Flex Engine invocations do not receive a separate cross-Session package because
@@ -177,7 +181,7 @@ also applies a limit of approximately 6,000 words. When a limit requires
 reducing conversation history, PCM must remove the **oldest complete chat
 entries first**. It must preserve the newest chats ahead of older chats and
 must not discard the current user request or higher-authority PCM sections to
-retain older history. HER v2 continues to use its own context-capacity and
+retain older history. HERV3 continues to use its own context-capacity and
 Compact controls.
 
 |                                                                                                                                                                                          |
@@ -225,7 +229,7 @@ Figure 1. Current immediate and overnight memory processing flow
 
 The figure records the current deployment flow. The named consolidation actor is deployment-specific and is not a requirement of the generic HASHI PCM architecture.
 
-The two search paths are not currently connected. Normal Flex and HER-V2 prompt retrieval mainly searches each agent’s lower-quality local hash memory. It does not automatically query the central BGE-M3 memory store.
+The two search paths are not currently connected. Normal Flex and HERV3 prompt retrieval mainly searches each agent’s lower-quality local hash memory. It does not automatically query the central BGE-M3 memory store.
 
   - retrieve\_memories() searches the agent’s own bridge\_memory.sqlite.
 
@@ -275,8 +279,8 @@ and the default injection of only ten recent completed exchanges.
 
 Memory+ is an Agent-owned notepad containing structured, limited working state.
 It is not a chat log, a second long-term Memory database, an Agent working mode,
-or a HER execution mode. It can be enabled independently in Fixed or Flex and
-with any HER execution mode.
+or a HERV3 reasoning setting. It can be enabled independently in Fixed or Flex
+and with any HERV3 Provider/model reasoning value.
 
 Notes remain available throughout the business day. When Memory+ is next loaded or updated after the local calendar date changes, HASHI performs a deterministic rollover. It archives the previous structured state and derives a bounded carryover from completed items, decisions, state changes, unresolved items and pointers according to fixed rules. This is not a scheduled night-time model call and the agent does not independently generate a free-form overnight summary.
 
@@ -306,7 +310,7 @@ Memory may be retrieved passively or proactively.
 At the start of a persistent Engine Session, PCM may provide the ten most recent
 completed exchanges as bootstrap Context. The Engine is then expected to
 maintain its logical continuity without depending on provider-native thread
-state. HER v2 implements this boundary through its durable HER Engine Session.
+state. HERV3 implements this boundary through its durable HER Engine Session.
 
 After bootstrap, the Fixed working mode uses delta PCM on every external user
 turn. HASHI sends:
@@ -343,7 +347,7 @@ to infer historical order.
 
 |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Size management** PCM applies Engine-specific assembled-request limits to non-HER Engines; handoff restoration is also bounded to approximately 6,000 words. The target remains up to ten recent completed exchanges, but limits may reduce that number. Pruning must operate on complete exchanges and remove the oldest exchanges first, preserving newer exchanges, sequence labels and timestamps. The current user request and higher-authority PCM sections are protected. PCM must audit any omitted history instead of silently keeping old exchanges while dropping newer ones. HER v2 uses its own capacity controller and Compact policy. |
+| **Size management** PCM applies Engine-specific assembled-request limits to non-HER Engines; handoff restoration is also bounded to approximately 6,000 words. The target remains up to ten recent completed exchanges, but limits may reduce that number. Pruning must operate on complete exchanges and remove the oldest exchanges first, preserving newer exchanges, sequence labels and timestamps. The current user request and higher-authority PCM sections are protected. PCM must audit any omitted history instead of silently keeping old exchanges while dropping newer ones. HERV3 uses its own capacity controller and Compact policy. |
 
 #### Long-term memory stored in agent.md
 
@@ -475,7 +479,7 @@ control or a change in instruction authority.
 
 | **Area**                  | **Gap**                                                                                                      | **Required treatment**                                                                                                                         |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| Cross-Engine delta parity | HER v2 supports full bootstrap/rebase plus typed PCM deltas, while not every Engine Adapter exposes an equivalent delta contract. | Preserve HER's implemented contract and add conformant delta or explicit full-projection semantics per Engine Adapter without duplicating PCM ownership. |
+| Cross-Engine delta parity | HERV3 supports full bootstrap/rebase plus typed PCM deltas, while not every Engine Adapter exposes an equivalent delta contract. | Preserve HER's implemented contract and add conformant delta or explicit full-projection semantics per Engine Adapter without duplicating PCM ownership. |
 | Cross-Session handoff     | `/backend +` may prepare but not send the handoff content.                                                   | Complete and verify one-time delivery to the selected fixed Engine.                                                                             |
 | Context size management   | Non-HER prompt budgets may clip flat context instead of pruning complete conversations by age.               | Preserve the current request and higher-authority PCM; remove the oldest complete chat entries first, preserve newer entries and audit omission. |
 | Skills and Tools          | Catalogues are not consistently provided across all Engines.                                                | Expose concise HASHI-level catalogues on each permitted Turn.                                                                                   |
@@ -497,15 +501,16 @@ The following decisions were accepted on 26 August 2026. They are normative and 
 | PCM-DEC-003 | A Skills or Tools catalogue may advertise only capabilities that the Agent can actually invoke in the current request scope. Uniform HASHI Tool access for supported fixed CLI Engines is part of this upgrade. | Resolve availability after Agent, Engine, stage, and permission filtering. Catalogue metadata never grants permission. Connect supported fixed CLI Engines to the PAO-owned HASHI Tool Gateway through MCP or an equivalent native bridge, and do not advertise a capability until that connection is available and authorised. |
 | PCM-DEC-004 | Canonical raw audit evidence has indefinite retention and no automatic expiry. | Preserve complete unredacted audit evidence across `/reset`, `/new`, backend switches, process reloads and ordinary workspace maintenance. Use encryption at rest where supported together with strict least-privilege access controls. Archival or tiered storage may move evidence but may not discard it. Deletion is permitted only through a separately scoped, explicitly confirmed destructive audit-wipe operation; ordinary reset or wipe behaviour must not silently delete it. Backups inherit the same retention and access requirements. |
 | PCM-DEC-005 | Central BGE-M3 raw-memory search is scoped to the current HASHI instance and Agent by default. | `memory_sync` permits ingestion but does not grant cross-Agent read access. Shared knowledge is delivered through the curated Wiki. Searching another Agent’s raw consolidated records requires explicit user authorisation, an auditable purpose and provenance-preserving results. `/wiki` never exposes the underlying raw cross-Agent memory store. |
-| PCM-DEC-006 | Unfinished work is transient Context, not Agent Memory. HER v2's canonical Engine Session control plane owns durable recovery evidence; the former WIP Journal is shadow compatibility evidence only. | Interrupted work is reconstructed from canonical typed Turn, Tool, side-effect, and checkpoint evidence. Later HER Turns receive quoted recovery Context with visible uncertainty where required. Provider requests and raw assembled envelopes are excluded. `/compact` operates on settled Session history. Memory+ is not responsible for crash recovery. |
+| PCM-DEC-006 | Unfinished work is transient Context, not Agent Memory. HERV3's canonical Engine Session control plane owns durable recovery evidence; the former WIP Journal is shadow compatibility evidence only. | Interrupted work is reconstructed from canonical typed Turn, Tool, side-effect, and checkpoint evidence. Later HER Turns receive quoted recovery Context with visible uncertainty where required. Provider requests and raw assembled envelopes are excluded. `/compact` operates on settled Session history. Memory+ is not responsible for crash recovery. |
 | PCM-DEC-007 | Natural-language referents are resolved by the Engine from the current user message and chronologically ordered Conversation history, not by PAO/PCM hard binding. | Preserve ordinary user text verbatim, including bare choices such as `3` and words such as `continue`. Out-of-session results may enter Context only as timestamped, read-only user-assistant history. Do not infer a reply target from prose, rewrite the current request, synthesize option wording, or create Connector reply controls. Explicit typed slash/control operations retain their own contracts. |
 | PCM-DEC-008 | PCM transports context and resource facts but never decides which historical topic or attachment is relevant to the current conversation. | Bind each attachment projection to its originating Message/Turn. Present only the current Message's attachments as current references; keep attachments from completed Turns inside their chronologically ordered historical exchanges, and never promote resources from failed or cancelled Turns. A cumulative Engine Session resource registry is transport/audit state, not a current-request or relevance selector. |
 
 The WIP Journal remains temporarily as a bounded shadow/legacy compatibility
 projection while canonical HER recovery is validated. It must not be re-ingested
 when canonical recovery is available and must not become a competing authority.
-See [HER v2 Fixed-Session Control Plane](HER_V2_SESSION_CONTROL_PLANE.md) for the
-current contract and [HER v2 WIP Journal](HER_V2_WIP_JOURNAL.md) for the legacy
+See [HERV3 upgrade](HERV3_UPGRADE.md) for the current contract and the archived
+[HERV2 Fixed-Session Control Plane](HER_V2_SESSION_CONTROL_PLANE.md) and
+[HERV2 WIP Journal](HER_V2_WIP_JOURNAL.md) for legacy
 inspection boundary.
 
 ## 11. Upgrade Test Contract

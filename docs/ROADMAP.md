@@ -8,7 +8,7 @@
 ## Strategic Direction
 
 HASHI is a local-first platform for persistent AI agents, with PCM,
-provider-agnostic orchestration, the native HER v2 Engine, and Frontend
+provider-agnostic orchestration, the native HERV3 Engine, and Frontend
 Connectors. Personal/local operation is the primary path; team and enterprise
 governance remains available for environment-specific evaluation.
 
@@ -23,7 +23,7 @@ Current version-line interpretation:
 
 - **HASHI `v4.0.0-beta.1` / Python package `4.0.0b1`** is the single current
   repository Beta, led by the provider-neutral HASHI-native
-  Python HER v2 runtime, evidence-backed execution contracts, and governed AAI
+  Python HERV3 runtime, evidence-backed execution contracts, and governed AAI
   control plane.
 - **Enterprise AAI `v0.1.0-alpha.1`** is a historical tagged milestone and no
   longer a parallel active package line.
@@ -67,12 +67,12 @@ matching GitHub Release, npm package, or binary artifact. See
 The development accumulated after the first v4 foundation alpha is now
 consolidated as the `v4.0.0-alpha.2` release candidate:
 
-- provider-neutral HER v2 as the sole HER execution backend;
+- provider-neutral HERV2 as the then-current HER execution backend;
 - Direct (`zero`), Strategic (`low`), and Planned (`medium`) production
   execution modes, independent from provider reasoning and tool-call count;
 - persistent direct-conversation ordering, isolated scheduler execution,
   reply-target snapshots, explicit stream ownership, and idempotent delivery;
-- explicit staged orchestration, Tool Gateway/MCP, secure multimedia, and
+- explicit staged HERV2 orchestration, Tool Gateway/MCP, secure multimedia, and
   optional agent-local Habit/Meditation;
 - deferred redesign of the retained but non-public Adaptive, Reviewed, and
   Assured implementation;

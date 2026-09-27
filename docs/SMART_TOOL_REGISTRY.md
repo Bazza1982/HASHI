@@ -2,10 +2,11 @@
 
 HASHI uses one deterministic layer around its existing tools. It is not a model
 or a semantic task planner. It may, however, reject a mechanically unsafe tool
-shape before execution and return typed guidance so HER v2 can re-plan.
+shape before execution and return typed guidance so the HERV3 main model can
+choose a safer alternative inside the same loop.
 
 ```text
-HER v2 Executor -> Smart Tool admission -> Tool Registry -> Tool
+HERV3 main loop -> Smart Tool admission -> Tool Registry -> Tool
                          |                 |             |
                          +--------------- Ledger <-------+
 ```
@@ -13,8 +14,10 @@ HER v2 Executor -> Smart Tool admission -> Tool Registry -> Tool
 The Registry keeps existing permission checks, performs bounded deterministic
 admission checks, invokes the original tool, adapts the result, adds a soft
 repeat warning when appropriate, and appends one ledger row. Permission and
-process execution remain PAO/Tool Registry responsibilities; HER v2 owns how it
-responds to `needs_replan` and chooses the suggested alternative.
+process execution remain PAO/Tool Registry responsibilities; HERV3 owns how it
+responds to `needs_replan` and chooses the suggested alternative. The retained
+`needs_replan` result name means “choose another action”; it does not invoke a
+Replanning stage.
 
 ## Safe text and log search
 

@@ -301,7 +301,7 @@ class HERv2Config:
             raise HERv2ConfigurationError("idle-progress timeout must be positive")
         if not 120.0 <= float(self.commentary_interval_s) <= 180.0:
             raise HERv2ConfigurationError(
-                "HER v3 commentary_interval_s must be between 120 and 180 seconds"
+                "HERV3 commentary_interval_s must be between 120 and 180 seconds"
             )
         if self.audit_failure_terminal not in {
             TerminalState.ERROR,
@@ -770,7 +770,7 @@ class HERv2Config:
         if reasoning is None:
             reasoning = self.stage_reasoning.get(stage)
         if reasoning is None:
-            # HER v3 effort is provider reasoning, never orchestration policy.
+            # HERV3 effort is provider reasoning, never orchestration policy.
             reasoning = profile.reasoning
         return replace(
             profile,

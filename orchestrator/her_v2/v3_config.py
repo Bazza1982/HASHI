@@ -1,4 +1,4 @@
-"""HER v3 single-model configuration; legacy names are storage compatibility only."""
+"""HERV3 single-model configuration; legacy names are storage compatibility only."""
 from __future__ import annotations
 from collections.abc import Mapping
 from copy import deepcopy
@@ -21,7 +21,7 @@ HER_V3_CONFIGURATION_STATE_KEY = "her_v3_configuration"
 
 @dataclass(frozen=True)
 class HERv3ModelTarget:
-    """The only user-selectable model target in HER v3."""
+    """The only user-selectable model target in HERV3."""
 
     provider: str
     model: str
@@ -30,16 +30,16 @@ class HERv3ModelTarget:
         provider = canonical_backend_engine(self.provider)
         model = str(self.model or "").strip()
         if not provider or provider == "her-v2":
-            raise ValueError("HER v3 target requires a concrete Provider")
+            raise ValueError("HERV3 target requires a concrete Provider")
         if not model:
-            raise ValueError("HER v3 target requires a model")
+            raise ValueError("HERV3 target requires a model")
         object.__setattr__(self, "provider", provider)
         object.__setattr__(self, "model", model)
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "HERv3ModelTarget":
         if not isinstance(raw, Mapping):
-            raise ValueError("HER v3 target must be an object")
+            raise ValueError("HERV3 target must be an object")
         return cls(
             provider=str(raw.get("provider") or raw.get("engine") or "").strip(),
             model=str(raw.get("model") or "").strip(),
@@ -92,7 +92,7 @@ def normalise_v3_config(raw: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError(f"HER {key} must be an object")
     for key in ("strategy_tools_enabled", "planning_tools_enabled"):
         if key in raw and not isinstance(raw[key], bool):
-            raise ValueError(f"{key} must be a boolean (retired in HER v3)")
+            raise ValueError(f"{key} must be a boolean (retired in HERV3)")
     if raw.get("auxiliary") is not None and not isinstance(raw["auxiliary"], Mapping):
         raise ValueError("HER auxiliary must be an object")
     provider_allowlist = raw.get("v3_provider_allowlist")
@@ -100,7 +100,7 @@ def normalise_v3_config(raw: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(provider_allowlist, list) or not provider_allowlist or any(
             not isinstance(value, str) or not value.strip() for value in provider_allowlist
         ):
-            raise ValueError("HER v3 provider allowlist must be a nonempty list of Providers")
+            raise ValueError("HERV3 provider allowlist must be a nonempty list of Providers")
         provider_allowlist = [canonical_backend_engine(value) for value in provider_allowlist]
 
     profiles = raw.get("profiles") or {}
@@ -115,10 +115,10 @@ def normalise_v3_config(raw: Mapping[str, Any]) -> dict[str, Any]:
     main = raw.get("main")
     explicit = isinstance(main, Mapping)
     if main is not None and not explicit:
-        raise ValueError("HER v3 main must be an object")
+        raise ValueError("HERV3 main must be an object")
     source = main if explicit else legacy
     if not isinstance(source, Mapping):
-        raise ValueError("HER v3 requires main.provider/model or a legacy Execution profile")
+        raise ValueError("HERV3 requires main.provider/model or a legacy Execution profile")
 
     primary = deepcopy(dict(source))
     if "provider" in primary:
@@ -143,9 +143,9 @@ def normalise_v3_config(raw: Mapping[str, Any]) -> dict[str, Any]:
 
     for profile in (primary, auxiliary):
         if not str(profile.get("engine") or "").strip() or not str(profile.get("model") or "").strip():
-            raise ValueError("HER v3 model targets require provider and model")
+            raise ValueError("HERV3 model targets require provider and model")
         if provider_allowlist is not None and canonical_backend_engine(profile["engine"]) not in provider_allowlist:
-            raise ValueError("HER v3 model target is outside the configured Provider allowlist")
+            raise ValueError("HERV3 model target is outside the configured Provider allowlist")
         for key in ("provider_reasoning", "reasoning_effort", "_native_audio_route"):
             profile.pop(key, None)
 
@@ -222,7 +222,7 @@ def build_v3_provider_options(
     target: HERv3ModelTarget,
     allowed_providers: Sequence[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Derive HER v3 Provider/model choices without the v2 route matrix."""
+    """Derive HERV3 Provider/model choices without the v2 route matrix."""
 
     rows_by_engine: dict[str, list[Mapping[str, Any]]] = {}
     for row in allowed_backends:
@@ -297,7 +297,7 @@ def build_v3_provider_options(
                 "models": models,
                 "default_model": default_model,
                 # Compatibility field names for callers that previously chose
-                # Quick/Pro. Both now mean the one HER v3 default target.
+                # Quick/Pro. Both now mean the one HERV3 default target.
                 "fast_model": default_model,
                 "pro_model": default_model,
                 "available": reason is None,

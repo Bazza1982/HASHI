@@ -7,7 +7,7 @@ from orchestrator.command_registry import RuntimeCommand
 
 RETIRED_NOTICE = (
     "ℹ️ <b>/rebuild is retired</b>\n\n"
-    "HER v1's native Rust runtime has been removed. HER v2 is Python-based "
+    "HER v1's native Rust runtime has been removed. HERV3 is Python-based "
     "and has no native runtime to build.\n\n"
     "No build, reload, or restart was performed. Use <code>/reboot</code> to "
     "adopt HASHI Python updates. This compatibility notice will be removed "

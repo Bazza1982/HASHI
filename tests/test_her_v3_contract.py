@@ -70,7 +70,7 @@ class _MainProvider:
     async def invoke(self, profile, request):
         self.calls.append((profile, request))
         return StageResponse(
-            text="HER v3 main-model answer",
+            text="HERV3 main-model answer",
             provider=profile.engine,
             model=profile.model,
             reasoning_trace=None,
@@ -121,7 +121,7 @@ async def test_high_effort_keeps_one_main_model_call(tmp_path):
     response = await adapter.generate_response("Answer directly", "request-high")
 
     assert response.is_success
-    assert response.text == "HER v3 main-model answer"
+    assert response.text == "HERV3 main-model answer"
     assert len(provider.calls) == 1
     profile, request = provider.calls[0]
     assert request.stage is Stage.DIRECT

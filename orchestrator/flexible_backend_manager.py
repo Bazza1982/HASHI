@@ -159,7 +159,7 @@ class FlexibleBackendManager:
             for backend_cfg in self.config.allowed_backends
             if backend_cfg.get("engine")
         }
-        # HER v3 effort is Provider reasoning.  Preserve the configured value;
+        # HERV3 effort is Provider reasoning.  Preserve the configured value;
         # its concrete Provider/model capability is validated by the runtime
         # once the main target has been resolved.
         for backend_cfg in self.config.allowed_backends:
@@ -387,7 +387,7 @@ class FlexibleBackendManager:
                                         else next(iter(choices), "")
                                     )
                                     self.logger.warning(
-                                        "Repaired unsupported HER v3 effort %r for %s/%s to %r",
+                                        "Repaired unsupported HERV3 effort %r for %s/%s to %r",
                                         raw_effort, target.provider, target.model, normalized,
                                     )
                             if normalized:
@@ -612,7 +612,7 @@ class FlexibleBackendManager:
         return raw
 
     def _her_v3_base_config(self) -> dict[str, Any]:
-        """Return the HER v3 source while keeping the storage key compatible."""
+        """Return the HERV3 source while keeping the storage key compatible."""
 
         return self._her_v2_base_config()
 
@@ -662,7 +662,7 @@ class FlexibleBackendManager:
         option = self._her_v3_provider_option(target.provider)
         if option is None or not option.get("available"):
             raise ValueError(
-                f"HER v3 Provider {target.provider!r} is unavailable on this instance"
+                f"HERV3 Provider {target.provider!r} is unavailable on this instance"
             )
         if target.model not in option.get("models", []):
             raise ValueError(
@@ -681,7 +681,7 @@ class FlexibleBackendManager:
             if self._her_v3_configuration_override is None:
                 raise
             self.logger.warning(
-                "Ignoring invalid persisted HER v3 model target: %s",
+                "Ignoring invalid persisted HERV3 model target: %s",
                 exc,
             )
             self._her_v3_configuration_override = None
@@ -692,7 +692,7 @@ class FlexibleBackendManager:
     def prepare_her_v3_provider(self, provider: str) -> HERv3ModelTarget:
         option = self._her_v3_provider_option(provider)
         if option is None:
-            raise ValueError(f"unknown HER v3 Provider: {provider}")
+            raise ValueError(f"unknown HERV3 Provider: {provider}")
         if not option.get("available"):
             raise ValueError(str(option.get("reason") or "Provider is unavailable"))
         current = self.get_her_v3_target()
@@ -719,7 +719,7 @@ class FlexibleBackendManager:
         """Persist one main target and refresh future turns immediately."""
 
         if self.config.active_backend != HER_V2_ENGINE:
-            raise ValueError("HER v3 model settings are available only while HER v3 is active")
+            raise ValueError("HERV3 model settings are available only while HERV3 is active")
         self._validate_her_v3_target(target)
         effective = apply_v3_target(self._her_v3_base_config(), target)
         parsed = HERv2Config.from_mapping(effective)
@@ -763,7 +763,7 @@ class FlexibleBackendManager:
         try:
             self.state_store.update(update_state)
         except Exception as exc:
-            raise OSError(f"failed to persist HER v3 model target: {exc}") from exc
+            raise OSError(f"failed to persist HERV3 model target: {exc}") from exc
         self._her_v3_configuration_override = serialized
         self._her_v2_configuration_override = None
         self._her_v2_configuration_draft = None
@@ -1309,7 +1309,7 @@ class FlexibleBackendManager:
                     )
                 except (TypeError, ValueError) as exc:
                     self.logger.warning(
-                        "Ignoring invalid HER v3 model target while building adapter config: %s",
+                        "Ignoring invalid HERV3 model target while building adapter config: %s",
                         exc,
                     )
         habit_override = self.get_habit_meditation_override()
@@ -1435,7 +1435,7 @@ class FlexibleBackendManager:
         *,
         target_model: str | None,
     ) -> dict[str, Any] | None:
-        """Build an internal call config from an instance-level HER v3 Provider."""
+        """Build an internal call config from an instance-level HERV3 Provider."""
 
         option = self._her_v3_provider_option(engine)
         if option is None or not option.get("available"):

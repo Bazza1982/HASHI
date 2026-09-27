@@ -185,7 +185,7 @@ Current implementation boundary:
   an information surface only: actions stay as slash commands in the input,
   and the panel owns no competing state;
 - the connection footer projects live Agent metadata for Engine, Provider,
-  model, effort, Think, Verbose, Commentary and Connector state. HER v3 shows
+  model, effort, Think, Verbose, Commentary and Connector state. HERV3 shows
   its one selected Provider/model target and model-reasoning effort; historical
   Quick/Pro routing is not a public v3 projection. The footer intentionally omits
   working mode; `/mode` remains its authoritative control surface;
@@ -446,7 +446,7 @@ known; an unrelated active Agent Run may not.
 
 ### 8.3 Backend API answer preview feed (2026-09-27)
 
-Provider text deltas remain internal. HER v2 may classify a safe visible delta
+Provider text deltas remain internal. HERV3 may classify a safe visible delta
 as `answer_preview`; FC then projects it as a typed, ephemeral `answer` event on
 the v2 Session feed. Each projected event carries the canonical Session, Run,
 and request identities. The durable terminal Event additionally carries the
@@ -545,7 +545,7 @@ The local `/connect` page and `hashi onboard` compatibility route use masked
 secret controls and explicit consent. Discovery lists same-environment CLI
 executables and catalogue models without claiming authentication. The selected
 backend is probed through FlexibleBackendManager and its real adapter in a
-disposable workspace. API choices configure HER v3's selected Provider/model
+disposable workspace. API choices configure HERV3's selected Provider/model
 through its internal compatibility storage boundary; a model-list response is
 not success. Unavailable models and failed streams remain errors. Probe, save,
 reload request and actual chat readiness are separate facts.

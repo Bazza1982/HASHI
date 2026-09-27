@@ -47,7 +47,7 @@ async def test_backend_catalogue_exposes_public_selectable_registry(tmp_path):
     assert "her-v2" not in payload["backends"]
     assert payload["backends"]["her-v3"] == {
         "engine": "her-v3",
-        "label": "HER v3",
+        "label": "HERV3",
         "models": [],
         "default_model": None,
         "efforts": [],

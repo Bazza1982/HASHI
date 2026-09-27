@@ -50,7 +50,7 @@ running Core. See [dependency profiles](DEPENDENCIES.md).
 ## Engine or provider cannot connect
 
 Use /connect in the local TUI, or hashi onboard. Choose an installed CLI or
-configure a HER v2 provider in the masked local page. Confirm the chosen
+configure a HERV3 provider in the masked local page. Confirm the chosen
 provider's minimal connection check before expecting model tasks to work.
 
 For CLI engines, verify the executable and authentication from the same OS

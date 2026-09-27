@@ -8,7 +8,7 @@
 
 ## 1. 目标
 
-在 HER v2 backend 上新增 `/meter`（兼容别名 `/metre`）命令：开启后，每轮对话结束**再**追加一条简短的「成本尾巴」，显示本轮 token 与金额。默认关闭。
+在 HERV3 backend 上新增 `/meter`（兼容别名 `/metre`）命令：开启后，每轮对话结束**再**追加一条简短的「成本尾巴」，显示本轮 token 与金额。默认关闭。
 
 ## 2. 总体结论（Zelda 审核）
 
@@ -137,7 +137,7 @@
 ### 本地验证结果
 
 - `/meter` 定向矩阵：命令语义、成本来源、并发隔离、reasoning、OpenRouter/DeepSeek 工具循环、冥想重试与恢复均通过。
-- 跨模块矩阵：runtime pipeline、Habit journal、HER v2 adapter、usage/overview 与 sidecar 调用均通过。
+- 跨模块矩阵：runtime pipeline、Habit journal、HERV3 adapter、usage/overview 与 sidecar 调用均通过。
 - `git diff --check` 通过；仅发现工作树中既有 PowerShell 文件的 LF/CRLF 提示，与本功能无关。
 
 ## 9. 用量汇总的未知成本展示（2026-09-08）
@@ -197,7 +197,7 @@ OpenRouter 的公开模型接口是价格与能力共用的自动元数据来源
   也绝不标成实际扣费。查不到、歧义、过期或维度不全仍为 `null`。
 
 紧凑回合尾从每条 provider invocation 的既有 `engine` 与 `model` 事实派生服务提供方
-和服务模型列表，均按首次调用顺序去重。HER v2 在一个回合调用多个模型时必须显示
+和服务模型列表，均按首次调用顺序去重。HERV3 在一个回合调用多个模型时必须显示
 全部已观测模型；没有模型遥测时显示本地化的“未知”，不从当前配置猜测。
 
 模型配置成功后会异步、尽力预热价格；配置事务不等待查价，也不会因查价
@@ -214,7 +214,7 @@ OpenRouter 的公开模型接口是价格与能力共用的自动元数据来源
 旧账。Codex CLI／app-server 的 cache hit 与可精确导出的 miss 从原始 usage
 贯通到 HER、前后台账本和 meter；字段缺失与 Provider 报告零保持不同。
 
-HER v2 fallback 的 Primary、同 Provider Level 1、跨 Provider Level 2 以及内部
+HERV3 fallback 的 Primary、同 Provider Level 1、跨 Provider Level 2 以及内部
 重试均按真实物理调用分别落账，使用各自的实际 Engine／model 与冻结 revision。
 已取消或失败且没有 usage receipt 的调用成本保持未知，不能写成零；同一回合仍
 展示其余已知小计和未知调用数，不能因一个未知项吞掉已知金额。

@@ -88,7 +88,7 @@ No unreleased changes are recorded yet.
   source can request `/reboot min` through the protected Workbench admin
   endpoint and audit a hard-restart fallback; live Remote deployment remains an
   explicit operator gate.
-- **HER v2 Fast/Low Strategy experiment (HASHI3)** — upgraded the compatible
+- **HERV2 Fast/Low Strategy experiment (HASHI3)** — upgraded the compatible
   Triage wire stage to a tool-capable Strategist backed by a versioned external
   38-card Playbook and schema v3. Low effort now passes only the selected Card
   snapshots and strategic execution brief to primary Execution while retaining
@@ -102,12 +102,12 @@ No unreleased changes are recorded yet.
   the last chunk of a split final notifies. The workspace preference survives
   restart, and hot reload validates the current command and purpose-aware
   notification contract before adopting a refreshed runtime.
-- **HER v2 crash-safe WIP Journal** — added per-Agent transient Context built
+- **HERV2 crash-safe WIP Journal** — added per-Agent transient Context built
   from observable, durably audited turn events. Interrupted and error turns
   preserve accumulated work; later turns receive it with a neutral warning not
   to continue by default; a later durably `COMPLETED` Ledger atomically clears
   it. Content-free lifecycle events record turn start, context injection,
-  preservation, and clearing in the canonical HER v2 audit log.
+  preservation, and clearing in the canonical HERV2 audit log.
 - **Persistent Session API v1** — added client-neutral Session, Message, Run,
   Event, consumer ACK, attachment, approval, fencing, context-generation, and
   promotion services behind a fail-closed qualification boundary. Restart
@@ -118,7 +118,7 @@ No unreleased changes are recorded yet.
   for `deepseek-v4-flash-vision-exp`, preserved ordered structured media through
   the shared provider contract, and kept other DeepSeek models text-only unless
   explicitly proven capable.
-- **HER v2 compulsory periodic Replanning** — corrected the earlier optional
+- **HERV2 compulsory periodic Replanning** — corrected the earlier optional
   high-risk checkpoint implementation. Adaptive (`high`), Reviewed (`xhigh`),
   and Assured (`max`) Execution now unconditionally enters Replanning at the
   next safe boundary after 10 completed Tool Gateway results or 300 monotonic
@@ -136,18 +136,18 @@ No unreleased changes are recorded yet.
   and identity, sends supported media natively, and uses an authorised local
   inspection path only when native input is unavailable. Typed failures prevent
   silent image loss, path-only claims, or unapproved media access.
-- **HER v2 hybrid provider and task routing** — added configurable Quick and Pro
+- **HERV2 hybrid provider and task routing** — added configurable Quick and Pro
   model slots, per-stage task routes, and Single or Hybrid provider selection.
   The new HASHI API provider lets HER use models served by another HASHI
   OpenAI-compatible Gateway while preserving request-scoped reasoning, usage,
   media, tool, and failure metadata.
-- **HER v2 automatic context compaction** — added protected, atomic context
+- **HERV2 automatic context compaction** — added protected, atomic context
   maintenance through the initiating Agent's active Quick/Light route. Compact
   failure, timeout, unavailable routing, invalid output, or insufficient
   shrinkage now preserves the best safe context, emits a required warning, and
   continues to the selected model instead of turning maintenance into an
   execution gate.
-- **HER Reviewed and Assured execution modes** — renamed the five HER v2
+- **HER Reviewed and Assured execution modes** — renamed the five HERV2
   orchestration choices in the UI while preserving `low` through `max` wire
   compatibility and command aliases. Reviewed (`xhigh`) now performs a
   tool-backed, read-only independent Review, one Primary-Agent remediation when
@@ -212,11 +212,11 @@ No unreleased changes are recorded yet.
   migration behavior now share that contract.
 - **OpenRouter and DeepSeek are Model Provider adapters** — an earlier label
   incorrectly treated them as Engines; removed both from
-  top-level `/backend` selection while retaining their adapters for HER v2 and
+  top-level `/backend` selection while retaining their adapters for HERV2 and
   internal rendering. Legacy direct active selections migrate to `her-v2` only
-  when the Agent already grants an explicit HER v2 row; otherwise startup fails
+  when the Agent already grants an explicit HERV2 row; otherwise startup fails
   with an actionable configuration error.
-- **HER v2 execution continuity** — removed legacy turn, tool, provider-attempt,
+- **HERV2 execution continuity** — removed legacy turn, tool, provider-attempt,
   and wall-clock ceilings from the HER path. Meaningful-progress idle detection,
   explicit user control, immediate policy/approval denial, scoped transport
   guards, explicitly requested single-tool timeouts, and bounded policy stages
@@ -240,7 +240,7 @@ No unreleased changes are recorded yet.
 - **HER v1 and legacy fixed runtime** — retired the Claw-derived native HER
   adapter, binaries/source integration, debug/certification tooling, old fixed
   runtime, and the standalone OpenClaw importer. `her` now resolves only to the
-  clean-room HER v2 backend; `claw-cli` is rejected. Flex retains Fixed mode for
+  clean-room HERV2 backend; `claw-cli` is rejected. Flex retains Fixed mode for
   session-based CLI backends.
 - **Repository-bundled EXP binaries** — moved large Office documents, PDFs,
   spreadsheets, presentations, and rendered evidence images into a separately
@@ -286,7 +286,7 @@ No unreleased changes are recorded yet.
 - **Workbench smoke-result correlation** — live Agent smoke checks now wait on
   the current request ID in the canonical core transcript instead of watching
   the legacy presentation transcript for an adjacent user/assistant pair. This
-  prevents successful HER v2 requests from being reported as 180-second false
+  prevents successful HERV2 requests from being reported as 180-second false
   timeouts and avoids cross-request response matches under concurrency.
 - **Fixed/Flex first hot-reload adoption** — configuration now reloads before
   working-mode consumers, Context Compact tolerates the one mixed-generation

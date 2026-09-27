@@ -282,8 +282,8 @@ function Get-HASHIStartupStage {
         [PSCustomObject]@{ Percent = 12; Pattern = '=== Bridge starting ==='; English = 'Loading HASHI core'; Chinese = '正在加载 HASHI 核心' },
         [PSCustomObject]@{ Percent = 25; Pattern = 'Agents to start:'; English = 'Loading Portable agent configuration'; Chinese = '正在加载 Portable Agent 配置' },
         [PSCustomObject]@{ Percent = 40; Pattern = 'Hashi Remote lifecycle:'; English = 'Starting local and Remote services'; Chinese = '正在启动本机与 Remote 服务' },
-        [PSCustomObject]@{ Percent = 58; Pattern = 'starting backend initialization'; English = 'Initializing HER v2'; Chinese = '正在初始化 HER v2' },
-        [PSCustomObject]@{ Percent = 76; Pattern = 'backend ready'; English = 'HER v2 is ready'; Chinese = 'HER v2 已就绪' },
+        [PSCustomObject]@{ Percent = 58; Pattern = 'starting backend initialization'; English = 'Initializing HERV3'; Chinese = '正在初始化 HERV3' },
+        [PSCustomObject]@{ Percent = 76; Pattern = 'backend ready'; English = 'HERV3 is ready'; Chinese = 'HERV3 已就绪' },
         [PSCustomObject]@{ Percent = 88; Pattern = 'starting local surfaces directly'; English = 'Starting local interfaces'; Chinese = '正在启动本机界面' },
         [PSCustomObject]@{ Percent = 96; Pattern = 'Backend API listening on'; English = 'Verifying the local API'; Chinese = '正在验证本机 API' }
     )

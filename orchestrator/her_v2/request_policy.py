@@ -1,6 +1,6 @@
 """Request-scoped HER v2 execution policy for deterministic HASHI actions.
 
-HER v3 has one foreground execution path. Request metadata may explain why a
+HERV3 has one foreground execution path. Request metadata may explain why a
 turn exists, but it must never override the Agent's selected model reasoning
 effort. Scheduled and HChat work therefore preserve the configured effort.
 """
@@ -119,14 +119,14 @@ def resolve_request_effort(
     configured_effort: Effort | str,
     request_meta: Mapping[str, Any] | None,
 ) -> EffortResolution:
-    """Preserve the selected model reasoning effort for every HER v3 request."""
+    """Preserve the selected model reasoning effort for every HERV3 request."""
 
     raw_effort = (
         configured_effort.value
         if isinstance(configured_effort, Effort)
         else str(configured_effort).strip().casefold()
     )
-    # A binary Provider reasoning switch is a valid HER v3 model setting.
+    # A binary Provider reasoning switch is a valid HERV3 model setting.
     # HER's retained internal Effort enum needs a nonzero value for its Direct
     # turn bookkeeping, while the Provider must still receive "enabled".
     configured = Effort.HIGH if raw_effort == "enabled" else parse_effort(raw_effort)

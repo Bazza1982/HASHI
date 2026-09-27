@@ -249,7 +249,7 @@ def test_portable_launcher_reports_real_startup_milestones_not_elapsed_time():
     assert "This may take a few minutes" in common
     assert "Get-HASHIStartupStage" in common
     assert "starting backend initialization" in common
-    assert "Initializing HER v2" in common
+    assert "Initializing HERV3" in common
     assert "Backend API listening on" in common
     assert "Local API is ready" in common
     assert "HASHI is still starting normally" not in common

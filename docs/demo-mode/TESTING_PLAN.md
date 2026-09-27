@@ -113,7 +113,8 @@ tests/test_demo_normal_regression.py
 
 ### H-T07 — PCM/HER 无副作用
 
-- 走真实 Direct admission/engine 路径验证有效 effort=zero，不仅检查输入配置。
+- 走真实 HERV3 main-loop admission/engine 路径验证模型推理关闭（兼容字段
+  `effort=zero`），不仅检查输入配置，也不得出现 Direct/Triage 路由。
 - public seed 经 canonical parser 解析；运行 prompt 不含个人 EXP、memory、global topology、真实机器路径或另一 Session marker。
 - 模型返回 tool_calls（shell/files/HChat/spawn/browser 等）或要求切换 engine：执行拦截点拒绝，零工具执行。
 - 用户正文/slash `/reboot`、`/backend`、`/hchat` 作为普通文本或受限提示，不触发控制 dispatcher。

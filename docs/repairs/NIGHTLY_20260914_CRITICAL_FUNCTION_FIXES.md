@@ -9,7 +9,7 @@ Baseline: `f22e87abbcef1abb60933671d3579c25d210719d`
 
 This repair contains only the three approved high-priority items:
 
-- HER v2 owns execution-owner leases, interrupted-Turn reconciliation, and
+- HERV2 owns execution-owner leases, interrupted-Turn reconciliation, and
   late terminal receipt repair in the Function Worker layer;
 - PCM owns host-independent conversation timeline ordering in the Function
   layer; and
@@ -22,7 +22,7 @@ data is part of the change.
 
 ## Result
 
-HER v2 now records a stable Worker execution owner and process lease. Candidate
+HERV2 now records a stable Worker execution owner and process lease. Candidate
 initialization leaves a Turn alone when its recorded owner is the same Worker,
 is still alive, or cannot safely be proven dead. Reconciliation is limited to
 requests whose different owner is confirmed dead. A late terminal success or

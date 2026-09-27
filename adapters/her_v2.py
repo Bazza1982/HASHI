@@ -1,4 +1,4 @@
-"""HASHI compatibility facade for the modular HER v2 orchestrator."""
+"""HASHI compatibility facade for the modular HERV3 runtime."""
 
 from __future__ import annotations
 
@@ -138,7 +138,7 @@ class _ExecutionStageCompactionProvider:
 
 
 class HERv2Adapter(BaseBackend):
-    """HASHI facade for the provider-neutral, pure-Python HER v2 runtime."""
+    """HASHI facade for the provider-neutral, pure-Python HERV3 runtime."""
 
     DEFAULT_IDLE_TIMEOUT_SEC = 30 * 60
     habit_pipeline_owner = "her_v2_runtime"
@@ -300,7 +300,7 @@ class HERv2Adapter(BaseBackend):
             self._wip_warned_requests.add(warning_key)
         except Exception as exc:
             self.logger.warning(
-                "HER v2 WIP recovery warning failed safely request=%s error=%s",
+                "HERV3 WIP recovery warning failed safely request=%s error=%s",
                 request_id,
                 type(exc).__name__,
             )
@@ -393,7 +393,7 @@ class HERv2Adapter(BaseBackend):
         """Terminate an accepted Turn when canonical setup cannot be persisted."""
 
         self.logger.error(
-            "HER v2 fixed control-plane setup failed operation=%s error=%s",
+            "HERV3 fixed control-plane setup failed operation=%s error=%s",
             operation,
             type(error).__name__,
         )
@@ -409,7 +409,7 @@ class HERv2Adapter(BaseBackend):
                 )
             except Exception as completion_error:
                 self.logger.error(
-                    "HER v2 fixed setup failure could not close Turn: %s",
+                    "HERV3 fixed setup failure could not close Turn: %s",
                     type(completion_error).__name__,
                 )
         return BackendResponse(
@@ -456,7 +456,7 @@ class HERv2Adapter(BaseBackend):
                     "accepted": False,
                     "reason": "model_capability_unknown",
                     "code": "MODEL_CAPABILITY_UNKNOWN",
-                    "model": "HER v2",
+                    "model": "HERV3",
                 }
             try:
                 resolved = HERv2Config.from_mapping(raw)
@@ -465,7 +465,7 @@ class HERv2Adapter(BaseBackend):
                     "accepted": False,
                     "reason": "model_capability_unknown",
                     "code": "MODEL_CAPABILITY_UNKNOWN",
-                    "model": "HER v2",
+                    "model": "HERV3",
                 }
 
         if normalized_modality == "audio":
@@ -477,7 +477,7 @@ class HERv2Adapter(BaseBackend):
                     "accepted": False,
                     "reason": "media_policy_blocked",
                     "code": "MEDIA_POLICY_BLOCKED",
-                    "model": "HER v2",
+                    "model": "HERV3",
                 }
             policy = getattr(voice_manager, "native_policy", None)
             try:
@@ -489,7 +489,7 @@ class HERv2Adapter(BaseBackend):
                     "accepted": False,
                     "reason": "media_policy_blocked",
                     "code": "MEDIA_POLICY_BLOCKED",
-                    "model": "HER v2",
+                    "model": "HERV3",
                 }
 
         manager = self._backend_manager()
@@ -563,7 +563,7 @@ class HERv2Adapter(BaseBackend):
             "accepted": False,
             "reason": reason,
             "code": media_failure_code(reason),
-            "model": models or "HER v2",
+            "model": models or "HERV3",
         }
 
     def supports_media_output(self, modality: str) -> bool:
@@ -710,7 +710,7 @@ class HERv2Adapter(BaseBackend):
             skills = list_skills()
         except Exception as exc:
             self.logger.warning(
-                "HER v2 Direct Skill catalogue unavailable: %s", type(exc).__name__
+                "HERV3 Skill catalogue unavailable: %s", type(exc).__name__
             )
             return ()
         for skill in skills:
@@ -787,7 +787,7 @@ class HERv2Adapter(BaseBackend):
                         deliver_to_telegram=bool(meta.get("deliver_to_telegram")),
                     ),
                     (
-                        "⚠️ <b>HER v2 context compaction warning</b>\n\n"
+                        "⚠️ <b>HERV3 context compaction warning</b>\n\n"
                         "Automatic Compact could not be started, but Execution "
                         "continued without waiting for it.\n"
                         f"<b>Error type</b> · <code>{type(exc).__name__}</code>",
@@ -840,9 +840,9 @@ class HERv2Adapter(BaseBackend):
             raw = self._extra.get("her_v2")
             if not isinstance(raw, Mapping):
                 raise HERv2ConfigurationError(
-                    "HER v2 requires a her_v2 object containing provider profiles"
+                    "HERV3 requires a her_v2 compatibility object containing provider profiles"
                 )
-            # HER v3 persists one concrete Provider/model target.  Function
+            # HERV3 persists one concrete Provider/model target.  Function
             # Workers must be able to bootstrap directly from that public
             # shape even when an older manager did not pre-expand the internal
             # compatibility profiles before constructing this adapter.
@@ -868,7 +868,7 @@ class HERv2Adapter(BaseBackend):
             injected = getattr(self.config, "_her_v2_stage_provider", None)
             if injected is None and self._backend_manager() is None:
                 raise HERv2ConfigurationError(
-                    "HER v2 requires a HASHI backend manager for provider-role invocation"
+                    "HERV3 requires a HASHI backend manager for Provider invocation"
                 )
             if injected is None:
                 manager = self._backend_manager()
@@ -878,7 +878,7 @@ class HERv2Adapter(BaseBackend):
                     ):
                         raise HERv2ConfigurationError(
                             "Codex is a separate HASHI backend and cannot be selected "
-                            "as an internal HER v2 provider; use hashi-api for GPT models"
+                            "as an internal HERV3 Provider; use hashi-api for GPT models"
                         )
                     if not _manager_authorises_profile(manager, profile):
                         raise HERv2ConfigurationError(
@@ -896,7 +896,7 @@ class HERv2Adapter(BaseBackend):
             reconciled_sessions = len(reconciled_turns)
             if reconciled_sessions:
                 self.logger.warning(
-                    "HER v2 retained %s session(s) while failing interrupted turns safely.",
+                    "HERV3 retained %s session(s) while failing interrupted turns safely.",
                     reconciled_sessions,
                 )
             self._ledger_store = LedgerStore(state_root / "ledgers")
@@ -951,7 +951,7 @@ class HERv2Adapter(BaseBackend):
                 logger=self.logger,
             )
             # Compatibility attributes are used by the existing /habit and
-            # /dream HASHI command surfaces. Their owner is now HER v2.
+            # /dream HASHI command surfaces. Their owner is now HERV3.
             self._habit_execution_lock = self._learning.habit_execution_lock
             self._habit_meditation_execution_lock = (
                 self._learning.meditation_execution_lock
@@ -972,7 +972,7 @@ class HERv2Adapter(BaseBackend):
                     recovery.resumed_meter_notifications,
                 )
             ):
-                self.logger.info("HER v2 learning recovery: %s", recovery)
+                self.logger.info("HERV3 learning recovery: %s", recovery)
             self._initialized = True
             return True
         except (
@@ -981,7 +981,7 @@ class HERv2Adapter(BaseBackend):
             OSError,
             ValueError,
         ) as exc:
-            self.logger.error("HER v2 initialization failed: %s", exc)
+            self.logger.error("HERV3 initialization failed: %s", exc)
             self._initialized = False
             return False
 
@@ -1131,15 +1131,15 @@ class HERv2Adapter(BaseBackend):
         timeout_s: float | None,
         json_repair_source_stage: Stage | None = None,
     ) -> StageResponse:
-        # ``timeout_s`` remains in the legacy callback signature.  HER v2 does
+        # ``timeout_s`` remains in the legacy callback signature. HERV3 does
         # not turn it into a provider-attempt or maintenance-stage deadline.
         del timeout_s
         if self._v2_config is None:
             raise StageInvocationError(
-                "HER v2 is not initialized",
+                "HERV3 is not initialized",
                 retryable=False,
                 code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
-                human_description="HER v2 learning services are not initialized.",
+                human_description="HERV3 learning services are not initialized.",
             )
         routing_stage = (
             json_repair_source_stage or Stage.MEDITATION
@@ -1329,17 +1329,17 @@ class HERv2Adapter(BaseBackend):
 
     def _her_habit_store(self):
         if self._learning is None:
-            raise RuntimeError("HER v2 learning services are not initialized")
+            raise RuntimeError("HERV3 learning services are not initialized")
         return self._learning.store
 
     def _her_meditation_journal(self):
         if self._learning is None:
-            raise RuntimeError("HER v2 learning services are not initialized")
+            raise RuntimeError("HERV3 learning services are not initialized")
         return self._learning.meditation_journal
 
     def _her_dream_journal(self):
         if self._learning is None:
-            raise RuntimeError("HER v2 learning services are not initialized")
+            raise RuntimeError("HERV3 learning services are not initialized")
         return self._learning.dream_journal
 
     def _record_learning_audit(
@@ -1351,7 +1351,7 @@ class HERv2Adapter(BaseBackend):
         payload: Mapping[str, Any] | None = None,
     ) -> str:
         if self._audit_log is None:
-            raise AuditPersistenceError("HER v2 audit log is unavailable")
+            raise AuditPersistenceError("HERV3 audit log is unavailable")
         correlation = str(identity or uuid.uuid4().hex)
         turn_id = f"learning:{correlation}"
         return self._audit_log.append(
@@ -1384,12 +1384,12 @@ class HERv2Adapter(BaseBackend):
         self, *, job_id: str, config: HabitMeditationConfig
     ) -> None:
         if self._learning is None:
-            raise RuntimeError("HER v2 learning services are not initialized")
+            raise RuntimeError("HERV3 learning services are not initialized")
         await self._learning._run_meditation(job_id, config)
 
     async def _run_habit_notification(self, job_id: str) -> None:
         if self._learning is None:
-            raise RuntimeError("HER v2 learning services are not initialized")
+            raise RuntimeError("HERV3 learning services are not initialized")
         await self._learning._run_notification(job_id)
 
     async def run_habit_dream_model(
@@ -1426,7 +1426,7 @@ class HERv2Adapter(BaseBackend):
         request_id: str,
     ) -> StageResponse:
         if self._learning is None or self._audit_log is None or self._v2_config is None:
-            raise RuntimeError("HER v2 Dream services are not initialized")
+            raise RuntimeError("HERV3 Dream services are not initialized")
         turn_id = f"dream:{request_id}"
         profile = self._v2_config.profile_for(Stage.DREAM)
         role = (
@@ -1505,12 +1505,12 @@ class HERv2Adapter(BaseBackend):
             return BackendResponse(
                 text="",
                 duration_ms=0,
-                error="HER v2 is not initialized",
+                error="HERV3 is not initialized",
                 is_success=False,
                 error_code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR.value,
                 error_retryable=False,
                 stream_metadata={
-                    "provider_failure_description": "HER v2 is not initialized."
+                    "provider_failure_description": "HERV3 is not initialized."
                 },
             )
         # Freeze the complete immutable routing/capability snapshot at Turn
@@ -1527,18 +1527,18 @@ class HERv2Adapter(BaseBackend):
             return BackendResponse(
                 text="",
                 duration_ms=round((time.perf_counter() - started) * 1000, 2),
-                error=f"Invalid HER v2 request effort policy: {exc}",
+                error=f"Invalid HERV3 request effort policy: {exc}",
                 is_success=False,
                 error_code=ProviderFailureCode.PROVIDER_BAD_REQUEST.value,
                 error_retryable=False,
                 stream_metadata={
                     "provider_failure_description": (
-                        "The request selected an invalid HER v2 effort policy."
+                        "The request selected an invalid HERV3 effort policy."
                     )
                 },
             )
         self.logger.info(
-            "HER v2 effort resolved request=%s configured=%s effective=%s "
+            "HERV3 effort resolved request=%s configured=%s effective=%s "
             "reason=%s scheduler_kind=%s scheduler_task_id=%s trigger=%s",
             request_id,
             effort_resolution.configured.value,
@@ -1729,7 +1729,7 @@ class HERv2Adapter(BaseBackend):
         habit_request_eligible = self._habit_request_eligible(request_id)
         if habit_config.enabled and not habit_request_eligible:
             self.logger.info(
-                "HER v2 Habit pipeline skipped by request eligibility: request=%s",
+                "HERV3 Habit pipeline skipped by request eligibility: request=%s",
                 request_id,
             )
         runtime_context = self._runtime_context()
@@ -1872,7 +1872,7 @@ class HERv2Adapter(BaseBackend):
         runtime_config = replace(
             turn_config,
             # The shared /timeout command is idle-only.  Bind its live value
-            # into the actual HER v2 runtime instead of leaving an unrelated
+            # into the actual HERV3 runtime instead of leaving an unrelated
             # outer adapter setting that cannot affect execution.
             user_idle_timeout_s=float(self.IDLE_TIMEOUT_SEC),
             meditation_enabled=(
@@ -1904,7 +1904,7 @@ class HERv2Adapter(BaseBackend):
             on_stream_event,
             allow_immediate_response=(
                 not silent
-                # HER v2 owns presentation in both of its supported foreground
+                # HERV3 owns presentation in both of its supported foreground
                 # modes. Wrapper/audit/dual-brain modes retain their separate
                 # final-presentation owners.
                 and str(getattr(self._backend_manager(), "agent_mode", "flex"))
@@ -2070,7 +2070,7 @@ class HERv2Adapter(BaseBackend):
                 )
             except Exception as usage_error:
                 self.logger.error(
-                    "HER v2 cancellation usage persistence failed: %s",
+                    "HERV3 cancellation usage persistence failed: %s",
                     type(usage_error).__name__,
                 )
             finally:
@@ -2279,7 +2279,7 @@ class HERv2Adapter(BaseBackend):
                 ),
             }
         if stopped and not error:
-            error = "HER v2 turn was stopped by an authorised control path."
+            error = "HERV3 turn was stopped by an authorised control path."
         if fixed_turn is not None and self._session_coordinator is not None:
             closed_turn: dict[str, Any] = {}
             try:
@@ -2465,7 +2465,7 @@ class HERv2Adapter(BaseBackend):
         completion_path: str = "foreground",
         error_type: str = "",
     ) -> bool:
-        """Correlate the ordinary HASHI send result with the HER v2 audit trail."""
+        """Correlate the ordinary HASHI send result with the HERV3 audit trail."""
 
         identifier = str(delivery_id or "").strip()
         if not identifier or self._audit_log is None:

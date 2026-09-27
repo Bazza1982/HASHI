@@ -305,9 +305,9 @@ class FlexibleAgentRuntime:
             self, "meter", default=False
         )
         self._meter_receipt_by_id: dict[str, Any] = {}
-        # The HER v2 routing-card control exposed retired Quick/Pro orchestration
-        # concepts. HER v3 reports real Provider/model reasoning through the
-        # standard backend, effort and meter surfaces instead.
+        # The retained compatibility toggle now emits a HERV3 runtime report.
+        # It reports real Provider/model reasoning through the standard backend,
+        # effort and meter surfaces without reviving Quick/Pro orchestration.
         self._herv2 = False
         # Load persisted Telegram notification preference, including final-only Quiet mode.
         self._notify_mode = notification_mode(self)
@@ -6842,7 +6842,7 @@ class FlexibleAgentRuntime:
         enabled = self._herv2_enabled()
         return setting_card(
             "🧭",
-            "HER v2 routing card",
+            "HERV3 runtime report",
             current=f"<b>{status_label(enabled)}</b>",
             facts=[
                 f"<b>{html.escape(ui_language.tr('common.default'))}</b> · "
@@ -11576,7 +11576,7 @@ class FlexibleAgentRuntime:
         response: Any = None,
         stage_timings_s: Mapping[str, float] | None = None,
     ) -> None:
-        """Send the per-turn HER v2 routing card after the answer is delivered.
+        """Send the per-turn HERV3 runtime report after the answer is delivered.
 
         Uses request-local ``herv2_at_start`` so a mid-flight toggle never changes
         an in-progress turn. Never writes to LLM prompt/memory history

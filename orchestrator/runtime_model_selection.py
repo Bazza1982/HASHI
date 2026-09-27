@@ -233,7 +233,7 @@ def _her_v2_edit_configuration(runtime):
 
 
 def her_v3_main_profile(runtime):
-    """Read the model actually selected by the active HER v3 adapter."""
+    """Read the model actually selected by the active HERV3 adapter."""
 
     backend = getattr(runtime.backend_manager, "current_backend", None)
     config = getattr(backend, "_v2_config", None)
@@ -1362,11 +1362,11 @@ async def cmd_provider(runtime, update, context: Any) -> None:
             update,
             setting_card(
                 "🔌",
-                "HER v2 provider",
+                "HERV3 provider",
                 current=(f"<b>{html.escape(ui_language.tr('menu.her.managed'))}</b>"),
                 facts=[
                     f"<b>{html.escape(ui_language.tr('common.backend'))}</b> · "
-                    "<code>her-v2</code>",
+                    "<code>her-v3</code>",
                     f"<b>{html.escape(ui_language.tr('common.mode'))}</b> · "
                     f"<code>{html.escape(managed_mode)}</code>",
                 ],

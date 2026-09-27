@@ -13,7 +13,7 @@
 |---|---|
 | 访客凭证摘要、lease、Agent 绑定、到期时间 | HASHI PAO Functions |
 | Conversation Session、Message、Run、Event | 原有 PAO 所有者 |
-| Engine Session、Turn、模型调用与实际计量 | HER v2 |
+| Engine Session、Turn、模型调用与实际计量 | HERV3 |
 | 公开产品材料与当前 Session 上下文 | PCM |
 | HTTP Cookie、Origin 校验、浏览器展示 | 兼容网页客户端及其受限 server |
 | 模型选择、服务 secret、端口、根路径 | 忽略跟踪的实例配置 |

@@ -44,7 +44,7 @@ HASHI has four top-level functional modules:
 
 1. **Persona-Context-Memory (PCM)**
 2. **Provider-Agnostic Orchestration (PAO)**
-3. **HASHI Engine Runtime v2 (HER v2)**
+3. **HASHI Engine Runtime v3 (HERV3)**
 4. **Frontend Connectors**
 
 ### 2.2 Engineering layers: how the program is deployed and changed
@@ -54,7 +54,7 @@ HASHI has four engineering layers:
 1. **Core** — the small, continuously running process kernel and stable
    contracts that let normal functions be adopted without a cold restart.
 2. **Functions** — replaceable shared and per-Agent process generations, including the primary
-   implementations of PCM, PAO, HER v2, and Frontend Connectors.
+   implementations of PCM, PAO, HERV3, and Frontend Connectors.
 3. **Platform Configuration** — adaptations required for Windows, Linux,
    macOS, WSL, packaging, and platform-side services.
 4. **Instance Configuration** — machine- and deployment-specific identity,
@@ -88,7 +88,7 @@ ambiguous:
 
 - An **Engine Provider** or **Harness Provider** supplies an agentic runtime
   that turns model capability into agentic work. Examples include Codex CLI,
-  Claude Code, Gemini CLI, Grok CLI, and HER v2.
+  Claude Code, Gemini CLI, Grok CLI, and HERV3.
 - A **Model Provider** supplies model inference. Examples include HASHI API,
   DeepSeek, OpenRouter, xAI, or another capability-conformant inference
   service.
@@ -96,7 +96,7 @@ ambiguous:
 The broad word in **Provider-Agnostic Orchestration** deliberately includes
 both categories. PAO must not embed the private semantics of either category.
 At the outer runtime boundary PAO normally selects an Engine Provider. Inside
-HER v2, HER selects and routes Model Providers. If a PAO surface stores or
+HERV3, HER selects one Model Provider/model target for the continuous loop. If a PAO surface stores or
 forwards a Model Provider choice, it does so through a typed Engine contract
 without taking ownership of that provider's internal semantics.
 
@@ -119,7 +119,7 @@ Model Providers, a local model, or a CLI-managed inference path.
 - A **Frontend Connector** translates a HASHI protocol or transport into a
   user-facing channel while keeping HASHI state authoritative.
 - An **Engine Adapter** binds PAO to one Engine Provider.
-- A **Model Provider Adapter** binds an Engine, such as HER v2, to one Model
+- A **Model Provider Adapter** binds an Engine, such as HERV3, to one Model
   Provider.
 
 Adapters translate contracts. They do not become a second owner of the state
@@ -136,7 +136,7 @@ or policy they carry.
 - A **Provider Context** is rebuildable transport or native-thread state. It is
   never authoritative HASHI or Engine Session state.
 - A **Run** is a PAO-owned accepted execution of one user Message.
-- A **Turn** is an Engine's processing unit inside an Engine Session. HER v2
+- A **Turn** is an Engine's processing unit inside an Engine Session. HERV3
   owns HER Turns; other Engine Providers may expose different internal forms.
 
 ## 4. Functional modules
@@ -178,46 +178,43 @@ lifecycle, or own a frontend's window and presentation state.
 The module contract is defined in
 [HASHI PAO System Design](docs/HASHI_PAO_SYSTEM_DESIGN.md).
 
-### 4.3 HASHI Engine Runtime v2 (HER v2)
+### 4.3 HASHI Engine Runtime v3 (HERV3)
 
-HER v2 is HASHI's native Engine. It is both a top-level HASHI functional module
+HERV3 is HASHI's native Engine. It is both a top-level HASHI functional module
 and one Engine Provider selectable by PAO.
 
-HER v2 owns:
+HERV3 owns:
 
 - the durable HER Engine Session after PAO binds a HASHI Conversation Session;
 - ordered HER Turns and materialised PCM/resource revisions;
-- Direct, Strategic, and Planned execution policy;
-- Strategy, Planning, Execution, Tool loops, Replanning where an internal
-  policy permits it, Review where an internal policy permits it, and
-  Finalisation;
-- HER-internal Model Provider routing;
-- HER recovery evidence, checkpoints, Compact, and Engine-level metering; and
-- HER-specific Habit and Meditation behaviour.
+- one selected Model Provider/model/tool loop in which the model reasons,
+  plans, adapts, uses tools, and verifies continuously;
+- HER recovery evidence, checkpoints, Compact, and Engine-level metering;
+- optional Strategy Cards as advisory context;
+- the bounded JEV Agent Companion experiment; and
+- optional HER-specific Habit and Meditation behaviour.
 
-HER v2 is fixed at the **PAO-to-Engine boundary**: a HASHI Conversation Session
+HERV3 completely removes Triage, Strategy, Planning, Replanning, Review, and
+stage-based Finalisation from active foreground routing and public controls.
+Strategy Cards remain, but they never select a workflow or require a card-ID
+handoff. Habits remain advisory context and Meditation remains post-delivery.
+
+HERV3 is fixed at the **PAO-to-Engine boundary**: a HASHI Conversation Session
 has a stable binding to its HER Engine Session and later messages use
 incremental PCM/resource deltas. HER remains flexible inside that boundary: it
 may change Model Provider, model, reasoning setting, or process while
-preserving its logical Session.
+preserving its logical Session. `/effort` controls only the selected model's
+supported reasoning level; it does not select a HASHI cognitive workflow.
 
-HER v2 does not own the enclosing HASHI Conversation Session, frontend state,
-or provider-native thread state. Its retained v2 surface has exactly three
-modes: Direct (`zero`), Strategic (`low`), and Planned (`medium`). The
-retained `high`, `xhigh`, and `max` implementations are dormant regression and
-future-design material, not selectable v2 product modes.
+HERV3 does not own the enclosing HASHI Conversation Session, frontend state,
+or provider-native thread state. Its public machine ID is `her-v3`. The
+internal `her-v2` adapter name, `her_v2` configuration key, and `HERv2*` Python
+names remain temporary compatibility contracts and are not public identity.
 
-The main Functions baseline also carries the experimental HER v3 harness inside
-this same functional owner. HER v3 exposes public Engine ID `her-v3` and uses
-one selected Model Provider/model/tool loop; its effort setting controls model
-reasoning rather than selecting a cognitive workflow. The internal `her-v2`
-adapter name and `her_v2` configuration key remain temporary compatibility
-boundaries, not public v3 identity. Promotion and live-adoption evidence are
-recorded in [HER v3 experimental runtime](docs/HER_V3_EXPERIMENT.md).
-
-The detailed lifecycle is defined in
-[HER v2 Product Requirements and Technical Design](docs/HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md),
-subject to accepted current decisions linked from that document.
+The current lifecycle, compatibility boundary, JEV experiment, Strategy Card
+retention, Habit retention, and adoption evidence are defined in
+[HERV3 upgrade](docs/HERV3_UPGRADE.md). The former HERV2 design documents are
+historical records and are not normative for HERV3.
 
 ### 4.4 Frontend Connectors
 
@@ -256,7 +253,7 @@ The connector boundary is defined in
 |---|---|---|
 | Agent Workzone profile | PAO | One owner/Agent-scoped, revisioned set of working roots shared by every Conversation Session; each admitted Run freezes a snapshot |
 | HASHI Conversation Session | PAO | User/Agent/client binding, Messages, Runs, Events, context generation, and Engine binding |
-| HER Engine Session | HER v2 | Durable HER logical thread, accepted Turns, materialised PCM/resources, plans, Tool evidence, recovery, Compact, and Engine meter |
+| HER Engine Session | HERV3 | Durable HER logical thread, accepted Turns, materialised PCM/resources, Tool evidence, recovery, Compact, and Engine meter |
 | Other Engine Session | Selected Engine Provider | Provider-specific logical thread under the PAO binding contract |
 | Provider Context | No persistent product authority | Rebuildable model transport, response-chain, thread, cache, or process state |
 | Frontend projection | Frontend Connector/client | Disposable view reconstructed from HASHI state; never a second canonical chat archive |

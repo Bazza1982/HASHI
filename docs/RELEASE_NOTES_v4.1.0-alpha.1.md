@@ -22,14 +22,14 @@ still requires the release checklist and explicit user approval.
   recoverable interruption, and keeps `continue`/`cancel` as admin recovery.
 - Exact Model Provider capability facts are discovered asynchronously, cached
   with provenance and revision, intersected with Adapter transport and instance
-  policy, and consumed consistently by runtime and HER v2 media admission.
+  policy, and consumed consistently by runtime and HERV3 media admission.
 - Current-message source provenance and signed private-resource authorization
   are carried across PAO/PCM/Frontend boundaries without granting authority
   from model-generated text.
 
 ## Included maintenance and usability work
 
-- HER v2 preserves malformed native Tool-call evidence and performs bounded,
+- HERV3 preserves malformed native Tool-call evidence and performs bounded,
   explicit repair rather than losing the Provider failure reason.
 - Provider-response and stop-decision diagnostics, `/version` provenance,
   Move/Clone separation, TUI usability, and command metadata remain part of the

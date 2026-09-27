@@ -19,13 +19,13 @@ active version.
 
 > **Architecture note (2026-09-01):** this is the release-scope record,
 > subordinate to the current
-> [HASHI System Architecture](../ARCHITECTURE.md). HER v2 is an Engine
+> [HASHI System Architecture](../ARCHITECTURE.md). HERV2 is an Engine
 > (Harness) Provider selected by PAO; an unqualified Provider inside HER means a
 > Model Provider. The implemented fixed HER Engine Session control plane is now
 > canonical recovery authority, while the WIP Journal is shadow compatibility
 > evidence.
 
-> **Product-surface update (2026-08-31):** HER v2 now exposes only Direct
+> **Product-surface update (2026-08-31):** HERV2 now exposes only Direct
 > (`zero`), Strategic (`low`), and Planned (`medium`). The higher-mode sections
 > in these notes describe retained dormant implementation and regression
 > evidence, not selectable production modes. See
@@ -42,7 +42,7 @@ active version.
 
 ## Why This Is a Significant HER Update
 
-HER v2 is HASHI-owned orchestration over provider, tool, delivery, and audit
+HERV2 is HASHI-owned orchestration over provider, tool, delivery, and audit
 interfaces. Its release contract includes:
 
 - three task-matched production execution modes using stable `zero`, `low`, and
@@ -163,20 +163,20 @@ commentary presentation with `💬 ` while preserving the original audit text.
 A final candidate paired only with `StructuredOutput` remains on the final lane
 instead of appearing once as commentary and again as final.
 
-An unfinished HER v2 turn leaves observable progress in a per-Agent WIP
+An unfinished HERV2 turn leaves observable progress in a per-Agent WIP
 Journal. A later turn receives that prior context with an explicit warning not
 to continue it by default. The Journal clears only after a later Ledger is
-durably `COMPLETED`, while lifecycle events remain in the canonical HER v2
+durably `COMPLETED`, while lifecycle events remain in the canonical HERV2
 audit log.
 
-OpenRouter and DeepSeek adapters remain available as HER v2 providers, but are
+OpenRouter and DeepSeek adapters remain available as HERV2 providers, but are
 no longer selectable as top-level `/backend` engines. A legacy direct active
-selection migrates only when the Agent already grants an explicit HER v2 row;
+selection migrates only when the Agent already grants an explicit HERV2 row;
 otherwise startup fails with an actionable configuration error.
 
 ## Adoption Workflow
 
-HER v2 is ordinary hot-reloadable HASHI Python code. `/reboot min` and numbered
+HERV2 is ordinary hot-reloadable HASHI Python code. `/reboot min` and numbered
 reboots compile and reload the shared project modules while interrupting only
 the selected Agent lifecycle. Public interface additions such as the
 `VERIFYING` state, Verification route, and evidence receipts do not widen that

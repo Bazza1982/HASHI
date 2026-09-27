@@ -1,4 +1,6 @@
-# HER v2 Real-Workload Single-Variable A/B Efficiency Test Plan
+> **Legacy HERV2 archive — non-normative.** This document records the retired staged runtime. HERV3 uses one continuous main-model/tool loop with no Triage, Strategy, Planning, Replanning, Review, or stage-based Finalisation routing. Strategy Cards and Habit/Meditation remain optional. See [HERV3 upgrade](HERV3_UPGRADE.md).
+
+# HERV2 Real-Workload Single-Variable A/B Efficiency Test Plan
 
 | Field | Value |
 |---|---|
@@ -6,14 +8,14 @@
 | Date | 2026-08-24 |
 | Primary experiment environment | HASHI2 |
 | Production reference | Current stable HASHI1 behaviour; not the statistical A arm unless environments are calibrated |
-| Control | Last accepted HER v2 baseline |
+| Control | Last accepted HERV2 baseline |
 | Treatment | Exactly one efficiency feature flag at a time |
 | Workloads | Real recurring email work, real workbook work, and other eligible production assignments |
 | Primary goals | Reduce execution latency, token consumption, and cost without reducing work quality, safety, or completion rate |
 
 ## 1. Purpose
 
-This document defines a controlled A/B programme for improving HER v2 execution
+This document defines a controlled A/B programme for improving HERV2 execution
 efficiency using real work rather than invented benchmark tasks. The primary
 evidence comes from recurring production workflows such as daily email review
 and real workbook assignments.

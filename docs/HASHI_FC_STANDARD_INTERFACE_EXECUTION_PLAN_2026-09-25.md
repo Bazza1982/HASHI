@@ -431,7 +431,7 @@ Protected Core 检查通过。
 第一次共享 Functions 采用在真实 zhaojun 请求仍运行时达到静默超时，回执为
 `rolled_back`，旧共享进程和全部 Worker 保持权威；该请求随后自然成功结束，
 没有取消或重复。再次采用后，Workbench 标准 Run 持久化了一份 final，随后
-依次一份 meter 和一份 HER v2，Telegram mirror 为关闭。重启独立 Workbench
+依次一份 meter 和一份 HERV3，Telegram mirror 为关闭。重启独立 Workbench
 服务后，历史仍恢复；以同一幂等键重发得到同一 request/run，四类消息计数均
 未增加。旧连接菜单在服务/连接变化后被明确拒绝，没有跨连接执行。
 
@@ -440,7 +440,7 @@ Protected Core 检查通过。
 共享 Functions、六个 Worker 与 Remote 同代次在线，运行 source commit 为
 `2d939cfc`，Core PID 保持 `910`。真实 Workbench 中 `/meter status` 和
 `/herv2 status` 可连续打开；英文 meter 菜单的开启、关闭、通知和刷新都保持
-英文，测试 Agent 的 meter/HER v2 偏好最终恢复为默认关闭。
+英文，测试 Agent 的 meter/HERV3 偏好最终恢复为默认关闭。
 
 `8e09e116` 与文档提交后的干净候选再次通过 Core gate **712 passed**，并采用为
 generation `sha256:00be86a9ae4525ed1d3fe2495d0307b6a1dd6cb69754b6998003f1a00b70abbd`；
@@ -448,6 +448,10 @@ generation `sha256:00be86a9ae4525ed1d3fe2495d0307b6a1dd6cb69754b6998003f1a00b70a
 同代次在线，Core PID 仍为 `910`。真实 Workbench 立即重放同一 `/herv2 status`
 请求时，第二次响应与第一次具有相同 event/invocation，`replayed=true`、
 `refresh_required=true`，不含 legacy menu，标准 action 数为零；设置保持 OFF。
+
+以上 `/herv2 status` 仅是当时代码的兼容控件验收记录，不是现行命令说明。
+HERV3 不公开 `/herv2`；当前 FC 只投影 HERV3 运行报告，并通过标准
+Session/Event 出口保持可重放性。
 
 这构成 L01、Workbench 范围的 L02/L03/L04（已有三文件上传、下载）、L05
 重连/幂等恢复，以及 L08 自动回退边界的现场证据。最终代次从 12:43:42 到

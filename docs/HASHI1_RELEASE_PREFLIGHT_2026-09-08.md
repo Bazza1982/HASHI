@@ -129,11 +129,11 @@ Final results in the qualified HASHI2 test environment are:
 - default, staged and checkpoint-only Core guards: passed.
 
 A deliberately stricter repeat put pytest's temporary workspace underneath the
-checkout's ignored `tmp/` directory. It found a pre-existing HER v2
+checkout's ignored `tmp/` directory. It found a pre-existing HERV2
 `workspace_inspect` limitation: Git-backed snapshot mode does not see a
 same-size content change inside a Git-ignored nested workspace. That run was
 3,835 passed and one failed; the same test passes in the policy-standard
-external temporary directory. This checkpoint does not alter the HER v2 tool
+external temporary directory. This checkpoint does not alter the HERV2 tool
 outside its PAO release scope. The limitation needs separate owner triage and
 must not be represented as fixed by this release.
 
@@ -258,7 +258,7 @@ clean/reset operation as a recovery shortcut.
   until Remote discovery reports it online again; HASHI3 was usable.
 - HASHI1's production environment has no pytest. Real candidate READY used that
   exact runtime; test gates use the qualified HASHI2 test environment.
-- A Git-ignored nested workzone can evade HER v2 `workspace_inspect` snapshot
+- A Git-ignored nested workzone can evade HERV2 `workspace_inspect` snapshot
   drift detection as described above; this is an existing cross-owner risk,
   not a regression introduced by the HASHI1 candidate range.
 - No all-Agent cold start, shared-service handoff, Telegram delivery, live
@@ -294,7 +294,7 @@ The Core protection check against `4b5497cb` passes; against HASHI1
 The ignored nested workspace drift limitation was independently reproduced
 with the existing inspection test. It is not limited to same-size edits:
 `alpha\n` to `beta\n` also yields an unchanged Git-backed snapshot digest.
-HER v2 owns that remaining Functions defect; do not claim this checkpoint fixes it.
+HERV2 owns that remaining Functions defect; do not claim this checkpoint fixes it.
 
 The final platform candidate must incorporate HASHI3 evidence before its
 release suite; HASHI3's current offline suite is active on the shared WSL host.

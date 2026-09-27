@@ -53,7 +53,7 @@ HASHI 需要把 FC 从“Telegram 适配器加若干兼容 API”升级为**所�
 - Telegram polling 已做到 Worker 接纳后才推进 offset，发送侧已有分片、格式化、重试与 failover；
 - Exchange 已有经过验证的远端主体、持久 inbox/outbox、去重和 body-free correlation；
 - Remote、设备控制和工具系统已有实例身份、授权、租约、审计与能力发现基础；
-- 外部 Workbench 当前已经在含附件消息上使用 Persistent Session API，并能展示 Session attachment、命令卡、meter/HER v2 presentation channel 和 live request activity。
+- 外部 Workbench 当前已经在含附件消息上使用 Persistent Session API，并能展示 Session attachment、命令卡、meter/HERV3 presentation channel 和 live request activity。
 
 这些不是要推翻的旧功能，而是新 FC 的骨架。
 
@@ -61,7 +61,7 @@ HASHI 需要把 FC 从“Telegram 适配器加若干兼容 API”升级为**所�
 
 调查确认，当前问题不是单一 UI 回归，而是历史上形成了多条平行管线：
 
-1. **Telegram 仍是部分运行时输出的隐式中心。** 普通回复、后台通知、meter cost tail、HER v2 card 等路径仍直接调用 Telegram 发送函数；meter 还受 `deliver_to_telegram` 条件控制，并在 Telegram 发送后才补记 presentation message。于是 Telegram 可见并不保证 Workbench/TUI 可见，反之亦然。
+1. **Telegram 仍是部分运行时输出的隐式中心。** 普通回复、后台通知、meter cost tail、HERV3 card 等路径仍直接调用 Telegram 发送函数；meter 还受 `deliver_to_telegram` 条件控制，并在 Telegram 发送后才补记 presentation message。于是 Telegram 可见并不保证 Workbench/TUI 可见，反之亦然。
 2. **持久 delivery outbox 尚未成为发送中枢。** SessionStore 会写 `delivery_outbox`，但当前主发送链仍在运行时内联完成；该表没有形成统一的 claim、dispatch、retry、receipt 消费循环。
 3. **Workbench 输入是双轨的。** 当前纯文本仍走兼容 `/api/chat`，文件消息才走 Persistent Session API；两条路径的 source、idempotency、session addressing、错误和投递行为并不完全相同。
 4. **历史上的 TUI 独立策略。** 它曾有单独的 `hashi.frontend-delivery` 策略和本地 Telegram mirror 开关，并通过兼容绑定共享 `workbench/default` Session。现行目标是由 FC 按 owner 统一控制各外部平台镜像，旧客户端策略只读兼容且不决定投递。
@@ -275,7 +275,7 @@ HChat、Remote 和 Exchange 携带用户/Agent 可见消息时使用 typed relay
 | 可选推理展示 | `reasoning` | bounded stream block | 可完全隐藏 |
 | 技术详情 | `technical` | expandable block | 简短摘要 |
 | 成本与耗时 | `meter` | metrics card | 可读文本 |
-| HER 路由/阶段摘要 | `herv2` | strategy/status card | 可读文本 |
+| HERV3 运行报告 | `herv2`（内部兼容频道名） | model/runtime status card | 可读文本 |
 | 命令交互 | `command` | revisioned card/buttons | 编号选项或只读文本 |
 | 审批 | `approval` | typed actions | 明确允许/拒绝文本 |
 | 系统/错误/交付状态 | `status` | severity/status fields | plain text |
@@ -600,7 +600,7 @@ Persistent Session API 下一版本提供统一 snapshot + event feed：
 
 工作：
 
-- 将 meter、HER v2 card、command card、approval/status/error 写成 durable FrontendEvent；
+- 将 meter、HERV3 card、command card、approval/status/error 写成 durable FrontendEvent；
 - 将 request activity 暴露为同一 feed 的 ephemeral lane；
 - 激活 outbox claim/lease/attempt/receipt 机制，但 canary event 不发送 legacy 副本；
 - 为 Telegram、TUI/API 和 external client 建 renderer；
@@ -911,7 +911,7 @@ Workbench 可按 Phase 2、3、7 调整 server proxy、Session client、event me
 - 增加版本化 Frontend Ingress、Delivery Intent、Delivery Receipt、Media Group、Command Invocation、Relay 与 Tool Interaction 契约及验证器；增加静态 Connector 能力目录和 `/api/v2/frontend/capabilities`。这尚不是带健康、generation 与动态 endpoint 注册的完整 Registry/统一订阅服务。
 - 把旧 TUI 专用 Telegram mirror 策略转为 connector-neutral delivery preference；旧配置只读兼容，首次成功写入时按配置 revision 迁移，损坏/冲突时不覆盖。原 TUI primary 与 mirror 语义保留。
 - 将命令执行从重新解析原始 slash 文本改为执行规范化的 typed invocation；新增 command envelope 的身份摘要、action/revision fence 测试。
-- 将 meter 与 HER v2 presentation 先写入 canonical Session event，再尝试 Telegram 投影；补充后台最终答复、错误与取消的 outbox claim/receipt 垂直切片，并阻止同一已提交 Run 的重复直接发送。
+- 将 meter 与 HERV3 presentation 先写入 canonical Session event，再尝试 Telegram 投影；补充后台最终答复、错误与取消的 outbox claim/receipt 垂直切片，并阻止同一已提交 Run 的重复直接发送。
 - 加固 `frontend_send_attachments` 的授权根目录与路径解析检查，补充有序 Media Group 标识、digest 与 retention 绑定测试。
 - 在已验证的 Exchange/HChat 消息上下文中保留 typed relay 相关性，不把显示用 prompt 投影当作授权来源。
 - 更新命令菜单、FC 架构文档、TUI 兼容策略和迁移测试，移除若干 Telegram/Workbench 专属的旧断言。

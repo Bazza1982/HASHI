@@ -1,4 +1,4 @@
-"""Observable HER v3 command presentation while the storage ID remains her-v2."""
+"""Observable HERV3 command presentation while the storage ID remains her-v2."""
 
 import re
 from types import SimpleNamespace
@@ -96,7 +96,7 @@ async def test_model_menu_reports_the_actual_single_main_model():
     await cmd_model(runtime, update, SimpleNamespace(args=[]))
 
     text = runtime._reply_text.await_args.args[1]
-    assert "HER V3" in text
+    assert "HERV3" in text
     assert "deepseek-v4-pro" in text
     assert "old-fast" not in text
     assert "old-pro" not in text
@@ -133,7 +133,7 @@ def test_effort_menu_reports_model_reasoning_not_old_execution_modes():
 
     text = FlexibleAgentRuntime._build_effort_followup_text(runtime)
 
-    assert "HER v3" in text
+    assert "HERV3" in text
     assert "deepseek-v4-pro" in text
     assert "old-fast" not in text
     assert "old-pro" not in text
@@ -152,7 +152,7 @@ async def test_old_route_callback_cannot_reopen_v2_editor():
 
     await callback_model(runtime, SimpleNamespace(callback_query=query), None)
 
-    assert "HER v3" in query.answer.await_args.args[0]
+    assert "HERV3" in query.answer.await_args.args[0]
     query.edit_message_text.assert_not_awaited()
 
 
@@ -164,7 +164,7 @@ async def test_provider_menu_offers_real_provider_without_v2_quick_pro_routes():
     await cmd_provider(runtime, update, SimpleNamespace(args=[]))
 
     text = runtime._reply_text.await_args.args[1]
-    assert "HER V3" in text
+    assert "HERV3" in text
     assert "deepseek" in text
     assert "old-fast" not in text
     assert "old-pro" not in text
@@ -195,14 +195,14 @@ async def test_legacy_reasoning_stages_callback_cannot_reopen_v2_editor():
 
     await callback_model(runtime, SimpleNamespace(callback_query=query), None)
 
-    assert "HER v3" in query.answer.await_args.args[0]
+    assert "HERV3" in query.answer.await_args.args[0]
     query.edit_message_text.assert_not_awaited()
 
 
 def test_commentary_menu_does_not_describe_retired_effort_stages():
     text = her_commentary_text(enabled=True, effort="high")
 
-    assert "HER v3" in text
+    assert "HERV3" in text
     assert "Direct" not in text
     assert "Planned" not in text
     assert "Adaptive" not in text

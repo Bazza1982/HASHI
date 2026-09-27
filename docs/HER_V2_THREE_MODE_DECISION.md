@@ -1,10 +1,12 @@
-# HER v2 Three-Mode Production Decision
+> **Legacy HERV2 archive — non-normative.** This document records the retired staged runtime. HERV3 uses one continuous main-model/tool loop with no Triage, Strategy, Planning, Replanning, Review, or stage-based Finalisation routing. Strategy Cards and Habit/Meditation remain optional. See [HERV3 upgrade](HERV3_UPGRADE.md).
+
+# HERV2 Three-Mode Production Decision
 
 | Field | Accepted value |
 |---|---|
 | Status | Accepted and frozen for practical deployment |
 | Date | 2026-08-31 |
-| Scope | HASHI HER v2 public `/effort` surface |
+| Scope | HASHI HERV2 public `/effort` surface |
 | Public modes | Direct (`zero`), Strategic (`low`), Planned (`medium`) |
 | Default | Planned (`medium`) |
 | Deferred | Adaptive (`high`), Reviewed (`xhigh`), Assured (`max`) redesign |
@@ -12,7 +14,7 @@
 
 ## Decision
 
-HER v2 exposes exactly three production execution modes:
+HERV2 exposes exactly three production execution modes:
 
 | Mode | Wire value | Active path | Intended use |
 |---|---|---|---|
@@ -25,7 +27,7 @@ tool-call ceilings, filesystem authority, or user-granted scope.
 
 ### Routing-card projection
 
-The HER v2 per-turn card keeps the execution route separate from Triage
+The HERV2 per-turn card keeps the execution route separate from Triage
 classification. Direct (`zero`) turns bypass Triage and therefore display
 `DIRECT` with a `Direct (no triage)` note. Strategic and Planned turns display
 the validated Triage classification (`DIRECT_RESPONSE`, `SIMPLE_TASK`,

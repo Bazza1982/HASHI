@@ -452,7 +452,7 @@ def test_formatter_adds_total_and_effort_aware_stage_wall_times():
 
     assert tail.splitlines()[1:3] == [
         "⏱️ 本回合耗时：2分18秒",
-        "🧭 主要阶段：策略 12.8秒 · 规划 18.6秒 · 执行 1分42秒",
+        "🧭 运行活动：建议上下文 12.8秒 · 准备 18.6秒 · 主模型 1分42秒",
     ]
     assert "immediate" not in tail.casefold()
 
@@ -470,7 +470,7 @@ def test_formatter_direct_timing_omits_unrun_strategy_and_planning():
     )
 
     assert "⏱️ Turn time: 8.9s" in tail
-    assert "🧭 Main stages: Execution 8.7s" in tail
+    assert "🧭 Runtime activity: Main model 8.7s" in tail
     assert "Strategy" not in tail
     assert "Planning" not in tail
 

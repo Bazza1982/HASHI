@@ -37,8 +37,8 @@ hard-coded admission rule.
 ### HASHI
 
 - PAO owns canonical Conversation Session, Message, Run and Event identity.
-- PAO selects canonical Conversation Session history and PCM projects it before
-  HER v2 Triage.
+- PAO selects canonical Conversation Session history and PCM projects it into
+  the HERV3 main-model request.
 - Enforce owner, deployment, Agent, Session, Run and fencing boundaries.
 - Provide durable replay, consumer ACK, snapshots and restart interruption.
 - Keep capability publication fail-closed until the complete HASHI gate passes.
@@ -95,7 +95,7 @@ No product name or client revision is compiled into HASHI admission logic.
 ### H3 — Context isolation
 
 - Canonical history comes from the selected HASHI Session.
-- Long history is compacted or bounded before HER v2 Triage.
+- Long history is compacted or bounded before the HERV3 main-model request.
 - The current request remains verbatim and occurs once.
 - Another Session's unpromoted sentinel never reaches the provider envelope.
 - `fresh` cannot cross an active Run and starts a new context generation.

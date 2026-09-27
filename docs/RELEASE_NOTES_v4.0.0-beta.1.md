@@ -27,7 +27,7 @@ and installer has already published this version.
   instance identity, user-scoped startup, separate logs, and fail-closed
   validation.
 - **Restricted online demo mode.** The shared Demo Connector provides isolated
-  anonymous leases, text-only HER v2 Direct runs, bounded workers and budgets,
+  anonymous leases, text-only HERV2 Direct runs, bounded workers and budgets,
   cancellation, cleanup, and a deliberately narrow public event projection.
   It enables an operator to host a simple online demo without turning the demo
   into a second runtime.
@@ -35,7 +35,7 @@ and installer has already published this version.
   installation media and installed quickly on a new Windows PC with its own
   Python runtime and clean local identity. The USB is transfer/install media;
   the verified runtime executes from the destination PC.
-- **Runtime hardening.** The Beta line includes sustained fixes across HER v2,
+- **Runtime hardening.** The Beta line includes sustained fixes across HERV2,
   PCM/PAO conversation binding, cross-channel delivery, media handling,
   Function adoption, Remote recovery, Windows launchers, and release
   qualification.

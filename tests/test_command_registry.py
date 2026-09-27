@@ -100,7 +100,7 @@ def test_runtime_command_registry_loads_external_private_commands(monkeypatch, t
     commands = {command.name: command for command in load_runtime_commands()}
 
     assert commands["rebuild"].description == "Retired HER rebuild notice"
-    assert commands["compact"].description.startswith("Compact eligible HER v2 history")
+    assert commands["compact"].description.startswith("Compact eligible HERV3 history")
     assert "private_sample" in commands
     assert any(command.command == "private_sample" for command in runtime_bot_commands())
 

@@ -7,9 +7,10 @@ Bring identity, memory, tools, conversations, and workflows together on
 infrastructure you control. Work through a terminal, Telegram, WhatsApp, or
 an authenticated client API.
 
-Use HASHI's native **HER v2** engine or connect engines such as Claude Code,
-Codex CLI, Gemini CLI, and Grok CLI. HER v2 can route work across supported
-model providers while keeping its own durable session.
+Use HASHI's native **HERV3** engine or connect engines such as Claude Code,
+Codex CLI, Gemini CLI, and Grok CLI. HERV3 keeps one durable Engine Session
+while one selected model reasons, uses tools, adapts, and verifies in a
+continuous loop.
 
 [Get started](docs/INSTALL.md) · [User guide](docs/USER_GUIDE.md) ·
 [Integrations](docs/INTEGRATIONS.md) ·
@@ -21,7 +22,7 @@ model providers while keeping its own durable session.
 - **Agents with continuity.** Keep each agent's persona, context, memory, and
   project access together across tasks. Inspect work and recovery records.
 - **A choice of engines and models.** Use CLI engines with their own local
-  authentication, or configure model providers inside HER v2.
+  authentication, or configure model providers inside HERV3.
 - **Work that extends beyond a reply.** Give agents tools, schedule recurring
   work, track background processes, and coordinate multi-agent workflows.
 - **Several ways to stay connected.** Use the built-in terminal UI and messaging
@@ -35,7 +36,7 @@ model providers while keeping its own durable session.
 | Task | HASHI capabilities |
 |---|---|
 | Research and writing | Project Workzones, memory, skills, file and browser tools |
-| Coding and local automation | CLI engines or HER v2, scoped tools, background jobs, logs |
+| Coding and local automation | CLI engines or HERV3, scoped tools, background jobs, logs |
 | Repeatable multi-step work | Nagare workflows, scheduled jobs, review and recovery records |
 | Long-running coordination | Superloop taskboards, explicit waits, HChat across trusted instances |
 | Client integrations | Authenticated Backend APIs and an optional model API Gateway |
@@ -56,7 +57,7 @@ before downloading.
 | Area | Current boundary |
 |---|---|
 | Personal/local use | Primary development path; open for small-scale Beta testing |
-| HER v2 | Native Python engine with Direct, Strategic, and Planned execution |
+| HERV3 | Native Python engine with one model/tool loop, optional Strategy Cards, Habits, and an experimental JEV companion |
 | Team/enterprise governance | Alpha profiles, policy, approvals, audit, and deployment artifacts; production deployment validation remains pending |
 | Frontends | Built-in TUI, Telegram, WhatsApp, and client APIs; the independently maintained Workbench v2 is an external client, not bundled with HASHI |
 | Platform evidence | Windows-native and WSL/Linux deployment templates are included; macOS releases still need platform acceptance |
@@ -121,7 +122,7 @@ HASHI has four functional owners:
 |---|---|
 | PCM — Persona, Context, Memory | Assemble and project an agent's context and memory |
 | PAO — Provider-Agnostic Orchestration | Agents, conversations, runs, engine selection, tools, jobs, and coordination |
-| HER v2 — HASHI Engine Runtime | Durable engine sessions, execution stages, and model-provider routing |
+| HERV3 — HASHI Engine Runtime | Durable Engine Sessions, one model/tool loop, Model Provider selection, optional Strategy Cards and Habits |
 | Frontend Connectors | User-facing channels and client protocols |
 
 These owners are separate from the engineering layers: Core, Functions,
@@ -155,7 +156,8 @@ operational direction.
 
 [OpenClaw](https://github.com/openclaw/openclaw), Peter Steinberger, and its
 contributors provided important early inspiration. HASHI now has its own
-orchestration and native HER v2 runtime; the earlier Claw-derived HER v1 is
+orchestration and native HERV3 runtime; the earlier Claw-derived HER v1 and
+staged HERV2 runtime are
 retired. Historical bridge-u-f names remain in compatibility entry points.
 
 ## Contributing and Support

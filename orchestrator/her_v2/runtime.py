@@ -706,7 +706,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         return merged
 
     async def _run_turn(self, state: _TurnState) -> TurnResult:
-        """Run HER v3 as one model-owned reasoning/tool loop for every effort."""
+        """Run HERV3 as one model-owned reasoning/tool loop for every effort."""
 
         ref = self._audit(
             state,
@@ -739,11 +739,11 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
                 )
             elif direct_transport == "unsupported":
                 raise StageInvocationError(
-                    "HER v3 main model accepts neither text nor audio input",
+                    "HERV3 main model accepts neither text nor audio input",
                     retryable=False,
                     code=ProviderFailureCode.PROVIDER_MODALITY_UNSUPPORTED,
                     human_description=(
-                        "The configured HER v3 main model cannot consume the current request."
+                        "The configured HERV3 main model cannot consume the current request."
                     ),
                 )
         return await self._run_direct(
@@ -756,7 +756,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         *,
         request_content_override: Mapping[str, Any] | None = None,
     ) -> TurnResult:
-        """Run the HER v3 foreground path as one fully capable agent/tool loop."""
+        """Run the HERV3 foreground path as one fully capable agent/tool loop."""
 
         habits: Sequence[str] = ()
         if self.config.meditation_enabled:

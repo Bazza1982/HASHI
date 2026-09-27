@@ -8,7 +8,7 @@
 
 **HASHI 侧 Demo Connector 源码施工已完成，离线 CI 已通过。**
 
-当前实现包含匿名 Demo lease、一个访客一个真实 HASHI Agent、最多三个原生 Conversation Sessions、HER Direct/zero、按需 Agent Worker、纯文字 Run、取消、事件长轮询、每日请求预算和到期/结束清理。它没有修改 Core major version，现已进入 `main`，可供运营者部署简单的在线演示。
+当前实现包含匿名 Demo lease、一个访客一个真实 HASHI Agent、最多三个原生 Conversation Sessions、HERV3 单模型循环、按需 Agent Worker、纯文字 Run、取消、事件长轮询、每日请求预算和到期/结束清理。它没有修改 Core major version，现已进入 `main`，可供运营者部署简单的在线演示。
 
 尚未由 Demo Connector 本身声明完成的部分：Demo 前端与真实模型联调、Windows/目标 VM、200 用户压力、Cloudflare/公网 canary。源码合并不等于这些部署验证已经完成。
 
@@ -28,7 +28,7 @@
 - Agent 使用正常 HASHI AgentCreation/配置 owner 创建，但保持 inactive，首次 Run 时才启动 Function Worker。
 - 每个 Session 显式使用 Demo owner；`memory_policy=disabled`，promotion schedule 关闭。
 - Run 仍进入原生 HASHI Session/Run/HER 路径；Connector 不直接调用模型。
-- Demo Agent 固定 HER v2、`zero` effort，并写入空 Tool allowlist。
+- Demo Agent 固定 HERV3 单模型循环、关闭模型推理，并写入空 Tool allowlist；内部兼容值 `zero` 不代表 Direct 路由。
 - 每访客最多一个未完成 Run；全局 generation semaphore 与 Worker 上限独立限制。
 - 每日请求预算保存在独立 Demo lease DB 中，清除访客不会重置当日全局预算。
 - 结束/过期先 revoke，再 cancel active Runs、停止 Worker、清 Session owner 数据、删除 Agent config/workspace、最后删除 lease。

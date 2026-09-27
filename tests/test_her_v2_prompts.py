@@ -187,7 +187,7 @@ def test_system_prompt_renderers_preserve_persona_and_authority_envelopes() -> N
     )
     subagent_system = render_internal_stage_system_prompt(request)
     assert subagent_system is not None
-    assert "bounded HER v2 sub-agent" in subagent_system
+    assert "bounded compatibility sub-agent" in subagent_system
     assert "Inspect the assigned target." in subagent_system
     assert "Inspect current state before reporting." in subagent_system
 
@@ -574,16 +574,16 @@ def test_direct_prompt_is_one_natural_language_agent_with_full_catalogues() -> N
 
     assert render_stage_prompt(request) == request.goal
     assert render_internal_stage_system_prompt(request) is None
-    assert "zero-orchestration Direct route" in system_prompt
+    assert "HERV3's single continuous main-model/tool loop" in system_prompt
     assert "Never hand the task off" in system_prompt
-    assert "request an orchestration upgrade" in system_prompt
+    assert "request a different orchestration path" in " ".join(system_prompt.split())
     assert '"name": "file_write"' in system_prompt
     assert '"id": "reports"' in system_prompt
     assert "Check the current workspace" in system_prompt
     assert "Address the user as Captain." in system_prompt
     assert "Return only the natural-language response" in system_prompt
     assert "$tool_catalogue" not in system_prompt
-    assert "Direct Strategy Playbook self-selection" not in system_prompt
+    assert "Strategy Card advisory self-selection" not in system_prompt
 
 
 def test_prompt_tool_catalogue_keeps_guidance_without_duplicate_parameters() -> None:
@@ -649,7 +649,7 @@ def test_direct_prompt_can_self_select_from_the_complete_strategy_playbook() -> 
         persona_block_end="[persona_end]",
     )
 
-    assert "Direct Strategy Playbook self-selection" in system_prompt
+    assert "Strategy Card advisory self-selection" in system_prompt
     assert "Before making the first task tool call" in system_prompt
     assert "normally one to\n   three" in system_prompt
     assert "Strategy Cards used: CARD_ID" in system_prompt

@@ -232,7 +232,7 @@ Open the local connection page from the repository root:
 python -m onboarding.onboarding_main
 ```
 
-Choose a detected CLI engine or a HER v2 Model Provider, enter any required
+Choose a detected CLI engine or a HERV3 Model Provider, enter any required
 credentials in the masked local page, and confirm the minimal connection
 check. Telegram is optional. After setup, launch with the platform helper
 below, or run `python main.py` from the activated environment.
@@ -536,7 +536,7 @@ removes only the current directory binding. Completion scripts are printed by
 
 For first connection, interactive `hashi` asks for one detected CLI or one API
 provider. Confirm a minimal adapter call, then enter Hashiko's TUI conversation.
-API credentials use masked local input and configure HER v2 internally.
+API credentials use masked local input and configure HERV3 internally.
 `/connect` opens the same local repair page when a model is unavailable.
 Telegram can be skipped; its optional local page requires a Bot Token and your
 numeric user ID. Do not paste credentials into ordinary chat.

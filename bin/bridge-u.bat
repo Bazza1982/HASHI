@@ -198,7 +198,7 @@ exit /b 0
 cls
 set "API_GATEWAY_LABEL=OFF"
 if "!API_GATEWAY_LAUNCH!"=="1" set "API_GATEWAY_LABEL=ON"
-call :print_banner "HASHI LAUNCHER" "Powered by HER-V2 - Flexible with CLI backends"
+call :print_banner "HASHI LAUNCHER" "Powered by HERV3 - Flexible with CLI backends"
 echo !C_RAIL!^|!C_RESET! !C_LABEL!Active agents    !C_RESET! !C_TEXT!!AGENT_COUNT!!C_RESET!
 echo !C_RAIL!^|!C_RESET! !C_LABEL!Inactive agents  !C_RESET! !C_TEXT!!INACTIVE_COUNT!!C_RESET!
 echo !C_RAIL!^|!C_RESET! !C_LABEL!Workbench       !C_RESET! !C_OK!enabled!C_RESET!

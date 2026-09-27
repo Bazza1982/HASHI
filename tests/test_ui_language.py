@@ -283,7 +283,7 @@ def test_telegram_activity_can_be_chinese_while_terminal_default_stays_english()
         )
     )
 
-    assert digest.phase_label_for(locale="zh-CN") == "执行"
+    assert digest.phase_label_for(locale="zh-CN") == "工作中"
     assert digest.render_lines(locale="zh-CN") == ["🔎 检查了 1 个文件"]
     with ui_language.language_scope(SimpleNamespace(), locale="zh-CN"):
         assert digest.phase_label == "Execution"

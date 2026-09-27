@@ -1,4 +1,4 @@
-"""HER v3 sidecars: rate-limited Persona Commentary and Agent Companion.
+"""HERV3 sidecars: rate-limited Persona Commentary and Agent Companion.
 
 These services observe the foreground model. They never plan or review the task.
 Commentary informs the user; Agent Companion is silent unless a bounded JEV

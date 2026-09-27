@@ -1,13 +1,15 @@
-# HER v2 Issue Register
+> **Legacy HERV2 archive — non-normative.** This document records the retired staged runtime. HERV3 uses one continuous main-model/tool loop with no Triage, Strategy, Planning, Replanning, Review, or stage-based Finalisation routing. Strategy Cards and Habit/Meditation remain optional. See [HERV3 upgrade](HERV3_UPGRADE.md).
+
+# HERV2 Issue Register
 
 | Field | Value |
 |---|---|
 | Status | Active |
-| Scope | HER v2 runtime, provider adapters, tool/evidence handling, and delivery lifecycle only |
+| Scope | HERV2 runtime, provider adapters, tool/evidence handling, and delivery lifecycle only |
 | Canonical filename | `her-v2-issues.md` |
 | Last updated | 2026-08-26 |
 
-This is the canonical register for HER v2 defects and open design gaps. General
+This is the canonical register for HERV2 defects and open design gaps. General
 HASHI issues belong in [KNOWN_ISSUES.md](KNOWN_ISSUES.md); implementation plans
 and test plans may be linked from an entry, but they do not replace the entry's
 status here.
@@ -168,7 +170,7 @@ the final root cause.
 ### Code pointers
 
 - `orchestrator/her_v2/progress.py`: `ProviderActivityTracker`
-- HER v2 provider activity and evidence-receipt integration tests
+- HERV2 provider activity and evidence-receipt integration tests
 
 ## HERV2-003: Non-zero Bash exits can be recorded as successful receipts
 
@@ -176,7 +178,7 @@ the final root cause.
 |---|---|
 | Severity | Major |
 | Status | Open |
-| Affected flow | Bash tool result semantics and HER v2 evidence receipts |
+| Affected flow | Bash tool result semantics and HERV2 evidence receipts |
 | Evidence | Hashi2 `arale`, turn `req-0001-019e2f651d05`, observed 2026-08-26 |
 
 ### Expected behaviour
@@ -188,7 +190,7 @@ command output as evidence.
 
 ### Observed behaviour
 
-At least two Bash results began with `[exit code 1]`, but their HER v2 evidence
+At least two Bash results began with `[exit code 1]`, but their HERV2 evidence
 receipts were recorded as `SUCCESS`. A timed-out Bash call in the same flow was
 correctly recorded as `FAILED`.
 
@@ -204,7 +206,7 @@ semantics.
 
 `execute_bash()` renders a non-zero process result as ordinary output prefixed
 with `[exit code N]`. `ToolRegistry` currently treats output as an error only
-when its text starts with `Error:`. The HER v2 evidence wrapper maps
+when its text starts with `Error:`. The HERV2 evidence wrapper maps
 `is_error=false` to a `SUCCESS` receipt, so a non-zero shell exit crosses the
 tool boundary without structured failure state.
 
@@ -418,9 +420,9 @@ should avoid another semantic wording gate or another model stage.
 
 ## Migration note
 
-The active HER v2 design, testing, cleanup, and checkpoint documents were
+The active HERV2 design, testing, cleanup, and checkpoint documents were
 checked when this register was created. They are contracts, implementation
 plans, or point-in-time evidence rather than an issue register. HERV2-004 is the
-one explicit unresolved HER v2 design item migrated from the current integration
+one explicit unresolved HERV2 design item migrated from the current integration
 checkpoint. Pending rollout canaries are evidence gaps, not defects, and were
 not converted into issues without a failing observation.

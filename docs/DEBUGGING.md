@@ -45,7 +45,7 @@ switching. Wrapper, Audit, and Dual Brain are retired, and Fixed is not the
 retired legacy fixed Agent runtime. See `docs/FIXED_FLEX_WORKING_MODES.md` for
 the current contract.
 
-OpenRouter and DeepSeek are Model Provider adapters used through HER v2 and
+OpenRouter and DeepSeek are Model Provider adapters used through HERV3 and
 internal rendering. They are not selectable top-level Engine choices in
 `/backend`.
 

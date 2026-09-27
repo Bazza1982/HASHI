@@ -1,21 +1,23 @@
-# HER v2 Mandatory Cognitive Control Decision
+> **Legacy HERV2 archive — non-normative.** This document records the retired staged runtime. HERV3 uses one continuous main-model/tool loop with no Triage, Strategy, Planning, Replanning, Review, or stage-based Finalisation routing. Strategy Cards and Habit/Meditation remain optional. See [HERV3 upgrade](HERV3_UPGRADE.md).
+
+# HERV2 Mandatory Cognitive Control Decision
 
 | Field | Accepted value |
 |---|---|
 | Status | Accepted; permanent safety invariant |
 | Date | 2026-09-06 |
-| Scope | Every HER v2 Agent, provider, execution mode, and tool-enabled lifecycle stage |
-| Decision owner | HER v2 Engine runtime |
+| Scope | Every HERV2 Agent, provider, execution mode, and tool-enabled lifecycle stage |
+| Decision owner | HERV2 Engine runtime |
 | Supersedes | Optional Agent rollout gate `cognitive_control_enabled` |
-| Parent design | [HER v2 Product Requirements and Technical Design](HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md) |
+| Parent design | [HERV2 Product Requirements and Technical Design](HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md) |
 
 ## Decision
 
-Provider-neutral cognitive control is permanently active in HER v2. It is not
+Provider-neutral cognitive control is permanently active in HERV2. It is not
 an optional capability and cannot be disabled by configuration, constructor
 argument, Agent preference, execution mode, provider profile, or task route.
 
-Every HER v2 Turn creates one lifecycle-wide evidence-aware `TaskState` before
+Every HERV2 Turn creates one lifecycle-wide evidence-aware `TaskState` before
 its first stage. Every stage that receives a HASHI Tool Registry is wrapped by
 the cognitive-control boundary, including Direct, tool-enabled
 Strategy/Triage, Planning, Execution, Replanning, Review, and delegated or
@@ -38,7 +40,7 @@ fatal.
 
 ## Safety objective
 
-HER v2 must not permit a model to remain indefinitely in a no-new-information
+HERV2 must not permit a model to remain indefinitely in a no-new-information
 reasoning/action loop merely because it can keep issuing syntactically
 different or periodically repeated tool calls. The Runtime therefore tracks
 observable tool actions, results, state changes, and evidence-linked TaskState
@@ -61,7 +63,7 @@ transport inactivity protection, or the meaningful-progress idle detector.
 Polling-only cycles remain exempt because observing an unchanged external job
 can be legitimate progress evidence.
 
-The invariant belongs inside HER v2, not in frontends or individual provider
+The invariant belongs inside HERV2, not in frontends or individual provider
 adapters. Non-HER Engines keep their own lifecycle and safety contracts.
 
 ## Enforcement and acceptance
@@ -70,7 +72,7 @@ The decision is enforced at three non-optional boundaries:
 
 1. configuration rejects the retired switch;
 2. Runtime always creates the Turn-scoped `TaskState`; and
-3. the stage provider always wraps every available HER v2 Tool Registry with
+3. the stage provider always wraps every available HERV2 Tool Registry with
    cognitive control before exposing it to the model.
 
 Acceptance requires regression tests proving all three boundaries, coverage of
