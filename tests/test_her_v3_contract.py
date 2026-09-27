@@ -135,6 +135,19 @@ async def test_boolean_provider_reasoning_is_preserved_for_her_v3(tmp_path):
     provider = _MainProvider()
     adapter = _adapter(tmp_path, provider)
     adapter.config.extra["effort"] = "enabled"
+    allowed_backends = [
+        {
+            "engine": "openrouter-api",
+            "model": "deepseek/deepseek-v3.2-exp",
+            "models": ["deepseek/deepseek-v3.2-exp"],
+            "model_efforts": {"deepseek/deepseek-v3.2-exp": ["off", "enabled"]},
+        }
+    ]
+    adapter.config._hashi_runtime = SimpleNamespace(
+        backend_manager=SimpleNamespace(
+            config=SimpleNamespace(allowed_backends=allowed_backends)
+        )
+    )
     adapter.config.extra["her_v2"] = {
         "main": {
             "provider": "openrouter-api",
@@ -151,6 +164,39 @@ async def test_boolean_provider_reasoning_is_preserved_for_her_v3(tmp_path):
     profile, request = provider.calls[0]
     assert request.stage is Stage.DIRECT
     assert profile.reasoning == "enabled"
+
+
+@pytest.mark.asyncio
+async def test_openrouter_model_without_reasoning_does_not_receive_it(tmp_path):
+    provider = _MainProvider()
+    adapter = _adapter(tmp_path, provider)
+    model = "cognitivecomputations/dolphin-mistral-24b-venice-edition"
+    allowed_backends = [
+        {
+            "engine": "openrouter-api",
+            "model": model,
+            "models": [model],
+            "model_efforts": {model: []},
+        }
+    ]
+    adapter.config._hashi_runtime = SimpleNamespace(
+        backend_manager=SimpleNamespace(
+            config=SimpleNamespace(allowed_backends=allowed_backends)
+        )
+    )
+    adapter.config.extra["her_v2"] = {
+        "main": {"provider": "openrouter-api", "model": model}
+    }
+
+    assert await adapter.initialize()
+    response = await adapter.generate_response("Say hello", "request-no-reasoning")
+
+    assert response.is_success
+    assert len(provider.calls) == 1
+    profile, request = provider.calls[0]
+    assert request.stage is Stage.DIRECT
+    assert profile.model == model
+    assert profile.reasoning is None
 
 
 @pytest.mark.asyncio

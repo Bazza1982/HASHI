@@ -86,6 +86,26 @@ that is unsupported by the selected Provider/model to the configured compatible
 effort. Source, instance configuration, and live Worker adoption are separate;
 the running HASHI1 generation was not restarted as part of this correction.
 
+### HASHI1 OpenRouter instance opt-ins, 2026-09-27
+
+The user requested five exact OpenRouter models for every HASHI1 Agent:
+`cognitivecomputations/dolphin-mistral-24b-venice-edition`,
+`thedrummer/cydonia-24b-v4.1`, `sao10k/l3.3-euryale-70b`,
+`sao10k/l3.1-euryale-70b`, and `gryphe/mythomax-l2-13b`. All 18 Agent
+`allowed_backends` entries opt into those models without changing defaults or
+the shared model catalogue. OpenRouter's current catalogue lists no reasoning
+parameter for these five, so their instance `model_efforts` entries are empty.
+HER v3 omits its inherited reasoning setting for a model explicitly declared
+this way; an undeclared model retains its previous Provider behavior.
+
+Only the Llama 3.1 Euryale model currently advertises tool parameters. The
+other four are suitable for conversations that do not require model tool calls.
+MythoMax advertises an 8,192-token model context, while its current top
+OpenRouter endpoint reports 4,096; request planning should use the effective
+endpoint limit. The source change and ignored instance configuration were
+verified offline. Running Worker adoption and live Provider use require
+separate verification after an authorized Function replacement.
+
 ## Strategy Cards
 
 Cards are optional reference context. When disabled, they are absent. When enabled,

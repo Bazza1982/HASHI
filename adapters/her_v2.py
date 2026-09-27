@@ -71,6 +71,7 @@ from orchestrator.multimodal_contract import (
     request_content_is_voice_origin,
     resolve_input_capability,
 )
+from orchestrator.runtime_effort_options import configured_model_efforts
 
 HER_V2_DISPLAY_NAME = "HASHI Engine Runtime v2"
 HER_V2_VERSION = "2.0.0-alpha.1"
@@ -1547,21 +1548,45 @@ class HERv2Adapter(BaseBackend):
             effort_resolution.scheduler_task_id or "none",
             effort_resolution.scheduler_trigger or "none",
         )
-        # HER v3 /effort is the selected model's reasoning level, never a
-        # routing or orchestration policy.  Zero is retained as the wire value
-        # for the user-facing `none` level.
-        turn_reasoning = effort_resolution.model_reasoning
-        turn_config = replace(
-            turn_config,
-            stage_reasoning={
-                **dict(turn_config.stage_reasoning),
-                Stage.DIRECT: turn_reasoning,
-            },
-            route_reasoning={
-                **dict(turn_config.route_reasoning),
-                Route.DIRECT: turn_reasoning,
-            },
+        # A model explicitly configured with no reasoning choices must receive
+        # no reasoning field, including the inherited main-profile default.
+        # An absent declaration leaves existing Provider behavior unchanged.
+        direct_profile = turn_config.profile_for_route(Route.DIRECT)
+        manager_config = getattr(self._backend_manager(), "config", None)
+        allowed_backends = getattr(manager_config, "allowed_backends", ()) or ()
+        explicitly_without_reasoning = any(
+            row.get("engine") == direct_profile.engine
+            and configured_model_efforts(row, direct_profile.model) == []
+            for row in allowed_backends
         )
+        if not explicitly_without_reasoning:
+            # Zero remains the wire value for the user-facing `none` level.
+            turn_reasoning = effort_resolution.model_reasoning
+            turn_config = replace(
+                turn_config,
+                stage_reasoning={
+                    **dict(turn_config.stage_reasoning),
+                    Stage.DIRECT: turn_reasoning,
+                },
+                route_reasoning={
+                    **dict(turn_config.route_reasoning),
+                    Route.DIRECT: turn_reasoning,
+                },
+            )
+        else:
+            direct_role = turn_config.stage_roles[Stage.DIRECT]
+            profiles = dict(turn_config.profiles)
+            profiles[direct_role] = replace(profiles[direct_role], reasoning=None)
+            stage_reasoning = dict(turn_config.stage_reasoning)
+            route_reasoning = dict(turn_config.route_reasoning)
+            stage_reasoning.pop(Stage.DIRECT, None)
+            route_reasoning.pop(Route.DIRECT, None)
+            turn_config = replace(
+                turn_config,
+                profiles=profiles,
+                stage_reasoning=stage_reasoning,
+                route_reasoning=route_reasoning,
+            )
         if str(prompt or "").startswith(HER_FIXED_ENVELOPE_PREFIX):
             if self._session_coordinator is None:
                 return BackendResponse(

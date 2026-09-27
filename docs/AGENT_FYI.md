@@ -163,6 +163,14 @@ acceptance covered real switching, reasoning, Session identity, usage, and
 metering; see [HER v3 experiment](HER_V3_EXPERIMENT.md) for evidence and the
 separate HASHI1 promotion record.
 
+HASHI1's 2026-09-27 instance configuration opts all 18 Agents into five exact
+OpenRouter conversation models (Venice, Cydonia, both Euryales, MythoMax).
+Their empty per-model effort declarations mean HER v3 omits reasoning on the
+Provider request; models without that explicit declaration keep existing
+behavior. Only Llama 3.1 Euryale currently advertises tool calls. Source and
+configuration checks are offline evidence until a separately authorized
+Function replacement and live check establish running adoption.
+
 Use current metadata for context, price, effort, and modality. Media needs
 model, Adapter, and policy support; unknown is not unsupported or zero cost.
 Fallback is opt-in and request-observed; warn before switching, block uncertain
