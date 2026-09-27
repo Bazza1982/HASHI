@@ -288,3 +288,12 @@ The Backend API health result exposes the same status as a warning issue, so
 Remote's existing degraded-restart notification explicitly warns after a cold
 restart too. Recovery still completes and the previous generation remains
 usable. Neither notice claims that new source was adopted without evidence.
+
+On HASHI1 `main`, the user authorized this correction and its necessary hot
+adoption. The source was committed before `/reboot max`. The final receipt
+reported `succeeded`, a new shared generation, `adoption.status=qualified`, and
+all six Workers online; Backend health reported the same generation and
+adoption status. The full curated Core gate passed (725 tests), plus the
+Function/Worker/reboot minimum (170 tests). A cold `/restart` fallback was
+verified offline through the health and notification contracts, not by a live
+cold restart.

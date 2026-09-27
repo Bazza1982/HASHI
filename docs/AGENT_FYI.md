@@ -205,8 +205,16 @@ separate mirror switches. A Run retains its admission-time destinations.
 
 HASHI1 `main`, 2026-09-27: the user approved this centralized mirror behavior,
 including normal origin-platform replies while mirroring is off. The Functions
-source and focused offline tests were updated. No HASHI process was rebooted;
-running Worker adoption and live frontend delivery remain unverified.
+source was committed and adopted by an authorized `/reboot max`. The receipt
+confirmed a qualified new generation and all six Workers online. Workbench
+`/telegram off` and `/whatsapp off` were read back through TUI's command path
+as the same owner state. These were switch checks, not real chat delivery to
+either external platform.
+
+The same HASHI1 change makes release fallback explicit in broad reboot receipts
+and Backend health, which Remote's existing degraded restart notice consumes.
+Offline red/green and the curated Core gate passed. Cold `/restart` fallback
+notification was checked by tests; no cold restart was performed for this fix.
 
 ## Move, Clone, jobs, and HCC
 
