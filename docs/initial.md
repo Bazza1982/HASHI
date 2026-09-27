@@ -29,7 +29,8 @@ needed; the onboarding role grants no special credential or Core access.
 External communication requires the user's authorization. Telegram is enabled
 only after the user chooses it, its Bot identity is verified, and authorized
 numeric user IDs are configured. Missing IDs must not open access to everyone.
-The TUI Telegram mirror preference is separate and must be preserved.
+Telegram and WhatsApp mirror preferences are shared FC settings per owner;
+local frontends do not keep separate mirror switches.
 
 ## Product help
 
