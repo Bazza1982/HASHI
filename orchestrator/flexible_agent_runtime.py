@@ -7100,6 +7100,18 @@ class FlexibleAgentRuntime:
                 return
             broadcast_targets = directory.resolve_group(group_name, exclude_self=self.name)
             broadcast_label = ui_language.tr("hchat.label.group", name=group_name)
+        else:
+            from orchestrator.hchat_delivery import (
+                HChatDraftParseError,
+                draft_parse_error_text,
+                validate_hchat_target_format,
+            )
+
+            try:
+                target_name = validate_hchat_target_format(target_name)
+            except HChatDraftParseError as exc:
+                await self._reply_text(update, draft_parse_error_text(exc))
+                return
 
         # HChat is an internal Bridge request, but it continues the exact
         # Conversation where /hchat was invoked.  Preserve that Session and
@@ -7139,7 +7151,11 @@ class FlexibleAgentRuntime:
                 f"IMPORTANT: When you later receive messages starting with '[hchat reply from ...]', "
                 f"just report the reply content to the user. Do NOT send another hchat message back."
             )
-        elif self._hchat_draft_delivery_enabled():
+        else:
+            from orchestrator.hchat_delivery import HCHAT_TARGET_METADATA_KEY
+
+            hchat_request_metadata = dict(hchat_request_metadata or {})
+            hchat_request_metadata[HCHAT_TARGET_METADATA_KEY] = target_name
             self_prompt = self._build_hchat_draft_prompt(target_name, intent)
             await self.enqueue_api_text(
                 self_prompt,
@@ -7149,28 +7165,6 @@ class FlexibleAgentRuntime:
                 request_metadata=hchat_request_metadata,
             )
             return
-
-        else:
-            # Single agent target
-            self_prompt = (
-                f"[HCHAT TASK] The user wants you to send a Hchat message to agent \"{target_name}\".\n\n"
-                f"Intent: {intent}\n\n"
-                f"Instructions:\n"
-                f"1. Think about what from our current conversation context is relevant to this intent.\n"
-                f"2. Compose a complete, meaningful message FROM you ({self.name}) TO {target_name}. "
-                f"Write it as yourself — introduce yourself if appropriate, include relevant context, be concise.\n"
-                f"3. Send the message by running this bash command:\n"
-                f"   {sys.executable} {Path(__file__).resolve().parent.parent / 'tools' / 'hchat_send.py'} --to {target_name} --from {self.name} --text \"<your composed message>\"\n"
-                f"4. In your final response, show the exact message body passed to --text "
-                f"under a 'Message:' label. Preserve the tool's result: 'queued' means "
-                f"the destination accepted it for processing, 'sent' requires a confirmed "
-                f"Frontend Connector transport receipt, and a failed state must be reported "
-                f"as failed even beside a success flag.\n\n"
-                f"Do NOT relay the user's words literally. Compose the message yourself.\n\n"
-                f"IMPORTANT: When you later receive a message starting with '[hchat reply from ...]', "
-                f"just report the reply content to the user. Do NOT send another hchat message back — "
-                f"the conversation ends there."
-            )
         # The command already authorises one clear action.  Queue it without a
         # second user-visible preflight reply; only its final delivery report
         # (or a deterministic validation error above) is presented.
@@ -7182,44 +7176,53 @@ class FlexibleAgentRuntime:
             request_metadata=hchat_request_metadata,
         )
 
-    def _hchat_draft_delivery_enabled(self) -> bool:
-        extra = self.config.extra if isinstance(getattr(self.config, "extra", None), dict) else {}
-        value = extra.get("hchat_draft_delivery")
-        if isinstance(value, str):
-            return value.strip().lower() in {"1", "true", "yes", "on"}
-        return bool(value)
-
     def _build_hchat_draft_prompt(self, target_name: str, intent: str) -> str:
         return (
             f"[HCHAT DRAFT TASK] The user wants you to draft a Hchat message to agent \"{target_name}\".\n\n"
             f"Intent: {intent}\n\n"
-            f"Return ONLY a JSON object with this exact shape:\n"
-            f'{{"target": "{target_name}", "message": "<complete message to send>", '
-            f'"user_report": "<short report for the user after delivery>"}}\n\n'
+            f"Return ONLY the exact message body to send. Do not return JSON, a label, "
+            f"a delivery report, or routing metadata.\n\n"
             f"Rules:\n"
             f"- Do not run shell commands.\n"
             f"- Do not mention delivery tools or implementation details.\n"
-            f"- Do not wrap the JSON in prose.\n"
             f"- Compose the message FROM you ({self.name}) TO {target_name}.\n"
             f"- Do not relay the user's words literally; include relevant context and be concise.\n"
-            f"- The runtime will validate the JSON and send the message."
+            f"- The runtime already owns and validates the target, sends the message, and reports the receipt."
         )
 
     async def _prepare_hchat_draft_success(self, item: QueuedRequest, *, core_raw: str, completion_path: str):
         from orchestrator.hchat_delivery import (
+            HCHAT_TARGET_METADATA_KEY,
+            HChatDraft,
             HChatDraftParseError,
             deliver_hchat_draft,
             draft_parse_error_text,
             hchat_delivery_receipt_text,
             hchat_delivery_log_fields,
             hchat_draft_parsed_log_fields,
+            parse_hchat_message_body,
             parse_hchat_draft,
+            validate_hchat_target_format,
         )
         from orchestrator.wrapper_mode import passthrough_result
 
-        wrapper_result = passthrough_result(core_raw or "", fallback_reason="hchat_draft_delivery")
+        wrapper_result = passthrough_result(core_raw or "", fallback_reason="hchat_runtime_delivery")
         try:
-            draft = parse_hchat_draft(core_raw or "")
+            request_metadata = (
+                item.request_metadata if isinstance(item.request_metadata, Mapping) else {}
+            )
+            frozen_target = str(
+                request_metadata.get(HCHAT_TARGET_METADATA_KEY) or ""
+            ).strip()
+            if frozen_target:
+                draft = HChatDraft(
+                    target=validate_hchat_target_format(frozen_target),
+                    message=parse_hchat_message_body(core_raw or ""),
+                )
+            else:
+                # Compatibility for a draft queued before this generation was
+                # adopted. New requests always carry an ingress-frozen target.
+                draft = parse_hchat_draft(core_raw or "")
         except HChatDraftParseError as exc:
             visible_text = draft_parse_error_text(exc)
             self._mark_error(visible_text)
@@ -7249,7 +7252,13 @@ class FlexibleAgentRuntime:
             )
 
         sender = getattr(self, "_hchat_draft_sender", None)
-        result = deliver_hchat_draft(draft, from_agent=self.name, sender=sender)
+        result = await asyncio.to_thread(
+            deliver_hchat_draft,
+            draft,
+            from_agent=self.name,
+            sender=sender,
+            attempt_id=item.request_id,
+        )
         locale = ui_language.preferred_locale(
             self,
             actor_id=getattr(item, "owner_id", None) or getattr(item, "chat_id", None),

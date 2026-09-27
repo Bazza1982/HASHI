@@ -26,6 +26,7 @@ from orchestrator.audit_mode import (
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
+from orchestrator.hchat_delivery import HCHAT_TARGET_METADATA_KEY
 from orchestrator.memory_plus_mode import (
     MEMORY_PLUS_CLOSE,
     MEMORY_PLUS_OPEN,
@@ -299,7 +300,7 @@ def _read_state(workspace: Path) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_cmd_hchat_legacy_path_enqueues_bridge_hchat_source(tmp_path):
+async def test_cmd_hchat_single_target_enqueues_runtime_owned_delivery(tmp_path):
     manager = _make_manager(tmp_path)
     runtime, messages = _make_runtime(manager)
     runtime.name = "zelda"
@@ -316,16 +317,12 @@ async def test_cmd_hchat_legacy_path_enqueues_bridge_hchat_source(tmp_path):
 
     assert messages == []
     assert len(enqueued) == 1
-    assert enqueued[0]["source"] == "bridge:hchat"
+    assert enqueued[0]["source"] == "bridge:hchat-draft"
     assert enqueued[0]["deliver_to_telegram"] is True
-    assert "[HCHAT TASK]" in enqueued[0]["prompt"]
-    assert "--to akane --from zelda" in enqueued[0]["prompt"]
-    assert str(Path("tools") / "hchat_send.py") in enqueued[0]["prompt"]
-    assert "show the exact message body passed to --text" in enqueued[0]["prompt"]
-    assert "'queued' means the destination accepted it" in enqueued[0]["prompt"]
-    assert "'sent' requires a confirmed" in enqueued[0]["prompt"]
-    assert "Frontend Connector transport receipt" in enqueued[0]["prompt"]
-    assert "failed state must be reported as failed" in enqueued[0]["prompt"]
+    assert "[HCHAT DRAFT TASK]" in enqueued[0]["prompt"]
+    assert "hchat_send.py" not in enqueued[0]["prompt"]
+    assert "Return ONLY the exact message body" in enqueued[0]["prompt"]
+    assert enqueued[0]["request_metadata"][HCHAT_TARGET_METADATA_KEY] == "akane"
 
 
 @pytest.mark.asyncio
@@ -435,7 +432,7 @@ async def test_callback_notepad_clear_uses_confirmation(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_cmd_hchat_legacy_path_preserves_remote_target_in_prompt(tmp_path):
+async def test_cmd_hchat_runtime_delivery_freezes_remote_target(tmp_path):
     manager = _make_manager(tmp_path)
     runtime, _messages = _make_runtime(manager)
     runtime.name = "zelda"
@@ -451,17 +448,17 @@ async def test_cmd_hchat_legacy_path_preserves_remote_target_in_prompt(tmp_path)
     await FlexibleAgentRuntime.cmd_hchat(runtime, update, context)
 
     assert len(enqueued) == 1
-    assert enqueued[0]["source"] == "bridge:hchat"
+    assert enqueued[0]["source"] == "bridge:hchat-draft"
     assert 'agent "rika@hashi2"' in enqueued[0]["prompt"]
-    assert "--to rika@hashi2 --from zelda" in enqueued[0]["prompt"]
-    assert "show the exact message body passed to --text" in enqueued[0]["prompt"]
-    assert "failed state must be reported as failed" in enqueued[0]["prompt"]
+    assert "Return ONLY the exact message body" in enqueued[0]["prompt"]
+    assert "hchat_send.py" not in enqueued[0]["prompt"]
+    assert enqueued[0]["request_metadata"][HCHAT_TARGET_METADATA_KEY] == "rika@hashi2"
 
 
 @pytest.mark.asyncio
-async def test_cmd_hchat_draft_delivery_flag_enqueues_draft_source(tmp_path):
+async def test_cmd_hchat_runtime_delivery_is_default_without_feature_flag(tmp_path):
     manager = _make_manager(tmp_path)
-    manager.config.extra = {"hchat_draft_delivery": True}
+    manager.config.extra = {}
     runtime, messages = _make_runtime(manager)
     runtime.name = "zelda"
     enqueued = []
@@ -479,9 +476,30 @@ async def test_cmd_hchat_draft_delivery_flag_enqueues_draft_source(tmp_path):
     assert len(enqueued) == 1
     assert enqueued[0]["source"] == "bridge:hchat-draft"
     assert enqueued[0]["deliver_to_telegram"] is True
-    assert '"target": "akane"' in enqueued[0]["prompt"]
+    assert '"target": "akane"' not in enqueued[0]["prompt"]
+    assert enqueued[0]["request_metadata"][HCHAT_TARGET_METADATA_KEY] == "akane"
     assert "tools/hchat_send.py" not in enqueued[0]["prompt"]
     assert "Do not run shell commands." in enqueued[0]["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_cmd_hchat_rejects_invalid_single_target_before_model_call(tmp_path):
+    manager = _make_manager(tmp_path)
+    runtime, messages = _make_runtime(manager)
+    runtime.name = "zelda"
+    enqueued = []
+
+    async def enqueue_api_text(prompt, **kwargs):
+        enqueued.append({"prompt": prompt, **kwargs})
+
+    runtime.enqueue_api_text = enqueue_api_text
+    update, context = _update(["agent;rm", "review", "the", "plan"])
+
+    await FlexibleAgentRuntime.cmd_hchat(runtime, update, context)
+
+    assert enqueued == []
+    assert len(messages) == 1
+    assert "invalid" in messages[0].lower()
 
 
 @pytest.mark.asyncio
@@ -512,25 +530,21 @@ async def test_cmd_hchat_group_broadcast_has_no_preflight_reply(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("manager_factory", "draft_enabled", "expected_source"),
+    "manager_factory",
     [
-        (_make_manager, False, "bridge:hchat"),
-        (_make_manager, True, "bridge:hchat-draft"),
-        (_make_her_v2_manager, False, "bridge:hchat"),
-        (_make_her_v2_manager, True, "bridge:hchat-draft"),
+        _make_manager,
+        _make_her_v2_manager,
     ],
 )
 @pytest.mark.asyncio
 async def test_cmd_hchat_preserves_invoking_session_for_every_backend(
     tmp_path,
     manager_factory,
-    draft_enabled,
-    expected_source,
 ):
     from orchestrator import runtime_session
 
-    manager = manager_factory(tmp_path / expected_source.replace(":", "-"))
-    manager.config.extra = {"hchat_draft_delivery": draft_enabled}
+    manager = manager_factory(tmp_path / manager_factory.__name__)
+    manager.config.extra = {}
     runtime, messages = _make_runtime(manager)
     default = runtime_session.initialize_runtime_sessions(runtime)
     owner = runtime_session.owner_id(runtime)
@@ -560,7 +574,7 @@ async def test_cmd_hchat_preserves_invoking_session_for_every_backend(
 
     assert messages == []
     assert len(enqueued) == 1
-    assert enqueued[0]["source"] == expected_source
+    assert enqueued[0]["source"] == "bridge:hchat-draft"
     assert enqueued[0]["chat_id"] == 123
     assert enqueued[0]["deliver_to_telegram"] is True
     assert enqueued[0]["request_metadata"] == {
@@ -568,6 +582,7 @@ async def test_cmd_hchat_preserves_invoking_session_for_every_backend(
         "owner_id": owner,
         "session_surface": "telegram",
         "session_channel_key": "123",
+        HCHAT_TARGET_METADATA_KEY: "akane",
     }
 
 
@@ -623,7 +638,8 @@ async def test_hchat_draft_success_prepares_delivery_report(tmp_path):
 
     runtime._hchat_draft_sender = fake_sender
     item = _queued_request_from("bridge:hchat-draft")
-    core_raw = '{"target": "akane", "message": "Please review the plan.", "user_report": "I sent Akane the plan."}'
+    item.request_metadata = {HCHAT_TARGET_METADATA_KEY: "akane"}
+    core_raw = "Please review the plan."
 
     result = await FlexibleAgentRuntime._prepare_hchat_draft_success(
         runtime,
@@ -643,6 +659,33 @@ async def test_hchat_draft_success_prepares_delivery_report(tmp_path):
     assert listener_payloads[0]["hchat_draft_parsed"]["target"] == "akane"
     assert listener_payloads[0]["hchat_payload_final"] == "Please review the plan."
     assert listener_payloads[0]["hchat_delivery_status"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_hchat_draft_cannot_redirect_frozen_target(tmp_path):
+    runtime, _sent, _voices = _make_background_runtime(tmp_path)
+    sender_calls = []
+
+    def fake_sender(to_agent, from_agent, text, **kwargs):
+        sender_calls.append((to_agent, from_agent, text, kwargs))
+        return True
+
+    runtime._hchat_draft_sender = fake_sender
+    item = _queued_request_from("bridge:hchat-draft")
+    item.request_metadata = {HCHAT_TARGET_METADATA_KEY: "akane"}
+
+    result = await FlexibleAgentRuntime._prepare_hchat_draft_success(
+        runtime,
+        item,
+        core_raw=(
+            '{"target": "wrong-agent", "message": "Please review the plan.", '
+            '"user_report": "pretend it was sent elsewhere"}'
+        ),
+        completion_path="foreground",
+    )
+
+    assert result.visible_text.startswith("🟡 Hchat queued for akane.")
+    assert sender_calls == [("akane", "zelda", "Please review the plan.", {})]
 
 
 @pytest.mark.asyncio

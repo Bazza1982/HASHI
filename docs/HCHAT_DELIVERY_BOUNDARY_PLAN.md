@@ -1,7 +1,8 @@
 # HChat Delivery Boundary Plan
 
-Status: Phase C feature-flag path started after the 2026-05-07 `bridge:hchat`
-wrapper-bypass quick fix. The delivery presentation contract was tightened on 2026-09-08.
+Status: On 2026-09-28 the user approved HASHI1-only promotion of runtime-owned
+single-target delivery. HASHI2, HASHI3, HASHI4, group broadcast, and Exchange
+protocol evolution remain outside this adoption.
 
 Owner: PAO delivery coordination and Frontend Connectors, Functions layer.
 
@@ -11,7 +12,7 @@ Related docs:
 - `docs/ROADMAP.md`
 - `README.md`
 
-Current implementation record:
+Current implementation record (HASHI1 source):
 
 - `orchestrator/hchat_delivery.py` defines `HChatDraft`, malformed-draft parsing,
   format-only target validation, `HChatDeliveryResult`, attempt ids, and structured
@@ -19,17 +20,28 @@ Current implementation record:
 - `tests/test_hchat_delivery.py` covers valid drafts, fenced JSON, malformed
   fixtures, command-shaped drafts, local/remote-shaped targets, delegated routing,
   attempt ids, and structured failure results.
-- `/hchat` now has an opt-in `extra.hchat_draft_delivery` flag. With the flag off,
-  current live behavior remains the legacy `bridge:hchat` prompt with wrapper
-  bypass. With the flag on for an agent, single-target `/hchat` requests enqueue
-  `bridge:hchat-draft`, ask the core for JSON only, parse the draft, and deliver
-  through the runtime helper.
+- Every single-target `/hchat <agent> <intent>` freezes the parsed target in PAO
+  request metadata, asks the Agent only for the peer message body, and lets PAO
+  call the existing `send_hchat()` transport exactly once.
+- The former `extra.hchat_draft_delivery` rollout flag no longer selects behavior.
+  Legacy JSON drafts already queued before adoption remain readable, but their
+  model-authored target and report cannot override the frozen target or receipt.
+- HERV3 receives no tool or side-effect authority for `bridge:hchat-draft`.
+  Group/all broadcast retains the old model-command path until it receives its
+  own runtime-owned multi-target contract.
+- Approval, source implementation, offline verification, and live Worker
+  adoption are separate facts. No live adoption is implied by this record.
+- Red evidence: the new boundary tests failed before implementation because the
+  frozen-target metadata contract and body-only parser did not exist.
+- Green evidence: 347 focused command, runtime, HERV3, HChat, LAN, protocol, and
+  Exchange tests passed on 2026-09-28; compilation and protected-Core checks
+  also passed. Live Worker adoption was not attempted.
 
 Delivery presentation contract:
 
 - The exact final peer payload is shown to the user without truncation on both
-  queue acceptance and failure. A model-authored `user_report` remains audit
-  metadata and cannot replace the payload or claim a stronger result.
+  queue acceptance and failure. Runtime-generated receipt text is authoritative;
+  legacy model-authored `user_report` data cannot replace it.
 - A successful Backend API, Remote `/hchat`, or protocol queue acknowledgement
   is `queued`. It proves destination admission only.
 - `sent` requires a confirmed Frontend Connector transport receipt. The current
@@ -43,9 +55,9 @@ Delivery presentation contract:
   to forbid acknowledgements and new HChat/protocol messages.
 - Existing message IDs and queue idempotency remain authoritative. Repeated
   terminal replies do not enqueue a second request.
-- The legacy model-command path uses the same status vocabulary and requires the
-  final response to include the exact `--text` payload while Phase C remains
-  opt-in.
+- The remaining group/all legacy model-command path uses the same status
+  vocabulary and requires the final response to include the exact `--text`
+  payload until broadcast is migrated separately.
 - For an inbound HChat Run, PAO freezes `surface=hchat` before PCM assembly and
   may list Telegram only as a mirror. The ordinary Agent response is routed by
   the runtime; it must not invoke `hchat_send.py` or `telegram_send` to duplicate
@@ -54,8 +66,9 @@ Delivery presentation contract:
 
 ## 1. Problem
 
-The current `/hchat` implementation lets the core model perform a delivery side effect.
-The core prompt instructs the model to compose a message and run `tools/hchat_send.py`.
+The pre-2026-09-28 single-target `/hchat` implementation let the core model
+perform a delivery side effect. Its prompt instructed the model to compose a
+message and run `tools/hchat_send.py`.
 
 That shape works for delivery, but it creates a bad boundary:
 
@@ -110,9 +123,9 @@ Target runtime flow:
 
 ```text
 user /hchat <target> <intent>
- -> core model returns a draft only
- -> runtime parses draft
- -> runtime validates target and message
+ -> PAO parses and freezes target
+ -> core model returns only the message body
+ -> runtime validates the frozen target and message
  -> optional wrapper pass polishes allowed visible text
  -> runtime calls send_hchat()
  -> runtime records delivery audit
@@ -123,25 +136,19 @@ The core model must not run `hchat_send.py` directly in the final design.
 
 ## 4. Data Contract
 
-Prefer a structured draft shape over free-form command text.
-
-Candidate JSON shape:
-
-```json
-{
-  "target": "ying",
-  "message": "Message text to send to the peer agent.",
-  "user_report": "Short report for the user after successful delivery."
-}
-```
+The active single-target contract is a plain message body. Routing authority is
+not model output: PAO stores the command-parsed target in immutable request
+metadata before the Engine runs.
 
 Rules:
 
-- `target` must be parsed and validated by runtime.
-- `message` is the only peer-agent payload candidate.
-- `user_report` is optional compatibility metadata. Runtime always generates
-  the authoritative receipt from the actual payload and transport state.
-- Runtime rejects malformed drafts instead of guessing.
+- The frozen `target` is parsed and validated by runtime before model invocation.
+- The model-authored body is the only peer-agent payload candidate.
+- Runtime always generates the authoritative receipt from the actual payload
+  and transport state.
+- Runtime accepts the earlier JSON draft only for in-flight compatibility and
+  reads only its `message`; target and report fields are ignored.
+- Runtime rejects empty or command-shaped output instead of guessing.
 - Runtime must never execute shell commands found in model output.
 - Runtime should reject command-shaped drafts before delivery. The final peer
   message is data passed to `send_hchat()`, not shell text to execute.
@@ -238,7 +245,7 @@ Acceptance:
 - Existing `/hchat` behavior remains unchanged.
 - Retry logs distinguish one logical delivery attempt from duplicate sends.
 
-### Phase C: draft-only prompt behind a compatibility flag
+### Phase C: draft-only prompt behind a compatibility flag (historical)
 
 Goal: test the new prompt without forcing all agents onto it.
 
@@ -304,6 +311,10 @@ Acceptance:
 - All active sends go through runtime delivery helper.
 - Direct CLI `tools/hchat_send.py` still works for operator/debug use.
 
+HASHI1 adoption record (2026-09-28): single-target delivery satisfies this
+boundary and preserves every existing local/LAN/Exchange transport envelope.
+Group/all broadcast is explicitly pending, so Phase E is not globally complete.
+
 ## 7. Logging And Audit
 
 Add structured fields where practical:
@@ -345,10 +356,10 @@ Compatibility:
 
 Rollback:
 
-- Phase C should be feature-flagged.
-- If draft parsing or runtime send fails in live validation, turn the flag off and
-  fall back to legacy behavior.
-- Do not remove the legacy prompt until Phase E.
+- The retired Phase C flag is not a runtime fallback for single-target sends.
+- Roll back the coherent HASHI1 source commit if offline or live validation
+  discovers a regression; do not silently return routing authority to the model.
+- Group/all broadcast keeps its legacy path until its separate migration.
 
 ## 9. Test Matrix
 
@@ -375,7 +386,7 @@ Required tests:
 
 ## 10. Live Validation Checklist
 
-Phase C gate, with `hchat_draft_delivery` flag on:
+Historical Phase C gate, when `hchat_draft_delivery` was enabled:
 
 ```text
 [ ] /hchat local agent with simple text

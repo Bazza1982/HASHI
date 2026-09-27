@@ -116,6 +116,14 @@ never enter messages or arguments. `/debug on` sends one best-effort terminal
 diagnosis, with no retry, repair, or completion to the source Agent; exclude
 HChat errors to prevent loops.
 
+HASHI1 source promoted single-target `/hchat` to runtime-owned delivery on
+2026-09-28: PAO freezes the dialled target, the Agent composes only the message
+body, HERV3 receives no tools for that composition Turn, and PAO emits the
+receipt. Existing local, LAN, Remote, and Exchange wire envelopes are unchanged,
+so older instances can still send to HASHI1 and receive from it. Group/all
+broadcast remains on the legacy path. This is offline source qualification only;
+live Worker adoption requires a separately authorized `/reboot`.
+
 Remote trust retains accepted peers until definitive revalidation. Health
 clears recovered Remote warnings, not other problems. Remote has a separate
 lifecycle and does not restart during `/reboot`. Reboot admission fences new

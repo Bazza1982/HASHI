@@ -1235,11 +1235,15 @@ async def test_scheduler_preserves_selected_model_effort_and_instruction(
     await adapter.shutdown()
 
 
-@pytest.mark.parametrize("source", ["bridge:hchat", "bridge:hchat-draft"])
+@pytest.mark.parametrize(
+    ("source", "expected_tool_authority"),
+    [("bridge:hchat", True), ("bridge:hchat-draft", False)],
+)
 @pytest.mark.asyncio
 async def test_hchat_policy_uses_one_direct_call_without_early_delivery(
     tmp_path,
     source,
+    expected_tool_authority,
 ):
     provider = _EffortPolicyProvider()
     request_id = f"request-{source.replace(':', '-')}"
@@ -1271,8 +1275,8 @@ async def test_hchat_policy_uses_one_direct_call_without_early_delivery(
 
     assert response.is_success is True
     assert [request.stage for _profile, request in provider.requests] == [Stage.DIRECT]
-    assert provider.requests[0][1].allow_tools is True
-    assert provider.requests[0][1].allow_side_effects is True
+    assert provider.requests[0][1].allow_tools is expected_tool_authority
+    assert provider.requests[0][1].allow_side_effects is expected_tool_authority
     assert response.stream_metadata["her_v2"]["effort"] == {
         "configured": "max",
         "effective": "max",

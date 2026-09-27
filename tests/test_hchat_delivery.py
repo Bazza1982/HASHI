@@ -11,6 +11,7 @@ from orchestrator.hchat_delivery import (
     draft_parse_error_text,
     hchat_delivery_log_fields,
     hchat_draft_parsed_log_fields,
+    parse_hchat_message_body,
     parse_hchat_draft,
     validate_hchat_target_format,
 )
@@ -47,6 +48,24 @@ def test_parse_hchat_draft_accepts_fenced_json():
     assert draft.target == "rika@HASHI2"
     assert draft.message == "Please check remote routing."
     assert draft.user_report is None
+
+
+def test_parse_hchat_message_body_accepts_plain_text():
+    assert parse_hchat_message_body("Please review the plan.") == "Please review the plan."
+
+
+def test_parse_hchat_message_body_accepts_legacy_json_but_returns_only_message():
+    assert parse_hchat_message_body(
+        '{"target": "wrong-agent", "message": "Use the frozen target.", '
+        '"user_report": "ignore me"}'
+    ) == "Use the frozen target."
+
+
+def test_parse_hchat_message_body_rejects_delivery_commands():
+    with pytest.raises(HChatDraftParseError):
+        parse_hchat_message_body(
+            'python3 tools/hchat_send.py --to akane --text "bypass runtime"'
+        )
 
 
 @pytest.mark.parametrize(

@@ -137,6 +137,30 @@ class _ExecutionStageCompactionProvider:
         return await self._base.invoke(profile, request)
 
 
+class _NoToolAuthorityProvider:
+    """Clamp a composition-only Turn before it reaches any Model Provider."""
+
+    def __init__(self, base: StageProvider) -> None:
+        self._base = base
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._base, name)
+
+    def tool_catalogue(self, *, allow_side_effects: bool, delegated_tools=None):
+        del allow_side_effects, delegated_tools
+        return ()
+
+    async def invoke(
+        self,
+        profile: ProviderProfile,
+        request: StageRequest,
+    ) -> StageResponse:
+        return await self._base.invoke(
+            profile,
+            replace(request, allow_tools=False, allow_side_effects=False),
+        )
+
+
 class HERv2Adapter(BaseBackend):
     """HASHI facade for the provider-neutral, pure-Python HERV3 runtime."""
 
@@ -2003,6 +2027,8 @@ class HERv2Adapter(BaseBackend):
             provider,
             lambda: self._schedule_execution_stage_compaction(request_id),
         )
+        if str(request_meta.get("source") or "").strip().casefold() == "bridge:hchat-draft":
+            execution_provider = _NoToolAuthorityProvider(execution_provider)
         habit_advisor = (
             turn_learning
             if not habit_request_eligible
