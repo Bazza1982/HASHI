@@ -464,6 +464,23 @@ Telegram presentation or delivery. Source and focused offline validation are
 recorded separately from running-Function adoption; this change did not restart
 or replace a running HASHI generation.
 
+### 8.4 Voice profile preview publication (2026-09-28)
+
+Voice profile previews are versioned, immutable Function assets. A deployment
+must package and validate the complete manifest; an instance-local
+`media/_voice_previews` asset may override its matching product asset without
+becoming part of the deployment template.
+
+The preview action publishes through FC to the Session and context generation
+that opened the command UI. Backend API/Workbench receives a standard
+`audio_attachment` presentation. Telegram keeps its registered connector-local
+voice-message rendering and is the only branch that calls the Telegram
+transport. No frontend packages a private copy of the preview catalogue.
+
+The user approved the Function, HASHI1 deployment-template, and local-instance
+changes on 2026-09-28. Offline validation and running-Function adoption remain
+separate; approval did not authorize a reboot or replacement.
+
 ## 9. Engineering-layer placement
 
 Connector business behaviour belongs in the Functions layer. Stable process

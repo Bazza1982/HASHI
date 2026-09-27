@@ -3784,30 +3784,38 @@ class FlexibleAgentRuntime:
 
     async def _send_voice_profile_previews(
         self,
-        query: Any,
+        update: Any,
         profile_id: str,
         assets: tuple[tuple[str, Path], ...],
     ) -> int:
         """Send prerecorded UI previews without creating a conversation Turn."""
 
+        query = getattr(update, "callback_query", None)
         message = getattr(query, "message", None)
         chat_id = getattr(message, "chat_id", None)
         if chat_id is None:
             chat_id = getattr(getattr(message, "chat", None), "id", None)
-        if chat_id is None or not assets:
+        surface = str(
+            getattr(update, "_hashi_session_surface", None) or "telegram"
+        ).strip().casefold()
+        if not assets or (surface == "telegram" and chat_id is None):
             return 0
-        from orchestrator.frontend_connector_registry import (
-            endpoint_id_for,
-            get_connector_customization,
-        )
+        if surface == "telegram":
+            from orchestrator.frontend_connector_registry import (
+                endpoint_id_for,
+                get_connector_customization,
+            )
 
-        customization = get_connector_customization(
-            "telegram",
-            kind="presentation_override",
-            key="voice_profile_preview",
-        )
-        if not customization or customization.get("route") != "connector_local":
-            raise RuntimeError("Telegram voice preview is not registered in FC")
+            customization = get_connector_customization(
+                "telegram",
+                kind="presentation_override",
+                key="voice_profile_preview",
+            )
+            if (
+                not customization
+                or customization.get("route") != "connector_local"
+            ):
+                raise RuntimeError("Telegram voice preview is not registered in FC")
         profile_label = ui_language.tr(f"voice.profile.{profile_id}")
         sent = 0
         for renderer, path in assets:
@@ -3820,22 +3828,35 @@ class FlexibleAgentRuntime:
                 publication_id = (
                     "voice-profile-preview:"
                     + hashlib.sha256(
-                        f"{profile_id}\0{renderer}\0".encode("utf-8")
-                        + payload
+                        (
+                            f"{surface}\0{profile_id}\0{renderer}\0"
+                        ).encode("utf-8")
+                        + payload,
                     ).hexdigest()
                 )
-                publication = runtime_session.publish_frontend_media_notification(
-                    self,
-                    filename=path.name,
-                    media_type="audio/ogg",
-                    payload=payload,
-                    sha256=hashlib.sha256(payload).hexdigest(),
-                    caption=caption,
-                    publication_id=publication_id,
-                    surface="telegram",
-                    channel_key=str(chat_id),
-                    semantic_role="voice_message",
+                publication = (
+                    runtime_session.publish_frontend_media_notification_for_update(
+                        self,
+                        update,
+                        filename=path.name,
+                        media_type="audio/ogg",
+                        payload=payload,
+                        sha256=hashlib.sha256(payload).hexdigest(),
+                        caption=caption,
+                        publication_id=publication_id,
+                        semantic_role=(
+                            "voice_message"
+                            if surface == "telegram"
+                            else "audio_attachment"
+                        ),
+                        presentation_role=(
+                            "" if surface == "telegram" else "audio"
+                        ),
+                    )
                 )
+                if surface != "telegram":
+                    sent += 1
+                    continue
                 endpoint_id = endpoint_id_for(
                     "telegram",
                     ingress_transport="telegram",
@@ -4259,7 +4280,7 @@ class FlexibleAgentRuntime:
         await query.answer(callback_notice)
         if preview_profile and preview_assets:
             await self._send_voice_profile_previews(
-                query,
+                update,
                 preview_profile,
                 preview_assets,
             )

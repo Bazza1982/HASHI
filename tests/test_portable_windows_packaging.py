@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import re
@@ -606,6 +607,24 @@ def test_builder_copies_the_real_runtime_contract_inputs(tmp_path):
         assert (destination / relative).read_bytes() == (ROOT / relative).read_bytes()
     assert core_source_digest(destination) == core_source_digest(ROOT)
     builder.validate_portable_runtime_inputs(destination)
+
+
+def test_builder_copies_the_versioned_voice_preview_bundle(tmp_path):
+    builder = _load_builder()
+    destination = tmp_path / "portable-app"
+
+    builder.copy_hashi_source(destination)
+
+    preview_root = destination / "orchestrator" / "voice_preview_assets" / "v1"
+    manifest = json.loads((preview_root / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["schema_version"] == 1
+    assert manifest["version"] == "v1"
+    assert len(manifest["entries"]) == 16
+    for entry in manifest["entries"]:
+        payload = (preview_root / entry["path"]).read_bytes()
+        assert payload.startswith(b"OggS")
+        assert len(payload) == entry["size_bytes"]
+        assert hashlib.sha256(payload).hexdigest() == entry["sha256"]
 
 
 def test_builder_copies_and_validates_the_runtime_entry_profile(tmp_path):

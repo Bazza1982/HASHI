@@ -39,6 +39,9 @@ from orchestrator.runtime_contract import (  # noqa: E402
     locked_standard_dependencies,
 )
 from orchestrator.build_provenance import capture_build_provenance  # noqa: E402
+from orchestrator.voice_preview_bundle import (  # noqa: E402
+    validate_voice_preview_bundle,
+)
 
 _RUNTIME_POLICY = load_runtime_policy(HASHI_ROOT)
 PYTHON_VERSION = _RUNTIME_POLICY.python_text
@@ -1048,6 +1051,9 @@ def validate_packaged_provider_models(config: dict) -> None:
 def validate_image(image_root: Path) -> None:
     app_hashi = image_root / "app" / "hashi"
     validate_portable_runtime_inputs(app_hashi)
+    validate_voice_preview_bundle(
+        root=app_hashi / "orchestrator" / "voice_preview_assets"
+    )
     portable_identity = json.loads(
         (image_root / "data" / "portable-instance.json").read_text(encoding="utf-8")
     )

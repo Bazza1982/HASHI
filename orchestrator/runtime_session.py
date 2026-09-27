@@ -437,13 +437,15 @@ def publish_frontend_media_notification(
     semantic_role: str = "",
     presentation_role: str = "",
     explicit_owner_id: str | None = None,
+    explicit_session_id: str | None = None,
+    expected_context_generation: int | None = None,
 ) -> dict[str, Any]:
     """Commit a destination-scoped media notification before transport I/O."""
 
     store = ensure_store(runtime)
     resolved_owner = owner_id(runtime, explicit_owner_id)
     normalized_surface = str(surface or "").strip().casefold()
-    if normalized_surface in _SHARED_PRIMARY_SURFACES:
+    if normalized_surface in _SHARED_PRIMARY_SURFACES and explicit_session_id is None:
         session = store.resolve_primary_session(
             owner_id=resolved_owner,
             agent_id=runtime.name,
@@ -455,6 +457,14 @@ def publish_frontend_media_notification(
             agent_id=runtime.name,
             surface=normalized_surface,
             channel_key=str(channel_key),
+            explicit_session_id=explicit_session_id,
+        )
+    if (
+        expected_context_generation is not None
+        and int(session["context_generation"]) != int(expected_context_generation)
+    ):
+        raise SessionConflict(
+            "session context changed before frontend media publication"
         )
     stable_id = str(publication_id or "").strip()
     if not stable_id:
@@ -557,6 +567,45 @@ def publish_frontend_media_notification(
         "channel_key": str(channel_key),
         "attachment_id": str(attachment["attachment_id"]),
     }
+
+
+def publish_frontend_media_notification_for_update(
+    runtime: Any,
+    update: Any,
+    *,
+    filename: str,
+    media_type: str,
+    payload: bytes,
+    sha256: str,
+    caption: str,
+    publication_id: str,
+    semantic_role: str = "",
+    presentation_role: str = "",
+) -> dict[str, Any]:
+    """Publish media to the exact Session and generation that opened the UI."""
+
+    surface, channel_key, resolved_owner, explicit_session_id = (
+        _update_session_route(runtime, update)
+    )
+    expected_generation = getattr(
+        update, "_hashi_session_context_generation", None
+    )
+    return publish_frontend_media_notification(
+        runtime,
+        filename=filename,
+        media_type=media_type,
+        payload=payload,
+        sha256=sha256,
+        caption=caption,
+        publication_id=publication_id,
+        surface=surface,
+        channel_key=channel_key,
+        semantic_role=semantic_role,
+        presentation_role=presentation_role,
+        explicit_owner_id=resolved_owner,
+        explicit_session_id=explicit_session_id,
+        expected_context_generation=expected_generation,
+    )
 
 
 def publish_frontend_message_for_update(
@@ -1963,6 +2012,7 @@ __all__ = [
     "promote_sessions",
     "promotion_is_due",
     "publish_frontend_media_notification",
+    "publish_frontend_media_notification_for_update",
     "publish_frontend_message",
     "recent_exchanges",
     "record_assistant_delivery",

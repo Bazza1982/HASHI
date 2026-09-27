@@ -125,6 +125,9 @@ class _FakeUpdate:
         self._hashi_session_channel_key = metadata.get("session_channel_key")
         self._hashi_session_owner_id = metadata.get("owner_id")
         self._hashi_session_id = metadata.get("session_id")
+        self._hashi_session_context_generation = metadata.get(
+            "context_generation"
+        )
         self._hashi_ui_locale = metadata.get("ui_locale")
         # Local command projections have no Telegram update number.  Preserve
         # the typed frontend invocation identity so each command response gets

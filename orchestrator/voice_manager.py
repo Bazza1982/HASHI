@@ -12,6 +12,12 @@ from typing import Callable
 from orchestrator import ui_language
 from orchestrator.config_json import ConfigConflictError, read_config_json, write_config_json
 from orchestrator.tts_providers import build_provider, list_provider_names
+from orchestrator.voice_preview_bundle import (
+    DEFAULT_VOICE_PREVIEW_ASSET_ROOT,
+    VOICE_PREVIEW_VERSION as PRODUCT_VOICE_PREVIEW_VERSION,
+    VoicePreviewBundleError,
+    validate_voice_preview_bundle,
+)
 from orchestrator.voice_synthesis_runtime import isolated_tts_configured
 from orchestrator.voice_synthesizer import VoiceAsset
 from orchestrator.command_ui import setting_card
@@ -32,7 +38,7 @@ class VoiceManager:
         or Path(__file__).resolve().parent.parent
     ).resolve()
     PIPER_MODEL_DIR = PROJECT_ROOT / "voice_models" / "piper"
-    VOICE_PREVIEW_VERSION = "v1"
+    VOICE_PREVIEW_VERSION = PRODUCT_VOICE_PREVIEW_VERSION
     VOICE_PREVIEW_RENDERERS = ("native", "tts")
     DEFAULT_STATE = {
         "enabled": False,
@@ -242,12 +248,16 @@ class VoiceManager:
         ffmpeg_cmd: str = "ffmpeg",
         secrets: dict | None = None,
         native_capabilities: list[dict] | None = None,
+        preview_asset_root: Path | None = None,
     ):
         self.workspace_dir = workspace_dir
         self.media_dir = media_dir
         self.state_path = workspace_dir / "voice_state.json"
         self.output_dir = media_dir / "voice"
         self.ffmpeg_cmd = ffmpeg_cmd
+        self.preview_asset_root = Path(
+            preview_asset_root or DEFAULT_VOICE_PREVIEW_ASSET_ROOT
+        ).resolve()
         self._secrets = secrets or {}
         self._native_capabilities = tuple(
             dict(item) for item in (native_capabilities or ()) if isinstance(item, dict)
@@ -722,12 +732,18 @@ class VoiceManager:
         """Resolve readable OGG previews without generating or mutating them."""
 
         selected = renderers or self.VOICE_PREVIEW_RENDERERS
+        selected_locale = ui_language.normalize_locale(
+            locale or ui_language.current_locale()
+        )
+        profile = str(profile_id or "").strip().casefold()
         assets: list[tuple[str, Path]] = []
+        bundled: dict[tuple[str, str, str], Path] | None = None
         for renderer in selected:
+            output_renderer = str(renderer or "").strip().casefold()
             path = self.voice_preview_path(
-                profile_id,
-                renderer,
-                locale=locale,
+                profile,
+                output_renderer,
+                locale=selected_locale,
             )
             try:
                 valid = path.is_file() and path.stat().st_size > 4
@@ -737,7 +753,20 @@ class VoiceManager:
             except OSError:
                 valid = False
             if valid:
-                assets.append((str(renderer), path))
+                assets.append((output_renderer, path))
+                continue
+            if bundled is None:
+                try:
+                    bundled = validate_voice_preview_bundle(
+                        root=self.preview_asset_root,
+                        version=self.VOICE_PREVIEW_VERSION,
+                        require_complete=False,
+                    )
+                except VoicePreviewBundleError:
+                    bundled = {}
+            fallback = bundled.get((selected_locale, profile, output_renderer))
+            if fallback is not None:
+                assets.append((output_renderer, fallback))
         return tuple(assets)
 
     def _normalise_state(self, data: dict) -> dict:
