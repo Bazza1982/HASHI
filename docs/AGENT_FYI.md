@@ -257,6 +257,8 @@ ship as a validated, versioned Function bundle, with instance-local media taking
 precedence. Workbench receives a Session-bound `audio_attachment`; Telegram
 alone uses its registered voice-message renderer. Never route a non-Telegram
 preview through Telegram or copy the preview catalogue into a frontend.
+The report voice-summary sidecar preserves the caller's module path and adds
+the HASHI root before handing its OGG to the standard Telegram media CLI.
 
 Commands follow the [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md); `/help` derives
 from metadata. Workbench and Telegram share a Session while UI rows stay out of

@@ -60,3 +60,6 @@ message by default. By default it writes to:
   this flag so Barry receives both the text report and the OGG voice summary.
 - Telegram delivery uses the standard FC media Event/outbox and keeps the OGG
   as a `voice_message` rendition; it does not call the platform API directly.
+- The sidecar passes the HASHI project root to its Telegram child process while
+  preserving any existing `PYTHONPATH`, so scheduled launches resolve the same
+  Function modules as an interactive launch from the repository root.
