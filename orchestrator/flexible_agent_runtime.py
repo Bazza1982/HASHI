@@ -18,7 +18,7 @@ import json
 import aiohttp
 import yaml
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, constants
-from telegram.error import RetryAfter, TimedOut as TelegramTimedOut
+from telegram.error import RetryAfter
 from telegram.ext import ApplicationBuilder
 
 from orchestrator.config import DEFAULT_AGENT_MODE, FlexibleAgentConfig, GlobalConfig
@@ -100,7 +100,6 @@ from orchestrator.enterprise.channel_gate import EnterpriseChannelGate
 from orchestrator.enterprise.policy import evaluate_governance_policy
 from orchestrator.runtime_common import (
     QueuedRequest,
-    _md_to_html,
     _print_final_response,
     _print_thinking,
     _print_user_message,
