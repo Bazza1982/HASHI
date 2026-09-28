@@ -183,6 +183,13 @@ acceptance covered real switching, reasoning, Session identity, usage, and
 metering; see [HERV3 upgrade](HERV3_UPGRADE.md) for evidence and the
 separate HASHI1 promotion record.
 
+`/meter` derives HERV3 model roles from each physical call's recorded phase.
+Show `direct` work as the main task and `persona` calls as progress wording,
+with per-model call counts and cost subtotals; keep the overall total inclusive.
+An auxiliary presentation model must never appear to be a second task model.
+Receipts without phase evidence retain the compact model list instead of
+guessing a role.
+
 HASHI1's 2026-09-27 instance configuration opts all 18 Agents into five exact
 OpenRouter conversation models (Venice, Cydonia, both Euryales, MythoMax).
 Their empty per-model effort declarations mean HERV3 omits reasoning on the

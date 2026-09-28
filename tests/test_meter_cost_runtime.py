@@ -232,7 +232,6 @@ async def test_foreground_tail_commits_canonical_event_before_telegram_projectio
 
 @pytest.mark.asyncio
 async def test_foreground_tail_projects_the_same_report_to_the_shared_session(monkeypatch):
-    from orchestrator import runtime_session
     from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 
     runtime = FakeMeterRuntime(meter_at_start=True, receipt=_receipt())
@@ -277,7 +276,7 @@ async def test_foreground_tail_renders_frozen_total_and_stage_timings(monkeypatc
 
     text = projected[0]["text"]
     assert "⏱️ 本回合耗时：1分15秒" in text
-    assert "🧭 主要阶段：策略 5.4秒 · 执行 1分8秒" in text
+    assert "🧭 运行活动：建议上下文 5.4秒 · 主模型 1分8秒" in text
 
 
 @pytest.mark.asyncio
