@@ -75,7 +75,7 @@ from orchestrator.pathing import instance_runtime_dir
 from orchestrator.process_execution import process_is_alive
 from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_PORT
 
-from ..attachments import AttachmentStore
+from ..attachments import AttachmentStore, STREAM_ATTACHMENT_CHUNK_BYTES
 from ..audit.logger import get_audit_logger
 from ..local_http import local_http_hosts, local_http_url
 from ..protocol_ack import ack_state_path, load_ack_state, record_protocol_ack
@@ -101,6 +101,7 @@ from ..security.auth import (
 )
 from ..security.pairing import PairingManager, PairingState
 from ..security.shared_token import (
+    HEADER_FROM_INSTANCE,
     HEADER_NONCE,
     build_auth_headers,
     build_response_auth,
@@ -444,6 +445,22 @@ class AttachmentUploadPayload(BaseModel):
     sha256: Optional[str] = None
 
 
+class AttachmentStreamBeginPayload(BaseModel):
+    message_id: str
+    from_instance: str
+    attachment_id: str
+    filename: str
+    mime_type: Optional[str] = None
+    size_bytes: int
+    sha256: str
+
+
+class AttachmentStreamFinishPayload(BaseModel):
+    message_id: str
+    from_instance: str
+    pending_upload_id: str
+
+
 class AttachmentCommitItem(BaseModel):
     attachment_id: str
     pending_upload_id: str
@@ -485,6 +502,15 @@ class ProtocolMessageWithAttachmentsPayload(BaseModel):
 # ─────────────────────────────────────────────────────────────
 
 MAX_FILE_PUSH_BYTES = 256 * 1024 * 1024
+
+
+async def _bounded_request_body(request: Request, *, limit: int) -> bytes:
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > int(limit):
+            raise ValueError(f"request body exceeds max of {int(limit)} bytes")
+    return bytes(body)
 
 
 def _shared_token_response(
@@ -3033,6 +3059,148 @@ def create_app(
         )
         return {"ok": True, "attachment": staged}
 
+    @app.post("/attachments/v2/begin")
+    async def attachment_stream_begin(
+        request: Request, payload: AttachmentStreamBeginPayload
+    ):
+        if _attachment_store is None:
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "attachment store unavailable"},
+            )
+        body_bytes = await request.body()
+        ok, reason, _authenticated_instance = verify_protocol_request(
+            request,
+            body_bytes=body_bytes,
+            from_instance=payload.from_instance,
+        )
+        if not ok:
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "ok": False,
+                    "error": "Attachment stream authentication failed",
+                    "code": reason,
+                },
+            )
+        try:
+            staged = await asyncio.to_thread(
+                _attachment_store.begin_stream_upload,
+                message_id=payload.message_id,
+                from_instance=payload.from_instance,
+                attachment_id=payload.attachment_id,
+                filename=payload.filename,
+                mime_type=payload.mime_type,
+                size_bytes=payload.size_bytes,
+                sha256=payload.sha256,
+            )
+        except (OSError, ValueError) as exc:
+            return JSONResponse(
+                status_code=400, content={"ok": False, "error": str(exc)}
+            )
+        logger.info(
+            "Attachment stream opened: message_id=%s attachment_id=%s bytes=%d",
+            payload.message_id,
+            payload.attachment_id,
+            payload.size_bytes,
+        )
+        return {"ok": True, "attachment": staged}
+
+    @app.put("/attachments/v2/chunk/{pending_upload_id}")
+    async def attachment_stream_chunk(
+        pending_upload_id: str,
+        request: Request,
+    ):
+        if _attachment_store is None:
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "attachment store unavailable"},
+            )
+        try:
+            body_bytes = await _bounded_request_body(
+                request, limit=STREAM_ATTACHMENT_CHUNK_BYTES
+            )
+        except ValueError as exc:
+            return JSONResponse(
+                status_code=413, content={"ok": False, "error": str(exc)}
+            )
+        from_instance = str(request.headers.get(HEADER_FROM_INSTANCE) or "").strip()
+        ok, reason, _authenticated_instance = verify_protocol_request(
+            request,
+            body_bytes=body_bytes,
+            from_instance=from_instance,
+        )
+        if not ok:
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "ok": False,
+                    "error": "Attachment chunk authentication failed",
+                    "code": reason,
+                },
+            )
+        try:
+            offset = int(str(request.query_params.get("offset") or ""))
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "chunk offset is required"},
+            )
+        try:
+            staged = await asyncio.to_thread(
+                _attachment_store.append_stream_chunk,
+                pending_upload_id=pending_upload_id,
+                from_instance=from_instance,
+                offset=offset,
+                payload=body_bytes,
+            )
+        except (OSError, ValueError) as exc:
+            return JSONResponse(
+                status_code=400, content={"ok": False, "error": str(exc)}
+            )
+        return {
+            "ok": True,
+            "pending_upload_id": pending_upload_id,
+            "received_bytes": staged.get("received_bytes"),
+        }
+
+    @app.post("/attachments/v2/finish")
+    async def attachment_stream_finish(
+        request: Request, payload: AttachmentStreamFinishPayload
+    ):
+        if _attachment_store is None:
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "attachment store unavailable"},
+            )
+        body_bytes = await request.body()
+        ok, reason, _authenticated_instance = verify_protocol_request(
+            request,
+            body_bytes=body_bytes,
+            from_instance=payload.from_instance,
+        )
+        if not ok:
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "ok": False,
+                    "error": "Attachment finish authentication failed",
+                    "code": reason,
+                },
+            )
+        try:
+            staged = await asyncio.to_thread(
+                _attachment_store.finish_stream_upload,
+                message_id=payload.message_id,
+                from_instance=payload.from_instance,
+                pending_upload_id=payload.pending_upload_id,
+            )
+        except (OSError, ValueError) as exc:
+            return JSONResponse(
+                status_code=400, content={"ok": False, "error": str(exc)}
+            )
+        return {"ok": True, "attachment": staged}
+
     @app.post("/attachments/upload/cancel")
     async def attachment_upload_cancel(request: Request, payload: AttachmentCancelPayload):
         if _attachment_store is None:
@@ -3089,13 +3257,19 @@ def create_app(
                 content={"ok": False, "error": "Protocol authentication failed", "code": reason},
             )
         try:
-            normalized_attachments = _attachment_store.commit_message(
+            normalized_attachments = await asyncio.to_thread(
+                _attachment_store.commit_message,
                 message_id=payload.message_id,
                 from_instance=payload.from_instance,
                 attachments=[item.model_dump() for item in payload.attachments],
             )
         except ValueError as exc:
             return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
+
+        async def rollback_committed_attachments() -> None:
+            await asyncio.to_thread(
+                _attachment_store.rollback_message, payload.message_id
+            )
 
         local_instance = str(_instance_info.get("instance_id") or "").strip().upper()
         if str(payload.to_instance or "").strip().upper() != local_instance:
@@ -3104,17 +3278,25 @@ def create_app(
                 "/protocol/message-with-attachments",
             )
             if not candidate_urls:
+                await rollback_committed_attachments()
                 return JSONResponse(
                     status_code=404,
                     content={"ok": False, "error": f"Target instance '{payload.to_instance}' not in peer registry"},
                 )
-            forward_payload = payload.model_dump()
-            forward_payload["body"] = _merge_attachment_text(
-                payload.body,
-                normalized_attachments,
-                message_id=payload.message_id,
-            )
-            forward_payload["attachments"] = normalized_attachments
+            try:
+                forward_payload = payload.model_dump()
+                forward_payload["body"] = _merge_attachment_text(
+                    payload.body,
+                    normalized_attachments,
+                    message_id=payload.message_id,
+                )
+                forward_payload["attachments"] = normalized_attachments
+            except Exception as exc:
+                await rollback_committed_attachments()
+                return JSONResponse(
+                    status_code=400,
+                    content={"ok": False, "error": f"Invalid attachment message: {exc}"},
+                )
             last_exc = None
             for url in candidate_urls:
                 try:
@@ -3128,47 +3310,70 @@ def create_app(
                 except Exception as exc:
                     last_exc = exc
                     logger.warning("Attachment forward via %s failed: %s", url, exc)
+            await rollback_committed_attachments()
             return JSONResponse(
                 status_code=502,
                 content={"ok": False, "error": f"Failed to forward attachment message: {last_exc}"},
             )
 
-        local_payload = ProtocolMessagePayload(
-            message_id=payload.message_id,
-            conversation_id=payload.conversation_id,
-            in_reply_to=payload.in_reply_to,
-            from_instance=payload.from_instance,
-            from_agent=payload.from_agent,
-            to_instance=payload.to_instance,
-            to_agent=payload.to_agent,
-            body=_merge_attachment_text(
-                payload.body,
-                normalized_attachments,
+        try:
+            local_payload = ProtocolMessagePayload(
                 message_id=payload.message_id,
-            ),
-            hop_count=payload.hop_count,
-            ttl=payload.ttl,
-            route_trace=payload.route_trace,
-            message_type=payload.message_type,
-            created_at=payload.created_at,
-            private_authorization_proofs=payload.private_authorization_proofs,
-            authorization_resources=payload.authorization_resources,
-        )
-        local_data = local_payload.model_dump()
-        # Preserve the sender-authored body for the private proof binding.  The
-        # local prompt adds an attachment summary after transport validation;
-        # that presentation-only expansion must not invalidate the proof.
-        local_data["_private_authorization_content_text"] = str(
-            (payload.body or {}).get("text") or ""
-        )
-        local_data["_network_authenticated_instance"] = str(
-            _auth_identity or ""
-        ).strip().upper()
-        local_data["_network_authentication"] = "shared_network_hmac"
-        status, result = await _protocol_manager.handle_protocol_message(local_data)
+                conversation_id=payload.conversation_id,
+                in_reply_to=payload.in_reply_to,
+                from_instance=payload.from_instance,
+                from_agent=payload.from_agent,
+                to_instance=payload.to_instance,
+                to_agent=payload.to_agent,
+                body=_merge_attachment_text(
+                    payload.body,
+                    normalized_attachments,
+                    message_id=payload.message_id,
+                ),
+                hop_count=payload.hop_count,
+                ttl=payload.ttl,
+                route_trace=payload.route_trace,
+                message_type=payload.message_type,
+                created_at=payload.created_at,
+                private_authorization_proofs=payload.private_authorization_proofs,
+                authorization_resources=payload.authorization_resources,
+            )
+            local_data = local_payload.model_dump()
+            # Preserve the sender-authored body for the private proof binding.  The
+            # local prompt adds an attachment summary after transport validation;
+            # that presentation-only expansion must not invalidate the proof.
+            local_data["_private_authorization_content_text"] = str(
+                (payload.body or {}).get("text") or ""
+            )
+            local_data["_network_authenticated_instance"] = str(
+                _auth_identity or ""
+            ).strip().upper()
+            local_data["_network_authentication"] = "shared_network_hmac"
+            local_data["_local_attachment_manifest_verified"] = True
+        except Exception as exc:
+            await rollback_committed_attachments()
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": f"Invalid attachment message: {exc}"},
+            )
+        try:
+            status, result = await _protocol_manager.handle_protocol_message(local_data)
+        except Exception as exc:
+            await rollback_committed_attachments()
+            logger.exception(
+                "Attachment message delivery failed after commit: message_id=%s",
+                payload.message_id,
+            )
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": f"Local message delivery failed: {exc}"},
+            )
+        if status >= 400 or not isinstance(result, dict) or not result.get("ok"):
+            await rollback_committed_attachments()
         if isinstance(result, dict):
             result = dict(result)
-            result["attachments"] = normalized_attachments
+            if status < 400 and result.get("ok"):
+                result["attachments"] = normalized_attachments
         return JSONResponse(status_code=status, content=result)
 
     @app.get("/attachments/message/{message_id}")

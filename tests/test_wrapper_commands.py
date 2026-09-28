@@ -662,6 +662,49 @@ async def test_hchat_draft_success_prepares_delivery_report(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_hchat_draft_success_forwards_bound_output_attachments(tmp_path):
+    runtime, _sent, _voices = _make_background_runtime(tmp_path)
+    attachment = tmp_path / "review.xlsx"
+    attachment.write_bytes(b"spreadsheet")
+    runtime.session_store = SimpleNamespace(
+        run_output_attachment_content=lambda *args, **kwargs: [
+            {
+                "type": "media",
+                "attachment_id": "att-review",
+                "filename": attachment.name,
+                "local_ref": str(attachment),
+            }
+        ]
+    )
+    sender_calls = []
+
+    def fake_sender(to_agent, from_agent, text, **kwargs):
+        sender_calls.append((to_agent, from_agent, text, kwargs))
+        return True
+
+    runtime._hchat_draft_sender = fake_sender
+    item = _queued_request_from("bridge:hchat-draft")
+    item.request_metadata = {HCHAT_TARGET_METADATA_KEY: "akane@HASHI2"}
+
+    result = await FlexibleAgentRuntime._prepare_hchat_draft_success(
+        runtime,
+        item,
+        core_raw="Please inspect the workbook.",
+        completion_path="foreground",
+    )
+
+    assert result.visible_text.startswith("🟡 Hchat queued for akane@HASHI2.")
+    assert sender_calls == [
+        (
+            "akane@HASHI2",
+            runtime.name,
+            "Please inspect the workbook.",
+            {"attachments": [attachment]},
+        )
+    ]
+
+
+@pytest.mark.asyncio
 async def test_hchat_draft_cannot_redirect_frozen_target(tmp_path):
     runtime, _sent, _voices = _make_background_runtime(tmp_path)
     sender_calls = []

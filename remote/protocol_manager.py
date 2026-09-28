@@ -27,6 +27,10 @@ from urllib.parse import quote, urlsplit
 from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
 
+from orchestrator.hchat_attachment_contract import (
+    HCHAT_ATTACHMENT_CLAIM_KEY,
+    canonical_hchat_attachment_manifest,
+)
 from orchestrator.runtime_defaults import DEFAULT_HASHI_REMOTE_PORT, DEFAULT_WORKBENCH_PORT
 from orchestrator.service_endpoints import (
     ServiceEndpointError,
@@ -1144,34 +1148,57 @@ class ProtocolManager:
                 return 410, error
             return 404, self._error_payload("target_agent_not_found", f"Target agent '{to_agent}' not found", retryable=False, payload=payload)
 
-        prompt_text = self._render_remote_message_prompt(from_agent, from_instance, payload.get("body") or {})
+        body = payload.get("body") or {}
+        attachments = None
+        if payload.get("_local_attachment_manifest_verified") is True:
+            try:
+                attachments = canonical_hchat_attachment_manifest(
+                    body.get("attachments") or []
+                )
+            except ValueError as exc:
+                return 400, self._error_payload(
+                    "invalid_attachment_manifest",
+                    str(exc),
+                    retryable=False,
+                    payload=payload,
+                )
+        prompt_text = self._render_remote_message_prompt(
+            from_agent, from_instance, body
+        )
+        enqueue_kwargs = {
+            "exchange_kind": "message",
+            "message_id": message_id,
+            "conversation_id": conversation_id,
+            "from_instance": from_instance,
+            "from_agent": from_agent,
+            "to_instance": local_instance,
+            "to_agent": to_agent,
+            "route_trace": route_trace,
+            "authenticated_peer": str(
+                payload.get("_network_authenticated_instance") or ""
+            ),
+            "network_authentication": str(
+                payload.get("_network_authentication") or "not_verified"
+            ),
+            "private_authorization_proofs": list(
+                payload.get("private_authorization_proofs") or []
+            ),
+            "authorization_resources": list(
+                payload.get("authorization_resources") or []
+            ),
+            "authorization_content_text": str(
+                payload.get("_private_authorization_content_text")
+                if payload.get("_private_authorization_content_text") is not None
+                else body.get("text")
+                or ""
+            ),
+        }
+        if attachments:
+            enqueue_kwargs["attachments"] = attachments
         local_acceptance = await self._enqueue_local_prompt(
             to_agent,
             prompt_text,
-            exchange_kind="message",
-            message_id=message_id,
-            conversation_id=conversation_id,
-            from_instance=from_instance,
-            from_agent=from_agent,
-            to_instance=local_instance,
-            to_agent=to_agent,
-            route_trace=route_trace,
-            authenticated_peer=str(
-                payload.get("_network_authenticated_instance") or ""
-            ),
-            network_authentication=str(
-                payload.get("_network_authentication") or "not_verified"
-            ),
-            private_authorization_proofs=list(
-                payload.get("private_authorization_proofs") or []
-            ),
-            authorization_resources=list(payload.get("authorization_resources") or []),
-            authorization_content_text=str(
-                payload.get("_private_authorization_content_text")
-                if payload.get("_private_authorization_content_text") is not None
-                else (payload.get("body") or {}).get("text")
-                or ""
-            ),
+            **enqueue_kwargs,
         )
         if isinstance(local_acceptance, dict):
             request_id = str(local_acceptance.get("request_id") or "")
@@ -1381,6 +1408,7 @@ class ProtocolManager:
         authorization_resources: list[str] | None = None,
         authorization_content_text: str | None = None,
         terminal_response_text: str | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> dict[str, str] | None:
         terminal = exchange_kind == "reply"
         request_metadata = {
@@ -1439,6 +1467,13 @@ class ProtocolManager:
                 },
             }
         )
+        normalized_attachments = (
+            canonical_hchat_attachment_manifest(attachments)
+            if attachments
+            else None
+        )
+        if normalized_attachments:
+            request_metadata[HCHAT_ATTACHMENT_CLAIM_KEY] = normalized_attachments
         if private_authorization_proofs:
             from orchestrator.private_authorization import (
                 authorization_content_sha256,
@@ -1474,6 +1509,7 @@ class ProtocolManager:
                 "_private_authorization_proofs",
                 "_private_authorization_binding",
                 "_private_authorization_content_sha256",
+                HCHAT_ATTACHMENT_CLAIM_KEY,
             )
             if key in request_metadata
         }
@@ -1510,6 +1546,8 @@ class ProtocolManager:
             "request_metadata": request_metadata,
             "idempotency_key": f"protocol:{exchange_kind}:{message_id}",
         }
+        if normalized_attachments:
+            payload["remote_attachments"] = normalized_attachments
         last_exc = None
         for host, port in self._local_workbench_routes():
             if not self._probe_local_workbench(host, port):

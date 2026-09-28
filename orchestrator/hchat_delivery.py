@@ -6,6 +6,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
 
@@ -130,6 +131,7 @@ def deliver_hchat_draft(
     *,
     from_agent: str,
     sender: SendHChatCallable | None = None,
+    attachments: list[Path] | None = None,
     attempt_id: str | None = None,
 ) -> HChatDeliveryResult:
     sender_fn = sender or _load_send_hchat()
@@ -145,7 +147,10 @@ def deliver_hchat_draft(
     start = time.perf_counter()
     error: str | None = None
     try:
-        success = bool(sender_fn(target, clean_from, message))
+        sender_kwargs = {}
+        if attachments:
+            sender_kwargs["attachments"] = [Path(path) for path in attachments]
+        success = bool(sender_fn(target, clean_from, message, **sender_kwargs))
     except Exception as exc:
         success = False
         error = f"{type(exc).__name__}: {exc}"

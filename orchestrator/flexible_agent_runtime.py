@@ -3088,6 +3088,7 @@ class FlexibleAgentRuntime:
         *,
         chat_id: Any | None = None,
         request_metadata: Mapping[str, Any] | None = None,
+        request_content: Mapping[str, Any] | None = None,
         idempotency_key: str | None = None,
     ):
         if self._should_redirect_after_transfer() and not source.startswith(("bridge-transfer:", "bridge-fork:")):
@@ -3107,6 +3108,7 @@ class FlexibleAgentRuntime:
             _safe_excerpt(text),
             deliver_to_telegram=deliver_to_telegram,
             request_metadata=request_metadata,
+            request_content=request_content,
             idempotency_key=idempotency_key,
         )
 
@@ -7261,6 +7263,8 @@ class FlexibleAgentRuntime:
             f"Rules:\n"
             f"- Do not run shell commands.\n"
             f"- Do not mention delivery tools or implementation details.\n"
+            f"- If local files should accompany the message, select the exact complete set once "
+            f"with frontend_send_attachments; the runtime sends that set atomically with the text.\n"
             f"- Compose the message FROM you ({self.name}) TO {target_name}.\n"
             f"- Do not relay the user's words literally; include relevant context and be concise.\n"
             f"- The runtime already owns and validates the target, sends the message, and reports the receipt."
@@ -7270,6 +7274,7 @@ class FlexibleAgentRuntime:
         from orchestrator.hchat_delivery import (
             HCHAT_TARGET_METADATA_KEY,
             HChatDraft,
+            HChatDeliveryResult,
             HChatDraftParseError,
             deliver_hchat_draft,
             draft_parse_error_text,
@@ -7328,13 +7333,46 @@ class FlexibleAgentRuntime:
             )
 
         sender = getattr(self, "_hchat_draft_sender", None)
-        result = await asyncio.to_thread(
-            deliver_hchat_draft,
-            draft,
-            from_agent=self.name,
-            sender=sender,
-            attempt_id=item.request_id,
-        )
+        attachment_paths: list[Path] = []
+        attachment_error: str | None = None
+        store = getattr(self, "session_store", None)
+        if store is not None and hasattr(store, "run_output_attachment_content"):
+            try:
+                output_attachments = await asyncio.to_thread(
+                    store.run_output_attachment_content,
+                    item.request_id,
+                    owner_id=getattr(item, "owner_id", None),
+                    agent_id=self.name,
+                )
+                for attachment in output_attachments:
+                    local_ref = str((attachment or {}).get("local_ref") or "").strip()
+                    if not local_ref:
+                        raise ValueError("selected HChat attachment has no local reference")
+                    attachment_paths.append(Path(local_ref))
+            except Exception as exc:
+                attachment_error = f"attachment selection unavailable: {type(exc).__name__}: {exc}"
+        if attachment_error:
+            result = HChatDeliveryResult(
+                success=False,
+                target=draft.target,
+                from_agent=self.name,
+                message=draft.message,
+                attempt_id=item.request_id,
+                retry_count=0,
+                delivery_status="failed",
+                error=attachment_error,
+                latency_ms=0.0,
+                user_report=draft.user_report,
+            )
+        else:
+            result = await asyncio.to_thread(
+                deliver_hchat_draft,
+                draft,
+                from_agent=self.name,
+                sender=sender,
+                attachments=attachment_paths,
+                attempt_id=item.request_id,
+            )
         locale = ui_language.preferred_locale(
             self,
             actor_id=getattr(item, "owner_id", None) or getattr(item, "chat_id", None),

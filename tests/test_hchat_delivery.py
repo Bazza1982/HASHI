@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 import pytest
 
@@ -133,6 +134,34 @@ def test_deliver_hchat_draft_delegates_routing_to_send_hchat():
     assert result.attempt_id == "attempt-1"
     assert result.retry_count == 0
     assert result.user_report == "sent"
+
+
+def test_deliver_hchat_draft_passes_selected_attachments_to_sender(tmp_path):
+    attachment = tmp_path / "payload.bin"
+    attachment.write_bytes(b"payload")
+    calls = []
+
+    def fake_sender(to_agent, from_agent, text, **kwargs):
+        calls.append((to_agent, from_agent, text, kwargs))
+        return True
+
+    result = deliver_hchat_draft(
+        HChatDraft(target="rika@HASHI2", message="check the attachment"),
+        from_agent="zelda",
+        sender=fake_sender,
+        attachments=[attachment],
+        attempt_id="attempt-with-attachment",
+    )
+
+    assert calls == [
+        (
+            "rika@HASHI2",
+            "zelda",
+            "check the attachment",
+            {"attachments": [Path(attachment)]},
+        )
+    ]
+    assert result.success is True
 
 
 def test_deliver_hchat_draft_generates_attempt_id_and_structured_failure():

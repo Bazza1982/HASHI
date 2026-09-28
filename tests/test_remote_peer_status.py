@@ -2799,6 +2799,59 @@ def test_protocol_message_preserves_hchat_sender_relay_and_private_proofs(tmp_pa
     assert kwargs["authorization_resources"] == ["user:synthetic"]
 
 
+def test_protocol_message_forwards_only_server_verified_attachment_manifest(tmp_path):
+    manager = ProtocolManager.__new__(ProtocolManager)
+    manager._instance_info = {"instance_id": "HASHI3"}
+    manager._max_allowed_ttl = 8
+    manager._inflight = {}
+    manager._inflight_path = tmp_path / "inflight.json"
+    manager._peer_registry = None
+    manager.get_local_agents_snapshot = lambda: [{"agent_name": "sunny"}]
+    manager._save_inflight = lambda: None
+
+    async def enqueue(agent_name, text, **kwargs):
+        manager._captured_enqueue = (agent_name, text, kwargs)
+        return "req-attachment"
+
+    manager._enqueue_local_prompt = enqueue
+    attachment = {
+        "attachment_id": "att-1",
+        "filename": "bundle.7z",
+        "mime_type": "application/x-7z-compressed",
+        "size_bytes": 7,
+        "sha256": "a" * 64,
+        "stored_path": str(tmp_path / "bundle.7z"),
+    }
+    payload = {
+        "message_type": "agent_message",
+        "message_id": "wire-attachment-1",
+        "conversation_id": "conv-attachment-1",
+        "from_instance": "HASHI1",
+        "from_agent": "sender",
+        "to_instance": "HASHI3",
+        "to_agent": "sunny",
+        "body": {"text": "inspect bundle", "attachments": [attachment]},
+        "ttl": 8,
+        "route_trace": ["HASHI1"],
+        "_local_attachment_manifest_verified": True,
+        "_network_authenticated_instance": "HASHI1",
+        "_network_authentication": "shared_network_hmac",
+    }
+
+    status, result = asyncio.run(manager.handle_protocol_message(payload))
+
+    assert status == 202
+    assert result["request_id"] == "req-attachment"
+    assert manager._captured_enqueue[2]["attachments"] == [
+        {**attachment, "caption": None}
+    ]
+
+    payload["message_id"] = "wire-attachment-2"
+    payload["_local_attachment_manifest_verified"] = False
+    asyncio.run(manager.handle_protocol_message(payload))
+    assert manager._captured_enqueue[2].get("attachments") is None
+
+
 def test_protocol_ignores_legacy_reply_deadline_instead_of_timing_out():
     manager = ProtocolManager.__new__(ProtocolManager)
     manager._inflight = {

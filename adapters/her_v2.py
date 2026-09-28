@@ -140,8 +140,13 @@ class _ExecutionStageCompactionProvider:
         return await self._base.invoke(profile, request)
 
 
-class _NoToolAuthorityProvider:
-    """Clamp a composition-only Turn before it reaches any Model Provider."""
+class _HChatDraftToolProvider:
+    """Expose only attachment selection during a runtime-owned HChat draft."""
+
+    _ALLOWED_TOOL = "frontend_send_attachments"
+    _TOOL_STAGES = frozenset(
+        {Stage.DIRECT, Stage.EXECUTION, Stage.IMMEDIATE_RESPONSE}
+    )
 
     def __init__(self, base: StageProvider) -> None:
         self._base = base
@@ -151,13 +156,37 @@ class _NoToolAuthorityProvider:
 
     def tool_catalogue(self, *, allow_side_effects: bool, delegated_tools=None):
         del allow_side_effects, delegated_tools
-        return ()
+        resolver = getattr(self._base, "tool_catalogue", None)
+        if not callable(resolver):
+            return ()
+        catalogue = resolver(
+            allow_side_effects=True,
+            delegated_tools=[self._ALLOWED_TOOL],
+        )
+        return tuple(
+            item
+            for item in catalogue
+            if str((item.get("function") or {}).get("name") or "")
+            == self._ALLOWED_TOOL
+        )
 
     async def invoke(
         self,
         profile: ProviderProfile,
         request: StageRequest,
     ) -> StageResponse:
+        if request.stage in self._TOOL_STAGES:
+            context = dict(request.context)
+            context["delegated_tools"] = [self._ALLOWED_TOOL]
+            return await self._base.invoke(
+                profile,
+                replace(
+                    request,
+                    allow_tools=True,
+                    allow_side_effects=True,
+                    context=context,
+                ),
+            )
         return await self._base.invoke(
             profile,
             replace(request, allow_tools=False, allow_side_effects=False),
@@ -2062,7 +2091,7 @@ class HERv2Adapter(BaseBackend):
             lambda: self._schedule_execution_stage_compaction(request_id),
         )
         if str(request_meta.get("source") or "").strip().casefold() == "bridge:hchat-draft":
-            execution_provider = _NoToolAuthorityProvider(execution_provider)
+            execution_provider = _HChatDraftToolProvider(execution_provider)
         habit_advisor = (
             turn_learning
             if not habit_request_eligible

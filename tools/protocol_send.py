@@ -13,6 +13,7 @@ import hashlib
 import json
 import mimetypes
 import os
+import stat
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -26,6 +27,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from remote.delivery_results import format_delivery_result
+from remote.attachments import (
+    STREAM_ATTACHMENT_CHUNK_BYTES,
+    STREAM_MAX_ATTACHMENT_BYTES,
+    STREAM_MAX_ATTACHMENTS_PER_MESSAGE,
+    STREAM_MAX_TOTAL_ATTACHMENT_BYTES,
+)
 from remote.security.client_auth import build_client_auth_headers
 from tools.remote_capabilities import fetch_remote_protocol_capabilities
 from tools.hchat_send import (
@@ -85,6 +92,43 @@ def _request_json(
             shared_token=shared_token,
             from_instance=from_instance,
         ),
+        method=method,
+    )
+    try:
+        with urllib_request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except HTTPError as exc:
+        try:
+            body = json.loads(exc.read().decode("utf-8"))
+        except Exception:
+            body = {"ok": False, "error": str(exc)}
+        body.setdefault("status", exc.code)
+        return body
+
+
+def _request_bytes(
+    url: str,
+    *,
+    payload: bytes,
+    method: str,
+    token: str | None,
+    shared_token: str | None,
+    from_instance: str,
+    timeout: int,
+) -> dict:
+    headers = _build_request_headers(
+        url=url,
+        method=method,
+        data=payload,
+        token=token,
+        shared_token=shared_token,
+        from_instance=from_instance,
+    )
+    headers["Content-Type"] = "application/octet-stream"
+    req = urllib_request.Request(
+        url,
+        data=payload,
+        headers=headers,
         method=method,
     )
     try:
@@ -274,7 +318,56 @@ def _encode_attachment(path: Path, *, message_id: str, index: int) -> dict:
     }
 
 
-def _send_with_attachments(
+def _prepare_stream_attachments(
+    attachments: list[Path], *, message_id: str
+) -> list[dict]:
+    if len(attachments) > STREAM_MAX_ATTACHMENTS_PER_MESSAGE:
+        raise ValueError(
+            f"attachment count exceeds max of {STREAM_MAX_ATTACHMENTS_PER_MESSAGE}"
+        )
+    prepared: list[dict] = []
+    total_bytes = 0
+    for index, raw_path in enumerate(attachments):
+        path = Path(raw_path).expanduser()
+        if path.is_symlink():
+            raise ValueError(f"attachment symlinks are not supported: {path}")
+        try:
+            file_stat = path.stat()
+        except OSError as exc:
+            raise ValueError(f"attachment is unavailable: {path}") from exc
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise ValueError(f"attachment is not a regular file: {path}")
+        size_bytes = int(file_stat.st_size)
+        if size_bytes > STREAM_MAX_ATTACHMENT_BYTES:
+            raise ValueError(
+                f"attachment exceeds max size of {STREAM_MAX_ATTACHMENT_BYTES} bytes: {path.name}"
+            )
+        total_bytes += size_bytes
+        if total_bytes > STREAM_MAX_TOTAL_ATTACHMENT_BYTES:
+            raise ValueError(
+                "total attachment size exceeds max of "
+                f"{STREAM_MAX_TOTAL_ATTACHMENT_BYTES} bytes"
+            )
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            while chunk := handle.read(STREAM_ATTACHMENT_CHUNK_BYTES):
+                digest.update(chunk)
+        prepared.append(
+            {
+                "path": path,
+                "message_id": message_id,
+                "attachment_id": f"att-{index + 1}",
+                "filename": path.name,
+                "mime_type": mimetypes.guess_type(path.name)[0]
+                or "application/octet-stream",
+                "size_bytes": size_bytes,
+                "sha256": digest.hexdigest(),
+            }
+        )
+    return prepared
+
+
+def _send_with_attachments_v2(
     *,
     base_url: str,
     payload: dict,
@@ -283,19 +376,162 @@ def _send_with_attachments(
     shared_token: str | None,
     timeout: int,
 ) -> dict:
-    capabilities, probe_error = fetch_remote_protocol_capabilities(base_url, timeout=min(timeout, 5))
-    if capabilities and "message_attachments_v1" not in capabilities:
-        return {
-            "ok": False,
-            "error": (
-                "remote peer does not advertise message_attachments_v1 on live /protocol/status; "
-                "restart/update that peer before sending attachments"
-            ),
-            "code": "attachment_capability_missing",
-        }
-    if probe_error:
-        print(f"⚠️  Could not confirm remote attachment capability via /protocol/status: {probe_error}", file=sys.stderr)
+    try:
+        prepared = _prepare_stream_attachments(
+            attachments, message_id=payload["message_id"]
+        )
+    except (OSError, ValueError) as exc:
+        return {"ok": False, "error": str(exc), "code": "attachment_preflight_failed"}
 
+    staged: list[dict] = []
+    for item in prepared:
+        begin_payload = {
+            key: item[key]
+            for key in (
+                "message_id",
+                "attachment_id",
+                "filename",
+                "mime_type",
+                "size_bytes",
+                "sha256",
+            )
+        }
+        begin_payload["from_instance"] = payload["from_instance"]
+        begin_result = _request_json(
+            f"{base_url}/attachments/v2/begin",
+            payload=begin_payload,
+            token=token,
+            shared_token=shared_token,
+            from_instance=payload["from_instance"],
+            timeout=timeout,
+        )
+        if not begin_result.get("ok"):
+            _cancel_staged_attachments(
+                base_url=base_url,
+                message_id=payload["message_id"],
+                from_instance=payload["from_instance"],
+                staged=staged,
+                token=token,
+                shared_token=shared_token,
+                timeout=timeout,
+            )
+            return begin_result
+        pending_upload_id = str(
+            (begin_result.get("attachment") or {}).get("pending_upload_id") or ""
+        ).strip()
+        if not pending_upload_id:
+            return {"ok": False, "error": "stream begin returned no pending upload id"}
+        commit_item = {
+            key: item[key]
+            for key in (
+                "attachment_id",
+                "filename",
+                "mime_type",
+                "size_bytes",
+                "sha256",
+            )
+        }
+        commit_item["pending_upload_id"] = pending_upload_id
+        staged.append(commit_item)
+
+        offset = 0
+        try:
+            with item["path"].open("rb") as handle:
+                while chunk := handle.read(STREAM_ATTACHMENT_CHUNK_BYTES):
+                    chunk_url = (
+                        f"{base_url}/attachments/v2/chunk/{pending_upload_id}"
+                        f"?offset={offset}"
+                    )
+                    chunk_result = _request_bytes(
+                        chunk_url,
+                        payload=chunk,
+                        method="PUT",
+                        token=token,
+                        shared_token=shared_token,
+                        from_instance=payload["from_instance"],
+                        timeout=timeout,
+                    )
+                    if not chunk_result.get("ok"):
+                        _cancel_staged_attachments(
+                            base_url=base_url,
+                            message_id=payload["message_id"],
+                            from_instance=payload["from_instance"],
+                            staged=staged,
+                            token=token,
+                            shared_token=shared_token,
+                            timeout=timeout,
+                        )
+                        return chunk_result
+                    offset += len(chunk)
+        except OSError as exc:
+            _cancel_staged_attachments(
+                base_url=base_url,
+                message_id=payload["message_id"],
+                from_instance=payload["from_instance"],
+                staged=staged,
+                token=token,
+                shared_token=shared_token,
+                timeout=timeout,
+            )
+            return {"ok": False, "error": f"attachment changed during upload: {exc}"}
+
+        finish_result = _request_json(
+            f"{base_url}/attachments/v2/finish",
+            payload={
+                "message_id": payload["message_id"],
+                "from_instance": payload["from_instance"],
+                "pending_upload_id": pending_upload_id,
+            },
+            token=token,
+            shared_token=shared_token,
+            from_instance=payload["from_instance"],
+            timeout=timeout,
+        )
+        if not finish_result.get("ok"):
+            _cancel_staged_attachments(
+                base_url=base_url,
+                message_id=payload["message_id"],
+                from_instance=payload["from_instance"],
+                staged=staged,
+                token=token,
+                shared_token=shared_token,
+                timeout=timeout,
+            )
+            return finish_result
+
+    commit_payload = dict(payload)
+    commit_payload["attachments"] = staged
+    commit_result = _request_json(
+        f"{base_url}/protocol/message-with-attachments",
+        payload=commit_payload,
+        token=token,
+        shared_token=shared_token,
+        from_instance=payload["from_instance"],
+        timeout=timeout,
+    )
+    if not commit_result.get("ok"):
+        _cancel_staged_attachments(
+            base_url=base_url,
+            message_id=payload["message_id"],
+            from_instance=payload["from_instance"],
+            staged=staged,
+            token=token,
+            shared_token=shared_token,
+            timeout=timeout,
+            reason="sender_commit_failed",
+        )
+    return commit_result
+
+
+def _send_with_attachments_v1(
+    *,
+    base_url: str,
+    payload: dict,
+    attachments: list[Path],
+    token: str | None,
+    shared_token: str | None,
+    timeout: int,
+) -> dict:
     staged: list[dict] = []
     for index, path in enumerate(attachments):
         upload_payload = _encode_attachment(path, message_id=payload["message_id"], index=index)
@@ -353,6 +589,53 @@ def _send_with_attachments(
             reason="sender_commit_failed",
         )
     return commit_result
+
+
+def _send_with_attachments(
+    *,
+    base_url: str,
+    payload: dict,
+    attachments: list[Path],
+    token: str | None,
+    shared_token: str | None,
+    timeout: int,
+) -> dict:
+    capabilities, probe_error = fetch_remote_protocol_capabilities(
+        base_url, timeout=min(timeout, 5)
+    )
+    if "message_attachments_v2_streaming" in capabilities:
+        return _send_with_attachments_v2(
+            base_url=base_url,
+            payload=payload,
+            attachments=attachments,
+            token=token,
+            shared_token=shared_token,
+            timeout=timeout,
+        )
+    if capabilities and "message_attachments_v1" not in capabilities:
+        return {
+            "ok": False,
+            "error": (
+                "remote peer advertises neither message_attachments_v2_streaming "
+                "nor message_attachments_v1 on live /protocol/status; update that peer "
+                "before sending attachments"
+            ),
+            "code": "attachment_capability_missing",
+        }
+    if probe_error:
+        print(
+            "⚠️  Could not confirm remote attachment capability via "
+            f"/protocol/status: {probe_error}",
+            file=sys.stderr,
+        )
+    return _send_with_attachments_v1(
+        base_url=base_url,
+        payload=payload,
+        attachments=attachments,
+        token=token,
+        shared_token=shared_token,
+        timeout=timeout,
+    )
 
 
 def _cancel_staged_attachments(

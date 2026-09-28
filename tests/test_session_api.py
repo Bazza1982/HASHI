@@ -78,6 +78,7 @@ class _Runtime:
         self.last_source = None
         self.enqueue_request_calls = 0
         self.api_request_metadata = []
+        self.api_request_content = []
         self.api_delivery_flags = []
         self.media_dir = None
         self.api_media_calls = []
@@ -141,12 +142,14 @@ class _Runtime:
         *,
         deliver_to_telegram=True,
         request_metadata,
+        request_content=None,
         idempotency_key=None,
     ):
         del source
         del idempotency_key
         self.api_delivery_flags.append(bool(deliver_to_telegram))
         self.api_request_metadata.append(dict(request_metadata))
+        self.api_request_content.append(request_content)
         return f"req-api-{len(self.api_request_metadata)}"
 
     async def enqueue_api_media(self, **kwargs):
@@ -1051,6 +1054,210 @@ async def test_legacy_chat_response_is_queue_ack_without_transport_receipt(tmp_p
     assert payload["request_id"] == "req-api-1"
     assert "delivery_receipt" not in payload
     assert "delivered" not in payload
+
+
+@pytest.mark.asyncio
+async def test_protocol_hchat_attachments_enter_one_canonical_session_request(tmp_path):
+    from orchestrator.hchat_attachment_contract import (
+        HCHAT_ATTACHMENT_CLAIM_KEY,
+        canonical_hchat_attachment_manifest,
+    )
+    from orchestrator.message_context import seal_connector_evidence
+
+    (tmp_path / "secrets.json").write_text(
+        json.dumps({"hashi_remote_shared_token": "test-network-secret"}),
+        encoding="utf-8",
+    )
+    server, runtime = _server(tmp_path)
+    content = b"PK\x03\x04small spreadsheet fixture"
+    received = (
+        tmp_path
+        / "state"
+        / "remote_attachments"
+        / "hashi1"
+        / "messages"
+        / "wire-attachment-1"
+        / "report.xlsx"
+    )
+    received.parent.mkdir(parents=True)
+    received.write_bytes(content)
+    attachments = [
+        {
+            "attachment_id": "att-1",
+            "filename": "report.xlsx",
+            "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "size_bytes": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "caption": "quarterly extract",
+            "stored_path": str(received),
+        }
+    ]
+    text = "System exchange message from testing@HASHI2:\ninspect this"
+    claims = {
+        "_message_source_reserved": "hchat",
+        "_hchat_context": {
+            "from_agent": "testing",
+            "from_instance": "HASHI2",
+            "to_agent": "lily",
+            "to_instance": "HASHI1",
+            "authenticated_peer": "HASHI2",
+            "network_authentication": "shared_network_hmac",
+            "sender_assurance": "shared_network_member_declared",
+            "relay_chain": [],
+            "origin_instance": {
+                "id": "HASHI2",
+                "assurance": "shared_network_hmac",
+            },
+        },
+        HCHAT_ATTACHMENT_CLAIM_KEY: canonical_hchat_attachment_manifest(attachments),
+    }
+    request = _Request(
+        {
+            "agent": "lily",
+            "text": text,
+            "source": "protocol:message",
+            "request_metadata": {
+                "session_surface": "remote",
+                "session_channel_key": "HASHI2:conversation-1",
+                "_connector_evidence": seal_connector_evidence(
+                    tmp_path, claims=claims, prompt=text
+                ),
+            },
+            "remote_attachments": attachments,
+            "idempotency_key": "protocol:message:wire-attachment-1",
+        }
+    )
+    request.content_type = "application/json"
+
+    response = await server.handle_chat(request)
+
+    assert response.status == 200
+    canonical = runtime.api_request_content[-1]
+    media = [part for part in canonical["parts"] if part["type"] == "media"]
+    assert len(media) == 1
+    assert media[0]["filename"] == "report.xlsx"
+    assert media[0]["mime_type"].endswith("spreadsheetml.sheet")
+    assert Path(media[0]["local_ref"]).read_bytes() == content
+    assert Path(media[0]["local_ref"]).is_relative_to(
+        server.session_store.attachment_files_root
+    )
+
+
+@pytest.mark.asyncio
+async def test_protocol_hchat_attachments_fail_closed_before_partial_admission(tmp_path):
+    server, runtime = _server(tmp_path)
+    received = (
+        tmp_path
+        / "state"
+        / "remote_attachments"
+        / "hashi1"
+        / "messages"
+        / "wire-attachment-2"
+        / "script.ps1"
+    )
+    received.parent.mkdir(parents=True)
+    received.write_bytes(b"Write-Host safe")
+    request = _Request(
+        {
+            "agent": "lily",
+            "text": "unsigned attachment must not enter admission",
+            "source": "protocol:message",
+            "remote_attachments": [
+                {
+                    "attachment_id": "att-script",
+                    "filename": "script.ps1",
+                    "mime_type": "application/octet-stream",
+                    "size_bytes": received.stat().st_size,
+                    "sha256": hashlib.sha256(received.read_bytes()).hexdigest(),
+                    "stored_path": str(received),
+                }
+            ],
+        }
+    )
+    request.content_type = "application/json"
+
+    response = await server.handle_chat(request)
+
+    assert response.status == 401
+    assert runtime.api_request_metadata == []
+    assert list(server.session_store.attachment_files_root.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_protocol_hchat_attachment_batch_rolls_back_if_one_file_changes(tmp_path):
+    from orchestrator.hchat_attachment_contract import (
+        HCHAT_ATTACHMENT_CLAIM_KEY,
+        canonical_hchat_attachment_manifest,
+    )
+    from orchestrator.message_context import seal_connector_evidence
+
+    (tmp_path / "secrets.json").write_text(
+        json.dumps({"hashi_remote_shared_token": "test-network-secret"}),
+        encoding="utf-8",
+    )
+    server, runtime = _server(tmp_path)
+    inbox = (
+        tmp_path
+        / "state"
+        / "remote_attachments"
+        / "hashi1"
+        / "messages"
+        / "wire-attachment-rollback"
+    )
+    inbox.mkdir(parents=True)
+    good = inbox / "good.ps1"
+    changed = inbox / "changed.7z"
+    good.write_bytes(b"Write-Host safe")
+    changed.write_bytes(b"changed")
+    attachments = [
+        {
+            "attachment_id": "att-good",
+            "filename": good.name,
+            "mime_type": "application/octet-stream",
+            "size_bytes": good.stat().st_size,
+            "sha256": hashlib.sha256(good.read_bytes()).hexdigest(),
+            "stored_path": str(good),
+        },
+        {
+            "attachment_id": "att-changed",
+            "filename": changed.name,
+            "mime_type": "application/x-7z-compressed",
+            "size_bytes": changed.stat().st_size,
+            "sha256": hashlib.sha256(b"initial").hexdigest(),
+            "stored_path": str(changed),
+        },
+    ]
+    text = "System exchange message from testing@HASHI2:\ninspect atomically"
+    claims = {
+        "_message_source_reserved": "hchat",
+        "_hchat_context": {
+            "network_authentication": "shared_network_hmac",
+        },
+        HCHAT_ATTACHMENT_CLAIM_KEY: canonical_hchat_attachment_manifest(attachments),
+    }
+    request = _Request(
+        {
+            "agent": "lily",
+            "text": text,
+            "source": "protocol:message",
+            "request_metadata": {
+                "session_surface": "remote",
+                "session_channel_key": "HASHI2:conversation-rollback",
+                "_connector_evidence": seal_connector_evidence(
+                    tmp_path, claims=claims, prompt=text
+                ),
+            },
+            "remote_attachments": attachments,
+            "idempotency_key": "protocol:message:wire-attachment-rollback",
+        }
+    )
+    request.content_type = "application/json"
+
+    response = await server.handle_chat(request)
+
+    assert response.status == 400
+    assert runtime.api_request_metadata == []
+    assert list(server.session_store.attachment_files_root.iterdir()) == []
 
 
 @pytest.mark.asyncio

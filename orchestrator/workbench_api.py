@@ -117,6 +117,10 @@ from orchestrator.frontend_compatibility import (
     normalize_compatibility_operation,
 )
 from orchestrator.her_v2.v3_config import resolve_v3_target
+from orchestrator.hchat_attachment_contract import (
+    HCHAT_ATTACHMENT_CLAIM_KEY,
+    canonical_hchat_attachment_manifest,
+)
 from orchestrator.message_context import (
     CONNECTOR_EVIDENCE_METADATA_KEY,
     HCHAT_CONTEXT_METADATA_KEY,
@@ -128,12 +132,16 @@ from orchestrator.message_context import (
     PRIVATE_AUTHORIZATION_RESULTS_METADATA_KEY,
     normalize_external_source,
     public_source_capabilities,
+    verify_connector_evidence,
 )
 from orchestrator.private_authorization import (
     public_private_authorization_capabilities,
 )
 from orchestrator.ui_language import normalize_locale, preferred_locale, tr
-from orchestrator.multimodal_contract import canonical_request_content
+from orchestrator.multimodal_contract import (
+    canonical_request_content,
+    modality_for_attachment,
+)
 from orchestrator.pathing import BridgePaths, resolve_instance_id, resolve_path_value
 from orchestrator.service_endpoints import ServiceEndpointError, select_service_bind_host
 from orchestrator.session_store import (
@@ -7479,6 +7487,163 @@ class WorkbenchApiServer:
             )
         return web.json_response({"ok": True, **response})
 
+    @staticmethod
+    def _path_has_symlink_component(path: Path) -> bool:
+        current = path.expanduser().absolute()
+        while True:
+            if current.is_symlink():
+                return True
+            parent = current.parent
+            if parent == current:
+                return False
+            current = parent
+
+    def _stage_hchat_remote_attachments(
+        self,
+        *,
+        runtime: Any,
+        text: str,
+        session_metadata: dict[str, Any],
+        idempotency_key: str,
+        attachments: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any], list[str], dict[str, Any], str]:
+        manifest = canonical_hchat_attachment_manifest(attachments)
+        instance_id = str(
+            getattr(self.global_config, "instance_id", "HASHI") or "HASHI"
+        ).strip().casefold()
+        remote_root = (
+            self.config_path.parent
+            / "state"
+            / "remote_attachments"
+            / instance_id
+            / "messages"
+        ).resolve(strict=True)
+        resolved_sources: list[Path] = []
+        for item in manifest:
+            source_path = Path(str(item["stored_path"]))
+            if self._path_has_symlink_component(source_path):
+                raise ValueError("HChat attachment path contains a symlink")
+            try:
+                resolved = source_path.resolve(strict=True)
+                observed_size = resolved.stat().st_size
+            except OSError as exc:
+                raise ValueError("HChat attachment is unavailable") from exc
+            if not resolved.is_relative_to(remote_root) or not resolved.is_file():
+                raise ValueError("HChat attachment is outside the verified inbox")
+            if observed_size != int(item["size_bytes"]):
+                raise ValueError("HChat attachment size changed after receipt")
+            resolved_sources.append(resolved)
+
+        owner_id = SessionStore.owner_id_for(
+            self.global_config,
+            str(session_metadata.get("owner_id") or "") or None,
+        )
+        surface = str(session_metadata.get("session_surface") or "remote")
+        channel_key = str(session_metadata.get("session_channel_key") or "default")
+        session = self.session_store.resolve_session(
+            owner_id=owner_id,
+            agent_id=str(runtime.name),
+            surface=surface,
+            channel_key=channel_key,
+            explicit_session_id=(
+                str(session_metadata.get("session_id") or "").strip() or None
+            ),
+        )
+        session_metadata.update(
+            {
+                "session_id": session["session_id"],
+                "owner_id": owner_id,
+                "session_surface": surface,
+                "session_channel_key": channel_key,
+                "session_message_text": text,
+            }
+        )
+
+        attachment_ids: list[str] = []
+        parts: list[dict[str, Any]] = [
+            {"type": "text", "item_index": 1, "text": text}
+        ]
+        try:
+            for item_index, (item, source_path) in enumerate(
+                zip(manifest, resolved_sources, strict=True), start=2
+            ):
+                stage_key = hashlib.sha256(
+                    (
+                        "hchat-ingress\x00"
+                        + idempotency_key
+                        + "\x00"
+                        + str(item["attachment_id"])
+                    ).encode("utf-8")
+                ).hexdigest()
+                staged = self.session_store.stage_attachment(
+                    session_id=session["session_id"],
+                    owner_id=owner_id,
+                    filename=str(item["filename"]),
+                    media_type="application/octet-stream",
+                    size_bytes=int(item["size_bytes"]),
+                    sha256=str(item["sha256"]),
+                    retention_seconds=24 * 60 * 60,
+                    idempotency_key=f"hchat-ingress:{stage_key}",
+                    attachment_policy="hchat",
+                )
+                attachment_id = str(staged["attachment_id"])
+                attachment_ids.append(attachment_id)
+                self.session_store.upload_attachment_file(
+                    session_id=session["session_id"],
+                    owner_id=owner_id,
+                    attachment_id=attachment_id,
+                    source_path=source_path,
+                )
+                self.session_store.commit_attachment(
+                    session_id=session["session_id"],
+                    owner_id=owner_id,
+                    attachment_id=attachment_id,
+                )
+                part = self.session_store.attachment_canonical_part(
+                    session_id=session["session_id"],
+                    owner_id=owner_id,
+                    attachment_id=attachment_id,
+                    item_index=item_index,
+                    caption=str(item.get("caption") or ""),
+                )
+                modality = modality_for_attachment(
+                    "",
+                    mime_type=str(item["mime_type"]),
+                    filename=str(item["filename"]),
+                )
+                part.update(
+                    {
+                        "modality": modality,
+                        "kind": modality,
+                        "mime_type": str(item["mime_type"]),
+                    }
+                )
+                if modality == "audio":
+                    part["semantic_role"] = "audio_attachment"
+                else:
+                    part.pop("semantic_role", None)
+                    part.pop("duration_ms", None)
+                parts.append(part)
+            return (
+                canonical_request_content(parts),
+                attachment_ids,
+                session,
+                owner_id,
+            )
+        except Exception:
+            try:
+                self.session_store.discard_unbound_attachments(
+                    session_id=session["session_id"],
+                    owner_id=owner_id,
+                    attachment_ids=attachment_ids,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to clean an unbound HChat attachment intake batch",
+                    exc_info=True,
+                )
+            raise
+
     async def handle_chat(self, request):
         runtime_map = self._runtime_map()
 
@@ -7793,6 +7958,162 @@ class WorkbenchApiServer:
             ]
         if isinstance(binding, Mapping):
             session_metadata[PRIVATE_AUTHORIZATION_BINDING_METADATA_KEY] = dict(binding)
+        remote_attachments = payload.get("remote_attachments")
+        if remote_attachments is not None:
+            if isinstance(attachment_spec, Mapping) or workzone_ref:
+                return web.json_response(
+                    {"ok": False, "error": "exactly one attachment source is required"},
+                    status=400,
+                )
+            evidence = session_metadata.get(CONNECTOR_EVIDENCE_METADATA_KEY)
+            claims = verify_connector_evidence(
+                self.config_path.parent,
+                evidence=evidence,
+                prompt=text,
+            )
+            if (
+                source.casefold() != "protocol:message"
+                or not isinstance(claims, Mapping)
+                or claims.get(MESSAGE_SOURCE_RESERVED_METADATA_KEY) != "hchat"
+                or not isinstance(claims.get(HCHAT_CONTEXT_METADATA_KEY), Mapping)
+                or str(
+                    claims[HCHAT_CONTEXT_METADATA_KEY].get(
+                        "network_authentication"
+                    )
+                    or ""
+                )
+                != "shared_network_hmac"
+            ):
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "error": "verified HChat attachment evidence is required",
+                        "error_code": "hchat_attachment_evidence_required",
+                    },
+                    status=401,
+                )
+            try:
+                normalized_remote_attachments = canonical_hchat_attachment_manifest(
+                    remote_attachments
+                )
+                signed_manifest = canonical_hchat_attachment_manifest(
+                    claims.get(HCHAT_ATTACHMENT_CLAIM_KEY)
+                )
+            except ValueError as exc:
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "error": str(exc),
+                        "error_code": "invalid_hchat_attachment_manifest",
+                    },
+                    status=400,
+                )
+            if signed_manifest != normalized_remote_attachments:
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "error": "HChat attachment manifest does not match signed evidence",
+                        "error_code": "hchat_attachment_manifest_mismatch",
+                    },
+                    status=401,
+                )
+            idempotency_key = str(payload.get("idempotency_key") or "").strip()
+            if not idempotency_key:
+                return web.json_response(
+                    {"ok": False, "error": "idempotency_key is required"},
+                    status=400,
+                )
+            try:
+                (
+                    canonical_content,
+                    staged_attachment_ids,
+                    resolved_session,
+                    resolved_owner,
+                ) = await asyncio.to_thread(
+                    self._stage_hchat_remote_attachments,
+                    runtime=runtime,
+                    text=text,
+                    session_metadata=session_metadata,
+                    idempotency_key=idempotency_key,
+                    attachments=normalized_remote_attachments,
+                )
+            except (OSError, TypeError, ValueError, SessionConflict) as exc:
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "error": str(exc),
+                        "error_code": "hchat_attachment_rejected",
+                    },
+                    status=400,
+                )
+            try:
+                request_id = await runtime.enqueue_api_text(
+                    text,
+                    source=source,
+                    deliver_to_telegram=telegram_mirror,
+                    request_metadata=session_metadata,
+                    request_content=canonical_content,
+                    idempotency_key=idempotency_key,
+                )
+            except Exception as exc:
+                existing = await asyncio.to_thread(
+                    self.session_store.find_run_by_idempotency,
+                    session_id=resolved_session["session_id"],
+                    owner_id=resolved_owner,
+                    idempotency_key=idempotency_key,
+                )
+                if existing is None:
+                    await asyncio.to_thread(
+                        self.session_store.discard_unbound_attachments,
+                        session_id=resolved_session["session_id"],
+                        owner_id=resolved_owner,
+                        attachment_ids=staged_attachment_ids,
+                    )
+                    return web.json_response(
+                        {
+                            "ok": False,
+                            "error": str(exc),
+                            "error_code": "hchat_attachment_enqueue_failed",
+                        },
+                        status=503,
+                    )
+                request_id = str(existing["request_id"])
+            if not request_id:
+                existing = await asyncio.to_thread(
+                    self.session_store.find_run_by_idempotency,
+                    session_id=resolved_session["session_id"],
+                    owner_id=resolved_owner,
+                    idempotency_key=idempotency_key,
+                )
+                if existing is None:
+                    await asyncio.to_thread(
+                        self.session_store.discard_unbound_attachments,
+                        session_id=resolved_session["session_id"],
+                        owner_id=resolved_owner,
+                        attachment_ids=staged_attachment_ids,
+                    )
+                    return web.json_response(
+                        {"ok": False, "error": "attachment request was not accepted"},
+                        status=409,
+                    )
+                request_id = str(existing["request_id"])
+            response_payload = {"ok": True, "request_id": request_id}
+            try:
+                run = self.session_store.get_run_by_request(
+                    request_id,
+                    owner_id=resolved_owner,
+                    agent_id=agent_name,
+                )
+                response_payload.update(
+                    {
+                        "session_id": run["session_id"],
+                        "run_id": run["run_id"],
+                        "message_id": run["user_message_id"],
+                    }
+                )
+            except SessionNotFound:
+                pass
+            return web.json_response(response_payload)
         if isinstance(attachment_spec, Mapping) or workzone_ref:
             if isinstance(attachment_spec, Mapping) and workzone_ref:
                 return web.json_response(

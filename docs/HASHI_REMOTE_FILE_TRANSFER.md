@@ -56,11 +56,27 @@ Shared-token mode requires a sender identity:
 Capability rules:
 
 - plain `/protocol/message` chat does not require attachment support
-- attachment send requires the target peer to advertise `message_attachments_v1`
+- attachment send prefers `message_attachments_v2_streaming`
+- v2 streams 8 MiB chunks, accepts up to 10 regular files, and caps the complete
+  attachment set at 1 GiB
+- v2 has no extension or MIME allowlist: scripts, executables, and encrypted
+  archives travel as opaque bytes and are never automatically executed or unpacked
+- v2 requires shared-token HMAC even in LAN mode
+- `message_attachments_v1` remains a compatibility fallback with its original
+  smaller limits; an attachment attempt never falls back to text-only delivery
 - direct shared-token file transfer requires the target peer to advertise
   `file_transfer_hmac_v1`
 - the CLIs now probe live `/protocol/status` before HMAC file-transfer and
   attachment operations so stale peer metadata fails clearly
+
+HChat attachment delivery is transactional: all selected files are staged,
+hashed, streamed, committed, copied into the target Session attachment store,
+and admitted with the message as one request. Any failed file, commit, or local
+admission fails the complete delivery rather than exposing a partial message.
+The public HASHI Exchange path remains text-only.
+
+HASHI1 contains the source-qualified v2 implementation as of 2026-09-28. A
+running Worker does not adopt it until a separately authorized hot `/reboot`.
 
 Windows/LAN stability note:
 

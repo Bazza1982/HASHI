@@ -1958,6 +1958,9 @@ async def execute_frontend_send_attachments(
     import mimetypes
 
     from orchestrator.session_store import (
+        HCHAT_SESSION_ATTACHMENT_BYTES,
+        HCHAT_SESSION_ATTACHMENTS_PER_MESSAGE,
+        HCHAT_SESSION_ATTACHMENT_TOTAL_BYTES,
         MAX_SESSION_ATTACHMENT_BYTES,
         MAX_SESSION_ATTACHMENTS_PER_MESSAGE,
         MAX_SESSION_ATTACHMENT_TOTAL_BYTES,
@@ -1968,6 +1971,26 @@ async def execute_frontend_send_attachments(
     )
 
     context = dict(audit_context or {})
+    is_hchat_selection = (
+        str(context.get("request_source") or "").strip().casefold()
+        == "bridge:hchat-draft"
+    )
+    attachment_policy = "hchat" if is_hchat_selection else "standard"
+    max_attachment_count = (
+        HCHAT_SESSION_ATTACHMENTS_PER_MESSAGE
+        if is_hchat_selection
+        else MAX_SESSION_ATTACHMENTS_PER_MESSAGE
+    )
+    max_attachment_bytes = (
+        HCHAT_SESSION_ATTACHMENT_BYTES
+        if is_hchat_selection
+        else MAX_SESSION_ATTACHMENT_BYTES
+    )
+    max_total_bytes = (
+        HCHAT_SESSION_ATTACHMENT_TOTAL_BYTES
+        if is_hchat_selection
+        else MAX_SESSION_ATTACHMENT_TOTAL_BYTES
+    )
     surface = str(context.get("session_surface") or "").strip().casefold()
     # Connector surfaces are presentation hints, not eligibility gates. All
     # attachments bind to the same canonical Session message/group contract.
@@ -2016,7 +2039,7 @@ async def execute_frontend_send_attachments(
     raw_attachments = args.get("attachments")
     if not isinstance(raw_attachments, list) or not raw_attachments:
         return "Error: attachments must be a non-empty array"
-    if len(raw_attachments) > MAX_SESSION_ATTACHMENTS_PER_MESSAGE:
+    if len(raw_attachments) > max_attachment_count:
         return "Error: attachment count exceeds the current Session limit"
 
     prepared: list[dict[str, Any]] = []
@@ -2034,14 +2057,28 @@ async def execute_frontend_send_attachments(
             if not path.is_file():
                 raise ValueError(f"path is not a file: {path}")
             size_bytes = int(path.stat().st_size)
-            if size_bytes > MAX_SESSION_ATTACHMENT_BYTES:
+            if size_bytes > max_attachment_bytes:
                 raise ValueError(f"attachment exceeds the Session size limit: {path.name}")
             total_bytes += size_bytes
-            if total_bytes > MAX_SESSION_ATTACHMENT_TOTAL_BYTES:
+            if total_bytes > max_total_bytes:
                 raise ValueError("attachments exceed the Session total size limit")
-            payload = path.read_bytes()
-            if len(payload) != size_bytes:
-                raise SessionConflict(f"attachment changed while being read: {path.name}")
+            payload = None
+            digest = hashlib.sha256()
+            if is_hchat_selection:
+                def _hash_selected_file() -> str:
+                    selected_digest = hashlib.sha256()
+                    with path.open("rb") as handle:
+                        while chunk := handle.read(8 * 1024 * 1024):
+                            selected_digest.update(chunk)
+                    return selected_digest.hexdigest()
+
+                digest_hex = await asyncio.to_thread(_hash_selected_file)
+            else:
+                payload = path.read_bytes()
+                if len(payload) != size_bytes:
+                    raise SessionConflict(f"attachment changed while being read: {path.name}")
+                digest.update(payload)
+                digest_hex = digest.hexdigest()
             caption = str(raw.get("caption") or "").strip()
             if len(caption) > 4096:
                 raise ValueError("attachment caption exceeds 4096 characters")
@@ -2058,9 +2095,15 @@ async def execute_frontend_send_attachments(
                     "filename": path.name,
                     "caption": caption,
                     "media_type": media_type,
+                    "storage_media_type": (
+                        "application/octet-stream"
+                        if is_hchat_selection
+                        else media_type
+                    ),
                     "size_bytes": size_bytes,
-                    "sha256": hashlib.sha256(payload).hexdigest(),
+                    "sha256": digest_hex,
                     "payload": payload,
+                    "path": path,
                 }
             )
 
@@ -2120,25 +2163,35 @@ async def execute_frontend_send_attachments(
                 session_id=session_id,
                 owner_id=owner_id,
                 filename=item["filename"],
-                media_type=item["media_type"],
+                media_type=item["storage_media_type"],
                 size_bytes=item["size_bytes"],
                 sha256=item["sha256"],
                 semantic_role=(
                     "audio_attachment"
-                    if item["media_type"].startswith("audio/")
+                    if item["storage_media_type"].startswith("audio/")
                     else ""
                 ),
                 # A frontend-bound output is part of the durable assistant
                 # Message, not a temporary generated-audio preview.
-                retention_indefinite=item["media_type"].startswith("audio/"),
+                retention_indefinite=item["storage_media_type"].startswith("audio/"),
+                attachment_policy=attachment_policy,
             )
-            store.upload_attachment_bytes(
-                session_id=session_id,
-                owner_id=owner_id,
-                attachment_id=staged["attachment_id"],
-                payload=item["payload"],
-                audio_direction="output",
-            )
+            if is_hchat_selection:
+                await asyncio.to_thread(
+                    store.upload_attachment_file,
+                    session_id=session_id,
+                    owner_id=owner_id,
+                    attachment_id=staged["attachment_id"],
+                    source_path=item["path"],
+                )
+            else:
+                store.upload_attachment_bytes(
+                    session_id=session_id,
+                    owner_id=owner_id,
+                    attachment_id=staged["attachment_id"],
+                    payload=item["payload"],
+                    audio_direction="output",
+                )
             store.commit_attachment(
                 session_id=session_id,
                 owner_id=owner_id,
@@ -2158,6 +2211,7 @@ async def execute_frontend_send_attachments(
             idempotency_key=idempotency_key,
             request_digest=request_digest,
             attachments=bindings,
+            attachment_policy=attachment_policy,
         )
         return json.dumps(
             {

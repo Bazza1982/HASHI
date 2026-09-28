@@ -17,6 +17,7 @@ from adapters.her_v2 import (
     HERv2Adapter,
     _AdapterDelivery,
     _ExecutionStageCompactionProvider,
+    _HChatDraftToolProvider,
     _backend_response_error,
 )
 from adapters.ollama_api import OllamaAdapter
@@ -954,6 +955,30 @@ class _EffortPolicyProvider:
         )
 
 
+def test_hchat_draft_tool_provider_exposes_only_attachment_selection():
+    calls = []
+
+    class _CatalogueProvider:
+        def tool_catalogue(self, *, allow_side_effects, delegated_tools=None):
+            calls.append((allow_side_effects, delegated_tools))
+            return (
+                {"type": "function", "function": {"name": "shell"}},
+                {
+                    "type": "function",
+                    "function": {"name": "frontend_send_attachments"},
+                },
+            )
+
+    provider = _HChatDraftToolProvider(_CatalogueProvider())
+
+    catalogue = provider.tool_catalogue(allow_side_effects=True)
+
+    assert calls == [(True, ["frontend_send_attachments"])]
+    assert [item["function"]["name"] for item in catalogue] == [
+        "frontend_send_attachments"
+    ]
+
+
 class _StaticPersonaPackager:
     def __init__(self):
         self.commentaries = []
@@ -1236,14 +1261,22 @@ async def test_scheduler_preserves_selected_model_effort_and_instruction(
 
 
 @pytest.mark.parametrize(
-    ("source", "expected_tool_authority"),
-    [("bridge:hchat", True), ("bridge:hchat-draft", False)],
+    ("source", "expected_tool_authority", "expected_delegated_tools"),
+    [
+        ("bridge:hchat", True, None),
+        (
+            "bridge:hchat-draft",
+            True,
+            ["frontend_send_attachments"],
+        ),
+    ],
 )
 @pytest.mark.asyncio
 async def test_hchat_policy_uses_one_direct_call_without_early_delivery(
     tmp_path,
     source,
     expected_tool_authority,
+    expected_delegated_tools,
 ):
     provider = _EffortPolicyProvider()
     request_id = f"request-{source.replace(':', '-')}"
@@ -1277,6 +1310,8 @@ async def test_hchat_policy_uses_one_direct_call_without_early_delivery(
     assert [request.stage for _profile, request in provider.requests] == [Stage.DIRECT]
     assert provider.requests[0][1].allow_tools is expected_tool_authority
     assert provider.requests[0][1].allow_side_effects is expected_tool_authority
+    if expected_delegated_tools is not None:
+        assert provider.requests[0][1].context["delegated_tools"] == expected_delegated_tools
     assert response.stream_metadata["her_v2"]["effort"] == {
         "configured": "max",
         "effective": "max",

@@ -95,6 +95,7 @@ def _registry(
     session,
     *,
     surface="generic-desktop",
+    request_source="session-api",
     access_root=None,
     workspace_dir=None,
 ):
@@ -106,6 +107,7 @@ def _registry(
         audit_context={
             "agent_name": "agent1",
             "request_id": "request-frontend-output",
+            "request_source": request_source,
             "hashi_session_id": session["session_id"],
             "owner_id": owner,
             "session_surface": surface,
@@ -116,6 +118,56 @@ def _registry(
             },
         },
     )
+
+
+@pytest.mark.asyncio
+async def test_hchat_attachment_selection_uses_hchat_limits_and_streaming_file_copy(
+    tmp_path, monkeypatch
+):
+    from orchestrator import session_store as session_store_module
+
+    store, owner, session, _accepted = _running_session(tmp_path)
+    target = tmp_path / "bundle.enc"
+    target.write_bytes(b"0123456789ab")
+    monkeypatch.setattr(session_store_module, "MAX_SESSION_ATTACHMENT_BYTES", 8)
+    monkeypatch.setattr(session_store_module, "MAX_SESSION_ATTACHMENT_TOTAL_BYTES", 8)
+    monkeypatch.setattr(session_store_module, "HCHAT_SESSION_ATTACHMENT_BYTES", 32)
+    monkeypatch.setattr(session_store_module, "HCHAT_SESSION_ATTACHMENT_TOTAL_BYTES", 32)
+    monkeypatch.setattr(
+        SessionStore,
+        "upload_attachment_bytes",
+        lambda *args, **kwargs: pytest.fail("HChat attachment was buffered in memory"),
+    )
+
+    standard = _registry(tmp_path, store, owner, session)
+    rejected = await standard.execute(
+        "frontend_send_attachments",
+        {"attachments": [{"path": str(target)}]},
+        tool_call_id="standard-limit",
+    )
+    assert rejected.is_error is True
+
+    hchat = _registry(
+        tmp_path,
+        store,
+        owner,
+        session,
+        request_source="bridge:hchat-draft",
+    )
+    selected = await hchat.execute(
+        "frontend_send_attachments",
+        {"attachments": [{"path": str(target)}]},
+        tool_call_id="hchat-stream-selection",
+    )
+
+    assert selected.is_error is False, selected.output
+    published = json.loads(selected.output)
+    assert published["attachment_count"] == 1
+    [part] = store.run_output_attachment_content(
+        "request-frontend-output", owner_id=owner, agent_id="agent1"
+    )
+    assert part["filename"] == "bundle.enc"
+    assert part["local_ref"]
 
 
 def test_frontend_attachment_tool_is_standard_multi_attachment_contract():

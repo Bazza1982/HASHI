@@ -24,6 +24,11 @@ from orchestrator.audio_assets import (
     AudioAssetStore,
     normalize_audio_format,
 )
+from orchestrator.hchat_attachment_contract import (
+    HCHAT_MAX_ATTACHMENT_BYTES,
+    HCHAT_MAX_ATTACHMENTS_PER_MESSAGE,
+    HCHAT_MAX_TOTAL_ATTACHMENT_BYTES,
+)
 from orchestrator.multimodal_contract import (
     contains_persistent_inline_media,
     modality_for_attachment,
@@ -52,6 +57,26 @@ SESSION_KINDS = frozenset(
 MAX_SESSION_ATTACHMENTS_PER_MESSAGE = 16
 MAX_SESSION_ATTACHMENT_BYTES = 64 * 1024 * 1024
 MAX_SESSION_ATTACHMENT_TOTAL_BYTES = 64 * 1024 * 1024
+HCHAT_SESSION_ATTACHMENTS_PER_MESSAGE = HCHAT_MAX_ATTACHMENTS_PER_MESSAGE
+HCHAT_SESSION_ATTACHMENT_BYTES = HCHAT_MAX_ATTACHMENT_BYTES
+HCHAT_SESSION_ATTACHMENT_TOTAL_BYTES = HCHAT_MAX_TOTAL_ATTACHMENT_BYTES
+
+
+def _attachment_policy_limits(policy: str) -> tuple[int, int, int]:
+    normalized = str(policy or "standard").strip().casefold()
+    if normalized == "standard":
+        return (
+            MAX_SESSION_ATTACHMENTS_PER_MESSAGE,
+            MAX_SESSION_ATTACHMENT_BYTES,
+            MAX_SESSION_ATTACHMENT_TOTAL_BYTES,
+        )
+    if normalized == "hchat":
+        return (
+            HCHAT_SESSION_ATTACHMENTS_PER_MESSAGE,
+            HCHAT_SESSION_ATTACHMENT_BYTES,
+            HCHAT_SESSION_ATTACHMENT_TOTAL_BYTES,
+        )
+    raise ValueError("unknown attachment policy")
 
 
 def _utc_now() -> str:
@@ -3426,6 +3451,7 @@ class SessionStore:
         retention_indefinite: bool = False,
         upload_required: bool | None = None,
         idempotency_key: str | None = None,
+        attachment_policy: str = "standard",
     ) -> dict[str, Any]:
         self.get_session(session_id, owner_id=owner_id, include_deleted=False)
         digest = str(sha256).lower()
@@ -3439,7 +3465,10 @@ class SessionStore:
         declared_size = int(size_bytes)
         if declared_size < 0:
             raise ValueError("attachment size must be non-negative")
-        if declared_size > MAX_SESSION_ATTACHMENT_BYTES:
+        _max_count, max_attachment_bytes, _max_total = _attachment_policy_limits(
+            attachment_policy
+        )
+        if declared_size > max_attachment_bytes:
             raise ValueError("attachment exceeds the configured size limit")
         is_audio = normalized_media_type.startswith("audio/")
         normalized_role = str(semantic_role or "").strip().casefold()
@@ -3482,6 +3511,9 @@ class SessionStore:
                     "retention_seconds": normalized_retention,
                     "retention_indefinite": normalized_retention_indefinite,
                     "upload_required": bool(requires_upload),
+                    "attachment_policy": str(attachment_policy or "standard")
+                    .strip()
+                    .casefold(),
                 },
                 ensure_ascii=False,
                 sort_keys=True,
@@ -3720,6 +3752,86 @@ class SessionStore:
             ).fetchone()
         return dict(updated)
 
+    def upload_attachment_file(
+        self,
+        *,
+        session_id: str,
+        owner_id: str,
+        attachment_id: str,
+        source_path: Path | str,
+    ) -> dict[str, Any]:
+        """Atomically copy one staged non-audio attachment without whole buffering."""
+
+        source = Path(source_path)
+        if source.is_symlink():
+            raise ValueError("attachment symlinks are not supported")
+        try:
+            source_size = source.stat().st_size
+        except OSError as exc:
+            raise SessionConflict("attachment source is unavailable") from exc
+        if not source.is_file():
+            raise ValueError("attachment source must be a regular file")
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """SELECT * FROM session_attachments
+                   WHERE attachment_id=? AND session_id=? AND owner_id=?""",
+                (str(attachment_id), str(session_id), str(owner_id)),
+            ).fetchone()
+        if row is None:
+            raise SessionNotFound("attachment not found")
+        attachment = dict(row)
+        if str(attachment["state"]) not in {"staged", "committed"}:
+            raise SessionConflict("attachment is no longer available for upload")
+        if str(attachment["media_type"]).casefold().startswith("audio/"):
+            raise ValueError("streaming Session upload requires file-backed media")
+        existing_asset = str(attachment.get("asset_id") or "")
+        if existing_asset:
+            self._validated_attachment_file(attachment)
+            return attachment
+        if attachment["state"] != "staged":
+            raise SessionConflict("only staged attachments can be uploaded")
+        if source_size != int(attachment["size_bytes"]):
+            raise SessionConflict("attachment size does not match staged metadata")
+
+        target = self._attachment_file_path(
+            str(attachment_id), str(attachment["filename"])
+        )
+        partial = target.with_suffix(f"{target.suffix}.{uuid4().hex}.partial")
+        digest = hashlib.sha256()
+        observed_size = 0
+        try:
+            with source.open("rb") as input_handle, partial.open("xb") as output_handle:
+                while chunk := input_handle.read(8 * 1024 * 1024):
+                    observed_size += len(chunk)
+                    digest.update(chunk)
+                    output_handle.write(chunk)
+                output_handle.flush()
+            if observed_size != int(attachment["size_bytes"]):
+                raise SessionConflict("attachment changed while being copied")
+            if digest.hexdigest() != str(attachment["sha256"]):
+                raise SessionConflict("attachment digest does not match staged metadata")
+            try:
+                os.chmod(partial, 0o600)
+            except OSError:
+                pass
+            partial.replace(target)
+        except Exception:
+            partial.unlink(missing_ok=True)
+            raise
+
+        now = _utc_now()
+        with self._lock, self._connection() as connection:
+            connection.execute(
+                """UPDATE session_attachments SET asset_id=?, uploaded_at=?
+                   WHERE attachment_id=? AND state='staged'""",
+                (str(attachment_id), now, str(attachment_id)),
+            )
+            updated = connection.execute(
+                "SELECT * FROM session_attachments WHERE attachment_id=?",
+                (str(attachment_id),),
+            ).fetchone()
+        return dict(updated)
+
     def commit_attachment(
         self, *, session_id: str, owner_id: str, attachment_id: str
     ) -> dict[str, Any]:
@@ -3760,6 +3872,84 @@ class SessionStore:
         result["retention_indefinite"] = bool(result["retention_indefinite"])
         result["upload_required"] = bool(result["upload_required"])
         return result
+
+    def discard_unbound_attachments(
+        self,
+        *,
+        session_id: str,
+        owner_id: str,
+        attachment_ids: Iterable[str],
+    ) -> list[str]:
+        """Remove a failed intake batch only while none of it is message-bound."""
+
+        normalized_ids = list(
+            dict.fromkeys(
+                self._safe_attachment_id(item)
+                for item in attachment_ids
+                if str(item or "").strip()
+            )
+        )
+        if not normalized_ids:
+            return []
+        rows: list[dict[str, Any]] = []
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for attachment_id in normalized_ids:
+                row = connection.execute(
+                    """SELECT * FROM session_attachments
+                       WHERE attachment_id=? AND session_id=? AND owner_id=?""",
+                    (attachment_id, str(session_id), str(owner_id)),
+                ).fetchone()
+                if row is None:
+                    continue
+                reference_pattern = '%"attachment_id":"' + attachment_id + '"%'
+                bound = any(
+                    connection.execute(query, parameters).fetchone() is not None
+                    for query, parameters in (
+                        (
+                            "SELECT 1 FROM messages WHERE session_id=? "
+                            "AND content_json LIKE ? LIMIT 1",
+                            (str(session_id), reference_pattern),
+                        ),
+                        (
+                            "SELECT 1 FROM run_audio_assets WHERE attachment_id=? LIMIT 1",
+                            (attachment_id,),
+                        ),
+                        (
+                            "SELECT 1 FROM run_output_attachments WHERE attachment_id=? LIMIT 1",
+                            (attachment_id,),
+                        ),
+                        (
+                            "SELECT 1 FROM voice_transcripts WHERE attachment_id=? LIMIT 1",
+                            (attachment_id,),
+                        ),
+                    )
+                )
+                if bound:
+                    raise SessionConflict(
+                        "message-bound attachments cannot be discarded"
+                    )
+                rows.append(dict(row))
+            for row in rows:
+                connection.execute(
+                    "DELETE FROM attachment_stage_idempotency WHERE attachment_id=?",
+                    (str(row["attachment_id"]),),
+                )
+                connection.execute(
+                    "DELETE FROM session_attachments WHERE attachment_id=?",
+                    (str(row["attachment_id"]),),
+                )
+        for row in rows:
+            if str(row.get("asset_id") or "") and not str(
+                row.get("media_type") or ""
+            ).casefold().startswith("audio/"):
+                try:
+                    self._attachment_file_path(
+                        str(row["attachment_id"]), str(row["filename"])
+                    ).unlink(missing_ok=True)
+                except OSError:
+                    pass
+        return [str(row["attachment_id"]) for row in rows]
 
     def attachment_bytes(
         self, *, session_id: str, owner_id: str, attachment_id: str
@@ -3996,6 +4186,7 @@ class SessionStore:
         idempotency_key: str,
         request_digest: str,
         attachments: Iterable[Mapping[str, Any]],
+        attachment_policy: str = "standard",
     ) -> dict[str, Any]:
         key = str(idempotency_key or "").strip()
         if not key or len(key) > 512:
@@ -4023,7 +4214,10 @@ class SessionStore:
                     "detail": detail,
                 }
             )
-        if not bindings or len(bindings) > MAX_SESSION_ATTACHMENTS_PER_MESSAGE:
+        max_count, _max_attachment_bytes, max_total_bytes = _attachment_policy_limits(
+            attachment_policy
+        )
+        if not bindings or len(bindings) > max_count:
             raise ValueError("frontend attachment binding count is invalid")
 
         now = _utc_now()
@@ -4080,7 +4274,7 @@ class SessionStore:
                 attachment_count = int(totals["attachment_count"])
                 total_bytes = int(totals["total_bytes"])
                 last_index = int(totals["last_index"])
-                if attachment_count + len(bindings) > MAX_SESSION_ATTACHMENTS_PER_MESSAGE:
+                if attachment_count + len(bindings) > max_count:
                     raise SessionConflict(
                         "assistant reply exceeds the configured attachment count limit"
                     )
@@ -4103,7 +4297,7 @@ class SessionStore:
                             "frontend attachment is unavailable or not committed"
                         )
                     total_bytes += int(attachment["size_bytes"])
-                    if total_bytes > MAX_SESSION_ATTACHMENT_TOTAL_BYTES:
+                    if total_bytes > max_total_bytes:
                         raise SessionConflict(
                             "assistant reply exceeds the configured attachment size limit"
                         )

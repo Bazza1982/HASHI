@@ -1,8 +1,41 @@
 # HASHI Remote File Transfer and Message Attachments Plan
 
-Status: planned  
+Status: v1 implemented; streaming v2 source-qualified on HASHI1 (live adoption pending)
 Scope: Hashi Remote cross-instance transport  
-Last updated: 2026-05-14
+Last updated: 2026-09-28
+
+## Approved streaming v2 decision (2026-09-28)
+
+This decision supersedes the earlier conservative message-attachment limits and
+the earlier assumption that `/hchat` would remain text-only:
+
+- `/hchat agent@instance message` keeps its existing user syntax.
+- The HChat draft Turn may select an exact attachment set through
+  `frontend_send_attachments`; routing, capability discovery, upload, and commit
+  remain deterministic runtime work.
+- `message_attachments_v2_streaming` transfers ordinary regular files in 8 MiB
+  chunks. It allows up to 10 files and 1 GiB aggregate per message, with no
+  extension or MIME allowlist. Scripts, executables, and encrypted archives are
+  transported as opaque bytes and are never automatically executed or extracted.
+- Streaming v2 requires shared-token HMAC even when LAN mode is enabled. HMAC
+  authenticates and integrity-protects the exchange; plain HTTP does not add
+  confidentiality, so private LAN deployment or TLS remains responsible for
+  transport secrecy.
+- The receiver verifies count, aggregate size, every declared size and digest,
+  the signed local manifest, and the managed inbox path before binding all files
+  to one canonical Session request.
+- Delivery is all-or-none. Upload failure cancels the batch; commit or local
+  admission failure removes the committed inbox; no text-only fallback occurs
+  after an attachment attempt starts.
+- `message_attachments_v1` remains available for upgraded-to-legacy peer
+  compatibility with its original 4-file/32 MiB aggregate limits. Ordinary text
+  protocol messaging remains unchanged.
+- Public HASHI Exchange remains text-only for now. It is not an attachment
+  downgrade route.
+
+Implementation and tests are present in HASHI1 source. This record does not
+claim that the running Worker adopted the source; that requires a separately
+authorized hot `/reboot`.
 
 ## Why this plan exists
 
@@ -282,7 +315,7 @@ Keep current large-transfer path:
 
 This remains suitable for release bundles, EXP packs, and artifact movement.
 
-### Message attachments
+### Message attachments (historical v1 defaults)
 
 Recommended default limits:
 
@@ -297,6 +330,9 @@ Why:
 - keeps end-to-end latency reasonable for interactive agent messaging
 
 These limits can be config-driven later if needed.
+
+Streaming v2 uses the approved 2026-09-28 limits recorded above. The legacy v1
+limits remain intact for mixed-version compatibility.
 
 ## Transaction semantics
 
@@ -364,6 +400,11 @@ Plain chat compatibility rule:
 - attachment send should fail closed or explicitly downgrade only when the caller
   opts in
 
+Streaming v2 adds the independent capability
+`message_attachments_v2_streaming`. A sender prefers v2, falls back to v1 only
+when the peer advertises v1 (or an older peer cannot publish status), and never
+downgrades an attachment message to plain text.
+
 ## Security model
 
 ### For file transfer endpoints
@@ -428,23 +469,12 @@ Nice-to-have later:
 - shared-token HMAC file transfer
 - combined message+attachment delivery when both peers advertise capability
 
-### Legacy `/hchat`
+### `/hchat` integration
 
-This plan does not require changing `/hchat` in Phase 1 or Phase 2.
-
-However, there is a related decision:
-
-- either teach `/hchat` to accept shared-token HMAC too
-- or keep it bearer/LAN-only and clearly document it as a legacy compatibility
-  surface rather than a primary trusted inter-instance path
-
-Recommendation:
-
-- treat `/hchat` as legacy and prefer protocol-owned messaging
-- only extend `/hchat` auth if a concrete compatibility need remains
-- do not change current `/hchat` behavior as part of the file-transfer fix
-- do not require `/hchat` changes for plain chat interoperability with current
-  HASHI Remote versions
+Single-target `/hchat` is now a runtime-owned composition and delivery flow. Its
+wire path remains protocol-owned, and attachment transport is selected only when
+the draft Turn binds files. Group/all broadcast and public Exchange remain on
+their existing text paths.
 
 ### Plain chat compatibility with current peers
 
@@ -508,13 +538,12 @@ spool.
 
 Expose attachment metadata in runtime and Backend API surfaces.
 
-## Open questions
+## Remaining questions
 
 1. Should attachment files be kept permanently or cleaned after a retention period?
-2. Should attachments be allowed for all agent-to-agent messages or only explicit
-   tool-driven operations?
-3. Do we want resumable/chunked transfers later for files larger than `256 MiB`?
-4. Should `/hchat` remain legacy-only or be pulled into the shared-token trust model?
+2. Should group/all HChat ever gain atomic attachment fan-out?
+3. Do we want resumable chunk retry for interrupted v2 transfers?
+4. When should public HASHI Exchange gain a separately designed attachment path?
 5. Should retries permit overwrite of prior pending attachment ids, or always
    write a new spool path?
 6. Should file endpoints use a wider HMAC timestamp window than protocol

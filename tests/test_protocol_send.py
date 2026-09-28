@@ -431,6 +431,78 @@ def test_send_protocol_message_uploads_attachments_then_commits(monkeypatch, tmp
     assert "attachments: 1" in capsys.readouterr().out
 
 
+def test_send_protocol_message_streams_v2_chunks_before_atomic_commit(
+    monkeypatch, tmp_path, capsys
+):
+    attachment = tmp_path / "archive.bin"
+    attachment.write_bytes(b"0123456789abcdefghij")
+    captured: list[dict] = []
+
+    def fake_urlopen(req, timeout=0):
+        raw = req.data or b""
+        captured.append(
+            {
+                "url": req.full_url,
+                "headers": dict(req.header_items()),
+                "raw": raw,
+                "timeout": timeout,
+            }
+        )
+        if req.full_url.endswith("/attachments/v2/begin"):
+            return _FakeResponse(
+                {
+                    "ok": True,
+                    "attachment": {"pending_upload_id": "pu-stream-1"},
+                }
+            )
+        if "/attachments/v2/chunk/pu-stream-1?offset=" in req.full_url:
+            return _FakeResponse({"ok": True, "received_bytes": len(raw)})
+        if req.full_url.endswith("/attachments/v2/finish"):
+            return _FakeResponse({"ok": True, "attachment": {"complete": True}})
+        if req.full_url.endswith("/protocol/message-with-attachments"):
+            return _FakeResponse({"ok": True, "state": "delivered_to_local_queue"})
+        raise AssertionError(f"unexpected request url: {req.full_url}")
+
+    monkeypatch.setattr(protocol_send.urllib_request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(protocol_send, "STREAM_ATTACHMENT_CHUNK_BYTES", 7)
+    monkeypatch.setattr(protocol_send, "_load_config", lambda: {"global": {"instance_id": "HASHI1"}})
+    monkeypatch.setattr(protocol_send, "_load_instances", lambda: {})
+    monkeypatch.setattr(
+        protocol_send,
+        "_find_remote_instance",
+        lambda *args, **kwargs: {"remote_host": "10.0.0.9", "remote_port": 8766},
+    )
+    monkeypatch.setattr(protocol_send, "_probe_remote_http", lambda host, port: True)
+    monkeypatch.setattr(
+        protocol_send,
+        "fetch_remote_protocol_capabilities",
+        lambda base_url, timeout=5: ({"message_attachments_v2_streaming"}, None),
+    )
+
+    ok = protocol_send.send_protocol_message(
+        "lily@HASHI9",
+        "zelda",
+        "stream this",
+        attachments=[attachment],
+        shared_token="shared-secret",
+    )
+
+    assert ok is True
+    assert [item["url"] for item in captured] == [
+        "http://10.0.0.9:8766/attachments/v2/begin",
+        "http://10.0.0.9:8766/attachments/v2/chunk/pu-stream-1?offset=0",
+        "http://10.0.0.9:8766/attachments/v2/chunk/pu-stream-1?offset=7",
+        "http://10.0.0.9:8766/attachments/v2/chunk/pu-stream-1?offset=14",
+        "http://10.0.0.9:8766/attachments/v2/finish",
+        "http://10.0.0.9:8766/protocol/message-with-attachments",
+    ]
+    chunks = captured[1:4]
+    assert b"".join(item["raw"] for item in chunks) == attachment.read_bytes()
+    assert all(len(item["raw"]) <= 7 for item in chunks)
+    assert all(item["headers"]["X-hashi-auth-scheme"] == AUTH_SCHEME for item in chunks)
+    assert "attachments: 1" in capsys.readouterr().out
+
+
 def test_send_protocol_message_cancels_staged_uploads_after_partial_failure(monkeypatch, tmp_path):
     first = tmp_path / "one.txt"
     second = tmp_path / "two.txt"
