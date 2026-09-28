@@ -14,7 +14,7 @@ from orchestrator.chat_transcript_projection import (
 )
 from orchestrator.her_message_router import HERMessageRouter
 from orchestrator.request_activity import RequestActivityStore
-from orchestrator.session_store import SessionStore
+from orchestrator.session_store import IdempotencyConflict, SessionStore
 from orchestrator.workbench_api import WorkbenchApiServer
 
 
@@ -89,6 +89,70 @@ async def test_transcript_identity_and_recovery_are_bound_to_current_session(tmp
     assert payload["requests"][0]["request_id"] == accepted.request_id
     assert payload["requests"][0]["session_id"] == session["session_id"]
     assert "text" not in payload["requests"][0]
+
+
+def test_display_projection_uses_explicit_value_and_never_filters_canonical_text(
+    tmp_path: Path,
+):
+    store = SessionStore(tmp_path / "display.sqlite", instance_id="HASHI1")
+    session = store.ensure_default_session(owner_id="user:7", agent_id="a")
+    canonical_text = (
+        "[WORKBENCH_LOCAL_PATH_DIRECTIONS]\n"
+        '{"schema_version":1,"arbitrary_user_json":true}\n'
+        "[/WORKBENCH_LOCAL_PATH_DIRECTIONS]\n"
+        "visible request"
+    )
+    projected = store.accept_run(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        agent_id="a",
+        request_id="display-request",
+        text=canonical_text,
+        display_text="visible request",
+        source="workbench",
+        idempotency_key="display-request",
+    )
+    literal = store.accept_run(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        agent_id="a",
+        request_id="literal-request",
+        text=canonical_text,
+        source="workbench",
+        idempotency_key="literal-request",
+    )
+    empty = store.accept_run(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        agent_id="a",
+        request_id="empty-display-request",
+        text=canonical_text,
+        display_text="",
+        source="workbench",
+        idempotency_key="empty-display-request",
+    )
+
+    rows = build_chat_projection(
+        store,
+        session=session,
+        owner_id="user:7",
+    )["messages"]
+    by_id = {row["message_id"]: row for row in rows}
+
+    assert by_id[projected.message_id]["text"] == "visible request"
+    assert by_id[literal.message_id]["text"] == canonical_text
+    assert by_id[empty.message_id].get("text", "") == ""
+    with pytest.raises(IdempotencyConflict):
+        store.accept_run(
+            session_id=session["session_id"],
+            owner_id="user:7",
+            agent_id="a",
+            request_id="different-request-id",
+            text=canonical_text,
+            display_text="different projection",
+            source="workbench",
+            idempotency_key="display-request",
+        )
 
 
 @pytest.mark.asyncio

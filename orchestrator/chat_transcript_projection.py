@@ -162,15 +162,26 @@ def _canonical_projection_row(
         else None
     )
     attachments = _project_message_attachments(store, message, owner_id=owner_id)
-    text = str(message.get("text") or "")
-    if attachments and str(message.get("source") or "").strip().casefold() in {
-        "photo",
-        "document",
-        "video",
-        "sticker",
-        "multimodal",
-        "workbench_ui_chat",
-    }:
+    has_display_text = message.get("display_text") is not None
+    text = (
+        str(message["display_text"])
+        if has_display_text
+        else str(message.get("text") or "")
+    )
+    projection_source = str(message.get("source") or "").strip().casefold()
+    if (
+        not has_display_text
+        and attachments
+        and projection_source
+        in {
+            "photo",
+            "document",
+            "video",
+            "sticker",
+            "multimodal",
+            "workbench_ui_chat",
+        }
+    ):
         captions = [str(item.get("caption") or "").strip() for item in attachments]
         names = [str(item.get("filename") or "").strip() for item in attachments]
         text = next((value for value in captions if value), "") or ", ".join(

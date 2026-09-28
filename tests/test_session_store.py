@@ -58,6 +58,41 @@ def test_schema_12_sessions_migrate_to_conversations_and_hide_activity(tmp_path)
     }
 
 
+def test_schema_13_messages_gain_nullable_display_projection(tmp_path):
+    store = _store(tmp_path)
+    session = store.ensure_default_session(owner_id="user:7", agent_id="lily")
+    accepted = store.accept_run(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        agent_id="lily",
+        request_id="before-display-projection",
+        text="original text",
+        source="workbench",
+        idempotency_key="before-display-projection",
+    )
+    db_path = store.db_path
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("ALTER TABLE messages DROP COLUMN display_text")
+        connection.execute(
+            "UPDATE schema_metadata SET value='13' WHERE key='schema_version'"
+        )
+
+    migrated = _store(tmp_path)
+    message = next(
+        item
+        for item in migrated.messages(session["session_id"], owner_id="user:7")
+        if item["message_id"] == accepted.message_id
+    )
+    with sqlite3.connect(db_path) as connection:
+        schema_version = connection.execute(
+            "SELECT value FROM schema_metadata WHERE key='schema_version'"
+        ).fetchone()[0]
+
+    assert schema_version == str(SessionStore.SCHEMA_VERSION)
+    assert message["text"] == "original text"
+    assert message["display_text"] is None
+
+
 def test_agent_workzones_are_independent_of_legacy_session_rows(tmp_path):
     store = _store(tmp_path)
     session = store.ensure_default_session(owner_id="user:7", agent_id="lily")

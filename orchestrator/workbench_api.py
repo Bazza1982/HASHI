@@ -148,6 +148,7 @@ from orchestrator.session_store import (
     MAX_SESSION_ATTACHMENT_BYTES,
     MAX_SESSION_ATTACHMENTS_PER_MESSAGE,
     MAX_SESSION_ATTACHMENT_TOTAL_BYTES,
+    MAX_SESSION_MESSAGE_CHARS,
     TERMINAL_RUN_STATES,
     IdempotencyConflict,
     SessionConflict,
@@ -5431,9 +5432,9 @@ class WorkbenchApiServer:
                         "agent_deletion",
                     ],
                     "event_delivery": "cursor-polling-at-least-once",
-                    "max_message_chars": 200000,
+                    "max_message_chars": MAX_SESSION_MESSAGE_CHARS,
                     "limits": {
-                        "max_message_chars": 200000,
+                        "max_message_chars": MAX_SESSION_MESSAGE_CHARS,
                         "max_attachments_per_message": MAX_SESSION_ATTACHMENTS_PER_MESSAGE,
                         "max_attachment_bytes": MAX_SESSION_ATTACHMENT_BYTES,
                         "max_total_attachment_bytes_per_message": MAX_SESSION_ATTACHMENT_TOTAL_BYTES,
@@ -5449,10 +5450,17 @@ class WorkbenchApiServer:
                         },
                     },
                     "frontend_connector": {
-                        "version": "1.1",
+                        "version": "1.2",
                         "event_source": "persistent_session_events",
                         "contract_versions": frontend_contract_versions,
                         "message_content_schema_version": "1.2",
+                        "message_display_projection": {
+                            "version": "1.0",
+                            "field": "message.display_text",
+                            "canonical_input": "message.content",
+                            "binding": "server-message-id",
+                            "fallback": "canonical-text",
+                        },
                         "multi_attachment": True,
                         "assistant_multi_attachment": True,
                         "assistant_attachment_delivery": "terminal-message-projection",
@@ -5989,6 +5997,15 @@ class WorkbenchApiServer:
             content = message.get("content") if isinstance(message, dict) else None
             if not isinstance(content, list):
                 raise ValueError("message.content must be a list")
+            display_text = None
+            if "display_text" in message:
+                display_text = message["display_text"]
+                if not isinstance(display_text, str):
+                    raise ValueError("message.display_text must be a string")
+                if len(display_text) > MAX_SESSION_MESSAGE_CHARS:
+                    raise ValueError(
+                        "message.display_text exceeds the configured message limit"
+                    )
             text_blocks = [
                 str(block.get("text") or "")
                 for block in content
@@ -6185,6 +6202,7 @@ class WorkbenchApiServer:
                         "execution_mode": payload.get("execution_mode"),
                         "parent_run_id": payload.get("parent_run_id"),
                         "session_message_text": text,
+                        "session_message_display_text": display_text,
                         "session_message_content": content,
                         "session_context_generation": payload.get(
                             "session_context_generation"

@@ -130,6 +130,7 @@ class _Runtime:
             text=str(request_metadata.get("session_message_text", prompt)),
             source=source,
             idempotency_key=idempotency_key,
+            display_text=request_metadata.get("session_message_display_text"),
             content=request_metadata.get("session_message_content"),
             response_preferences=request_metadata.get("response_preferences"),
         )
@@ -513,7 +514,14 @@ async def test_frontend_connector_admits_ordered_multi_attachment_as_one_run(
 
     capabilities = json.loads((await server.handle_v1_capabilities(_Request())).text)
     connector = capabilities["frontend_connector"]
-    assert connector["version"] == "1.1"
+    assert connector["version"] == "1.2"
+    assert connector["message_display_projection"] == {
+        "version": "1.0",
+        "field": "message.display_text",
+        "canonical_input": "message.content",
+        "binding": "server-message-id",
+        "fallback": "canonical-text",
+    }
     assert connector["multi_attachment"] is True
     assert connector["assistant_multi_attachment"] is True
     assert connector["assistant_attachment_delivery"] == "terminal-message-projection"
@@ -1537,6 +1545,72 @@ def test_workbench_service_refresh_preserves_runs_owned_by_live_workers(tmp_path
     run = refreshed.session_store.get_run(accepted.run_id, owner_id="user:7")
     assert run["state"] == "running"
     assert refreshed.reconciled_session_runs == []
+
+
+@pytest.mark.asyncio
+async def test_session_api_keeps_agent_text_and_persists_identity_bound_display_text(
+    tmp_path,
+):
+    from orchestrator.chat_transcript_projection import build_chat_projection
+    from orchestrator.session_store import SessionStore
+
+    server, runtime = _server(tmp_path)
+    created_response = await server.handle_v1_sessions_create(
+        _Request({"agent_id": "lily", "title": "Display projection"})
+    )
+    session_id = json.loads(created_response.text)["session"]["session_id"]
+    canonical_text = (
+        "[WORKBENCH_LOCAL_PATH_DIRECTIONS]\n"
+        '{"schema_version":1,"path":"C:\\\\Users\\\\example.txt"}\n'
+        "[/WORKBENCH_LOCAL_PATH_DIRECTIONS]\n"
+        "Please inspect the selected file."
+    )
+    display_text = "Please inspect the selected file."
+
+    response = await server.handle_v1_session_runs_create(
+        _Request(
+            {
+                "idempotency_key": "display-projection-one",
+                "surface": "workbench",
+                "message": {
+                    "content": [{"type": "text", "text": canonical_text}],
+                    "display_text": display_text,
+                },
+            },
+            match_info={"session_id": session_id},
+            headers={"X-Client-Id": "workbench-window"},
+        )
+    )
+    accepted = json.loads(response.text)
+
+    assert response.status == 202
+    assert runtime.last_request_metadata["session_message_text"] == canonical_text
+    assert runtime.last_request_metadata["session_message_display_text"] == display_text
+    assert runtime.last_request_content["parts"][0]["text"] == canonical_text
+
+    messages_response = await server.handle_v1_session_messages(
+        _Request(match_info={"session_id": session_id})
+    )
+    messages = json.loads(messages_response.text)["messages"]
+    stored = next(
+        item for item in messages if item["message_id"] == accepted["message_id"]
+    )
+    assert stored["text"] == canonical_text
+    assert stored["display_text"] == display_text
+
+    reopened = SessionStore(server.session_store.db_path, instance_id="HASHI1")
+    session = reopened.get_session(session_id, owner_id="user:7")
+    projection = build_chat_projection(
+        reopened,
+        session=session,
+        owner_id="user:7",
+    )
+    projected = next(
+        item
+        for item in projection["messages"]
+        if item["message_id"] == accepted["message_id"]
+    )
+    assert projected["text"] == display_text
 
 
 @pytest.mark.asyncio

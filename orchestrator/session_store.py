@@ -47,6 +47,7 @@ CONVERSATION_CONTINUITY_VERSION = 1
 CONVERSATION_HISTORY_MODES = frozenset({"move", "copy", "inherit_read_only"})
 MAX_CONTINUITY_SESSIONS = 500
 MAX_CONTINUITY_MESSAGES = 100_000
+MAX_SESSION_MESSAGE_CHARS = 200_000
 PRIMARY_CONVERSATION_SURFACE = "conversation"
 PRIMARY_CONVERSATION_CHANNEL = "main"
 SESSION_KIND_CONVERSATION = "conversation"
@@ -264,6 +265,14 @@ def validate_conversation_continuity_capsule(
             if origin_ref in seen_origins:
                 raise SessionConflict("conversation continuity message is duplicated")
             seen_origins.add(origin_ref)
+            display_text = item.get("display_text")
+            if display_text is not None and (
+                not isinstance(display_text, str)
+                or len(display_text) > MAX_SESSION_MESSAGE_CHARS
+            ):
+                raise SessionConflict(
+                    "conversation continuity display text is invalid"
+                )
             item.update(
                 {
                     "role": role,
@@ -277,6 +286,7 @@ def validate_conversation_continuity_capsule(
                     "source_created_at": source_created_at,
                     "source_ordinal": source_ordinal,
                     "text": str(item.get("text") or ""),
+                    "display_text": display_text,
                     "source": str(item.get("source") or "unknown"),
                 }
             )
@@ -353,7 +363,7 @@ class SessionStore:
     per-Session working files are derived state used by Memory+ and Compact.
     """
 
-    SCHEMA_VERSION = 13
+    SCHEMA_VERSION = 14
 
     def __init__(
         self,
@@ -546,6 +556,7 @@ class SessionStore:
                     message_context_json TEXT NOT NULL DEFAULT '{}',
                     content_json TEXT NOT NULL,
                     text TEXT NOT NULL,
+                    display_text TEXT,
                     visibility TEXT NOT NULL DEFAULT 'visible',
                     history_eligible INTEGER NOT NULL DEFAULT 1,
                     content_hash TEXT NOT NULL,
@@ -1064,6 +1075,10 @@ class SessionStore:
                 connection.execute(
                     "ALTER TABLE messages ADD COLUMN "
                     "message_context_json TEXT NOT NULL DEFAULT '{}'"
+                )
+            if "display_text" not in message_columns:
+                connection.execute(
+                    "ALTER TABLE messages ADD COLUMN display_text TEXT"
                 )
             session_columns = {
                 str(row["name"])
@@ -2160,6 +2175,7 @@ class SessionStore:
         text: str,
         source: str,
         idempotency_key: str,
+        display_text: str | None = None,
         execution_mode: str | None = None,
         content: Iterable[Mapping[str, Any]] | None = None,
         parent_run_id: str | None = None,
@@ -2169,6 +2185,10 @@ class SessionStore:
         expected_context_generation: int | None = None,
     ) -> AcceptedRun:
         clean = str(text or "").strip()
+        if display_text is not None and not isinstance(display_text, str):
+            raise ValueError("display_text must be a string")
+        if display_text is not None and len(display_text) > MAX_SESSION_MESSAGE_CHARS:
+            raise ValueError("display_text exceeds the configured message limit")
         blocks = list(content or ({"type": "text", "text": clean},))
         if contains_persistent_inline_media(blocks):
             raise SessionConflict("Session content cannot contain inline media bytes")
@@ -2341,6 +2361,7 @@ class SessionStore:
             digest_payload = {
                 "content": blocks,
                 "attachments": attachment_fingerprints,
+                "display_text": display_text,
                 "execution_mode": str(execution_mode or ""),
                 "parent_run_id": str(parent_run_id or ""),
                 "response_preferences": dict(response_preferences or {}),
@@ -2382,8 +2403,8 @@ class SessionStore:
                 INSERT INTO messages(
                     message_id, session_id, run_id, ordinal, context_generation,
                     role, author_id, source, message_context_json, content_json,
-                    text, content_hash, created_at
-                ) VALUES (?, ?, ?, ?, ?, 'user', ?, ?, ?, ?, ?, ?, ?)
+                    text, display_text, content_hash, created_at
+                ) VALUES (?, ?, ?, ?, ?, 'user', ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     message_id,
@@ -2396,6 +2417,7 @@ class SessionStore:
                     _json(dict(message_context or {})),
                     content_json,
                     clean,
+                    display_text,
                     content_hash,
                     now,
                 ),
@@ -6299,6 +6321,11 @@ class SessionStore:
                             "source": str(row["source"]),
                             "content": [dict(part) for part in content],
                             "text": str(row["text"]),
+                            **(
+                                {"display_text": str(row["display_text"])}
+                                if row["display_text"] is not None
+                                else {}
+                            ),
                             "content_hash": str(row["content_hash"]),
                         }
                     )
@@ -6668,9 +6695,10 @@ class SessionStore:
                         INSERT INTO messages(
                             message_id, session_id, run_id, ordinal,
                             context_generation, role, author_id, source,
-                            message_context_json, content_json, text, visibility,
+                            message_context_json, content_json, text, display_text,
+                            visibility,
                             history_eligible, content_hash, created_at
-                        ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 'visible', 1, ?, ?)
+                        ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'visible', 1, ?, ?)
                         """,
                         (
                             message_id,
@@ -6683,6 +6711,7 @@ class SessionStore:
                             _json({"conversation_continuity": provenance}),
                             item["content_json"],
                             str(item.get("text") or ""),
+                            item.get("display_text"),
                             item["content_hash"],
                             str(item.get("source_created_at") or imported_at),
                         ),

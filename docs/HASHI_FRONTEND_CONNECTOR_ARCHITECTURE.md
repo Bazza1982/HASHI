@@ -111,6 +111,17 @@ bounded projections. They must not:
   a typed, owner-/Session-/generation-bound admission and decision contract so
   moving connectors cannot weaken the confirmation boundary.
 
+For user-authored Runs, `message.content` remains the unchanged canonical Agent
+input and audit record. A conforming client may also submit the optional
+`message.display_text` presentation projection. HASHI stores that projection
+atomically on the server-generated Message identity and uses it only in
+user-facing transcript/history projections. Absence falls back to the stored
+canonical text without content-based transformation; an explicit empty string
+does not trigger that fallback. The idempotency
+digest includes the projection, and the canonical Message API exposes both
+values. Connectors must not derive this field by scanning, recognizing, or
+removing marker-like user text.
+
 ## 5. Built-in TUI
 
 The TUI is a permanent HASHI Frontend Connector and reference local client. It

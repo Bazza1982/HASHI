@@ -8,6 +8,8 @@
 
 功能负责人：Frontend Connector。工程层：Functions；平台差异和实例配置仍使用各自现有配置边界。PAO 保留 Session、Message、Run、Event、权限、执行和路线冻结的唯一状态所有权。Protected Core 不在本次变更范围内。
 
+2026-09-28 FYI：Session Runs 增加可选的 `message.display_text` 展示投影。原始 `message.content` 继续完整进入 Agent 并作为审计记录；展示投影与服务端生成的 Message 身份原子绑定，只供 transcript/history 显示使用。没有该字段时严格显示原文，不扫描或拦截任何控制标记、JSON 或用户文本。外部 Workbench 仍需在自身接入变更中显式提交该字段；HASHI1 运行采用和现场验证另行记录。
+
 ## 1. 本计划如何接续已有工作
 
 已有 `HASHI_FRONTEND_CONNECTOR_UNIFIED_IO_REPAIR_PLAN.md` 总方案和实施记录。本文件把剩余工作按用户最新确认的“标准 FC 优先，TUI 保持基本可用”重新排成执行清单。旧方案作为背景和历史证据保留；下一次开始施工时，将本清单纳入 HASHI1 候选分支并从原方案建立引用，后续只维护一份剩余任务状态。

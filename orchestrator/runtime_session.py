@@ -262,6 +262,11 @@ def accept_request(
         text=persistent_text,
         source=source,
         idempotency_key=str(idempotency_key or f"legacy:{request_id}"),
+        display_text=(
+            metadata.get("session_message_display_text")
+            if "session_message_display_text" in metadata
+            else None
+        ),
         expected_context_generation=metadata.get("session_context_generation"),
         execution_mode=str(metadata.get("execution_mode") or "") or None,
         content=blocks,
