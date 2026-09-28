@@ -137,10 +137,10 @@ Runtime profile / 运行配置
   不创建 Windows 服务，不写入安装注册表，也不修改系统 PATH。
   运行时只使用原生 Windows 执行环境；Bash/WSL 回退已被禁止。
 
-- HER v2 is the only top-level Engine. Official DeepSeek is the default
+- HERV3 is the only top-level Engine. Official DeepSeek is the default
   Provider; Qwen/DashScope is configurable. TUI uses the canonical HASHI
   conversation through the Backend API. The retired Workbench is not bundled.
-  HER v2 是唯一顶层 Engine；默认使用 DeepSeek 官方 API，也可配置
+  HERV3 是唯一顶层 Engine；默认使用 DeepSeek 官方 API，也可配置
   Qwen/DashScope。TUI 通过 Backend API 使用 HASHI 权威对话。已退役的
   Workbench 不会被打包。
 

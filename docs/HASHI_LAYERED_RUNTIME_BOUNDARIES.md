@@ -22,7 +22,7 @@ land in replaceable shared/per-Agent Function processes or configuration layers.
 Pulling from `main` must not erase local platform or instance configuration.
 
 These are **engineering layers**, not HASHI's functional modules. The
-orthogonal functional dimension is PCM, PAO, HER v2, and Frontend Connectors.
+orthogonal functional dimension is PCM, PAO, HERV3, and Frontend Connectors.
 Every product capability must have one functional owner and one primary
 engineering-layer placement. Most module behaviour belongs in Layer 2;
 cross-module Core utilities may remain module-neutral only while they own no
@@ -141,8 +141,8 @@ with their own declared `uv` dependency set.
 
 Shared Function managers and services retain identity during a targeted Agent
 Worker reboot. They are owned by a separately replaceable Function process, not
-by Core. Broad `/reboot same|max` uses the existing shared handoff, keeps the
-Core/lock identity, and has a service gap; see
+by Core. Only `/reboot max` uses the existing shared handoff, keeps the
+Core/lock identity, and has a brief service gap; see
 [Minimal Core](HASHI_SLIM_CORE_ARCHITECTURE.md). Ordinary product changes never
 require moving these owners back into the long-lived Core process.
 
@@ -181,8 +181,9 @@ protected paths change.
 ## Layer 2: HASHI Functions
 
 Purpose: replaceable product behavior in shared or per-Agent Function processes.
-Agent behavior changes through a targeted Worker `/reboot`; shared services and
-enabled Remote adopt through the broad `/reboot same|max` scope.
+Agent behavior changes through a targeted Worker `/reboot`; shared services
+adopt through `/reboot max`. Remote remains a separate live process with its
+own lifecycle and does not restart during `/reboot`.
 
 Examples:
 
@@ -197,10 +198,9 @@ Examples:
 Rules:
 
 - Feature work should land here by default.
-- Every non-Core function-layer change must be adoptable through `/reboot`.
-  Agent-local changes should use `/reboot min`; shared Functions or Remote
-  changes use `/reboot same|max`. A cold Core restart is never their adoption
-  path.
+- Agent-local changes use `/reboot min` or `/reboot same`; shared Functions
+  changes use `/reboot max`. Remote changes require a separate Remote lifecycle
+  action. A cold Core restart is not the adoption path for Function changes.
 - A function change without a verified adoption path at its actual owner scope
   is incomplete and must not be promoted.
 - Optional or native Function dependencies must run in a replaceable sidecar
@@ -211,7 +211,8 @@ Rules:
 - A targeted reboot must never be widened or rejected because class members,
   signatures, fields, or other valid Python interfaces changed. Only an
   explicit `group` request may select multiple Agent routes without replacing
-  shared Functions. `same` and `max` are explicit whole-Function scopes.
+  shared Functions. `same` targets the requesting Agent; only `max` replaces
+  the shared Functions process and all running Agent Workers.
 - Workers may request a narrow shared capability through versioned JSON IPC; they
   may not receive or mutate Core Python objects.
 - New behavior should be modular and swappable rather than added to stable
@@ -327,9 +328,11 @@ explicit; malformed or targeted input never widens into a shared handoff:
 3. Import and validate it in an isolated probe with the exact Core runtime.
 4. Materialise a content-addressed immutable artifact.
 5. Spawn one candidate Worker per selected Agent and require a READY receipt.
-6. Reject any pre-READY failure without closing an active route.
-7. Close only the selected stable route gates, drain their old Workers, and
-   reverify runtime, Core and source fingerprints.
+6. Fence only selected routes at admission so new messages cannot enter old
+   Workers; unrelated Agents keep working. Reject candidate failures and reopen
+   those same routes while keeping the previous Workers.
+7. Drain accepted work from the selected old Workers and reverify runtime,
+   Core and source fingerprints.
 8. Activate every candidate, then replace all selected handle pointers under
    their route locks with no await point between the first and last mutation.
 9. Open the gates together, publish topology, and retire the old Workers.
@@ -338,13 +341,13 @@ explicit; malformed or targeted input never widens into a shared handoff:
 11. For targeted scopes, keep Core PID, instance lock, runtime fingerprint,
     shared Function managers, Backend API, API Gateway, scheduler, background
     jobs and unselected Agent handles intact.
-12. For `same|max`, persist one whole-Function receipt and submit one request to
+12. For `max`, persist one whole-Function receipt and submit one request to
     the existing Core handoff protocol only after the initiating operation has
     released its shared drain guard. Core qualifies, drains, commits or rolls
     back the shared generation without changing its PID or lock.
 13. The successor shared process verifies the Core receipt, shared PID and
-    generation, every running Agent Worker, and reloads enabled Remote from the
-    new source. It reports success only after all of that evidence passes.
+    generation, and every running Agent Worker. It does not touch Remote.
+    It reports success only after the Core and Worker evidence passes.
 14. A legacy shared generation that implements broad reboot as Worker-only may
     bootstrap exactly once through a deterministic newly qualified Worker. It
     publishes the same Core request only after the legacy Worker receipt is
@@ -503,9 +506,9 @@ Changes that touch these boundaries require focused checks:
 
 - protected Core touched: explicit major-version authorization + version bump
   + `core-change-approved` label + matching independent review record;
-- Agent-local function layer touched: isolated probe plus `/reboot min` Worker
-  switch; shared/Remote function layer touched: broad handoff tests for
-  `/reboot same|max`;
+- Agent-local function layer touched: isolated probe plus `/reboot min|same`
+  Worker switch; shared Function layer touched: `/reboot max` handoff tests;
+  Remote layer touched: independent lifecycle tests;
 - platform config touched: at least one WSL/Windows/macOS-relevant fixture;
 - instance config touched: migration test preserving existing local values;
 - port allocation touched: collision, persistence, and legacy migration tests.

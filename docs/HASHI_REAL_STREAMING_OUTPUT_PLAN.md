@@ -9,7 +9,7 @@
 
 **Status:** implementation plan with Phase 0, Phase 1, Phase 2 OpenRouter streaming, Phase 2b full-delta preservation, and CLI stream-json full-delta preservation implemented behind explicit capability/config gates. OpenRouter live streaming was verified on 2026-06-13 with the `temp` agent. Direct Codex Responses streaming remains future work.
 
-**2026-09-24 implementation checkpoint:** HER v2 now keeps raw provider text
+**2026-09-24 implementation checkpoint:** HERV3 now keeps raw provider text
 deltas private, but emits a typed `answer_preview` event for safe,
 already-user-visible stages.  The bounded request-activity projection exposes
 that ephemeral lane only to Workbench and marks the final response as the
@@ -312,10 +312,10 @@ Risk:
 
 - Heuristic parsing can create false deltas or leak non-answer status text into the answer.
 
-### 7.5 HASHI Engine Runtime v2 (HER v2)
+### 7.5 HASHI Engine Runtime v3 (HERV3)
 
-HER v2 owns staged commentary, progress, tool activity, and final delivery
-events. Its final answer is delivered as one validated message rather than
+HERV3 owns model-authored commentary, tool activity, and final delivery events
+inside one continuous loop. Its final answer is delivered as one validated message rather than
 reconstructed from a retired native runtime's deltas. Capability tests should
 therefore cover event ownership and duplicate-delivery prevention instead of
 Claw-specific stream shapes.

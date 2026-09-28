@@ -25,8 +25,10 @@ configuration, transition, migration, and regression contract.
 
 - **Memory+ continuity:** an independent optional layer that can stay enabled in any execution mode.
 - **Selectable Engine Providers:** `gemini-cli`, `claude-cli`, `codex-cli`, `grok-cli`,
-  `her-v2` (with `her` as a migration alias), `ollama-api`, and `xai-api`.
-  `openrouter-api` and `deepseek-api` remain Model Provider adapters for HER v2
+  `her-v3` (with `her` as a migration alias), `ollama-api`, and `xai-api`.
+  Persisted configuration may still use the internal compatibility ID `her-v2`;
+  `/backend`, Backend API projections, and user-facing cards expose only `her-v3`.
+  `openrouter-api` and `deepseek-api` remain Model Provider adapters for HERV3
   and internal rendering; they are hidden from `/backend`.
 - **Adding agents:** Add a new block to `<project_root>\agents.json`. Always set
   `type` explicitly. New agents should normally use `type: "flex"`; omitted
@@ -46,19 +48,19 @@ configuration, transition, migration, and regression contract.
   - `background_mode` — detach to background with escalating placeholders and an `agent.md`-authored transition status (`true`/`false`)
   - `background_detach_after` — seconds before detaching
   - `escalation_thresholds` — array of seconds for placeholder messages (e.g. `[30, 60, 90, 150]`)
-- **HER v2 tools and authority:** every explicit `her-v2` backend row defaults
+- **HERV3 tools and authority:** every explicit `her-v2` backend row defaults
   to the personal-instance YOLO policy: `permission_mode` is
   `"danger-full-access"`, `access_scope` is `"drive"`, and
   `tools.allowed` is `["*"]`. The normalizer fills only missing fields, so a
   user can restrict any Agent by setting those fields explicitly in that
-  Agent's HER v2 row. HASHI never adds a HER v2 backend row that the user did
+  Agent's HERV3 row. HASHI never adds a HERV3 backend row that the user did
   not configure. Scheduled prompts run through their owning Agent's current
   backend and inherit that Agent runtime's authority; a Cron does not create a
   separate low-privilege Agent.
 - **Tokens and secrets:** Telegram bot tokens and API keys are stored in `<project_root>\secrets.json`, keyed by agent name. Never put them in `agents.json`.
 - **Session isolation:** Each Agent runs inside its own `workspace_dir`. Fixed
   mode preserves native Engine Sessions for session-capable Codex, Claude, and
-  Grok CLI Engines. HER v2 separately owns a durable HER Engine Session behind
+  Grok CLI Engines. HERV3 separately owns a durable HER Engine Session behind
   its stable PAO Conversation-to-Engine binding and receives incremental PCM.
   Stateless/per-turn Engine invocations use PAO/PCM-managed Context.
 - **Per-agent logs and files:** Logs under `<project_root>\logs\<agent>\<session>`. Media under `<project_root>\media\<agent>`.
@@ -68,7 +70,7 @@ configuration, transition, migration, and regression contract.
 **Common (all agents):**
 - `/help` — list available commands
 - `/new` — create and select a new HASHI Conversation Session for the originating channel; session-capable fixed Engines also clear their native Engine Session so the next request starts fresh
-- `/fresh` — advance the PAO Context generation for the selected Engine; HER v2 persists the boundary across every prior Turn source while preserving logs, searchable Memory, and archives
+- `/fresh` — advance the PAO Context generation for the selected Engine; HERV3 persists the boundary across every prior Turn source while preserving logs, searchable Memory, and archives
 - `/memory [status|on|pause|saved on|saved off|plus on|plus off]` — inspect or change normal memory injection and independent Memory+ continuity
 - `/notepad [today|carryover|history|find <query>|edit <text>|replace <text>|compact|clear]` — inspect or maintain the compact Memory+ work card and archive index
 - `/clear` — clear workspace context files
@@ -117,8 +119,8 @@ configuration, transition, migration, and regression contract.
 - Alias: `/usercomputer`
 
 The `/verbose` digest uses one stable, Engine-neutral vocabulary. Lifecycle
-headers are `🧭 Planning`, `🛠️ Execution`, `🔄 Replanning`, `🧐 Review`,
-`🔬 Verification`, `✍️ Finalisation`, and `✅ Completed`, with `⏳ Preparing`,
+headers are `🧭 Preparing`, `🛠️ Working`, `🔄 Adjusting`, `🧐 Checking`,
+`🔬 Verifying`, `✍️ Finishing`, and `✅ Completed`, with `⏳ Preparing`,
 `⛔ Blocked`, and `❌ Error` for control states. Body rows are grouped as
 `🔎 Inspect`, `📝 Change`, `⚙️ Execute`, `🧪 Check`, `🌐 External`,
 `🔁 Recovery`, and `⏳ Waiting`. Outcomes use `✅` success, `⚠️` warning,
@@ -126,17 +128,28 @@ headers are `🧭 Planning`, `🛠️ Execution`, `🔄 Replanning`, `🧐 Revie
 events and known command/tool shapes; no model generates or paraphrases it.
 
 **Engine and Model Provider configuration:**
-- `/backend` — switch the active Engine Provider in Flex (inline keyboard; `+` variant carries continuity handoff). In another mode it first asks whether to switch to Flex, preserves saved mode configuration and Memory+, then continues directly to the Engine picker. Selecting `her-v2` switches only the Engine; it never asks the user to select the internal `role-configured` sentinel.
-- `/provider [name|hybrid]` — HER v2-only Model Provider routing picker. A named Model Provider keeps the immediate Single-provider flow; `hybrid` opens a draft with independent Quick and Pro Model Provider/model targets.
-- `/model` — for HER v2, edit complete Quick/Pro targets and configure the public Direct, Strategy, Planning, and Execution stages. Direct is fixed to Quick. Execution `Auto` uses Quick for simple tasks and Pro for complex or high-volume tasks; Quick and Pro apply one choice to every execution class. Provider-reasoning choices are limited to values declared by the active provider/model. Per-task Custom targets and Compact are under Advanced settings; internal/background routes retain their saved defaults without appearing in the normal menu. Typed compatibility controls remain `/model quick|pro [provider] <model>`, `/model route <route> <quick|pro>`, `/model route <route> custom <provider> <model>`, `/model reasoning <route> <value|inherit>`, and `/model apply|discard`. Other Engines retain their existing single-model `/model [name]` behaviour.
-- `/compact [status|cancel]` — HER v2-only maintenance over settled HER Engine Session history. Manual Compact is blocked while a Turn is active and follows the active Quick/Light Model Provider/model route. Canonical typed recovery state is never compacted away. The WIP Journal is only a shadow/legacy compatibility projection and is not re-ingested when canonical recovery is available.
-- `/model compact inherit_quick [auto|tier_2|tier_3]` or `/model compact off` — enable the approved inherited Quick/Light Compact policy, choose its isolated watchdog tier, or turn it off. Legacy inherited-Pro and explicit Compact records migrate to `inherit_quick`.
-- Non-HER Engine/model selection continues to the existing optional effort step when supported. HER v2 keeps Engine, Model Provider, models/reasoning, and effort as independent controls.
-- `/effort [level]` — HER v2 opens the **HER execution mode** control: Direct (`zero`), Strategic (`low`), and Planned (`medium`). Direct invokes one fully capable Quick agent and skips HER orchestration. Strategic selects task-matched Strategy Cards before fully capable Execution. Planned uses no-tool Strategy, mechanically read-only Planning, then fully capable Execution; Planning may investigate but cannot mutate artifacts or perform the downstream implementation. Descriptive aliases persist as canonical wire values, while legacy `fast` and `fast_path` still select Strategic. Retired saved HER values `high`, `xhigh`, and `max` migrate to Planned; their Replanning/Review designs remain internal and are not selectable. HER effort never reads or writes Model Provider reasoning. Other Engines retain their model-aware effort behaviour.
+- `/backend` — switch the active Engine Provider. HERV3's public machine ID is
+  `her-v3`; an internal `her-v2` configuration row may still identify the same
+  adapter during compatibility migration.
+- `/provider [name]` — select one configured HERV3 Model Provider. Hybrid,
+  Quick/Pro, and per-stage routing controls are retired.
+- `/model [name]` — select one real model offered by the active HERV3 Model
+  Provider. HERV3 uses that model for the continuous reasoning/tool loop.
+- `/compact [status|cancel]` — maintain settled HERV3 Engine Session history.
+  Compact is outside the foreground cognitive path and does not create a
+  Planning or Replanning stage.
+- `/effort [level]` — select only a reasoning value supported by the active
+  Provider/model. It never selects Direct, Strategic, Planned, or another
+  HASHI workflow. Other Engines retain their own model-aware effort behavior.
 
-### HER v2 Model Provider and model configuration
+HERV3 has no public stage routes. Triage, Strategy, Planning, Replanning,
+Review, and stage-based Finalisation are removed from active foreground
+routing. Strategy Cards remain optional reference context; Habit/Meditation
+remains an optional learning subsystem.
 
-HER v2 is Model-Provider-neutral. Model Provider connection metadata lives under
+### HERV3 Model Provider and model configuration
+
+HERV3 is Model-Provider-neutral. Model Provider connection metadata lives under
 `global.her_providers.providers`; an enabled instance provider is sufficient for
 HER routing and does not need to be repeated in each Agent's
 `allowed_backends`. Concrete non-HER Engine rows still control ordinary direct
@@ -174,26 +187,21 @@ adapter; it does not make that adapter a top-level Engine Provider.
           "engine": "her-v2",
           "access_scope": "drive",
           "model": "role-configured",
-          "effort": "medium",
+          "effort": "high",
           "permission_mode": "danger-full-access",
           "tools": {"allowed": ["*"]},
           "her_v2": {
-            "profiles": {
-              "lightweight": {
-                "engine": "deepseek-api",
-                "model": "deepseek-v4-flash",
-                "reasoning": "high"
-              },
-              "triage": {
-                "engine": "deepseek-api",
-                "model": "deepseek-v4-flash",
-                "reasoning": "high"
-              },
-              "premium": {
-                "engine": "deepseek-api",
-                "model": "deepseek-v4-pro",
-                "reasoning": "high"
-              }
+            "main": {
+              "provider": "deepseek-api",
+              "model": "deepseek-flash",
+              "reasoning": "high"
+            },
+            "v3_provider_allowlist": ["deepseek-api", "openrouter-api"],
+            "strategy_cards": true,
+            "agent_companion": {
+              "enabled": true,
+              "interval_minutes": 5,
+              "model": "jev-latest"
             }
           }
         }
@@ -203,61 +211,18 @@ adapter; it does not make that adapter a top-level Engine Provider.
 }
 ```
 
-Model Provider choices are built from enabled instance profiles and the
-installed adapter model catalogue, with legacy Agent backend rows retained only
-as compatibility hints. A one-model Model Provider uses that model for both
-slots. Disabled Model Providers remain visible but locked.
+Model Provider choices are derived from enabled instance profiles, Agent
+opt-ins, and the installed adapter catalogue. HERV3 stores the selected target
+under `her_v3_configuration`; an in-flight Turn keeps its accepted target while
+later Turns see persisted changes. Legacy Quick/Pro, Hybrid, stage-role, and
+`her_v2_configuration*` records are migration inputs only and cannot reactivate
+staged routing. The internal `role-configured` model and `her-v2` adapter ID are
+compatibility sentinels and are never presented as the HERV3 product name.
 
-Single mode keeps one Model Provider for Quick and Pro. Hybrid mode stores full
-`Model Provider + model` targets for Quick and Pro. Current Direct, Strategic,
-and Planned stages follow their configured role routes. Dormant reviewer and
-Replanning profiles may remain for isolated regression coverage, but their
-presence does not expose a higher mode. This phase adds no automatic
-cross-Model-Provider failover.
-
-### Dormant higher-mode internals
-
-The following Replanning and Review behaviour remains implemented for internal
-regression coverage, but Adaptive, Reviewed, and Assured are not exposed by the
-current three-mode production selector. It must not be treated as an available
-day-to-day `/effort` choice.
-
-Triage independently records each work turn as `STANDARD` or `HIGH_RISK` risk
-metadata. Adaptive (`high`) and above Execution, regardless of that label,
-unconditionally enters tool-free Replanning at the next safe boundary after 10
-completed tool results or 300 seconds. Each Replan sends one fact-preserving
-progress message. This does not cancel active work or cap the tool loop,
-Replans, or whole workflow; ordinary denial, approval, permissions, `/stop`,
-Review, and Finalisation keep their existing authority.
-
-Independent Review follows the reviewer/Pro route by default and receives only
-the validation capabilities needed to assess the latest Execution result.
-`workspace_inspect`
-provides read-only snapshots, status, diff, search, and artifact hashes.
-Its search operation uses ripgrep when available and falls back to the system
-grep binary, so it does not depend on the service inheriting a developer-shell
-PATH.
-`verification_run` runs a configured recipe or direct process `argv` in the
-authoritative current workspace. It does not copy or sandbox the workspace and
-does not invoke an implicit shell. The command inherits HASHI's process
-identity, filesystem access, environment, `HOME`, and network. Its effective
-timeout is the maximum of its configured/requested values, five minutes, and
-cumulative Execution time multiplied by 1.5 plus five minutes; requested values
-can raise but never shorten that budget.
-Passing claims require exact completed receipts from the current Review
-invocation and matching before/after snapshots.
-
-Runtime selections persist in the agent workspace as a dedicated
-`her_v2_configuration` block. It contains `routing_mode`, full Quick/Pro
-`targets`, per-route target selection, optional Custom `route_targets`, and
-per-route provider reasoning. Hybrid edits first persist in
-`her_v2_configuration_draft`; `/model apply` validates and activates the whole
-draft in one state update. The last Single and Hybrid configurations are kept
-under `her_v2_configuration_presets`. In-flight turns keep their starting
-routing snapshot, and queued Meditation jobs durably keep the turn's target.
-Legacy provider/model and profile/stage reasoning fields remain readable as a
-migration fallback. The internal `role-configured` model remains an adapter
-sentinel only and is never presented as a user choice.
+The optional JEV Agent Companion sees bounded observable activity rather than
+private reasoning and can only offer advisory intervention at a safe tool
+boundary. Strategy Cards and Habits are advisory context; neither introduces
+another model route or mandatory handoff. See [HERV3 upgrade](HERV3_UPGRADE.md).
 
 **Retired working modes:** `/mode wrapper`, `/mode audit`, and
 `/mode dual-brain` return a compatibility notice. Their former configuration commands
@@ -272,7 +237,7 @@ pointers without injecting old prompts or full answers. Pausing it preserves
 all files. See [Memory+ v2 — Compact Work Continuity](MEMORY_PLUS_V2.md) for
 backend routing, rollover, migration, and writer ownership.
 
-## HER v2 Smart Tools
+## HERV3 Smart Tools
 
 `log_query` is the preferred Tool Registry path for literal searches in UTF-8
 logs, JSONL, NDJSON, and other files with potentially long records. It reads
@@ -347,8 +312,8 @@ python tools/browser_cli.py fill       --url https://site.com --selector "#q" --
 python tools/browser_cli.py evaluate   --url https://site.com --script "() => document.title"
 ```
 
-**HER v2 / provider tool path** — enable the required Tool Registry entries on
-the explicit HER v2 row or the provider row consumed by HER v2:
+**HERV3 / provider tool path** — enable the required Tool Registry entries on
+the explicit HERV3 row or the provider row consumed by HERV3:
 ```json
 {
   "engine": "her-v2",
@@ -375,7 +340,9 @@ Chrome/Chromium auto-detected on Linux, macOS, and Windows (including WSL). Fall
 
 ## Telegram File Sending
 
-Agents can send photos, documents, videos, and audio files directly to the user's Telegram chat.
+Agents can publish photos, documents, videos, and audio files to the user's
+Telegram endpoint through the standard Frontend Connector outbox. The CLI does
+not call Telegram's HTTP API directly.
 
 ### CLI Script (all backends)
 
@@ -387,13 +354,18 @@ python tools/telegram_send_file_cli.py --path /tmp/report.pdf --type document
 Parameters:
 - `--path` (required): absolute path to the file
 - `--caption` (optional): message caption
-- `--type` (optional): `photo | document | video | audio` (default: auto-detect from extension)
-- `--agent` (optional): agent name for token resolution (defaults to first available)
+- `--type` (optional): `photo | document | video | audio | voice` (default: auto-detect from extension)
+- `--agent` (optional): configured Agent identity (otherwise `HASHI_AGENT_NAME` is required)
 - `--chat-id` (optional): override target chat ID
+- `--publication-id` (optional): stable idempotency identity for a safe replay
 
 Auto-detection: `.jpg/.jpeg/.png/.webp` → photo, `.mp4/.mov/.avi/.mkv` → video, `.mp3/.ogg/.flac/.wav/.m4a` → audio, everything else → document.
 
-### Native Tool Call (HER v2 provider/tool paths)
+An explicit `--type` remains a Connector-local rendition choice. The file is
+first stored as a durable Session attachment and delivery is recorded per
+endpoint; replaying the same `--publication-id` does not send it twice.
+
+### Native Tool Call (HERV3 provider/tool paths)
 
 `telegram_send_file` can be supplied through `global.default_tools` and becomes
 model-visible when the selected runtime/provider exposes the HASHI Tool
@@ -455,14 +427,13 @@ opt-in required by media and local-vision tools.
 - Pending and recently resolved recovery batches are injected into later user turns for that agent. The bridge directly handles `run all` / `全部补跑`, `task-id=N` / `补跑 N 次`, and `skip all` / `全部跳过`, and persists the result across restarts.
 - Recovery defaults to one execution per task. Set `"recovery": {"max_replay": N}` on a job to permit bounded repeated catch-up; partial counts select the most recent N occurrences and execute them in chronological order.
 - A single recent job keeps automatic catch-up behavior. A cron missed by more than one hour still waits for user confirmation, and normal heartbeat ticks after startup are not grouped.
-- HER v2 prompt/skill jobs always use Direct (`zero`) for scheduled, recovery,
-  and manual Run invocations. This bypasses Triage so the authoritative job
-  instruction reaches one fully capable Quick-model agent without
-  pre-processing. It does not change provider reasoning settings or the
-  Agent's saved `/effort` value.
+- HERV3 prompt/skill jobs use the same one main-model/tool loop for scheduled,
+  recovery, and manual Run invocations. There is no Triage or Direct route.
+  The accepted job instruction reaches the selected model without a separate
+  cognitive router, and the Agent's saved Provider reasoning value is retained.
 - Per-job HER effort overrides are retired. Older `her_v2_effort` fields remain
   loadable but are ignored and removed when the job is next updated,
-  transferred, or imported; they cannot bypass the Direct policy.
+  transferred, or imported; they cannot recreate a retired execution mode.
 - Nudge continuations keep the Agent's configured effort. Built-in automation,
   transcript export, and HER Dream actions bypass this prompt-only policy.
 

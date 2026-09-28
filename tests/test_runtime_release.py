@@ -7,6 +7,7 @@ import pytest
 
 import orchestrator.runtime_release as runtime_release
 from orchestrator.runtime_contract import RuntimeFingerprint
+from orchestrator.function_generation import UncommittedFunctionSourceError
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -73,6 +74,28 @@ def test_cold_release_uses_last_verified_generation_when_candidate_fails(
 
     assert release["generation_root"] == str(artifact)
     assert release["manifest"] == generation.manifest.to_dict()
+    assert release["adoption"] == {"status": "fallback", "reason_code": "qualification_failed"}
+
+
+def test_cold_release_identifies_uncommitted_source_fallback(tmp_path, monkeypatch):
+    artifact = tmp_path / "bridge" / "state" / "function_generations" / ("a" * 64)
+    generation = SimpleNamespace(manifest=_Manifest())
+    monkeypatch.setattr(
+        runtime_release,
+        "probe_function_generation",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            UncommittedFunctionSourceError("uncommitted source")
+        ),
+    )
+    monkeypatch.setattr(
+        runtime_release,
+        "load_bootable_generation_cache",
+        lambda *_args, **_kwargs: (generation, artifact),
+    )
+
+    release = runtime_release.qualify_release(_payload(tmp_path / "bridge"))
+
+    assert release["adoption"] == {"status": "fallback", "reason_code": "source_uncommitted"}
 
 
 def test_cold_release_saves_new_verified_generation_for_future_boots(
@@ -103,6 +126,7 @@ def test_cold_release_saves_new_verified_generation_for_future_boots(
 
     assert release["generation_root"] == str(artifact)
     assert persisted == [(bridge_home.resolve(), generation, artifact)]
+    assert release["adoption"] == {"status": "qualified", "reason_code": None}
 
 
 def test_cold_release_fails_only_without_candidate_or_verified_fallback(

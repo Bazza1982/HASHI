@@ -4,6 +4,7 @@ import datetime
 from typing import Any
 
 from orchestrator import ui_language
+from orchestrator.flexible_backend_registry import public_backend_engine
 
 
 _USAGE_TOTAL_NUMERIC_FIELDS = (
@@ -128,6 +129,39 @@ def _format_reasoning_annotation(data: dict[str, Any], fmt_tokens) -> str:
     return ui_language.tr(key, tokens=fmt_tokens(thinking))
 
 
+def _public_usage_summary(runtime: Any, summary: dict[str, Any]) -> dict[str, Any]:
+    """Retire storage-only HER placeholders from the user-facing model list."""
+
+    manager = getattr(runtime, "backend_manager", None)
+    backend = (
+        getattr(manager, "active_backend", None)
+        or getattr(getattr(runtime, "config", None), "active_backend", None)
+        or ""
+    )
+    by_model = summary.get("by_model")
+    if (
+        public_backend_engine(backend) != "her-v3"
+        or not isinstance(by_model, dict)
+        or "role-configured" not in by_model
+    ):
+        return summary
+
+    visible_models = dict(by_model)
+    legacy = visible_models.pop("role-configured")
+    label = ui_language.tr("usage.model.legacy_unattributed")
+    existing = visible_models.get(label)
+    if isinstance(existing, dict) and isinstance(legacy, dict):
+        merged = _empty_usage_total()
+        _merge_usage_total(merged, existing)
+        _merge_usage_total(merged, legacy)
+        visible_models[label] = merged
+    else:
+        visible_models[label] = legacy
+    public_summary = dict(summary)
+    public_summary["by_model"] = visible_models
+    return public_summary
+
+
 async def cmd_usage(runtime: Any, update: Any, context: Any) -> None:
     if not runtime._is_authorized_user(update.effective_user.id):
         return
@@ -188,7 +222,10 @@ async def cmd_usage(runtime: Any, update: Any, context: Any) -> None:
         await runtime._reply_text(update, "\n".join(lines), parse_mode="HTML")
         return
 
-    summary = get_summary(runtime.workspace_dir, session_id=runtime.session_id_dt)
+    summary = _public_usage_summary(
+        runtime,
+        get_summary(runtime.workspace_dir, session_id=runtime.session_id_dt),
+    )
     labels = {
         "title": ui_language.tr("usage.title"),
         "thinking": ui_language.tr("usage.thinking"),
@@ -252,7 +289,7 @@ async def cmd_token(runtime: Any, update: Any, context: Any) -> None:
             continue
         total_agents += 1
         manager = getattr(agent_runtime, "backend_manager", None)
-        backend = (
+        backend = public_backend_engine(
             getattr(manager, "active_backend", None)
             or getattr(getattr(agent_runtime, "config", None), "active_backend", None)
             or "unknown"

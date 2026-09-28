@@ -232,6 +232,8 @@ def _runtime():
     runtime.logger = _Logger()
     runtime.telegram_logger = _Logger()
     runtime.error_logger = _Logger()
+    runtime.telegram_connected = True
+    runtime._notify_enabled = False
     runtime.last_prompt = None
     runtime.current_request_meta = None
     runtime.is_generating = False
@@ -323,7 +325,7 @@ def _runtime():
 
     runtime._streaming_display_loop = _streaming_display_loop
 
-    async def _thinking_flush_loop(chat_id, stop_typing):
+    async def _thinking_flush_loop(chat_id, stop_typing, **_kwargs):
         await stop_typing.wait()
 
     runtime._thinking_flush_loop = _thinking_flush_loop
@@ -787,9 +789,33 @@ def test_begin_queue_item_marks_typed_scheduled_jobs_isolated():
     )
 
 
-def test_begin_queue_item_does_not_isolate_untyped_scheduler_source():
+@pytest.mark.parametrize(
+    "source",
+    [
+        "scheduler",
+        "scheduler-skill",
+        "background:prompt",
+        "background-job-event",
+        "heartbeat",
+        "cron",
+        "proactive",
+    ],
+)
+def test_begin_queue_item_isolates_every_agent_activity_source(source):
     runtime = _runtime()
-    item = _item(source="scheduler")
+    item = _item(source=source)
+
+    runtime_pipeline.begin_queue_item(runtime, item)
+
+    assert (
+        runtime.current_request_meta["session_scope"]
+        == runtime_pipeline.SESSION_SCOPE_ISOLATED
+    )
+
+
+def test_begin_queue_item_keeps_interactive_loop_setup_in_conversation():
+    runtime = _runtime()
+    item = _item(source="loop_skill")
 
     runtime_pipeline.begin_queue_item(runtime, item)
 
@@ -1009,6 +1035,94 @@ async def test_her_fixed_backend_replaces_assembled_pcm_with_typed_transport(
     assert observed["request_id"] == "req-1"
     assert prompt.prompt_audit["her_fixed_backend"]["operation"] == "append_turn"
     assert captured_bindings == ["req-1"]
+
+
+@pytest.mark.asyncio
+async def test_agent_activity_her_preparation_opens_fresh_provider_session(
+    monkeypatch,
+):
+    runtime = _runtime()
+    runtime.config.active_backend = "her-v2"
+    runtime.backend_manager.agent_mode = "fixed"
+    captured_bindings = []
+    monkeypatch.setattr(
+        runtime_session,
+        "capture_backend_binding",
+        lambda _runtime, *, request_id: captured_bindings.append(request_id),
+    )
+
+    class _HERAssembler:
+        turns_injection_enabled = True
+        saved_memory_injection_enabled = True
+        MAX_RECENT_EXCHANGES = 8
+
+        def build_prompt_payload(self, prompt, backend, **_kwargs):
+            return {
+                "final_prompt": prompt,
+                "audit": {"incremental": False, "sections": []},
+                "envelope": {"version": 1, "sections": []},
+            }
+
+    class _HERBackend:
+        def __init__(self):
+            self._session_id = "closed-conversation-provider-session"
+            self.persistent_session_busy = False
+            self.seen_session_ids = []
+            self.capabilities = SimpleNamespace(
+                supports_sessions=True,
+                supports_thinking_stream=True,
+            )
+
+        def prepare_fixed_turn_input(self, **_kwargs):
+            self.seen_session_ids.append(self._session_id)
+            operation = "open_session" if self._session_id is None else "append_turn"
+            if self._session_id is None:
+                self._session_id = "activity-provider-session"
+            return (
+                f'HASHI_HER_FIXED_ENVELOPE_V1\n{{"operation":"{operation}"}}',
+                {
+                    "operation": operation,
+                    "incremental": operation == "append_turn",
+                    "transport_chars": 80,
+                },
+            )
+
+    backend = _HERBackend()
+    runtime.context_assembler = _HERAssembler()
+    runtime.backend_manager.current_backend = backend
+    item = _item(source="scheduler")
+    runtime_pipeline.begin_queue_item(runtime, item)
+
+    prompt = await runtime_pipeline.build_turn_prompt(
+        runtime,
+        item,
+        is_bridge_request=False,
+    )
+
+    assert backend.seen_session_ids == [None]
+    assert backend._session_id == "closed-conversation-provider-session"
+    assert prompt.prompt_audit["her_fixed_backend"]["operation"] == "open_session"
+    assert prompt.incremental is False
+    assert captured_bindings == []
+    assert item._isolated_provider_session_id == "activity-provider-session"
+
+    generation_session_ids = []
+
+    async def generate_response(*_args, **_kwargs):
+        generation_session_ids.append(backend._session_id)
+        return SimpleNamespace(is_success=True, text="done")
+
+    runtime.backend_manager.generate_response = generate_response
+    await runtime_pipeline.run_backend_generation(
+        runtime,
+        item,
+        prompt.final_prompt,
+        on_stream_event=lambda _event: None,
+        audit_active=False,
+    )
+
+    assert generation_session_ids == ["activity-provider-session"]
+    assert backend._session_id == "closed-conversation-provider-session"
 
 
 @pytest.mark.asyncio
@@ -1723,6 +1837,46 @@ async def test_setup_interactive_feedback_creates_placeholder_and_cleanup_tasks(
 
 
 @pytest.mark.asyncio
+async def test_agent_activity_start_is_visible_when_typing_is_disabled():
+    runtime = _runtime()
+    telegram_stream_policy.set_typing_enabled(runtime, False)
+    runtime.get_agent_activity_start_placeholder = lambda item: (
+        f"started: {item.summary}",
+        None,
+    )
+    item = _item(
+        source="scheduler",
+        summary="Cron Task [morning-report]",
+        session_surface="agent-activity",
+    )
+
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        item,
+        audit_active=False,
+        audit_collector=None,
+    )
+
+    assert runtime.app.bot.sent == [
+        {
+            "chat_id": 123,
+            "text": "started: Cron Task [morning-report]",
+            "parse_mode": None,
+            "disable_notification": True,
+        }
+    ]
+    assert feedback.placeholder.message_id == 77
+    assert feedback.typing_task is None
+    feedback.stop_typing.set()
+    await feedback.escalation_task
+    await feedback.think_flush_task
+    runtime_pipeline.release_display_preference_event(
+        runtime,
+        feedback.preference_event,
+    )
+
+
+@pytest.mark.asyncio
 async def test_medium_her_v2_sends_each_task_acknowledgement_event_once():
     runtime = _runtime()
     runtime.config.active_backend = "her-v2"
@@ -2351,6 +2505,13 @@ async def test_setup_interactive_feedback_placeholder_retry_after_records_failov
         token="token-lin-yueru",
     )
     failover_runtime.workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    async def _failover_send_text(chat_id, text, **_kwargs):
+        return await failover_runtime.app.bot.send_message(
+            chat_id=chat_id, text=text
+        )
+
+    failover_runtime._send_text = _failover_send_text
     orchestrator = SimpleNamespace(runtimes=[runtime, failover_runtime], raw_config={})
     runtime.orchestrator = orchestrator
     failover_runtime.orchestrator = orchestrator
@@ -2517,7 +2678,7 @@ async def test_typing_off_keeps_thinking_delivery_independent_without_placeholde
     runtime._think = True
     telegram_stream_policy.set_typing_enabled(runtime, False)
 
-    async def _flush_thinking(_chat_id):
+    async def _flush_thinking(_chat_id, **_kwargs):
         return None
 
     runtime._flush_thinking = _flush_thinking
@@ -3747,7 +3908,9 @@ async def test_handle_success_delivery_sends_response_and_routes_hchat(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_tui_mirror_off_persists_final_without_any_telegram_delivery(monkeypatch):
+async def test_tui_mirror_off_persists_final_and_presentations_without_telegram(
+    monkeypatch,
+):
     runtime = _runtime()
     item = _item(
         prompt="TUI-only projection",
@@ -3755,6 +3918,17 @@ async def test_tui_mirror_off_persists_final_without_any_telegram_delivery(monke
         deliver_to_telegram=False,
     )
     outcomes = []
+    meter_tails = []
+    herv2_cards = []
+
+    async def _send_meter_cost_tail(current_item, **timing):
+        meter_tails.append((current_item, timing))
+
+    async def _send_herv2_card(current_item, **fields):
+        herv2_cards.append((current_item, fields))
+
+    runtime._send_meter_cost_tail = _send_meter_cost_tail
+    runtime._send_herv2_card = _send_herv2_card
     monkeypatch.setattr(
         runtime_cross_session,
         "record_turn_result",
@@ -3778,6 +3952,18 @@ async def test_tui_mirror_off_persists_final_without_any_telegram_delivery(monke
     assert runtime.last_response["text"] == "canonical response"
     assert not hasattr(runtime, "sent_message")
     assert runtime.voice_replies == []
+    assert meter_tails[0][0] is item
+    assert meter_tails[0][1]["total_elapsed_s"] >= 0
+    assert meter_tails[0][1]["stage_timings_s"] == {}
+    assert herv2_cards == [
+        (
+            item,
+            {
+                "response": SimpleNamespace(text="canonical response"),
+                "stage_timings_s": {},
+            },
+        )
+    ]
     assert outcomes == [
         {
             "delivered": False,
@@ -3920,6 +4106,27 @@ async def test_voice_origin_delivers_native_audio_and_companion_text_without_tts
         owner_id="user:123",
         request_metadata={"voice_origin": True},
     )
+    from orchestrator.frontend_delivery import freeze_run_delivery_route
+
+    runtime.session_store.accept_run(
+        session_id=session["session_id"],
+        owner_id="user:123",
+        agent_id=runtime.name,
+        request_id=item.request_id,
+        text=item.prompt,
+        source="telegram",
+        idempotency_key="native-terminal-run",
+        delivery_route=freeze_run_delivery_route(
+            message_source_id="telegram",
+            session_surface="telegram",
+            session_channel_key=str(item.chat_id),
+            chat_id=item.chat_id,
+            telegram_requested=False,
+        ),
+    )
+    runtime.session_store.mark_request_running(
+        item.request_id, worker_id="native-terminal-worker"
+    )
     asset = runtime.session_store.audio_assets.create(
         b"OggS" + b"\0" * 64,
         owner_id="",
@@ -3973,7 +4180,7 @@ async def test_voice_origin_delivers_native_audio_and_companion_text_without_tts
         audit_collector=None,
     )
 
-    assert runtime.sent_message["text"] == "Native transcript."
+    assert runtime.app.bot.sent[0]["text"] == "Native transcript."
     assert len(sent_voice) == 1
     assert sent_voice[0]["chat_id"] == item.chat_id
     assert runtime.voice_replies == []
@@ -4309,13 +4516,35 @@ async def test_required_native_audio_immediate_ignores_commentary_and_uses_quiet
     runtime.app.bot.send_voice = _send_voice
     runtime._send_text = _send_text
     telegram_stream_policy.set_typing_enabled(runtime, False)
+    item = _item(
+        request_id="req-native-immediate",
+        session_id=session["session_id"],
+        owner_id="user:123",
+    )
+    from orchestrator.frontend_delivery import freeze_run_delivery_route
+
+    runtime.session_store.accept_run(
+        session_id=session["session_id"],
+        owner_id="user:123",
+        agent_id=runtime.name,
+        request_id=item.request_id,
+        text=item.prompt,
+        source="telegram",
+        idempotency_key="native-immediate-run",
+        delivery_route=freeze_run_delivery_route(
+            message_source_id="telegram",
+            session_surface="telegram",
+            session_channel_key=str(item.chat_id),
+            chat_id=item.chat_id,
+            telegram_requested=False,
+        ),
+    )
+    runtime.session_store.mark_request_running(
+        item.request_id, worker_id="native-immediate-worker"
+    )
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
-        _item(
-            request_id="req-native-immediate",
-            session_id=session["session_id"],
-            owner_id="user:123",
-        ),
+        item,
         audit_active=False,
         audit_collector=None,
     )
@@ -4345,8 +4574,7 @@ async def test_required_native_audio_immediate_ignores_commentary_and_uses_quiet
 
     assert accepted is True
     assert len(sent_voice) == 1
-    assert runtime.sent_message["text"] == "Native transcript."
-    assert runtime.sent_message["_purpose"] == "task_acknowledgement"
+    assert runtime.app.bot.sent[0]["text"] == "Native transcript."
 
 
 @pytest.mark.asyncio
@@ -4745,11 +4973,16 @@ async def test_handle_success_delivery_promotes_streamed_final_after_wrapper_tex
     runtime = _runtime()
     item = _item(prompt="user text")
     meter_tails = []
+    herv2_cards = []
 
     async def _send_meter_cost_tail(item, **timing):
         meter_tails.append((item.request_id, timing))
 
+    async def _send_herv2_card(item, **fields):
+        herv2_cards.append((item.request_id, fields))
+
     runtime._send_meter_cost_tail = _send_meter_cost_tail
+    runtime._send_herv2_card = _send_herv2_card
     queued_monotonic = time.monotonic() - 1.0
     stream_state = runtime_pipeline.StreamedAnswerState(
         request_id=item.request_id,
@@ -4796,6 +5029,12 @@ async def test_handle_success_delivery_promotes_streamed_final_after_wrapper_tex
     assert meter_tails[0][0] == "req-1"
     assert meter_tails[0][1]["total_elapsed_s"] >= 1.0
     assert meter_tails[0][1]["stage_timings_s"] == {
+        "triage": 0.2,
+        "execution": 0.7,
+    }
+    assert len(herv2_cards) == 1
+    assert herv2_cards[0][0] == "req-1"
+    assert herv2_cards[0][1]["stage_timings_s"] == {
         "triage": 0.2,
         "execution": 0.7,
     }

@@ -9,7 +9,7 @@ requires a later explicit operation and its own adoption evidence.
 ## Approval and ownership
 
 The operator requested implementation and testing on HASHI3 before any wider
-sync. HER v2 owns tool choice, response to typed admission guidance, and
+sync. HERV2 owns tool choice, response to typed admission guidance, and
 re-planning. PAO's Tool Registry owns permission, deterministic admission,
 invocation, process cleanup, and audit. The implementation is replaceable
 Functions-layer behavior plus ignored HASHI3 instance configuration; protected
@@ -71,8 +71,8 @@ adopted generation: sha256:e2c536ab051709495d25657b38d39ffdfb4ef4f00836630a550ae
 status: online, healthy, idle
 ```
 
-The live HER v2 canary was submitted through a typed TUI delivery policy with
-`telegram.mirror: false`. HER v2 invoked `log_query` against the real
+The live HERV2 canary was submitted through a typed TUI delivery policy with
+`telegram.mirror: false`. HERV2 invoked `log_query` against the real
 3,408,164-byte `codex_exec_events.jsonl`, then invoked the exact guarded shell
 shape against a nonexistent canary path so an accidental dispatch would remain
 harmless. The running Smart Tool ledger independently recorded:

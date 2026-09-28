@@ -3,9 +3,18 @@
 | Field | Value |
 |---|---|
 | Status | **Authoritative Frontend Connector module specification** |
-| Effective date | 2026-09-01 |
+| Effective date | 2026-09-25 |
 | Parent architecture | [HASHI System Architecture](../ARCHITECTURE.md) |
 | Scope | Built-in TUI, messaging connectors, Backend API, Persistent Session API, Remote projection, and compatible external clients |
+| Implementation status | Standard FC source converged and adopted on HASHI1; connector-specific live acceptance remains scoped |
+
+As of 2026-09-26, Functions contains the versioned connector-neutral contracts,
+capability catalog, common ingress, canonical Event/Message projection, media
+ownership, and per-endpoint outbox used by the production adapters in scope.
+The qualified source has been adopted on HASHI1. This is not proof that every
+configured external destination or physical device has passed live acceptance;
+the authoritative rollout evidence and remaining gates are tracked in
+[the standard-interface execution plan](HASHI_FC_STANDARD_INTERFACE_EXECUTION_PLAN_2026-09-25.md).
 
 ## 1. Definition
 
@@ -55,9 +64,28 @@ An external client owns:
 - product-specific data and final product-domain authorization; and
 - disposable caches that can be rebuilt from HASHI state.
 
+Terminal backend failures retain bounded user-safe provider fields on the
+canonical Run failure Event. The owner-scoped request activity API exposes the
+same durable fields to clients, including code, HTTP status, provider request ID,
+retryability, and diagnostic log reference. Clients may collapse the error
+summary but must allow the user to inspect those fields. Existing failure Events
+written before this contract retain only the text that was originally stored.
+The 2026-09-27 Lily failure demonstrated the gap: Telegram had HTTP 400 and a
+provider request ID while the Run Event retained only its generic error text,
+leaving Workbench with a one-error count. Focused regression now verifies that
+the structured fields survive a SessionStore reopen and remain owner-scoped;
+Workbench's request digest test verifies expansion and the bad-request advice.
+Live adoption and a real browser click remain separate acceptance evidence.
+
 No external client name, repository revision, installer, or private release
 channel may be compiled into general HASHI admission policy. Compatibility is
 defined by protocol conformance and declared limits.
+
+Command-triggered continuations such as `/load` retain the authenticated
+command's Session, owner, surface, and channel when they enter the normal Run
+queue. The continuation's internal source names its purpose; it is not a new
+frontend. A parked topic is marked loaded only after its continuation has been
+accepted by the queue, so an admission failure leaves the topic available.
 
 ## 4. Authority and projection
 
@@ -77,8 +105,22 @@ bounded projections. They must not:
 - maintain a competing authoritative sent-message archive;
 - resend client-owned chat history as if it were canonical HASHI Context;
 - infer authorization from possession of an opaque identifier;
-- expose provider-native thread or request IDs as Session authority; or
-- let a late client or worker overwrite a fenced or terminal Run.
+- expose provider-native thread or request IDs as Session authority;
+- let a late client or worker overwrite a fenced or terminal Run; or
+- turn a confirmation-gated action into ordinary Session text. Such flows need
+  a typed, owner-/Session-/generation-bound admission and decision contract so
+  moving connectors cannot weaken the confirmation boundary.
+
+For user-authored Runs, `message.content` remains the unchanged canonical Agent
+input and audit record. A conforming client may also submit the optional
+`message.display_text` presentation projection. HASHI stores that projection
+atomically on the server-generated Message identity and uses it only in
+user-facing transcript/history projections. Absence falls back to the stored
+canonical text without content-based transformation; an explicit empty string
+does not trigger that fallback. The idempotency
+digest includes the projection, and the canonical Message API exposes both
+values. Connectors must not derive this field by scanning, recognizing, or
+removing marker-like user text.
 
 ## 5. Built-in TUI
 
@@ -87,7 +129,22 @@ supports local operation and trusted instance switching through Hashi Remote.
 
 Current implementation boundary:
 
-- the TUI uses the basic Backend API chat and transcript routes;
+- when the explicit TUI Session ingress capability is advertised, TUI ordinary text resolves the
+  owner-scoped primary Session and enters through Session Runs, locally or via
+  authenticated Remote proxy; older instances and proxy generations retain
+  the basic Backend API chat fallback before submission only. Single-file
+  attachments use Session stage/upload/commit followed by one Run when explicitly
+  advertised, locally or through the authenticated Remote proxy. Only a proxy
+  rejection before canonical admission permits legacy fallback. Target-relative
+  Workzone references are read only by the selected Agent's enabled Workzone
+  adapter and committed as managed Session attachments. Commands still use
+  compatibility chat routes, and display still polls
+  transcript while canonical feed migration is pending;
+- a write timeout or a connection loss after a request may have been sent is
+  an unknown outcome: the TUI must not replay that write against another
+  fallback URL or the legacy chat route. Direct writes pin the verified Session
+  host; authenticated Remote proxy writes verify the target's local instance
+  before submission and never replay an uncertain local or peer write;
 - those routes keep the established `workbench/default` Conversation binding,
   so a TUI window is a projection of the same formal Conversation rather than
   the owner of a private TUI Session;
@@ -122,8 +179,9 @@ Current implementation boundary:
   available semantic profiles are discovered from the Agent voice owner and
   profile changes use that existing revision-safe state rather than a second
   TUI voice configuration;
-- language, layout, sounds, auto-read, the TUI typing indicator, and the default Telegram
-  mirror choice are local persisted Connector preferences;
+- language, layout, sounds, auto-read, and the TUI typing indicator are local
+  persisted Connector preferences. External platform mirrors use the FC owner
+  setting shared by every ingress;
 - the side panel is closed by default. `/sidepanel` opens the TUI's persisted,
   read-only information panel;
   `/sidepanel off` closes it and `/sidepanel refresh` refreshes it. The panel
@@ -137,12 +195,10 @@ Current implementation boundary:
   loops to the top; manual navigation temporarily pauses it. The panel remains
   an information surface only: actions stay as slash commands in the input,
   and the panel owns no competing state;
-- the connection footer projects live Agent metadata for Engine, model, effort,
-  Think, Verbose, Commentary and Connector state. Model Provider and structured
-  Quick/Pro routing are shown only for HER v2. Identical HER Quick/Pro Provider
-  IDs are rendered once; their model is also rendered once only when both model
-  IDs are identical. Distinct Provider routes retain their complete Q/P pairing.
-  The footer intentionally omits
+- the connection footer projects live Agent metadata for Engine, Provider,
+  model, effort, Think, Verbose, Commentary and Connector state. HERV3 shows
+  its one selected Provider/model target and model-reasoning effort; historical
+  Quick/Pro routing is not a public v3 projection. The footer intentionally omits
   working mode; `/mode` remains its authoritative control surface;
 - its cross-instance path proxies only a small named operation set through
   authenticated Hashi Remote peers. Side-panel reads use explicit, Agent-scoped
@@ -154,33 +210,33 @@ This current limitation must be stated plainly. Future TUI development should
 adopt the richer Session/Event contract without changing the rule that the TUI
 stays inside HASHI.
 
-### 5.1 TUI per-Run Telegram projection
+### 5.1 Connector-neutral delivery intent
 
-The TUI may disable only the Telegram projection of a newly submitted TUI Run.
-The public `delivery_policy` wire value is complete, versioned and client-bound:
+Frontend delivery is a versioned, server-owned intent over one or more
+connector endpoints. The canonical form identifies connector and opaque
+endpoint IDs, delivery role, enabled state, and retry policy; it does not use a
+Telegram-shaped field as the generic model. The intent is frozen when a Run is
+admitted so later preference changes cannot redirect an in-flight reply.
 
-```json
-{
-  "type": "hashi.frontend-delivery",
-  "version": 1,
-  "scope": "run",
-  "frontend": "tui",
-  "client_id": "tui-<ephemeral-window-id>",
-  "telegram": {"mirror": false}
-}
-```
+The former TUI-only `hashi.frontend-delivery` version 1 value remains an input
+compatibility format. The Backend API validates and binds it to the submitting
+TUI client, then normalizes it to the connector-neutral version 2 form. New
+preference writes use `frontend_delivery_preferences.json`; reads lazily
+recognize `workbench_telegram_state.json` without rewriting it, and the first
+successful write migrates the value under revision checking. A damaged or
+conflicting document is not overwritten.
 
-The Backend API validates that value for `source=tui`, binds it to the same
-ephemeral TUI client identity, and snapshots the canonical form into the
-admitted Run metadata. Invalid or incomplete policy cannot create a hidden
-Turn. Legacy callers and all non-TUI sources remain visible by default.
-
-`telegram.mirror=false` prevents Telegram typing, commentary, final and error
-delivery for that Run. It does not disconnect the Bot, fork Context, change the
-Conversation binding, suppress the TUI projection, or affect Telegram-native,
-Scheduler, HChat, API, another client, or another already-open TUI window.
-Changing the local preference affects future submissions only. Re-enabling it
-does not replay Turns completed while the projection was disabled.
+The Frontend Connector owns one persistent mirror switch per owner and external
+destination. `/telegram on|off` and `/whatsapp on|off` update those switches
+from any authenticated frontend, including Telegram and WhatsApp themselves.
+TUI and Backend API submit no separate mirror choice; old client-bound delivery
+policies remain readable but cannot override the central switch. A switch
+applies to future Runs regardless of their ingress. Turning a mirror off never
+suppresses a reply to a conversation initiated on that destination, nor does it
+disable the destination's transport. A Run's destinations are frozen at
+admission, so switching later does not replay or redirect it. Automatic
+WhatsApp mirrors require exactly one configured allowed personal number; the
+transport's ordinary replies still use their original chat endpoint.
 
 TUI queue/typing state is an ephemeral Connector projection fenced by instance
 generation, Agent, Session, Run and request identity. Durable Run status and
@@ -296,13 +352,14 @@ and uses the tool-call identity for replay-safe idempotency. A reused identity
 with different bytes is rejected. Multiple tool calls may contribute ordered
 attachments to one reply, but the total limits still apply to the Message.
 
-The public `frontend_connector` capability version 1.1 advertises
-`assistant_multi_attachment=true` and
-`assistant_attachment_delivery=terminal-message-projection`. This is not a
-Workbench contract: any future external frontend must render the canonical
-Message attachment projection. Telegram retains its established
-`telegram_send_file` transport path, and the built-in TUI retains its deeper
-HASHI-owned attachment path; neither is silently redirected through this tool.
+The public `frontend_connector` capability snapshot includes the
+connector-neutral registry and versioned FC contract families. The standard
+`frontend_send_attachments` tool accepts any active Session delivery route,
+including Telegram, TUI and Backend API, while checking every source file
+against authorized access roots. Media groups retain declared order, content
+digests and Session retention policy. Explicit `telegram_send_file` remains a
+Telegram-targeted compatibility action; it is not the generic multi-connector
+attachment contract.
 
 ## 7. Retired Workbench boundary
 
@@ -337,6 +394,104 @@ In particular:
 - a Backend API response must not expose internal implementation state as a
   public contract accidentally.
 
+### 8.1 Standard semantic boundary (2026-09-26)
+
+FC defines one semantic interface for every frontend. A message is a message,
+a command is a command, a display/card is a display, and an interactive button
+is an action regardless of whether the Connector is Telegram, TUI, Backend API,
+an external desktop frontend, or a future registered Connector.
+
+PAO remains the authority for Sessions, Messages, Runs, Events, routing and
+delivery state. Every normal ingress is normalized by a registered FC adapter
+before PAO admission. Every durable user-facing output is first a canonical
+Message/Event with per-endpoint outbox state; only then may a Connector render
+and send it. Frontend applications do not inject objects into a runtime, and
+runtime business code does not emit frontend-specific cards as a second source
+of truth.
+
+Connector-local layout, HTML, terminal styling, media rendition and native
+interaction mechanics remain allowed. A semantic exception, such as TUI-local
+`/agents`, must be declared in the FC registry and fail closed when it is not
+registered. Telegram ephemeral progress and the no-Worker delivery-health
+notice are likewise registered presentation-only exceptions; neither may
+become a second command, Session, Message, or delivery-status authority.
+
+Existing frontend programs keep their own standards. Compatibility endpoints
+and transport APIs are thin Connector adapters around FC; a normal FC change
+does not require editing Telegram, an external Workbench application, or HASHI
+business behavior merely to reproduce the same command/card for another UI.
+
+Each command-menu response binds its Session presentation identity to the
+canonical command invocation, not to fallback text or a transport message
+number. A replay of the same client/request returns the saved non-action result
+and requires a refresh; it never reissues stale legacy or standard actions. A
+new status request may safely render the same text with newly issued actions.
+Native callback wrappers preserve the Connector-requested UI locale. Native
+Telegram text also retains `telegram` as its admission source so its automatic
+reply destination cannot be lost by generic text normalization.
+Telegram command-menu registration is presentation setup after Bot connection.
+A timeout or rate limit while setting the default menu must not demote a
+connected Agent to local-only mode. The Worker records the failed stage and
+retries menu registration independently until success or a permanent rejection;
+shutdown cancels the retry task.
+
+Final replies from standard non-Telegram Runs publish enabled meter and HER
+presentations after the final Message through the same Session Event boundary.
+Telegram mirroring is a destination choice, not a prerequisite for creating
+those canonical display events.
+
+### 8.2 Commands during an active Run
+
+An active Agent Run does not close FC command ingress. A conforming frontend
+must not suppress the command catalogue or a typed command invocation solely
+because the Agent is generating. It submits the command through the same FC
+adapter and lets the owning command decide whether it can apply immediately,
+must reject while busy, or requires a separate lifecycle operation.
+
+Commands never become ordinary chat Messages or queued Runs as a workaround.
+The typed invocation keeps its Session and generation fence, and its result is
+returned as the canonical command response and durable
+`frontend.command_result` Event. Connector-local submission, cancellation, and
+draft conflicts may still block the local control until their own outcome is
+known; an unrelated active Agent Run may not.
+
+### 8.3 Backend API answer preview feed (2026-09-27)
+
+Provider text deltas remain internal. HERV3 may classify a safe visible delta
+as `answer_preview`; FC then projects it as a typed, ephemeral `answer` event on
+the v2 Session feed. Each projected event carries the canonical Session, Run,
+and request identities. The durable terminal Event additionally carries the
+canonical Message identity and is the only authoritative final answer.
+
+Pull clients consume both lanes through
+`/api/v2/frontend/sessions/{session_id}/feed` using independent durable and
+ephemeral cursors. They may render a preview progressively, but must discard it
+after an incomplete replay or gap and wait for the durable final. The final
+replaces the preview rather than creating a second answer. Raw provider deltas
+and the legacy request-activity endpoint are not alternate answer outputs.
+
+This capability is additive to the Backend API Connector. It does not change
+Telegram presentation or delivery. Source and focused offline validation are
+recorded separately from running-Function adoption; this change did not restart
+or replace a running HASHI generation.
+
+### 8.4 Voice profile preview publication (2026-09-28)
+
+Voice profile previews are versioned, immutable Function assets. A deployment
+must package and validate the complete manifest; an instance-local
+`media/_voice_previews` asset may override its matching product asset without
+becoming part of the deployment template.
+
+The preview action publishes through FC to the Session and context generation
+that opened the command UI. Backend API/Workbench receives a standard
+`audio_attachment` presentation. Telegram keeps its registered connector-local
+voice-message rendering and is the only branch that calls the Telegram
+transport. No frontend packages a private copy of the preview catalogue.
+
+The user approved the Function, HASHI1 deployment-template, and local-instance
+changes on 2026-09-28. Offline validation and running-Function adoption remain
+separate; approval did not authorize a reboot or replacement.
+
 ## 9. Engineering-layer placement
 
 Connector business behaviour belongs in the Functions layer. Stable process
@@ -350,14 +505,19 @@ into HASHI Functions or Core.
 
 ## 10. Current alignment debt
 
-- The TUI has trusted multi-instance switching but still uses basic Backend API
-  chat/transcript routes.
-- Some orchestrator modules directly depend on Telegram types rather than a
-  transport-neutral event interface.
+- The TUI keeps registered local commands and basic Backend API compatibility
+  routes. They are intentionally thin FC adapters; a complete v2 multi-Session
+  TUI is not required by the current standard-interface migration.
+- Telegram-native classes remain inside its Connector renderer and registered
+  presentation exceptions. They are not canonical Event or command types.
 - Retired Workbench compatibility names remain in source and configuration.
 - Persistent Session API v1 remains fail-closed when its runtime qualification
   evidence is absent, even though qualified personal instances enable it by
   default.
+- Source convergence and live adoption are separate. The 2026-09-26 FC source
+  is adopted on HASHI1; Telegram, Relay, physical microphone and any other
+  unavailable or unauthorized destination remain explicitly outside the
+  completed Workbench live subset.
 
 These are current implementation facts, not target architecture exceptions.
 
@@ -413,13 +573,13 @@ The local `/connect` page and `hashi onboard` compatibility route use masked
 secret controls and explicit consent. Discovery lists same-environment CLI
 executables and catalogue models without claiming authentication. The selected
 backend is probed through FlexibleBackendManager and its real adapter in a
-disposable workspace. API choices configure HER v2 and its internal provider
-profiles; a model-list response is not success. Unavailable models and failed
-streams remain errors. Probe, save, reload request and actual chat readiness are
-separate facts.
+disposable workspace. API choices configure HERV3's selected Provider/model
+through its internal compatibility storage boundary; a model-list response is
+not success. Unavailable models and failed streams remain errors. Probe, save,
+reload request and actual chat readiness are separate facts.
 
 Only Hashiko's connection fields and scoped credential references are merged.
-Existing Agents, identities, history, optional integrations and TUI mirroring
+Existing Agents, identities, history, optional integrations and FC mirror preferences
 are retained. A connection revision is consumed once by the backend state
 owner to supersede old overrides. New Hashiko uses workspace access and the
 PAO-owned open HASHI Tool default; the disposable connection probe remains
@@ -429,7 +589,7 @@ whole-instance restart, and does not report ready.
 
 Optional Telegram setup uses a separate masked Bot Token and positive numeric
 user ID, verifies getMe, refuses conflicting existing ownership, and saves no
-open-to-everyone fallback. It does not send a test message or change TUI mirror
+open-to-everyone fallback. It does not send a test message or change FC mirror
 preferences. Real Telegram round trips require their own authorized evidence.
 
 Fresh TUI startup focuses the chat input, so typing starts work immediately.
@@ -503,6 +663,10 @@ shared-ingress protocol is introduced.
 
 ### Targeted Workbench Safe Voice adoption (2026-09-13)
 
+> Historical migration note: this admin-command transport was the first
+> Workbench adapter and is superseded for Safe Voice by the Session API path
+> documented below. Do not add new Safe Voice reads or decisions to this route.
+
 The existing authenticated admin-command transport may carry the reserved
 `__hashi_voice_confirmation_v1__:` envelope through the unchanged
 `runtime.slash` RPC. This lets one selected Agent Worker adopt Workbench Safe
@@ -538,6 +702,34 @@ Implementation and offline validation are scoped to the local candidate branch
 feature/chat-connector-ux-20260912. Shared API source adoption, Worker source
 adoption, qualified artifacts, current STT dependencies and terminal delivery are
 separate facts. This task did not adopt a running generation or restart production.
+
+### Workbench Safe Voice through canonical Session Runs (2026-09-25)
+
+New Workbench voice recordings enter the selected owner-scoped Session as an
+audio attachment with `semantic_role=voice_message`, then one idempotent Session
+Run. The route verifies the Session's Agent and context generation before
+staging bytes. It reads the durable transcript event filtered by that Run ID;
+Safe Voice still presents a confirmation preview, and confirm/discard use the
+typed Session voice-transcript decision endpoint. The audio is never converted
+to plain text by the connector, and no decision is automatic.
+
+Attachment stage retries are bound to a client idempotency key and canonical
+metadata digest. Identical retries reuse the same attachment; changed metadata
+conflicts. Uploading the identical bytes and committing an already committed
+attachment are safe replays, while expired or otherwise unavailable assets
+cannot be revived. The Session API publishes this capability explicitly, and
+Workbench fails closed for file delivery when it is absent.
+
+Safe Voice confirmation is fenced atomically against both the originating Run
+generation and the Session's current generation. Session events support a Run-ID
+filter so a replay can find its own durable transcript event without mixing in
+other messages. The Session API does not currently expose a durable transcript
+expiry, so the Workbench does not invent one in its presentation contract.
+
+The changes are source-only and offline-validated. Running Function adoption,
+real microphone/file delivery, confirmation in the external Workbench, and the
+remaining live acceptance manifest are separate pending checks; no runtime was
+restarted as part of this slice.
 
 ### Targeted Worker chat-projection adoption (2026-09-12)
 
@@ -583,3 +775,18 @@ the guard was tightened. Focused validation passed: 76 cases across
 command-audit/admin consumers passed separately. The protected-Core guard and
 whitespace check passed. Live Worker generation and user-terminal delivery remain
 separate acceptance evidence.
+
+### Terminal-only slash commands
+
+The shared command catalogue contains `/logo`, whose effect targets the HASHI
+server terminal. The command is TUI-only and stays out of shared command menus
+(`menu_visible=False`). The Connector registry projects the mandatory
+`connector_local` restriction for every non-TUI Connector, including dynamically
+registered third-party Connectors; a registration cannot override it with
+`route=standard`. Admission, compatibility adapters, capability responses and
+registry snapshots all derive this restriction from the same owner.
+
+External calls are rejected before terminal execution. The native Telegram
+handler returns a localized unsupported notice. The TUI compatibility route
+passes its normalized Connector identity to the handler and retains terminal
+execution; a handler must not mistake that call for a native Telegram update.

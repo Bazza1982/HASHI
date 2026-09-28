@@ -185,9 +185,14 @@ def test_say_does_not_fall_back_after_route_delivery_tracking_starts(
 
 
 @pytest.mark.asyncio
-async def test_send_voice_reply_reports_telegram_timeout_as_unknown(tmp_path):
+async def test_send_voice_reply_reports_telegram_timeout_as_unknown(
+    tmp_path, monkeypatch
+):
+    from orchestrator import runtime_delivery
+    from orchestrator.session_store import SessionStore
+
     ogg_path = tmp_path / "reply.ogg"
-    ogg_path.write_bytes(b"ogg")
+    ogg_path.write_bytes(b"OggS" + b"\0" * 32)
 
     class TestVoiceManager:
         async def synthesize_reply(self, *args, **kwargs):
@@ -203,25 +208,61 @@ async def test_send_voice_reply_reports_telegram_timeout_as_unknown(tmp_path):
         async def send_voice(self, **kwargs):
             raise TimedOut("ack timeout")
 
-    warnings = []
     runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
     runtime.telegram_connected = True
     runtime.voice_manager = TestVoiceManager()
     runtime.name = "zelda"
     runtime.app = SimpleNamespace(bot=Bot())
+    runtime.config = SimpleNamespace(active_backend="codex-cli", extra={})
+    runtime.global_config = SimpleNamespace(
+        authorized_id=123,
+        instance_id="HASHI1",
+        project_root=tmp_path,
+    )
+    runtime.workspace_dir = tmp_path
+    runtime.session_dir = tmp_path
+    runtime.session_store = SessionStore(
+        tmp_path / "sessions.sqlite3", instance_id="HASHI1"
+    )
+    runtime.logger = SimpleNamespace(warning=lambda *args: None)
     runtime.telegram_logger = SimpleNamespace(
-        warning=warnings.append,
+        warning=lambda *args: None,
         info=lambda *args: None,
     )
     runtime.error_logger = SimpleNamespace(error=lambda *args: None)
+    runtime._notify_enabled = False
     runtime._mark_error = lambda *args: pytest.fail(
         "ambiguous delivery is not a hard failure"
+    )
+
+    async def not_blocked(*_args, **_kwargs):
+        return False
+
+    monkeypatch.setattr(
+        runtime_delivery.telegram_delivery_failover,
+        "handle_blocked_send",
+        not_blocked,
     )
 
     result = await runtime._send_voice_reply(123, "hello", "say-timeout", force=True)
 
     assert result is None
-    assert warnings
+    session = runtime.session_store.resolve_primary_session(
+        owner_id="user:123", agent_id="zelda"
+    )
+    event = next(
+        item
+        for item in runtime.session_store.events(
+            session["session_id"], owner_id="user:123"
+        )
+        if item["kind"] == "frontend.message.recorded"
+    )
+    receipts = runtime.session_store.frontend_delivery_receipts(
+        session_id=session["session_id"],
+        owner_id="user:123",
+        event_id=event["event_id"],
+    )
+    assert [item["status"] for item in receipts] == ["unknown"]
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -56,6 +57,22 @@ def _runtime(tmp_path: Path, name: str, *, preview_default: bool = True):
         startup_success=True,
         token=f"token-{name}",
     )
+
+    async def send_via_fc_adapter(chat_id, text, **kwargs):
+        for key in (
+            "_delivery_mode",
+            "_purpose",
+            "_raise_delivery_error",
+            "_request_id",
+        ):
+            kwargs.pop(key, None)
+        return await runtime.app.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            **kwargs,
+        )
+
+    runtime._send_text = send_via_fc_adapter
     return runtime
 
 
@@ -872,13 +889,19 @@ def test_status_summary_reports_delivery_block_and_typing(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("availability", ["source", "fallback", "blocked", "none"])
+@pytest.mark.parametrize(
+    "availability",
+    ["source", "default_key", "fallback", "blocked", "rate_limited", "none"],
+)
 async def test_runtime_notice_uses_original_bot_without_worker_then_same_destination_fallback(
-    tmp_path, monkeypatch, availability
+    tmp_path, monkeypatch, caplog, availability
 ):
     from orchestrator.reboot_ui import render_notice
 
     calls, closed = [], []
+    bridge_audit = logging.getLogger("BridgeU.Bridge")
+    monkeypatch.setattr(bridge_audit, "propagate", True)
+    monkeypatch.setattr(bridge_audit, "level", logging.INFO)
 
     class DirectBot:
         def __init__(self, token):
@@ -896,6 +919,8 @@ async def test_runtime_notice_uses_original_bot_without_worker_then_same_destina
                 availability == "fallback" and self.token == "source-test-token"
             ):
                 raise OSError("unavailable")
+            if availability == "rate_limited" and self.token == "source-test-token":
+                raise RetryAfter(timedelta(seconds=9))
             return SimpleNamespace(message_id=19)
 
     monkeypatch.setattr("telegram.Bot", DirectBot)
@@ -919,11 +944,17 @@ async def test_runtime_notice_uses_original_bot_without_worker_then_same_destina
             },
         ],
     }
+    if availability == "default_key":
+        config["agents"][0].pop("telegram_token_key")
     kernel = SimpleNamespace(
         global_cfg=SimpleNamespace(project_root=tmp_path, instance_id="HASHI2"),
         _runtime_map=lambda: {},  # no Worker exists, including the initiator
         _load_raw_config=lambda: config,
-        secrets={"s": "source-test-token", "b": "backup-test-token"},
+        secrets={
+            "s": "source-test-token",
+            "source": "source-test-token",
+            "b": "backup-test-token",
+        },
     )
     if availability == "blocked":
         _write_delivery_state(
@@ -953,6 +984,8 @@ async def test_runtime_notice_uses_original_bot_without_worker_then_same_destina
     result = await failover.send_runtime_notice(
         kernel,
         source_agent="source",
+        operation_id="reboot-test-operation",
+        notice_kind="final",
         chat_id=-42,
         thread_id=7,
         render_text=lambda name, display: render_notice(
@@ -960,9 +993,9 @@ async def test_runtime_notice_uses_original_bot_without_worker_then_same_destina
         ),
     )
     assert result["sent"] is (availability != "none")
-    if availability in {"fallback", "blocked"}:
+    if availability in {"fallback", "blocked", "rate_limited"}:
         assert result["sender"] == "backup" and "backup" in calls[-1][1]["text"]
-    elif availability == "source":
+    elif availability in {"source", "default_key"}:
         assert result["sender"] == "source" and len(calls) == 1
     else:
         assert len(calls) == 2  # aliases sharing a token are tried once
@@ -972,3 +1005,77 @@ async def test_runtime_notice_uses_original_bot_without_worker_then_same_destina
             "显示&lt;&amp;&gt;名称" in kwargs["text"] and kwargs["parse_mode"] == "HTML"
         )
     assert len(closed) == len(calls)
+    if availability == "rate_limited":
+        assert any(
+            entry.name == "BridgeU.Bridge"
+            and "reboot-test-operation" in entry.message
+            and "source" in entry.message
+            and "retry_after" in entry.message
+            and "9" in entry.message
+            for entry in caplog.records
+        )
+    if availability == "blocked":
+        assert any(
+            entry.name == "BridgeU.Bridge"
+            and "reboot-test-operation" in entry.message
+            and "source" in entry.message
+            and "active_delivery_block" in entry.message
+            for entry in caplog.records
+        )
+    assert "source-test-token" not in caplog.text
+    assert "backup-test-token" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_runtime_notice_reuses_initialized_source_ingress_bot(
+    tmp_path, monkeypatch
+):
+    sent = []
+
+    class IngressBot:
+        async def send_message(self, **kwargs):
+            sent.append(kwargs)
+            return SimpleNamespace(message_id=31)
+
+    def no_new_bot(_token):
+        raise AssertionError("notice opened a second Telegram Bot connection")
+
+    monkeypatch.setattr("telegram.Bot", no_new_bot)
+    ingress = SimpleNamespace(
+        token="source-test-token", bot=IngressBot(), connected=True, is_running=True
+    )
+    kernel = SimpleNamespace(
+        global_cfg=SimpleNamespace(project_root=tmp_path, instance_id="HASHI2"),
+        function_workers=SimpleNamespace(_telegram_ingress={"source": ingress}),
+        _runtime_map=lambda: {},
+        _load_raw_config=lambda: {
+            "global": {"instance_id": "HASHI2"},
+            "agents": [
+                {
+                    "name": "source",
+                    "telegram_token_key": "s",
+                    "agent_lifecycle_id": "1" * 32,
+                }
+            ],
+        },
+        secrets={"s": "source-test-token"},
+    )
+
+    result = await failover.send_runtime_notice(
+        kernel,
+        source_agent="source",
+        operation_id="reboot-live-source",
+        notice_kind="final",
+        chat_id=42,
+        render_text=lambda _name, _display: "done",
+    )
+
+    assert result == {"sent": True, "sender": "source", "message_id": 31}
+    assert sent == [
+        {
+            "chat_id": 42,
+            "message_thread_id": None,
+            "text": "done",
+            "parse_mode": "HTML",
+        }
+    ]

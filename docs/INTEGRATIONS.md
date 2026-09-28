@@ -13,7 +13,7 @@ An Engine turns model capability into agentic work using tools, context,
 control loops, and persistence. A Model Provider supplies inference.
 HASHI separates these boundaries.
 
-HER v2 is HASHI's native Engine. It owns a durable Engine Session and can use
+HERV3 is HASHI's native Engine. It owns a durable Engine Session and can use
 configured Model Providers such as OpenRouter or DeepSeek. HASHI also connects
 CLI engines such as Claude Code, Codex CLI, Gemini CLI, and Grok CLI, with
 their own installation and authentication requirements. Other compatibility

@@ -8,7 +8,7 @@ from orchestrator.background_jobs import TERMINAL_STATES
 from orchestrator.background_job_policy import USER_BACKGROUND_JOB_REQUEST_SOURCE
 from orchestrator.command_ui import card_title
 from orchestrator.command_registry import RuntimeCommand
-from orchestrator import ui_language
+from orchestrator import runtime_session, ui_language
 
 
 RESERVED_SUBCOMMANDS = {"run", "status", "tail", "cancel", "list", "ls", "help", "-h", "--help"}
@@ -145,11 +145,32 @@ async def _run_task(runtime: Any, update: Any, task_text: str) -> None:
         "--- USER TASK ---\n"
         f"{task_text}"
     )
+    activity_context = {
+        "kind": "background_request",
+        "trigger": "user",
+    }
+    if getattr(runtime, "session_store", None) is not None or getattr(
+        runtime,
+        "workspace_dir",
+        None,
+    ) is not None:
+        origin_session = runtime_session.current_session_for_update(runtime, update)
+        activity_context["origin_session_id"] = origin_session["session_id"]
+        activity_context["origin_context_generation"] = origin_session[
+            "context_generation"
+        ]
+        activity_context["origin_message_ordinal"] = max(
+            0,
+            int(origin_session.get("next_message_ordinal") or 1) - 1,
+        )
     request_id = await enqueue(
         chat_id,
         prompt,
         USER_BACKGROUND_JOB_REQUEST_SOURCE,
         f"Background task: {_short(task_text)}",
+        request_metadata={
+            "agent_activity_context": activity_context,
+        },
     )
     suffix = (
         f"\n{html.escape(ui_language.tr('bg.request'))}: "

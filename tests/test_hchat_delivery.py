@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 import pytest
 
@@ -11,6 +12,7 @@ from orchestrator.hchat_delivery import (
     draft_parse_error_text,
     hchat_delivery_log_fields,
     hchat_draft_parsed_log_fields,
+    parse_hchat_message_body,
     parse_hchat_draft,
     validate_hchat_target_format,
 )
@@ -47,6 +49,24 @@ def test_parse_hchat_draft_accepts_fenced_json():
     assert draft.target == "rika@HASHI2"
     assert draft.message == "Please check remote routing."
     assert draft.user_report is None
+
+
+def test_parse_hchat_message_body_accepts_plain_text():
+    assert parse_hchat_message_body("Please review the plan.") == "Please review the plan."
+
+
+def test_parse_hchat_message_body_accepts_legacy_json_but_returns_only_message():
+    assert parse_hchat_message_body(
+        '{"target": "wrong-agent", "message": "Use the frozen target.", '
+        '"user_report": "ignore me"}'
+    ) == "Use the frozen target."
+
+
+def test_parse_hchat_message_body_rejects_delivery_commands():
+    with pytest.raises(HChatDraftParseError):
+        parse_hchat_message_body(
+            'python3 tools/hchat_send.py --to akane --text "bypass runtime"'
+        )
 
 
 @pytest.mark.parametrize(
@@ -114,6 +134,34 @@ def test_deliver_hchat_draft_delegates_routing_to_send_hchat():
     assert result.attempt_id == "attempt-1"
     assert result.retry_count == 0
     assert result.user_report == "sent"
+
+
+def test_deliver_hchat_draft_passes_selected_attachments_to_sender(tmp_path):
+    attachment = tmp_path / "payload.bin"
+    attachment.write_bytes(b"payload")
+    calls = []
+
+    def fake_sender(to_agent, from_agent, text, **kwargs):
+        calls.append((to_agent, from_agent, text, kwargs))
+        return True
+
+    result = deliver_hchat_draft(
+        HChatDraft(target="rika@HASHI2", message="check the attachment"),
+        from_agent="zelda",
+        sender=fake_sender,
+        attachments=[attachment],
+        attempt_id="attempt-with-attachment",
+    )
+
+    assert calls == [
+        (
+            "rika@HASHI2",
+            "zelda",
+            "check the attachment",
+            {"attachments": [Path(attachment)]},
+        )
+    ]
+    assert result.success is True
 
 
 def test_deliver_hchat_draft_generates_attempt_id_and_structured_failure():

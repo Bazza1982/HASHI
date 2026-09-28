@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -20,6 +21,378 @@ def _store(tmp_path) -> SessionStore:
     return SessionStore(tmp_path / "state" / "sessions.sqlite3", instance_id="HASHI1")
 
 
+def test_schema_12_sessions_migrate_to_conversations_and_hide_activity(tmp_path):
+    store = _store(tmp_path)
+    conversation = store.ensure_default_session(owner_id="user:7", agent_id="lily")
+    db_path = store.db_path
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("DROP INDEX one_active_agent_activity_session")
+        connection.execute("ALTER TABLE sessions DROP COLUMN session_kind")
+        connection.execute(
+            "UPDATE schema_metadata SET value='12' WHERE key='schema_version'"
+        )
+
+    migrated = _store(tmp_path)
+    visible = migrated.list_sessions(owner_id="user:7", agent_id="lily")
+    activity = migrated.ensure_agent_activity_session(
+        owner_id="user:7",
+        agent_id="lily",
+    )
+    all_sessions = migrated.list_sessions(
+        owner_id="user:7",
+        agent_id="lily",
+        include_internal=True,
+    )
+    with sqlite3.connect(db_path) as connection:
+        schema_version = connection.execute(
+            "SELECT value FROM schema_metadata WHERE key='schema_version'"
+        ).fetchone()[0]
+
+    assert schema_version == str(SessionStore.SCHEMA_VERSION)
+    assert visible == [migrated.get_session(conversation["session_id"])]
+    assert visible[0]["session_kind"] == "conversation"
+    assert activity["session_kind"] == "agent_activity"
+    assert {session["session_id"] for session in all_sessions} == {
+        conversation["session_id"],
+        activity["session_id"],
+    }
+
+
+def test_schema_13_messages_gain_nullable_display_projection(tmp_path):
+    store = _store(tmp_path)
+    session = store.ensure_default_session(owner_id="user:7", agent_id="lily")
+    accepted = store.accept_run(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        agent_id="lily",
+        request_id="before-display-projection",
+        text="original text",
+        source="workbench",
+        idempotency_key="before-display-projection",
+    )
+    db_path = store.db_path
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("ALTER TABLE messages DROP COLUMN display_text")
+        connection.execute(
+            "UPDATE schema_metadata SET value='13' WHERE key='schema_version'"
+        )
+
+    migrated = _store(tmp_path)
+    message = next(
+        item
+        for item in migrated.messages(session["session_id"], owner_id="user:7")
+        if item["message_id"] == accepted.message_id
+    )
+    with sqlite3.connect(db_path) as connection:
+        schema_version = connection.execute(
+            "SELECT value FROM schema_metadata WHERE key='schema_version'"
+        ).fetchone()[0]
+
+    assert schema_version == str(SessionStore.SCHEMA_VERSION)
+    assert message["text"] == "original text"
+    assert message["display_text"] is None
+
+
+def test_agent_workzones_are_independent_of_legacy_session_rows(tmp_path):
+    store = _store(tmp_path)
+    session = store.ensure_default_session(owner_id="user:7", agent_id="lily")
+    legacy_path = tmp_path / "legacy-session-zone"
+    agent_path = tmp_path / "agent-zone"
+    legacy_path.mkdir()
+    agent_path.mkdir()
+    store.set_workzone_slot(session["session_id"], "main", path=str(legacy_path))
+
+    assert store.get_agent_workzone_set(owner_id="user:7", agent_id="lily") == {
+        "owner_id": "user:7",
+        "agent_id": "lily",
+        "revision": 0,
+        "slots": [],
+    }
+    updated = store.set_agent_workzone_slot(
+        owner_id="user:7",
+        agent_id="lily",
+        slot_id="main",
+        path=str(agent_path),
+    )
+    assert updated["revision"] == 1
+    assert updated["slots"][0]["path"] == str(agent_path)
+    assert store.get_workzone_set(session["session_id"])["slots"][0]["path"] == str(
+        legacy_path
+    )
+
+
+def test_failed_run_retains_owner_scoped_provider_details_after_reopen(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    session = store.ensure_default_session(owner_id="user:7", agent_id="lily")
+    store.accept_run(
+        session_id=session["session_id"], owner_id="user:7", agent_id="lily",
+        request_id="req-provider-failure", text="hello", source="workbench",
+        idempotency_key="provider-failure",
+    )
+    store.mark_request_running("req-provider-failure", worker_id="test-worker")
+    monkeypatch.setattr(runtime_session, "capture_backend_binding", lambda *args, **kwargs: None)
+    runtime = SimpleNamespace(
+        session_store=store, config=SimpleNamespace(active_backend="her-v2"),
+        session_dir=tmp_path / "logs" / "lily" / "run",
+    )
+    runtime_session.finish_request_from_listener(
+        runtime, "req-provider-failure", {
+            "success": False,
+            "error": "[PROVIDER_BAD_REQUEST] The provider rejected the request as invalid.",
+            "error_code": "PROVIDER_BAD_REQUEST", "http_status": 400,
+            "provider_request_id": "apireq-example", "error_retryable": False,
+            "raw_provider_response": "must not be published",
+        },
+    )
+    reopened = _store(tmp_path)
+    detail = reopened.request_failure_detail(
+        "req-provider-failure", owner_id="user:7", agent_id="lily",
+    )
+    assert detail["request_id"] == "req-provider-failure"
+    assert detail["error_code"] == "PROVIDER_BAD_REQUEST"
+    assert detail["http_status"] == 400
+    assert detail["provider_request_id"] == "apireq-example"
+    assert detail["backend"] == "her-v3"
+    assert detail["diagnostic_log"] == str(runtime.session_dir / "errors.log")
+    assert "raw_provider_response" not in detail
+    with pytest.raises(SessionNotFound):
+        reopened.request_failure_detail(
+            "req-provider-failure", owner_id="user:other", agent_id="lily",
+        )
+
+
+def test_attachment_stage_idempotency_reuses_metadata_and_rejects_conflicts(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    payload = b"stable attachment bytes"
+    metadata = {
+        "session_id": session["session_id"],
+        "owner_id": owner,
+        "filename": "report.txt",
+        "media_type": "text/plain",
+        "size_bytes": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "idempotency_key": "send-attachment-0",
+    }
+
+    first = store.stage_attachment(**metadata)
+    replay = store.stage_attachment(**metadata)
+    assert replay["attachment_id"] == first["attachment_id"]
+    assert replay["state"] == "staged"
+
+    store.upload_attachment_bytes(
+        session_id=session["session_id"],
+        owner_id=owner,
+        attachment_id=first["attachment_id"],
+        payload=payload,
+    )
+    committed = store.commit_attachment(
+        session_id=session["session_id"],
+        owner_id=owner,
+        attachment_id=first["attachment_id"],
+    )
+    committed_replay = store.stage_attachment(**metadata)
+    assert committed_replay["attachment_id"] == first["attachment_id"]
+    assert committed_replay["state"] == "committed"
+    assert store.upload_attachment_bytes(
+        session_id=session["session_id"],
+        owner_id=owner,
+        attachment_id=first["attachment_id"],
+        payload=payload,
+    )["state"] == "committed"
+    assert store.commit_attachment(
+        session_id=session["session_id"],
+        owner_id=owner,
+        attachment_id=first["attachment_id"],
+    )["committed_at"] == committed["committed_at"]
+
+    with pytest.raises(IdempotencyConflict):
+        store.stage_attachment(**{**metadata, "filename": "other.txt"})
+    distinct = store.stage_attachment(
+        **{**metadata, "idempotency_key": "send-attachment-1"}
+    )
+    assert distinct["attachment_id"] != first["attachment_id"]
+
+
+def test_attachment_cleanup_expires_only_unbound_and_non_inflight_bytes(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+
+    def prepared(name: str, payload: bytes):
+        staged = store.stage_attachment(
+            session_id=session["session_id"],
+            owner_id=owner,
+            filename=name,
+            media_type="text/plain",
+            size_bytes=len(payload),
+            sha256=hashlib.sha256(payload).hexdigest(),
+            retention_seconds=1,
+        )
+        store.upload_attachment_bytes(
+            session_id=session["session_id"],
+            owner_id=owner,
+            attachment_id=staged["attachment_id"],
+            payload=payload,
+        )
+        return staged
+
+    unbound = prepared("unbound.txt", b"unbound")
+    inflight = prepared("inflight.txt", b"inflight")
+    store.commit_attachment(
+        session_id=session["session_id"],
+        owner_id=owner,
+        attachment_id=inflight["attachment_id"],
+    )
+    with store._lock, store._connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        event = store._append_event(
+            connection,
+            session_id=session["session_id"],
+            run_id=None,
+            kind="frontend.media.available",
+            status="ready",
+            phase="publication",
+            summary="Media ready",
+            detail={"attachments": [{"attachment_id": inflight["attachment_id"]}]},
+            outbox=True,
+        )
+        connection.execute(
+            """UPDATE session_attachments SET created_at=?
+               WHERE attachment_id IN (?,?)""",
+            (
+                "2000-01-01T00:00:00Z",
+                unbound["attachment_id"],
+                inflight["attachment_id"],
+            ),
+        )
+
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    expired = store.cleanup_attachments(now=now)
+    assert [item["attachment_id"] for item in expired] == [
+        unbound["attachment_id"]
+    ]
+    assert store.cleanup_attachments(now=now) == []
+    with pytest.raises(SessionConflict):
+        store.commit_attachment(
+            session_id=session["session_id"],
+            owner_id=owner,
+            attachment_id=unbound["attachment_id"],
+        )
+    store.attachment_bytes(
+        session_id=session["session_id"],
+        owner_id=owner,
+        attachment_id=inflight["attachment_id"],
+    )
+
+    claim = store.claim_delivery_outbox(
+        session_id=session["session_id"],
+        owner_id=owner,
+        worker_id="media-test",
+        event_id=event["event_id"],
+        limit=1,
+    )[0]
+    store.complete_delivery_outbox(
+        outbox_id=claim["outbox_id"],
+        lease_token=claim["lease_token"],
+        status="completed",
+    )
+    assert [
+        item["attachment_id"]
+        for item in store.cleanup_attachments(now=now)
+    ] == [inflight["attachment_id"]]
+
+
+def test_message_bound_attachment_becomes_indefinite(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    payload = b"durable history"
+    attachment = store.stage_attachment(
+        session_id=session["session_id"],
+        owner_id=owner,
+        filename="history.txt",
+        media_type="text/plain",
+        size_bytes=len(payload),
+        sha256=hashlib.sha256(payload).hexdigest(),
+        retention_seconds=1,
+    )
+    store.upload_attachment_bytes(
+        session_id=session["session_id"],
+        owner_id=owner,
+        attachment_id=attachment["attachment_id"],
+        payload=payload,
+    )
+    store.commit_attachment(
+        session_id=session["session_id"],
+        owner_id=owner,
+        attachment_id=attachment["attachment_id"],
+    )
+    store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="lily",
+        request_id="req-bound-attachment",
+        text="see attachment",
+        source="api",
+        idempotency_key="bound-attachment",
+        content=[
+            {"type": "text", "text": "see attachment"},
+            {"type": "attachment", "attachment_id": attachment["attachment_id"]},
+        ],
+    )
+    with store._connection() as connection:
+        row = connection.execute(
+            """SELECT retention_indefinite, retention_seconds
+               FROM session_attachments WHERE attachment_id=?""",
+            (attachment["attachment_id"],),
+        ).fetchone()
+    assert tuple(row) == (1, None)
+
+
+def test_voice_transcript_decision_is_fenced_to_its_original_session_generation(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    accepted = store.accept_run(
+        session_id=session["session_id"], owner_id=owner, agent_id="lily",
+        request_id="req-voice-fence", text="audio input", source="session-api",
+        idempotency_key="voice-fence-run",
+    )
+    store.mark_request_running(accepted.request_id, worker_id="test-worker")
+    store.finish_request(
+        accepted.request_id, success=True, assistant_text="done", assistant_source="test"
+    )
+    attachment = store.stage_attachment(
+        session_id=session["session_id"], owner_id=owner, filename="voice.bin",
+        media_type="application/octet-stream", size_bytes=1,
+        sha256=hashlib.sha256(b"x").hexdigest(), upload_required=False,
+    )
+    transcript = store.record_voice_transcript(
+        request_id=accepted.request_id, attachment_id=attachment["attachment_id"],
+        text="unsubmitted transcript", provenance="local_stt",
+        safe_voice_state="pending_confirmation",
+    )
+    store.start_fresh_generation(session["session_id"], reason="test-stale-voice")
+
+    with pytest.raises(SessionConflict, match="stale Session context"):
+        store.decide_voice_transcript_by_id(
+            session_id=session["session_id"], owner_id=owner,
+            transcript_id=transcript["transcript_id"], confirmed=True,
+            expected_context_generation=1,
+        )
+    transcript_events = store.events(session["session_id"], run_id=accepted.run_id)
+    assert any(
+        event["kind"] == "voice.input.transcript_pending_confirmation"
+        for event in transcript_events
+    )
+    assert not any(
+        event["kind"] == "voice.input.transcript_confirmed"
+        for event in transcript_events
+    )
+
+
 def test_runtime_without_bridge_root_keeps_session_db_in_its_workspace(tmp_path):
     runtime = type("Runtime", (), {})()
     runtime.name = "test-agent"
@@ -32,6 +405,38 @@ def test_runtime_without_bridge_root_keeps_session_db_in_its_workspace(tmp_path)
 
     assert store.db_path == runtime.workspace_dir / "state" / "sessions.sqlite3"
     assert not (tmp_path / "state" / "sessions.sqlite3").exists()
+
+
+def test_listener_completion_projects_public_her_v3_source(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.create_session(owner_id=owner, agent_id="lily")
+    store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="lily",
+        request_id="her-v3-source",
+        text="hello",
+        source="session-api",
+        idempotency_key="her-v3-source",
+    )
+    store.mark_request_running("her-v3-source", worker_id="worker")
+    runtime = SimpleNamespace(
+        name="lily",
+        config=SimpleNamespace(active_backend="her-v2"),
+        backend_manager=SimpleNamespace(current_backend=None),
+        session_store=store,
+        _request_meta_by_id={},
+    )
+
+    runtime_session.finish_request_from_listener(
+        runtime,
+        "her-v3-source",
+        {"success": True, "text": "hello back"},
+    )
+
+    messages = store.messages(session["session_id"], owner_id=owner)
+    assert messages[-1]["source"] == "her-v3"
 
 
 def _complete(
@@ -1031,6 +1436,50 @@ def test_delivery_queue_acknowledgement_is_not_a_delivered_receipt(tmp_path):
     ) == "peer answer"
 
 
+def test_unknown_assistant_delivery_is_not_mislabeled_or_replayed(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    accepted = _complete(
+        store,
+        session_id=session["session_id"],
+        owner_id=owner,
+        request_id="req-unknown-delivery",
+        key="unknown-delivery",
+        text="prompt",
+        answer="answer",
+        source="text",
+    )
+
+    event = store.record_assistant_delivery(
+        accepted.request_id,
+        delivered=False,
+        outcome_state="unknown",
+        surface="whatsapp",
+        channel_key="peer",
+        transport="whatsapp",
+        completion_path="foreground",
+        disposition="connector_outcome_unknown",
+    )
+    duplicate = store.record_assistant_delivery(
+        accepted.request_id,
+        delivered=False,
+        outcome_state="unknown",
+        surface="whatsapp",
+        channel_key="peer",
+        transport="whatsapp",
+        completion_path="foreground",
+        disposition="connector_outcome_unknown",
+    )
+
+    assert event["status"] == "unknown"
+    assert event["detail"]["outcome_state"] == "unknown"
+    assert duplicate["event_id"] == event["event_id"]
+    assert store.latest_delivered_assistant_text(
+        session["session_id"], surface="whatsapp", channel_key="peer"
+    ) is None
+
+
 def test_say_delivery_lookup_targets_telegram_when_command_arrives_via_workbench(
     tmp_path,
 ):
@@ -1583,6 +2032,505 @@ def test_terminal_commit_writes_message_event_projection_and_outbox_together(tmp
         )
 
 
+def test_frontend_delivery_receipts_are_endpoint_scoped_idempotent_and_monotonic(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    _complete(
+        store,
+        session_id=session["session_id"],
+        owner_id=owner,
+        request_id="req-delivery-receipt",
+        key="delivery-receipt-key",
+        text="question",
+        answer="answer",
+    )
+    event = next(
+        item
+        for item in store.events(session["session_id"], owner_id=owner)
+        if item["kind"] == "run.completed"
+    )
+    unknown = {
+        "type": "hashi.delivery-receipt",
+        "version": 1,
+        "event_id": event["event_id"],
+        "endpoint_id": "ep_telegram_main",
+        "status": "unknown",
+        "proof": None,
+    }
+
+    first = store.record_frontend_delivery_receipt(
+        session_id=session["session_id"], owner_id=owner, receipt=unknown
+    )
+    assert first["status"] == "unknown"
+    delivered = {
+        **unknown,
+        "status": "delivered",
+        "proof": {"type": "telegram-api-accepted", "value": "tgmsg_123"},
+    }
+    success = store.record_frontend_delivery_receipt(
+        session_id=session["session_id"], owner_id=owner, receipt=delivered
+    )
+    replay = store.record_frontend_delivery_receipt(
+        session_id=session["session_id"], owner_id=owner, receipt=delivered
+    )
+    late_failure = store.record_frontend_delivery_receipt(
+        session_id=session["session_id"],
+        owner_id=owner,
+        receipt={**unknown, "status": "failed"},
+    )
+
+    assert success["status"] == "delivered"
+    assert replay["duplicate"] is True
+    assert late_failure["status"] == "delivered"
+    assert late_failure["ignored_regression"] is True
+    with sqlite3.connect(store.db_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM connector_delivery_receipts WHERE event_id = ?",
+            (event["event_id"],),
+        ).fetchone()[0] == 1
+
+
+def test_delivery_outbox_uses_fenced_claims_and_requires_safe_retry(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    _complete(
+        store,
+        session_id=session["session_id"],
+        owner_id=owner,
+        request_id="req-outbox-lease",
+        key="outbox-lease-key",
+        text="question",
+        answer="answer",
+    )
+
+    claimed = store.claim_delivery_outbox(
+        session_id=session["session_id"],
+        owner_id=owner,
+        worker_id="fc-worker-a",
+        limit=1,
+    )
+    assert len(claimed) == 1
+    first = claimed[0]
+    assert first["lease_token"]
+    assert first["attempt_count"] == 1
+
+    with pytest.raises(SessionConflict, match="lease"):
+        store.complete_delivery_outbox(
+            outbox_id=first["outbox_id"],
+            lease_token="not-the-lease",
+            status="completed",
+        )
+    with pytest.raises(ValueError, match="retry is safe"):
+        store.complete_delivery_outbox(
+            outbox_id=first["outbox_id"],
+            lease_token=first["lease_token"],
+            status="retry",
+        )
+    with pytest.raises(ValueError, match="error code"):
+        store.complete_delivery_outbox(
+            outbox_id=first["outbox_id"],
+            lease_token=first["lease_token"],
+            status="failed",
+            error_code="sensitive error text",
+        )
+
+    retried = store.complete_delivery_outbox(
+        outbox_id=first["outbox_id"],
+        lease_token=first["lease_token"],
+        status="retry",
+        retry_safe=True,
+    )
+    assert retried["state"] == "retry"
+    claimed_again = store.claim_delivery_outbox(
+        session_id=session["session_id"],
+        owner_id=owner,
+        worker_id="fc-worker-b",
+        limit=1,
+    )
+    assert claimed_again[0]["outbox_id"] == first["outbox_id"]
+    assert claimed_again[0]["attempt_count"] == 2
+    assert claimed_again[0]["lease_token"] != first["lease_token"]
+
+    completed = store.complete_delivery_outbox(
+        outbox_id=first["outbox_id"],
+        lease_token=claimed_again[0]["lease_token"],
+        status="completed",
+    )
+    assert completed["state"] == "completed"
+    replayed = store.complete_delivery_outbox(
+        outbox_id=first["outbox_id"],
+        lease_token=claimed_again[0]["lease_token"],
+        status="completed",
+    )
+    assert replayed["duplicate"] is True
+
+
+def test_run_delivery_claim_obeys_frozen_destination_and_is_single_attempt(tmp_path):
+    from orchestrator.frontend_delivery import freeze_run_delivery_route
+
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    route = freeze_run_delivery_route(
+        message_source_id="telegram",
+        session_surface="telegram",
+        session_channel_key="7",
+        chat_id=7,
+        telegram_requested=False,
+    )
+    accepted = store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="lily",
+        request_id="req-frozen-outbox",
+        text="question",
+        source="telegram",
+        idempotency_key="frozen-outbox-key",
+        delivery_route=route,
+    )
+    store.mark_request_running(accepted.request_id, worker_id="test-worker")
+    store.finish_request(
+        accepted.request_id,
+        success=True,
+        assistant_text="answer",
+    )
+
+    mismatch = store.claim_run_delivery_outbox(
+        request_id=accepted.request_id,
+        owner_id=owner,
+        surface="telegram",
+        channel_key="8",
+        worker_id="telegram-worker-a",
+    )
+    assert mismatch["state"] == "suppressed"
+
+    claim_result = store.claim_run_delivery_outbox(
+        request_id=accepted.request_id,
+        owner_id=owner,
+        surface="telegram",
+        channel_key="7",
+        worker_id="telegram-worker-a",
+    )
+    assert claim_result["state"] == "claimed"
+    claim = claim_result["claim"]
+    assert claim["kind"] == "run.completed"
+    assert claim["event_id"]
+    intent = claim_result["delivery_intent"]
+    assert intent["type"] == "hashi.delivery-intent"
+    assert intent["version"] == 2
+    assert intent["destinations"][0]["connector_id"] == "telegram"
+    assert "channel_key" not in intent["destinations"][0]
+
+    duplicate_attempt = store.claim_run_delivery_outbox(
+        request_id=accepted.request_id,
+        owner_id=owner,
+        surface="telegram",
+        channel_key="7",
+        worker_id="telegram-worker-b",
+    )
+    assert duplicate_attempt["state"] == "claimed"
+    assert "claim" not in duplicate_attempt
+
+    completed = store.complete_delivery_outbox(
+        outbox_id=claim["outbox_id"],
+        lease_token=claim["lease_token"],
+        status="completed",
+    )
+    assert completed["state"] == "completed"
+    after_completion = store.claim_run_delivery_outbox(
+        request_id=accepted.request_id,
+        owner_id=owner,
+        surface="telegram",
+        channel_key="7",
+        worker_id="telegram-worker-c",
+    )
+    assert after_completion["state"] == "completed"
+
+
+def test_run_delivery_outbox_is_independent_per_frozen_endpoint(tmp_path):
+    from orchestrator.frontend_delivery import freeze_run_delivery_route
+
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    route = freeze_run_delivery_route(
+        message_source_id="api",
+        session_surface="session-api",
+        session_channel_key="desktop-a",
+        chat_id=7,
+        telegram_requested=True,
+    )
+    accepted = store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="lily",
+        request_id="req-multi-destination",
+        text="question",
+        source="session-api",
+        idempotency_key="multi-destination-key",
+        delivery_route=route,
+    )
+    store.mark_request_running(accepted.request_id, worker_id="test-worker")
+    store.finish_request(
+        accepted.request_id,
+        success=True,
+        assistant_text="answer",
+    )
+
+    telegram = store.claim_run_delivery_outbox(
+        request_id=accepted.request_id,
+        owner_id=owner,
+        surface="telegram",
+        channel_key="7",
+        worker_id="telegram-worker",
+    )
+    assert telegram["state"] == "claimed"
+    store.complete_delivery_outbox(
+        outbox_id=telegram["claim"]["outbox_id"],
+        lease_token=telegram["claim"]["lease_token"],
+        status="completed",
+    )
+
+    session_api = store.claim_run_delivery_outbox(
+        request_id=accepted.request_id,
+        owner_id=owner,
+        surface="session-api",
+        channel_key="desktop-a",
+        worker_id="session-api-worker",
+    )
+    assert session_api["state"] == "claimed"
+    assert (
+        session_api["claim"]["outbox_id"]
+        != telegram["claim"]["outbox_id"]
+    )
+    store.complete_delivery_outbox(
+        outbox_id=session_api["claim"]["outbox_id"],
+        lease_token=session_api["claim"]["lease_token"],
+        status="completed",
+    )
+
+    with sqlite3.connect(store.db_path) as connection:
+        rows = connection.execute(
+            """SELECT endpoint_id, state FROM connector_delivery_tasks
+               WHERE event_id=? ORDER BY endpoint_id""",
+            (telegram["claim"]["event_id"],),
+        ).fetchall()
+    assert len(rows) == 2
+    assert {row[1] for row in rows} == {"completed"}
+
+
+def test_delivery_outbox_adds_claim_columns_to_legacy_session_database(tmp_path):
+    path = tmp_path / "state" / "sessions.sqlite3"
+    path.parent.mkdir(parents=True)
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE delivery_outbox (
+                outbox_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                run_id TEXT,
+                event_id TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL,
+                delivered_at TEXT
+            )
+            """
+        )
+
+    store = SessionStore(path, instance_id="HASHI1")
+    with sqlite3.connect(store.db_path) as connection:
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(delivery_outbox)")
+        }
+
+    assert {
+        "lease_owner",
+        "lease_token",
+        "lease_expires_at",
+        "attempt_count",
+        "last_error_code",
+        "last_claim_token",
+        "last_claim_status",
+    } <= columns
+
+
+def test_expired_delivery_claim_becomes_unknown_instead_of_auto_replay(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    _complete(
+        store,
+        session_id=session["session_id"],
+        owner_id=owner,
+        request_id="req-outbox-expiry",
+        key="outbox-expiry-key",
+        text="question",
+        answer="answer",
+    )
+    claimed = store.claim_delivery_outbox(
+        session_id=session["session_id"],
+        owner_id=owner,
+        worker_id="fc-worker-a",
+        limit=1,
+        lease_seconds=1,
+    )[0]
+    with store._connection() as connection:
+        connection.execute(
+            """UPDATE connector_delivery_tasks SET lease_expires_at=?
+               WHERE task_id=?""",
+            ("2000-01-01T00:00:00+00:00", claimed["outbox_id"]),
+        )
+
+    next_claim = store.claim_delivery_outbox(
+        session_id=session["session_id"],
+        owner_id=owner,
+        worker_id="fc-worker-b",
+        limit=10,
+    )
+    assert all(item["outbox_id"] != claimed["outbox_id"] for item in next_claim)
+    with store._connection() as connection:
+        state = connection.execute(
+            "SELECT state FROM connector_delivery_tasks WHERE task_id=?",
+            (claimed["outbox_id"],),
+        ).fetchone()[0]
+        aggregate = connection.execute(
+            "SELECT state FROM delivery_outbox WHERE event_id=?",
+            (claimed["event_id"],),
+        ).fetchone()[0]
+    assert state == "unknown"
+    assert aggregate == "unknown"
+
+
+def test_unknown_delivery_requires_connector_evidence_before_retry(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    _complete(
+        store,
+        session_id=session["session_id"],
+        owner_id=owner,
+        request_id="req-outbox-reconcile",
+        key="outbox-reconcile-key",
+        text="question",
+        answer="answer",
+    )
+    claim = store.claim_delivery_outbox(
+        session_id=session["session_id"],
+        owner_id=owner,
+        worker_id="fc-worker-a",
+        limit=1,
+    )[0]
+    store.complete_delivery_outbox(
+        outbox_id=claim["outbox_id"],
+        lease_token=claim["lease_token"],
+        status="unknown",
+        error_code="transport_timeout",
+    )
+    assert all(
+        item["outbox_id"] != claim["outbox_id"]
+        for item in store.claim_delivery_outbox(
+            session_id=session["session_id"],
+            owner_id=owner,
+            worker_id="fc-worker-b",
+            limit=20,
+        )
+    )
+    with pytest.raises(ValueError, match="proof"):
+        store.reconcile_unknown_delivery(
+            outbox_id=claim["outbox_id"],
+            resolution="not_delivered",
+            proof={},
+        )
+
+    reconciled = store.reconcile_unknown_delivery(
+        outbox_id=claim["outbox_id"],
+        resolution="not_delivered",
+        proof={"type": "provider-query", "value": "not-found-1"},
+    )
+    assert reconciled["state"] == "retry"
+    retry = store.claim_delivery_outbox(
+        session_id=session["session_id"],
+        owner_id=owner,
+        worker_id="fc-worker-c",
+        event_id=claim["event_id"],
+        limit=1,
+    )[0]
+    assert retry["outbox_id"] == claim["outbox_id"]
+    assert retry["attempt_count"] == 2
+
+
+def test_presentation_message_returns_same_durable_event_identity_on_replay(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    kwargs = {
+        "session_id": session["session_id"],
+        "owner_id": owner,
+        "agent_id": "lily",
+        "role": "assistant",
+        "text": "cost tail",
+        "source": "meter-cost",
+        "idempotency_key": "meter-cost:req-1",
+        "presentation_channel": "meter",
+    }
+
+    first = store.append_presentation_message(**kwargs)
+    replay = store.append_presentation_message(**kwargs)
+
+    assert first["delivery_event_id"].startswith("evt_")
+    assert replay["delivery_event_id"] == first["delivery_event_id"]
+    event = next(
+        item
+        for item in store.events(session["session_id"], owner_id=owner)
+        if item["event_id"] == first["delivery_event_id"]
+    )
+    assert event["kind"] == "frontend.message.recorded"
+    assert event["detail"]["message_id"] == first["message_id"]
+
+
+def test_frontend_delivery_receipt_requires_proof_and_session_ownership(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    _complete(
+        store,
+        session_id=session["session_id"],
+        owner_id=owner,
+        request_id="req-delivery-receipt-proof",
+        key="delivery-receipt-proof-key",
+        text="question",
+        answer="answer",
+    )
+    event = next(
+        item
+        for item in store.events(session["session_id"], owner_id=owner)
+        if item["kind"] == "run.completed"
+    )
+    receipt = {
+        "type": "hashi.delivery-receipt",
+        "version": 1,
+        "event_id": event["event_id"],
+        "endpoint_id": "ep_telegram_main",
+        "status": "delivered",
+    }
+
+    with pytest.raises(ValueError, match="proof"):
+        store.record_frontend_delivery_receipt(
+            session_id=session["session_id"], owner_id=owner, receipt=receipt
+        )
+    with pytest.raises(SessionNotFound):
+        store.record_frontend_delivery_receipt(
+            session_id=session["session_id"],
+            owner_id="user:other",
+            receipt={
+                **receipt,
+                "proof": {"type": "telegram-api-accepted", "value": "tgmsg_456"},
+            },
+        )
+
+
 def test_promotion_watermark_is_idempotent_and_archive_is_non_destructive(tmp_path):
     store = _store(tmp_path)
     owner = "user:7"
@@ -1995,3 +2943,60 @@ def test_agent_restart_reconciliation_does_not_interrupt_other_agents(tmp_path):
     assert len(terminal) == 1
     assert terminal[0]["detail"]["agent_id"] == "alpha"
     assert terminal[0]["detail"]["recovery_scope"] == "agent"
+
+def test_frontend_transport_references_resolve_only_inside_their_endpoint(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    publication = store.append_presentation_message(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="lily",
+        role="assistant",
+        text="Quoted answer FC-LIVE-REFERENCE",
+        source="test",
+        idempotency_key="reply-target-1",
+        outbox=True,
+    )
+    event_id = publication["delivery_event_id"]
+
+    store.record_frontend_transport_reference(
+        session_id=session["session_id"],
+        owner_id=owner,
+        connector_id="telegram",
+        endpoint_id="ep_telegram_test",
+        transport_message_id="7788",
+        event_id=event_id,
+    )
+
+    resolved = store.resolve_frontend_transport_reference(
+        session_id=session["session_id"],
+        owner_id=owner,
+        connector_id="telegram",
+        endpoint_id="ep_telegram_test",
+        transport_message_id="7788",
+    )
+    assert resolved == {
+        "event_id": event_id,
+        "message_id": publication["message_id"],
+        "role": "assistant",
+        "text": "Quoted answer FC-LIVE-REFERENCE",
+        "created_at": publication["created_at"],
+    }
+    assert store.resolve_frontend_transport_reference(
+        session_id=session["session_id"],
+        owner_id=owner,
+        connector_id="telegram",
+        endpoint_id="ep_telegram_other",
+        transport_message_id="7788",
+    ) is None
+
+    with pytest.raises(SessionConflict, match="already bound"):
+        store.record_frontend_transport_reference(
+            session_id=session["session_id"],
+            owner_id=owner,
+            connector_id="telegram",
+            endpoint_id="ep_telegram_test",
+            transport_message_id="7788",
+            event_id="evt_other",
+        )

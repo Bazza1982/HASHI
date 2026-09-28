@@ -1,8 +1,10 @@
-# HER v2 fallback and OpenRouter-only pricing repair — 2026-09-15
+> **Legacy HERV2 repair record — non-normative.** This file preserves historical evidence for the retired staged runtime. Current behavior is defined by [HERV3 upgrade](../HERV3_UPGRADE.md).
+
+# HERV2 fallback and OpenRouter-only pricing repair — 2026-09-15
 
 ## Approval
 
-- The current user approved the pricing repair and HER v2 fallback deployment
+- The current user approved the pricing repair and HERV2 fallback deployment
   on HASHI1.
 - The follow-up steer fixed the long-term policy: OpenRouter's public model
   price list is the sole automatic schedule source. No official Provider
@@ -13,7 +15,7 @@
 
 ## Implementation
 
-- Owners: PAO for derived price facts and partial-cost rendering; HER v2 for
+- Owners: PAO for derived price facts and partial-cost rendering; HERV2 for
   request-observed fallback and physical-call attribution; runtime renderers
   for localized command, menu, and warning delivery.
 - Engineering layer: replaceable Functions and runtime language catalogues.
@@ -21,7 +23,7 @@
   OpenRouter-managed aliases `~deepseek/deepseek-flash-latest` and
   `~deepseek/deepseek-pro-latest`. Missing exact evidence remains unknown; no
   historical static DeepSeek row may replace it.
-- HER v2 retains its existing single safe same-target recovery, then may use
+- HERV2 retains its existing single safe same-target recovery, then may use
   same-Provider Level 1 and configured cross-Provider Level 2. Light may
   upgrade to Pro; Pro never downgrades. A required localized warning precedes
   each switch, and replay remains blocked after uncertain effects.
@@ -39,7 +41,7 @@
 - Pricing, metering, and exact DeepSeek/OpenRouter mapping: 91 passed.
 - DeepSeek/OpenAI-compatible streaming guard and typed StageProvider wiring:
   69 passed.
-- HER v2 fallback configuration, bilingual UI, and command binding: 90 passed.
+- HERV2 fallback configuration, bilingual UI, and command binding: 90 passed.
 - Fallback/retry/replay-safety runtime matrix: 4 passed.
 - Ruff, Python compilation, locale JSON parsing, `git diff --check`, and the
   protected-Core checker passed.

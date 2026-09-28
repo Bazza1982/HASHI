@@ -1,11 +1,13 @@
-# HER v2 Execution-Limit Regression Cleanup Plan
+> **Legacy HERV2 archive — non-normative.** This document records the retired staged runtime. HERV3 uses one continuous main-model/tool loop with no Triage, Strategy, Planning, Replanning, Review, or stage-based Finalisation routing. Strategy Cards and Habit/Meditation remain optional. See [HERV3 upgrade](HERV3_UPGRADE.md).
+
+# HERV2 Execution-Limit Regression Cleanup Plan
 
 | Field | Value |
 |---|---|
 | Status | Implemented, verified in source, and loaded by an authorised Arale `/reboot min` on 2026-08-24 |
 | Date | 2026-08-22 |
 | Authority | `HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md` section 3.2.1 |
-| Regression source | `839b10a5` (`Add tiered provider retry recovery to HER v2`) |
+| Regression source | `839b10a5` (`Add tiered provider retry recovery to HERV2`) |
 | Runtime activation | Targeted Arale hot reload passed on 2026-08-24; the original implementation did not restart a runtime |
 
 > Scope note (2026-08-22): the later approved
@@ -17,13 +19,13 @@
 
 ## 1. Objective
 
-Remove the unauthorised HER v2 execution limits and their secondary failure
+Remove the unauthorised HERV2 execution limits and their secondary failure
 modes without adding another scheduler, budget system, permission reduction, or
 global process manager.
 
 The remediation must:
 
-1. remove every elapsed provider-attempt deadline from every HER v2 path;
+1. remove every elapsed provider-attempt deadline from every HERV2 path;
 2. preserve typed, side-effect-aware fresh-connection recovery without using a
    clock to end an otherwise healthy attempt;
 3. make foreground `bash` unbounded by default while preserving an explicitly
@@ -42,7 +44,7 @@ Implementation and tests must not weaken these rules:
 
 - There is no turn-count, wall-clock, elapsed-time, stage, provider-attempt,
   tool-round, call/step, sub-agent-count, cumulative-token, or output-token
-  execution ceiling in any HER v2 stage or adapter path.
+  execution ceiling in any HERV2 stage or adapter path.
 - The existing authorised controls are limited to explicit stop/cancellation,
   the configured meaningful-progress idle detector, narrowly scoped transport
   inactivity/protocol guards, an explicitly requested single-tool timeout, the
@@ -151,11 +153,11 @@ an awaited foreground process can escape the local cancellation barrier.
 
 ### Phase D — verification and activation gate
 
-1. Run focused unit tests after each phase, then the complete HER v2 core,
+1. Run focused unit tests after each phase, then the complete HERV2 core,
    Runtime, adapter, unbounded-tool-loop, stop/steer, and Tool Registry suites.
 2. Run syntax, `git diff --check`, and a repository search for forbidden
    attempt-tier/deadline fields and historical numeric deadlines in executable
-   HER v2 code.
+   HERV2 code.
 3. Run the real process-tree integration tests on the supported POSIX path and
    the platform-appropriate Windows fallback tests without broad `pkill` or
    unrelated-process matching.
@@ -228,7 +230,7 @@ background-job lifetime.
 
 The cleanup is complete only when all of the following are true:
 
-- no executable HER v2 path contains the tier deadline machinery introduced by
+- no executable HERV2 path contains the tier deadline machinery introduced by
   `839b10a5`;
 - no foreground `bash` call receives an implicit timeout or leaves a descendant
   or pipe holder after any terminal path;

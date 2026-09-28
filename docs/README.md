@@ -7,7 +7,7 @@ defines the two orthogonal dimensions—four functional modules and four
 engineering layers—and governs every lower-level design in this directory.
 
 > **Status:** HASHI `v4.0.0-beta.1` (Python `4.0.0b1`) is the current source
-> Beta for small-scale public testing. It combines HER v2, hardened
+> Beta for small-scale public testing. It combines HERV3, hardened
 > conversation and delivery paths, external Workbench v2 client integration,
 > Windows/WSL deployment templates, restricted Demo Mode, and the Portable
 > Windows builder. See [the release notes](RELEASE_NOTES_v4.0.0-beta.1.md).
@@ -77,9 +77,10 @@ line.
 
 ### Core references
 
-- [HASHI_RUNTIME_PROTECTION_REBOOT_RECOVERY_PLAN_2026-09-17.md](HASHI_RUNTIME_PROTECTION_REBOOT_RECOVERY_PLAN_2026-09-17.md) — 已确认的重大修复边界：实例证据冻结、最小 PR 门禁、精确 live Core 保护、不可变 Function `/reboot`、简化 `/restart`、HER v2 禁改项及分阶段验收
+- [HERV3_UPGRADE.md](HERV3_UPGRADE.md) — current HERV3 identity, single-loop routing, bounded JEV experiment, retained Strategy Cards/Habits, compatibility boundaries, and adoption evidence
+- [HASHI_RUNTIME_PROTECTION_REBOOT_RECOVERY_PLAN_2026-09-17.md](HASHI_RUNTIME_PROTECTION_REBOOT_RECOVERY_PLAN_2026-09-17.md) — 已确认的重大修复边界：实例证据冻结、最小 PR 门禁、精确 live Core 保护、不可变 Function `/reboot`、简化 `/restart` 及分阶段验收
 - [HASHI3_SMART_TOOL_TEXT_QUERY_PILOT_2026-09-13.md](HASHI3_SMART_TOOL_TEXT_QUERY_PILOT_2026-09-13.md) — HASHI3-only Smart Tool admission, bounded `log_query`, foreground safety-fuse implementation and verification record
-- [SMART_TOOL_REGISTRY.md](SMART_TOOL_REGISTRY.md) — HER v2 Smart Tool admission, typed results, specialised safe queries, repeat guidance, and Ledger contract
+- [SMART_TOOL_REGISTRY.md](SMART_TOOL_REGISTRY.md) — HERV3 Smart Tool admission, typed results, specialised safe queries, repeat guidance, and Ledger contract
 - [HASHI_DOCUMENTATION_BETA_READINESS_2026-09-11.md](HASHI_DOCUMENTATION_BETA_READINESS_2026-09-11.md) — public-documentation cleanup, GitHub/npm status, package checks, FYI truncation fix, and remaining baseline test conflicts
 
 - [HASHI_VERSIONING_POLICY.md](HASHI_VERSIONING_POLICY.md) — accepted Core/functional/maintenance numbering, pre-release maturity, Portable build identity, compatibility evidence, and prospective adoption boundary
@@ -90,7 +91,7 @@ line.
 - [HASHI_NATIVE_AUDIO_CHAT_DESIGN.md](HASHI_NATIVE_AUDIO_CHAT_DESIGN.md) — implemented and qualified provider- and terminal-neutral native audio input/output, HER routing, Safe Voice, fallback, retention, and generic frontend Events
 - [HASHI_PCM_SYSTEM_DESIGN.md](HASHI_PCM_SYSTEM_DESIGN.md) — authoritative target design for backend-neutral HASHI Persona-Context-Memory ownership, assembly, retrieval and migration
 - [CODEX_FAILURE_CONTRACT.md](CODEX_FAILURE_CONTRACT.md) — terminal status, event evidence, typed failure, and side-effect-safe retry contract for Codex CLI execution
-- [HER_V2_WIP_JOURNAL.md](HER_V2_WIP_JOURNAL.md) — crash-safe transient unfinished-work context, clear/preserve rules, and lifecycle audit evidence
+- [PROVIDER_AGNOSTIC_MULTIMODAL_INPUT_UPGRADE_TEST_PLAN.md](PROVIDER_AGNOSTIC_MULTIMODAL_INPUT_UPGRADE_TEST_PLAN.md) — current HERV3 model-exact native/fallback media contract and remaining live multi-provider canary matrix
 - [TELEGRAM_NOTIFICATION_MODES.md](TELEGRAM_NOTIFICATION_MODES.md) — `/notify on|quiet|off`, final/error notification policy, persistence, and Telegram sound/vibration boundary
 - [HASHI_PERSISTENT_MULTI_SESSION_FRONTEND_DESIGN.md](HASHI_PERSISTENT_MULTI_SESSION_FRONTEND_DESIGN.md) — client-neutral persistent Session, Run, Message and Event architecture for agentic frontends
 - [HASHI_PCM_UPGRADE_TEST_PLAN.md](HASHI_PCM_UPGRADE_TEST_PLAN.md) — accepted assertion migration and minimum 24-contract backend-neutral PCM verification gate
@@ -134,23 +135,30 @@ line.
 - [HASHI2_WSL_STABLE_PORT_ROLLOUT_PLAN.md](HASHI2_WSL_STABLE_PORT_ROLLOUT_PLAN.md) — staged HASHI2 WSL rollout and full-function validation plan for stable Remote port allocation
 - [AUDIT_VIBE_CODING_SUPERLOOP.md](AUDIT_VIBE_CODING_SUPERLOOP.md) — end-to-end vibe-coded product superloop with mandatory independent reviews and live runtime exit gates
 - [HASHI_VOICE_BRIDGE_PLAN.md](HASHI_VOICE_BRIDGE_PLAN.md) — local-first voice runtime plan for the WhatsApp Desktop call bridge and future provider transports
-- [HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md) — historical HER v2, Session, notification, WIP Journal, multimodal, and publication checkpoint
+- [HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md) — historical HERV2, Session, notification, WIP Journal, multimodal, and publication checkpoint
 - [HASHI_UNRELEASED_CHECKPOINT_2026-08-24.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-24.md) — historical compulsory-Replanning integration and publication record, superseded by the 27 August checkpoint
 - [HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-13.md) — historical native-HER integration and release-preparation evidence
 - [HER_HABIT_MEDITATION.md](HER_HABIT_MEDITATION.md) — default-off adapter-direct HER Habit controls, JSON persistence, recovery, audit, and change notifications
 - [her_multimedia_multimodal_plan.md](her_multimedia_multimodal_plan.md) — implemented HER media bridge, security limits, compatibility paths, and remaining live rollout matrix
-- [her-v2-issues.md](her-v2-issues.md) — canonical HER v2-only defect and open-design-gap register
-- [HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md](HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md) — authoritative HER v2 lifecycle, provider, delivery, and compatibility contract
-- [HER_V2_CONTINUOUS_STRATEGY_EXECUTION_IMPLEMENTATION_PLAN.md](HER_V2_CONTINUOUS_STRATEGY_EXECUTION_IMPLEMENTATION_PLAN.md) — implemented HER v2 fixed Engine Session record with incremental PCM/turn input and Model-Provider-neutral routing; current recovery/accounting authority is the Session control-plane document
+
+### Legacy HERV2 archive (non-normative)
+
+These filenames remain stable for provenance and inbound links. They describe
+the retired staged runtime and must not be used as HERV3 product or routing
+authority. Current behavior is defined by [HERV3_UPGRADE.md](HERV3_UPGRADE.md).
+
+- [her-v2-issues.md](her-v2-issues.md) — historical HERV2-only defect and open-design-gap register
+- [HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md](HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md) — historical HERV2 lifecycle, provider, delivery, and compatibility contract
+- [HER_V2_CONTINUOUS_STRATEGY_EXECUTION_IMPLEMENTATION_PLAN.md](HER_V2_CONTINUOUS_STRATEGY_EXECUTION_IMPLEMENTATION_PLAN.md) — implemented HERV2 fixed Engine Session record with incremental PCM/turn input and Model-Provider-neutral routing; current recovery/accounting authority is the Session control-plane document
 - [HER_V2_SESSION_CONTROL_PLANE.md](HER_V2_SESSION_CONTROL_PLANE.md) — implemented durable routing, recovery, physical Provider accounting, settled-history compaction, and WIP shadow migration contract
-- [HER_V2_TRIAGE_TO_STRATEGY_REWIRING_PLAN.md](HER_V2_TRIAGE_TO_STRATEGY_REWIRING_PLAN.md) — implemented historical Strategy-stage experiment record; current Strategic and Planned behaviour is governed by the three-mode decision
-- [HER_V2_PLANNED_MEDIUM_DECISION.md](HER_V2_PLANNED_MEDIUM_DECISION.md) — accepted Planned/Medium boundary: no-tool Strategy, read-only Planning, and fully capable Execution
-- [HER_V2_THREE_MODE_DECISION.md](HER_V2_THREE_MODE_DECISION.md) — accepted production surface: Direct, Strategic, and Planned, with higher-mode redesign postponed
-- [HER_V2_TESTING_PLAN.md](HER_V2_TESTING_PLAN.md) — consolidated HER v2 behavioral and integration test contract
+- [HER_V2_TRIAGE_TO_STRATEGY_REWIRING_PLAN.md](HER_V2_TRIAGE_TO_STRATEGY_REWIRING_PLAN.md) — historical Strategy-stage experiment record; all staged routing is now retired
+- [HER_V2_PLANNED_MEDIUM_DECISION.md](HER_V2_PLANNED_MEDIUM_DECISION.md) — historical Planned/Medium boundary retained only as HERV2 provenance
+- [HER_V2_THREE_MODE_DECISION.md](HER_V2_THREE_MODE_DECISION.md) — historical Direct/Strategic/Planned product decision superseded by HERV3's single loop
+- [HER_V2_TESTING_PLAN.md](HER_V2_TESTING_PLAN.md) — historical HERV2 behavioral and integration test contract
 - [HER_V2_COMPULSORY_REPLAN_REPAIR_PLAN.md](HER_V2_COMPULSORY_REPLAN_REPAIR_PLAN.md) — historical implemented Replanning contract retained for dormant higher-mode regression coverage
 - [HER_V2_HIGH_RISK_PERIODIC_CHECKPOINT_PLAN.md](HER_V2_HIGH_RISK_PERIODIC_CHECKPOINT_PLAN.md) — retired incorrect optional-checkpoint design retained only as a migration pointer
-- [HER_V2_AUTO_COMPACTION_DESIGN.md](HER_V2_AUTO_COMPACTION_DESIGN.md) — HER v2 Quick/Light high-effort compaction policy, protected context, atomic commit, and Tier 2/Tier 3 isolation
-- [PROVIDER_AGNOSTIC_MULTIMODAL_INPUT_UPGRADE_TEST_PLAN.md](PROVIDER_AGNOSTIC_MULTIMODAL_INPUT_UPGRADE_TEST_PLAN.md) — current model-exact native/fallback media contract and remaining live multi-provider canary matrix
+- [HER_V2_AUTO_COMPACTION_DESIGN.md](HER_V2_AUTO_COMPACTION_DESIGN.md) — HERV2 Quick/Light high-effort compaction policy, protected context, atomic commit, and Tier 2/Tier 3 isolation
+- [HER_V2_WIP_JOURNAL.md](HER_V2_WIP_JOURNAL.md) — historical HERV2 WIP recovery and lifecycle evidence retained for internal compatibility provenance
 
 ### Nagare Flow System (v2.1)
 - [NAGARE_FLOW_SYSTEM.md](NAGARE_FLOW_SYSTEM.md) — Complete technical reference for the multi-agent workflow orchestration engine

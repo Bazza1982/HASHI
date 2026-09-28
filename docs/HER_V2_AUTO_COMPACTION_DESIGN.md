@@ -1,4 +1,6 @@
-# HER v2 Context Compaction
+> **Legacy HERV2 archive — non-normative.** This document records the retired staged runtime. HERV3 uses one continuous main-model/tool loop with no Triage, Strategy, Planning, Replanning, Review, or stage-based Finalisation routing. Strategy Cards and Habit/Meditation remain optional. See [HERV3 upgrade](HERV3_UPGRADE.md).
+
+# HERV2 Context Compaction
 
 | Field | Value |
 |---|---|
@@ -6,7 +8,7 @@
 | Revised | 2026-09-01 |
 | Scope | Settled HER Engine Session conversation-capacity management; active recovery evidence is excluded |
 | Decision | Compact follows the initiating Agent's active Model Provider and Quick/Light model at internal high HER maintenance effort |
-| Current recovery authority | [HER v2 Fixed-Session Control Plane](HER_V2_SESSION_CONTROL_PLANE.md) |
+| Current recovery authority | [HERV2 Fixed-Session Control Plane](HER_V2_SESSION_CONTROL_PLANE.md) |
 
 In this document, `provider` means HER's internal **Model Provider**. The
 enclosing HASHI Conversation Session remains PAO-owned.
@@ -19,10 +21,10 @@ confirmation, and capability-declaration lock rules are retired.
 
 For every model-based manual or automatic **conversation-history** Compact
 operation, HASHI resolves the route from the initiating Agent's current
-persisted HER v2 configuration:
+persisted HERV2 configuration:
 
-1. provider = active HER v2 Quick/Fast provider;
-2. model = active HER v2 Quick/Fast model (the lightweight profile);
+1. provider = active HERV2 Quick/Fast provider;
+2. model = active HERV2 Quick/Fast model (the lightweight profile);
 3. HER effort = `high`;
 4. provider reasoning = the provider's supported high-effort mapping, or an
    enable-only control when the provider does not expose granular effort;
@@ -47,8 +49,8 @@ A persisted `off` remains off.
 
 The route is rejected only when a real configuration requirement is missing:
 
-- HER v2 is not active;
-- the active HER v2 provider cannot be resolved;
+- HERV2 is not active;
+- the active HERV2 provider cannot be resolved;
 - the active Quick/Light model cannot be resolved;
 - the exact provider/model is absent from the Agent's grants;
 - the configured timeout tier is invalid; or
@@ -75,7 +77,7 @@ thresholds. HASHI uses one fixed product window for known and unknown targets:
 - below 64,000 effective tokens, manual `/compact` reports that compaction is
   not yet useful and gives the exact current count;
 - from 64,000 through 128,000 effective tokens, manual `/compact` executes;
-- above 128,000 effective tokens, the first main HER v2 Execution invocation
+- above 128,000 effective tokens, the first main HERV2 Execution invocation
   starts automatic Compact as a detached background task; and
 - successful automatic maintenance targets 64,000 effective tokens.
 
@@ -164,7 +166,7 @@ it invokes the initiating Agent's Quick/Light backend immediately and reports
 the selected-history reduction.
 
 Threshold-triggered automatic Compact has exactly one scheduling boundary:
-the first main HER v2 Execution provider invocation, and only when the effective
+the first main HERV2 Execution provider invocation, and only when the effective
 context is above 128,000 tokens. Prompt assembly, Planning, and post-turn
 observers do not invoke or wait for Compact. Execution schedules a detached
 maintenance task and immediately continues its own provider call with the

@@ -60,8 +60,8 @@ def _workzone_slot_ids() -> tuple[str, ...]:
     return tuple(workzone_module.WORKZONE_SLOT_IDS)
 
 
-def _empty_state(session_id: str = "") -> dict[str, Any]:
-    return {"session_id": str(session_id), "revision": 0, "slots": []}
+def _empty_state() -> dict[str, Any]:
+    return {"revision": 0, "slots": []}
 
 
 def _legacy_runtime_state(runtime: Any) -> dict[str, Any]:
@@ -88,23 +88,25 @@ def install_runtime_state(runtime: Any, state: Mapping[str, Any] | None) -> dict
     return normalized
 
 
-def session_state(runtime: Any, session_id: str) -> dict[str, Any]:
+def agent_state(runtime: Any, *, owner_id: str | None = None) -> dict[str, Any]:
     from orchestrator import runtime_session
 
     store = runtime_session.ensure_store(runtime)
-    getter = getattr(store, "get_workzone_set", None)
-    if callable(getter):
-        return normalize_workzone_state(getter(str(session_id)))
-    session = store.get_session(str(session_id))
-    value = str(session.get("workzone") or "").strip()
-    if not value:
-        return _empty_state(str(session_id))
     return normalize_workzone_state(
-        {
-            "session_id": str(session_id),
-            "slots": [{"slot_id": "main", "path": value, "enabled": True}],
-        }
+        store.get_agent_workzone_set(
+            owner_id=owner_id or runtime_session.owner_id(runtime),
+            agent_id=runtime.name,
+        )
     )
+
+
+def session_state(runtime: Any, session_id: str) -> dict[str, Any]:
+    """Compatibility projection of the Agent profile for an owning Session."""
+
+    from orchestrator import runtime_session
+
+    session = runtime_session.ensure_store(runtime).get_session(str(session_id))
+    return agent_state(runtime, owner_id=str(session["owner_id"]))
 
 
 def sync_workzone_to_backend_config(runtime: Any) -> None:
@@ -190,7 +192,7 @@ def workzone_prompt_section(runtime: Any) -> list[tuple]:
                 "key": "working_environment.workzones",
                 "protected": True,
                 "schema_version": 2,
-                "scope": "session",
+                "scope": "agent",
                 "workzone_revision": int(state["revision"]),
                 "primary_slot": "main" if primary_workzone_path(state) else None,
                 "active_slots": active_metadata,
@@ -543,7 +545,7 @@ async def _begin_path_reply(
     runtime: Any,
     query: Any,
     *,
-    session_id: str,
+    owner_id: str,
     state: Mapping[str, Any],
     slot_id: str,
 ) -> None:
@@ -558,7 +560,8 @@ async def _begin_path_reply(
     chat_id = int(getattr(getattr(query.message, "chat", None), "id", 0) or 0)
     user_id = int(getattr(getattr(query, "from_user", None), "id", 0) or 0)
     _pending_paths(runtime)[(chat_id, user_id)] = {
-        "session_id": str(session_id),
+        "owner_id": str(owner_id),
+        "agent_id": str(runtime.name).lower(),
         "slot": slot,
         "revision": int(normalize_workzone_state(state)["revision"]),
         "prompt_message_id": int(getattr(prompt, "message_id", 0) or 0),
@@ -582,7 +585,7 @@ def _validate_unique_path(
 async def _save_path(
     runtime: Any,
     *,
-    session_id: str,
+    owner_id: str,
     state: Mapping[str, Any],
     slot_id: str,
     raw_path: str,
@@ -603,9 +606,10 @@ async def _save_path(
     if enable is None:
         enable = bool(current["enabled"]) if current is not None else True
     store = runtime_session.ensure_store(runtime)
-    updated = store.set_workzone_slot(
-        str(session_id),
-        slot,
+    updated = store.set_agent_workzone_slot(
+        owner_id=str(owner_id),
+        agent_id=runtime.name,
+        slot_id=slot,
         path=str(path),
         enabled=bool(enable),
         expected_revision=expected_revision,
@@ -634,15 +638,18 @@ async def handle_pending_path_reply(runtime: Any, update: Any) -> bool:
         await runtime._reply_text(update, ui_language.tr("workzone.busy"))
         return True
     session = _current_session(runtime, update)
-    if str(session["session_id"]) != str(pending["session_id"]):
+    if (
+        str(session["owner_id"]) != str(pending["owner_id"])
+        or str(runtime.name).lower() != str(pending["agent_id"])
+    ):
         _clear_pending_path(runtime, update)
         await runtime._reply_text(update, ui_language.tr("workzone.path_stale"))
         return True
-    state = session_state(runtime, session["session_id"])
+    state = agent_state(runtime, owner_id=str(session["owner_id"]))
     try:
         after = await _save_path(
             runtime,
-            session_id=session["session_id"],
+            owner_id=str(session["owner_id"]),
             state=state,
             slot_id=pending["slot"],
             raw_path=str(getattr(message, "text", "") or ""),
@@ -675,7 +682,7 @@ async def handle_pending_path_reply(runtime: Any, update: Any) -> bool:
 async def _set_enabled(
     runtime: Any,
     *,
-    session_id: str,
+    owner_id: str,
     state: Mapping[str, Any],
     slot_id: str,
     enabled: bool,
@@ -692,9 +699,10 @@ async def _set_enabled(
         resolve_workzone_input(
             item["path"], runtime.global_config.project_root, runtime.workspace_dir
         )
-    updated = runtime_session.ensure_store(runtime).set_workzone_slot(
-        str(session_id),
-        slot,
+    updated = runtime_session.ensure_store(runtime).set_agent_workzone_slot(
+        owner_id=str(owner_id),
+        agent_id=runtime.name,
+        slot_id=slot,
         enabled=enabled,
         expected_revision=expected_revision,
         source=source,
@@ -707,7 +715,7 @@ async def _set_enabled(
 async def _delete_slot(
     runtime: Any,
     *,
-    session_id: str,
+    owner_id: str,
     state: Mapping[str, Any],
     slot_id: str,
     expected_revision: int | None = None,
@@ -715,9 +723,10 @@ async def _delete_slot(
 ) -> dict[str, Any]:
     from orchestrator import runtime_session
 
-    updated = runtime_session.ensure_store(runtime).delete_workzone_slot(
-        str(session_id),
-        slot_id,
+    updated = runtime_session.ensure_store(runtime).delete_agent_workzone_slot(
+        owner_id=str(owner_id),
+        agent_id=runtime.name,
+        slot_id=slot_id,
         expected_revision=expected_revision,
         source=source,
     )
@@ -729,7 +738,7 @@ async def _delete_slot(
 async def _reload_slots(
     runtime: Any,
     *,
-    session_id: str,
+    owner_id: str,
     state: Mapping[str, Any],
     slots: list[str],
     source: str,
@@ -743,8 +752,11 @@ async def _reload_slots(
         resolve_workzone_input(
             item["path"], runtime.global_config.project_root, runtime.workspace_dir
         )
-    runtime_session.ensure_store(runtime).record_workzone_reload(
-        str(session_id), slots=slots, source=source
+    runtime_session.ensure_store(runtime).record_agent_workzone_reload(
+        owner_id=str(owner_id),
+        agent_id=runtime.name,
+        slots=slots,
+        source=source,
     )
     await _activate_state(
         runtime,
@@ -762,7 +774,8 @@ async def cmd_workzone(runtime: Any, update: Any, context: Any) -> None:
         return
     args = [str(item).strip() for item in (context.args or []) if str(item).strip()]
     session = _current_session(runtime, update)
-    state = session_state(runtime, session["session_id"])
+    resolved_owner = str(session["owner_id"])
+    state = agent_state(runtime, owner_id=resolved_owner)
     install_runtime_state(runtime, state)
     if not args:
         await _reply_overview(runtime, update, state)
@@ -786,8 +799,10 @@ async def cmd_workzone(runtime: Any, update: Any, context: Any) -> None:
             if action == "off":
                 from orchestrator import runtime_session
 
-                updated = runtime_session.ensure_store(runtime).disable_all_workzones(
-                    session["session_id"], source="telegram_command"
+                updated = runtime_session.ensure_store(runtime).disable_all_agent_workzones(
+                    owner_id=resolved_owner,
+                    agent_id=runtime.name,
+                    source="telegram_command",
                 )
                 after = normalize_workzone_state(updated)
                 await _activate_state(runtime, state, after)
@@ -803,7 +818,7 @@ async def cmd_workzone(runtime: Any, update: Any, context: Any) -> None:
                 raise ValueError(ui_language.tr("workzone.none_configured"))
             after = await _reload_slots(
                 runtime,
-                session_id=session["session_id"],
+                owner_id=resolved_owner,
                 state=state,
                 slots=configured,
                 source="telegram_command",
@@ -840,7 +855,7 @@ async def cmd_workzone(runtime: Any, update: Any, context: Any) -> None:
         if action in {"on", "off"}:
             after = await _set_enabled(
                 runtime,
-                session_id=session["session_id"],
+                owner_id=resolved_owner,
                 state=state,
                 slot_id=slot,
                 enabled=action == "on",
@@ -855,7 +870,7 @@ async def cmd_workzone(runtime: Any, update: Any, context: Any) -> None:
         if action in {"reset", "reload"}:
             after = await _reload_slots(
                 runtime,
-                session_id=session["session_id"],
+                owner_id=resolved_owner,
                 state=state,
                 slots=[slot],
                 source="telegram_command",
@@ -888,7 +903,7 @@ async def cmd_workzone(runtime: Any, update: Any, context: Any) -> None:
                 return
             after = await _delete_slot(
                 runtime,
-                session_id=session["session_id"],
+                owner_id=resolved_owner,
                 state=state,
                 slot_id=slot,
                 source="telegram_command",
@@ -907,9 +922,10 @@ async def cmd_workzone(runtime: Any, update: Any, context: Any) -> None:
                 raise ValueError(ui_language.tr("workzone.empty_slot", slot=slot))
             from orchestrator import runtime_session
 
-            updated = runtime_session.ensure_store(runtime).set_workzone_slot(
-                session["session_id"],
-                slot,
+            updated = runtime_session.ensure_store(runtime).set_agent_workzone_slot(
+                owner_id=resolved_owner,
+                agent_id=runtime.name,
+                slot_id=slot,
                 label=label,
                 source="telegram_command",
             )
@@ -933,7 +949,7 @@ async def cmd_workzone(runtime: Any, update: Any, context: Any) -> None:
             enable = True
         after = await _save_path(
             runtime,
-            session_id=session["session_id"],
+            owner_id=resolved_owner,
             state=state,
             slot_id=slot,
             raw_path=raw_path,
@@ -963,7 +979,8 @@ async def callback_workzone(runtime: Any, update: Any, context: Any) -> None:
         return
     data = str(query.data or "")
     session = _current_session(runtime, update)
-    state = session_state(runtime, session["session_id"])
+    resolved_owner = str(session["owner_id"])
+    state = agent_state(runtime, owner_id=resolved_owner)
     if data == "wz:h":
         await query.answer()
         await _edit_overview(runtime, query, state)
@@ -1015,7 +1032,7 @@ async def callback_workzone(runtime: Any, update: Any, context: Any) -> None:
         await _begin_path_reply(
             runtime,
             query,
-            session_id=session["session_id"],
+            owner_id=resolved_owner,
             state=state,
             slot_id=slot,
         )
@@ -1028,7 +1045,7 @@ async def callback_workzone(runtime: Any, update: Any, context: Any) -> None:
         if action in {"on", "off"} and slot is not None:
             after = await _set_enabled(
                 runtime,
-                session_id=session["session_id"],
+                owner_id=resolved_owner,
                 state=state,
                 slot_id=slot,
                 enabled=action == "on",
@@ -1041,7 +1058,7 @@ async def callback_workzone(runtime: Any, update: Any, context: Any) -> None:
         if action == "reset" and slot is not None:
             after = await _reload_slots(
                 runtime,
-                session_id=session["session_id"],
+                owner_id=resolved_owner,
                 state=state,
                 slots=[slot],
                 source="telegram_callback",
@@ -1052,7 +1069,7 @@ async def callback_workzone(runtime: Any, update: Any, context: Any) -> None:
         if action == "dc" and slot is not None:
             after = await _delete_slot(
                 runtime,
-                session_id=session["session_id"],
+                owner_id=resolved_owner,
                 state=state,
                 slot_id=slot,
                 expected_revision=expected_revision,
@@ -1064,8 +1081,9 @@ async def callback_workzone(runtime: Any, update: Any, context: Any) -> None:
         if action == "a":
             from orchestrator import runtime_session
 
-            updated = runtime_session.ensure_store(runtime).disable_all_workzones(
-                session["session_id"],
+            updated = runtime_session.ensure_store(runtime).disable_all_agent_workzones(
+                owner_id=resolved_owner,
+                agent_id=runtime.name,
                 expected_revision=expected_revision,
                 source="telegram_callback",
             )
@@ -1075,7 +1093,7 @@ async def callback_workzone(runtime: Any, update: Any, context: Any) -> None:
             await _edit_overview(runtime, query, after)
             return
     except SessionConflict:
-        current = session_state(runtime, session["session_id"])
+        current = agent_state(runtime, owner_id=resolved_owner)
         await query.answer(ui_language.tr("workzone.menu_stale"), show_alert=True)
         await _edit_overview(runtime, query, current)
         return

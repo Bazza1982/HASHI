@@ -213,7 +213,7 @@ def build_workzone_prompt(
         main = next((item for item in active if item["slot_id"] == "main"), None)
         usable_main = main if main and main["available"] else None
         lines = [
-            "Scope: current HASHI session.",
+            "Scope: current HASHI Agent across all Sessions.",
             f"Agent home workspace: {workspace_dir}",
             (
                 f"Primary working directory: {usable_main['path']} (slot main)."

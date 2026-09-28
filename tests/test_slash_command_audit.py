@@ -348,6 +348,7 @@ async def test_wrap_callback_audits_telegram_callback(tmp_path):
 
     wrapped = FlexibleAgentRuntime._wrap_callback(runtime, "callback_toggle", handler)
     query = SimpleNamespace(
+        id="telegram-callback-opaque-id",
         data="tgl:verbose:on",
         from_user=SimpleNamespace(id=42),
         message=SimpleNamespace(chat=SimpleNamespace(id=99)),
@@ -355,13 +356,27 @@ async def test_wrap_callback_audits_telegram_callback(tmp_path):
     )
     update = SimpleNamespace(callback_query=query)
     await wrapped(update, SimpleNamespace())
+    await wrapped(update, SimpleNamespace())
 
     assert calls == ["tgl:verbose:on"]
     rows = _read_jsonl(default_audit_path(tmp_path))
-    assert len(rows) == 1
+    assert len(rows) == 2
     assert rows[0]["source_channel"] == "telegram_callback"
     assert rows[0]["command_name"] == "tgl:verbose"
     assert rows[0]["args_redacted"] == ["on"]
+    assert rows[0]["status"] == "success"
+    assert rows[1]["status"] == "blocked"
+    from orchestrator import runtime_session
+
+    store = runtime_session.ensure_store(runtime)
+    session = runtime_session.current_session_for_update(runtime, update)
+    events = store.events(
+        session["session_id"], owner_id=runtime_session.owner_id(runtime)
+    )
+    command_events = [
+        event for event in events if event["kind"] == "frontend.command_result"
+    ]
+    assert len(command_events) == 1
 
 
 @pytest.mark.asyncio
@@ -409,6 +424,7 @@ async def test_concurrent_telegram_commands_keep_audit_side_effects_isolated(
 
     def update(chat_id):
         return SimpleNamespace(
+            update_id=1000 + chat_id,
             effective_user=SimpleNamespace(id=42),
             effective_chat=SimpleNamespace(id=chat_id),
             callback_query=None,
@@ -428,6 +444,131 @@ async def test_concurrent_telegram_commands_keep_audit_side_effects_isolated(
     assert rows["first"]["side_effects"] == ["first_effect"]
     assert rows["second"]["side_effects"] == ["second_effect"]
     assert active_slash_command_audit_session() is None
+
+
+@pytest.mark.asyncio
+async def test_native_telegram_command_is_durably_admitted_and_replay_safe(
+    tmp_path, monkeypatch
+):
+    from orchestrator import runtime_session
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    class _TelegramRuntime:
+        name = "nana"
+        workspace_dir = tmp_path
+        global_config = SimpleNamespace(authorized_id=42, instance_id="HASHI1")
+
+        def _is_authorized_user(self, user_id):
+            return user_id == 42
+
+        def _record_active_chat(self, _update):
+            return None
+
+        def _is_command_allowed(self, _command):
+            return True
+
+    async def allow_channel(self, _update, *, source_channel):
+        return source_channel == "telegram"
+
+    monkeypatch.setattr(FlexibleAgentRuntime, "_telegram_channel_allowed", allow_channel)
+    runtime = _TelegramRuntime()
+    calls = []
+
+    async def handler(_update, _context):
+        calls.append("executed")
+
+    message = SimpleNamespace(message_id=321, text="/sys 1 on")
+    update = SimpleNamespace(
+        update_id=654321,
+        effective_user=SimpleNamespace(id=42),
+        effective_chat=SimpleNamespace(id=99),
+        effective_message=message,
+        message=message,
+        callback_query=None,
+    )
+    wrapped = FlexibleAgentRuntime._wrap_cmd(runtime, "sys", handler)
+
+    await wrapped(update, SimpleNamespace(args=["1", "on"]))
+    await wrapped(update, SimpleNamespace(args=["1", "on"]))
+    from orchestrator.session_store import IdempotencyConflict
+
+    message.text = "/sys 2 on"
+    with pytest.raises(IdempotencyConflict):
+        await wrapped(update, SimpleNamespace(args=["2", "on"]))
+
+    assert calls == ["executed"]
+    store = runtime_session.ensure_store(runtime)
+    session = runtime_session.current_session_for_update(runtime, update)
+    owner = runtime_session.owner_id(runtime)
+    events = store.events(session["session_id"], owner_id=owner)
+    command_events = [event for event in events if event["kind"] == "frontend.command_result"]
+    assert len(command_events) == 1
+    invocation = command_events[0]["detail"]["command_invocation"]
+    assert invocation["connector_id"] == "telegram"
+    assert invocation["command"] == "sys"
+    assert invocation["arguments"] == ["[redacted]"]
+
+
+@pytest.mark.asyncio
+async def test_native_telegram_pending_command_is_not_reexecuted_after_unknown_commit(
+    tmp_path, monkeypatch
+):
+    from orchestrator import runtime_session
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    class _TelegramRuntime:
+        name = "nana"
+        workspace_dir = tmp_path
+        global_config = SimpleNamespace(authorized_id=42, instance_id="HASHI1")
+
+        def _is_authorized_user(self, user_id):
+            return user_id == 42
+
+        def _record_active_chat(self, _update):
+            return None
+
+        def _is_command_allowed(self, _command):
+            return True
+
+    async def allow_channel(self, _update, *, source_channel):
+        return source_channel == "telegram"
+
+    monkeypatch.setattr(FlexibleAgentRuntime, "_telegram_channel_allowed", allow_channel)
+    runtime = _TelegramRuntime()
+    calls = []
+
+    async def handler(_update, _context):
+        calls.append("executed")
+
+    message = SimpleNamespace(message_id=322, text="/sys 1 on")
+    update = SimpleNamespace(
+        update_id=654322,
+        effective_user=SimpleNamespace(id=42),
+        effective_chat=SimpleNamespace(id=99),
+        effective_message=message,
+        message=message,
+        callback_query=None,
+    )
+    wrapped = FlexibleAgentRuntime._wrap_cmd(runtime, "sys", handler)
+    store = runtime_session.ensure_store(runtime)
+    complete = store.complete_frontend_command_invocation
+
+    def fail_completion(**_kwargs):
+        raise RuntimeError("completion durability is unknown")
+
+    monkeypatch.setattr(store, "complete_frontend_command_invocation", fail_completion)
+    with pytest.raises(RuntimeError, match="completion durability is unknown"):
+        await wrapped(update, SimpleNamespace(args=["1", "on"]))
+
+    monkeypatch.setattr(store, "complete_frontend_command_invocation", complete)
+    await wrapped(update, SimpleNamespace(args=["1", "on"]))
+
+    assert calls == ["executed"]
+    session = runtime_session.current_session_for_update(runtime, update)
+    events = store.events(
+        session["session_id"], owner_id=runtime_session.owner_id(runtime)
+    )
+    assert not [event for event in events if event["kind"] == "frontend.command_result"]
 
 
 class _PolicyRuntime(_Runtime):

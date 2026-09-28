@@ -1,71 +1,49 @@
-"""Server-authoritative per-owner Workbench Telegram mirror state.
+"""Compatibility facade for the retired Workbench Telegram state module.
 
-Owned by the Function layer.  The single persisted fact is whether Runs
-submitted by the Workbench (api_chat) for one Session owner mirror their
-replies to Telegram.  Defaults to ON.  Clients never declare this value:
-admission consults this store server-side, and only the /telegram slash
-command (api_chat channel) mutates it.
-
-State file: <bridge_home>/state/workbench_telegram_state.json
+New state is stored by the connector-neutral preference service. This module
+remains as a narrow adapter for existing command and admission call sites.
 """
-
 from __future__ import annotations
 
-import json
-import os
-from pathlib import Path
 from typing import Any
 
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - non-POSIX fallback
-    fcntl = None
-
-STATE_FILENAME = "workbench_telegram_state.json"
-DEFAULT_MIRROR = True
-
-
-def state_path(bridge_home: Any) -> Path:
-    """Return the canonical state file path for one instance bridge home."""
-
-    return Path(bridge_home) / "state" / STATE_FILENAME
-
-
-def _empty_state() -> dict[str, Any]:
-    return {"revision": 0, "owners": {}}
-
-
-def _load_state_unsafe(path: Path) -> dict[str, Any]:
-    """Read the state file, tolerating a missing or corrupt file.
-
-    Failures degrade to the empty state so admission keeps the historical
-    default (mirror on).
-    """
-
-    if not path.is_file():
-        return _empty_state()
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return _empty_state()
-    if not isinstance(data, dict):
-        return _empty_state()
-    owners = data.get("owners")
-    if not isinstance(owners, dict):
-        owners = {}
-    normalized_owners = {
-        str(owner): bool(value)
-        for owner, value in owners.items()
-        if str(owner).strip()
-    }
-    revision = data.get("revision")
-    if not isinstance(revision, int) or revision < 0:
-        revision = 0
-    return {"revision": revision, "owners": normalized_owners}
+from orchestrator.connector_delivery_preferences import (
+    DEFAULT_MIRROR,
+    LEGACY_STATE_FILENAME,
+    STATE_FILENAME,
+    get_connector_preference,
+    legacy_state_path,
+    load_preferences,
+    set_connector_preference,
+    state_path,
+)
 
 
 def load_state(bridge_home: Any) -> dict[str, Any]:
-    return _load_state_unsafe(state_path(bridge_home))
+    try:
+        state = load_preferences(bridge_home)
+    except (OSError, TypeError, ValueError):
+        # Reads retain the historical visible default. Mutations still fail
+        # closed in set_connector_preference and never replace corrupt data.
+        state = {"revision": 0, "owners": {}}
+    return load_state_from_snapshot(state)
+
+
+def _legacy_owner_view(state: dict[str, Any]) -> dict[str, Any]:
+    owners: dict[str, bool] = {}
+    for owner, owner_entry in state["owners"].items():
+        value = (
+            owner_entry.get("connectors", {})
+            .get("telegram", {})
+            .get("mirror")
+        )
+        if type(value) is bool:
+            owners[owner] = value
+    return {"revision": state["revision"], "owners": owners}
+
+
+def load_state_from_snapshot(state: dict[str, Any]) -> dict[str, Any]:
+    return _legacy_owner_view(state)
 
 
 def mirror_enabled(
@@ -74,63 +52,24 @@ def mirror_enabled(
     *,
     default: bool = DEFAULT_MIRROR,
 ) -> bool:
-    """Return the persisted mirror decision for one owner.
-
-    An owner without an explicit entry keeps the default (ON), matching the
-    historical non-TUI admission behavior.
-    """
-
-    state = load_state(bridge_home)
-    return bool(state["owners"].get(str(owner_id), bool(default)))
-
-
-def _write_state_atomic(path: Path, state: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(
-        json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+    return get_connector_preference(
+        bridge_home,
+        owner_id,
+        "telegram",
+        "mirror",
+        default=default,
     )
-    os.replace(temporary, path)
 
 
 def set_mirror(bridge_home: Any, owner_id: Any, enabled: bool) -> dict[str, Any]:
-    """Persist one owner's mirror decision and return the new state snapshot.
-
-    The read-modify-write cycle is guarded by an advisory lock file so
-    concurrent /telegram commands from multiple Workers serialize and the
-    revision advances monotonically.
-    """
-
-    path = state_path(bridge_home)
-    lock_path = Path(str(path) + ".lock")
-    owner = str(owner_id).strip()
-    if not owner:
-        raise ValueError("owner_id is required")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(lock_path, "a") as lock_file:
-        if fcntl is not None:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        try:
-            state = _load_state_unsafe(path)
-            owners = dict(state["owners"])
-            owners[owner] = bool(enabled)
-            state["owners"] = owners
-            state["revision"] = int(state["revision"]) + 1
-            _write_state_atomic(path, state)
-        finally:
-            if fcntl is not None:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-    return state
+    state = set_connector_preference(
+        bridge_home, owner_id, "telegram", "mirror", enabled
+    )
+    return load_state_from_snapshot(state)
 
 
 def parse_mirror_arg(args: Any) -> bool | None:
-    """Parse /telegram arguments.
-
-    Returns None for a bare status query, True for on and False for off.
-    Anything else raises ValueError with the usage line.
-    """
-
+    """Parse /telegram arguments, retaining the historical command syntax."""
     tokens = [str(token).strip() for token in (args or [])]
     if not tokens:
         return None
@@ -145,7 +84,9 @@ def parse_mirror_arg(args: Any) -> bool | None:
 
 __all__ = [
     "DEFAULT_MIRROR",
+    "LEGACY_STATE_FILENAME",
     "STATE_FILENAME",
+    "legacy_state_path",
     "load_state",
     "mirror_enabled",
     "parse_mirror_arg",

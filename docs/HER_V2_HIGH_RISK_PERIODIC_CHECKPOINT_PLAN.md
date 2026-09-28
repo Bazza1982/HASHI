@@ -1,6 +1,8 @@
-# Retired: HER v2 High-Risk Periodic Checkpoint Plan
+> **Legacy HERV2 archive — non-normative.** This document records the retired staged runtime. HERV3 uses one continuous main-model/tool loop with no Triage, Strategy, Planning, Replanning, Review, or stage-based Finalisation routing. Strategy Cards and Habit/Meditation remain optional. See [HERV3 upgrade](HERV3_UPGRADE.md).
 
-Status: **superseded and not an active HER v2 contract**.
+# Retired: HERV2 High-Risk Periodic Checkpoint Plan
+
+Status: **superseded and not an active HERV2 contract**.
 
 This document name is retained only so older links resolve. The optional
 model-authored risk-label checkpoint-assessor design was incorrect: it allowed
@@ -9,7 +11,7 @@ commentary, and used risk metadata as the cadence gate. That behaviour has been
 removed from code and tests.
 
 The authoritative replacement is the
-[HER v2 Compulsory Replanning Repair Plan](HER_V2_COMPULSORY_REPLAN_REPAIR_PLAN.md).
+[HERV2 Compulsory Replanning Repair Plan](HER_V2_COMPULSORY_REPLAN_REPAIR_PLAN.md).
 In summary:
 
 - Adaptive (`high`), Reviewed (`xhigh`), and Assured (`max`) are eligible;

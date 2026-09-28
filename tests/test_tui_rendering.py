@@ -216,7 +216,6 @@ async def test_tui_language_balanced_logo_and_command_preview(tmp_path):
         "layout": "balanced",
         "sounds": True,
         "typing": True,
-        "telegram_mirror": True,
         "sidepanel": False,
         "sidepanel_auto": False,
         "last_agent_by_instance": {},
@@ -492,7 +491,6 @@ async def test_command_response_messages_render_immediately_and_refresh_status(t
             "akane",
             client,
             0,
-            False,
             "en",
             submission_ref,
         )
@@ -501,7 +499,7 @@ async def test_command_response_messages_render_immediately_and_refresh_status(t
         rendered = "\n".join(line.text for line in app.query_one("#chat-history", ChatHistory).lines)
         assert "Model · gpt-test" in rendered
         assert len(client.sent) == 1
-        assert client.sent[0][2]["telegram_mirror"] is False
+        assert "telegram_mirror" not in client.sent[0][2]
         assert "Effort high" in app.query_one("#footer-info-box", FooterInfoBox).render().plain
 
 
@@ -533,7 +531,6 @@ async def test_footer_shows_her_routes_but_never_invents_other_engine_provider(t
                     },
                 },
             },
-            telegram_mirror=False,
         )
         plain = footer.render().plain
         assert "Instance HASHI2" in plain
@@ -542,7 +539,7 @@ async def test_footer_shows_her_routes_but_never_invents_other_engine_provider(t
         assert "Model Q:gpt-quick / P:claude-pro" in plain
         assert "Provider Q:openai / P:anthropic" in plain
         assert "Think ON · Verbose OFF · Commentary ON" in plain
-        assert "TG mirror OFF" in plain
+        assert "TG mirror" not in plain
         assert "Flex" not in plain
 
         footer.update_state(
@@ -612,7 +609,7 @@ async def test_footer_collapses_her_details_only_for_identical_providers(tmp_pat
         from textual.geometry import Region
         visible = "\n".join(strip.text for strip in footer.render_lines(
             Region(0, 0, footer.region.width, footer.region.height)))
-        assert "TG 镜像 ON" in visible, "updated footer must grow to show its last fields"
+        assert "API 已连接" in visible, "updated footer must grow to show its last fields"
 
         footer.update_state(
             "Temp",
@@ -704,7 +701,7 @@ async def test_mouse_drag_creates_chat_selection(tmp_path):
         assert chat.auto_scroll is False
 
 
-async def test_typing_and_telegram_preferences_are_persistent_and_run_fenced(tmp_path):
+async def test_typing_preference_is_persistent_and_run_fenced(tmp_path):
     app = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI2")
     app._schedule_startup_sequence = lambda: None
 
@@ -728,17 +725,15 @@ async def test_typing_and_telegram_preferences_are_persistent_and_run_fenced(tmp
         assert indicator.display is False
         app._handle_tui_cmd("/tui typing on")
         assert indicator.display is True
-        app._handle_telegram_cmd("/telegram off")
-        assert app._telegram_mirror_enabled is False
         app._clear_typing_indicator(second)
         assert indicator.display is False
 
     preferences = json.loads((tmp_path / "state" / "tui_preferences.json").read_text())
     assert preferences["typing"] is True
-    assert preferences["telegram_mirror"] is False
+    assert "telegram_mirror" not in preferences
     reloaded = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI2")
     assert reloaded._tui_typing_enabled is True
-    assert reloaded._telegram_mirror_enabled is False
+    assert not hasattr(reloaded, "_telegram_mirror_enabled")
 
 
 async def test_sidepanel_is_read_only_bilingual_and_persistent(tmp_path):

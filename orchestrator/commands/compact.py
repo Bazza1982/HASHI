@@ -445,7 +445,7 @@ async def compact_command(runtime: Any, update: Any, context: Any) -> None:
 COMMANDS = [
     RuntimeCommand(
         name="compact",
-        description="Compact eligible HER v2 history [status|cancel]",
+        description="Compact eligible HERV3 history [status|cancel]",
         callback=compact_command,
     )
 ]

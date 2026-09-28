@@ -95,13 +95,26 @@
   - `docs/HASHI_SLIM_CORE_ARCHITECTURE.md` reflects current manager boundaries
   - `docs/HASHI_CORE_SLIMMING_PLAN.md` reflects latest implementation and validation status
   - `CHANGELOG.md` records structural changes and residual notes
-- HER v2 mode gates:
+- HERV3 gates:
   - release scope uses HASHI `v4.0.0-beta.1` as the single current repository,
     Python package (`4.0.0b1`), root Node package, and Helm application line;
     Enterprise AAI `v0.1.0-alpha.1` is labelled only as historical provenance
-  - HER v2 changes run the touched v2 module plus its direct adapter/runtime
+  - HERV3 changes run the touched compatibility module plus its direct adapter/runtime
     consumers; no active path imports the retired HER v1 implementation
-  - `her` resolves forward to `her-v2`, while `claw-cli` is rejected
+  - public Engine projections resolve to `her-v3`; internal `her-v2` adapter
+    and `her_v2` storage compatibility remain non-public, while `claw-cli` is rejected
+  - the foreground path makes exactly one selected Provider/model available to one
+    continuous model/tool loop; no public command, callback, status, scheduler policy,
+    or effort value can restore Triage, Strategy, Planning, Replanning, Review, or
+    stage-based Finalisation routing
+  - `/provider`, `/model`, and `/effort` derive their choices from instance and
+    Provider/model capabilities; effort is Provider reasoning only and never selects
+    a HASHI workflow
+  - optional Strategy Cards enter the same main loop as advisory context only;
+    Habit/Meditation remains the request-scoped learning owner and never becomes a
+    routing stage
+  - the optional JEV Agent Companion receives bounded observable liveness state only,
+    stays advisory, and cannot create a second planner, reviewer, or execution owner
   - the release candidate passes the explicit offline product suite once;
     repeated overlapping HER bundles are not separate gates
   - `python -m py_compile adapters/her_v2.py adapters/her_v2_provider.py orchestrator/her_v2/prompt_catalog.py orchestrator/her_v2/prompts.py orchestrator/her_v2/runtime.py orchestrator/her_v2/runtime_invocation.py orchestrator/her_v2/runtime_support.py adapters/her_habits.py orchestrator/runtime_her_habits.py tools/media_read.py tools/gateway/mcp_stdio.py`
@@ -114,30 +127,24 @@
   - retired Wrapper, Audit, and Dual Brain state migrates to the valid
     configured default without deleting historical configuration blocks;
     former commands and callbacks are hidden compatibility notices
-  - HER v2 remains the active Habit/Meditation owner and request-scoped
-    eligibility prevents internal or ephemeral work from entering `/habit`
-  - HER UI and status show only Direct, Strategic, and Planned while persisted/API
-    values remain `zero`, `low`, and `medium`; legacy `fast` aliases select
-    Strategic and saved `high`, `xhigh`, or `max` values migrate to Planned
-  - Direct (`zero`) proves exactly one Quick-model call at default provider
-    reasoning `high`, complete tool/side-effect capability, no orchestration
-    upgrade or other HER stage, normal verbose tool progress, attachment fallback,
-    and `COMPLETED` for every successful natural-language return
-  - retained higher-mode regressions remain internal coverage and do not expose
-    Adaptive, Reviewed, or Assured through the production selector
+  - request-scoped learning eligibility prevents internal or ephemeral work from
+    entering `/habit`
+  - one successful natural-language Turn proves one main target, normal tool and
+    side-effect authority, provider reasoning, attachment fallback, and `COMPLETED`;
+    a chat-only model omits tools and reports that limitation truthfully
   - `verification_run` runs configured recipes or direct argv in the
     authoritative workspace without copying, inherits the execution process's
     filesystem/environment/`HOME`/network authority, and enforces a timeout
-    floor derived from cumulative Execution duration
-  - Review/Verification unavailable, partly verified, and not-AI-verifiable
-    results are reported honestly without replacing Execution disposition
+    floor derived from the real foreground duration
+  - unavailable, partial, and not-AI-verifiable checks are reported honestly
+    without inventing a separate Review or Finalisation stage
   - Auto Compact failure, timeout, unavailable routing, non-shrinking output,
-    and retry exhaustion never suppress the selected-model call; the 120,000
-    estimated-token regression proves the original request continues and a
-    mandatory warning is exposed independently of `/verbose`
+    and retry exhaustion never suppress the main-model call; the 120,000
+    estimated-token regression proves the original request continues and a mandatory
+    warning is exposed independently of `/verbose`
   - `/rebuild` is a side-effect-free one-version retirement notice and no
     native HER manager/source/package is initialized at startup
-  - At least one live `her-v2` canary after `/reboot min` validates
+  - At least one live `her-v3` canary after `/reboot min` validates
     provider/model selection, Flex Fixed-mode continuation for session CLI
     backends, repo-root read/write/edit, `media_read` for image/PDF/audio,
     canonical and legacy screenshot image results,

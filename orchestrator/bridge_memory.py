@@ -1509,6 +1509,7 @@ class BridgeContextAssembler:
         extra_sections: list[tuple[str, str] | tuple[str, str, dict[str, Any]]] | None = None,
         context_profile: str | None = None,
         recent_exchanges: list[dict[str, Any]] | None = None,
+        explicit_history_context: bool = False,
         prompt_budget_tokens: int | None = None,
     ) -> str:
         return self.build_prompt_payload(
@@ -1518,6 +1519,7 @@ class BridgeContextAssembler:
             extra_sections=extra_sections,
             context_profile=context_profile,
             recent_exchanges=recent_exchanges,
+            explicit_history_context=explicit_history_context,
             prompt_budget_tokens=prompt_budget_tokens,
         )["final_prompt"]
 
@@ -1645,6 +1647,7 @@ class BridgeContextAssembler:
         inject_memory: bool = True,
         context_profile: str | None = None,
         recent_exchanges: list[dict[str, Any]] | None = None,
+        explicit_history_context: bool = False,
         prompt_budget_tokens: int | None = None,
     ) -> dict[str, Any]:
         """Build PCM with token-aware, traceable non-HER history fallback."""
@@ -1766,9 +1769,11 @@ class BridgeContextAssembler:
 
         should_inject_history = (
             not incremental
-            and inject_memory
-            and self.turns_injection_enabled
             and not managed_history
+            and (
+                bool(explicit_history_context)
+                or (inject_memory and self.turns_injection_enabled)
+            )
         )
         exchanges = []
         if should_inject_history:

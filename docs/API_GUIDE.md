@@ -182,9 +182,9 @@ than exposing one unsafe backend-wide list. If an agent switches from a model
 with `ultra` selected to a Luna model, or from `max`/`ultra` to GPT-5.5, HASHI
 automatically normalizes effort to `medium` before the next Codex invocation.
 
-### HER v2 provider models
+### HERV3 provider models
 
-HASHI1 uses OpenRouter as a HER v2 Model Provider. Its shared catalogue
+HASHI1 uses OpenRouter as a HERV3 Model Provider. Its shared catalogue
 contains only `deepseek/deepseek-v3.2-exp`,
 `deepseek/deepseek-v4-flash`, `deepseek/deepseek-v4-pro`, and
 `google/gemini-3.8-flash`.

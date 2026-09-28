@@ -22,6 +22,8 @@ MAX_CALLBACK_TOKENS = 256
 
 def _her_v2_job_effort_label(job: dict) -> str:
     policy = job_effort_policy(job)
+    if str(policy["effective"]).casefold() == "inherit":
+        return ui_language.tr("jobs.inherit_policy")
     return (
         f"{effort_display_label(policy['effective'])} · "
         f"{ui_language.tr('jobs.fixed_policy')}"

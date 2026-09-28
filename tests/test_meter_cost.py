@@ -452,7 +452,7 @@ def test_formatter_adds_total_and_effort_aware_stage_wall_times():
 
     assert tail.splitlines()[1:3] == [
         "⏱️ 本回合耗时：2分18秒",
-        "🧭 主要阶段：策略 12.8秒 · 规划 18.6秒 · 执行 1分42秒",
+        "🧭 运行活动：建议上下文 12.8秒 · 准备 18.6秒 · 主模型 1分42秒",
     ]
     assert "immediate" not in tail.casefold()
 
@@ -470,7 +470,7 @@ def test_formatter_direct_timing_omits_unrun_strategy_and_planning():
     )
 
     assert "⏱️ Turn time: 8.9s" in tail
-    assert "🧭 Main stages: Execution 8.7s" in tail
+    assert "🧭 Runtime activity: Main model 8.7s" in tail
     assert "Strategy" not in tail
     assert "Planning" not in tail
 
@@ -585,9 +585,59 @@ def test_formatter_task_total():
     assert "任务累计 ≈" in tail
 
 
+def test_formatter_separates_herv3_main_work_from_persona_packaging():
+    line_items = [
+        PerCallUsageLineItem(
+            phase="direct",
+            engine="deepseek-api",
+            model="deepseek-v4-pro",
+            input_tokens=80_000,
+            output_tokens=1_000,
+            token_source="provider",
+            thinking_in_output=True,
+            cost_usd=0.002,
+            cost_source="pricing_table",
+        )
+        for _ in range(24)
+    ]
+    line_items.extend(
+        PerCallUsageLineItem(
+            phase="persona",
+            engine="deepseek-api",
+            model="deepseek-flash",
+            input_tokens=300,
+            output_tokens=100,
+            token_source="provider",
+            thinking_in_output=True,
+            cost_usd=0.0001,
+            cost_source="pricing_table",
+        )
+        for _ in range(2)
+    )
+    receipt = UsageReceipt(line_items=line_items)
+
+    chinese = format_cost_tail(receipt, locale="zh-CN")
+    assert chinese.splitlines()[:4] == [
+        "💰 本回合：≈ 4.82 美分 · 服务提供方：DeepSeek",
+        "🧠 主任务：deepseek-v4-pro · 24次调用 · ≈ 4.80 美分",
+        "💬 进度表达：deepseek-flash · 2次调用 · ≈ 0.02 美分",
+        "📝 最终答复：deepseek-v4-pro（无额外模型改写）",
+    ]
+    assert "服务模型：deepseek-v4-pro + deepseek-flash" not in chinese
+
+    english = format_cost_tail(receipt, locale="en")
+    assert english.splitlines()[:4] == [
+        "💰 This turn: ≈ 4.82 cents · Provider: DeepSeek",
+        "🧠 Main task: deepseek-v4-pro · 24 calls · ≈ 4.80 cents",
+        "💬 Progress wording: deepseek-flash · 2 calls · ≈ 0.02 cents",
+        "📝 Final answer: deepseek-v4-pro (no additional model rewrite)",
+    ]
+
+
 def test_formatter_does_not_reprice_historical_cache_savings_without_source_fact():
     line_items = [
         PerCallUsageLineItem(
+            phase="direct",
             engine="deepseek-api",
             model="deepseek-v4-pro",
             input_tokens=2_283_850,
@@ -601,6 +651,7 @@ def test_formatter_does_not_reprice_historical_cache_savings_without_source_fact
             pricing_revision="2026-08-23.v1",
         ),
         PerCallUsageLineItem(
+            phase="persona",
             engine="deepseek-api",
             model="deepseek-v4-flash",
             input_tokens=631_748,
@@ -617,6 +668,7 @@ def test_formatter_does_not_reprice_historical_cache_savings_without_source_fact
     ]
     line_items.extend(
         PerCallUsageLineItem(
+            phase="persona",
             engine="deepseek-api",
             model="deepseek-v4-flash",
             token_source="provider",
@@ -631,15 +683,18 @@ def test_formatter_does_not_reprice_historical_cache_savings_without_source_fact
 
     chinese = format_cost_tail(receipt, locale="zh-CN")
     assert chinese.splitlines() == [
-        "💰 本回合：≈ 10.61 美分 · 服务提供方：DeepSeek "
-        "· 服务模型：deepseek-v4-pro + deepseek-v4-flash",
+        "💰 本回合：≈ 10.61 美分 · 服务提供方：DeepSeek",
+        "🧠 主任务：deepseek-v4-pro · 1次调用 · ≈ 8.09 美分",
+        "💬 进度表达：deepseek-v4-flash · 39次调用 · ≈ 2.52 美分",
+        "📝 最终答复：deepseek-v4-pro（无额外模型改写）",
         "📥 输入 2.916M · 缓存命中 2.683M（92.0%） 📤 输出 52.2K（其中推理 38.1K）",
         "🔁 无缓存估算不可用",
     ]
     english = format_cost_tail(receipt, locale="en")
     assert english.splitlines()[0].startswith("💰 This turn: ≈ 10.61 cents")
     assert "Provider: DeepSeek" in english.splitlines()[0]
-    assert "Models: deepseek-v4-pro + deepseek-v4-flash" in english.splitlines()[0]
+    assert "Main task: deepseek-v4-pro · 1 call · ≈ 8.09 cents" in english
+    assert "Progress wording: deepseek-v4-flash · 39 calls · ≈ 2.52 cents" in english
     assert "cache hit 2.683M (92.0%)" in english
     assert "including 38.1K reasoning" in english
     assert "no-cache estimate unavailable" in english.casefold()

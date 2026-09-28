@@ -40,7 +40,7 @@ protected process core.
 9. Qualify `Provider` as Engine/Harness Provider or Model Provider whenever the
    category is ambiguous. Use `Engine` as the canonical term for an agentic
    Harness, and qualify HASHI Conversation Session versus Engine Session.
-10. Keep PAO, PCM, HER v2, and Frontend Connector ownership distinct. A
+10. Keep PAO, PCM, HERV3, and Frontend Connector ownership distinct. A
     compatibility filename or command location does not transfer domain
     authority.
 

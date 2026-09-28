@@ -546,7 +546,7 @@ async def test_retry_uses_fresh_semantics_for_api_backend(tmp_path):
     backend.handle_new_session.assert_not_awaited()
     assert store.clear_count == 0
     assert runtime.context_assembler.turns_injection_enabled is True
-    assert runtime.context_assembler.saved_memory_injection_enabled is True
+    assert runtime.context_assembler.saved_memory_injection_enabled is False
     assert [call[0][2] for call in enqueued] == ["retry"]
     assert "Clean context: /fresh semantics." in replies[-1]
 

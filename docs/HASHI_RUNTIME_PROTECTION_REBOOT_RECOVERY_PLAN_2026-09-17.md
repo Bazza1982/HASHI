@@ -22,7 +22,7 @@ Core 主版本迁移授权，不能把本文当作授权替代品。
 本文记录的是已确认的目标设计，不代表当前运行实例已经采用。源码实现、测试合格、制品生成、GitHub
 发布和生产实例采用必须分别记录。
 
-若后续建议与本文冲突，先保持本文边界并请用户作产品决定；不得由实现者自行扩大保护、增加 HER v2
+若后续建议与本文冲突，先保持本文边界并请用户作产品决定；不得由实现者自行扩大保护、增加 HERV3
 限制、增加 `/restart` 人工证明，或降低 Agent 的正常开发能力。
 
 ## 2. 要解决的问题
@@ -33,7 +33,7 @@ Core 主版本迁移授权，不能把本文当作授权替代品。
 - 过宽的依赖摘要、dirty-tree 判断和运行保护会把无关包、无关文档或实例状态误判为 `/reboot` 风险，导致正常 Function 更新经常失败。
 - `/reboot` 的“命令已受理”“候选合格”“路由已切换”和“新 Worker 最终在线”没有始终清楚分开，容易产生错误诊断。
 - HASHI1、HASHI2、HASHI3、HASHI4 和 GitHub 已经出现不同的已提交与未提交工作；继续盲目同步会覆盖证据或混合不相关功能。
-- 旧计划曾建议给 HER v2 增加 token、时间、工具循环限制和自动压缩，也曾建议给 `/restart` 增加真人一次性证明与双重确认；这些建议已被用户明确否决。
+- 旧计划曾建议给现行 HER 增加 token、时间、工具循环限制和自动压缩，也曾建议给 `/restart` 增加真人一次性证明与双重确认；这些建议已被用户明确否决。
 
 本计划的核心原则是：**精确保护 live runtime，同时保持 Agent 在自己的 workspace/workzone 中正常工作。**
 
@@ -64,10 +64,10 @@ Core 主版本迁移授权，不能把本文当作授权替代品。
 - 不把所有 Agent Worker 一刀切迁移到会破坏凭据、CLI 或开发能力的新受限账户。
 - 不禁止 workspace/workzone、开发分支、开发虚拟环境或 Function sidecar 内的正常写入和 `pip`／`uv`。
 - 不允许 Agent 直接修改 live Core 环境、向 live Core 解释器安装包、改服务定义或读取重启密钥。
-- 不给 HER v2 增加 token、时间、工具数、上下文或工具循环上限。
-- 不给 HER v2 增加自动 checkpoint、自动压缩或新的确定性失败重试政策。
-- 不改变 HER v2 当前 shell 只读／副作用判断、执行循环或普通失败答复。
-- 不大改 HER v2；本轮仅允许低风险、fail-open 的诊断日志投影。
+- 不给 HERV3 增加 token、时间、工具数、上下文或工具循环上限。
+- 不给 HERV3 增加自动 checkpoint、自动压缩或新的确定性失败重试政策。
+- 不改变 HERV3 当前 shell 只读／副作用判断、执行循环或普通失败答复。
+- 不大改 HERV3；本轮仅允许低风险、fail-open 的诊断日志投影。
 - 不改当前已正常工作的 Antigravity（AGY）路径。
 - 不给 `/restart` 增加真人一次性证明、nonce、防重放证明或本机／远端双重确认。
 - 不要求每次普通 Function PR 都跑全量 Linux、Windows、Nagare 和发布资格套件。
@@ -82,7 +82,7 @@ Core 主版本迁移授权，不能把本文当作授权替代品。
 | `/reboot`、`/restart` 命令和用户可见状态 | Frontend Connector | Functions、语言目录 | Core |
 | live 路径 ACL、服务配置、部署身份 | PAO／平台 | 平台配置、安装与部署脚本 | Agent 业务逻辑 |
 | Agent FYI 精简 | PCM | PCM Functions／配置 | Core、HER 执行循环 |
-| 副作用与 Provider ID 的可查询日志 | HER v2 诊断投影／工具审计 | 既有审计或旁路投影 | HER v2 关键执行路径 |
+| 副作用与 Provider ID 的可查询日志 | HERV3 诊断投影／工具审计 | 既有审计或旁路投影 | HERV3 关键执行路径 |
 | Gemini CLI 退役 | PAO／Backend 配置 | Functions、平台／实例配置、UI | Core |
 
 任何实现前都要重新声明 owner、工程层和聚焦验证。正常功能必须放入最窄的现有 owner，不复制模型、命令、端口、状态写入或配置事实源。
@@ -230,7 +230,7 @@ ACL 必须只覆盖明确的 live 目标，不能覆盖整个仓库、用户目�
 
 Windows 服务型实例的补充边界：Remote 只读取本地 live-runtime policy 中与受控实例 ID 精确匹配的服务名，并只通过窄范围服务脚本执行停止／启动；部署工具只给 Remote 运行身份授予该服务的 start/stop 权限。没有明确服务目标的开发型实例继续使用非服务 launcher。服务命令返回或服务显示 `Running` 均不构成成功，仍以新 Core PID、健康、身份、版本和 Function 代际的终态回执为准。
 
-H3 实测补充（2026-09-18）：Windows PowerShell 服务脚本若使用 `DETACHED_PROCESS`，可能只留下 launcher PID 而未执行服务控制；服务型路径必须改用无窗口、非 detached 子进程，并给正常的服务停止、启动和产品 readiness 留出独立验证窗口。该窗口只约束一次 restart 的健康确认，不属于 HER v2 的 turn、token、工具或上下文预算。
+H3 实测补充（2026-09-18）：Windows PowerShell 服务脚本若使用 `DETACHED_PROCESS`，可能只留下 launcher PID 而未执行服务控制；服务型路径必须改用无窗口、非 detached 子进程，并给正常的服务停止、启动和产品 readiness 留出独立验证窗口。该窗口只约束一次 restart 的健康确认，不属于 HERV3 的 turn、token、工具或上下文预算。
 
 H3 的连续现场样本从请求到最终 ready 约需 133–135 秒，120 秒会把随后正常上线的实例过早记为失败。终态验证窗口因此设为 240 秒，客户端请求为 270 秒并在 ready 后立即返回；不得以放宽 PID、身份、版本、Function 代际或健康条件来换取较快的成功回执。
 
@@ -238,7 +238,7 @@ H3 最终验收又暴露了一个独立活性问题：Remote 在 `/restart` 请�
 
 H2 最终验收同时确认 Linux Remote systemd unit 的默认 `KillMode=control-group` 会在重载 Remote 时误杀由其救援入口启动、仍处于同一 cgroup 的 HASHI Core。Remote supervisor 必须只管理 Remote 主进程；Core 的停止与重启继续只由显式 HASHI 控制端点及终态回执负责。该边界不得让 Remote reload 隐式变成 Core restart。
 
-### 阶段 5：只增强诊断证据，不大改 HER v2
+### 阶段 5：只增强诊断证据，不大改 HERV3
 
 允许的唯一新增范围是可查询日志：
 
@@ -248,13 +248,13 @@ H2 最终验收同时确认 Linux Remote systemd unit 的默认 `KillMode=contro
 - Provider request ID、response ID 和已有 wire evidence 引用；
 - 最终任务状态、已知副作用和是否存在安全重试证据。
 
-实现优先复用现有 tool ledger、audit event 和 BackgroundJob receipt，建立只读诊断投影；不在 HER v2 主执行循环复制状态机。日志写入不得成为任务成功的同步前置条件；投影失败时保留原执行结果并记录本地警告，避免“为了报告失败而让正常任务失败”。
+实现优先复用现有 tool ledger、audit event 和 BackgroundJob receipt，建立只读诊断投影；不在 HERV3 主执行循环复制状态机。日志写入不得成为任务成功的同步前置条件；投影失败时保留原执行结果并记录本地警告，避免“为了报告失败而让正常任务失败”。
 
 本批次不改变普通用户失败答复。待日志证据稳定后，再单独评审是否给失败界面增加三项简短摘要：任务是否完成、已知副作用、能否安全重试。没有完整证据时必须显示“未知”，不能猜测。
 
 以下提案取消，不进入 backlog：HER token／时间／工具预算、自动 checkpoint、自动压缩、shell 重新分类、工具循环改写和新的自动重试禁令。
 
-实现检查点（2026-09-17）：已增加按 request ID 查询的只读诊断投影，复用现有 Tool audit／Smart Tool ledger 与 BackgroundJob receipt；普通 Tool 审计补齐 request ID，后台任务保留状态变化历史，终态旁路投影记录 Provider request/response ID、wire evidence、已知副作用和“安全重试证据存在／缺失／未知”。投影异步且 fail-open，不改变 HER v2 主循环、预算、压缩、shell 判定、普通失败答复或重试行为。
+实现检查点（2026-09-17）：已增加按 request ID 查询的只读诊断投影，复用现有 Tool audit／Smart Tool ledger 与 BackgroundJob receipt；普通 Tool 审计补齐 request ID，后台任务保留状态变化历史，终态旁路投影记录 Provider request/response ID、wire evidence、已知副作用和“安全重试证据存在／缺失／未知”。投影异步且 fail-open，不改变 HERV3 主循环、预算、压缩、shell 判定、普通失败答复或重试行为。
 
 ### 阶段 6：剩余功能分开处理
 

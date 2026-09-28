@@ -1,15 +1,17 @@
+> **Legacy HERV2 archive — non-normative.** This document records the retired staged runtime. HERV3 uses one continuous main-model/tool loop with no Triage, Strategy, Planning, Replanning, Review, or stage-based Finalisation routing. Strategy Cards and Habit/Meditation remain optional. See [HERV3 upgrade](HERV3_UPGRADE.md).
+
 # Hashi Engine Runtime v2
 
 ## Formal Testing Plan
 
 | Field | Value |
 |---|---|
-| Status | Approved HER v2 testing baseline under the Level 0 architecture |
+| Status | Approved HERV2 testing baseline under the Level 0 architecture |
 | Version | 1.3 |
 | Date | 2026-09-01 |
 | System | Hashi Engine Runtime (HER) v2 |
 | Testing approach | Intent-based, risk-focused, and scenario-driven |
-| Governing design | [HER v2 Product Requirements and Technical Design](HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md) |
+| Governing design | [HERV2 Product Requirements and Technical Design](HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md) |
 | Implementation baseline | HASHI `her-v2` at `cc010d11d69b4eb24c62c134dc57ac62ea42c277` |
 | Parent architecture | [HASHI System Architecture](../ARCHITECTURE.md) |
 
@@ -25,7 +27,7 @@
 
 ## 1. Purpose
 
-This plan defines the minimum correct test coverage for HER v2.
+This plan defines the minimum correct test coverage for HERV2.
 
 Testing exists to prove that HER preserves its intended execution behaviour when models, tools, schemas, providers, messages, logs, concurrency, and timing are imperfect. It does not exist to maximise test count, assertion count, line coverage, snapshot volume, or schema permutations.
 
@@ -274,7 +276,7 @@ no-tool stages, and safe acceptance of a previously unknown engine that has no
 tool capability. Engine-name allowlists are not an acceptance invariant.
 
 Auto Compact routing tests must prove that Compact follows the initiating
-Agent's active HER v2 provider and Quick/Light model at fixed high HER effort.
+Agent's active HERV2 provider and Quick/Light model at fixed high HER effort.
 `/model compact` may select only the approved inherit-Quick policy, off, and the
 Tier 2-or-3 watchdog; it must not create a third provider/model path. Legacy
 `inherit_pro` or explicit route state migrates forward without a Pro/global
@@ -305,7 +307,7 @@ acceptance tests.
 
 Cron and heartbeat regressions must prove that:
 
-- every prompt job resolves to HER v2 Direct (`zero`) for scheduled, manual
+- every prompt job resolves to HERV2 Direct (`zero`) for scheduled, manual
   Run, and recovery replay paths;
 - valid, invalid, and stale `her_v2_effort` fields cannot bypass Direct or
   prevent an otherwise valid job from running;
@@ -423,7 +425,7 @@ Tests must prove that:
   directory;
 - malformed or placeholder-drifted prompt assets fail closed before provider
   invocation;
-- Execution receives a dedicated HER v2 system prompt rather than the Agent's
+- Execution receives a dedicated HERV2 system prompt rather than the Agent's
   full `system_md` or Persona;
 - its user message retains the same complete HASHI-supplied request context as
   Planning, including recent turns, Memory+, and cross-session receipts, plus
@@ -943,7 +945,7 @@ Tests must prove that false progress cannot keep a stalled turn alive indefinite
 ### 10.1.1 Semantic cognitive-control boundary
 
 Deterministic tests must first prove that cognitive control is an unconditional
-HER v2 Engine invariant: no constructor, runtime configuration, Agent setting,
+HERV2 Engine invariant: no constructor, runtime configuration, Agent setting,
 mode, stage, or provider can disable it, and every legacy switch field is
 rejected. The tests must then cover the shared boundary in Direct, Strategy/Triage,
 Planning, Execution, Replanning, Review, and delegated tool contexts. At a
@@ -1153,7 +1155,7 @@ conversation-history phase:
   Journal and prevent the conversation-history phase from starting;
 - a committed recovery turn renders as quoted data rather than instructions
   and remains eligible historical context for a later normal Compact;
-- each new HER v2 request that encounters previous-turn WIP schedules exactly
+- each new HERV2 request that encounters previous-turn WIP schedules exactly
   one mandatory visible warning even with `/verbose off`;
 - new Journals are isolated by HASHI Session context, while legacy Agent-level
   state migrates by write-before-compare-and-swap-clear; and
@@ -1224,7 +1226,7 @@ Tests must prove:
   receipt shapes, and initial-resolution support is advertised when the
   provisional transport message can be edited; discard additionally requires
   delete capability;
-- every ordinary final send writes its real outcome back to the HER v2 audit
+- every ordinary final send writes its real outcome back to the HERV2 audit
   under the same stable `delivery_id` used by the deferred delivery intent;
 - a deferred-lane acceptance is never asserted as an actual transport delivery;
 - reporting failure follows the single-provider-recovery Finalisation policy
@@ -1238,9 +1240,9 @@ but retain separate typed delivery tests.
 
 ### 11.1 Retired backend isolation
 
-Tests must prove that `her` and `her-v2` resolve to the HER v2 adapter, that
+Tests must prove that `her` and `her-v2` resolve to the HERV2 adapter, that
 `claw-cli` is rejected, and that no registry, normalization, startup, switch,
-or recovery path imports or initializes the retired HER adapter. HER v2
+or recovery path imports or initializes the retired HER adapter. HERV2
 configuration failure must fail closed; it must not activate the retired
 backend. Compatible Habit, Meditation, and Dream files may be reused without
 importing the old execution backend.
@@ -1493,7 +1495,7 @@ Coverage percentage remains useful for locating accidental gaps, but it is not e
 
 ## 18. Initial Minimum Correct Coverage
 
-Before HER v2 is accepted, the suite must contain logically complete coverage of:
+Before HERV2 is accepted, the suite must contain logically complete coverage of:
 
 1. every locked runtime invariant;
 2. every canonical lifecycle edge and representative illegal edges;

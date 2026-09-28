@@ -6,12 +6,13 @@ This is the service-owned control plane for:
   - active agent directory exchange
   - merged peer state inspection
   - protocol message ingress
-  - transcript-based reply correlation
+  - durable Session/Run reply correlation
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import dataclasses
 import hashlib
 import json
@@ -26,6 +27,10 @@ from urllib.parse import quote, urlsplit
 from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
 
+from orchestrator.hchat_attachment_contract import (
+    HCHAT_ATTACHMENT_CLAIM_KEY,
+    canonical_hchat_attachment_manifest,
+)
 from orchestrator.runtime_defaults import DEFAULT_HASHI_REMOTE_PORT, DEFAULT_WORKBENCH_PORT
 from orchestrator.service_endpoints import (
     ServiceEndpointError,
@@ -102,6 +107,8 @@ DEFAULT_CAPABILITIES = [
 ]
 TERMINAL_INFLIGHT_STATES = {
     "reply_sent",
+    "reply_unknown",
+    "reply_failed",
     "failed",
     # Read-only compatibility for records written before reply wall-clock
     # ceilings were retired. New protocol messages never enter this state.
@@ -1077,6 +1084,13 @@ class ProtocolManager:
                     "request_id": existing.get("request_id"),
                     "normalized_ttl": existing.get("ttl", normalized_ttl),
                 }
+            if state in {"reply_unknown", "reply_failed"}:
+                return 409, self._error_payload(
+                    "delivery_outcome_unknown",
+                    "Prior reply outcome is unknown and will not be replayed",
+                    retryable=False,
+                    payload=payload,
+                )
 
         # If message is addressed to a different instance, forward it there.
         to_instance = str(payload.get("to_instance") or "").strip().upper()
@@ -1134,36 +1148,66 @@ class ProtocolManager:
                 return 410, error
             return 404, self._error_payload("target_agent_not_found", f"Target agent '{to_agent}' not found", retryable=False, payload=payload)
 
-        prompt_text = self._render_remote_message_prompt(from_agent, from_instance, payload.get("body") or {})
-        start_offset = await self._get_transcript_offset(to_agent)
-        request_id = await self._enqueue_local_prompt(
-            to_agent,
-            prompt_text,
-            exchange_kind="message",
-            message_id=message_id,
-            conversation_id=conversation_id,
-            from_instance=from_instance,
-            from_agent=from_agent,
-            to_instance=local_instance,
-            to_agent=to_agent,
-            route_trace=route_trace,
-            authenticated_peer=str(
+        body = payload.get("body") or {}
+        attachments = None
+        if payload.get("_local_attachment_manifest_verified") is True:
+            try:
+                attachments = canonical_hchat_attachment_manifest(
+                    body.get("attachments") or []
+                )
+            except ValueError as exc:
+                return 400, self._error_payload(
+                    "invalid_attachment_manifest",
+                    str(exc),
+                    retryable=False,
+                    payload=payload,
+                )
+        prompt_text = self._render_remote_message_prompt(
+            from_agent, from_instance, body
+        )
+        enqueue_kwargs = {
+            "exchange_kind": "message",
+            "message_id": message_id,
+            "conversation_id": conversation_id,
+            "from_instance": from_instance,
+            "from_agent": from_agent,
+            "to_instance": local_instance,
+            "to_agent": to_agent,
+            "route_trace": route_trace,
+            "authenticated_peer": str(
                 payload.get("_network_authenticated_instance") or ""
             ),
-            network_authentication=str(
+            "network_authentication": str(
                 payload.get("_network_authentication") or "not_verified"
             ),
-            private_authorization_proofs=list(
+            "private_authorization_proofs": list(
                 payload.get("private_authorization_proofs") or []
             ),
-            authorization_resources=list(payload.get("authorization_resources") or []),
-            authorization_content_text=str(
+            "authorization_resources": list(
+                payload.get("authorization_resources") or []
+            ),
+            "authorization_content_text": str(
                 payload.get("_private_authorization_content_text")
                 if payload.get("_private_authorization_content_text") is not None
-                else (payload.get("body") or {}).get("text")
+                else body.get("text")
                 or ""
             ),
+        }
+        if attachments:
+            enqueue_kwargs["attachments"] = attachments
+        local_acceptance = await self._enqueue_local_prompt(
+            to_agent,
+            prompt_text,
+            **enqueue_kwargs,
         )
+        if isinstance(local_acceptance, dict):
+            request_id = str(local_acceptance.get("request_id") or "")
+            session_id = str(local_acceptance.get("session_id") or "")
+            run_id = str(local_acceptance.get("run_id") or "")
+        else:
+            request_id = str(local_acceptance or "")
+            session_id = ""
+            run_id = ""
         if not request_id:
             return 502, self._error_payload("local_enqueue_failed", "Workbench enqueue failed", retryable=True, payload=payload)
 
@@ -1175,14 +1219,10 @@ class ProtocolManager:
             "to_instance": local_instance,
             "to_agent": to_agent,
             "request_id": request_id,
-            "prompt_text": prompt_text,
+            "session_id": session_id,
+            "run_id": run_id,
             "state": "delivered_to_local_queue",
-            "matched_user_prompt": False,
-            "transcript_offset_at_enqueue": start_offset,
-            "last_seen_offset": start_offset,
-            "assistant_segments": [],
             "reply_target_agent": from_agent,
-            "settle_deadline": 0,
             "updated_at": int(time.time()),
             "ttl": normalized_ttl,
         }
@@ -1195,6 +1235,8 @@ class ProtocolManager:
             "accepted": True,
             "state": "delivered_to_local_queue",
             "request_id": request_id,
+            "session_id": session_id or None,
+            "run_id": run_id or None,
             "normalized_ttl": normalized_ttl,
         }
 
@@ -1267,7 +1309,7 @@ class ProtocolManager:
                 return 410, error
             return 404, self._error_payload("target_agent_unavailable", f"Reply target '{to_agent}' is unavailable", retryable=True, payload=payload)
         prompt_text = self._render_remote_reply_prompt(from_agent, from_instance, body)
-        request_id = await self._enqueue_local_prompt(
+        local_acceptance = await self._enqueue_local_prompt(
             to_agent,
             prompt_text,
             exchange_kind="reply",
@@ -1277,6 +1319,14 @@ class ProtocolManager:
             from_agent=from_agent,
             terminal_response_text=str((body or {}).get("text") or "").strip(),
         )
+        if isinstance(local_acceptance, dict):
+            request_id = str(local_acceptance.get("request_id") or "")
+            session_id = str(local_acceptance.get("session_id") or "")
+            run_id = str(local_acceptance.get("run_id") or "")
+        else:
+            request_id = str(local_acceptance or "")
+            session_id = ""
+            run_id = ""
         if not request_id:
             return 502, self._error_payload("local_enqueue_failed", "Failed to inject reply into local agent", retryable=True, payload=payload)
         now = int(time.time())
@@ -1295,6 +1345,8 @@ class ProtocolManager:
             "to_instance": local_instance,
             "to_agent": to_agent,
             "request_id": request_id,
+            "session_id": session_id,
+            "run_id": run_id,
             "state": "reply_delivered_locally",
             "correlation_state": correlation_state,
             "route_trace": route_trace,
@@ -1310,6 +1362,8 @@ class ProtocolManager:
             "accepted": True,
             "state": "reply_delivered_locally",
             "request_id": request_id,
+            "session_id": session_id or None,
+            "run_id": run_id or None,
             "in_reply_to": in_reply_to,
             "conversation_id": conversation_id,
             "correlation_state": correlation_state,
@@ -1354,7 +1408,8 @@ class ProtocolManager:
         authorization_resources: list[str] | None = None,
         authorization_content_text: str | None = None,
         terminal_response_text: str | None = None,
-    ) -> str | None:
+        attachments: list[dict[str, Any]] | None = None,
+    ) -> dict[str, str] | None:
         terminal = exchange_kind == "reply"
         request_metadata = {
             "system_exchange": True,
@@ -1364,6 +1419,13 @@ class ProtocolManager:
             "protocol_conversation_id": conversation_id,
             "protocol_from_instance": from_instance,
             "protocol_from_agent": from_agent,
+            "connector_id": "remote",
+            "ingress_transport": "remote.protocol",
+            "session_surface": "remote",
+            "session_channel_key": (
+                f"{str(from_instance).strip().upper()}:"
+                f"{str(conversation_id).strip()}"
+            ),
         }
         resolved_target_instance = str(
             to_instance
@@ -1405,6 +1467,13 @@ class ProtocolManager:
                 },
             }
         )
+        normalized_attachments = (
+            canonical_hchat_attachment_manifest(attachments)
+            if attachments
+            else None
+        )
+        if normalized_attachments:
+            request_metadata[HCHAT_ATTACHMENT_CLAIM_KEY] = normalized_attachments
         if private_authorization_proofs:
             from orchestrator.private_authorization import (
                 authorization_content_sha256,
@@ -1440,6 +1509,7 @@ class ProtocolManager:
                 "_private_authorization_proofs",
                 "_private_authorization_binding",
                 "_private_authorization_content_sha256",
+                HCHAT_ATTACHMENT_CLAIM_KEY,
             )
             if key in request_metadata
         }
@@ -1476,6 +1546,8 @@ class ProtocolManager:
             "request_metadata": request_metadata,
             "idempotency_key": f"protocol:{exchange_kind}:{message_id}",
         }
+        if normalized_attachments:
+            payload["remote_attachments"] = normalized_attachments
         last_exc = None
         for host, port in self._local_workbench_routes():
             if not self._probe_local_workbench(host, port):
@@ -1487,42 +1559,172 @@ class ProtocolManager:
                     lambda u=url: self._post_json(u, payload, timeout=10),
                 )
                 if result.get("ok"):
-                    return str(result.get("request_id") or "")
+                    request_id = str(result.get("request_id") or "").strip()
+                    if not request_id:
+                        continue
+                    return {
+                        key: value
+                        for key, value in {
+                            "request_id": request_id,
+                            "session_id": str(result.get("session_id") or "").strip(),
+                            "run_id": str(result.get("run_id") or "").strip(),
+                            "message_id": str(result.get("message_id") or "").strip(),
+                        }.items()
+                        if value
+                    }
             except Exception as exc:
                 last_exc = exc
         if last_exc:
             logger.warning("Protocol local enqueue failed: %s", last_exc)
         return None
 
-    async def _get_transcript_offset(self, agent_name: str) -> int:
+    async def _resolve_request_identity(
+        self, agent_name: str, request_id: str
+    ) -> dict[str, str] | None:
+        """Recover a legacy in-flight item's durable Session and Run IDs."""
+
+        encoded_agent = quote(str(agent_name), safe="")
+        encoded_request = quote(str(request_id), safe="")
+        path = (
+            f"/api/agents/{encoded_agent}/requests/{encoded_request}"
+            "/activity?after_sequence=0&limit=1"
+        )
         for host, port in self._local_workbench_routes():
             if not self._probe_local_workbench(host, port):
                 continue
-            url = local_http_url(port, f"/api/transcript/{agent_name}?limit=1", host=host)
+            url = local_http_url(port, path, host=host)
             try:
                 result = await asyncio.get_running_loop().run_in_executor(
                     None,
                     lambda u=url: self._get_json(u, timeout=10),
                 )
-                return int(result.get("offset") or 0)
+                session_id = str(result.get("session_id") or "").strip()
+                run_id = str(result.get("run_id") or "").strip()
+                if result.get("ok") and session_id and run_id:
+                    return {
+                        "session_id": session_id,
+                        "run_id": run_id,
+                        "request_id": str(
+                            result.get("request_id") or request_id
+                        ).strip(),
+                    }
             except Exception:
                 continue
-        return 0
+        return None
 
-    async def _poll_transcript(self, agent_name: str, offset: int) -> dict:
+    async def _poll_session_result(
+        self, agent_name: str, session_id: str, run_id: str
+    ) -> dict[str, Any]:
+        """Read the exact canonical Run and final Message, never transcript text."""
+
         last_exc = None
+        path = (
+            f"/api/v1/sessions/{quote(str(session_id), safe='')}"
+            f"/runs/{quote(str(run_id), safe='')}"
+        )
         for host, port in self._local_workbench_routes():
             if not self._probe_local_workbench(host, port):
                 continue
-            url = local_http_url(port, f"/api/transcript/{agent_name}/poll?offset={offset}", host=host)
+            url = local_http_url(port, path, host=host)
             try:
-                return await asyncio.get_running_loop().run_in_executor(
+                result = await asyncio.get_running_loop().run_in_executor(
                     None,
                     lambda u=url: self._get_json(u, timeout=10),
                 )
+                run = result.get("run") if isinstance(result, dict) else None
+                if not result.get("ok") or not isinstance(run, dict):
+                    raise RuntimeError("canonical Run lookup returned no Run")
+                if str(run.get("session_id") or "") != str(session_id):
+                    raise RuntimeError("canonical Run Session mismatch")
+                if str(run.get("run_id") or "") != str(run_id):
+                    raise RuntimeError("canonical Run identity mismatch")
+                final_message = result.get("final_message")
+                text = ""
+                attachments: list[dict[str, Any]] = []
+                if isinstance(final_message, dict):
+                    if str(final_message.get("message_id") or "") != str(
+                        run.get("final_message_id") or ""
+                    ):
+                        raise RuntimeError("canonical final Message mismatch")
+                    text = str(final_message.get("text") or "")
+                    for raw_part in final_message.get("content") or ():
+                        if not isinstance(raw_part, dict):
+                            continue
+                        part_type = str(
+                            raw_part.get("type") or ""
+                        ).strip().casefold()
+                        if part_type in {"attachment", "media"}:
+                            attachment_id = str(
+                                raw_part.get("attachment_id") or ""
+                            ).strip()
+                            if not attachment_id:
+                                continue
+                            attachments.append(
+                                {
+                                    "kind": "attachment",
+                                    "attachment_id": attachment_id,
+                                    "filename": str(
+                                        raw_part.get("filename") or "attachment"
+                                    ),
+                                    "mime_type": str(
+                                        raw_part.get("mime_type")
+                                        or "application/octet-stream"
+                                    ),
+                                    "size_bytes": int(
+                                        raw_part.get("size_bytes") or 0
+                                    ),
+                                    "sha256": str(
+                                        raw_part.get("sha256") or ""
+                                    ).strip().casefold(),
+                                    "caption": str(
+                                        raw_part.get("caption") or ""
+                                    ),
+                                }
+                            )
+                        elif part_type == "audio":
+                            asset_id = str(
+                                raw_part.get("asset_id") or ""
+                            ).strip()
+                            if not asset_id:
+                                continue
+                            audio_format = str(
+                                raw_part.get("format") or "ogg"
+                            ).strip().casefold()
+                            attachments.append(
+                                {
+                                    "kind": "audio_asset",
+                                    "asset_id": asset_id,
+                                    "filename": str(
+                                        raw_part.get("filename")
+                                        or f"assistant-audio.{audio_format}"
+                                    ),
+                                    "mime_type": str(
+                                        raw_part.get("mime_type")
+                                        or f"audio/{audio_format}"
+                                    ),
+                                    "size_bytes": int(
+                                        raw_part.get("size_bytes") or 0
+                                    ),
+                                    "sha256": str(
+                                        raw_part.get("sha256") or ""
+                                    ).strip().casefold(),
+                                    "caption": str(
+                                        raw_part.get("caption") or ""
+                                    ),
+                                }
+                            )
+                return {
+                    "state": str(run.get("state") or "queued"),
+                    "request_id": str(run.get("request_id") or ""),
+                    "session_id": str(session_id),
+                    "run_id": str(run_id),
+                    "text": text,
+                    "attachments": attachments,
+                    "error_code": str(run.get("error_code") or ""),
+                }
             except Exception as exc:
                 last_exc = exc
-        raise last_exc or RuntimeError("local transcript poll failed")
+        raise last_exc or RuntimeError("canonical Run poll failed")
 
     async def _process_superloop_receipts(self) -> None:
         root = getattr(self, "_hashi_root", None)
@@ -1579,13 +1781,6 @@ class ProtocolManager:
             state = str(item.get("state") or "")
             if state in TERMINAL_INFLIGHT_STATES:
                 continue
-            if state == "reply_failed" and item.get("reply_text"):
-                sent = await self._send_agent_reply(item, str(item.get("reply_text") or ""))
-                item["state"] = "reply_sent" if sent else "reply_failed"
-                item["updated_at"] = int(now)
-                self._inflight[message_id] = item
-                dirty = True
-                continue
             try:
                 changed = await self._advance_inflight_item(item, now=now)
                 dirty = dirty or changed
@@ -1597,58 +1792,222 @@ class ProtocolManager:
 
     async def _advance_inflight_item(self, item: dict, *, now: float) -> bool:
         agent_name = str(item.get("to_agent") or "").lower()
-        data = await self._poll_transcript(agent_name, int(item.get("last_seen_offset") or 0))
-        item["last_seen_offset"] = int(data.get("offset") or item.get("last_seen_offset") or 0)
-        messages = data.get("messages") or []
         changed = False
-        reply_boundary_observed = False
-
-        for message in messages:
-            role = str(message.get("role") or "")
-            text = str(message.get("text") or "")
-            if not text:
-                continue
-            if role == "user":
-                if not item.get("matched_user_prompt") and text == item.get("prompt_text"):
-                    item["matched_user_prompt"] = True
-                    item["state"] = "matched_user_prompt"
-                    changed = True
-                    continue
-                if item.get("matched_user_prompt"):
-                    # Transcript records are ordered request pairs.  A later
-                    # user record starts another request, so none of its
-                    # assistant output belongs to this protocol exchange.
-                    reply_boundary_observed = True
-                    break
-                continue
-            if item.get("matched_user_prompt") and role == "assistant":
-                segments = list(item.get("assistant_segments") or [])
-                if not segments or segments[-1] != text:
-                    segments.append(text)
-                    item["assistant_segments"] = segments
-                    item["state"] = "assistant_streaming" if len(segments) > 1 else "assistant_started"
-                    item["settle_deadline"] = now + self._settle_window_seconds
-                    changed = True
-
-        if reply_boundary_observed and item.get("assistant_segments"):
-            # The next request is a stronger completion boundary than the
-            # legacy quiet-window timer.  Finalize now without absorbing the
-            # following request's response.
-            item["settle_deadline"] = now
+        session_id = str(item.get("session_id") or "").strip()
+        run_id = str(item.get("run_id") or "").strip()
+        if not session_id or not run_id:
+            identity = await self._resolve_request_identity(
+                agent_name, str(item.get("request_id") or "")
+            )
+            if identity is None:
+                return False
+            session_id = identity["session_id"]
+            run_id = identity["run_id"]
+            item.update(identity)
             changed = True
-
-        if item.get("assistant_segments") and float(item.get("settle_deadline") or 0) and now >= float(item.get("settle_deadline") or 0):
-            reply_text = "\n\n".join(str(x).strip() for x in item.get("assistant_segments") or [] if str(x).strip()).strip()
-            if not reply_text:
+        result = await self._poll_session_result(agent_name, session_id, run_id)
+        state = str(result.get("state") or "queued")
+        if state == "completed":
+            reply_text = str(result.get("text") or "").strip()
+            reply_attachments = [
+                dict(item)
+                for item in result.get("attachments") or ()
+                if isinstance(item, dict)
+            ]
+            if not reply_text and not reply_attachments:
                 item["state"] = "failed"
-                changed = True
-                return changed
-            sent = await self._send_agent_reply(item, reply_text)
+                item["error_code"] = "canonical_final_message_missing"
+                item["updated_at"] = int(now)
+                return True
+            item["reply_attachments"] = reply_attachments
+            delivery = await self._dispatch_agent_reply(item, reply_text)
             item["reply_text"] = reply_text
-            item["state"] = "reply_sent" if sent else "reply_failed"
+            item["state"] = (
+                "reply_sent"
+                if delivery["sent"]
+                else "reply_failed"
+                if delivery["known_failure"]
+                else "reply_unknown"
+            )
+            item.pop("reply_failure_known", None)
+            item["updated_at"] = int(now)
+            return True
+        if state in {"failed", "stopped", "superseded", "interrupted"}:
+            item["state"] = "failed"
+            item["error_code"] = str(
+                result.get("error_code") or f"remote_run_{state}"
+            )
+            item["updated_at"] = int(now)
+            return True
+        if item.get("state") != state:
+            item["state"] = state
             item["updated_at"] = int(now)
             changed = True
         return changed
+
+    def _frontend_session_store(self):
+        """Open the PAO Session database used by the local Function runtime."""
+
+        from orchestrator.session_store import SessionStore
+
+        cached = getattr(self, "_fc_session_store", None)
+        if isinstance(cached, SessionStore):
+            return cached
+        root = Path(self._hashi_root)
+        cached = SessionStore(
+            root / "state" / "sessions.sqlite3",
+            instance_id=str(
+                self._instance_info.get("instance_id") or "HASHI"
+            ),
+            attachment_root=root / "media" / "session_attachments",
+        )
+        self._fc_session_store = cached
+        return cached
+
+    async def _dispatch_agent_reply(
+        self,
+        item: dict[str, Any],
+        reply_text: str,
+    ) -> dict[str, Any]:
+        """Claim the canonical FC Event before the Remote transport effect."""
+
+        async def legacy_compatibility() -> dict[str, Any]:
+            sent = bool(await self._send_agent_reply(item, reply_text))
+            known = bool(item.get("reply_failure_known"))
+            return {
+                "sent": sent,
+                "known_failure": known,
+                "state": "delivered" if sent else "failed" if known else "unknown",
+            }
+
+        if not getattr(self, "_hashi_root", None):
+            return await legacy_compatibility()
+        session_id = str(item.get("session_id") or "").strip()
+        request_id = str(item.get("request_id") or "").strip()
+        from_instance = str(item.get("from_instance") or "").strip().upper()
+        conversation_id = str(item.get("conversation_id") or "").strip()
+        if not all((session_id, request_id, from_instance, conversation_id)):
+            return await legacy_compatibility()
+
+        from orchestrator.session_store import SessionNotFound
+
+        store = self._frontend_session_store()
+        try:
+            session = store.get_session(session_id)
+        except SessionNotFound:
+            return await legacy_compatibility()
+        owner_id = str(session["owner_id"])
+        channel_key = f"{from_instance}:{conversation_id}"
+        claim_result = store.claim_run_delivery_outbox(
+            request_id=request_id,
+            owner_id=owner_id,
+            surface="remote",
+            channel_key=channel_key,
+            worker_id=f"fc-remote-{request_id}",
+        )
+        if claim_result is None:
+            return await legacy_compatibility()
+        claim_state = str(claim_result.get("state") or "").casefold()
+        if claim_state != "claimed" or "claim" not in claim_result:
+            if claim_state == "completed":
+                event_id = str(claim_result.get("event_id") or "")
+                receipts = (
+                    store.frontend_delivery_receipts(
+                        session_id=session_id,
+                        owner_id=owner_id,
+                        event_id=event_id,
+                    )
+                    if event_id
+                    else []
+                )
+                sent = any(
+                    row.get("status") in {"accepted", "delivered", "duplicate"}
+                    for row in receipts
+                )
+                return {
+                    "sent": sent,
+                    "known_failure": not sent,
+                    "state": "already_completed",
+                }
+            return {
+                "sent": False,
+                "known_failure": claim_state
+                in {"failed", "suppressed", "missing_outbox"},
+                "state": claim_state or "unknown",
+            }
+
+        from orchestrator.frontend_dispatch import (
+            FrontendDispatcher,
+            OutcomeConnectorAdapter,
+        )
+
+        transport_outcome: dict[str, Any] = {}
+
+        async def send_standard_event(event, *, endpoint_id):
+            del endpoint_id
+            text_blocks = [
+                str(block.get("text") or "")
+                for block in event.get("content_blocks") or ()
+                if isinstance(block, dict) and block.get("type") == "text"
+            ]
+            semantic_text = "\n".join(text_blocks).strip()
+            media_ids = [
+                str(block.get("attachment_id") or "")
+                for block in event.get("content_blocks") or ()
+                if isinstance(block, dict) and block.get("type") == "media_ref"
+            ]
+            expected_media_ids = [
+                str(
+                    attachment.get("attachment_id")
+                    or attachment.get("asset_id")
+                    or ""
+                )
+                for attachment in item.get("reply_attachments") or ()
+                if isinstance(attachment, dict)
+            ]
+            if media_ids != expected_media_ids:
+                raise ValueError("Remote attachment projection mismatch")
+            if not semantic_text and not media_ids:
+                raise ValueError("standard frontend Event has no reply content")
+            sent = bool(await self._send_agent_reply(item, semantic_text))
+            known_failure = bool(item.get("reply_failure_known"))
+            outcome = {
+                "attempted": True,
+                "delivered": sent,
+                "state": (
+                    "delivered" if sent else "failed" if known_failure else "unknown"
+                ),
+                "message_id": (
+                    f"{item.get('message_id')}:reply" if sent else None
+                ),
+            }
+            transport_outcome.update(outcome)
+            return outcome
+
+        dispatcher = FrontendDispatcher(
+            store,
+            worker_id=f"fc-remote-{request_id}",
+            adapters={
+                "remote": OutcomeConnectorAdapter("remote", send_standard_event)
+            },
+        )
+        result = await dispatcher.dispatch_claimed_task(
+            claim_result["claim"],
+            session_id=session_id,
+            owner_id=owner_id,
+        )
+        if transport_outcome.get("delivered"):
+            return {"sent": True, "known_failure": False, "state": "delivered"}
+        status = str(result.get("status") or "unknown")
+        known_failure = bool(item.get("reply_failure_known")) or status in {
+            "failed",
+            "suppressed",
+        }
+        return {
+            "sent": False,
+            "known_failure": known_failure,
+            "state": "failed" if known_failure else "unknown",
+        }
 
     async def _send_agent_reply(self, item: dict, reply_text: str) -> bool:
         instance_id = str(item.get("from_instance") or "")
@@ -1676,28 +2035,283 @@ class ProtocolManager:
             "route_trace": [str(self._instance_info.get("instance_id") or "").upper()],
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
-        last_exc = None
-        for url in self._candidate_urls(route["host"], route["port"], "/protocol/message"):
+        reply_attachments = [
+            dict(attachment)
+            for attachment in item.get("reply_attachments") or ()
+            if isinstance(attachment, dict)
+        ]
+        if reply_attachments:
+            peer = (
+                self._peer_registry.get_peer(instance_id)
+                if self._peer_registry
+                else None
+            )
+            capabilities = {
+                str(value)
+                for value in getattr(peer, "capabilities", ()) or ()
+            }
+            if "message_attachments_v1" not in capabilities:
+                item["reply_failure_known"] = True
+                item["reply_error_code"] = "attachment_capability_missing"
+                logger.warning(
+                    "Cannot send attachment reply %s: peer %s lacks message_attachments_v1",
+                    payload["message_id"],
+                    instance_id,
+                )
+                return False
+            return await self._send_agent_reply_attachments(
+                item=item,
+                route=route,
+                payload=payload,
+                attachments=reply_attachments,
+            )
+        urls = self._candidate_urls(route["host"], route["port"], "/protocol/message")
+        if not urls:
+            return False
+        url = urls[0]
+        try:
+            result = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: self._post_json(url, payload, timeout=10),
+            )
+            if self._response_confirms_terminal_duplicate(result, payload):
+                logger.info(
+                    "Reply %s was already terminal at %s; accepting duplicate rejection as delivery success",
+                    payload["message_id"],
+                    route.get("instance_id"),
+                )
+                return True
+            if self._response_is_error(result):
+                item["reply_failure_known"] = True
+                item["reply_error_code"] = "reply_rejected"
+                return False
+            return bool(result.get("ok", True))
+        except Exception as exc:
+            logger.warning(
+                "Reply send via %s has unknown outcome; no alternate replay: %s",
+                url,
+                exc,
+            )
+            return False
+
+    def _get_bytes(self, url: str, timeout: int = 10) -> bytes:
+        request = urllib_request.Request(url, method="GET")
+        context = (
+            ssl._create_unverified_context()
+            if str(url).startswith("https://")
+            else None
+        )
+        with urllib_request.urlopen(
+            request, timeout=timeout, context=context
+        ) as response:
+            return bytes(response.read())
+
+    async def _read_local_reply_attachment(
+        self,
+        *,
+        session_id: str,
+        attachment: dict[str, Any],
+    ) -> bytes:
+        kind = str(attachment.get("kind") or "").strip().casefold()
+        identifier = str(
+            attachment.get("attachment_id")
+            if kind == "attachment"
+            else attachment.get("asset_id")
+            or ""
+        ).strip()
+        if not identifier:
+            raise ValueError("reply attachment identity is missing")
+        if kind == "attachment":
+            path = (
+                f"/api/v1/sessions/{quote(session_id, safe='')}"
+                f"/attachments/{quote(identifier, safe='')}/content"
+            )
+        elif kind == "audio_asset":
+            path = (
+                f"/api/v1/sessions/{quote(session_id, safe='')}"
+                f"/audio-assets/{quote(identifier, safe='')}"
+            )
+        else:
+            raise ValueError("reply attachment kind is unsupported")
+        last_error: Exception | None = None
+        for host, port in self._local_workbench_routes():
+            if not self._probe_local_workbench(host, port):
+                continue
+            url = local_http_url(port, path, host=host)
+            try:
+                payload = await asyncio.get_running_loop().run_in_executor(
+                    None,
+                    lambda target=url: self._get_bytes(target, timeout=10),
+                )
+                declared_size = int(attachment.get("size_bytes") or 0)
+                if declared_size and len(payload) != declared_size:
+                    raise ValueError("reply attachment size changed")
+                declared_digest = str(
+                    attachment.get("sha256") or ""
+                ).strip().casefold()
+                if (
+                    declared_digest
+                    and hashlib.sha256(payload).hexdigest() != declared_digest
+                ):
+                    raise ValueError("reply attachment content changed")
+                return payload
+            except Exception as exc:
+                last_error = exc
+        raise last_error or RuntimeError("reply attachment bytes are unavailable")
+
+    async def _send_agent_reply_attachments(
+        self,
+        *,
+        item: dict[str, Any],
+        route: dict[str, Any],
+        payload: dict[str, Any],
+        attachments: list[dict[str, Any]],
+    ) -> bool:
+        """Upload all managed reply bytes, then commit one correlated reply."""
+
+        prepared: list[tuple[dict[str, Any], bytes]] = []
+        try:
+            for attachment in attachments:
+                prepared.append(
+                    (
+                        attachment,
+                        await self._read_local_reply_attachment(
+                            session_id=str(item.get("session_id") or ""),
+                            attachment=attachment,
+                        ),
+                    )
+                )
+        except Exception as exc:
+            item["reply_failure_known"] = True
+            item["reply_error_code"] = "reply_attachment_unavailable"
+            logger.warning("Reply attachment preparation failed: %s", exc)
+            return False
+
+        def _url(path: str) -> str:
+            candidates = self._candidate_urls(
+                route["host"], route["port"], path
+            )
+            if not candidates:
+                raise RuntimeError("reply attachment route is unavailable")
+            return candidates[0]
+
+        staged: list[dict[str, Any]] = []
+        for index, (attachment, content) in enumerate(prepared, start=1):
+            attachment_id = f"att-{index}"
+            upload_payload = {
+                "message_id": payload["message_id"],
+                "from_instance": payload["from_instance"],
+                "attachment_id": attachment_id,
+                "filename": Path(
+                    str(attachment.get("filename") or f"attachment-{index}")
+                ).name,
+                "mime_type": str(
+                    attachment.get("mime_type") or "application/octet-stream"
+                ),
+                "content_b64": base64.b64encode(content).decode("ascii"),
+                "sha256": hashlib.sha256(content).hexdigest(),
+            }
             try:
                 result = await asyncio.get_running_loop().run_in_executor(
                     None,
-                    lambda u=url: self._post_json(u, payload, timeout=10),
+                    lambda target=_url("/attachments/upload"), body=upload_payload: self._post_json(
+                        target, body, timeout=15
+                    ),
                 )
-                if self._response_confirms_terminal_duplicate(result, payload):
-                    logger.info(
-                        "Reply %s was already terminal at %s; accepting duplicate rejection as delivery success",
-                        payload["message_id"],
-                        route.get("instance_id"),
-                    )
-                    return True
-                if self._response_is_error(result):
-                    raise RuntimeError(result)
-                return bool(result.get("ok", True))
             except Exception as exc:
-                last_exc = exc
-                logger.warning("Reply send via %s failed: %s", url, exc)
-        logger.warning("Reply send failed to %s: %s", route.get("instance_id"), last_exc)
-        return False
+                logger.warning(
+                    "Reply attachment upload has unknown outcome; no replay: %s",
+                    exc,
+                )
+                return False
+            if self._response_is_error(result) or not result.get("ok"):
+                item["reply_failure_known"] = True
+                item["reply_error_code"] = "reply_attachment_upload_rejected"
+                await self._cancel_reply_attachment_uploads(
+                    route=route,
+                    message_id=str(payload["message_id"]),
+                    from_instance=str(payload["from_instance"]),
+                    staged=staged,
+                )
+                return False
+            pending = dict(result.get("attachment") or {})
+            staged.append(
+                {
+                    "attachment_id": attachment_id,
+                    "pending_upload_id": str(
+                        pending.get("pending_upload_id") or ""
+                    ),
+                    "filename": upload_payload["filename"],
+                    "mime_type": upload_payload["mime_type"],
+                    "size_bytes": len(content),
+                    "sha256": upload_payload["sha256"],
+                    "caption": str(attachment.get("caption") or ""),
+                }
+            )
+
+        commit_payload = {**payload, "attachments": staged}
+        try:
+            result = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: self._post_json(
+                    _url("/protocol/message-with-attachments"),
+                    commit_payload,
+                    timeout=15,
+                ),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Attachment reply commit has unknown outcome; no replay or cancel: %s",
+                exc,
+            )
+            return False
+        if self._response_confirms_terminal_duplicate(result, payload):
+            return True
+        if self._response_is_error(result) or not result.get("ok", True):
+            item["reply_failure_known"] = True
+            item["reply_error_code"] = "reply_attachment_commit_rejected"
+            await self._cancel_reply_attachment_uploads(
+                route=route,
+                message_id=str(payload["message_id"]),
+                from_instance=str(payload["from_instance"]),
+                staged=staged,
+            )
+            return False
+        return True
+
+    async def _cancel_reply_attachment_uploads(
+        self,
+        *,
+        route: dict[str, Any],
+        message_id: str,
+        from_instance: str,
+        staged: list[dict[str, Any]],
+    ) -> None:
+        pending_ids = [
+            str(item.get("pending_upload_id") or "")
+            for item in staged
+            if str(item.get("pending_upload_id") or "")
+        ]
+        if not pending_ids:
+            return
+        candidates = self._candidate_urls(
+            route["host"], route["port"], "/attachments/upload/cancel"
+        )
+        if not candidates:
+            return
+        body = {
+            "message_id": message_id,
+            "from_instance": from_instance,
+            "pending_upload_ids": pending_ids,
+            "reason": "reply_commit_rejected",
+        }
+        try:
+            await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: self._post_json(candidates[0], body, timeout=10),
+            )
+        except Exception as exc:
+            logger.warning("Reply attachment cleanup failed safely: %s", exc)
 
     def _error_payload(self, code: str, message: str, *, retryable: bool, payload: dict) -> dict:
         return {
@@ -1773,9 +2387,12 @@ class ProtocolManager:
         headers = {"Content-Type": "application/json"}
         path = urlsplit(url).path
         if self._shared_token and path in {
+            "/attachments/upload",
+            "/attachments/upload/cancel",
             "/protocol/announce",
             "/protocol/handshake",
             "/protocol/message",
+            "/protocol/message-with-attachments",
         }:
             headers.update(
                 build_auth_headers(

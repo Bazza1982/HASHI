@@ -1187,10 +1187,18 @@ class SkillManager:
             lines.append(f"- {job.get('id')} [{enabled}] {schedule} -> {action}")
             if kind in {"cron", "heartbeat"}:
                 effort_policy = job_effort_policy(job)
+                effective_effort = str(effort_policy["effective"])
+                effort_label = (
+                    "inherit current model effort"
+                    if effective_effort.casefold() == "inherit"
+                    else (
+                        f"{effort_display_label(effective_effort)} "
+                        "(fixed scheduler policy)"
+                    )
+                )
                 lines.append(
-                    "  HER execution mode: "
-                    f"{effort_display_label(effort_policy['effective'])} "
-                    "(fixed scheduler policy)"
+                    "  HERV3 model effort: "
+                    f"{effort_label}"
                 )
             if note:
                 lines.append(f"  {note}")
@@ -1633,7 +1641,7 @@ class SkillManager:
             return (
                 f"Active mode: OFF\n"
                 f"Interval: {default_minutes} min (default)\n"
-                "HER execution mode: Direct (zero) (fixed scheduler policy)\n"
+                "HERV3 model effort: inherit current model effort\n"
                 f"Usage: /active on [{default_minutes}] | /active off"
             )
         interval_minutes = max(
@@ -1646,15 +1654,20 @@ class SkillManager:
             else ""
         )
         effort_policy = job_effort_policy(job)
+        effective_effort = str(effort_policy["effective"])
         effort_label = (
-            f"{effort_display_label(effort_policy['effective'])} "
-            "(fixed scheduler policy)"
+            "inherit current model effort"
+            if effective_effort.casefold() == "inherit"
+            else (
+                f"{effort_display_label(effective_effort)} "
+                "(fixed scheduler policy)"
+            )
         )
         return (
             f"Active mode: {state}\n"
             f"Interval: {interval_minutes} min{reset_note}\n"
             f"Job: {job.get('id')}\n"
-            f"HER execution mode: {effort_label}\n"
+            f"HERV3 model effort: {effort_label}\n"
             f"Usage: /active on [{default_minutes}] | /active off"
         )
 

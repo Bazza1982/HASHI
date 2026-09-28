@@ -706,6 +706,37 @@ async def test_ensure_remote_started_falls_back_to_bundled_child(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups only")
+async def test_bundled_remote_starts_outside_shared_process_group(monkeypatch, tmp_path):
+    settings = remote_lifecycle.RemoteLifecycleSettings(
+        root=tmp_path,
+        enabled=True,
+        supervised=False,
+        disabled_path=tmp_path / "state" / "remote_disabled.json",
+        port=8767,
+        use_tls=False,
+        backend="lan",
+    )
+    calls = []
+
+    async def fake_subprocess(*args, **kwargs):
+        calls.append((args, kwargs))
+        return SimpleNamespace(pid=321)
+
+    async def fake_owned(_settings):
+        return {"remote_ready": True}
+
+    monkeypatch.setattr(remote_lifecycle, "build_child_command", lambda _settings: ["python", "-m", "remote"])
+    monkeypatch.setattr(remote_lifecycle.asyncio, "create_subprocess_exec", fake_subprocess)
+    monkeypatch.setattr(remote_lifecycle, "_wait_for_owned_remote", fake_owned)
+
+    result = await remote_lifecycle._start_child_remote(settings)
+
+    assert result["ok"] is True
+    assert calls[0][1]["start_new_session"] is True
+
+
+@pytest.mark.asyncio
 async def test_activate_remote_supervisor_uses_enable_action(monkeypatch, tmp_path):
     monkeypatch.setattr(remote_lifecycle.sys, "platform", "linux")
     helper = tmp_path / "bin" / "hashi-remote-ctl.sh"
@@ -911,127 +942,17 @@ async def test_stop_remote_signals_only_matching_owned_child(monkeypatch, tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_reboot_reload_replaces_enabled_remote_process(monkeypatch, tmp_path):
-    calls = []
-
-    async def fake_inspect(_root):
-        return {
-            "ok": True,
-            "action": "already_running",
-            "health": {"instance": {"runtime_claim": {"pid": 4321}}},
-        }
-
-    async def fake_stop(_root):
-        calls.append("stop")
-        return {"ok": True, "action": "child_stopped", "pid": 4321}
-
-    async def fake_start(_root):
-        calls.append("start")
-        return {
-            "ok": True,
-            "action": "started_child",
-            "health": {"instance": {"runtime_claim": {"pid": 5432}}},
-        }
-
-    monkeypatch.setattr(remote_lifecycle, "inspect_remote", fake_inspect)
-    monkeypatch.setattr(remote_lifecycle, "stop_remote", fake_stop)
-    monkeypatch.setattr(remote_lifecycle, "ensure_remote_started", fake_start)
-
-    result = await remote_lifecycle.reload_remote_for_reboot(tmp_path)
-
-    assert result["ok"] is True
-    assert result["action"] == "remote_reloaded"
-    assert result["old_pid"] == 4321 and result["new_pid"] == 5432
-    assert calls == ["stop", "start"]
-
-
-@pytest.mark.asyncio
-async def test_reboot_reload_refreshes_supervisor_before_remote_start(
-    monkeypatch,
-    tmp_path,
-):
-    async def fake_inspect(_root):
-        return {
-            "ok": True,
-            "action": "already_running",
-            "health": {"instance": {"runtime_claim": {"pid": 4321}}},
-        }
-
-    monkeypatch.setattr(remote_lifecycle, "inspect_remote", fake_inspect)
-    monkeypatch.setattr(
-        remote_lifecycle,
-        "stop_remote",
-        AsyncMock(return_value={"ok": True, "action": "supervisor_stopped"}),
-    )
-    activate = AsyncMock(return_value={"ok": True, "action": "supervisor_activated"})
-    monkeypatch.setattr(remote_lifecycle, "activate_remote_supervisor", activate)
-    monkeypatch.setattr(
-        remote_lifecycle,
-        "_wait_for_owned_remote",
-        AsyncMock(
-            return_value={
-                "health": {"instance": {"runtime_claim": {"pid": 5432}}},
-                "remote_ready": True,
-            }
-        ),
-    )
+async def test_shared_hot_replacement_skips_remote_lifecycle(monkeypatch, tmp_path):
     ensure = AsyncMock()
     monkeypatch.setattr(remote_lifecycle, "ensure_remote_started", ensure)
+    kernel = SimpleNamespace(
+        _shared_replacement_candidate=True,
+        global_config=SimpleNamespace(project_root=tmp_path),
+    )
 
-    result = await remote_lifecycle.reload_remote_for_reboot(tmp_path)
+    await StartupManager(kernel, console_handler=None)._ensure_remote_lifecycle()
 
-    assert result["ok"] is True and result["new_pid"] == 5432
-    activate.assert_awaited_once_with(tmp_path)
     ensure.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_reboot_reload_preserves_explicit_remote_off_state(
-    monkeypatch,
-    tmp_path,
-):
-    remote_lifecycle.write_disabled_state(tmp_path)
-    inspect = AsyncMock()
-    monkeypatch.setattr(remote_lifecycle, "inspect_remote", inspect)
-
-    result = await remote_lifecycle.reload_remote_for_reboot(tmp_path)
-
-    assert result["ok"] is True
-    assert result["action"] == "skipped_disabled"
-    inspect.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_reboot_reload_rejects_same_remote_process(monkeypatch, tmp_path):
-    async def fake_inspect(_root):
-        return {
-            "ok": True,
-            "action": "already_running",
-            "health": {"instance": {"runtime_claim": {"pid": 4321}}},
-        }
-
-    monkeypatch.setattr(remote_lifecycle, "inspect_remote", fake_inspect)
-    monkeypatch.setattr(
-        remote_lifecycle,
-        "stop_remote",
-        AsyncMock(return_value={"ok": True, "action": "child_stopped"}),
-    )
-    monkeypatch.setattr(
-        remote_lifecycle,
-        "ensure_remote_started",
-        AsyncMock(
-            return_value={
-                "ok": True,
-                "action": "already_running",
-                "health": {"instance": {"runtime_claim": {"pid": 4321}}},
-            }
-        ),
-    )
-
-    result = await remote_lifecycle.reload_remote_for_reboot(tmp_path)
-
-    assert result["ok"] is False
-    assert result["action"] == "remote_reload_unconfirmed"
 
 
 @pytest.mark.asyncio

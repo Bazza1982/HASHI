@@ -106,6 +106,20 @@ Static `instances.json` discovery is an observable bootstrap fallback. A peer
 reached through it is marked as such and must not be reported as proof that
 mDNS discovery succeeded.
 
+The Remote-owned peer registry projects confirmed routes and liveness into the
+optional legacy `instances.json` view. An absent optional value and its empty
+representation are the same state for change detection; an unchanged projection
+must not rewrite the file or emit a peer-update event. Actual route, trust, or
+liveness changes still persist. This prevents repeated discovery and status
+checks from multiplying registry writes after a restart.
+
+2026-09-27 HASHI1 repair record: the user requested this restart slowdown
+repair. The registry comparison fix is committed on local `main` as
+`e1e3b007`; the regression failed before the fix and passed after it, the
+Remote owner suite passed 96/96, and the offline core gate passed 716/716.
+Live HASHI1 Remote adoption and post-adoption write-rate verification remain
+pending; no HASHI instance lifecycle operation was authorized for this repair.
+
 ### Multi-backend merge rules
 
 Discovery backends may report the same peer through:

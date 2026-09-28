@@ -104,7 +104,7 @@ def test_scheduler_exchange_is_persisted_as_read_only_history(tmp_path):
     assert receipt["pending_interaction"] is None
     state_path = runtime_cross_session.receipt_state_path(runtime)
     assert state_path is not None
-    assert json.loads(state_path.read_text(encoding="utf-8"))["version"] == 2
+    assert json.loads(state_path.read_text(encoding="utf-8"))["version"] == 3
     assert runtime_cross_session.context_section(runtime, item) == []
 
     user_item = _item(request_id="req-user", source="text", prompt="What happened?")
@@ -122,6 +122,60 @@ def test_scheduler_exchange_is_persisted_as_read_only_history(tmp_path):
     assert timeline[0]["completed_at"] == receipt["updated_at"]
     assert timeline[0]["user_text"] == item.prompt
     assert timeline[0]["assistant_text"] == visible
+
+
+def test_agent_activity_receipt_projects_across_conversation_sessions_for_same_owner(
+    tmp_path,
+):
+    runtime = _runtime(tmp_path)
+    activity_item = _item(
+        request_id="req-activity",
+        source="background-job-event",
+        owner_id="user:123",
+        session_id="ses-agent-activity",
+        session_surface="agent-activity",
+        context_generation=1,
+    )
+    receipt = runtime_cross_session.record_turn_result(
+        runtime,
+        activity_item,
+        assistant_text="Background export completed successfully.",
+        response=_response("Background export completed successfully."),
+        delivered=True,
+        completion_path="background",
+    )
+
+    current_conversation = _item(
+        request_id="req-follow-up",
+        chat_id=0,
+        source="text",
+        prompt="What did the export produce?",
+        owner_id="user:123",
+        session_id="ses-current-chat",
+        session_surface="telegram",
+        context_generation=4,
+    )
+    other_owner = _item(
+        request_id="req-other-owner",
+        source="text",
+        owner_id="user:999",
+        session_id="ses-other-owner",
+        session_surface="telegram",
+        context_generation=1,
+    )
+
+    assert receipt is not None
+    assert receipt["owner_id"] == "user:123"
+    assert receipt["agent_id"] == "momo"
+    assert receipt["session_surface"] == "agent-activity"
+    assert [
+        entry["request_id"]
+        for entry in runtime_cross_session.timeline_entries(
+            runtime,
+            current_conversation,
+        )
+    ] == ["req-activity"]
+    assert runtime_cross_session.timeline_entries(runtime, other_owner) == []
 
 
 def test_primary_pending_turn_stays_in_canonical_session_not_receipt_state(tmp_path):
@@ -653,10 +707,12 @@ def test_failed_scheduler_turn_is_context_only(tmp_path):
     )
 
 
-def test_receipts_never_cross_hashi_session_or_context_generation(tmp_path):
+def test_agent_activity_receipts_follow_owner_across_conversation_sessions(tmp_path):
     runtime = _runtime(tmp_path)
     scheduled = _item(
+        owner_id="user:123",
         session_id="session-a",
+        session_surface="agent-activity",
         context_generation=1,
     )
     visible = "Reply with a letter:\nA — Continue Session A"
@@ -673,34 +729,39 @@ def test_receipts_never_cross_hashi_session_or_context_generation(tmp_path):
         request_id="req-session-b",
         source="text",
         prompt="A",
+        owner_id="user:123",
         session_id="session-b",
         context_generation=1,
     )
-    assert runtime_cross_session.context_section(runtime, other_session) == []
-    assert runtime_cross_session.timeline_entries(runtime, other_session) == []
+    assert "Continue Session A" in runtime_cross_session.context_section(
+        runtime, other_session
+    )[0][1]
+    assert len(runtime_cross_session.timeline_entries(runtime, other_session)) == 1
     assert runtime_cross_session.capture_reply_target(runtime, other_session) is None
 
     fresh_generation = _item(
         request_id="req-session-a-fresh",
         source="text",
         prompt="A",
+        owner_id="user:123",
         session_id="session-a",
         context_generation=2,
     )
-    assert runtime_cross_session.context_section(runtime, fresh_generation) == []
+    assert "Continue Session A" in runtime_cross_session.context_section(
+        runtime, fresh_generation
+    )[0][1]
     assert runtime_cross_session.capture_reply_target(runtime, fresh_generation) is None
 
-    same_generation = _item(
-        request_id="req-session-a",
+    other_owner = _item(
+        request_id="req-other-owner",
         source="text",
         prompt="A",
-        session_id="session-a",
+        owner_id="user:999",
+        session_id="session-c",
         context_generation=1,
     )
-    assert "Continue Session A" in runtime_cross_session.context_section(
-        runtime, same_generation
-    )[0][1]
-    assert runtime_cross_session.capture_reply_target(runtime, same_generation) is None
+    assert runtime_cross_session.context_section(runtime, other_owner) == []
+    assert runtime_cross_session.timeline_entries(runtime, other_owner) == []
 
 
 def test_natural_choice_reply_remains_verbatim_and_unbound(tmp_path):

@@ -67,12 +67,15 @@ from orchestrator.agent_move.transport_crypto import (
     ENVELOPE_SCHEME,
     decrypt_package_transport,
 )
-from orchestrator.frontend_delivery import normalize_tui_run_delivery_policy
+from orchestrator.frontend_delivery import (
+    TUI_MUTATING_PROXY_OPERATIONS,
+    normalize_tui_run_delivery_policy,
+)
 from orchestrator.pathing import instance_runtime_dir
 from orchestrator.process_execution import process_is_alive
 from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_PORT
 
-from ..attachments import AttachmentStore
+from ..attachments import AttachmentStore, STREAM_ATTACHMENT_CHUNK_BYTES
 from ..audit.logger import get_audit_logger
 from ..local_http import local_http_hosts, local_http_url
 from ..protocol_ack import ack_state_path, load_ack_state, record_protocol_ack
@@ -98,6 +101,7 @@ from ..security.auth import (
 )
 from ..security.pairing import PairingManager, PairingState
 from ..security.shared_token import (
+    HEADER_FROM_INSTANCE,
     HEADER_NONCE,
     build_auth_headers,
     build_response_auth,
@@ -163,6 +167,11 @@ TUI_PROXY_OPERATIONS = {
     "background_jobs",
     "chat",
     "chat_attachment",
+    "primary_session",
+    "session_run",
+    "session_command_invocation",
+    "session_attachment_run",
+    "session_workzone_attachment_run",
     "voice_state",
     "voice_profile",
     "speech",
@@ -384,11 +393,15 @@ class TuiProxyRequest(BaseModel):
     agent: Optional[str] = None
     text: Optional[str] = None
     client_id: Optional[str] = None
+    idempotency_key: Optional[str] = None
     ui_locale: Optional[str] = None
     delivery_policy: Optional[dict[str, Any]] = None
     session_id: Optional[str] = None
     run_id: Optional[str] = None
     request_id: Optional[str] = None
+    command: Optional[str] = None
+    arguments: Optional[list[str]] = None
+    context_generation: Optional[int] = None
     voice_profile: Optional[str] = None
     attachment: Optional[dict[str, Any]] = None
     workzone_ref: Optional[str] = None
@@ -405,11 +418,15 @@ class ProtocolTuiRequest(BaseModel):
     agent: Optional[str] = None
     text: Optional[str] = None
     client_id: Optional[str] = None
+    idempotency_key: Optional[str] = None
     ui_locale: Optional[str] = None
     delivery_policy: Optional[dict[str, Any]] = None
     session_id: Optional[str] = None
     run_id: Optional[str] = None
     request_id: Optional[str] = None
+    command: Optional[str] = None
+    arguments: Optional[list[str]] = None
+    context_generation: Optional[int] = None
     voice_profile: Optional[str] = None
     attachment: Optional[dict[str, Any]] = None
     workzone_ref: Optional[str] = None
@@ -426,6 +443,22 @@ class AttachmentUploadPayload(BaseModel):
     mime_type: Optional[str] = None
     content_b64: str
     sha256: Optional[str] = None
+
+
+class AttachmentStreamBeginPayload(BaseModel):
+    message_id: str
+    from_instance: str
+    attachment_id: str
+    filename: str
+    mime_type: Optional[str] = None
+    size_bytes: int
+    sha256: str
+
+
+class AttachmentStreamFinishPayload(BaseModel):
+    message_id: str
+    from_instance: str
+    pending_upload_id: str
 
 
 class AttachmentCommitItem(BaseModel):
@@ -469,6 +502,15 @@ class ProtocolMessageWithAttachmentsPayload(BaseModel):
 # ─────────────────────────────────────────────────────────────
 
 MAX_FILE_PUSH_BYTES = 256 * 1024 * 1024
+
+
+async def _bounded_request_body(request: Request, *, limit: int) -> bytes:
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > int(limit):
+            raise ValueError(f"request body exceeds max of {int(limit)} bytes")
+    return bytes(body)
 
 
 def _shared_token_response(
@@ -636,6 +678,11 @@ def _validate_tui_proxy_payload(payload: ProtocolTuiRequest) -> tuple[bool, str]
         "background_jobs",
         "chat",
         "chat_attachment",
+        "primary_session",
+        "session_run",
+        "session_command_invocation",
+        "session_attachment_run",
+        "session_workzone_attachment_run",
         "voice_state",
         "voice_profile",
         "speech",
@@ -645,9 +692,9 @@ def _validate_tui_proxy_payload(payload: ProtocolTuiRequest) -> tuple[bool, str]
         agent = str(payload.agent or "").strip()
         if not agent or len(agent) > 128 or any(ord(ch) < 32 for ch in agent):
             return False, "invalid_agent"
-    if operation in {"chat", "chat_attachment"}:
+    if operation in {"chat", "chat_attachment", "session_run", "session_attachment_run", "session_workzone_attachment_run"}:
         text = str(payload.text or "")
-        if operation == "chat" and not text:
+        if operation in {"chat", "session_run"} and not text.strip():
             return False, "invalid_text"
         if len(text.encode("utf-8")) > TUI_PROXY_MAX_TEXT_BYTES:
             return False, "invalid_text"
@@ -662,8 +709,75 @@ def _validate_tui_proxy_payload(payload: ProtocolTuiRequest) -> tuple[bool, str]
                 )
             except ValueError:
                 return False, "invalid_delivery_policy"
-    if operation == "chat_attachment":
+    if operation in {"session_run", "session_attachment_run", "session_workzone_attachment_run"}:
+        session_id = str(payload.session_id or "").strip()
+        if (
+            not session_id
+            or len(session_id) > 200
+            or session_id in {".", ".."}
+            or "/" in session_id
+            or chr(92) in session_id
+            or any(ord(character) < 33 for character in session_id)
+        ):
+            return False, "invalid_run_identity"
+        key = str(payload.idempotency_key or "")
+        if (
+            not key
+            or len(key) > 128
+            or any(
+                not (character.isalnum() or character in "._:-")
+                for character in key
+            )
+        ):
+            return False, "invalid_idempotency_key"
+        if operation == "session_run" and (
+            payload.attachment is not None or payload.workzone_ref is not None
+        ):
+            return False, "invalid_attachment_source"
+        if payload.delivery_policy is None:
+            return False, "invalid_delivery_policy"
+    if operation == "session_command_invocation":
+        session_id = str(payload.session_id or "").strip()
+        request_id = str(payload.request_id or "").strip()
+        client_id = str(payload.client_id or "").strip()
+        command = str(payload.command or "").strip().casefold()
+        arguments = payload.arguments
+        if (
+            not session_id
+            or len(session_id) > 200
+            or session_id in {".", ".."}
+            or "/" in session_id
+            or chr(92) in session_id
+            or any(ord(character) < 33 for character in session_id)
+        ):
+            return False, "invalid_command_identity"
+        if not re.fullmatch(r"[A-Za-z0-9_-]{16,96}", request_id) or not re.fullmatch(
+            r"[A-Za-z0-9_-]{16,96}", client_id
+        ):
+            return False, "invalid_command_identity"
+        if not re.fullmatch(r"[a-z0-9_.:-]{1,128}", command):
+            return False, "invalid_command"
+        if (
+            not isinstance(arguments, list)
+            or len(arguments) > 64
+            or any(
+                not isinstance(value, str) or len(value) > 4096
+                for value in arguments
+            )
+        ):
+            return False, "invalid_command_arguments"
+        generation = payload.context_generation
+        if type(generation) is not int or generation < 1:
+            return False, "invalid_command_identity"
+        locale = str(payload.ui_locale or "")
+        if len(locale) > 32 or any(ord(character) < 32 for character in locale):
+            return False, "invalid_ui_locale"
+    if operation in {"chat_attachment", "session_attachment_run", "session_workzone_attachment_run"}:
         if bool(payload.attachment) == bool(payload.workzone_ref):
+            return False, "invalid_attachment_source"
+        if operation == "session_attachment_run" and payload.workzone_ref is not None:
+            return False, "invalid_attachment_source"
+        if operation == "session_workzone_attachment_run" and payload.attachment is not None:
             return False, "invalid_attachment_source"
         if payload.workzone_ref is not None:
             reference = str(payload.workzone_ref or "")
@@ -673,14 +787,24 @@ def _validate_tui_proxy_payload(payload: ProtocolTuiRequest) -> tuple[bool, str]
                 or "\x00" in reference
             ):
                 return False, "invalid_workzone_ref"
+            if operation == "session_workzone_attachment_run" and (
+                reference.startswith(("/", "\\"))
+                or "\\" in reference
+                or ":" in reference
+                or any(part in {"", ".", ".."} for part in reference.split("/"))
+            ):
+                return False, "invalid_workzone_ref"
         else:
             attachment = payload.attachment or {}
             filename = str(attachment.get("filename") or "")
             encoded = str(attachment.get("content_b64") or "")
             if (
                 not filename
+                or filename in {".", ".."}
                 or Path(filename).name != filename
                 or len(filename) > 255
+                or any(character in filename for character in ("/", "\\"))
+                or any(ord(character) < 32 for character in filename)
                 or len(encoded) > ((TUI_PROXY_MAX_ATTACHMENT_BYTES + 2) // 3) * 4 + 16
             ):
                 return False, "invalid_attachment"
@@ -691,9 +815,18 @@ def _validate_tui_proxy_payload(payload: ProtocolTuiRequest) -> tuple[bool, str]
             if not decoded or len(decoded) > TUI_PROXY_MAX_ATTACHMENT_BYTES:
                 return False, "invalid_attachment"
             declared_size = attachment.get("size_bytes")
-            if declared_size is not None and int(declared_size) != len(decoded):
-                return False, "attachment_size_mismatch"
+            if operation == "session_attachment_run" and declared_size is None:
+                return False, "invalid_attachment"
+            if declared_size is not None:
+                try:
+                    parsed_size = int(declared_size)
+                except (ValueError, TypeError, OverflowError):
+                    return False, "invalid_attachment"
+                if parsed_size != len(decoded):
+                    return False, "attachment_size_mismatch"
             declared_sha = str(attachment.get("sha256") or "")
+            if operation == "session_attachment_run" and not declared_sha:
+                return False, "invalid_attachment"
             if declared_sha and declared_sha != hashlib.sha256(decoded).hexdigest():
                 return False, "attachment_digest_mismatch"
     if operation == "speech":
@@ -733,6 +866,169 @@ def _validate_tui_proxy_payload(payload: ProtocolTuiRequest) -> tuple[bool, str]
     return True, "ok"
 
 
+def _local_tui_session_http_request(
+    host: str,
+    path: str,
+    *,
+    method: str,
+    body: bytes | None = None,
+    content_type: str = "application/json",
+    timeout: int = 15,
+) -> tuple[int, dict[str, Any]]:
+    """Use one verified local host; never retry an uncertain write elsewhere."""
+
+    request = urllib_request.Request(
+        local_http_url(_workbench_port, path, host=host),
+        data=body,
+        headers={"Content-Type": content_type} if body is not None else {},
+        method=method,
+    )
+    try:
+        with urllib_request.urlopen(request, timeout=timeout) as response:
+            raw = response.read(TUI_PROXY_MAX_RESPONSE_BYTES + 1)
+            if len(raw) > TUI_PROXY_MAX_RESPONSE_BYTES:
+                return 502, {"ok": False, "error": "workbench_response_too_large"}
+            result = json.loads(raw.decode("utf-8"))
+            if not isinstance(result, dict):
+                return 502, {"ok": False, "error": "invalid_workbench_response"}
+            return int(getattr(response, "status", 200)), result
+    except HTTPError as exc:
+        raw = exc.read(TUI_PROXY_MAX_RESPONSE_BYTES + 1)
+        try:
+            result = json.loads(raw.decode("utf-8")) if raw else {}
+        except (UnicodeDecodeError, ValueError):
+            result = {"ok": False, "error": f"Workbench HTTP {exc.code}"}
+        if not isinstance(result, dict):
+            result = {"ok": False, "error": str(result)}
+        result.setdefault("ok", False)
+        return int(exc.code), result
+    except (URLError, OSError, ValueError, UnicodeDecodeError) as exc:
+        logger.warning(
+            "TUI Session operation outcome unavailable: method=%s path=%s error=%s",
+            method, path, type(exc).__name__,
+        )
+        if method != "GET":
+            return 502, {
+                "ok": False,
+                "code": "request_outcome_unknown",
+                "accepted": None,
+                "error": "Local HASHI may have accepted the request; check its Session before retrying",
+            }
+        return 503, {"ok": False, "error": "local_workbench_unreachable"}
+
+
+def _local_tui_session_attachment_run(
+    payload: ProtocolTuiRequest, *, host: str, timeout: int
+) -> tuple[int, dict[str, Any]]:
+    """Stage immutable media and bind it to exactly one canonical TUI Run."""
+
+    valid, reason = _validate_tui_proxy_payload(payload)
+    if not valid:
+        return 400, {"ok": False, "error": reason}
+    agent = str(payload.agent or "").strip()
+    session_id = str(payload.session_id or "").strip()
+    local_instance = str(_instance_info.get("instance_id") or "").strip().upper()
+    status, primary = _local_tui_session_http_request(
+        host, f"/api/v1/agents/{quote(agent, safe='')}/primary-session",
+        method="GET", timeout=timeout,
+    )
+    if status >= 400 or not primary.get("ok"):
+        return status, primary
+    session = primary.get("session")
+    if not isinstance(session, dict) or (
+        str(session.get("session_id") or "") != session_id
+        or str(session.get("agent_id") or "").strip().lower() != agent.lower()
+        or str(session.get("instance_id") or "").strip().upper() != local_instance
+    ):
+        return 409, {"ok": False, "error": "primary_session_mismatch"}
+
+    session_path = f"/api/v1/sessions/{quote(session_id, safe='')}"
+    workzone_source = (
+        str(payload.operation or "").strip().lower()
+        == "session_workzone_attachment_run"
+    )
+    if workzone_source:
+        stage_path = f"{session_path}/attachments/from-workzone"
+        stage_body = {"reference": str(payload.workzone_ref or "")}
+    else:
+        attachment = dict(payload.attachment or {})
+        content = base64.b64decode(str(attachment["content_b64"]), validate=True)
+        stage_path = f"{session_path}/attachments"
+        stage_body = {
+            "filename": str(attachment["filename"]),
+            "media_type": str(attachment.get("media_type") or "application/octet-stream"),
+            "size_bytes": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(),
+        }
+    status, staged = _local_tui_session_http_request(
+        host, stage_path, method="POST",
+        body=json.dumps(stage_body).encode("utf-8"), timeout=timeout,
+    )
+    if status >= 400 or not staged.get("ok"):
+        return status, staged
+    staged_attachment = staged.get("attachment")
+    attachment_id = str(
+        staged_attachment.get("attachment_id") or ""
+        if isinstance(staged_attachment, dict) else ""
+    )
+    if (
+        not attachment_id or len(attachment_id) > 200
+        or attachment_id in {".", ".."}
+        or any(ord(char) < 33 or char in "/\\" for char in attachment_id)
+    ):
+        return 502, {"ok": False, "code": "invalid_attachment_stage", "error": "Server returned an invalid attachment ID"}
+    if workzone_source:
+        if staged_attachment.get("state") != "committed":
+            return 502, {"ok": False, "code": "invalid_attachment_stage", "error": "Workzone asset was not committed"}
+    else:
+        attachment_path = f"{session_path}/attachments/{quote(attachment_id, safe='')}"
+        status, uploaded = _local_tui_session_http_request(
+            host, f"{attachment_path}/content", method="PUT", body=content,
+            content_type="application/octet-stream", timeout=max(timeout, 35),
+        )
+        if status >= 400 or not uploaded.get("ok"):
+            return status, uploaded
+        status, committed = _local_tui_session_http_request(
+            host, f"{attachment_path}/commit", method="POST", body=b"{}",
+            timeout=timeout,
+        )
+        if status >= 400 or not committed.get("ok"):
+            return status, committed
+
+    text = str(payload.text or "")
+    message_content: list[dict[str, str]] = []
+    if text.strip():
+        message_content.append({"type": "text", "text": text})
+    message_content.append({"type": "attachment", "attachment_id": attachment_id})
+    body: dict[str, Any] = {
+        "idempotency_key": str(payload.idempotency_key or ""),
+        "surface": "tui",
+        "client_id": str(payload.client_id or ""),
+        "ui_locale": str(payload.ui_locale or ""),
+        "delivery_policy": dict(payload.delivery_policy or {}),
+        "message": {"content": message_content},
+    }
+    from orchestrator.message_context import seal_connector_evidence
+
+    evidence = seal_connector_evidence(
+        Path(_hashi_root) if _hashi_root else Path.cwd(),
+        claims={
+            "_message_source_reserved": "tui",
+            "_origin_instance_evidence": {
+                "id": str(payload.from_instance or "").strip().upper(),
+                "assurance": "shared_network_hmac",
+            },
+        },
+        prompt=text,
+    )
+    if evidence is not None:
+        body["request_metadata"] = {"_connector_evidence": evidence}
+    return _local_tui_session_http_request(
+        host, f"{session_path}/runs", method="POST",
+        body=json.dumps(body).encode("utf-8"), timeout=max(timeout, 25),
+    )
+
+
 def _local_workbench_tui_request(
     payload: ProtocolTuiRequest,
     *,
@@ -757,6 +1053,79 @@ def _local_workbench_tui_request(
             f"/api/background-jobs?agent={quote(agent, safe='')}&limit="
             f"{int(payload.limit)}"
         )
+    elif operation == "primary_session":
+        path = f"/api/v1/agents/{quote(agent, safe='')}/primary-session"
+    elif operation == "session_run":
+        path = f"/api/v1/sessions/{quote(str(payload.session_id), safe='')}/runs"
+        method = "POST"
+        body = {
+            "idempotency_key": str(payload.idempotency_key or ""),
+            "surface": "tui",
+            "client_id": str(payload.client_id or ""),
+            "ui_locale": str(payload.ui_locale or ""),
+            "delivery_policy": dict(payload.delivery_policy or {}),
+            "message": {
+                "content": [{"type": "text", "text": str(payload.text or "")}]
+            },
+        }
+        from orchestrator.message_context import seal_connector_evidence
+
+        connector_evidence = seal_connector_evidence(
+            Path(_hashi_root) if _hashi_root else Path.cwd(),
+            claims={
+                "_message_source_reserved": "tui",
+                "_origin_instance_evidence": {
+                    "id": str(payload.from_instance or "").strip().upper(),
+                    "assurance": "shared_network_hmac",
+                },
+            },
+            prompt=str(payload.text or ""),
+        )
+        if connector_evidence is not None:
+            body["request_metadata"] = {
+                "_connector_evidence": connector_evidence
+            }
+        body_bytes = json.dumps(body).encode("utf-8")
+    elif operation == "session_command_invocation":
+        path = (
+            f"/api/v1/sessions/{quote(str(payload.session_id), safe='')}"
+            "/commands"
+        )
+        method = "POST"
+        command = str(payload.command or "").strip().casefold()
+        arguments = list(payload.arguments or [])
+        prompt_binding = json.dumps(
+            {"command": command, "arguments": arguments},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        body = {
+            "command": command,
+            "arguments": arguments,
+            "client_id": str(payload.client_id or ""),
+            "request_id": str(payload.request_id or ""),
+            "ui_locale": str(payload.ui_locale or "en"),
+            "context_generation": payload.context_generation,
+        }
+        from orchestrator.message_context import seal_connector_evidence
+
+        connector_evidence = seal_connector_evidence(
+            Path(_hashi_root) if _hashi_root else Path.cwd(),
+            claims={
+                "_message_source_reserved": "tui",
+                "_origin_instance_evidence": {
+                    "id": str(payload.from_instance or "").strip().upper(),
+                    "assurance": "shared_network_hmac",
+                },
+            },
+            prompt=prompt_binding,
+        )
+        if connector_evidence is not None:
+            body["request_metadata"] = {
+                "_connector_evidence": connector_evidence
+            }
+        body_bytes = json.dumps(body).encode("utf-8")
     elif operation in {"chat", "chat_attachment"}:
         path = "/api/chat"
         method = "POST"
@@ -867,8 +1236,52 @@ def _local_workbench_tui_request(
                 "error": "Host log could not be read",
             }
 
+    hosts = local_http_hosts()
+    if operation in TUI_MUTATING_PROXY_OPERATIONS:
+        local_instance = str(_instance_info.get("instance_id") or "").strip().upper()
+        verified_host = None
+        for candidate in hosts:
+            health_url = local_http_url(_workbench_port, "/api/health", host=candidate)
+            try:
+                with urllib_request.urlopen(
+                    urllib_request.Request(health_url, method="GET"),
+                    timeout=min(timeout, 5),
+                ) as response:
+                    health = json.loads(response.read(4097).decode("utf-8"))
+                if (
+                    isinstance(health, dict)
+                    and health.get("ok") is True
+                    and bool(local_instance)
+                    and str(health.get("instance_id") or "").strip().upper()
+                    == local_instance
+                ):
+                    verified_host = candidate
+                    break
+                logger.warning(
+                    "TUI proxy local identity mismatch: expected=%s host=%s",
+                    local_instance,
+                    candidate,
+                )
+            except (HTTPError, URLError, OSError, ValueError, UnicodeDecodeError) as exc:
+                logger.debug("TUI proxy local health unavailable: host=%s error=%s", candidate, exc)
+        if verified_host is None:
+            return 503, {
+                "ok": False,
+                "code": "local_workbench_identity_unverified",
+                "error": "No local HASHI Session host passed instance verification",
+            }
+        hosts = (verified_host,)
+
+    if operation in {"session_attachment_run", "session_workzone_attachment_run"}:
+        status, result = _local_tui_session_attachment_run(
+            payload, host=hosts[0], timeout=timeout
+        )
+        # Only a proxy-level operation_not_allowed proves that no canonical
+        # write was attempted and that legacy fallback is safe.
+        return status, {**result, "canonical_operation_attempted": True}
+
     last_error: Exception | None = None
-    for host in local_http_hosts():
+    for host in hosts:
         url = local_http_url(_workbench_port, path, host=host)
         headers = (
             {"Content-Type": "application/json"}
@@ -911,6 +1324,13 @@ def _local_workbench_tui_request(
                 url,
                 exc,
             )
+            if operation in TUI_MUTATING_PROXY_OPERATIONS:
+                return 502, {
+                    "ok": False,
+                    "code": "request_outcome_unknown",
+                    "accepted": None,
+                    "error": "Local HASHI may have accepted the request; check its Session before retrying",
+                }
     logger.warning(
         "TUI proxy local Workbench unavailable: operation=%s error=%s",
         operation,
@@ -2169,11 +2589,15 @@ def create_app(
             agent=payload.agent,
             text=payload.text,
             client_id=payload.client_id,
+            idempotency_key=payload.idempotency_key,
             ui_locale=payload.ui_locale,
             delivery_policy=payload.delivery_policy,
             session_id=payload.session_id,
             run_id=payload.run_id,
             request_id=payload.request_id,
+            command=payload.command,
+            arguments=payload.arguments,
+            context_generation=payload.context_generation,
             voice_profile=payload.voice_profile,
             attachment=payload.attachment,
             workzone_ref=payload.workzone_ref,
@@ -2189,6 +2613,7 @@ def create_app(
         if not candidate_urls:
             return JSONResponse(status_code=503, content={"ok": False, "error": "peer_route_unavailable"})
         last_error: Exception | None = None
+        normalized_operation = str(payload.operation or "").strip().lower()
         for url in candidate_urls:
             try:
                 result = await asyncio.get_running_loop().run_in_executor(
@@ -2198,9 +2623,15 @@ def create_app(
                         protocol_payload.model_dump(),
                         timeout=(
                             130
-                            if payload.operation == "speech"
+                            if normalized_operation == "speech"
+                            else 110
+                            if normalized_operation == "session_attachment_run"
+                            else 75
+                            if normalized_operation == "session_workzone_attachment_run"
                             else 40
-                            if payload.operation == "chat_attachment"
+                            if normalized_operation == "chat_attachment"
+                            else 45
+                            if normalized_operation == "session_command_invocation"
                             else 20
                         ),
                     ),
@@ -2208,6 +2639,11 @@ def create_app(
                 status = int(result.pop("__http_status", 200)) if isinstance(result, dict) else 502
                 if not isinstance(result, dict):
                     raise ValueError("invalid peer response")
+                if normalized_operation == "session_command_invocation":
+                    result["canonical_operation_attempted"] = True
+                    nested_result = result.get("result")
+                    if isinstance(nested_result, dict):
+                        nested_result["canonical_operation_attempted"] = True
                 actual_instance = str(result.get("target_instance") or "").strip().upper()
                 if status < 400 and actual_instance != target_instance:
                     logger.error(
@@ -2235,6 +2671,17 @@ def create_app(
             except Exception as exc:
                 last_error = exc
                 logger.warning("TUI proxy route failed: target=%s url=%s error=%s", target_instance, url, exc)
+                if str(payload.operation or "").strip().lower() in TUI_MUTATING_PROXY_OPERATIONS:
+                    return JSONResponse(
+                        status_code=502,
+                        content={
+                            "ok": False,
+                            "code": "request_outcome_unknown",
+                            "accepted": None,
+                            "target_instance": target_instance,
+                            "error": "Peer may have accepted the request; check its Session before retrying",
+                        },
+                    )
         return JSONResponse(
             status_code=502,
             content={"ok": False, "error": "peer_proxy_failed", "detail": str(last_error or "no route")},
@@ -2612,6 +3059,148 @@ def create_app(
         )
         return {"ok": True, "attachment": staged}
 
+    @app.post("/attachments/v2/begin")
+    async def attachment_stream_begin(
+        request: Request, payload: AttachmentStreamBeginPayload
+    ):
+        if _attachment_store is None:
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "attachment store unavailable"},
+            )
+        body_bytes = await request.body()
+        ok, reason, _authenticated_instance = verify_protocol_request(
+            request,
+            body_bytes=body_bytes,
+            from_instance=payload.from_instance,
+        )
+        if not ok:
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "ok": False,
+                    "error": "Attachment stream authentication failed",
+                    "code": reason,
+                },
+            )
+        try:
+            staged = await asyncio.to_thread(
+                _attachment_store.begin_stream_upload,
+                message_id=payload.message_id,
+                from_instance=payload.from_instance,
+                attachment_id=payload.attachment_id,
+                filename=payload.filename,
+                mime_type=payload.mime_type,
+                size_bytes=payload.size_bytes,
+                sha256=payload.sha256,
+            )
+        except (OSError, ValueError) as exc:
+            return JSONResponse(
+                status_code=400, content={"ok": False, "error": str(exc)}
+            )
+        logger.info(
+            "Attachment stream opened: message_id=%s attachment_id=%s bytes=%d",
+            payload.message_id,
+            payload.attachment_id,
+            payload.size_bytes,
+        )
+        return {"ok": True, "attachment": staged}
+
+    @app.put("/attachments/v2/chunk/{pending_upload_id}")
+    async def attachment_stream_chunk(
+        pending_upload_id: str,
+        request: Request,
+    ):
+        if _attachment_store is None:
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "attachment store unavailable"},
+            )
+        try:
+            body_bytes = await _bounded_request_body(
+                request, limit=STREAM_ATTACHMENT_CHUNK_BYTES
+            )
+        except ValueError as exc:
+            return JSONResponse(
+                status_code=413, content={"ok": False, "error": str(exc)}
+            )
+        from_instance = str(request.headers.get(HEADER_FROM_INSTANCE) or "").strip()
+        ok, reason, _authenticated_instance = verify_protocol_request(
+            request,
+            body_bytes=body_bytes,
+            from_instance=from_instance,
+        )
+        if not ok:
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "ok": False,
+                    "error": "Attachment chunk authentication failed",
+                    "code": reason,
+                },
+            )
+        try:
+            offset = int(str(request.query_params.get("offset") or ""))
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "chunk offset is required"},
+            )
+        try:
+            staged = await asyncio.to_thread(
+                _attachment_store.append_stream_chunk,
+                pending_upload_id=pending_upload_id,
+                from_instance=from_instance,
+                offset=offset,
+                payload=body_bytes,
+            )
+        except (OSError, ValueError) as exc:
+            return JSONResponse(
+                status_code=400, content={"ok": False, "error": str(exc)}
+            )
+        return {
+            "ok": True,
+            "pending_upload_id": pending_upload_id,
+            "received_bytes": staged.get("received_bytes"),
+        }
+
+    @app.post("/attachments/v2/finish")
+    async def attachment_stream_finish(
+        request: Request, payload: AttachmentStreamFinishPayload
+    ):
+        if _attachment_store is None:
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "attachment store unavailable"},
+            )
+        body_bytes = await request.body()
+        ok, reason, _authenticated_instance = verify_protocol_request(
+            request,
+            body_bytes=body_bytes,
+            from_instance=payload.from_instance,
+        )
+        if not ok:
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "ok": False,
+                    "error": "Attachment finish authentication failed",
+                    "code": reason,
+                },
+            )
+        try:
+            staged = await asyncio.to_thread(
+                _attachment_store.finish_stream_upload,
+                message_id=payload.message_id,
+                from_instance=payload.from_instance,
+                pending_upload_id=payload.pending_upload_id,
+            )
+        except (OSError, ValueError) as exc:
+            return JSONResponse(
+                status_code=400, content={"ok": False, "error": str(exc)}
+            )
+        return {"ok": True, "attachment": staged}
+
     @app.post("/attachments/upload/cancel")
     async def attachment_upload_cancel(request: Request, payload: AttachmentCancelPayload):
         if _attachment_store is None:
@@ -2668,13 +3257,19 @@ def create_app(
                 content={"ok": False, "error": "Protocol authentication failed", "code": reason},
             )
         try:
-            normalized_attachments = _attachment_store.commit_message(
+            normalized_attachments = await asyncio.to_thread(
+                _attachment_store.commit_message,
                 message_id=payload.message_id,
                 from_instance=payload.from_instance,
                 attachments=[item.model_dump() for item in payload.attachments],
             )
         except ValueError as exc:
             return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
+
+        async def rollback_committed_attachments() -> None:
+            await asyncio.to_thread(
+                _attachment_store.rollback_message, payload.message_id
+            )
 
         local_instance = str(_instance_info.get("instance_id") or "").strip().upper()
         if str(payload.to_instance or "").strip().upper() != local_instance:
@@ -2683,17 +3278,25 @@ def create_app(
                 "/protocol/message-with-attachments",
             )
             if not candidate_urls:
+                await rollback_committed_attachments()
                 return JSONResponse(
                     status_code=404,
                     content={"ok": False, "error": f"Target instance '{payload.to_instance}' not in peer registry"},
                 )
-            forward_payload = payload.model_dump()
-            forward_payload["body"] = _merge_attachment_text(
-                payload.body,
-                normalized_attachments,
-                message_id=payload.message_id,
-            )
-            forward_payload["attachments"] = normalized_attachments
+            try:
+                forward_payload = payload.model_dump()
+                forward_payload["body"] = _merge_attachment_text(
+                    payload.body,
+                    normalized_attachments,
+                    message_id=payload.message_id,
+                )
+                forward_payload["attachments"] = normalized_attachments
+            except Exception as exc:
+                await rollback_committed_attachments()
+                return JSONResponse(
+                    status_code=400,
+                    content={"ok": False, "error": f"Invalid attachment message: {exc}"},
+                )
             last_exc = None
             for url in candidate_urls:
                 try:
@@ -2707,47 +3310,70 @@ def create_app(
                 except Exception as exc:
                     last_exc = exc
                     logger.warning("Attachment forward via %s failed: %s", url, exc)
+            await rollback_committed_attachments()
             return JSONResponse(
                 status_code=502,
                 content={"ok": False, "error": f"Failed to forward attachment message: {last_exc}"},
             )
 
-        local_payload = ProtocolMessagePayload(
-            message_id=payload.message_id,
-            conversation_id=payload.conversation_id,
-            in_reply_to=payload.in_reply_to,
-            from_instance=payload.from_instance,
-            from_agent=payload.from_agent,
-            to_instance=payload.to_instance,
-            to_agent=payload.to_agent,
-            body=_merge_attachment_text(
-                payload.body,
-                normalized_attachments,
+        try:
+            local_payload = ProtocolMessagePayload(
                 message_id=payload.message_id,
-            ),
-            hop_count=payload.hop_count,
-            ttl=payload.ttl,
-            route_trace=payload.route_trace,
-            message_type=payload.message_type,
-            created_at=payload.created_at,
-            private_authorization_proofs=payload.private_authorization_proofs,
-            authorization_resources=payload.authorization_resources,
-        )
-        local_data = local_payload.model_dump()
-        # Preserve the sender-authored body for the private proof binding.  The
-        # local prompt adds an attachment summary after transport validation;
-        # that presentation-only expansion must not invalidate the proof.
-        local_data["_private_authorization_content_text"] = str(
-            (payload.body or {}).get("text") or ""
-        )
-        local_data["_network_authenticated_instance"] = str(
-            _auth_identity or ""
-        ).strip().upper()
-        local_data["_network_authentication"] = "shared_network_hmac"
-        status, result = await _protocol_manager.handle_protocol_message(local_data)
+                conversation_id=payload.conversation_id,
+                in_reply_to=payload.in_reply_to,
+                from_instance=payload.from_instance,
+                from_agent=payload.from_agent,
+                to_instance=payload.to_instance,
+                to_agent=payload.to_agent,
+                body=_merge_attachment_text(
+                    payload.body,
+                    normalized_attachments,
+                    message_id=payload.message_id,
+                ),
+                hop_count=payload.hop_count,
+                ttl=payload.ttl,
+                route_trace=payload.route_trace,
+                message_type=payload.message_type,
+                created_at=payload.created_at,
+                private_authorization_proofs=payload.private_authorization_proofs,
+                authorization_resources=payload.authorization_resources,
+            )
+            local_data = local_payload.model_dump()
+            # Preserve the sender-authored body for the private proof binding.  The
+            # local prompt adds an attachment summary after transport validation;
+            # that presentation-only expansion must not invalidate the proof.
+            local_data["_private_authorization_content_text"] = str(
+                (payload.body or {}).get("text") or ""
+            )
+            local_data["_network_authenticated_instance"] = str(
+                _auth_identity or ""
+            ).strip().upper()
+            local_data["_network_authentication"] = "shared_network_hmac"
+            local_data["_local_attachment_manifest_verified"] = True
+        except Exception as exc:
+            await rollback_committed_attachments()
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": f"Invalid attachment message: {exc}"},
+            )
+        try:
+            status, result = await _protocol_manager.handle_protocol_message(local_data)
+        except Exception as exc:
+            await rollback_committed_attachments()
+            logger.exception(
+                "Attachment message delivery failed after commit: message_id=%s",
+                payload.message_id,
+            )
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": f"Local message delivery failed: {exc}"},
+            )
+        if status >= 400 or not isinstance(result, dict) or not result.get("ok"):
+            await rollback_committed_attachments()
         if isinstance(result, dict):
             result = dict(result)
-            result["attachments"] = normalized_attachments
+            if status < 400 and result.get("ok"):
+                result["attachments"] = normalized_attachments
         return JSONResponse(status_code=status, content=result)
 
     @app.get("/attachments/message/{message_id}")

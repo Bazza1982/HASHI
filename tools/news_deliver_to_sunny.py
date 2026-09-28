@@ -4,15 +4,15 @@
 from __future__ import annotations
 
 import argparse
-import io
+import asyncio
+import hashlib
 import json
-import mimetypes
 import os
 import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from urllib import request as urllib_request
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 SYDNEY = ZoneInfo("Australia/Sydney")
@@ -171,63 +171,96 @@ def already_delivered(job_id: str, output_file: Path, state: dict) -> bool:
     return entry.get("delivered_file") == output_file.name
 
 
-def telegram_post(token: str, method: str, fields: dict, file_field: tuple[str, Path] | None = None) -> dict:
-    boundary = "----HASHINewsRelayBoundary"
-    body = io.BytesIO()
+async def publish_news_via_fc(
+    *,
+    job_id: str,
+    output_file: Path,
+    text: str,
+    media_paths: list[Path],
+    force: bool,
+) -> list[dict]:
+    """Commit news outputs to PAO state, then let the Telegram Connector send."""
 
-    def write(text: str) -> None:
-        body.write(text.encode("utf-8"))
+    secrets = load_secrets()
+    config_path = HASHI_ROOT / "agents.json"
+    config = json.loads(config_path.read_text(encoding="utf-8-sig"))
+    agent = next(
+        (
+            item
+            for item in config.get("agents") or ()
+            if isinstance(item, dict)
+            and str(item.get("name") or "").strip().casefold()
+            == AGENT.casefold()
+        ),
+        None,
+    )
+    if agent is None:
+        raise RuntimeError(f"Agent is not configured: {AGENT}")
+    token_key = str(agent.get("telegram_token_key") or AGENT)
+    token = str(secrets.get(token_key) or secrets.get(AGENT) or "").strip()
+    if not token or token == "WORKBENCH_ONLY_NO_TOKEN":
+        raise RuntimeError(f"No Telegram Connector token for agent '{AGENT}'")
+    configured_owner = (
+        os.environ.get("HASHI_NEWS_OWNER_ID")
+        or os.environ.get("HASHI_OWNER_ID")
+    )
+    configured_authorized = (
+        os.environ.get("HASHI_AUTHORIZED_TELEGRAM_ID")
+        or secrets.get("_authorized_telegram_id")
+    )
+    if configured_authorized is None:
+        raise RuntimeError("No authorized owner identity for news FC publication")
+    authorized_id = int(configured_authorized)
+    owner_id = str(configured_owner or f"user:{authorized_id}")
+    chat_id = int(telegram_chat_id())
+    force_suffix = f":force:{uuid4().hex}" if force else ""
+    base_material = f"{job_id}:{output_file.name}{force_suffix}"
+    from orchestrator.frontend_telegram_connector import (
+        publish_explicit_telegram_notification,
+    )
 
-    for key, value in fields.items():
-        write(f"--{boundary}\r\n")
-        write(f'Content-Disposition: form-data; name="{key}"\r\n\r\n')
-        write(f"{value}\r\n")
-
-    if file_field:
-        field_name, file_path = file_field
-        mime_type, _ = mimetypes.guess_type(str(file_path))
-        mime_type = mime_type or "application/octet-stream"
-        write(f"--{boundary}\r\n")
-        write(
-            f'Content-Disposition: form-data; name="{field_name}"; filename="{file_path.name}"\r\n'
+    common = {
+        "root": HASHI_ROOT,
+        "instance_id": str(
+            os.environ.get("HASHI_INSTANCE_ID")
+            or (config.get("global") or {}).get("instance_id")
+            or "HASHI"
+        ),
+        "agent_id": AGENT,
+        "owner_id": owner_id,
+        "authorized_id": authorized_id,
+        "chat_id": chat_id,
+        "token": token,
+        "session_db_path": os.environ.get("HASHI_SESSION_STORE_DB") or None,
+        "attachment_root": os.environ.get("HASHI_SESSION_ATTACHMENT_ROOT") or None,
+        "agent_lifecycle_id": str(agent.get("agent_lifecycle_id") or ""),
+    }
+    results = [
+        await publish_explicit_telegram_notification(
+            **common,
+            publication_id="news-text-"
+            + hashlib.sha256(base_material.encode("utf-8")).hexdigest(),
+            text=text,
         )
-        write(f"Content-Type: {mime_type}\r\n\r\n")
-        body.write(file_path.read_bytes())
-        write("\r\n")
-
-    write(f"--{boundary}--\r\n")
-    url = f"https://api.telegram.org/bot{token}/{method}"
-    req = urllib_request.Request(
-        url,
-        data=body.getvalue(),
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-        method="POST",
-    )
-    with urllib_request.urlopen(req, timeout=120) as resp:
-        return json.loads(resp.read().decode("utf-8"))
-
-
-def send_text(token: str, text: str) -> None:
-    if not text:
-        return
-    chunk_size = 4000
-    chunks = [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]
-    chat_id = telegram_chat_id()
-    for idx, chunk in enumerate(chunks, start=1):
-        result = telegram_post(token, "sendMessage", {"chat_id": chat_id, "text": chunk})
-        if not result.get("ok"):
-            raise RuntimeError(result.get("description", "sendMessage failed"))
-
-
-def send_voice(token: str, path: Path) -> None:
-    result = telegram_post(
-        token,
-        "sendVoice",
-        {"chat_id": telegram_chat_id()},
-        ("voice", path),
-    )
-    if not result.get("ok"):
-        raise RuntimeError(result.get("description", f"sendVoice failed for {path.name}"))
+    ]
+    for index, voice_path in enumerate(media_paths):
+        results.append(
+            await publish_explicit_telegram_notification(
+                **common,
+                publication_id="news-media-"
+                + hashlib.sha256(
+                    f"{base_material}:{index}:{voice_path.name}".encode("utf-8")
+                ).hexdigest(),
+                file_path=voice_path,
+                semantic_role="voice_message",
+            )
+        )
+    if not all(result.get("accepted") for result in results):
+        raise RuntimeError(
+            "FC delivery was not accepted: "
+            + ", ".join(str(result.get("state")) for result in results)
+        )
+    return results
 
 
 def relay_job(job_id: str, *, force: bool = False, dry_run: bool = False) -> int:
@@ -286,20 +319,22 @@ def relay_job(job_id: str, *, force: bool = False, dry_run: bool = False) -> int
         )
         return 0
 
-    secrets = load_secrets()
-    token = secrets.get(AGENT)
-    if not token:
-        raise SystemExit(f"No Telegram token for agent '{AGENT}' in secrets.json")
-
-    send_text(str(token), text)
-    for voice_path in media_paths:
-        send_voice(str(token), voice_path)
+    delivery_results = asyncio.run(
+        publish_news_via_fc(
+            job_id=job_id,
+            output_file=output_file,
+            text=text,
+            media_paths=media_paths,
+            force=force,
+        )
+    )
 
     state[job_id] = {
         "delivered_file": output_file.name,
         "delivered_at": datetime.now(SYDNEY).isoformat(),
         "delivered_date": sydney_today(),
         "voice_files": [str(p) for p in media_paths],
+        "fc_events": [result["event_id"] for result in delivery_results],
     }
     save_state(state_path, state)
     print(

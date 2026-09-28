@@ -8,6 +8,7 @@ from orchestrator.workspace_state import WorkspaceStateStore
 
 
 STATE_KEY = "memory_search"
+TURNS_STATE_KEY = "memory_turns"
 
 
 def is_memory_search_enabled(workspace_dir: str | Path) -> bool:
@@ -44,9 +45,56 @@ def set_memory_search_enabled(
     return normalized
 
 
+def is_memory_turns_enabled(workspace_dir: str | Path) -> bool:
+    """Return the persisted recent-turn injection preference.
+
+    Recent turns historically defaulted to ON.  Keeping that default makes
+    existing Agent workspaces backward compatible while allowing an explicit
+    pause to survive every Session boundary and process replacement.
+    """
+
+    state = WorkspaceStateStore(Path(workspace_dir)).read()
+    block = state.get(TURNS_STATE_KEY)
+    if not isinstance(block, Mapping):
+        return True
+    return bool(block.get("enabled", True))
+
+
+def set_memory_turns_enabled(
+    workspace_dir: str | Path,
+    enabled: bool,
+) -> bool:
+    """Persist the recent-turn injection preference independently."""
+
+    normalized = bool(enabled)
+
+    def update(state: dict[str, Any]) -> dict[str, Any]:
+        state[TURNS_STATE_KEY] = {
+            "version": 1,
+            "enabled": normalized,
+            "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+        return state
+
+    WorkspaceStateStore(Path(workspace_dir)).update(update)
+    return normalized
+
+
 def apply_memory_search_preference(assembler: Any, workspace_dir: str | Path) -> bool:
     """Apply the persisted setting to a newly-created context assembler."""
 
     enabled = is_memory_search_enabled(workspace_dir)
     assembler.saved_memory_injection_enabled = enabled
     return enabled
+
+
+def apply_memory_injection_preferences(
+    assembler: Any, workspace_dir: str | Path
+) -> dict[str, bool]:
+    """Reapply both independent user preferences to a context assembler."""
+
+    turns_enabled = is_memory_turns_enabled(workspace_dir)
+    saved_enabled = is_memory_search_enabled(workspace_dir)
+    assembler.turns_injection_enabled = turns_enabled
+    assembler.saved_memory_injection_enabled = saved_enabled
+    return {"turns": turns_enabled, "saved": saved_enabled}

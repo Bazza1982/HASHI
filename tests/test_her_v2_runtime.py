@@ -33,6 +33,8 @@ from orchestrator.her_v2.models import (
     TriageClassification,
 )
 from orchestrator.her_v2.presentation import (
+    FinalStyleRequest,
+    FinalStyleResult,
     RenderedRequiredMessage,
     RequiredUserMessage,
 )
@@ -339,6 +341,31 @@ class RecordingRequiredPersonaRenderer:
         )
 
 
+class RecordingFinalStyleRenderer:
+    def __init__(self, *, rewritten_text=None, error=None):
+        self.rewritten_text = rewritten_text
+        self.error = error
+        self.requests: list[FinalStyleRequest] = []
+
+    async def render(self, request):
+        self.requests.append(request)
+        if self.error is not None:
+            raise self.error
+        if self.rewritten_text is None:
+            return FinalStyleResult(
+                source_event_id=request.event_id,
+                decision="keep",
+                text=request.draft_text,
+                provenance="test_final_style",
+            )
+        return FinalStyleResult(
+            source_event_id=request.event_id,
+            decision="rewrite",
+            text=self.rewritten_text,
+            provenance="test_final_style",
+        )
+
+
 class _DraftOnlyPackager:
     async def package(self, commentary):
         del commentary
@@ -357,8 +384,10 @@ def _runtime(
     audit=None,
     commentary=None,
     required_persona=None,
+    final_style=None,
     retry_policy=None,
     skills_catalogue=None,
+    pcm_input=None,
 ):
     root = tmp_path / "her-v2"
     return HERv2Runtime(
@@ -370,11 +399,13 @@ def _runtime(
         delivery=delivery or RecordingDelivery(),
         commentary=commentary,
         required_persona=required_persona,
+        final_style=final_style,
         habits=habits,
         meditation=meditation if meditation is not None else habits,
         dream=dream,
         retry_policy=retry_policy,
         skills_catalogue=skills_catalogue,
+        pcm_input=pcm_input,
     )
 
 
@@ -760,6 +791,89 @@ async def test_zero_runs_one_direct_agent_without_any_orchestration_upgrade(tmp_
         Stage.REVIEW,
         Stage.FINALISATION,
     }.isdisjoint(request.stage for _profile, request in provider.requests)
+
+
+@pytest.mark.asyncio
+async def test_direct_applies_optional_final_style_before_delivery(tmp_path):
+    provider = ScriptedProvider(
+        {Stage.DIRECT: [{"message": "A long main-model draft."}]}
+    )
+    final_style = RecordingFinalStyleRenderer(
+        rewritten_text="Concise, persona-consistent answer."
+    )
+    runtime = _runtime(
+        tmp_path,
+        provider,
+        final_style=final_style,
+        pcm_input={
+            "current_request": "Explain the result briefly.",
+            "sections": [
+                {
+                    "key": "global-system-1",
+                    "title": "Global system",
+                    "authority": "global_system",
+                    "text": "Use short, plain language.",
+                    "order": 1,
+                },
+                {
+                    "key": "persona",
+                    "title": "Persona",
+                    "authority": "persona",
+                    "text": "Address the user warmly.",
+                    "order": 2,
+                },
+                {
+                    "key": "memory",
+                    "title": "Memory",
+                    "authority": "memory",
+                    "text": "This is context, not a style rule.",
+                    "order": 3,
+                },
+            ],
+        },
+    )
+
+    result = await runtime.run_turn(
+        "Explain the result briefly.",
+        "request-final-style",
+        effort=Effort.ZERO,
+    )
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert result.text == "Concise, persona-consistent answer."
+    assert [(item.kind, item.text) for item in result.delivery_records] == [
+        ("final", "Concise, persona-consistent answer.")
+    ]
+    assert len(final_style.requests) == 1
+    style_request = final_style.requests[0]
+    assert style_request.draft_text == "A long main-model draft."
+    assert style_request.current_request == "Explain the result briefly."
+    assert [item.authority for item in style_request.requirements] == [
+        "global_system",
+        "persona",
+    ]
+    assert "context, not a style rule" not in repr(style_request.requirements)
+
+
+@pytest.mark.asyncio
+async def test_direct_final_style_failure_delivers_unchanged_main_answer(tmp_path):
+    provider = ScriptedProvider(
+        {Stage.DIRECT: [{"message": "Main-model answer survives."}]}
+    )
+    final_style = RecordingFinalStyleRenderer(error=RuntimeError("flash unavailable"))
+
+    result = await _runtime(
+        tmp_path,
+        provider,
+        final_style=final_style,
+    ).run_turn("Answer this.", "request-final-style-fallback", effort=Effort.ZERO)
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert result.text == "Main-model answer survives."
+    assert [(item.kind, item.text) for item in result.delivery_records] == [
+        ("final", "Main-model answer survives.")
+    ]
+    assert len(final_style.requests) == 1
 
 
 @pytest.mark.asyncio

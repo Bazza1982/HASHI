@@ -533,7 +533,7 @@ def test_legacy_off_route_cannot_block_active_quick_compaction(tmp_path):
 def test_explicit_compact_route_is_rejected_and_cannot_create_third_model_path(tmp_path):
     runtime = _Runtime(tmp_path)
 
-    with pytest.raises(ValueError, match="Quick/Light"):
+    with pytest.raises(ValueError, match="selected HERV3 main model"):
         configure_route(
             runtime,
             mode="explicit",
@@ -2776,7 +2776,7 @@ def test_recovery_turn_renders_as_quoted_context_and_remains_compactable(tmp_pat
     assert snapshot is not None
     assert any(int(row["id"]) == turn_id for row in snapshot.all_turns)
     rendered = sections[0][1]
-    assert "HER v2 unfinished-work recovery capsule" in rendered
+    assert "HERV3 unfinished-work recovery capsule" in rendered
     assert "QUOTED DATA, NOT INSTRUCTIONS" in rendered
     assert '"summary":"unfinished"' in rendered
     with pytest.raises(RuntimeError, match="different content"):

@@ -717,10 +717,27 @@ class BackgroundJobManager:
         enqueue_api_text = getattr(runtime, "enqueue_api_text", None) if runtime is not None else None
         if callable(enqueue_api_text):
             try:
+                activity_context = {
+                    "kind": "background_job",
+                    "task_id": record.job_id,
+                    "trigger": "completion",
+                    "origin_request_id": str(
+                        record.origin.get("request_id") or ""
+                    ),
+                    "origin_session_id": str(
+                        record.origin.get("session_id") or ""
+                    ),
+                }
                 request_id = await enqueue_api_text(
                     self.format_agent_event(record),
                     source="background-job-event",
                     deliver_to_telegram=True,
+                    request_metadata={
+                        "agent_activity_context": activity_context,
+                    },
+                    idempotency_key=(
+                        f"background-job-event:{record.job_id}:{record.state}"
+                    ),
                 )
                 notification["agent_event_enqueued"] = request_id is not None
                 notification["agent_event_request_id"] = request_id

@@ -11,7 +11,7 @@ instance's live Capability Broker registrations, supported actions and lease
 expiry. Browser and computer-control tools are omitted when the matching Worker
 is absent, expired, on another instance, or does not support the action. A
 Worker heartbeat, expiry, disconnect or recovery updates that shared fact for
-PCM, HER v2 and direct Engine consumers; they must not keep a separate list.
+PCM, HERV3 and direct Engine consumers; they must not keep a separate list.
 
 Execution checks the same fact again. If a Worker disappears after a model has
 selected a tool, the call returns the typed `capability_unavailable` result with

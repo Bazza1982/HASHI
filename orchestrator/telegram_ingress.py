@@ -47,6 +47,7 @@ class CoreTelegramIngress:
         self.task: asyncio.Task[None] | None = None
         self.connected = False
         self._stopping = False
+        self._poll_task: asyncio.Task[Any] | None = None
 
     @property
     def is_running(self) -> bool:
@@ -81,19 +82,38 @@ class CoreTelegramIngress:
     async def _run(self) -> None:
         while not self._stopping:
             try:
-                updates = await self.bot.get_updates(
-                    offset=self.offset,
-                    timeout=TELEGRAM_LONG_POLL_SECONDS,
-                    read_timeout=TELEGRAM_READ_TIMEOUT_SECONDS,
-                    allowed_updates=Update.ALL_TYPES,
+                handle = self.handle_lookup(self.agent_name)
+                if handle is not None and getattr(handle, "route_is_gated", False):
+                    await asyncio.sleep(0.05)
+                    continue
+                poll = asyncio.create_task(
+                    self.bot.get_updates(
+                        offset=self.offset,
+                        timeout=TELEGRAM_LONG_POLL_SECONDS,
+                        read_timeout=TELEGRAM_READ_TIMEOUT_SECONDS,
+                        allowed_updates=Update.ALL_TYPES,
+                    )
                 )
+                self._poll_task = poll
+                try:
+                    updates = await poll
+                except asyncio.CancelledError:
+                    if self._stopping and poll.cancelled():
+                        break
+                    raise
+                finally:
+                    self._poll_task = None
                 await self._set_connected(True)
                 for update in updates:
+                    if self._stopping:
+                        break
                     handle = self.handle_lookup(self.agent_name)
                     if handle is None:
                         raise RuntimeError(
                             f"Agent route {self.agent_name!r} is unavailable"
                         )
+                    if getattr(handle, "route_is_gated", False):
+                        break
                     await handle.deliver_telegram_update(update.to_dict())
                     self.offset = int(update.update_id) + 1
                     if self.checkpoint_callback is not None:
@@ -108,16 +128,18 @@ class CoreTelegramIngress:
                     type(exc).__name__,
                     exc,
                 )
-                await asyncio.sleep(TELEGRAM_RETRY_SECONDS)
+                if not self._stopping:
+                    await asyncio.sleep(TELEGRAM_RETRY_SECONDS)
 
     async def pause(self) -> None:
         """Finish the accepted batch and retain its offset before handoff.
 
-        Cancellation can occur between accepting an update and advancing the
-        offset. A service rollout therefore awaits this loop instead of
-        cancelling it; a timeout rejects the rollout and resumes the poller.
+        Only an idle getUpdates request is cancelled. An accepted batch still
+        drains and checkpoints before this method returns.
         """
         self._stopping = True
+        if self._poll_task is not None and not self._poll_task.done():
+            self._poll_task.cancel()
         if self.task is not None:
             try:
                 await asyncio.wait_for(asyncio.shield(self.task), timeout=45)

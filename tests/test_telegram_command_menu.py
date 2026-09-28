@@ -17,7 +17,7 @@ from orchestrator.workbench_telegram_state import mirror_enabled
 def test_telegram_menu_text_uses_standard_card_in_english():
     with ui_language.language_scope(None, locale="en"):
         text = runtime_menu_views.telegram_menu_text(enabled=True)
-    assert text.startswith("📡 <b>WORKBENCH TELEGRAM MIRROR</b>\n" + DIVIDER)
+    assert text.startswith("📡 <b>TELEGRAM MIRROR</b>\n" + DIVIDER)
     assert "<b>Current</b> · <b>ON</b>" in text
     assert "Scope" in text
     assert "mirrored to your Telegram chat" in text
@@ -28,13 +28,13 @@ def test_telegram_menu_text_off_state_english():
     with ui_language.language_scope(None, locale="en"):
         text = runtime_menu_views.telegram_menu_text(enabled=False)
     assert "<b>Current</b> · <b>OFF</b>" in text
-    assert "stay in the Workbench only" in text
+    assert "other sources do not mirror messages to Telegram" in text
 
 
 def test_telegram_menu_text_chinese_resolves_no_key_fallback():
     with ui_language.language_scope(None, locale="zh-CN"):
         text = runtime_menu_views.telegram_menu_text(enabled=True)
-    assert "工作台 TELEGRAM 镜像" in text
+    assert "TELEGRAM 镜像" in text
     assert "menu.telegram" not in text
     assert "<b>当前</b>" in text or "<b>Current</b>" in text
     assert "已" not in text or "镜像" in text
@@ -106,9 +106,17 @@ class TelegramCommandMenuIntegrationTests(unittest.IsolatedAsyncioTestCase):
             ):
                 opened = await dispatch_command_interaction(runtime, operation, metadata)
                 self.assertTrue(opened["ok"], opened)
+                open_invocation = opened["command_invocation"]
+                self.assertEqual(open_invocation["type"], "hashi.frontend-command")
+                self.assertEqual(open_invocation["version"], 2)
+                self.assertEqual(open_invocation["connector_id"], "backend_api")
+                self.assertEqual(open_invocation["command"], "telegram")
+                self.assertEqual(open_invocation["authorization"]["decision"], "allowed")
+                self.assertNotIn("actor_id", open_invocation)
+                self.assertNotIn("connection_binding", open_invocation)
                 card = opened["messages"][-1]
                 self.assertEqual(card["channel"], "command-ui")
-                self.assertIn("WORKBENCH TELEGRAM MIRROR", card["text"])
+                self.assertIn("TELEGRAM MIRROR", card["text"])
                 rows = card["command_ui"]["rows"]
                 self.assertEqual(
                     {row["text"] for row in rows[0]},
@@ -132,6 +140,13 @@ class TelegramCommandMenuIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 }
                 result = await dispatch_command_interaction(runtime, action, metadata)
                 self.assertTrue(result["ok"], result)
+                action_invocation = result["command_invocation"]
+                self.assertEqual(action_invocation["command"], "telegram")
+                self.assertEqual(action_invocation["issued_action_id"], button)
+                self.assertEqual(action_invocation["revision"], action["revision"])
+                self.assertEqual(action_invocation["session_id"], "test-session")
+                self.assertEqual(action_invocation["context_generation"], 1)
+                self.assertTrue(action_invocation["actor_digest"].startswith("sha256:"))
                 self.assertEqual(mirror_enabled(root, "owner-a"), False)
                 self.assertIn("OFF", result["messages"][0]["text"])
                 self.assertEqual(

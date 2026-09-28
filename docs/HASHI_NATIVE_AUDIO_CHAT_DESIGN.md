@@ -15,6 +15,13 @@
 | Realtime calls | Explicitly out of scope for this stage |
 | Audio-model tools | Represented by the contract but disabled in the proof of concept |
 
+> **HERV3 routing note:** the Direct, Immediate, Triage, Planning,
+> Replanning, Review, and Finalisation sections below preserve the 2026-08-28
+> HERV2 qualification record. They are non-normative for current routing.
+> HERV3 supplies accepted native audio/text to its one main-model/tool loop;
+> current behavior is defined by [HERV3 upgrade](HERV3_UPGRADE.md). The media,
+> security, attachment, delivery, and retention evidence remains applicable.
+
 This document defines HASHI-native audio chat. It is separate from the deferred
 real-time call work in
 [HASHI_VOICE_BRIDGE_PLAN.md](HASHI_VOICE_BRIDGE_PLAN.md). The call plan covers
@@ -34,8 +41,9 @@ It extends, rather than replaces, the following accepted contracts:
   for canonical media parts and exact provider/model/modality routing;
 - [HASHI_PCM_SYSTEM_DESIGN.md](HASHI_PCM_SYSTEM_DESIGN.md) for authoritative
   Persona, Context, and Memory assembly; and
-- [HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md](HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md)
-  for Direct, Immediate Response, Triage, work, and delivery semantics.
+- [HERV3_UPGRADE.md](HERV3_UPGRADE.md) for the current one-loop runtime; the
+  historical [HERV2 design](HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md)
+  remains provenance for the staged acceptance evidence in this document.
 
 ## 1. Executive decision
 

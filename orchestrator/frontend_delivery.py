@@ -1,22 +1,35 @@
-"""Typed per-Run delivery policy for HASHI Frontend Connectors.
+"""Typed per-Run delivery routes for HASHI Frontend Connectors.
 
-The legacy ``deliver_to_telegram`` boolean is deliberately not a public
-suppression switch.  A TUI may opt one newly submitted Run out of Telegram
-mirroring only by supplying this complete, typed policy together with its
-ephemeral client identity.  The policy is copied into request metadata at
-admission, so later preference changes cannot alter an in-flight Run.
+Mirror preferences belong to the server and are frozen at Run admission.
+Legacy client-supplied delivery policies remain readable but cannot override
+the owner's connector preferences.
 """
 from __future__ import annotations
 
 import copy
+import hashlib
 from collections.abc import Mapping
 from typing import Any
 
 
-DELIVERY_POLICY_TYPE = "hashi.frontend-delivery"
-DELIVERY_POLICY_VERSION = 1
+DELIVERY_POLICY_TYPE = "hashi.frontend-delivery-policy"
+DELIVERY_POLICY_VERSION = 2
 DELIVERY_POLICY_SCOPE = "run"
+LEGACY_TUI_DELIVERY_POLICY_TYPE = "hashi.frontend-delivery"
+LEGACY_TUI_DELIVERY_POLICY_VERSION = 1
 TUI_FRONTEND_KIND = "tui"
+TUI_MUTATING_PROXY_OPERATIONS = frozenset(
+    {
+        "chat",
+        "chat_attachment",
+        "session_run",
+        "session_command_invocation",
+        "session_attachment_run",
+        "session_workzone_attachment_run",
+        "speech",
+        "voice_profile",
+    }
+)
 FRONTEND_CLIENT_METADATA_KEY = "frontend_client"
 FRONTEND_DELIVERY_METADATA_KEY = "frontend_delivery_policy"
 RUN_DELIVERY_ROUTE_METADATA_KEY = "_run_delivery_route"
@@ -113,6 +126,8 @@ def freeze_run_delivery_route(
     session_channel_key: str,
     chat_id: Any,
     telegram_requested: bool,
+    whatsapp_requested: bool = False,
+    whatsapp_channel_key: Any | None = None,
     primary_channel_key: Any | None = None,
     terminal_exchange: bool = False,
 ) -> dict[str, Any]:
@@ -142,7 +157,15 @@ def freeze_run_delivery_route(
             else _destination(resolved_surface, resolved_channel)
         )
     elif source_id == "hchat":
-        primary = _destination("hchat", primary_channel)
+        # HChat is the message semantic.  The authenticated transport remains
+        # its own Connector so Remote and Exchange can use separate adapters,
+        # health, receipts, and recovery without pretending to be one another.
+        relay_surface = (
+            resolved_surface
+            if resolved_surface in {"hchat", "remote", "exchange"}
+            else "hchat"
+        )
+        primary = _destination(relay_surface, primary_channel)
     elif source_id == "hashi.internal":
         primary = (
             _destination("telegram", telegram_channel)
@@ -163,16 +186,19 @@ def freeze_run_delivery_route(
 
     mirrors: list[dict[str, str]] = []
     primary_surface = primary["surface"] if primary is not None else ""
-    # WhatsApp owns its authenticated reply callback and must never inherit the
-    # legacy Telegram visibility default.  TUI, HChat and API-compatible
-    # clients preserve their established optional Telegram mirror.
     if (
         telegram_requested
         and primary_surface != "telegram"
-        and source_id != "whatsapp"
         and not terminal_exchange
     ):
         mirrors.append(_destination("telegram", telegram_channel))
+    if (
+        whatsapp_requested
+        and whatsapp_channel_key
+        and primary_surface != "whatsapp"
+        and not terminal_exchange
+    ):
+        mirrors.append(_destination("whatsapp", whatsapp_channel_key))
 
     return normalize_run_delivery_route(
         {
@@ -219,6 +245,65 @@ def project_run_delivery_route(route: Mapping[str, Any] | None) -> dict[str, Any
     }
 
 
+def delivery_intent_from_run_route(
+    route: Mapping[str, Any] | None,
+    *,
+    event_id: str,
+    session_id: str,
+    idempotency_key: str,
+    content_modes: list[str] | tuple[str, ...] = ("text",),
+) -> dict[str, Any]:
+    """Project the frozen compatibility route into endpoint-level FC intent."""
+
+    from orchestrator.frontend_connector_registry import (
+        canonical_connector_id,
+        endpoint_id_for,
+    )
+    from orchestrator.frontend_contracts import normalize_delivery_intent
+
+    normalized_route = normalize_run_delivery_route(route)
+    raw_destinations = [
+        ("primary", normalized_route.get("primary")),
+        *[("mirror", item) for item in normalized_route["mirrors"]],
+    ]
+    destinations = []
+    for role, item in raw_destinations:
+        if not isinstance(item, Mapping):
+            continue
+        surface = str(item["surface"])
+        channel_key = str(item["channel_key"])
+        connector_id = canonical_connector_id(
+            surface, ingress_transport=surface, surface=surface
+        )
+        destinations.append(
+            {
+                "connector_id": connector_id,
+                "endpoint_id": endpoint_id_for(
+                    connector_id,
+                    ingress_transport=surface,
+                    channel_key=channel_key,
+                ),
+                "channel_key": channel_key,
+                "role": role,
+                "content_modes": list(content_modes),
+                # The old Telegram transport cannot prove idempotent retries.
+                "retry_class": "query_before_retry",
+            }
+        )
+    digest = hashlib.sha256(str(idempotency_key).encode("utf-8")).hexdigest()
+    return normalize_delivery_intent(
+        {
+            "type": "hashi.delivery-intent",
+            "version": 2,
+            "scope": "run",
+            "event_id": event_id,
+            "session_id": session_id,
+            "idempotency_digest": f"sha256:{digest}",
+            "destinations": destinations,
+        }
+    )
+
+
 def _client_id(value: Any) -> str:
     client_id = str(value or "").strip()
     if (
@@ -226,21 +311,134 @@ def _client_id(value: Any) -> str:
         or len(client_id) > 128
         or any(ord(character) < 33 or ord(character) > 126 for character in client_id)
     ):
-        raise ValueError("TUI delivery policy requires a valid client_id")
+        raise ValueError("frontend delivery policy requires a valid client_id")
     return client_id
 
 
-def tui_run_delivery_policy(*, telegram_mirror: bool, client_id: str) -> dict[str, Any]:
-    """Build the canonical wire representation for one TUI-origin Run."""
+def frontend_run_delivery_policy(
+    *,
+    connector_id: str,
+    client_id: str,
+    targets: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...],
+) -> dict[str, Any]:
+    """Build a client-bound per-Run policy over connector-neutral targets."""
 
+    normalized_connector = _surface(connector_id, fallback="")
+    if normalized_connector == "unknown":
+        raise ValueError("frontend delivery policy requires a valid connector_id")
     return {
         "type": DELIVERY_POLICY_TYPE,
         "version": DELIVERY_POLICY_VERSION,
         "scope": DELIVERY_POLICY_SCOPE,
-        "frontend": TUI_FRONTEND_KIND,
+        "connector_id": normalized_connector,
         "client_id": _client_id(client_id),
-        "telegram": {"mirror": bool(telegram_mirror)},
+        "targets": [
+            {
+                "connector_id": _surface(item.get("connector_id"), fallback=""),
+                "role": str(item.get("role") or "").strip().casefold(),
+                "enabled": item.get("enabled"),
+            }
+            for item in targets
+        ],
     }
+
+
+def normalize_frontend_run_delivery_policy(
+    value: Any,
+    *,
+    connector_id: str,
+    client_id: str,
+) -> dict[str, Any]:
+    """Validate generic delivery preferences, with a v1 TUI compatibility read."""
+
+    if not isinstance(value, Mapping):
+        raise ValueError("delivery_policy must be an object")
+    expected_client_id = _client_id(client_id)
+    expected_connector = _surface(connector_id, fallback="")
+    if expected_connector == "unknown":
+        raise ValueError("frontend delivery policy connector is invalid")
+    # Read-only migration for older TUI clients. New writers emit only v2.
+    if (
+        str(value.get("type") or "") == LEGACY_TUI_DELIVERY_POLICY_TYPE
+        and value.get("version") == LEGACY_TUI_DELIVERY_POLICY_VERSION
+        and expected_connector == TUI_FRONTEND_KIND
+        and str(value.get("frontend") or "") == TUI_FRONTEND_KIND
+    ):
+        telegram = value.get("telegram")
+        if not isinstance(telegram, Mapping) or not isinstance(
+            telegram.get("mirror"), bool
+        ):
+            raise ValueError("legacy delivery_policy telegram.mirror must be boolean")
+        if _client_id(value.get("client_id")) != expected_client_id:
+            raise ValueError("delivery_policy client_id mismatch")
+        return frontend_run_delivery_policy(
+            connector_id=expected_connector,
+            client_id=expected_client_id,
+            targets=[
+                {
+                    "connector_id": "telegram",
+                    "role": "mirror",
+                    "enabled": bool(telegram["mirror"]),
+                }
+            ],
+        )
+    if str(value.get("type") or "") != DELIVERY_POLICY_TYPE:
+        raise ValueError("unsupported delivery_policy type")
+    if value.get("version") != DELIVERY_POLICY_VERSION:
+        raise ValueError("unsupported delivery_policy version")
+    if str(value.get("scope") or "") != DELIVERY_POLICY_SCOPE:
+        raise ValueError("delivery_policy scope must be run")
+    if _surface(value.get("connector_id"), fallback="") != expected_connector:
+        raise ValueError("delivery_policy connector_id mismatch")
+    if _client_id(value.get("client_id")) != expected_client_id:
+        raise ValueError("delivery_policy client_id mismatch")
+    targets = value.get("targets")
+    if not isinstance(targets, (list, tuple)) or len(targets) > 16:
+        raise ValueError("delivery_policy targets must be a list of at most 16 entries")
+    normalized_targets: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for target in targets:
+        if not isinstance(target, Mapping):
+            raise ValueError("delivery_policy target must be an object")
+        target_connector = _surface(target.get("connector_id"), fallback="")
+        role = str(target.get("role") or "").strip().casefold()
+        enabled = target.get("enabled")
+        if target_connector == "unknown" or role not in {"mirror", "subscriber"}:
+            raise ValueError("delivery_policy target is invalid")
+        if not isinstance(enabled, bool):
+            raise ValueError("delivery_policy target enabled must be boolean")
+        identity = (target_connector, role)
+        if identity in seen:
+            raise ValueError("delivery_policy targets must be unique")
+        seen.add(identity)
+        normalized_targets.append(
+            {
+                "connector_id": target_connector,
+                "role": role,
+                "enabled": enabled,
+            }
+        )
+    return frontend_run_delivery_policy(
+        connector_id=expected_connector,
+        client_id=expected_client_id,
+        targets=normalized_targets,
+    )
+
+
+def tui_run_delivery_policy(*, telegram_mirror: bool, client_id: str) -> dict[str, Any]:
+    """Compatibility builder; its wire representation is the generic v2 policy."""
+
+    return frontend_run_delivery_policy(
+        connector_id=TUI_FRONTEND_KIND,
+        client_id=client_id,
+        targets=[
+            {
+                "connector_id": "telegram",
+                "role": "mirror",
+                "enabled": bool(telegram_mirror),
+            }
+        ],
+    )
 
 
 def normalize_tui_run_delivery_policy(
@@ -248,29 +446,12 @@ def normalize_tui_run_delivery_policy(
     *,
     client_id: str,
 ) -> dict[str, Any]:
-    """Validate a TUI policy and return its canonical, JSON-safe form."""
+    """Compatibility validator for the built-in TUI per-Run preference."""
 
-    if not isinstance(value, Mapping):
-        raise ValueError("delivery_policy must be an object")
-    expected_client_id = _client_id(client_id)
-    if str(value.get("type") or "") != DELIVERY_POLICY_TYPE:
-        raise ValueError("unsupported delivery_policy type")
-    if value.get("version") != DELIVERY_POLICY_VERSION:
-        raise ValueError("unsupported delivery_policy version")
-    if str(value.get("scope") or "") != DELIVERY_POLICY_SCOPE:
-        raise ValueError("delivery_policy scope must be run")
-    if str(value.get("frontend") or "") != TUI_FRONTEND_KIND:
-        raise ValueError("delivery_policy frontend must be tui")
-    if _client_id(value.get("client_id")) != expected_client_id:
-        raise ValueError("delivery_policy client_id mismatch")
-    telegram = value.get("telegram")
-    if not isinstance(telegram, Mapping) or not isinstance(
-        telegram.get("mirror"), bool
-    ):
-        raise ValueError("delivery_policy telegram.mirror must be boolean")
-    return tui_run_delivery_policy(
-        telegram_mirror=bool(telegram["mirror"]),
-        client_id=expected_client_id,
+    return normalize_frontend_run_delivery_policy(
+        value,
+        connector_id=TUI_FRONTEND_KIND,
+        client_id=client_id,
     )
 
 
@@ -279,7 +460,7 @@ def tui_request_metadata(
     telegram_mirror: bool,
     client_id: str,
 ) -> dict[str, Any]:
-    """Return the server-owned metadata snapshot for one TUI submission."""
+    """Build legacy TUI metadata; its mirror target is non-authoritative."""
 
     normalized_client_id = _client_id(client_id)
     return {
@@ -294,32 +475,35 @@ def tui_request_metadata(
     }
 
 
-def _workbench_telegram_mirror_for_admission(
+def owner_mirror_for_admission(
     *,
     request_metadata: Mapping[str, Any] | None,
     state_root: Any | None,
+    connector_id: str,
+    default: bool,
 ) -> bool:
-    """Resolve server-authoritative Workbench Telegram mirroring.
-
-    Only Runs carrying Workbench session metadata consult the persisted
-    per-owner state.  Every other non-TUI source keeps its historical
-    default (mirror on).  Read failures fail open to that default.
-    """
+    """Resolve one owner-scoped mirror preference without trusting client policy."""
 
     if state_root is None:
-        return True
+        return default
     metadata = request_metadata if isinstance(request_metadata, Mapping) else {}
-    if str(metadata.get("session_surface") or "").strip() != "workbench":
-        return True
     owner_id = str(metadata.get("owner_id") or "").strip()
     if not owner_id:
-        return True
+        return default
     try:
-        from orchestrator.workbench_telegram_state import mirror_enabled
+        from orchestrator.connector_delivery_preferences import (
+            get_connector_preference,
+        )
 
-        return mirror_enabled(state_root, owner_id, default=True)
+        return get_connector_preference(
+            state_root,
+            owner_id,
+            connector_id,
+            "mirror",
+            default=default,
+        )
     except Exception:
-        return True
+        return default
 
 
 def telegram_delivery_for_admission(
@@ -328,34 +512,39 @@ def telegram_delivery_for_admission(
     request_metadata: Mapping[str, Any] | None,
     state_root: Any | None = None,
 ) -> bool:
-    """Resolve Telegram delivery without honoring legacy hidden-turn flags.
+    """Preserve Telegram primary replies; resolve mirrors from central state."""
 
-    Invalid, incomplete, non-TUI, and forged metadata all fail visible.  Only a
-    canonical policy bound to the same TUI client can turn mirroring off.  A
-    non-TUI Run carrying Workbench session metadata consults the server-owned
-    per-owner state when a state root is supplied.
-    """
-
-    if str(source or "").strip().casefold() != TUI_FRONTEND_KIND:
-        return _workbench_telegram_mirror_for_admission(
-            request_metadata=request_metadata,
-            state_root=state_root,
-        )
     metadata = request_metadata if isinstance(request_metadata, Mapping) else {}
-    frontend = metadata.get(FRONTEND_CLIENT_METADATA_KEY)
-    if not isinstance(frontend, Mapping):
+    from orchestrator.frontend_connector_registry import canonical_connector_id
+
+    connector_id = canonical_connector_id(
+        str(source or ""),
+        ingress_transport=str(metadata.get("ingress_transport") or ""),
+        surface=str(metadata.get("session_surface") or ""),
+    )
+    if connector_id == "telegram":
         return True
-    if str(frontend.get("kind") or "").strip().casefold() != TUI_FRONTEND_KIND:
-        return True
-    try:
-        client_id = _client_id(frontend.get("client_id"))
-        policy = normalize_tui_run_delivery_policy(
-            metadata.get(FRONTEND_DELIVERY_METADATA_KEY),
-            client_id=client_id,
-        )
-    except ValueError:
-        return True
-    return bool(policy["telegram"]["mirror"])
+    return owner_mirror_for_admission(
+        request_metadata=metadata,
+        state_root=state_root,
+        connector_id="telegram",
+        default=True,
+    )
+
+
+def configured_whatsapp_mirror_channel(global_config: Any) -> str | None:
+    """Use only one explicitly allowed personal recipient for automatic mirrors."""
+
+    config = getattr(global_config, "whatsapp", None)
+    if not isinstance(config, Mapping):
+        return None
+    numbers = config.get("allowed_numbers")
+    if not isinstance(numbers, (list, tuple)) or len(numbers) != 1:
+        return None
+    digits = str(numbers[0]).strip().removeprefix("+")
+    if not digits.isdigit() or not 7 <= len(digits) <= 15:
+        return None
+    return f"{digits}@s.whatsapp.net"
 
 
 __all__ = [
@@ -367,8 +556,13 @@ __all__ = [
     "RUN_DELIVERY_ROUTE_TYPE",
     "RUN_DELIVERY_ROUTE_VERSION",
     "freeze_run_delivery_route",
+    "delivery_intent_from_run_route",
+    "configured_whatsapp_mirror_channel",
+    "frontend_run_delivery_policy",
+    "normalize_frontend_run_delivery_policy",
     "normalize_tui_run_delivery_policy",
     "normalize_run_delivery_route",
+    "owner_mirror_for_admission",
     "project_run_delivery_route",
     "route_destination",
     "telegram_delivery_for_admission",

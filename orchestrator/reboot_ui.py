@@ -59,7 +59,7 @@ def render_notice(
     key = "reboot.notice." + (
         "source_update_incomplete" if source_update_incomplete else status
     )
-    broad = mode in {"same", "max"}
+    broad = mode == "max"
     if broad and not source_update_incomplete and status in {
         "starting",
         "candidate_rejected",
@@ -76,15 +76,40 @@ def render_notice(
         key += "_broad"
     elif total_count == 1 and status in {"starting", "online", "succeeded"}:
         key += "_single"
+    adoption = (record.get("shared_replacement") or {}).get("adoption") or {}
+    fallback = adoption.get("status") == "fallback"
+    fallback_reason_code = str(adoption.get("reason_code") or "qualification_failed")
+    if fallback_reason_code not in {"source_uncommitted", "qualification_failed"}:
+        fallback_reason_code = "qualification_failed"
+    if fallback and not starting and record.get("status") == "succeeded":
+        key = "reboot.notice.fallback_broad" if broad else "reboot.notice.fallback"
     text = ui_language.tr(
         key,
         locale=language,
         scope=scope,
         agents=target,
-        count=total_count,
+        count=(
+            sum(bool(value) for value in record.get("online", {}).values())
+            if not starting and record.get("status") == "succeeded" and record.get("online")
+            else total_count
+        ),
+        duration=(
+            f"{float(record.get('duration_seconds') or 0):.1f}".rstrip("0").rstrip(".")
+        ),
         online_count=len(recovered_targets),
         failed_count=len(targets),
+        fallback_reason=ui_language.tr(
+            "reboot.fallback_reason." + fallback_reason_code, locale=language
+        ),
     )
+    if fallback and not starting and record.get("status") != "succeeded":
+        text += "\n" + ui_language.tr(
+            "reboot.notice.fallback_detail",
+            locale=language,
+            fallback_reason=ui_language.tr(
+                "reboot.fallback_reason." + fallback_reason_code, locale=language
+            ),
+        )
     if recovered_targets and not partial:
         text += "\n" + ui_language.tr(
             "reboot.restored_targets",
@@ -99,8 +124,6 @@ def render_notice(
             locale=language,
             reason=ui_language.tr("reboot.reason." + reason, locale=language),
         )
-    if record.get("recovered") and not starting:
-        text = ui_language.tr("reboot.delayed_notice", locale=language) + "\n" + text
     if sender and sender != record.get("source_agent"):
         text += "\n" + ui_language.tr(
             "reboot.sent_by",

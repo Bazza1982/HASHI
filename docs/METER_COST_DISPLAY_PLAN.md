@@ -1,4 +1,4 @@
-# `/meter`（`/metre`）回合成本显示 — 设计与实施记录（v2.4）
+# `/meter`（`/metre`）回合成本显示 — 设计与实施记录（v2.7）
 
 > 状态：模型展示已实施、完成回归并由 `agent1` 热加载。2026-09-14 首次
 > `/reboot min` 因 Core 环境依赖漂移安全拒绝；恢复精确指纹并确认现役 Functions
@@ -8,7 +8,7 @@
 
 ## 1. 目标
 
-在 HER v2 backend 上新增 `/meter`（兼容别名 `/metre`）命令：开启后，每轮对话结束**再**追加一条简短的「成本尾巴」，显示本轮 token 与金额。默认关闭。
+在 HERV3 backend 上新增 `/meter`（兼容别名 `/metre`）命令：开启后，每轮对话结束**再**追加一条简短的「成本尾巴」，显示本轮 token 与金额。默认关闭。
 
 ## 2. 总体结论（Zelda 审核）
 
@@ -137,7 +137,7 @@
 ### 本地验证结果
 
 - `/meter` 定向矩阵：命令语义、成本来源、并发隔离、reasoning、OpenRouter/DeepSeek 工具循环、冥想重试与恢复均通过。
-- 跨模块矩阵：runtime pipeline、Habit journal、HER v2 adapter、usage/overview 与 sidecar 调用均通过。
+- 跨模块矩阵：runtime pipeline、Habit journal、HERV3 adapter、usage/overview 与 sidecar 调用均通过。
 - `git diff --check` 通过；仅发现工作树中既有 PowerShell 文件的 LF/CRLF 提示，与本功能无关。
 
 ## 9. 用量汇总的未知成本展示（2026-09-08）
@@ -197,7 +197,7 @@ OpenRouter 的公开模型接口是价格与能力共用的自动元数据来源
   也绝不标成实际扣费。查不到、歧义、过期或维度不全仍为 `null`。
 
 紧凑回合尾从每条 provider invocation 的既有 `engine` 与 `model` 事实派生服务提供方
-和服务模型列表，均按首次调用顺序去重。HER v2 在一个回合调用多个模型时必须显示
+和服务模型列表，均按首次调用顺序去重。HERV3 在一个回合调用多个模型时必须显示
 全部已观测模型；没有模型遥测时显示本地化的“未知”，不从当前配置猜测。
 
 模型配置成功后会异步、尽力预热价格；配置事务不等待查价，也不会因查价
@@ -214,7 +214,7 @@ OpenRouter 的公开模型接口是价格与能力共用的自动元数据来源
 旧账。Codex CLI／app-server 的 cache hit 与可精确导出的 miss 从原始 usage
 贯通到 HER、前后台账本和 meter；字段缺失与 Provider 报告零保持不同。
 
-HER v2 fallback 的 Primary、同 Provider Level 1、跨 Provider Level 2 以及内部
+HERV3 fallback 的 Primary、同 Provider Level 1、跨 Provider Level 2 以及内部
 重试均按真实物理调用分别落账，使用各自的实际 Engine／model 与冻结 revision。
 已取消或失败且没有 usage receipt 的调用成本保持未知，不能写成零；同一回合仍
 展示其余已知小计和未知调用数，不能因一个未知项吞掉已知金额。
@@ -233,5 +233,30 @@ Session 的展示消息流，Workbench 与其他当前／未来前台由同一�
 计价逻辑。稳定的 `meter_cost:<request_id>` 作为传输身份，避免不同前台各自
 重新计算或拼接成本。
 
+## 12. HERV3 模型职责与成本拆分（2026-09-28）
+
+### 决策与批准
+
+用户批准 HASHI1 只调整 `/meter` 呈现，维持现有 HERV3、Persona 包装与 JEV
+行为。计费凭据中的逐调用 `phase` 是职责归类事实；显示层不得再把主任务模型和
+辅助表达模型拼成一个无角色的“服务模型”列表。
+
+### 实现
+
+- 保留回合总成本、Provider、总 token、缓存和耗时统计。
+- 有阶段事实时，按职责和模型汇总物理调用次数及成本小计：`direct` 等任务阶段
+  显示为“主任务”，`persona` 显示为“进度表达”；其他已知辅助阶段使用各自标签。
+- 当前 HERV3 的阶段事实足以证明正常最终答复没有额外模型改写时，单独显示最终
+  答复模型。Persona 进度包装不会再让 Flash 看起来像任务共同执行模型。
+- 单模型费用、角色小计与总费用均复用原 `cost_source`；Provider 实报保持精确，
+  价目估值保留 `≈`，未知调用保持待确认。没有阶段事实的旧凭据继续使用原紧凑
+  模型列表，不猜测职责。异步 Meditation 尾巴保持原布局。
+
+### 验证与采用状态
+
+新的职责展示断言先在旧实现上失败，再在实现后通过。HASHI1 源码上的 `/meter`
+定向组件测试、双语目录校验、静态检查和 Protected Core 检查通过。此次没有执行
+`/reboot`、`/restart` 或真实前台验收；运行中的 HASHI1 是否采用仍未验证。
+
 ---
-_更新时间：2026-09-22 · v2.6 共享 Session meter 展示_
+_更新时间：2026-09-28 · v2.7 HERV3 模型职责与成本拆分_

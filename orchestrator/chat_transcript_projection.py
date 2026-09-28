@@ -162,15 +162,26 @@ def _canonical_projection_row(
         else None
     )
     attachments = _project_message_attachments(store, message, owner_id=owner_id)
-    text = str(message.get("text") or "")
-    if attachments and str(message.get("source") or "").strip().casefold() in {
-        "photo",
-        "document",
-        "video",
-        "sticker",
-        "multimodal",
-        "workbench_ui_chat",
-    }:
+    has_display_text = message.get("display_text") is not None
+    text = (
+        str(message["display_text"])
+        if has_display_text
+        else str(message.get("text") or "")
+    )
+    projection_source = str(message.get("source") or "").strip().casefold()
+    if (
+        not has_display_text
+        and attachments
+        and projection_source
+        in {
+            "photo",
+            "document",
+            "video",
+            "sticker",
+            "multimodal",
+            "workbench_ui_chat",
+        }
+    ):
         captions = [str(item.get("caption") or "").strip() for item in attachments]
         names = [str(item.get("filename") or "").strip() for item in attachments]
         text = next((value for value in captions if value), "") or ", ".join(
@@ -208,6 +219,33 @@ def _canonical_projection_row(
         "command_ui": command_ui,
         "canonical": True,
     }
+    message_content = message.get("content")
+    typed_reply_ids = {
+        str(part.get("event_id") or "")
+        for part in message_content
+        if isinstance(part, dict)
+        and str(part.get("type") or "").casefold() == "reply_ref"
+        and str(part.get("event_id") or "")
+    } if isinstance(message_content, list) else set()
+    reply_reference = context.get("reply_reference")
+    if isinstance(reply_reference, dict):
+        event_id = str(reply_reference.get("event_id") or "").strip()
+        quote_text = str(reply_reference.get("text") or "")[:4000]
+        if event_id in typed_reply_ids and quote_text:
+            row["reply_reference"] = {
+                "event_id": event_id,
+                "message_ref": event_id,
+                "session_id": str(message.get("session_id") or ""),
+                "context_generation": int(
+                    reply_reference.get("context_generation")
+                    or message.get("context_generation")
+                    or 1
+                ),
+                "role": "assistant",
+                "author": str(reply_reference.get("author") or ""),
+                "timestamp": str(reply_reference.get("timestamp") or ""),
+                "text": quote_text,
+            }
     return {key: value for key, value in row.items() if value not in (None, [], "")}
 
 

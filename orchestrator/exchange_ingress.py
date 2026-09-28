@@ -736,7 +736,9 @@ class ExchangeIngressService:
                 "owner_id": (
                     f"exchange:{principal.authority_id}:{principal.actor_id}"
                 ),
-                "session_surface": "hchat",
+                "connector_id": "exchange",
+                "ingress_transport": "exchange.wss",
+                "session_surface": "exchange",
                 "session_channel_key": (
                     f"{principal.registered_instance_id}:"
                     f"{delivery['conversation_id']}"

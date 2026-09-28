@@ -26,6 +26,7 @@ from orchestrator.audit_mode import (
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
+from orchestrator.hchat_delivery import HCHAT_TARGET_METADATA_KEY
 from orchestrator.memory_plus_mode import (
     MEMORY_PLUS_CLOSE,
     MEMORY_PLUS_OPEN,
@@ -299,7 +300,7 @@ def _read_state(workspace: Path) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_cmd_hchat_legacy_path_enqueues_bridge_hchat_source(tmp_path):
+async def test_cmd_hchat_single_target_enqueues_runtime_owned_delivery(tmp_path):
     manager = _make_manager(tmp_path)
     runtime, messages = _make_runtime(manager)
     runtime.name = "zelda"
@@ -316,16 +317,12 @@ async def test_cmd_hchat_legacy_path_enqueues_bridge_hchat_source(tmp_path):
 
     assert messages == []
     assert len(enqueued) == 1
-    assert enqueued[0]["source"] == "bridge:hchat"
+    assert enqueued[0]["source"] == "bridge:hchat-draft"
     assert enqueued[0]["deliver_to_telegram"] is True
-    assert "[HCHAT TASK]" in enqueued[0]["prompt"]
-    assert "--to akane --from zelda" in enqueued[0]["prompt"]
-    assert str(Path("tools") / "hchat_send.py") in enqueued[0]["prompt"]
-    assert "show the exact message body passed to --text" in enqueued[0]["prompt"]
-    assert "'queued' means the destination accepted it" in enqueued[0]["prompt"]
-    assert "'sent' requires a confirmed" in enqueued[0]["prompt"]
-    assert "Frontend Connector transport receipt" in enqueued[0]["prompt"]
-    assert "failed state must be reported as failed" in enqueued[0]["prompt"]
+    assert "[HCHAT DRAFT TASK]" in enqueued[0]["prompt"]
+    assert "hchat_send.py" not in enqueued[0]["prompt"]
+    assert "Return ONLY the exact message body" in enqueued[0]["prompt"]
+    assert enqueued[0]["request_metadata"][HCHAT_TARGET_METADATA_KEY] == "akane"
 
 
 @pytest.mark.asyncio
@@ -435,7 +432,7 @@ async def test_callback_notepad_clear_uses_confirmation(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_cmd_hchat_legacy_path_preserves_remote_target_in_prompt(tmp_path):
+async def test_cmd_hchat_runtime_delivery_freezes_remote_target(tmp_path):
     manager = _make_manager(tmp_path)
     runtime, _messages = _make_runtime(manager)
     runtime.name = "zelda"
@@ -451,17 +448,17 @@ async def test_cmd_hchat_legacy_path_preserves_remote_target_in_prompt(tmp_path)
     await FlexibleAgentRuntime.cmd_hchat(runtime, update, context)
 
     assert len(enqueued) == 1
-    assert enqueued[0]["source"] == "bridge:hchat"
+    assert enqueued[0]["source"] == "bridge:hchat-draft"
     assert 'agent "rika@hashi2"' in enqueued[0]["prompt"]
-    assert "--to rika@hashi2 --from zelda" in enqueued[0]["prompt"]
-    assert "show the exact message body passed to --text" in enqueued[0]["prompt"]
-    assert "failed state must be reported as failed" in enqueued[0]["prompt"]
+    assert "Return ONLY the exact message body" in enqueued[0]["prompt"]
+    assert "hchat_send.py" not in enqueued[0]["prompt"]
+    assert enqueued[0]["request_metadata"][HCHAT_TARGET_METADATA_KEY] == "rika@hashi2"
 
 
 @pytest.mark.asyncio
-async def test_cmd_hchat_draft_delivery_flag_enqueues_draft_source(tmp_path):
+async def test_cmd_hchat_runtime_delivery_is_default_without_feature_flag(tmp_path):
     manager = _make_manager(tmp_path)
-    manager.config.extra = {"hchat_draft_delivery": True}
+    manager.config.extra = {}
     runtime, messages = _make_runtime(manager)
     runtime.name = "zelda"
     enqueued = []
@@ -479,9 +476,30 @@ async def test_cmd_hchat_draft_delivery_flag_enqueues_draft_source(tmp_path):
     assert len(enqueued) == 1
     assert enqueued[0]["source"] == "bridge:hchat-draft"
     assert enqueued[0]["deliver_to_telegram"] is True
-    assert '"target": "akane"' in enqueued[0]["prompt"]
+    assert '"target": "akane"' not in enqueued[0]["prompt"]
+    assert enqueued[0]["request_metadata"][HCHAT_TARGET_METADATA_KEY] == "akane"
     assert "tools/hchat_send.py" not in enqueued[0]["prompt"]
     assert "Do not run shell commands." in enqueued[0]["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_cmd_hchat_rejects_invalid_single_target_before_model_call(tmp_path):
+    manager = _make_manager(tmp_path)
+    runtime, messages = _make_runtime(manager)
+    runtime.name = "zelda"
+    enqueued = []
+
+    async def enqueue_api_text(prompt, **kwargs):
+        enqueued.append({"prompt": prompt, **kwargs})
+
+    runtime.enqueue_api_text = enqueue_api_text
+    update, context = _update(["agent;rm", "review", "the", "plan"])
+
+    await FlexibleAgentRuntime.cmd_hchat(runtime, update, context)
+
+    assert enqueued == []
+    assert len(messages) == 1
+    assert "invalid" in messages[0].lower()
 
 
 @pytest.mark.asyncio
@@ -512,25 +530,21 @@ async def test_cmd_hchat_group_broadcast_has_no_preflight_reply(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("manager_factory", "draft_enabled", "expected_source"),
+    "manager_factory",
     [
-        (_make_manager, False, "bridge:hchat"),
-        (_make_manager, True, "bridge:hchat-draft"),
-        (_make_her_v2_manager, False, "bridge:hchat"),
-        (_make_her_v2_manager, True, "bridge:hchat-draft"),
+        _make_manager,
+        _make_her_v2_manager,
     ],
 )
 @pytest.mark.asyncio
 async def test_cmd_hchat_preserves_invoking_session_for_every_backend(
     tmp_path,
     manager_factory,
-    draft_enabled,
-    expected_source,
 ):
     from orchestrator import runtime_session
 
-    manager = manager_factory(tmp_path / expected_source.replace(":", "-"))
-    manager.config.extra = {"hchat_draft_delivery": draft_enabled}
+    manager = manager_factory(tmp_path / manager_factory.__name__)
+    manager.config.extra = {}
     runtime, messages = _make_runtime(manager)
     default = runtime_session.initialize_runtime_sessions(runtime)
     owner = runtime_session.owner_id(runtime)
@@ -560,7 +574,7 @@ async def test_cmd_hchat_preserves_invoking_session_for_every_backend(
 
     assert messages == []
     assert len(enqueued) == 1
-    assert enqueued[0]["source"] == expected_source
+    assert enqueued[0]["source"] == "bridge:hchat-draft"
     assert enqueued[0]["chat_id"] == 123
     assert enqueued[0]["deliver_to_telegram"] is True
     assert enqueued[0]["request_metadata"] == {
@@ -568,6 +582,7 @@ async def test_cmd_hchat_preserves_invoking_session_for_every_backend(
         "owner_id": owner,
         "session_surface": "telegram",
         "session_channel_key": "123",
+        HCHAT_TARGET_METADATA_KEY: "akane",
     }
 
 
@@ -623,7 +638,8 @@ async def test_hchat_draft_success_prepares_delivery_report(tmp_path):
 
     runtime._hchat_draft_sender = fake_sender
     item = _queued_request_from("bridge:hchat-draft")
-    core_raw = '{"target": "akane", "message": "Please review the plan.", "user_report": "I sent Akane the plan."}'
+    item.request_metadata = {HCHAT_TARGET_METADATA_KEY: "akane"}
+    core_raw = "Please review the plan."
 
     result = await FlexibleAgentRuntime._prepare_hchat_draft_success(
         runtime,
@@ -643,6 +659,112 @@ async def test_hchat_draft_success_prepares_delivery_report(tmp_path):
     assert listener_payloads[0]["hchat_draft_parsed"]["target"] == "akane"
     assert listener_payloads[0]["hchat_payload_final"] == "Please review the plan."
     assert listener_payloads[0]["hchat_delivery_status"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_hchat_draft_success_forwards_bound_output_attachments(tmp_path):
+    runtime, _sent, _voices = _make_background_runtime(tmp_path)
+    attachment = tmp_path / "review.xlsx"
+    attachment.write_bytes(b"spreadsheet")
+    runtime.session_store = SimpleNamespace(
+        run_output_attachment_content=lambda *args, **kwargs: [
+            {
+                "type": "media",
+                "attachment_id": "att-review",
+                "filename": attachment.name,
+                "local_ref": str(attachment),
+            }
+        ]
+    )
+    sender_calls = []
+
+    def fake_sender(to_agent, from_agent, text, **kwargs):
+        sender_calls.append((to_agent, from_agent, text, kwargs))
+        return True
+
+    runtime._hchat_draft_sender = fake_sender
+    item = _queued_request_from("bridge:hchat-draft")
+    item.request_metadata = {HCHAT_TARGET_METADATA_KEY: "akane@HASHI2"}
+
+    result = await FlexibleAgentRuntime._prepare_hchat_draft_success(
+        runtime,
+        item,
+        core_raw="Please inspect the workbook.",
+        completion_path="foreground",
+    )
+
+    assert result.visible_text.startswith("🟡 Hchat queued for akane@HASHI2.")
+    assert sender_calls == [
+        (
+            "akane@HASHI2",
+            runtime.name,
+            "Please inspect the workbook.",
+            {"attachments": [attachment]},
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_hchat_draft_attachment_selection_failure_aborts_delivery(tmp_path):
+    runtime, _sent, _voices = _make_background_runtime(tmp_path)
+    sender_calls = []
+
+    class FailedSelectionRegistry:
+        def consume_hchat_attachment_selection(self, request_id):
+            assert request_id == "req-001"
+            return {
+                "success": False,
+                "error": "Error: file not found: /mnt/c/missing.xlsx",
+            }
+
+    runtime.backend_manager.current_backend = SimpleNamespace(
+        tool_registry=FailedSelectionRegistry()
+    )
+    runtime._hchat_draft_sender = lambda *args, **kwargs: (
+        sender_calls.append((args, kwargs)) or True
+    )
+    item = _queued_request_from("bridge:hchat-draft")
+    item.request_metadata = {HCHAT_TARGET_METADATA_KEY: "akane@HASHI2"}
+
+    result = await FlexibleAgentRuntime._prepare_hchat_draft_success(
+        runtime,
+        item,
+        core_raw="Please inspect the workbook.",
+        completion_path="foreground",
+    )
+
+    assert result.visible_text.startswith(
+        "❌ Hchat delivery failed for akane@HASHI2."
+    )
+    assert "file not found" in result.visible_text
+    assert sender_calls == []
+
+
+@pytest.mark.asyncio
+async def test_hchat_draft_cannot_redirect_frozen_target(tmp_path):
+    runtime, _sent, _voices = _make_background_runtime(tmp_path)
+    sender_calls = []
+
+    def fake_sender(to_agent, from_agent, text, **kwargs):
+        sender_calls.append((to_agent, from_agent, text, kwargs))
+        return True
+
+    runtime._hchat_draft_sender = fake_sender
+    item = _queued_request_from("bridge:hchat-draft")
+    item.request_metadata = {HCHAT_TARGET_METADATA_KEY: "akane"}
+
+    result = await FlexibleAgentRuntime._prepare_hchat_draft_success(
+        runtime,
+        item,
+        core_raw=(
+            '{"target": "wrong-agent", "message": "Please review the plan.", '
+            '"user_report": "pretend it was sent elsewhere"}'
+        ),
+        completion_path="foreground",
+    )
+
+    assert result.visible_text.startswith("🟡 Hchat queued for akane.")
+    assert sender_calls == [("akane", "zelda", "Please review the plan.", {})]
 
 
 @pytest.mark.asyncio
@@ -819,7 +941,7 @@ def test_status_text_shows_wrapper_model_configuration():
     assert "<b>Slots</b> · <code>3</code> configured" in text
 
 
-def test_status_text_names_her_execution_mode_without_renaming_other_backends():
+def test_status_text_shows_herv3_model_effort_without_legacy_execution_mode():
     runtime = _make_status_runtime("flex", {})
     runtime.config.active_backend = "her-v2"
     runtime._get_current_effort = lambda: "medium"
@@ -828,8 +950,9 @@ def test_status_text_names_her_execution_mode_without_renaming_other_backends():
 
     text = runtime._build_status_text(detailed=False)
 
-    assert "<b>HER execution mode</b> · <code>Planned (medium)</code>" in text
-    assert "<b>Effort</b>" not in text
+    assert "<b>Backend</b> · <code>her-v3</code>" in text
+    assert "<b>Effort</b> · <code>medium</code>" in text
+    assert "HER execution mode" not in text
 
 
 def test_status_text_moves_display_settings_into_summary_for_compact_and_full(tmp_path):
@@ -1034,13 +1157,20 @@ def _make_background_runtime(
     sent = []
     voices = []
 
-    async def send_long_message(chat_id, text, request_id=None, purpose=None):
+    async def send_long_message(
+        chat_id,
+        text,
+        request_id=None,
+        purpose=None,
+        **delivery_options,
+    ):
         sent.append(
             {
                 "chat_id": chat_id,
                 "text": text,
                 "request_id": request_id,
                 "purpose": purpose,
+                **delivery_options,
             }
         )
         return 0.0, 1
@@ -1583,930 +1713,214 @@ async def test_backend_opens_menu_without_mutating(tmp_path, mode):
 
 
 @pytest.mark.asyncio
-async def test_provider_command_is_available_only_for_active_her_v2_backend(tmp_path):
+async def test_provider_command_is_available_only_for_active_herv3_backend(tmp_path):
     manager = _make_manager(tmp_path / "agent")
     runtime, messages = _make_runtime(manager)
     update, context = _update([])
 
     await FlexibleAgentRuntime.cmd_provider(runtime, update, context)
 
-    assert "HER V2 PROVIDER" in messages[-1]
+    assert "HERV3 PROVIDER" in messages[-1]
     assert "UNAVAILABLE" in messages[-1]
     assert "<code>codex-cli</code>" in messages[-1]
     assert not (manager.config.workspace_dir / "state.json").exists()
 
 
 @pytest.mark.asyncio
-async def test_provider_menu_marks_current_and_reports_locked_choices(tmp_path):
+async def test_herv3_provider_menu_exposes_one_target_without_retired_routes(tmp_path):
     manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, messages = _make_runtime(manager)
     update, context = _update([])
 
     await FlexibleAgentRuntime.cmd_provider(runtime, update, context)
 
-    text = messages[-1]
     markup = runtime._reply_payloads[-1]["reply_markup"]
     labels = [button.text for row in markup.inline_keyboard for button in row]
-    assert "HER V2 PROVIDER" in text
-    assert text.index("<b>Current</b>") < text.index("<b>Backend</b>")
-    assert "ollama (provider is disabled)" in text
-    assert labels == ["Hybrid routing", "✓ deepseek", "openrouter", "🔒 ollama"]
+    callbacks = [
+        button.callback_data
+        for row in markup.inline_keyboard
+        for button in row
+        if button.callback_data
+    ]
+    assert "HERV3 PROVIDER" in messages[-1]
+    assert any("deepseek" in label for label in labels)
+    assert any(value.startswith("herv3_provider:") for value in callbacks)
+    for retired in ("Hybrid", "Quick", "Pro", "Planning"):
+        assert retired not in " ".join(labels)
     assert not (manager.config.workspace_dir / "state.json").exists()
 
 
 @pytest.mark.asyncio
-async def test_provider_typed_choice_commits_both_model_slots_atomically(tmp_path):
+async def test_herv3_typed_provider_persists_one_main_target(tmp_path):
     manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, messages = _make_runtime(manager)
     update, context = _update(["openrouter"])
 
     await FlexibleAgentRuntime.cmd_provider(runtime, update, context)
 
-    text = messages[-1]
-    assert "HER V2 MODEL SETTINGS" in text
-    assert "<code>openrouter-api</code>" in text
-    assert "deepseek/deepseek-v4-flash" in text
-    assert "openai/gpt-4.1-mini" in text
-    state = _read_state(manager.config.workspace_dir)
-    assert state["active_backend"] == "her-v2"
-    assert "active_model" not in state
-    assert "active_provider" not in state
-    assert state["her_v2_configuration"]["provider"] == "openrouter-api"
-    assert state["her_v2_configuration"]["fast_model"] == "deepseek/deepseek-v4-flash"
-    assert state["her_v2_configuration"]["pro_model"] == "openai/gpt-4.1-mini"
+    target = manager.get_her_v3_target()
+    state = _read_state(tmp_path / "agent")
+    assert target.provider == "openrouter-api"
+    assert state["her_v3_configuration"] == target.to_dict()
+    assert "HERV3 MAIN MODEL" in messages[-1]
+    for retired in ("Quick ·", "Pro ·", "Planning", "Replan"):
+        assert retired not in messages[-1]
 
 
 @pytest.mark.asyncio
-async def test_provider_typed_name_is_case_insensitive(tmp_path):
+async def test_herv3_rejects_retired_hybrid_provider_without_mutation(tmp_path):
     manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, messages = _make_runtime(manager)
-    update, context = _update(["OpenRouter"])
-
-    await FlexibleAgentRuntime.cmd_provider(runtime, update, context)
-
-    assert "HER V2 MODEL SETTINGS" in messages[-1]
-    assert "<code>openrouter-api</code>" in messages[-1]
-    assert manager.get_her_v2_configuration().provider == "openrouter-api"
-
-
-@pytest.mark.asyncio
-async def test_typed_hybrid_configuration_stays_draft_until_apply(tmp_path):
-    manager = _make_her_v2_manager(tmp_path / "agent")
-    runtime, messages = _make_runtime(manager)
-
+    before = manager.get_her_v3_target()
     update, context = _update(["hybrid"])
-    await FlexibleAgentRuntime.cmd_provider(runtime, update, context)
-    assert "DRAFT" in messages[-1]
-    assert manager.get_her_v2_configuration().routing_mode == "single"
-
-    update, context = _update(["quick", "openrouter", "deepseek/deepseek-v4-flash"])
-    await FlexibleAgentRuntime.cmd_model(runtime, update, context)
-    update, context = _update(
-        [
-            "route",
-            "review",
-            "custom",
-            "openrouter",
-            "openai/gpt-4.1-mini",
-        ]
-    )
-    await FlexibleAgentRuntime.cmd_model(runtime, update, context)
-
-    assert manager.get_her_v2_configuration().routing_mode == "single"
-    draft = manager.get_her_v2_draft_configuration()
-    assert draft is not None
-    assert draft.fast_provider == "openrouter-api"
-    assert draft.target_for_route("review").model == "openai/gpt-4.1-mini"
-
-    update, context = _update(["apply"])
-    await FlexibleAgentRuntime.cmd_model(runtime, update, context)
-
-    active = manager.get_her_v2_configuration()
-    assert active.routing_mode == "hybrid"
-    assert active.fast_provider == "openrouter-api"
-    assert active.pro_provider == "deepseek-api"
-    assert active.target_for_route("review").model == "openai/gpt-4.1-mini"
-    assert manager.get_her_v2_draft_configuration() is None
-
-
-@pytest.mark.asyncio
-async def test_provider_command_respects_managed_model_modes(tmp_path):
-    manager = _make_her_v2_manager(tmp_path / "agent")
-    manager.agent_mode = "wrapper"
-    runtime, messages = _make_runtime(manager)
-    update, context = _update([])
 
     await FlexibleAgentRuntime.cmd_provider(runtime, update, context)
 
-    assert "HER V2 PROVIDER" in messages[-1]
-    assert "MANAGED" in messages[-1]
-    assert "<code>/core</code>" in messages[-1]
+    assert manager.get_her_v3_target() == before
+    assert "unknown HERV3 Provider: hybrid" in messages[-1]
     assert not (manager.config.workspace_dir / "state.json").exists()
 
 
 @pytest.mark.asyncio
-async def test_provider_button_commits_provider_and_both_slots_without_model_step(
-    tmp_path,
+@pytest.mark.parametrize(
+    "callback_data",
+    [
+        "her_execution",
+        "her_routes",
+        "her_route_menu:direct",
+        "her_reasoning_stages",
+        "her_model_slot:fast",
+    ],
+)
+async def test_herv3_rejects_retired_route_callbacks_without_mutation(
+    tmp_path, callback_data
 ):
     manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, _messages = _make_runtime(manager)
-
-    callback_data = (
-        runtime_model_selection.her_v2_provider_keyboard(runtime)
-        .inline_keyboard[2][0]
-        .callback_data
-    )
-    update, edits, _answers = _callback_update(callback_data)
-    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
-
-    state = _read_state(manager.config.workspace_dir)
-    assert state["active_backend"] == "her-v2"
-    assert state["her_v2_configuration"]["provider"] == "openrouter-api"
-    assert "active_provider" not in state
-    assert "active_model" not in state
-    assert "HER V2 MODEL SETTINGS" in edits[-1]["text"]
-    assert "her_model_slot:fast" in str(edits[-1]["reply_markup"])
-    assert "pmodel:" not in str(edits[-1]["reply_markup"])
-
-
-@pytest.mark.asyncio
-async def test_stale_active_provider_button_cannot_switch_from_non_her_v2_backend(
-    tmp_path,
-):
-    manager = _make_her_v2_manager(tmp_path / "agent")
-    runtime, _messages = _make_runtime(manager)
-    callback_data = (
-        runtime_model_selection.her_v2_provider_keyboard(runtime)
-        .inline_keyboard[1][0]
-        .callback_data
-    )
-    manager.config.active_backend = "codex-cli"
+    before = manager.get_her_v3_target()
     update, edits, answers = _callback_update(callback_data)
 
     await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
 
+    assert manager.get_her_v3_target() == before
     assert edits == []
     assert answers[-1]["show_alert"] is True
-    assert "only while HER v2 is active" in answers[-1]["text"]
-    assert manager.config.active_backend == "codex-cli"
+    assert "HERV3" in answers[-1]["text"]
+    assert "retired" in answers[-1]["text"].lower()
 
 
 @pytest.mark.asyncio
-async def test_stale_her_v2_model_button_cannot_bypass_managed_mode(tmp_path):
-    manager = _make_her_v2_manager(tmp_path / "agent")
-    manager.agent_mode = "wrapper"
-    runtime, _messages = _make_runtime(manager)
-    callback_data = (
-        runtime_model_selection.her_v2_slot_model_keyboard(
-            runtime,
-            "fast",
-        )
-        .inline_keyboard[1][0]
-        .callback_data
-    )
-    update, edits, answers = _callback_update(callback_data)
-
-    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
-
-    assert edits == []
-    assert answers[-1]["show_alert"] is True
-    assert "managed by the active mode" in answers[-1]["text"]
-    assert manager.get_her_v2_configuration().fast_model == "deepseek-v4-flash"
-
-
-@pytest.mark.asyncio
-async def test_stale_her_v2_route_button_cannot_bypass_managed_mode(tmp_path):
-    manager = _make_her_v2_manager(tmp_path / "agent")
-    runtime, _messages = _make_runtime(manager)
-    callback_data = (
-        runtime_model_selection.her_v2_route_keyboard(
-            runtime,
-            "planning",
-        )
-        .inline_keyboard[0][0]
-        .callback_data
-    )
-    before = manager.get_her_v2_configuration().to_dict()
-    manager.agent_mode = "wrapper"
-    update, edits, answers = _callback_update(callback_data)
-
-    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
-
-    assert edits == []
-    assert answers[-1]["show_alert"] is True
-    assert "managed by the active mode" in answers[-1]["text"]
-    assert manager.get_her_v2_configuration().to_dict() == before
-
-
-@pytest.mark.asyncio
-async def test_her_v2_model_menu_aligns_with_direct_strategic_and_planned(tmp_path):
+async def test_herv3_model_menu_has_one_target_and_no_stage_controls(tmp_path):
     manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, messages = _make_runtime(manager)
     update, context = _update([])
 
     await FlexibleAgentRuntime.cmd_model(runtime, update, context)
 
-    text = messages[-1]
-    markup = str(runtime._reply_payloads[-1]["reply_markup"])
-    assert "HER V2 MODEL SETTINGS" in text
-    assert "<b>Provider</b> · <code>deepseek-api</code>" in text
-    assert "<b>Quick model</b> · <code>deepseek-api / deepseek-v4-flash</code>" in text
-    assert "<b>Pro model</b> · <code>deepseek-api / deepseek-v4-pro</code>" in text
-    assert "<b>Direct</b> · Quick" in text
-    assert "<b>Strategic</b> · Strategy → Execution" in text
-    assert "<b>Planned</b> · Strategy → read-only Planning → Execution" in text
-    assert "simple tasks and Pro for complex or high-volume tasks" in text
-    assert "role-configured" not in text
-    assert "mixed" not in text.lower()
-    assert "her_model_slot:fast" in markup
-    assert "her_model_slot:pro" in markup
-    assert "her_route_menu:direct" in markup
-    assert "her_route_menu:triage" in markup
-    assert "her_route_menu:planning" in markup
-    assert "her_execution" in markup
-    assert "her_model_advanced" in markup
-    assert "her_model_compact" not in markup
-    assert "Replanning" not in markup
-    assert "Review" not in markup
-    assert "her_reasoning" not in markup
-
-
-def test_her_v2_model_menu_is_clear_in_english_and_chinese(tmp_path):
-    manager = _make_her_v2_manager(tmp_path / "agent")
-    runtime, _messages = _make_runtime(manager)
-
-    with ui_language.language_scope(runtime, locale="en"):
-        english_text = runtime_model_selection.her_v2_model_menu_text(runtime)
-        english_markup = str(runtime_model_selection.her_v2_model_keyboard(runtime))
-        english_execution = runtime_model_selection.her_v2_execution_text(runtime)
-        english_execution_markup = str(
-            runtime_model_selection.her_v2_execution_keyboard(runtime)
-        )
-        english_advanced = runtime_model_selection.her_v2_advanced_text(runtime)
-    with ui_language.language_scope(runtime, locale="zh-CN"):
-        chinese_text = runtime_model_selection.her_v2_model_menu_text(runtime)
-        chinese_markup = str(runtime_model_selection.her_v2_model_keyboard(runtime))
-        chinese_execution = runtime_model_selection.her_v2_execution_text(runtime)
-        chinese_execution_markup = str(
-            runtime_model_selection.her_v2_execution_keyboard(runtime)
-        )
-        chinese_advanced = runtime_model_selection.her_v2_advanced_text(runtime)
-
-    assert "HER V2 MODEL SETTINGS" in english_text
-    assert "Strategy → read-only Planning → Execution" in english_text
-    assert "Execution (Strategic + Planned) · Auto · High / Max" in english_markup
-    assert "Auto assigns simple tasks to Quick" in english_execution
-    assert "Reasoning · Off" in english_execution_markup
-    assert "saved settings are retained and hidden" in english_advanced
-    assert "HER V2 模型设置" in chinese_text
-    assert "策略 → 只读规划 → 执行" in chinese_text
-    assert "执行（Strategic／Planned）· 自动 · 高 / 最大" in chinese_markup
-    assert "高级设置" in chinese_markup
-    assert "“自动”会让简单任务使用 Quick" in chinese_execution
-    assert "推理 · 关闭" in chinese_execution_markup
-    assert "已保存设置会继续保留" in chinese_advanced
-
-
-def test_her_v2_callbacks_stay_within_telegram_limit_for_long_dynamic_values(tmp_path):
-    manager = _make_her_v2_manager(tmp_path / "agent")
-    runtime, _messages = _make_runtime(manager)
-    deepseek = next(
-        row
-        for row in manager.config.allowed_backends
-        if row["engine"] == "deepseek-api"
-    )
-    deepseek["models"].append("provider/" + "m" * 90)
-    manager.apply_her_v2_configuration(
-        manager.prepare_her_v2_route_reasoning(
-            "execution_high_volume",
-            "r" * 64,
-        )
-    )
-    manager.begin_her_v2_hybrid_draft()
-    keyboards = [
-        runtime_model_selection.her_v2_provider_keyboard(runtime),
-        runtime_model_selection.her_v2_slot_model_keyboard(runtime, "fast"),
-        runtime_model_selection.her_v2_routes_keyboard(runtime),
-        runtime_model_selection.her_v2_execution_keyboard(runtime),
-        runtime_model_selection.her_v2_advanced_keyboard(runtime),
-        runtime_model_selection.her_v2_advanced_routes_keyboard(runtime),
-        runtime_model_selection.her_v2_route_keyboard(
-            runtime,
-            "execution_high_volume",
-            advanced=True,
-        ),
-        runtime_model_selection.her_v2_compact_keyboard(runtime),
-        runtime_model_selection.her_v2_compact_provider_keyboard(runtime),
-        runtime_model_selection.her_v2_target_provider_keyboard(runtime, "fast"),
-        runtime_model_selection.her_v2_route_provider_keyboard(
-            runtime,
-            "execution_high_volume",
-            advanced=True,
-        ),
-    ]
-    for provider_index, option in enumerate(manager.get_her_v2_provider_options()):
-        if not option.get("available") or not option.get("models"):
-            continue
-        keyboards.append(
-            runtime_model_selection.her_v2_compact_model_keyboard(
-                runtime,
-                provider_index,
-            )
-        )
-        keyboards.append(
-            runtime_model_selection.her_v2_target_model_keyboard(
-                runtime,
-                "fast",
-                provider_index,
-            )
-        )
-        keyboards.append(
-            runtime_model_selection.her_v2_route_model_keyboard(
-                runtime,
-                "execution_high_volume",
-                provider_index,
-                advanced=True,
-            )
-        )
-        for model_index, _model in enumerate(option["models"]):
-            keyboards.append(
-                runtime_model_selection.her_v2_compact_reasoning_keyboard(
-                    runtime,
-                    provider_index,
-                    model_index,
-                )
-            )
-
+    markup = runtime._reply_payloads[-1]["reply_markup"]
     callbacks = [
         button.callback_data
-        for keyboard in keyboards
-        for row in keyboard.inline_keyboard
+        for row in markup.inline_keyboard
+        for button in row
+        if button.callback_data
+    ]
+    assert "HERV3 MAIN MODEL" in messages[-1]
+    assert any(value.startswith("herv3_model:") for value in callbacks)
+    assert not any(
+        token in value
+        for value in callbacks
+        for token in ("her_route", "her_execution", "her_reasoning")
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_alias", ["direct", "strategic", "planned"])
+async def test_herv3_rejects_legacy_effort_aliases(tmp_path, legacy_alias):
+    manager = _make_her_v2_manager(tmp_path / "agent")
+    runtime, messages = _make_runtime(manager)
+    before = manager.current_backend.effort
+    update, context = _update([legacy_alias])
+
+    await FlexibleAgentRuntime.cmd_effort(runtime, update, context)
+
+    assert manager.current_backend.effort == before
+    assert legacy_alias in messages[-1]
+    assert "Available" in messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_herv3_effort_menu_uses_provider_reasoning_levels_only(tmp_path):
+    manager = _make_her_v2_manager(tmp_path / "agent")
+    runtime, messages = _make_runtime(manager)
+    update, context = _update([])
+
+    await FlexibleAgentRuntime.cmd_effort(runtime, update, context)
+
+    markup = str(runtime._reply_payloads[-1]["reply_markup"])
+    assert "HERV3 MODEL EFFORT" in messages[-1]
+    for effort in ("off", "high", "max"):
+        assert effort in markup
+    for retired in ("Direct", "Strategic", "Planned", "Quick", "Pro"):
+        assert retired not in messages[-1]
+        assert retired not in markup
+
+
+def test_herv3_provider_and_model_callbacks_fit_frontend_limit(tmp_path):
+    manager = _make_her_v2_manager(tmp_path / "agent")
+    runtime, _messages = _make_runtime(manager)
+
+    provider_markup = runtime_model_selection.her_v3_provider_keyboard(runtime)
+    model_markup = runtime_model_selection.her_v3_model_keyboard(runtime)
+    callbacks = [
+        button.callback_data
+        for markup in (provider_markup, model_markup)
+        for row in markup.inline_keyboard
         for button in row
         if button.callback_data
     ]
 
     assert callbacks
-    assert max(len(value.encode("utf-8")) for value in callbacks) <= 64
+    assert all(len(value.encode("utf-8")) <= 64 for value in callbacks)
 
 
 @pytest.mark.asyncio
-async def test_her_v2_compact_typed_and_button_controls_are_independent(tmp_path):
+async def test_public_herv3_backend_name_maps_to_internal_compatibility_id(tmp_path):
     manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, messages = _make_runtime(manager)
-    before = manager.get_her_v2_configuration().to_dict()
-
-    update, context = _update(["compact", "status"])
-    await FlexibleAgentRuntime.cmd_model(runtime, update, context)
-    assert "HASHI Context Compact" in messages[-1]
-    assert "inherit_quick" in messages[-1]
-    assert "deepseek-api / deepseek-v4-flash" in messages[-1]
-    assert "HER effort</b> · <code>high" in messages[-1]
-
-    update, edits, answers = _callback_update("her_model_compact_mode:off")
-    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
-
-    assert any(answer.get("show_alert") for answer in answers)
-    assert "Quick/Light model at high effort" in answers[-1]["text"]
-    assert edits == []
-    assert manager.get_her_v2_configuration().to_dict() == before
-
-
-def test_compact_route_follows_quick_target_after_provider_change(tmp_path):
-    from orchestrator.context_compaction import resolve_compact_route
-
-    manager = _make_her_v2_manager(tmp_path / "agent")
-    runtime, _messages = _make_runtime(manager)
-
-    before = resolve_compact_route(runtime)
-    manager.apply_her_v2_configuration(manager.prepare_her_v2_provider("openrouter"))
-    after = resolve_compact_route(runtime)
-
-    assert before.provider == "deepseek-api"
-    assert before.model == "deepseek-v4-flash"
-    assert after.provider == manager.get_her_v2_configuration().fast_provider
-    assert after.model == manager.get_her_v2_configuration().fast_model
-    assert after.her_effort == "high"
-    assert after.crosses_provider is False
-
-
-@pytest.mark.asyncio
-async def test_backend_her_v2_button_switches_backend_without_provider_or_model_step(
-    tmp_path,
-):
-    manager = _make_her_v2_manager(tmp_path / "agent")
-    runtime, _messages = _make_runtime(manager)
-    manager.config.active_backend = "codex-cli"
-    manager.config.allowed_backends.append({"engine": "codex-cli", "model": "gpt-5.4"})
-    update, edits, _answers = _callback_update("backend:her-v2:plain")
-
-    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
-
-    assert manager.config.active_backend == "her-v2"
-    assert "HER V2 SELECTED" in edits[-1]["text"]
-    assert "role-configured" not in edits[-1]["text"]
-    assert edits[-1].get("reply_markup") is None
-
-
-@pytest.mark.asyncio
-async def test_backend_her_v2_typed_command_switches_without_role_model(tmp_path):
-    manager = _make_her_v2_manager(tmp_path / "agent")
-    runtime, messages = _make_runtime(manager)
-    manager.config.active_backend = "codex-cli"
-    manager.config.allowed_backends.append({"engine": "codex-cli", "model": "gpt-5.4"})
-    update, context = _update(["her-v2"])
+    update, context = _update(["her-v3"])
 
     await FlexibleAgentRuntime.cmd_backend(runtime, update, context)
 
     assert manager.config.active_backend == "her-v2"
-    assert "HER V2 SELECTED" in messages[-1]
-    assert "role-configured" not in messages[-1]
-
-
-def test_backend_menu_hides_her_v2_provider_only_engines(tmp_path):
-    manager = _make_her_v2_manager(tmp_path / "agent")
-    runtime, _messages = _make_runtime(manager)
-
-    callbacks = [
-        button.callback_data
-        for row in runtime._backend_keyboard().inline_keyboard
-        for button in row
-    ]
-
-    assert "backend:her-v2:plain" in callbacks
-    assert not any("openrouter-api" in callback for callback in callbacks)
-    assert not any("deepseek-api" in callback for callback in callbacks)
+    assert "HERV3 PROVIDER" in messages[-1]
+    assert "HERV2" not in messages[-1]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("engine", ["openrouter-api", "deepseek-api"])
-async def test_backend_typed_command_retires_provider_only_engine(tmp_path, engine):
-    manager = _make_her_v2_manager(tmp_path / engine)
-    runtime, messages = _make_runtime(manager)
-    update, context = _update([engine])
-
-    await FlexibleAgentRuntime.cmd_backend(runtime, update, context)
-
-    assert manager.config.active_backend == "her-v2"
-    assert "HER v2 provider, not a selectable backend" in messages[-1]
-    assert "/backend her-v2" in messages[-1]
-
-
-@pytest.mark.asyncio
-async def test_backend_stale_provider_only_callback_is_rejected(tmp_path):
-    manager = _make_her_v2_manager(tmp_path / "agent")
-    runtime, _messages = _make_runtime(manager)
-    update, edits, answers = _callback_update("backend:openrouter-api:plain")
-
-    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
-
-    assert edits == []
-    assert answers[-1]["show_alert"] is True
-    assert "through HER v2 only" in answers[-1]["text"]
-
-
-@pytest.mark.asyncio
-async def test_backend_her_v2_rejects_single_model_argument(tmp_path):
-    manager = _make_her_v2_manager(tmp_path / "agent")
-    runtime, messages = _make_runtime(manager)
-    manager.config.active_backend = "codex-cli"
-    manager.config.allowed_backends.append({"engine": "codex-cli", "model": "gpt-5.4"})
-    update, context = _update(["her-v2", "role-configured"])
-
-    await FlexibleAgentRuntime.cmd_backend(runtime, update, context)
-
-    assert manager.config.active_backend == "codex-cli"
-    assert "does not select a single backend model" in messages[-1]
-
-
-@pytest.mark.asyncio
-async def test_her_v2_model_and_reasoning_buttons_update_only_their_targets(tmp_path):
-    manager = _make_her_v2_manager(tmp_path / "agent")
-    runtime, _messages = _make_runtime(manager)
-
-    model_callback = (
-        runtime_model_selection.her_v2_slot_model_keyboard(
-            runtime,
-            "fast",
-        )
-        .inline_keyboard[1][0]
-        .callback_data
-    )
-    update, edits, _answers = _callback_update(model_callback)
-    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
-    selected = manager.get_her_v2_configuration()
-    assert selected.fast_model == "deepseek-v4-pro"
-    assert selected.pro_model == "deepseek-v4-pro"
-    reasoning_before = dict(selected.profile_reasoning)
-    routes_before = dict(selected.route_model_slots)
-
-    route_callback = (
-        runtime_model_selection.her_v2_route_keyboard(
-            runtime,
-            "planning",
-        )
-        .inline_keyboard[0][0]
-        .callback_data
-    )
-    update, edits, _answers = _callback_update(route_callback)
-    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
-    selected = manager.get_her_v2_configuration()
-    assert selected.model_slot_for_route("planning") == "fast"
-    assert selected.route_reasoning == {}
-    assert selected.fast_model == "deepseek-v4-pro"
-    assert selected.pro_model == "deepseek-v4-pro"
-
-    route_keyboard = runtime_model_selection.her_v2_route_keyboard(runtime, "planning")
-    reasoning_callback = next(
-        button.callback_data
-        for row in route_keyboard.inline_keyboard
-        for button in row
-        if button.text.endswith("Max")
-    )
-    update, edits, _answers = _callback_update(reasoning_callback)
-    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
-    selected = manager.get_her_v2_configuration()
-    assert selected.route_reasoning == {"planning": "max"}
-    assert selected.model_slot_for_route("planning") == "fast"
-    assert selected.model_slot_for_route("review") == routes_before["review"]
-    assert selected.profile_reasoning == reasoning_before
-    assert "HER V2 TASK STAGE" in edits[-1]["text"]
-
-
-def test_her_v2_stage_menu_groups_execution_and_hides_internal_routes(tmp_path):
-    manager = _make_her_v2_manager(tmp_path / "agent")
-    runtime, _messages = _make_runtime(manager)
-
-    route_markup = str(runtime_model_selection.her_v2_routes_keyboard(runtime))
-    direct_markup = str(
-        runtime_model_selection.her_v2_route_keyboard(runtime, "direct")
-    )
-    execution_markup = str(runtime_model_selection.her_v2_execution_keyboard(runtime))
-    advanced_markup = str(
-        runtime_model_selection.her_v2_advanced_routes_keyboard(runtime)
-    )
-
-    assert "Direct" in route_markup
-    assert "Strategy (Strategic + Planned)" in route_markup
-    assert "Planning (Planned only)" in route_markup
-    assert "Execution (Strategic + Planned) · Auto" in route_markup
-    assert "Simple execution" not in route_markup
-    assert "Complex execution" not in route_markup
-    assert "High-volume execution" not in route_markup
-    assert "Replanning" not in route_markup
-    assert "Review" not in route_markup
-    assert "Meditation" not in route_markup
-    assert "Structure repair" not in route_markup
-    assert "Model · Quick" in direct_markup
-    assert "Model · Pro" not in direct_markup
-    assert "Model · Custom" not in direct_markup
-    assert "Reasoning · Off" in direct_markup
-    assert "Reasoning · High" in direct_markup
-    assert "Reasoning · Max" in direct_markup
-    assert "Reasoning · Low" not in direct_markup
-    assert "Configured default (High)" in direct_markup
-    assert "Auto" in execution_markup
-    assert "Quick" in execution_markup
-    assert "Pro" in execution_markup
-    assert "Simple execution" in advanced_markup
-    assert "Complex execution" in advanced_markup
-    assert "High-volume execution" in advanced_markup
-    assert "Replanning" not in advanced_markup
-    assert "Review" not in advanced_markup
-    assert "Meditation" not in advanced_markup
-
-
-def test_her_v2_reasoning_menu_does_not_invent_undeclared_provider_levels(tmp_path):
-    manager = _make_her_v2_manager(tmp_path / "agent")
-    runtime, _messages = _make_runtime(manager)
-    manager.apply_her_v2_configuration(manager.prepare_her_v2_provider("openrouter"))
-
-    markup = str(runtime_model_selection.her_v2_route_keyboard(runtime, "direct"))
-
-    assert "Configured default (High)" in markup
-    assert "Reasoning · Off" not in markup
-    assert "Reasoning · Low" not in markup
-    assert "Reasoning · High" not in markup
-    assert "Reasoning · Max" not in markup
-
-
-def test_her_v2_custom_targets_appear_only_in_hybrid_advanced_settings(tmp_path):
-    manager = _make_her_v2_manager(tmp_path / "agent")
-    runtime, _messages = _make_runtime(manager)
-    manager.begin_her_v2_hybrid_draft()
-
-    standard = str(runtime_model_selection.her_v2_route_keyboard(runtime, "triage"))
-    advanced = str(
-        runtime_model_selection.her_v2_route_keyboard(
-            runtime,
-            "triage",
-            advanced=True,
-        )
-    )
-
-    assert "Model · Custom" not in standard
-    assert "Model · Custom" in advanced
-    assert "her_adv_custom:triage" in advanced
-    assert "Replanning" not in str(
-        runtime_model_selection.her_v2_advanced_routes_keyboard(runtime)
-    )
-
-
-@pytest.mark.asyncio
-async def test_her_v2_advanced_custom_target_callback_stays_in_advanced_flow(tmp_path):
-    manager = _make_her_v2_manager(tmp_path / "agent")
-    runtime, _messages = _make_runtime(manager)
-    manager.begin_her_v2_hybrid_draft()
-
-    custom_callback = next(
-        button.callback_data
-        for row in runtime_model_selection.her_v2_route_keyboard(
-            runtime,
-            "triage",
-            advanced=True,
-        ).inline_keyboard
-        for button in row
-        if button.callback_data.startswith("her_adv_custom:")
-    )
-    update, edits, _answers = _callback_update(custom_callback)
-    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
-    assert "her_adv_provider:triage" in str(edits[-1]["reply_markup"])
-
-    options = manager.get_her_v2_provider_options()
-    provider_index = next(
-        index
-        for index, option in enumerate(options)
-        if option["engine"] == "openrouter-api"
-    )
-    provider_callback = next(
-        button.callback_data
-        for row in runtime_model_selection.her_v2_route_provider_keyboard(
-            runtime,
-            "triage",
-            advanced=True,
-        ).inline_keyboard
-        for button in row
-        if button.callback_data.startswith(f"her_adv_provider:triage:{provider_index}:")
-    )
-    update, edits, _answers = _callback_update(provider_callback)
-    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
-    assert "her_adv_model:triage" in str(edits[-1]["reply_markup"])
-
-    model_callback = (
-        runtime_model_selection.her_v2_route_model_keyboard(
-            runtime,
-            "triage",
-            provider_index,
-            advanced=True,
-        )
-        .inline_keyboard[0][0]
-        .callback_data
-    )
-    update, edits, _answers = _callback_update(model_callback)
-    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
-
-    active = manager.get_her_v2_configuration()
-    draft = manager.get_her_v2_edit_configuration()
-    assert active.routing_mode == "single"
-    assert "triage" not in active.route_targets
-    assert draft.routing_mode == "hybrid"
-    assert draft.target_for_route("triage").provider == "openrouter-api"
-    assert "her_adv_custom:triage" in str(edits[-1]["reply_markup"])
-
-
-@pytest.mark.asyncio
-async def test_her_v2_execution_auto_quick_pro_and_reasoning_are_grouped_atomically(
-    tmp_path,
-):
-    manager = _make_her_v2_manager(tmp_path / "agent")
-    runtime, _messages = _make_runtime(manager)
-    before = manager.get_her_v2_configuration()
-    execution_names = {
-        route.value for route in runtime_model_selection.HER_V2_EXECUTION_ROUTES
-    }
-    untouched_slots = {
-        name: value
-        for name, value in before.route_model_slots.items()
-        if name not in execution_names
-    }
-    untouched_reasoning = {
-        name: value
-        for name, value in before.route_reasoning.items()
-        if name not in execution_names
-    }
-    review_slot = before.model_slot_for_route("review")
-    review_reasoning = before.reasoning_for_route(
-        manager._her_v2_base_config(),
-        "review",
-    )
-
-    assert runtime_model_selection._her_v2_execution_mode(runtime) == "auto"
-    update, _edits, _answers = _callback_update("her_execution_mode:fast")
-    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
-
-    selected = manager.get_her_v2_configuration()
-    assert [
-        selected.model_slot_for_route(route)
-        for route in runtime_model_selection.HER_V2_EXECUTION_ROUTES
-    ] == ["fast", "fast", "fast"]
-    assert selected.model_slot_for_route("review") == review_slot
-
-    update, _edits, _answers = _callback_update("her_execution_mode:auto")
-    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
-    selected = manager.get_her_v2_configuration()
-    assert [
-        selected.model_slot_for_route(route)
-        for route in runtime_model_selection.HER_V2_EXECUTION_ROUTES
-    ] == ["fast", "pro", "pro"]
-
-    reasoning_keyboard = runtime_model_selection.her_v2_execution_keyboard(runtime)
-    reasoning_callback = next(
-        button.callback_data
-        for row in reasoning_keyboard.inline_keyboard
-        for button in row
-        if button.text.endswith("Max")
-    )
-    update, _edits, _answers = _callback_update(reasoning_callback)
-    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
-
-    selected = manager.get_her_v2_configuration()
-    assert {
-        route.value: selected.route_reasoning.get(route.value)
-        for route in runtime_model_selection.HER_V2_EXECUTION_ROUTES
-    } == {
-        "execution_simple": "max",
-        "execution_complex": "max",
-        "execution_high_volume": "max",
-    }
-    assert (
-        selected.reasoning_for_route(
-            manager._her_v2_base_config(),
-            "review",
-        )
-        == review_reasoning
-    )
-    assert {
-        name: value
-        for name, value in selected.route_model_slots.items()
-        if name not in execution_names
-    } == untouched_slots
-    assert {
-        name: value
-        for name, value in selected.route_reasoning.items()
-        if name not in execution_names
-    } == untouched_reasoning
-
-
-@pytest.mark.asyncio
-async def test_stale_her_v2_model_menu_cannot_cross_provider_boundary(tmp_path):
-    manager = _make_her_v2_manager(tmp_path / "agent")
-    runtime, _messages = _make_runtime(manager)
-    stale_callback = (
-        runtime_model_selection.her_v2_slot_model_keyboard(
-            runtime,
-            "fast",
-        )
-        .inline_keyboard[1][0]
-        .callback_data
-    )
-    manager.apply_her_v2_configuration(manager.prepare_her_v2_provider("openrouter"))
-    update, edits, answers = _callback_update(stale_callback)
-
-    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
-
-    assert edits == []
-    assert answers[-1]["show_alert"] is True
-    assert "provider changed" in answers[-1]["text"]
-    assert manager.get_her_v2_configuration().provider == "openrouter-api"
-
-
-@pytest.mark.asyncio
-async def test_stale_her_v2_model_menu_rejects_reordered_model_grants(tmp_path):
-    manager = _make_her_v2_manager(tmp_path / "agent")
-    runtime, _messages = _make_runtime(manager)
-    stale_callback = (
-        runtime_model_selection.her_v2_slot_model_keyboard(
-            runtime,
-            "fast",
-        )
-        .inline_keyboard[1][0]
-        .callback_data
-    )
-    deepseek = next(
-        row
-        for row in manager.config.allowed_backends
-        if row["engine"] == "deepseek-api"
-    )
-    deepseek["models"].reverse()
-    update, edits, answers = _callback_update(stale_callback)
-
-    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
-
-    assert edits == []
-    assert answers[-1]["show_alert"] is True
-    assert "model menu is stale" in answers[-1]["text"]
-    assert manager.get_her_v2_configuration().fast_model == "deepseek-v4-flash"
-
-
-@pytest.mark.asyncio
-async def test_her_v2_model_typed_commands_update_slots_and_route_reasoning(tmp_path):
-    manager = _make_her_v2_manager(tmp_path / "agent")
-    runtime, messages = _make_runtime(manager)
-
-    update, context = _update(["quick", "deepseek-v4-pro"])
-    await FlexibleAgentRuntime.cmd_model(runtime, update, context)
-    assert manager.get_her_v2_configuration().fast_model == "deepseek-v4-pro"
-    assert manager.get_her_v2_configuration().pro_model == "deepseek-v4-pro"
-
-    update, context = _update(["route", "simple", "pro"])
-    await FlexibleAgentRuntime.cmd_model(runtime, update, context)
-    assert (
-        manager.get_her_v2_configuration().model_slot_for_route("execution_simple")
-        == "pro"
-    )
-
-    update, context = _update(["reasoning", "review", "low"])
-    await FlexibleAgentRuntime.cmd_model(runtime, update, context)
-    selected = manager.get_her_v2_configuration()
-    assert selected.route_reasoning["review"] == "low"
-    assert selected.stage_reasoning == {}
-    assert "HER V2 TASK STAGE" in messages[-1]
-
-
-@pytest.mark.asyncio
-async def test_retired_reasoning_button_fails_closed_without_mutation(tmp_path):
-    manager = _make_her_v2_manager(tmp_path / "agent")
-    runtime, _messages = _make_runtime(manager)
-    before = manager.get_her_v2_configuration().to_dict()
-    update, edits, answers = _callback_update("her_reasoning:review:1:abcdef")
-
-    await FlexibleAgentRuntime.callback_model(runtime, update, SimpleNamespace())
-
-    assert edits == []
-    assert answers[-1]["show_alert"] is True
-    assert "old reasoning menu was retired" in answers[-1]["text"]
-    assert manager.get_her_v2_configuration().to_dict() == before
-
-
-@pytest.mark.asyncio
-async def test_her_v2_effort_change_does_not_mutate_provider_reasoning(tmp_path):
-    manager = _make_her_v2_manager(tmp_path / "agent")
-    runtime, _messages = _make_runtime(manager)
-    before = manager.get_her_v2_configuration().to_dict()
-    update, context = _update(["strategic"])
-
-    await FlexibleAgentRuntime.cmd_effort(runtime, update, context)
-
-    after = manager.get_her_v2_configuration().to_dict()
-    assert after == before
-    assert manager.current_backend.effort == "low"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("alias", "canonical", "label"),
-    [
-        ("direct", "zero", "Direct (zero)"),
-        ("strategic", "low", "Strategic (low)"),
-        ("fast", "low", "Strategic (low)"),
-        ("planned", "medium", "Planned (medium)"),
-    ],
-)
-async def test_her_v2_effort_aliases_persist_canonical_execution_modes(
-    tmp_path, alias, canonical, label
-):
-    manager = _make_her_v2_manager(tmp_path / "agent")
-    runtime, messages = _make_runtime(manager)
-    update, context = _update([alias])
-
-    await FlexibleAgentRuntime.cmd_effort(runtime, update, context)
-
-    assert manager.current_backend.effort == canonical
-    assert label in messages[-1]
-    assert _read_state(tmp_path / "agent")["backend_efforts"]["her-v2"] == canonical
-
-
-@pytest.mark.asyncio
-async def test_her_v2_effort_menu_uses_execution_mode_names(tmp_path):
+async def test_backend_menu_shows_herv3_and_hides_provider_only_engines(tmp_path):
     manager = _make_her_v2_manager(tmp_path / "agent")
     runtime, messages = _make_runtime(manager)
     update, context = _update([])
 
-    await FlexibleAgentRuntime.cmd_effort(runtime, update, context)
+    await FlexibleAgentRuntime.cmd_backend(runtime, update, context)
 
-    assert "HER EXECUTION MODE" in messages[-1]
-    markup = str(runtime._reply_payloads[-1]["reply_markup"])
-    for label in (
-        "Direct (zero)",
-        "Strategic (low)",
-        "Planned (medium)",
-    ):
-        assert label in markup
-    for retired_label in (
-        "Adaptive (high)",
-        "Reviewed (xhigh)",
-        "Assured (max)",
-    ):
-        assert retired_label not in markup
+    rendered = messages[-1] + str(runtime._reply_payloads[-1]["reply_markup"])
+    assert "HERV3" in rendered
+    assert "backend:deepseek-api:" not in rendered
+    assert "backend:openrouter-api:" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_provider_only_backend_command_points_to_herv3(tmp_path):
+    manager = _make_her_v2_manager(tmp_path / "agent")
+    runtime, messages = _make_runtime(manager)
+    update, context = _update(["deepseek-api"])
+
+    await FlexibleAgentRuntime.cmd_backend(runtime, update, context)
+
+    assert manager.config.active_backend == "her-v2"
+    assert "HERV3 Provider" in messages[-1]
+    assert "/backend her-v3" in messages[-1]
 
 
 @pytest.mark.asyncio
@@ -2782,26 +2196,14 @@ def test_instance_model_reselection_preserves_model_and_effort(tmp_path):
     assert manager.current_backend.config.model == "instance-preview"
 
 
-def test_her_provider_reasoning_uses_instance_gateway_efforts(tmp_path):
+def test_herv3_provider_reasoning_uses_instance_gateway_efforts(tmp_path):
     runtime, manager = _instance_preview_runtime(tmp_path / "agent")
     manager.config.active_backend = "her-v2"
-    manager.config.allowed_backends.append({
-        "engine": "her-v2", "model": "role-configured",
-        "model_efforts": {"role-configured": ["max"]},
-    })
     target = SimpleNamespace(provider="hashi-api", model="instance-preview")
-    selected = SimpleNamespace(
-        target_for_route=lambda route: target,
-        reasoning_for_route=lambda route: "high",
-        route_reasoning={},
-    )
-    manager.get_her_v2_configuration = lambda: selected
-    manager.get_her_v2_edit_configuration = lambda: selected
-    assert runtime_model_selection._her_v2_execution_reasoning_choices(runtime) == [
-        "low", "medium", "high", "xhigh", "max", "inherit"
-    ]
+    manager.get_her_v3_target = lambda: target
+
     assert runtime._get_available_efforts_for("her-v2", "role-configured") == [
-        "zero", "low", "medium"
+        "low", "medium", "high", "xhigh", "max"
     ]
 
 

@@ -22,7 +22,7 @@ back through Frontend Connectors.
 
 PAO is agnostic to both. Its outer selection is normally an Engine Provider.
 Model Provider routing normally belongs inside the selected Engine, especially
-HER v2. PAO may store or forward a Model Provider preference through a typed
+HERV3. PAO may store or forward a Model Provider preference through a typed
 Engine contract, but it must not absorb provider-specific request, thread, or
 reasoning semantics.
 
@@ -34,6 +34,8 @@ PAO owns the following product domains.
 
 - Agent identity, directory, lifecycle, and active runtime binding;
 - Engine Provider discovery, selection, availability, and migration aliases;
+- one revisioned Workzone profile per authenticated owner and Agent, independent
+  of Conversation Session selection;
 - startup, stop, restart, hot-reload coordination, and runtime health; and
 - Fixed/Flex working-mode policy, retired outer-composition migration, and any
   future runtime composition that spans Engines.
@@ -66,11 +68,16 @@ PAO is the sole owner of:
 - Agent and frontend/channel binding;
 - Messages, Runs, attempts, Events, consumer acknowledgements, and fencing;
 - context generation, archive, fresh, fork, promotion, and recovery controls;
-- Workzone state and revision; and
 - the stable Conversation-to-Engine Session binding.
 
 An Engine may own its internal Engine Session but must not become a second
 owner of the enclosing Conversation Session.
+
+Workzone configuration is Agent control state, not Conversation Session state.
+`/new`, `/use`, `/fresh`, and `/archive` therefore cannot replace it. PAO freezes
+the current Agent Workzone revision into each admitted Run so an in-flight Run
+cannot observe a later menu change. Legacy Session Workzone rows remain inert
+compatibility records and are not silently migrated or merged.
 
 ### 2.3 Outer orchestration
 
@@ -84,9 +91,10 @@ instances, including:
 - transfers, queues, callbacks, cancellation, and delivery coordination; and
 - outer approvals, policy, audit, and operational governance.
 
-HER v2's Strategy, Planning, Execution, Tool loop, and recovery inside one HER
-Engine Session are **inner orchestration** owned by HER v2. The shared word
-`orchestration` does not transfer that lifecycle to PAO.
+HERV3's continuous main-model/tool loop and recovery inside one HER Engine
+Session are **inner orchestration** owned by HERV3. The shared word
+`orchestration` does not transfer that lifecycle to PAO. Optional Strategy
+Cards and Habits are advisory context, not PAO routes.
 
 #### Scheduler time contract
 
@@ -111,7 +119,7 @@ PAO owns the HASHI-level capability registry and execution authority:
 - preserve PAO-level execution and side-effect evidence; and
 - stop, fence, or reconcile work when required.
 
-PCM projects the authorised catalogue into an Engine request. HER v2 decides
+PCM projects the authorised catalogue into an Engine request. HERV3 decides
 when to request an available Tool during its Turn and preserves HER-level Tool
 evidence. Neither PCM nor HER may grant a capability withheld by PAO.
 
@@ -130,7 +138,7 @@ PAO does not own:
 
 - Persona, Context, or Memory content assembly, which belongs to PCM;
 - an Engine's internal Strategy/Planning/Execution lifecycle;
-- HER v2's Engine Session, checkpoints, Compact, or Model Provider routing;
+- HERV3's Engine Session, checkpoints, Compact, or Model Provider routing;
 - provider-native thread, response-chain, cache, or hidden state;
 - frontend window state, layout, unsent drafts, or product-specific data; or
 - platform- and instance-specific values that belong in configuration layers.
@@ -193,7 +201,7 @@ The Conversation Session is durable across frontend reconnects and may outlive
 an Engine process. A Run is accepted at most once for one idempotency boundary.
 Late writers and superseded attempts fail closed.
 
-When HER v2 is selected, PAO binds the Conversation Session and context
+When HERV3 is selected, PAO binds the Conversation Session and context
 generation to one HER Engine Session. PAO sends a complete PCM snapshot at
 open/rebase and authoritative deltas thereafter. HER owns the logical thread
 inside that binding; PAO retains outer Message, Run, Event, and delivery
@@ -245,24 +253,19 @@ may cache projections but must reconstruct them from PAO-owned state.
 
 PAO also owns the admission-time delivery decision for each Run. A Connector
 may request a projection policy only through a typed, versioned contract. The
-current TUI contract is `hashi.frontend-delivery` version 1, has `scope=run`, is
-bound to an ephemeral TUI client identity, and contains the boolean
-`telegram.mirror` projection choice. PAO validates and snapshots it before the
-Run enters the queue; changing frontend preferences later cannot mutate an
-in-flight Run. Missing, malformed, forged, legacy, or non-TUI suppression input
-fails visible.
-
-Turning off that projection does not create a new Conversation authority. The
-TUI continues to use the shared Conversation Session and PAO still commits its
-Message, Run, Events and terminal result. Only the Telegram delivery projector
-is skipped for that TUI-origin Run; Telegram-native input, Scheduler, HChat,
-other clients and other Runs retain their own admission decisions. PAO does not
-replay skipped projections when a later Run enables Telegram mirroring.
+The former TUI `hashi.frontend-delivery` version 1 per-Run value is read-only
+compatibility input. FC owns one mirror switch per owner and external platform.
+PAO validates legacy client input but freezes the central FC preference when
+it admits each Run. TUI remains in the shared Conversation Session, and
+changing a switch cannot redirect or replay an existing Run. Turning a mirror
+off affects every non-origin source for that owner, including scheduled work;
+conversations started on the platform retain their primary reply route.
 
 PAO projects live presentation facts through Agent metadata. Engine, model,
-effort and current switches come from the active runtime; HER v2 alone supplies
-its structured Quick/Pro Model Provider routing. Frontends may format these
-facts but must not infer them from files or become another catalogue owner.
+effort and current switches come from the active runtime; HERV3 supplies its
+one selected Model Provider/model target and supported reasoning values.
+Frontends may format these facts but must not infer them from files or become
+another catalogue owner.
 
 ### 6.4 Per-message source and private authorization
 
@@ -333,7 +336,7 @@ Commands are connector entry points into domain contracts.
 |---|---|---|
 | `/new`, `/fresh`, `/sessions`, `/use`, `/current`, `/archive`, `/fork` | Conversation Session lifecycle and selection | PCM supplies the resulting Context projection |
 | `/backend` and compatible Engine selection | Engine Provider binding and migration | Selected Engine owns its internal Session |
-| `/workzone` | Workzone state, validation, and revision | PCM projects enabled Workzones |
+| `/workzone` | Owner/Agent Workzone state, validation, and revision | PCM projects the admitted Run snapshot |
 | `/handoff` | Session continuity operation | PCM assembles the continuity payload |
 | `/clear` | Coordinate Session/media/Engine cleanup | Connector media and selected Engine participate |
 | `/jobs`, `/loop`, `/bg` | Job and outer orchestration lifecycle | Connector renders status |
@@ -361,7 +364,7 @@ strict-debug Skill behavior.
 request's fail-open terminal projection with the existing Tool audit/Smart Tool
 ledger and BackgroundJob receipts. It reports Provider request/response IDs,
 wire references, observed writes/effects, final state, and whether safe retry
-evidence is present, absent, or unknown. It never retries work, changes HER v2
+evidence is present, absent, or unknown. It never retries work, changes HERV3
 control flow, or makes diagnostic persistence a completion condition.
 
 ### HASHI1 automatic debug-reporting trial (2026-09-13)

@@ -235,11 +235,11 @@ async def _generate_tts(
         os.replace(staged, output_path)
 
 
-def _record(path: Path, **metadata) -> dict:
+def _record(path: Path, *, output_root: Path, **metadata) -> dict:
     payload = path.read_bytes()
     return {
         **metadata,
-        "path": str(path),
+        "path": path.relative_to(output_root).as_posix(),
         "size_bytes": len(payload),
         "sha256": hashlib.sha256(payload).hexdigest(),
     }
@@ -294,6 +294,7 @@ async def generate(args: argparse.Namespace) -> Path:
                 [
                     _record(
                         native_path,
+                        output_root=output_root,
                         locale=locale,
                         profile=profile_id,
                         renderer="native",
@@ -305,6 +306,7 @@ async def generate(args: argparse.Namespace) -> Path:
                     ),
                     _record(
                         tts_path,
+                        output_root=output_root,
                         locale=locale,
                         profile=profile_id,
                         renderer="tts",
@@ -317,6 +319,7 @@ async def generate(args: argparse.Namespace) -> Path:
             )
     manifest = output_root / "manifest.json"
     payload = {
+        "schema_version": 1,
         "version": VoiceManager.VOICE_PREVIEW_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "entries": entries,

@@ -6,11 +6,13 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
 
 SendHChatCallable = Callable[..., bool]
 
+HCHAT_TARGET_METADATA_KEY = "hchat_frozen_target"
 _FENCED_JSON_RE = re.compile(r"^\s*```(?:json)?\s*(?P<body>.*?)\s*```\s*$", re.DOTALL | re.IGNORECASE)
 _COMMAND_START_RE = re.compile(r"^\s*(?:/[\w./-]+|(?:python|python3|bash|sh)\b)", re.IGNORECASE)
 
@@ -73,6 +75,39 @@ def parse_hchat_draft(raw: str) -> HChatDraft:
     return HChatDraft(target=target, message=message, user_report=user_report)
 
 
+def parse_hchat_message_body(raw: str) -> str:
+    """Return model-authored message data without accepting routing authority.
+
+    Plain text is the current contract.  The legacy JSON draft shape remains
+    readable so a request already queued during an upgrade can complete, but
+    its ``target`` and ``user_report`` fields are deliberately ignored.
+    """
+
+    text = (raw or "").strip()
+    if not text:
+        raise _parse_error('missing required field "message"')
+    if _is_raw_command_shaped(text):
+        raise _parse_error("message looks like a shell command")
+
+    payload_text = _extract_fenced_json(text)
+    message = text
+    try:
+        payload = json.loads(payload_text)
+    except json.JSONDecodeError:
+        payload = None
+
+    if isinstance(payload, dict) and "message" in payload:
+        message = _required_string(payload, "message")
+    elif isinstance(payload, str):
+        message = payload.strip()
+
+    if not message:
+        raise _parse_error('missing required field "message"')
+    if _is_command_shaped(message):
+        raise _parse_error("message looks like a shell command")
+    return message
+
+
 def validate_hchat_target_format(target: str) -> str:
     normalized = (target or "").strip()
     if not normalized:
@@ -96,6 +131,7 @@ def deliver_hchat_draft(
     *,
     from_agent: str,
     sender: SendHChatCallable | None = None,
+    attachments: list[Path] | None = None,
     attempt_id: str | None = None,
 ) -> HChatDeliveryResult:
     sender_fn = sender or _load_send_hchat()
@@ -111,7 +147,10 @@ def deliver_hchat_draft(
     start = time.perf_counter()
     error: str | None = None
     try:
-        success = bool(sender_fn(target, clean_from, message))
+        sender_kwargs = {}
+        if attachments:
+            sender_kwargs["attachments"] = [Path(path) for path in attachments]
+        success = bool(sender_fn(target, clean_from, message, **sender_kwargs))
     except Exception as exc:
         success = False
         error = f"{type(exc).__name__}: {exc}"
@@ -247,6 +286,7 @@ def _parse_error(message: str) -> HChatDraftParseError:
 
 
 __all__ = [
+    "HCHAT_TARGET_METADATA_KEY",
     "HChatDeliveryResult",
     "HChatDraft",
     "HChatDraftParseError",
@@ -255,6 +295,7 @@ __all__ = [
     "hchat_delivery_receipt_text",
     "hchat_delivery_log_fields",
     "hchat_draft_parsed_log_fields",
+    "parse_hchat_message_body",
     "parse_hchat_draft",
     "validate_hchat_target_format",
 ]

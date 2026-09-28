@@ -126,10 +126,14 @@ async def test_telegram_delivery_still_uses_telegram_transport(monkeypatch):
 
     captured: dict = {}
 
-    async def fake_send_runtime_notice(kernel, *, source_agent, chat_id, thread_id, render_text):
+    async def fake_send_runtime_notice(
+        kernel, *, source_agent, operation_id, notice_kind, chat_id, thread_id, render_text
+    ):
         captured.update(
             chat_id=chat_id,
             source_agent=source_agent,
+            operation_id=operation_id,
+            notice_kind=notice_kind,
             text=render_text("zelda", "Zelda"),
         )
         return {"sent": True, "sender": "zelda", "message_id": 99}
@@ -144,6 +148,8 @@ async def test_telegram_delivery_still_uses_telegram_transport(monkeypatch):
     result = await manager._deliver(record, starting=False)
     assert result == {"sent": True, "sender": "zelda", "message_id": 99}
     assert captured["chat_id"] == 123
+    assert captured["operation_id"] == record["id"]
+    assert captured["notice_kind"] == "final"
 
 
 # --- candidate cache reuse ------------------------------------------------

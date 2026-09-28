@@ -1,15 +1,17 @@
-# HER v2 Agent-owned task mutations — 2026-09-24
+> **Legacy HERV2 repair record — non-normative.** This file preserves historical evidence for the retired staged runtime. Current behavior is defined by [HERV3 upgrade](../HERV3_UPGRADE.md).
+
+# HERV2 Agent-owned task mutations — 2026-09-24
 
 ## Scope
 
 - Instance: `HASHI4`
 - Branch: `feat/jev-skill`
-- Functional owner: HER v2 + PAO Scheduler/Superloop Functions
+- Functional owner: HERV2 + PAO Scheduler/Superloop Functions
 - Core status: unchanged
 
 ## Approval
 
-The current user explicitly requested that HER v2 Agents be able to create,
+The current user explicitly requested that HERV2 Agents be able to create,
 manage, and delete their own recurring and long-running tasks, including the
 work behind `/loop`, `/nudge`, and `/superloop`.
 
@@ -23,7 +25,7 @@ work behind `/loop`, `/nudge`, and `/superloop`.
   authorization.
 - Replaced `/loop`'s direct `tasks.json` editing instructions with the typed
   Scheduler create tool.
-- Kept direct file editing out of the HER v2 contract and preserved existing
+- Kept direct file editing out of the HERV2 contract and preserved existing
   Scheduler/Superloop state writers.
 
 ## Verification

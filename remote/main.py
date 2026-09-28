@@ -78,6 +78,7 @@ def _build_local_capabilities(*, rescue_start_enabled: bool) -> list[str]:
     for capability in (
         "file_transfer_hmac_v1",
         "message_attachments_v1",
+        "message_attachments_v2_streaming",
         AGENT_MOVE_CAPABILITY,
         AGENT_TRANSFER_LIFECYCLE_CAPABILITY,
     ):

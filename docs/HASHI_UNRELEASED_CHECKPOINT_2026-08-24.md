@@ -32,13 +32,13 @@ claim that later corrective working-tree changes have been published.
 
 The feature histories remain represented by their original commits and merge
 records. The consolidation did not resurrect source or assets explicitly
-retired by the HER v2 and repository-slimming architecture.
+retired by the HERV2 and repository-slimming architecture.
 
 ## Integrated scope
 
 ### HASHI Engine Runtime v2
 
-- HER v2 is the sole supported HER backend. `her` resolves forward to
+- HERV2 is the sole supported HER backend. `her` resolves forward to
   `her-v2`; `claw-cli` is rejected, and `/rebuild` is a side-effect-free
   retirement notice.
 - Direct, Fast path, Planned, Adaptive, Reviewed, and Assured use the canonical
@@ -101,14 +101,14 @@ The compulsory-Replanning corrective working tree completed these local gates:
 | --- | --- |
 | Complete offline product suite | `2685 passed`, `2 skipped`, `40 deselected` after integration with the retained Auto Compact commits |
 | Core deterministic gate | `237 passed` |
-| All HER v2 test modules | `346 passed`, `1 skipped` |
-| Combined Auto Compact and HER v2 focused suite | `403 passed`, `1 skipped` |
+| All HERV2 test modules | `346 passed`, `1 skipped` |
+| Combined Auto Compact and HERV2 focused suite | `403 passed`, `1 skipped` |
 | Focused Ruff correctness rules | passed |
 | Python compilation | passed |
 | Git diff/whitespace check | passed |
 | Internal Markdown targets | `207` checked; `0` missing |
 | Runtime code adoption | authorised Arale `/reboot min` passed; target set was exactly `('arale',)` and the current HER runtime contract was verified |
-| Runtime health after adoption | Arale online on HER v2; all 20 configured Agents online; Backend API and API Gateway recreated with reloaded code |
+| Runtime health after adoption | Arale online on HERV2; all 20 configured Agents online; Backend API and API Gateway recreated with reloaded code |
 | Capability-level canary | not performed; real threshold Replan, Auto Compact, and provider multi-image canaries remain separate |
 
 The already-published integrated implementation baseline had completed these
@@ -124,7 +124,7 @@ historical gates before its documentation pass:
 | `/reboot min` adoption | passed; implementation baseline loaded |
 | `/reboot max` adoption | passed; implementation baseline retained |
 | Runtime health after adoption | configured Agents online; Backend API, API Gateway, Telegram, and scheduler healthy |
-| Historical HER v2 canary | passed on `main` at `cc010d1`; it predates the compulsory-Replanning correction and does not certify its live cadence |
+| Historical HERV2 canary | passed on `main` at `cc010d1`; it predates the compulsory-Replanning correction and does not certify its live cadence |
 
 The documentation and publication-hygiene pass completed these additional
 gates:

@@ -78,10 +78,6 @@ TUI_COMMAND_HELP = {
     "tui": ("设置 TUI 语言及客户端选项", "Set TUI language and client options"),
     "voice": ("设置本机自动朗读与共享声音", "Set local auto-read and the shared voice"),
 }
-TUI_COMMAND_HELP["telegram"] = (
-    "\u67e5\u770b\u6216\u8bbe\u7f6e TUI Telegram \u955c\u50cf",
-    "Inspect or set TUI Telegram mirroring",
-)
 TUI_COMMAND_HELP["sidepanel"] = (
     "控制只读信息面板及自动巡览",
     "Control the read-only information panel and automatic tour",
@@ -107,12 +103,9 @@ TUI_COMMAND_GUIDES = {
         example="/log hide",
     ),
     "tui": CommandGuide(
-        "/tui <language|sound|typing|telegram> <value>",
-        ("language", "sound", "typing", "telegram"),
+        "/tui <language|sound|typing> <value>",
+        ("language", "sound", "typing"),
         example="/tui language zh",
-    ),
-    "telegram": CommandGuide(
-        "/telegram [on|off]", ("on", "off"), example="/telegram off"
     ),
     "sidepanel": CommandGuide(
         "/sidepanel [on|off|toggle|refresh|auto <on|off|toggle>]",
@@ -130,7 +123,6 @@ TUI_NESTED_CHOICES = {
     ("tui", "language"): ("zh", "en"),
     ("tui", "sound"): ("on", "off", "test"),
     ("tui", "typing"): ("on", "off"),
-    ("tui", "telegram"): ("on", "off"),
     ("sidepanel", "auto"): ("on", "off", "toggle"),
 }
 TUI_LOCALIZED_EXAMPLES = {
@@ -436,7 +428,6 @@ class FooterInfoBox(Static):
         instance_id: str = "",
         language: str = "en",
         metadata: dict | None = None,
-        telegram_mirror: bool = True,
     ):
         self._language = language
         facts = dict(metadata or {})
@@ -454,7 +445,6 @@ class FooterInfoBox(Static):
                 "think": "Think",
                 "verbose": "Verbose",
                 "commentary": "Commentary",
-                "mirror": "TG 镜像",
             }
             if language == "zh"
             else {
@@ -468,7 +458,6 @@ class FooterInfoBox(Static):
                 "think": "Think",
                 "verbose": "Verbose",
                 "commentary": "Commentary",
-                "mirror": "TG mirror",
             }
         )
         display_name = str(facts.get("display_name") or agent or "").strip()
@@ -545,7 +534,6 @@ class FooterInfoBox(Static):
                 "API 已连接" if language == "zh" and gateway_ok else
                 "API 离线" if language == "zh" else
                 "API connected" if gateway_ok else "API offline",
-                f"{labels['mirror']} {'ON' if telegram_mirror else 'OFF'}",
             ]
         )
         self._status_line = " · ".join(first) + "\n" + " · ".join(second)
@@ -780,13 +768,6 @@ class HASHITuiApp(App):
             os.environ.get("HASHI_TUI_TYPING", preferences.get("typing")),
             default=True,
         )
-        self._telegram_mirror_enabled = _enabled_setting(
-            os.environ.get(
-                "HASHI_TUI_TELEGRAM_MIRROR",
-                preferences.get("telegram_mirror"),
-            ),
-            default=True,
-        )
         self._side_panel_enabled = _enabled_setting(
             os.environ.get("HASHI_TUI_SIDEPANEL", preferences.get("sidepanel")),
             default=False,
@@ -892,7 +873,6 @@ class HASHITuiApp(App):
                 "layout": self._layout_mode,
                 "sounds": self._sound_enabled,
                 "typing": self._tui_typing_enabled,
-                "telegram_mirror": self._telegram_mirror_enabled,
                 "sidepanel": self._side_panel_enabled,
                 "sidepanel_auto": self._side_panel_auto_scroll,
             }
@@ -1589,7 +1569,6 @@ class HASHITuiApp(App):
             agent,
             prompt,
             client_id=self._tui_client_id,
-            telegram_mirror=self._telegram_mirror_enabled,
             ui_locale=self._ui_language,
         )
 
@@ -1757,9 +1736,6 @@ class HASHITuiApp(App):
         if normalized == "/agents":
             await self._handle_agents_cmd()
             return
-        if normalized == "/telegram" or normalized.startswith("/telegram "):
-            self._handle_telegram_cmd(normalized)
-            return
         if normalized == "/sidepanel" or normalized.startswith("/sidepanel "):
             await self._handle_sidepanel_cmd(normalized)
             return
@@ -1817,7 +1793,6 @@ class HASHITuiApp(App):
                     self.api,
                     self._connection_generation,
                     self.current_instance_id,
-                    self._telegram_mirror_enabled,
                     self._ui_language,
                     attachment=None,
                     workzone_ref=workzone_ref,
@@ -1841,7 +1816,6 @@ class HASHITuiApp(App):
                 targets,
                 self.api,
                 self._connection_generation,
-                self._telegram_mirror_enabled,
                 self._ui_language,
             )
             return
@@ -1868,7 +1842,6 @@ class HASHITuiApp(App):
                     self.api,
                     self._connection_generation,
                     self.current_instance_id,
-                    self._telegram_mirror_enabled,
                     self._ui_language,
                     attachment=pending,
                     workzone_ref=None,
@@ -1886,7 +1859,6 @@ class HASHITuiApp(App):
                 self.current_agent,
                 self.api,
                 self._connection_generation,
-                self._telegram_mirror_enabled,
                 self._ui_language,
                 submission_ref,
             )
@@ -2230,8 +2202,6 @@ class HASHITuiApp(App):
             if path == ("auto",):
                 return "on" if self._side_panel_auto_scroll else "off"
             return "on" if self._side_panel_enabled else "off"
-        if name == "telegram" or (name == "tui" and path == ("telegram",)):
-            return "on" if self._telegram_mirror_enabled else "off"
         if name == "tui" and path == ("language",):
             return self._ui_language
         if name == "tui" and path == ("sound",):
@@ -2469,10 +2439,6 @@ class HASHITuiApp(App):
         if len(parts) >= 2 and parts[1].casefold() == "typing":
             self._handle_tui_typing_cmd(parts[2:])
             return
-        if len(parts) >= 2 and parts[1].casefold() == "telegram":
-            suffix = " ".join(parts[2:])
-            self._handle_telegram_cmd("/telegram" + (f" {suffix}" if suffix else ""))
-            return
         if len(parts) == 1:
             current = "中文" if self._ui_language == "zh" else "English"
             sound = (
@@ -2481,12 +2447,11 @@ class HASHITuiApp(App):
                 else ("on" if self._sound_enabled else "off")
             )
             typing = "ON" if self._tui_typing_enabled else "OFF"
-            mirror = "ON" if self._telegram_mirror_enabled else "OFF"
             chat.write(markup(
                 f"[hashi.success]TUI language · {current} · sound · {sound} · "
-                f"typing · {typing} · TG mirror · {mirror}[/]\n"
+                f"typing · {typing}[/]\n"
                 "[hashi.secondary]/tui language zh|en · /tui sound on|off|test · "
-                "/tui typing on|off · /tui telegram on|off[/]"
+                "/tui typing on|off[/]"
             ))
             return
         if len(parts) == 2 and parts[1].casefold() in {"language", "lang"}:
@@ -2563,7 +2528,7 @@ class HASHITuiApp(App):
                 return
         chat.write(markup(
             "[hashi.error]Use /tui language zh|en, /tui sound on|off|test, "
-            "/tui typing on|off, or /tui telegram on|off.[/]"
+            "or /tui typing on|off.[/]"
         ))
 
     def _handle_tui_typing_cmd(self, arguments: list[str]) -> None:
@@ -2590,39 +2555,6 @@ class HASHITuiApp(App):
             else f"\u2713 TUI typing indicator {'enabled' if self._tui_typing_enabled else 'disabled'}."
         )
         chat.write(Text(message, style="hashi.accent"))
-
-    def _handle_telegram_cmd(self, text: str) -> None:
-        chat = self.query_one("#chat-history", ChatHistory)
-        parts = text.split()
-        if len(parts) > 2 or (len(parts) == 2 and parts[1].casefold() not in {"on", "off"}):
-            chat.write(Text("Use /telegram on|off.", style="hashi.error"))
-            return
-        changed = len(parts) == 2
-        if changed:
-            self._telegram_mirror_enabled = parts[1].casefold() == "on"
-            self._save_tui_preferences()
-            self._update_status_bar()
-        state = "ON" if self._telegram_mirror_enabled else "OFF"
-        connector = self._current_agent_metadata.get("telegram_connected")
-        if self._ui_language == "zh":
-            connector_state = (
-                "已连接" if connector is True else "离线" if connector is False else "未知"
-            )
-            prefix = "\u2713 " if changed else ""
-            message = (
-                f"{prefix}TUI Telegram \u955c\u50cf {state}\uff08Bot {connector_state}\uff09\u3002"
-                "\u4ec5\u5f71\u54cd\u6b64 TUI \u4eca\u540e\u63d0\u4ea4\u7684 Run\uff1b\u5f53\u524d\u4f1a\u8bdd\u4ecd\u662f\u6b63\u5f0f\u5171\u4eab\u4f1a\u8bdd\uff0c\u4e0d\u8865\u53d1\u5386\u53f2\u5185\u5bb9\u3002"
-            )
-        else:
-            connector_state = (
-                "connected" if connector is True else "offline" if connector is False else "unknown"
-            )
-            prefix = "\u2713 " if changed else ""
-            message = (
-                f"{prefix}TUI Telegram mirror {state} (Bot {connector_state}). "
-                "This affects only future Runs submitted by this TUI; the Conversation remains shared and no history is replayed."
-            )
-        chat.write(Text(message, style="hashi.accent" if changed else "hashi.success"))
 
     def _play_message_sound(self, event: str) -> bool:
         return play_message_sound(event, enabled=self._sound_enabled)
@@ -2693,12 +2625,14 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
         if language == "zh":
             help_text += (
                 "\n\n`/tui typing on|off`\u3000\u8bbe\u7f6e TUI \u8f93\u5165\u63d0\u793a"
-                "\n`/telegram on|off`\u3000\u8bbe\u7f6e\u6b64 TUI \u4eca\u540e Run \u7684 Telegram \u955c\u50cf"
+                "\n`/telegram on|off`\u3000\u8bbe\u7f6e\u6b64\u7528\u6237\u7684 Telegram \u955c\u50cf"
+                "\n`/whatsapp on|off`\u3000\u8bbe\u7f6e\u6b64\u7528\u6237\u7684 WhatsApp \u955c\u50cf"
             )
         else:
             help_text += (
                 "\n\n`/tui typing on|off`  Configure the TUI typing indicator"
-                "\n`/telegram on|off`  Configure Telegram mirroring for future Runs from this TUI"
+                "\n`/telegram on|off`  Configure Telegram mirroring for this user"
+                "\n`/whatsapp on|off`  Configure WhatsApp mirroring for this user"
             )
         chat.write(chat_message_renderable("assistant", "HASHI", help_text))
 
@@ -3401,7 +3335,6 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
         client: TuiApiClient,
         generation: int,
         instance_id: str,
-        telegram_mirror: bool,
         ui_locale: str,
         *,
         attachment: PendingAttachment | None,
@@ -3413,7 +3346,6 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
             attachment=attachment.wire_payload() if attachment is not None else None,
             workzone_ref=workzone_ref,
             client_id=self._tui_client_id,
-            telegram_mirror=telegram_mirror,
             ui_locale=ui_locale,
         )
         if (
@@ -3442,7 +3374,6 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
         agent: str,
         client: TuiApiClient,
         generation: int,
-        telegram_mirror: bool,
         ui_locale: str,
         submission_ref: tuple[int, str, int],
     ):
@@ -3450,7 +3381,6 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
             agent,
             text,
             client_id=self._tui_client_id,
-            telegram_mirror=telegram_mirror,
             ui_locale=ui_locale,
         )
         if generation != self._connection_generation or client is not self.api:
@@ -3677,7 +3607,6 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
         targets: tuple[str, ...],
         client: TuiApiClient,
         generation: int,
-        telegram_mirror: bool,
         ui_locale: str,
     ):
         for agent in targets:
@@ -3688,7 +3617,6 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
                     agent,
                     text,
                     client_id=self._tui_client_id,
-                    telegram_mirror=telegram_mirror,
                     ui_locale=ui_locale,
             )
         if generation != self._connection_generation:
@@ -3957,7 +3885,6 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
             self.current_instance_id,
             self._ui_language,
             self._current_agent_metadata,
-            self._telegram_mirror_enabled,
         )
 
     # ── Actions ─────────────────────────────────────────────────────────

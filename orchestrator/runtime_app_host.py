@@ -87,6 +87,9 @@ class RuntimeAppHost:
         self.app._load_config_bundle()
         self.app.kernel_pid = self.bootstrap["kernel_pid"]
         self.app.shared_generation_id = manifest["generation_id"]
+        self.app.function_release_adoption = dict(
+            self.bootstrap.get("adoption") or {"status": "unknown", "reason_code": None}
+        )
         from orchestrator.function_worker_supervisor import (
             generation_artifact_source_commit,
             generation_from_dict,
@@ -112,6 +115,9 @@ class RuntimeAppHost:
         self.app._startup_artifact = (
             startup_generation,
             generation_root,
+        )
+        self.app._shared_replacement_candidate = not any(
+            self.bootstrap.get(flag) for flag in ("initial", "recovery", "restore")
         )
         self.app._handoff_draining = True
         # This process is supervised; it must never exit around IPC cleanup.
@@ -241,6 +247,7 @@ class RuntimeAppHost:
             raise RuntimeError("shared Functions are not active")
         app._handoff_draining = False
         app._shared_committed = True
+        app._shared_replacement_candidate = False
         app.shared_adopted_at = datetime.now().astimezone().isoformat()
         broadcast_topology = getattr(
             app.function_workers, "broadcast_topology", None

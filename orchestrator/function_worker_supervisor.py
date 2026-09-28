@@ -571,6 +571,8 @@ class AgentRuntimeHandle:
         self.metadata = dict(metadata)
         self._condition = asyncio.Condition()
         self._cutover = False
+        self._reboot_fence = False
+        self._reboot_reject_new = False
         self._offline_error: str | None = None
         self._route_inflight = 0
         self._request_listeners: dict[str, list[Any]] = {}
@@ -725,17 +727,40 @@ class AgentRuntimeHandle:
     def native_audio_ready(self, terminal: str | None = None) -> bool:
         return self.voice_manager.native_audio_enabled(terminal)
 
+    def fence_for_reboot(self, *, reject_new: bool = False) -> None:
+        """Stop new FC routes at reboot admission without waiting for old work."""
+        if self._cutover:
+            raise FunctionWorkerError(f"Agent {self.name!r} is already cutting over")
+        self._cutover = True
+        self._reboot_fence = True
+        self._reboot_reject_new = reject_new
+
+    @property
+    def route_is_gated(self) -> bool:
+        return self._cutover
+
+    async def release_reboot_fence(self) -> None:
+        async with self._condition:
+            if self._reboot_fence:
+                self._reboot_fence = False
+                self._cutover = False
+                self._reboot_reject_new = False
+                self._condition.notify_all()
+
     async def begin_cutover(self) -> FunctionWorkerClient:
         async with self._condition:
-            if self._cutover:
+            if self._cutover and not self._reboot_fence:
                 raise FunctionWorkerError(f"Agent {self.name!r} is already cutting over")
             self._cutover = True
+            self._reboot_fence = False
             try:
                 while self._route_inflight:
                     await self._condition.wait()
                 return self._client
             except BaseException:
                 self._cutover = False
+                self._reboot_fence = False
+                self._reboot_reject_new = False
                 self._condition.notify_all()
                 raise
 
@@ -751,17 +776,23 @@ class AgentRuntimeHandle:
             self.metadata = dict(metadata)
             self._offline_error = None
             self._cutover = False
+            self._reboot_fence = False
+            self._reboot_reject_new = False
             self._condition.notify_all()
 
     async def abort_cutover(self) -> None:
         async with self._condition:
             self._cutover = False
+            self._reboot_fence = False
+            self._reboot_reject_new = False
             self._condition.notify_all()
 
     async def close_route(self, message: str) -> None:
         async with self._condition:
             self._offline_error = str(message)
             self._cutover = False
+            self._reboot_fence = False
+            self._reboot_reject_new = False
             self._condition.notify_all()
 
     async def _route(
@@ -773,6 +804,10 @@ class AgentRuntimeHandle:
     ) -> Any:
         async with self._condition:
             while self._cutover:
+                if self._reboot_reject_new:
+                    raise FunctionWorkerDisconnected(
+                        f"Agent {self.name!r} is rebooting; retry after it is online"
+                    )
                 await self._condition.wait()
             if self._offline_error is not None:
                 raise FunctionWorkerDisconnected(self._offline_error)

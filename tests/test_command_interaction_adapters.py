@@ -5,7 +5,9 @@ The separately provided notify integration test uses HASHI's real executor.
 """
 from __future__ import annotations
 import json
+import shlex
 import sys
+import tempfile
 import types
 import unittest
 from contextlib import contextmanager, nullcontext
@@ -15,15 +17,165 @@ from unittest.mock import AsyncMock, patch
 
 import orchestrator
 import pytest
+from orchestrator.admin_local_testing import _CaptureStore, _FakeUpdate
 from orchestrator import command_interaction_bridge as bridge
 from orchestrator.command_interactions import Binding, Capture, MenuStore
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+from orchestrator.session_store import SessionStore
 
 
 def module(name, **values):
     result = types.ModuleType(name)
     result.__dict__.update(values)
     return result
+
+
+def test_local_command_update_carries_frontend_invocation_identity():
+    update = _FakeUpdate(
+        7,
+        7,
+        _CaptureStore(messages=[]),
+        "/meter status",
+        session_metadata={
+            "session_surface": "workbench",
+            "session_channel_key": "default",
+            "frontend_invocation_id": "cmd_meter_status_001",
+        },
+    )
+
+    assert update.update_id == "cmd_meter_status_001"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("surface", "channel_key", "connector_id"),
+    [("workbench", "default", "backend_api"), ("telegram", "7", "telegram")],
+)
+async def test_parked_topic_load_admits_continuation_on_its_command_surface(
+    monkeypatch, surface, channel_key, connector_id,
+):
+    from orchestrator import runtime_session
+    from orchestrator.frontend_connector_registry import canonical_connector_id
+
+    loaded = []
+    topics = NS(
+        get_topic=lambda slot: {"title": "Topic 2"} if slot == 2 else None,
+        mark_loaded=lambda slot: loaded.append(slot),
+    )
+    update = _FakeUpdate(
+        7, 7, _CaptureStore(messages=[]), "/load 2",
+        session_metadata={
+            "session_surface": surface,
+            "session_channel_key": channel_key,
+            "session_id": "session-1",
+        },
+    )
+    runtime = NS(
+        _is_authorized_user=lambda actor: actor == 7,
+        _backend_busy=lambda: False,
+        _reply_text=AsyncMock(),
+        _arm_session_primer=lambda *args, **kwargs: None,
+        parked_topics=topics,
+        _pending_auto_recall_context=None,
+        _pending_auto_recall_session_id=None,
+    )
+    monkeypatch.setattr(
+        runtime_session, "current_session_for_update",
+        lambda *args: {"session_id": "session-1", "owner_id": "owner-7"},
+    )
+    admitted = []
+
+    async def enqueue(chat_id, prompt, source, summary, **kwargs):
+        metadata = kwargs.get("request_metadata") or {}
+        assert canonical_connector_id(
+            source, surface=metadata.get("session_surface", "")
+        ) == connector_id
+        admitted.append((chat_id, metadata))
+        return "request-1"
+
+    runtime.enqueue_request = enqueue
+    await FlexibleAgentRuntime.cmd_load(runtime, update, NS(args=["2"]))
+
+    assert loaded == [2]
+    assert admitted == [(7, {
+        "session_id": "session-1",
+        "owner_id": "owner-7",
+        "session_surface": surface,
+        "session_channel_key": channel_key,
+    })]
+
+
+@pytest.mark.asyncio
+async def test_parked_topic_load_keeps_topic_available_when_enqueue_fails(monkeypatch):
+    from orchestrator import runtime_session
+
+    loaded = []
+    runtime = NS(
+        _is_authorized_user=lambda actor: actor == 7,
+        _backend_busy=lambda: False,
+        _reply_text=AsyncMock(),
+        _arm_session_primer=lambda *args, **kwargs: None,
+        parked_topics=NS(
+            get_topic=lambda slot: {"title": "Topic 2"},
+            mark_loaded=lambda slot: loaded.append(slot),
+        ),
+        enqueue_request=AsyncMock(return_value=None),
+        _pending_auto_recall_context="previous recall",
+        _pending_auto_recall_session_id="previous session",
+    )
+    monkeypatch.setattr(
+        runtime_session, "current_session_for_update",
+        lambda *args: {"session_id": "session-1", "owner_id": "owner-7"},
+    )
+    update = _FakeUpdate(
+        7, 7, _CaptureStore(messages=[]), "/load 2",
+        session_metadata={"session_surface": "workbench"},
+    )
+
+    with pytest.raises(RuntimeError, match="not queued"):
+        await FlexibleAgentRuntime.cmd_load(runtime, update, NS(args=["2"]))
+
+    assert loaded == []
+    assert runtime._pending_auto_recall_context == "previous recall"
+    assert runtime._pending_auto_recall_session_id == "previous session"
+
+
+@pytest.mark.asyncio
+async def test_non_telegram_callback_preserves_connector_locale(tmp_path):
+    observed_locales = []
+    runtime = NS(
+        name="agent",
+        workspace_dir=tmp_path,
+        global_config=NS(authorized_id=7, ui_language="zh-CN"),
+        _is_authorized_user=lambda actor: actor == 7,
+    )
+
+    async def handler(update, context):
+        del update, context
+        observed_locales.append(orchestrator.ui_language.current_locale())
+
+    query = NS(
+        data="tgl:meter:off",
+        from_user=NS(id=7),
+        message=NS(chat=NS(id=7)),
+    )
+    update = NS(
+        callback_query=query,
+        effective_user=query.from_user,
+        effective_chat=query.message.chat,
+        _hashi_session_surface="workbench",
+        _hashi_ui_locale="en",
+    )
+    wrapped = FlexibleAgentRuntime._wrap_callback(runtime, "native", handler)
+
+    with patch.object(
+        FlexibleAgentRuntime,
+        "_telegram_channel_allowed",
+        new=AsyncMock(return_value=True),
+    ):
+        await wrapped(update, NS())
+
+    assert observed_locales == ["en"]
 
 
 @pytest.mark.asyncio
@@ -82,6 +234,9 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
                 _FakeUpdate=FakeUpdate, _capture_local_output=scope,
                 execute_local_command=execute, _runtime_audit_path=lambda runtime: Path('/unused'),
                 _runtime_agent_name=lambda runtime: runtime.name,
+                _format_slash_command_line=lambda command, args: f"/{command}" + (
+                    " " + " ".join(shlex.quote(arg) for arg in args) if args else ""
+                ),
                 _split_command=lambda line: (line.lstrip('/').split()[0], [])),
             'orchestrator.slash_command_audit': module('orchestrator.slash_command_audit',
                 SlashCommandAuditSession=Audit, bind_slash_command_audit_session=lambda x: nullcontext()),
@@ -127,6 +282,17 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.executions), 1)
         self.assertIs(self.runtime._send_text, self.original_send)
 
+    async def test_open_passes_typed_invocation_identity_to_local_command(self):
+        payload = self.payload(request_id="request-meter-status-002")
+
+        opened = await self.dispatch(payload)
+
+        self.assertTrue(opened["ok"], opened)
+        self.assertEqual(
+            self.executions[0][2]["frontend_invocation_id"],
+            opened["command_invocation"]["invocation_id"],
+        )
+
     async def test_opening_another_menu_does_not_expire_the_first_before_its_ttl(self):
         first = await self.dispatch(self.payload(request_id='firstrequestabcdefgh'))
         second = await self.dispatch(self.payload(request_id='secondrequestabcdefg'))
@@ -151,6 +317,72 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['commands'][0]['usage'], '/example [value]')
         self.assertEqual(result['commands'][0]['description'], 'Example from the registry')
         self.assertTrue(all(not row['enabled'] for row in result['commands']))
+        self.assertEqual(self.executions, [])
+
+    async def test_durable_command_replay_does_not_reexecute_or_reissue_stale_buttons(self):
+        with tempfile.TemporaryDirectory() as directory:
+            durable_store = SessionStore(Path(directory) / 'sessions.sqlite3', instance_id='TEST')
+            session = durable_store.create_session(
+                owner_id='owner-test', agent_id='agent', is_default=True,
+            )
+            self.runtime.session_store = durable_store
+            metadata = {
+                **self.metadata,
+                'owner_id': 'owner-test',
+                'session_id': session['session_id'],
+                'context_generation': session['context_generation'],
+                '_durable_command_invocation': True,
+            }
+            request = self.payload()
+            first = await self.dispatch(request, metadata)
+            self.assertTrue(first['ok'], first)
+            self.assertIsNotNone(first['command_event_id'])
+            self.assertFalse(first['replayed'])
+            self.assertEqual(len(self.executions), 1)
+            events = durable_store.events(session['session_id'], owner_id='owner-test')
+            command_events = [event for event in events
+                              if event['kind'] == 'frontend.command_result']
+            self.assertEqual(len(command_events), 1)
+            self.assertEqual(command_events[0]['detail']['command_invocation']['command'], 'example')
+
+            local_replay = await self.dispatch(request, metadata)
+            self.assertTrue(local_replay['replayed'])
+            self.assertTrue(local_replay['refresh_required'])
+            self.assertEqual(local_replay['command_event_id'], first['command_event_id'])
+            self.assertNotIn('command_ui', local_replay['messages'][0])
+            self.assertFalse(any(
+                block.get('type') == 'action'
+                for block in local_replay['messages'][0]['presentation']['content_blocks']
+            ))
+            self.assertEqual(len(self.executions), 1)
+
+            # Simulate Worker-local menu state being lost while the Session DB survives.
+            del self.runtime._command_interaction_store
+            replay = await self.dispatch(request, metadata)
+
+            self.assertTrue(replay['ok'], replay)
+            self.assertTrue(replay['replayed'])
+            self.assertTrue(replay['refresh_required'])
+            self.assertEqual(replay['command_event_id'], first['command_event_id'])
+            self.assertNotIn('command_ui', replay['messages'][0])
+            self.assertEqual(len(self.executions), 1)
+
+    async def test_unknown_durable_command_is_not_reexecuted(self):
+        class PendingStore:
+            def reserve_frontend_command_invocation(store_self, **kwargs):
+                return {'state': 'pending', 'replayed': True}
+
+            def complete_frontend_command_invocation(store_self, **kwargs):
+                raise AssertionError('an uncertain invocation must not be completed or replayed')
+
+        metadata = {**self.metadata, 'owner_id': 'owner-test',
+                    '_durable_command_invocation': True}
+        with patch('orchestrator.runtime_session.ensure_store', return_value=PendingStore()):
+            result = await self.dispatch(self.payload(), metadata)
+
+        self.assertFalse(result['ok'])
+        self.assertTrue(result['outcome_unknown'])
+        self.assertEqual(result['error_code'], 'command_menu_outcome_unknown')
         self.assertEqual(self.executions, [])
 
     async def test_owner_and_shape_validation_precede_execution(self):
@@ -202,15 +434,21 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
                                  revision=menu['revision'], button_id=menu['rows'][0][0]['button_id'])
         first = await self.dispatch(operation)
         second = await self.dispatch(operation)
-        self.assertEqual(first, second)
+        self.assertFalse(first.get('replayed', False))
+        self.assertTrue(second['replayed'])
+        self.assertEqual(first['error_code'], second['error_code'])
         self.assertEqual(self.actions, ['begun'])
         self.assertEqual(first['error_code'], 'command_menu_outcome_unknown')
-        self.assertNotIn('sensitive-path', json.dumps(first))
+        self.assertNotIn('sensitive-path', json.dumps([first, second]))
         self.assertIs(self.runtime._send_text, self.original_send)
 
 
 @pytest.mark.asyncio
-async def test_runtime_reply_records_command_ui_context_and_binds_the_canonical_message():
+async def test_runtime_reply_records_command_ui_context_and_binds_the_canonical_message(
+    tmp_path,
+):
+    from orchestrator.session_store import SessionStore
+
     menu_store = MenuStore()
     binding = Binding(
         'instance', 'agent', '7', 'session', 1,
@@ -224,8 +462,21 @@ async def test_runtime_reply_records_command_ui_context_and_binds_the_canonical_
             return await capture.capture_reply(text, **kwargs)
 
     update = NS(message=Message(), effective_chat=NS(id=7))
-    runtime = NS(telegram_logger=NS(warning=lambda *_args, **_kwargs: None))
-    recorded = {'message_id': 'msg_persisted'}
+    runtime = NS(
+        app=NS(bot=None),
+        telegram_logger=NS(warning=lambda *_args, **_kwargs: None),
+        global_config=NS(
+            authorized_id=7,
+            instance_id='HASHI1',
+            project_root=tmp_path,
+        ),
+        name='agent',
+        session_store=SessionStore(
+            tmp_path / 'state' / 'sessions.sqlite3',
+            instance_id='HASHI1',
+        ),
+        workspace_dir=tmp_path,
+    )
     with (
         patch(
             'orchestrator.flexible_agent_runtime.apply_disable_notification_default'
@@ -234,10 +485,6 @@ async def test_runtime_reply_records_command_ui_context_and_binds_the_canonical_
             'orchestrator.flexible_agent_runtime.telegram_delivery_failover.handle_blocked_send',
             new=AsyncMock(return_value=False),
         ),
-        patch(
-            'orchestrator.flexible_agent_runtime.runtime_session.record_frontend_message_for_update',
-            return_value=recorded,
-        ) as record,
     ):
         sent = await FlexibleAgentRuntime._reply_text(
             runtime,
@@ -252,10 +499,15 @@ async def test_runtime_reply_records_command_ui_context_and_binds_the_canonical_
             },
         )
 
-    kwargs = record.call_args.kwargs
-    assert kwargs['transport_message_id'] == f'command-ui:{sent.menu.id}'
-    assert kwargs['message_context']['command_ui'] == menu_store.render(sent.menu)
-    assert sent.menu.presentation_message_id == 'msg_persisted'
+    session = runtime.session_store.resolve_primary_session(
+        owner_id='user:7', agent_id='agent'
+    )
+    messages = runtime.session_store.messages(
+        session['session_id'], owner_id='user:7'
+    )
+    recorded = next(message for message in messages if message['role'] == 'assistant')
+    assert recorded['message_context']['command_ui'] == menu_store.render(sent.menu)
+    assert sent.menu.presentation_message_id == recorded['message_id']
 
 
 if __name__ == '__main__':

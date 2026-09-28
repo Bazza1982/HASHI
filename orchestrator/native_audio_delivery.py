@@ -2,14 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
-from pathlib import Path
+import hashlib
+import json
 from typing import Any, Mapping, Sequence
-from uuid import uuid4
-
-from telegram.error import TimedOut as TelegramTimedOut
-
-from orchestrator.voice_synthesizer import convert_audio_to_ogg
 
 
 def audio_parts(content: Sequence[Mapping[str, Any]] | None) -> tuple[dict[str, Any], ...]:
@@ -102,6 +97,82 @@ def native_reply_content_policy(runtime: Any, item: Any = None) -> str:
     )
 
 
+async def dispatch_persisted_audio_event(
+    runtime: Any,
+    item: Any,
+    *,
+    source_event_id: str,
+    purpose: str,
+    include_text: bool,
+) -> tuple[bool, bool]:
+    """Claim a persisted audio Event and deliver it through the FC adapter.
+
+    The first boolean says the Event is FC-managed.  Once managed, callers
+    must never fall back to an untracked second transport attempt.
+    """
+
+    store = getattr(runtime, "session_store", None)
+    session_id = str(getattr(item, "session_id", "") or "").strip()
+    owner_id = str(getattr(item, "owner_id", "") or "").strip()
+    request_id = str(getattr(item, "request_id", "") or "").strip()
+    if store is None or not session_id or not owner_id or not request_id:
+        return False, False
+    target_resolver = getattr(store, "runtime_event_delivery_target", None)
+    if not callable(target_resolver):
+        return False, False
+    target = target_resolver(
+        source_event_id=str(source_event_id),
+        request_id=request_id,
+        owner_id=owner_id,
+    )
+    if not isinstance(target, Mapping):
+        return False, False
+
+    from orchestrator.frontend_connector_registry import endpoint_id_for
+
+    endpoint_id = endpoint_id_for(
+        "telegram",
+        ingress_transport="telegram",
+        channel_key=str(getattr(item, "chat_id", "")),
+    )
+    claims = store.claim_delivery_outbox(
+        session_id=str(target["session_id"]),
+        owner_id=owner_id,
+        worker_id=(
+            f"fc-telegram-audio-{getattr(runtime, 'name', 'agent')}-"
+            f"{str(source_event_id)[:48]}"
+        ),
+        event_id=str(target["event_id"]),
+        connector_id="telegram",
+        endpoint_id=endpoint_id,
+        limit=1,
+    )
+    if not claims:
+        receipts = store.frontend_delivery_receipts(
+            session_id=str(target["session_id"]),
+            owner_id=owner_id,
+            event_id=str(target["event_id"]),
+        )
+        return True, any(
+            str(receipt.get("status") or "") in {"accepted", "delivered"}
+            for receipt in receipts
+        )
+
+    from orchestrator.runtime_delivery import dispatch_claimed_telegram_event
+
+    _elapsed, units = await dispatch_claimed_telegram_event(
+        runtime,
+        chat_id=int(getattr(item, "chat_id")),
+        store=store,
+        claim=claims[0],
+        frontend_owner_id=owner_id,
+        request_id=request_id,
+        purpose=purpose,
+        include_text=include_text,
+    )
+    return True, units > 0
+
+
 async def send_native_audio_parts(
     runtime: Any,
     item: Any,
@@ -109,9 +180,10 @@ async def send_native_audio_parts(
     *,
     purpose: str,
 ) -> bool:
-    """Claim and send complete audio assets once; never stream raw deltas."""
+    """Persist complete audio assets and dispatch the resulting FC Event once."""
 
-    if native_reply_content_policy(runtime, item) == "text_only":
+    reply_policy = native_reply_content_policy(runtime, item)
+    if reply_policy == "text_only":
         return False
     parts = claim_audio_parts(runtime, item, content)
     if not parts:
@@ -121,75 +193,52 @@ async def send_native_audio_parts(
     owner_id = str(getattr(item, "owner_id", "") or "")
     if store is None or not session_id or not owner_id:
         return False
-    sent_any = False
-    for part in parts:
-        asset_id = str(part["asset_id"])
-        derivative: Path | None = None
-        store.acquire_audio_asset(
-            session_id=session_id, owner_id=owner_id, asset_id=asset_id
-        )
-        try:
-            metadata, source_path = store.audio_asset_path(
-                session_id=session_id,
-                owner_id=owner_id,
-                asset_id=asset_id,
+    request_id = str(getattr(item, "request_id", "") or "").strip()
+    if not request_id:
+        return False
+    normalized_content = [
+        dict(part) for part in content or () if isinstance(part, Mapping)
+    ]
+    digest = hashlib.sha256(
+        json.dumps(
+            normalized_content,
+            sort_keys=True,
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    source_event_id = f"fc-native-{purpose}-{digest[:32]}"
+    event = store.append_native_audio_runtime_event(
+        request_id=request_id,
+        source_event_id=source_event_id,
+        event_kind="assistant_native_audio",
+        summary=text_projection(normalized_content) or "Assistant audio output",
+        phase="final",
+        content=normalized_content,
+    )
+    if event is None:
+        logger = getattr(runtime, "logger", None)
+        if logger is not None:
+            logger.warning(
+                "Native audio FC publication unavailable: request=%s purpose=%s",
+                request_id,
+                purpose,
             )
-            audio_format = str(metadata.get("format") or "").casefold()
-            upload_path = source_path
-            if audio_format not in {"ogg", "opus", "mp3", "m4a"}:
-                derivative = Path(runtime.media_dir) / (
-                    f"native_reply_{uuid4().hex}.ogg"
-                )
-                await convert_audio_to_ogg(
-                    str(getattr(runtime.voice_manager, "ffmpeg_cmd", "ffmpeg")),
-                    source_path,
-                    derivative,
-                )
-                upload_path = derivative
-            with upload_path.open("rb") as handle:
-                await runtime.app.bot.send_voice(
-                    chat_id=item.chat_id,
-                    voice=handle,
-                    read_timeout=30,
-                    write_timeout=30,
-                    connect_timeout=15,
-                )
-            sent_any = True
-            logger = getattr(runtime, "telegram_logger", None)
-            if logger is not None:
-                logger.info(
-                    "Sent native audio asset %s for request_id=%s purpose=%s",
-                    asset_id,
-                    item.request_id,
-                    purpose,
-                )
-        except TelegramTimedOut:
-            # Delivery may have reached Telegram; retrying could duplicate it.
-            raise
-        finally:
-            if derivative is not None:
-                derivative.unlink(missing_ok=True)
-            try:
-                store.release_audio_asset(
-                    session_id=session_id,
-                    owner_id=owner_id,
-                    asset_id=asset_id,
-                )
-            except Exception as exc:
-                logger = getattr(runtime, "logger", None)
-                if logger is not None:
-                    logger.warning(
-                        "Native audio lease release failed: asset=%s error_type=%s",
-                        asset_id,
-                        type(exc).__name__,
-                    )
-        await asyncio.sleep(0)
-    return sent_any
+        return False
+    managed, accepted = await dispatch_persisted_audio_event(
+        runtime,
+        item,
+        source_event_id=source_event_id,
+        purpose=purpose,
+        include_text=reply_policy != "audio_only",
+    )
+    return bool(managed and accepted)
 
 
 __all__ = [
     "audio_parts",
     "claim_audio_parts",
+    "dispatch_persisted_audio_event",
     "native_reply_content_policy",
     "send_native_audio_parts",
     "text_projection",

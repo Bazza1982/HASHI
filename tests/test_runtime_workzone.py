@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from orchestrator import runtime_workzone
+from orchestrator import runtime_session, runtime_workzone
 
 
 def _runtime(tmp_path):
@@ -183,8 +183,8 @@ async def test_callback_path_entry_is_bound_to_exact_force_reply(tmp_path):
     )
     assert await runtime_workzone.handle_pending_path_reply(runtime, reply) is True
 
-    configured = runtime.session_store.get_workzone_set(
-        runtime._workzone_state["session_id"]
+    configured = runtime.session_store.get_agent_workzone_set(
+        owner_id="user:1", agent_id="agent"
     )
     assert [(slot["slot_id"], slot["path"]) for slot in configured["slots"]] == [
         ("1", str(attached.resolve()))
@@ -225,21 +225,24 @@ async def test_reset_revalidates_and_restarts_without_clearing_slot(tmp_path):
     await runtime_workzone.cmd_workzone(
         runtime, _update(), SimpleNamespace(args=["repo"])
     )
-    session_id = runtime._workzone_state["session_id"]
-    before = runtime.session_store.get_workzone_set(session_id)
+    before = runtime.session_store.get_agent_workzone_set(
+        owner_id="user:1", agent_id="agent"
+    )
     restarts.clear()
 
     await runtime_workzone.cmd_workzone(
         runtime, _update(), SimpleNamespace(args=["reset"])
     )
 
-    after = runtime.session_store.get_workzone_set(session_id)
+    after = runtime.session_store.get_agent_workzone_set(
+        owner_id="user:1", agent_id="agent"
+    )
     assert after == before
     assert restarts == [True]
 
 
 @pytest.mark.asyncio
-async def test_workzone_changes_do_not_cross_session_bindings(tmp_path):
+async def test_workzone_changes_persist_across_session_bindings(tmp_path):
     runtime = _runtime(tmp_path)
     runtime._sync_workzone_to_backend_config = lambda: runtime_workzone.sync_workzone_to_backend_config(runtime)
 
@@ -260,7 +263,44 @@ async def test_workzone_changes_do_not_cross_session_bindings(tmp_path):
         runtime, _update(456), SimpleNamespace(args=[])
     )
 
-    assert "<b>Current</b> · <code>0/10</code> active" in runtime.replies[-1]["text"]
+    assert "<b>Current</b> · <code>1/10</code> active" in runtime.replies[-1]["text"]
+    state = runtime.session_store.get_agent_workzone_set(
+        owner_id="user:1", agent_id="agent"
+    )
+    assert state["slots"][0]["path"] == str(runtime.zone.resolve())
+
+
+@pytest.mark.asyncio
+async def test_admitted_workzone_snapshot_does_not_change_mid_request(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime._sync_workzone_to_backend_config = (
+        lambda: runtime_workzone.sync_workzone_to_backend_config(runtime)
+    )
+    replacement = runtime.global_config.project_root / "replacement"
+    replacement.mkdir()
+    await runtime_workzone.cmd_workzone(
+        runtime, _update(), SimpleNamespace(args=["repo"])
+    )
+    admitted = runtime_session.agent_workzone_state(runtime)
+
+    runtime.session_store.set_agent_workzone_slot(
+        owner_id="user:1",
+        agent_id="agent",
+        slot_id="main",
+        path=str(replacement),
+        expected_revision=admitted["revision"],
+    )
+    item = SimpleNamespace(
+        owner_id="user:1",
+        request_metadata={"workzone_snapshot": admitted},
+    )
+
+    assert runtime_session.session_workzone_state(runtime, item)["slots"][0][
+        "path"
+    ] == str(runtime.zone.resolve())
+    assert runtime_session.agent_workzone_state(runtime)["slots"][0]["path"] == str(
+        replacement.resolve()
+    )
 
 
 def test_workzone_prompt_section_uses_backend_capabilities(tmp_path):

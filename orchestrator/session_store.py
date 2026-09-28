@@ -4,13 +4,14 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import shutil
 import sqlite3
 import threading
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -23,9 +24,18 @@ from orchestrator.audio_assets import (
     AudioAssetStore,
     normalize_audio_format,
 )
+from orchestrator.hchat_attachment_contract import (
+    HCHAT_MAX_ATTACHMENT_BYTES,
+    HCHAT_MAX_ATTACHMENTS_PER_MESSAGE,
+    HCHAT_MAX_TOTAL_ATTACHMENT_BYTES,
+)
 from orchestrator.multimodal_contract import (
     contains_persistent_inline_media,
     modality_for_attachment,
+)
+from orchestrator.frontend_contracts import (
+    normalize_delivery_receipt,
+    normalize_media_group,
 )
 from orchestrator.storage_profile import removable_storage_profile
 
@@ -37,11 +47,37 @@ CONVERSATION_CONTINUITY_VERSION = 1
 CONVERSATION_HISTORY_MODES = frozenset({"move", "copy", "inherit_read_only"})
 MAX_CONTINUITY_SESSIONS = 500
 MAX_CONTINUITY_MESSAGES = 100_000
+MAX_SESSION_MESSAGE_CHARS = 200_000
 PRIMARY_CONVERSATION_SURFACE = "conversation"
 PRIMARY_CONVERSATION_CHANNEL = "main"
+SESSION_KIND_CONVERSATION = "conversation"
+SESSION_KIND_AGENT_ACTIVITY = "agent_activity"
+SESSION_KINDS = frozenset(
+    {SESSION_KIND_CONVERSATION, SESSION_KIND_AGENT_ACTIVITY}
+)
 MAX_SESSION_ATTACHMENTS_PER_MESSAGE = 16
 MAX_SESSION_ATTACHMENT_BYTES = 64 * 1024 * 1024
 MAX_SESSION_ATTACHMENT_TOTAL_BYTES = 64 * 1024 * 1024
+HCHAT_SESSION_ATTACHMENTS_PER_MESSAGE = HCHAT_MAX_ATTACHMENTS_PER_MESSAGE
+HCHAT_SESSION_ATTACHMENT_BYTES = HCHAT_MAX_ATTACHMENT_BYTES
+HCHAT_SESSION_ATTACHMENT_TOTAL_BYTES = HCHAT_MAX_TOTAL_ATTACHMENT_BYTES
+
+
+def _attachment_policy_limits(policy: str) -> tuple[int, int, int]:
+    normalized = str(policy or "standard").strip().casefold()
+    if normalized == "standard":
+        return (
+            MAX_SESSION_ATTACHMENTS_PER_MESSAGE,
+            MAX_SESSION_ATTACHMENT_BYTES,
+            MAX_SESSION_ATTACHMENT_TOTAL_BYTES,
+        )
+    if normalized == "hchat":
+        return (
+            HCHAT_SESSION_ATTACHMENTS_PER_MESSAGE,
+            HCHAT_SESSION_ATTACHMENT_BYTES,
+            HCHAT_SESSION_ATTACHMENT_TOTAL_BYTES,
+        )
+    raise ValueError("unknown attachment policy")
 
 
 def _utc_now() -> str:
@@ -229,6 +265,14 @@ def validate_conversation_continuity_capsule(
             if origin_ref in seen_origins:
                 raise SessionConflict("conversation continuity message is duplicated")
             seen_origins.add(origin_ref)
+            display_text = item.get("display_text")
+            if display_text is not None and (
+                not isinstance(display_text, str)
+                or len(display_text) > MAX_SESSION_MESSAGE_CHARS
+            ):
+                raise SessionConflict(
+                    "conversation continuity display text is invalid"
+                )
             item.update(
                 {
                     "role": role,
@@ -242,6 +286,7 @@ def validate_conversation_continuity_capsule(
                     "source_created_at": source_created_at,
                     "source_ordinal": source_ordinal,
                     "text": str(item.get("text") or ""),
+                    "display_text": display_text,
                     "source": str(item.get("source") or "unknown"),
                 }
             )
@@ -318,7 +363,7 @@ class SessionStore:
     per-Session working files are derived state used by Memory+ and Compact.
     """
 
-    SCHEMA_VERSION = 8
+    SCHEMA_VERSION = 14
 
     def __init__(
         self,
@@ -403,6 +448,7 @@ class SessionStore:
                     owner_id TEXT NOT NULL,
                     agent_id TEXT NOT NULL,
                     title TEXT NOT NULL,
+                    session_kind TEXT NOT NULL DEFAULT 'conversation',
                     title_source TEXT NOT NULL DEFAULT 'system',
                     status TEXT NOT NULL DEFAULT 'active',
                     is_default INTEGER NOT NULL DEFAULT 0,
@@ -438,6 +484,48 @@ class SessionStore:
                 CREATE INDEX IF NOT EXISTS session_workzones_session_enabled
                     ON session_workzones(session_id, enabled, slot_id);
 
+                CREATE TABLE IF NOT EXISTS agent_workzone_profiles (
+                    instance_id TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    revision INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(instance_id, owner_id, agent_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS agent_workzones (
+                    instance_id TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    slot_id TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    label TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(instance_id, owner_id, agent_id, slot_id),
+                    FOREIGN KEY(instance_id, owner_id, agent_id)
+                        REFERENCES agent_workzone_profiles(instance_id, owner_id, agent_id)
+                        ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS agent_workzones_enabled
+                    ON agent_workzones(instance_id, owner_id, agent_id, enabled, slot_id);
+
+                CREATE TABLE IF NOT EXISTS agent_workzone_events (
+                    event_id TEXT PRIMARY KEY,
+                    instance_id TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    kind TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    detail_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS agent_workzone_events_owner_agent
+                    ON agent_workzone_events(instance_id, owner_id, agent_id, created_at);
+
                 CREATE TABLE IF NOT EXISTS session_participants (
                     session_id TEXT NOT NULL,
                     agent_id TEXT NOT NULL,
@@ -468,6 +556,7 @@ class SessionStore:
                     message_context_json TEXT NOT NULL DEFAULT '{}',
                     content_json TEXT NOT NULL,
                     text TEXT NOT NULL,
+                    display_text TEXT,
                     visibility TEXT NOT NULL DEFAULT 'visible',
                     history_eligible INTEGER NOT NULL DEFAULT 1,
                     content_hash TEXT NOT NULL,
@@ -563,6 +652,22 @@ class SessionStore:
                     PRIMARY KEY(session_id, idempotency_key),
                     FOREIGN KEY(session_id) REFERENCES sessions(session_id),
                     FOREIGN KEY(run_id) REFERENCES runs(run_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS frontend_command_invocations (
+                    session_id TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    client_id TEXT NOT NULL,
+                    request_id TEXT NOT NULL,
+                    request_digest TEXT NOT NULL,
+                    invocation_json TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    response_json TEXT,
+                    event_id TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(session_id, client_id, request_id),
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id)
                 );
 
                 CREATE TABLE IF NOT EXISTS channel_bindings (
@@ -709,6 +814,75 @@ class SessionStore:
                     FOREIGN KEY(event_id) REFERENCES run_events(event_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS connector_delivery_tasks (
+                    task_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    run_id TEXT,
+                    event_id TEXT NOT NULL,
+                    connector_id TEXT NOT NULL,
+                    endpoint_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content_modes_json TEXT NOT NULL DEFAULT '[]',
+                    retry_class TEXT NOT NULL DEFAULT 'query_before_retry',
+                    state TEXT NOT NULL DEFAULT 'pending',
+                    created_at TEXT NOT NULL,
+                    delivered_at TEXT,
+                    lease_owner TEXT,
+                    lease_token TEXT,
+                    lease_expires_at TEXT,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    last_error_code TEXT,
+                    completed_at TEXT,
+                    last_claim_token TEXT,
+                    last_claim_status TEXT,
+                    UNIQUE(event_id, endpoint_id),
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id),
+                    FOREIGN KEY(event_id) REFERENCES run_events(event_id)
+                );
+                CREATE INDEX IF NOT EXISTS connector_delivery_tasks_claimable
+                    ON connector_delivery_tasks(
+                        session_id, connector_id, endpoint_id, state, created_at
+                    );
+
+                CREATE TABLE IF NOT EXISTS connector_delivery_receipts (
+                    event_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    endpoint_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    proof_json TEXT,
+                    attempt_count INTEGER NOT NULL DEFAULT 1,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(event_id, endpoint_id),
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id),
+                    FOREIGN KEY(event_id) REFERENCES run_events(event_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS frontend_message_events (
+                    message_id TEXT PRIMARY KEY,
+                    event_id TEXT NOT NULL UNIQUE,
+                    session_id TEXT NOT NULL,
+                    FOREIGN KEY(message_id) REFERENCES messages(message_id),
+                    FOREIGN KEY(event_id) REFERENCES run_events(event_id),
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS frontend_transport_references (
+                    connector_id TEXT NOT NULL,
+                    endpoint_id TEXT NOT NULL,
+                    transport_message_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    event_id TEXT NOT NULL,
+                    message_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(connector_id, endpoint_id, transport_message_id),
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE,
+                    FOREIGN KEY(event_id) REFERENCES run_events(event_id) ON DELETE CASCADE,
+                    FOREIGN KEY(message_id) REFERENCES messages(message_id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS frontend_transport_references_session
+                    ON frontend_transport_references(session_id, owner_id, event_id);
+
                 CREATE TABLE IF NOT EXISTS session_attachments (
                     attachment_id TEXT PRIMARY KEY,
                     session_id TEXT NOT NULL,
@@ -728,6 +902,19 @@ class SessionStore:
                     created_at TEXT NOT NULL,
                     committed_at TEXT,
                     FOREIGN KEY(session_id) REFERENCES sessions(session_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS attachment_stage_idempotency (
+                    session_id TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    request_digest TEXT NOT NULL,
+                    attachment_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(session_id, owner_id, idempotency_key),
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id),
+                    FOREIGN KEY(attachment_id) REFERENCES session_attachments(attachment_id)
+                        ON DELETE CASCADE
                 );
 
                 CREATE TABLE IF NOT EXISTS run_audio_assets (
@@ -816,6 +1003,31 @@ class SessionStore:
                     "ALTER TABLE event_consumers ADD COLUMN "
                     "issued_through_sequence INTEGER NOT NULL DEFAULT 0"
                 )
+            outbox_columns = {
+                str(row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(delivery_outbox)"
+                ).fetchall()
+            }
+            outbox_migrations = {
+                "lease_owner": "TEXT",
+                "lease_token": "TEXT",
+                "lease_expires_at": "TEXT",
+                "attempt_count": "INTEGER NOT NULL DEFAULT 0",
+                "last_error_code": "TEXT",
+                "completed_at": "TEXT",
+                "last_claim_token": "TEXT",
+                "last_claim_status": "TEXT",
+            }
+            for column, declaration in outbox_migrations.items():
+                if column not in outbox_columns:
+                    connection.execute(
+                        f"ALTER TABLE delivery_outbox ADD COLUMN {column} {declaration}"
+                    )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS delivery_outbox_claimable "
+                "ON delivery_outbox(session_id, state, created_at)"
+            )
             attachment_columns = {
                 str(row["name"])
                 for row in connection.execute(
@@ -864,6 +1076,10 @@ class SessionStore:
                     "ALTER TABLE messages ADD COLUMN "
                     "message_context_json TEXT NOT NULL DEFAULT '{}'"
                 )
+            if "display_text" not in message_columns:
+                connection.execute(
+                    "ALTER TABLE messages ADD COLUMN display_text TEXT"
+                )
             session_columns = {
                 str(row["name"])
                 for row in connection.execute("PRAGMA table_info(sessions)").fetchall()
@@ -878,6 +1094,16 @@ class SessionStore:
                     "ALTER TABLE sessions ADD COLUMN "
                     "history_generation INTEGER NOT NULL DEFAULT 1"
                 )
+            if "session_kind" not in session_columns:
+                connection.execute(
+                    "ALTER TABLE sessions ADD COLUMN "
+                    "session_kind TEXT NOT NULL DEFAULT 'conversation'"
+                )
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS one_active_agent_activity_session "
+                "ON sessions(instance_id, owner_id, agent_id, session_kind) "
+                "WHERE session_kind = 'agent_activity' AND status = 'active'"
+            )
             # One-time compatibility projection.  The former scalar Workzone
             # becomes the enabled ``main`` slot without changing the Session's
             # effective working directory.
@@ -974,6 +1200,7 @@ class SessionStore:
         summary: str = "",
         detail: Mapping[str, Any] | None = None,
         outbox: bool = False,
+        delivery_route: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         row = connection.execute(
             "SELECT next_event_sequence FROM sessions WHERE session_id = ?",
@@ -1011,11 +1238,118 @@ class SessionStore:
         if outbox:
             connection.execute(
                 """
-                INSERT INTO delivery_outbox(outbox_id, session_id, run_id, event_id, created_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO delivery_outbox(
+                    outbox_id, session_id, run_id, event_id, state, created_at
+                ) VALUES (?, ?, ?, ?, 'delegated', ?)
                 """,
                 (_new_id("out"), session_id, run_id, event_id, created_at),
             )
+            resolved_route = dict(delivery_route or {})
+            route_was_resolved = delivery_route is not None
+            if not resolved_route and run_id is not None:
+                run_row = connection.execute(
+                    "SELECT delivery_route_json FROM runs WHERE run_id=?",
+                    (str(run_id),),
+                ).fetchone()
+                if run_row is not None:
+                    resolved_route = _json_object(
+                        run_row["delivery_route_json"] or "{}"
+                    )
+                    route_was_resolved = bool(resolved_route)
+            destinations: list[dict[str, Any]] = []
+            invalid_route = False
+            if resolved_route:
+                try:
+                    from orchestrator.frontend_delivery import (
+                        delivery_intent_from_run_route,
+                    )
+
+                    intent = delivery_intent_from_run_route(
+                        resolved_route,
+                        event_id=event_id,
+                        session_id=session_id,
+                        idempotency_key=f"{event_id}:{kind}",
+                        content_modes=(
+                            tuple(
+                                str(item).strip().casefold()
+                                for item in (detail or {}).get(
+                                    "content_modes", ()
+                                )
+                                if str(item).strip()
+                            )
+                            or (
+                                ("text", "media")
+                                if kind == "assistant.output.available"
+                                else ("text", "card")
+                            )
+                        ),
+                    )
+                    destinations = [
+                        dict(item) for item in intent.get("destinations", ())
+                    ]
+                except ValueError:
+                    invalid_route = True
+            if not destinations and not route_was_resolved:
+                from orchestrator.frontend_connector_registry import endpoint_id_for
+
+                destinations = [
+                    {
+                        "connector_id": "session_api",
+                        "endpoint_id": endpoint_id_for(
+                            "session_api",
+                            ingress_transport="session-api",
+                            channel_key="default",
+                        ),
+                        "role": "primary",
+                        "content_modes": ["text", "card", "media"],
+                        "retry_class": "query_before_retry",
+                    }
+                ]
+            for destination in destinations:
+                connection.execute(
+                    """
+                    INSERT INTO connector_delivery_tasks(
+                        task_id, session_id, run_id, event_id, connector_id,
+                        endpoint_id, role, content_modes_json, retry_class,
+                        state, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                    ON CONFLICT(event_id, endpoint_id) DO NOTHING
+                    """,
+                    (
+                        _new_id("delivery"),
+                        session_id,
+                        run_id,
+                        event_id,
+                        str(destination["connector_id"]),
+                        str(destination["endpoint_id"]),
+                        str(destination.get("role") or "primary"),
+                        _json(list(destination.get("content_modes") or [])),
+                        str(
+                            destination.get("retry_class")
+                            or "query_before_retry"
+                        ),
+                        created_at,
+                    ),
+                    )
+            if invalid_route:
+                connection.execute(
+                    """
+                    UPDATE delivery_outbox
+                    SET state='failed', completed_at=?,
+                        last_error_code='invalid_delivery_route'
+                    WHERE event_id=?
+                    """,
+                    (created_at, event_id),
+                )
+            elif not destinations:
+                connection.execute(
+                    """
+                    UPDATE delivery_outbox
+                    SET state='suppressed', completed_at=?
+                    WHERE event_id=?
+                    """,
+                    (created_at, event_id),
+                )
         return {
             "event_id": event_id,
             "session_id": session_id,
@@ -1029,6 +1363,156 @@ class SessionStore:
             "created_at": created_at,
         }
 
+    def reserve_frontend_command_invocation(
+        self,
+        *,
+        session_id: str,
+        owner_id: str,
+        client_id: str,
+        request_id: str,
+        request_digest: str,
+        context_generation: int,
+        invocation: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Durably fence one command before any command handler can mutate state."""
+
+        identity = tuple(
+            str(value or "").strip()
+            for value in (session_id, owner_id, client_id, request_id)
+        )
+        if any(not value for value in identity):
+            raise ValueError("command invocation identity is required")
+        digest = str(request_digest or "").strip().casefold()
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError("command invocation digest is invalid")
+        encoded_invocation = _json(dict(invocation))
+        if len(encoded_invocation.encode("utf-8")) > 32768:
+            raise ValueError("command invocation exceeds the storage limit")
+        now = _utc_now()
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            session = connection.execute(
+                """
+                SELECT context_generation FROM sessions
+                WHERE session_id=? AND owner_id=? AND deleted_at IS NULL
+                """,
+                (identity[0], identity[1]),
+            ).fetchone()
+            if session is None:
+                raise SessionNotFound(identity[0])
+            if int(session["context_generation"]) != int(context_generation):
+                raise SessionConflict("session context changed before command admission")
+            existing = connection.execute(
+                """
+                SELECT request_digest, state, response_json, event_id
+                FROM frontend_command_invocations
+                WHERE session_id=? AND client_id=? AND request_id=?
+                """,
+                (identity[0], identity[2], identity[3]),
+            ).fetchone()
+            if existing is not None:
+                if str(existing["request_digest"]) != digest:
+                    raise IdempotencyConflict(
+                        "command request id is already bound to different content"
+                    )
+                if str(existing["state"]) == "completed":
+                    response = json.loads(str(existing["response_json"] or "{}"))
+                    return {
+                        "state": "completed",
+                        "response": response,
+                        "event_id": existing["event_id"],
+                        "replayed": True,
+                    }
+                return {"state": "pending", "replayed": True}
+            connection.execute(
+                """
+                INSERT INTO frontend_command_invocations(
+                    session_id, owner_id, client_id, request_id, request_digest,
+                    invocation_json, state, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                """,
+                (
+                    identity[0], identity[1], identity[2], identity[3], digest,
+                    encoded_invocation, now, now,
+                ),
+            )
+        return {"state": "reserved", "replayed": False}
+
+    def complete_frontend_command_invocation(
+        self,
+        *,
+        session_id: str,
+        owner_id: str,
+        client_id: str,
+        request_id: str,
+        request_digest: str,
+        response: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Persist a command result and its canonical Session event atomically."""
+
+        identity = tuple(
+            str(value or "").strip()
+            for value in (session_id, owner_id, client_id, request_id)
+        )
+        if any(not value for value in identity):
+            raise ValueError("command invocation identity is required")
+        digest = str(request_digest or "").strip().casefold()
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError("command invocation digest is invalid")
+        response_json = _json(dict(response))
+        if len(response_json.encode("utf-8")) > 262144:
+            raise ValueError("command result exceeds the storage limit")
+        now = _utc_now()
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT request_digest, invocation_json, state, response_json, event_id
+                FROM frontend_command_invocations
+                WHERE session_id=? AND owner_id=? AND client_id=? AND request_id=?
+                """,
+                identity,
+            ).fetchone()
+            if row is None:
+                raise SessionConflict("command invocation was not reserved")
+            if str(row["request_digest"]) != digest:
+                raise IdempotencyConflict(
+                    "command request id is already bound to different content"
+                )
+            if str(row["state"]) == "completed":
+                return {
+                    "state": "completed",
+                    "response": json.loads(str(row["response_json"] or "{}")),
+                    "event_id": row["event_id"],
+                    "replayed": True,
+                }
+            invocation = json.loads(str(row["invocation_json"]))
+            event_status = "completed" if response.get("ok") is True else "failed"
+            event = self._append_event(
+                connection,
+                session_id=identity[0],
+                run_id=None,
+                kind="frontend.command_result",
+                status=event_status,
+                phase="command",
+                summary=f"/{str(invocation.get('command') or 'command')} result",
+                detail={"command_invocation": invocation, "result": dict(response)},
+            )
+            connection.execute(
+                """
+                UPDATE frontend_command_invocations
+                SET state='completed', response_json=?, event_id=?, updated_at=?
+                WHERE session_id=? AND owner_id=? AND client_id=? AND request_id=?
+                """,
+                (response_json, event["event_id"], now, *identity),
+            )
+        return {
+            "state": "completed",
+            "response": dict(response),
+            "event_id": event["event_id"],
+            "replayed": False,
+        }
+
     def create_session(
         self,
         *,
@@ -1036,11 +1520,17 @@ class SessionStore:
         agent_id: str,
         title: str | None = None,
         is_default: bool = False,
+        session_kind: str = SESSION_KIND_CONVERSATION,
     ) -> dict[str, Any]:
         owner_id = str(owner_id).strip()
         agent_id = str(agent_id).strip().lower()
+        session_kind = str(session_kind or "").strip().casefold()
         if not owner_id or not agent_id:
             raise ValueError("owner_id and agent_id are required")
+        if session_kind not in SESSION_KINDS:
+            raise ValueError("unsupported Session kind")
+        if is_default and session_kind != SESSION_KIND_CONVERSATION:
+            raise ValueError("only a conversation Session can be the default")
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             if is_default:
@@ -1053,17 +1543,40 @@ class SessionStore:
                 ).fetchone()
                 if row is not None:
                     return self._session_dict(row)
+            if session_kind == SESSION_KIND_AGENT_ACTIVITY:
+                row = connection.execute(
+                    """
+                    SELECT * FROM sessions
+                    WHERE instance_id = ? AND owner_id = ? AND agent_id = ?
+                      AND session_kind = ? AND status = 'active'
+                    """,
+                    (
+                        self.instance_id,
+                        owner_id,
+                        agent_id,
+                        SESSION_KIND_AGENT_ACTIVITY,
+                    ),
+                ).fetchone()
+                if row is not None:
+                    return self._session_dict(row)
             session_id = _new_id("ses")
             now = _utc_now()
             resolved_title = str(
-                title or (f"{agent_id} default" if is_default else "New session")
+                title
+                or (
+                    f"{agent_id} activity"
+                    if session_kind == SESSION_KIND_AGENT_ACTIVITY
+                    else f"{agent_id} default"
+                    if is_default
+                    else "New session"
+                )
             ).strip()
             connection.execute(
                 """
                 INSERT INTO sessions(
                     session_id, instance_id, owner_id, agent_id, title,
-                    is_default, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    session_kind, is_default, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
@@ -1071,6 +1584,7 @@ class SessionStore:
                     owner_id,
                     agent_id,
                     resolved_title,
+                    session_kind,
                     int(is_default),
                     now,
                     now,
@@ -1094,7 +1608,11 @@ class SessionStore:
                 kind="session.created",
                 status="active",
                 summary="Session created",
-                detail={"is_default": bool(is_default), "agent_id": agent_id},
+                detail={
+                    "is_default": bool(is_default),
+                    "agent_id": agent_id,
+                    "session_kind": session_kind,
+                },
             )
             row = connection.execute(
                 "SELECT * FROM sessions WHERE session_id = ?", (session_id,)
@@ -1107,6 +1625,21 @@ class SessionStore:
             agent_id=agent_id,
             title=f"{str(agent_id).strip().lower()} default",
             is_default=True,
+        )
+
+    def ensure_agent_activity_session(
+        self,
+        *,
+        owner_id: str,
+        agent_id: str,
+    ) -> dict[str, Any]:
+        """Return the Agent-owned internal Session used for independent Runs."""
+
+        return self.create_session(
+            owner_id=owner_id,
+            agent_id=agent_id,
+            title=f"{str(agent_id).strip().lower()} activity",
+            session_kind=SESSION_KIND_AGENT_ACTIVITY,
         )
 
     def get_session(
@@ -1141,6 +1674,7 @@ class SessionStore:
         owner_id: str,
         agent_id: str | None = None,
         include_archived: bool = False,
+        include_internal: bool = False,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         clauses = ["instance_id = ?", "owner_id = ?", "status != 'deleted'"]
@@ -1150,6 +1684,8 @@ class SessionStore:
             params.append(str(agent_id).lower())
         if not include_archived:
             clauses.append("status = 'active'")
+        if not include_internal:
+            clauses.append("session_kind = 'conversation'")
         params.append(max(1, min(int(limit), 500)))
         with self._lock, self._connection() as connection:
             rows = connection.execute(
@@ -1308,10 +1844,13 @@ class SessionStore:
                 "runtime_event_correlations",
                 "run_approvals",
                 "delivery_outbox",
+                "connector_delivery_receipts",
+                "frontend_message_events",
                 "event_consumers",
                 "agent_memory_records",
                 "memory_promotion_watermarks",
                 "idempotency_records",
+                "frontend_command_invocations",
                 "run_projection_records",
                 "backend_bindings",
                 "channel_bindings",
@@ -1442,6 +1981,17 @@ class SessionStore:
     ) -> dict[str, Any]:
         """Select one shared personal conversation for interactive frontends."""
 
+        selected = self.get_session(
+            session_id,
+            owner_id=owner_id,
+            agent_id=agent_id,
+            include_deleted=False,
+        )
+        if selected.get("session_kind") != SESSION_KIND_CONVERSATION:
+            raise SessionConflict(
+                "the primary frontend can select only a conversation Session"
+            )
+
         return self.bind_channel(
             owner_id=owner_id,
             agent_id=agent_id,
@@ -1474,6 +2024,7 @@ class SessionStore:
                 JOIN sessions AS s ON s.session_id = b.session_id
                 WHERE b.instance_id = ? AND b.owner_id = ? AND b.agent_id = ?
                   AND b.surface = ? AND b.channel_key = ?
+                  AND s.session_kind = 'conversation'
                   AND s.status = 'active'
                 """,
                 (
@@ -1495,6 +2046,7 @@ class SessionStore:
                     b.surface = 'telegram'
                     OR (b.surface = 'workbench' AND b.channel_key = 'default')
                   )
+                  AND s.session_kind = 'conversation'
                   AND s.status = 'active'
                 ORDER BY s.updated_at DESC, b.updated_at DESC, s.session_id ASC
                 LIMIT 1
@@ -1514,6 +2066,7 @@ class SessionStore:
                 JOIN sessions AS s ON s.session_id = b.session_id
                 WHERE b.instance_id = ? AND b.owner_id = ? AND b.agent_id = ?
                   AND b.surface = ? AND b.channel_key = ?
+                  AND s.session_kind = 'conversation'
                   AND s.status = 'active'
                 """,
                 (
@@ -1551,6 +2104,7 @@ class SessionStore:
                 JOIN sessions AS s ON s.session_id = b.session_id
                 WHERE b.instance_id = ? AND b.owner_id = ? AND b.agent_id = ?
                   AND b.surface = ? AND b.channel_key = ?
+                  AND s.session_kind = 'conversation'
                   AND s.status = 'active'
                 """,
                 (
@@ -1621,6 +2175,7 @@ class SessionStore:
         text: str,
         source: str,
         idempotency_key: str,
+        display_text: str | None = None,
         execution_mode: str | None = None,
         content: Iterable[Mapping[str, Any]] | None = None,
         parent_run_id: str | None = None,
@@ -1630,6 +2185,10 @@ class SessionStore:
         expected_context_generation: int | None = None,
     ) -> AcceptedRun:
         clean = str(text or "").strip()
+        if display_text is not None and not isinstance(display_text, str):
+            raise ValueError("display_text must be a string")
+        if display_text is not None and len(display_text) > MAX_SESSION_MESSAGE_CHARS:
+            raise ValueError("display_text exceeds the configured message limit")
         blocks = list(content or ({"type": "text", "text": clean},))
         if contains_persistent_inline_media(blocks):
             raise SessionConflict("Session content cannot contain inline media bytes")
@@ -1757,6 +2316,37 @@ class SessionStore:
                         raise SessionConflict(
                             "media content requires attachment identity"
                         )
+                elif block_type == "reply_ref":
+                    event_id = str(block.get("event_id") or "").strip()
+                    if not event_id or len(event_id) > 512:
+                        raise ValueError("reply references require a valid Event ID")
+                    reference = connection.execute(
+                        """
+                        SELECT message.message_id
+                        FROM run_events AS e
+                        JOIN sessions AS s ON s.session_id=e.session_id
+                        LEFT JOIN frontend_message_events AS fme
+                          ON fme.event_id=e.event_id AND fme.session_id=e.session_id
+                        LEFT JOIN runs AS target_run
+                          ON target_run.run_id=e.run_id
+                         AND target_run.session_id=e.session_id
+                        JOIN messages AS message
+                          ON message.message_id=COALESCE(
+                              fme.message_id, target_run.final_message_id
+                          )
+                         AND message.session_id=e.session_id
+                        WHERE e.event_id=? AND e.session_id=?
+                          AND s.owner_id=? AND s.instance_id=?
+                          AND message.role='assistant'
+                          AND message.visibility='visible'
+                        """,
+                        (event_id, str(session_id), str(owner_id), self.instance_id),
+                    ).fetchone()
+                    if reference is None:
+                        raise SessionConflict(
+                            "reply reference is not a visible assistant Event in this Session"
+                        )
+                    block = {"type": "reply_ref", "event_id": event_id}
                 elif not block_type:
                     raise ValueError("message content parts require a type")
                 else:
@@ -1771,6 +2361,7 @@ class SessionStore:
             digest_payload = {
                 "content": blocks,
                 "attachments": attachment_fingerprints,
+                "display_text": display_text,
                 "execution_mode": str(execution_mode or ""),
                 "parent_run_id": str(parent_run_id or ""),
                 "response_preferences": dict(response_preferences or {}),
@@ -1812,8 +2403,8 @@ class SessionStore:
                 INSERT INTO messages(
                     message_id, session_id, run_id, ordinal, context_generation,
                     role, author_id, source, message_context_json, content_json,
-                    text, content_hash, created_at
-                ) VALUES (?, ?, ?, ?, ?, 'user', ?, ?, ?, ?, ?, ?, ?)
+                    text, display_text, content_hash, created_at
+                ) VALUES (?, ?, ?, ?, ?, 'user', ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     message_id,
@@ -1826,6 +2417,7 @@ class SessionStore:
                     _json(dict(message_context or {})),
                     content_json,
                     clean,
+                    display_text,
                     content_hash,
                     now,
                 ),
@@ -1861,8 +2453,25 @@ class SessionStore:
                     now,
                 ),
             )
+            if attachment_rows:
+                connection.executemany(
+                    """UPDATE session_attachments
+                       SET retention_seconds=NULL, retention_indefinite=1
+                       WHERE attachment_id=? AND session_id=? AND owner_id=?""",
+                    [
+                        (
+                            str(attachment["attachment_id"]),
+                            str(session_id),
+                            str(owner_id),
+                        )
+                        for attachment in attachment_rows
+                    ],
+                )
             for attachment in audio_rows:
                 asset_id = str(attachment["asset_id"])
+                self.audio_assets.set_indefinite(
+                    asset_id, owner_id=owner_id, session_id=session_id
+                )
                 self.audio_assets.acquire(
                     asset_id, owner_id=owner_id, session_id=session_id
                 )
@@ -1934,8 +2543,11 @@ class SessionStore:
         presentation_channel: str = "command",
         history_eligible: bool = False,
         message_context: Mapping[str, Any] | None = None,
+        content: Iterable[Mapping[str, Any]] | None = None,
+        outbox: bool = False,
+        delivery_route: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Persist frontend-visible text without turning it into model input."""
+        """Persist frontend-visible standard content outside model history."""
 
         clean = str(text or "").strip()
         normalized_role = str(role or "").strip().casefold()
@@ -1943,8 +2555,8 @@ class SessionStore:
         stable_key = str(idempotency_key or "").strip()
         normalized_format = str(content_format or "plain-text").strip().casefold()
         normalized_channel = str(presentation_channel or "command").strip().casefold()
-        if not clean or not normalized_source or not stable_key:
-            raise ValueError("presentation message text, source and idempotency key are required")
+        if not normalized_source or not stable_key:
+            raise ValueError("presentation message source and idempotency key are required")
         if normalized_role not in {"user", "assistant"}:
             raise ValueError("presentation message role must be user or assistant")
         if normalized_format not in {"plain-text", "markdown", "telegram-html"}:
@@ -1957,8 +2569,62 @@ class SessionStore:
                 "presentation_only": not bool(history_eligible),
             }
         )
-        content = [{"type": "text", "text": clean}]
-        content_json = _json(content)
+        supplied_content = list(content or ())
+        normalized_content: list[dict[str, Any]] = []
+        if supplied_content:
+            if contains_persistent_inline_media(supplied_content):
+                raise SessionConflict(
+                    "presentation content cannot contain inline media bytes"
+                )
+            for raw_part in supplied_content:
+                if not isinstance(raw_part, Mapping):
+                    raise ValueError("presentation content parts must be objects")
+                part = dict(raw_part)
+                part_type = str(part.get("type") or "").strip().casefold()
+                if part_type == "text":
+                    part_text = str(part.get("text") or "")
+                    if not part_text:
+                        raise ValueError("presentation text parts require text")
+                    normalized_content.append(
+                        {"type": "text", "text": part_text}
+                    )
+                    if not clean and part_text.strip():
+                        clean = part_text.strip()
+                elif part_type in {"attachment", "media"}:
+                    attachment_id = str(
+                        part.get("attachment_id") or ""
+                    ).strip()
+                    if not attachment_id:
+                        raise ValueError(
+                            "presentation media requires attachment_id"
+                        )
+                    normalized_content.append(
+                        self.attachment_canonical_part(
+                            session_id=str(session_id),
+                            owner_id=str(owner_id),
+                            attachment_id=attachment_id,
+                            item_index=len(normalized_content) + 1,
+                            semantic_role=str(
+                                part.get("semantic_role") or ""
+                            )
+                            or None,
+                            presentation_role=str(
+                                part.get("presentation_role") or ""
+                            )
+                            or None,
+                            caption=str(part.get("caption") or ""),
+                            detail=str(part.get("detail") or ""),
+                        )
+                    )
+                else:
+                    raise ValueError(
+                        f"unsupported presentation content type {part_type!r}"
+                    )
+        elif clean:
+            normalized_content = [{"type": "text", "text": clean}]
+        if not normalized_content:
+            raise ValueError("presentation message requires text or media")
+        content_json = _json(normalized_content)
         content_hash = hashlib.sha256(content_json.encode("utf-8")).hexdigest()
         identity = "\n".join(
             (
@@ -1997,7 +2663,14 @@ class SessionStore:
                     raise IdempotencyConflict(
                         "presentation idempotency key is bound to different content"
                     )
-                return self._message_dict(existing)
+                result = self._message_dict(existing)
+                event_link = connection.execute(
+                    "SELECT event_id FROM frontend_message_events WHERE message_id = ?",
+                    (message_id,),
+                ).fetchone()
+                if event_link is not None:
+                    result["delivery_event_id"] = str(event_link["event_id"])
+                return result
             ordinal = self._next_ordinal(connection, str(session_id))
             connection.execute(
                 """
@@ -2024,7 +2697,7 @@ class SessionStore:
                     now,
                 ),
             )
-            self._append_event(
+            presentation_event = self._append_event(
                 connection,
                 session_id=str(session_id),
                 run_id=None,
@@ -2036,7 +2709,25 @@ class SessionStore:
                     "message_id": message_id,
                     "source": normalized_source,
                     "presentation_channel": normalized_channel,
+                    "content_modes": sorted(
+                        {
+                            "media"
+                            if str(item.get("type") or "").casefold()
+                            in {"attachment", "media", "audio"}
+                            else "text"
+                            for item in normalized_content
+                        }
+                    ),
                 },
+                outbox=outbox,
+                delivery_route=delivery_route,
+            )
+            connection.execute(
+                """
+                INSERT INTO frontend_message_events(message_id, event_id, session_id)
+                VALUES (?, ?, ?)
+                """,
+                (message_id, presentation_event["event_id"], str(session_id)),
             )
             connection.execute(
                 """
@@ -2048,7 +2739,9 @@ class SessionStore:
             inserted = connection.execute(
                 "SELECT * FROM messages WHERE message_id = ?", (message_id,)
             ).fetchone()
-        return self._message_dict(inserted)
+        result = self._message_dict(inserted)
+        result["delivery_event_id"] = presentation_event["event_id"]
+        return result
 
     def update_presentation_message(
         self,
@@ -2066,10 +2759,20 @@ class SessionStore:
         if not clean:
             raise ValueError("presentation message text is required")
         supplied_context = dict(message_context or {})
-        if set(supplied_context) != {"command_ui"} or not isinstance(
-            supplied_context.get("command_ui"), Mapping
+        if (
+            not supplied_context
+            or set(supplied_context) - {"command_ui", "frontend_presentation"}
+            or not isinstance(supplied_context.get("command_ui"), Mapping)
+            or (
+                "frontend_presentation" in supplied_context
+                and not isinstance(
+                    supplied_context.get("frontend_presentation"), Mapping
+                )
+            )
         ):
-            raise ValueError("only command_ui presentation state may be updated")
+            raise ValueError(
+                "only command_ui and its standard presentation may be updated"
+            )
         content = [{"type": "text", "text": clean}]
         content_json = _json(content)
         content_hash = hashlib.sha256(content_json.encode("utf-8")).hexdigest()
@@ -2110,6 +2813,21 @@ class SessionStore:
                 raise SessionNotFound("presentation message not found")
             context = _json_object(existing["message_context_json"])
             context.update(supplied_context)
+            if "frontend_presentation" not in supplied_context and isinstance(
+                context.get("frontend_presentation"), Mapping
+            ):
+                presentation = dict(context["frontend_presentation"])
+                blocks = [
+                    dict(item)
+                    for item in presentation.get("content_blocks") or []
+                    if isinstance(item, Mapping)
+                ]
+                for block in blocks:
+                    if block.get("type") == "text":
+                        block["text"] = clean
+                        break
+                presentation["content_blocks"] = blocks
+                context["frontend_presentation"] = presentation
             # These invariants keep the row outside model history regardless of
             # what a Connector callback attempted to supply.
             context["presentation_only"] = True
@@ -2280,10 +2998,25 @@ class SessionStore:
         assistant_content: Iterable[Mapping[str, Any]] | None = None,
         assistant_source: str = "",
         error_text: str | None = None,
+        error_context: Mapping[str, Any] | None = None,
         failure_state: str = "failed",
         fencing_token: int | None = None,
     ) -> dict[str, Any] | None:
         now = _utc_now()
+        public_error_context: dict[str, Any] = {}
+        if isinstance(error_context, Mapping):
+            for key in ("error_code", "provider_request_id", "backend", "diagnostic_log"):
+                value = error_context.get(key)
+                if isinstance(value, str) and value.strip():
+                    public_error_context[key] = value.strip()[:4096 if key == "diagnostic_log" else 160]
+            for key in ("error_retryable", "side_effects_possible"):
+                value = error_context.get(key)
+                if isinstance(value, bool):
+                    public_error_context[key] = value
+            for key in ("http_status", "retry_after_s"):
+                value = error_context.get(key)
+                if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= 86400:
+                    public_error_context[key] = value
         clean = str(assistant_text or "").strip()
         supplied_content = list(assistant_content or ())
         if contains_persistent_inline_media(supplied_content):
@@ -2330,6 +3063,7 @@ class SessionStore:
             and str(part.get("attachment_id") or "").strip()
             for part in normalized_content
         )
+        terminal_content_already_published = False
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             run = connection.execute(
@@ -2369,6 +3103,7 @@ class SessionStore:
                         # first-ready time.  Reuse that canonical Message when
                         # the Run later settles instead of duplicating it.
                         final_message_id = str(existing_output["message_id"])
+                        terminal_content_already_published = True
                     else:
                         final_message_id = _new_id("msg")
                         ordinal = self._next_ordinal(connection, session_id)
@@ -2413,7 +3148,11 @@ class SessionStore:
                                 "disposition": "final",
                                 "content": content,
                             },
-                            outbox=True,
+                            # The terminal run.completed Event owns delivery of
+                            # final Message content.  Keep this availability
+                            # Event in the feed, but do not create a second
+                            # destination task for the same attachment bytes.
+                            outbox=False,
                         )
             state = "completed" if success else str(failure_state or "failed")
             if state not in TERMINAL_RUN_STATES:
@@ -2454,8 +3193,14 @@ class SessionStore:
                 else str(error_text or "Run failed"),
                 detail={"message_id": final_message_id}
                 if success
-                else {"error": str(error_text or "run failed")},
-                outbox=True,
+                else {
+                    "error": str(error_text or "run failed"),
+                    "error_context": public_error_context,
+                },
+                # A first-ready native output Event already owns delivery of
+                # a reused Message.  The terminal Event remains in the feed,
+                # but must not enqueue the same text/audio a second time.
+                outbox=not terminal_content_already_published,
             )
             projection = {
                 "run_id": str(run["run_id"]),
@@ -2530,7 +3275,13 @@ class SessionStore:
             outcome_status = str(outcome_state or "").strip().casefold() or (
                 "delivered" if delivered else "failed"
             )
-            if outcome_status not in {"queued", "delivered", "failed"}:
+            if outcome_status not in {
+                "queued",
+                "accepted",
+                "delivered",
+                "failed",
+                "unknown",
+            }:
                 raise ValueError("unsupported assistant delivery outcome state")
             if delivered != (outcome_status == "delivered"):
                 raise ValueError(
@@ -2579,7 +3330,15 @@ class SessionStore:
                     else (
                         "Assistant final response queued"
                         if outcome_status == "queued"
-                        else "Assistant final response delivery failed"
+                        else (
+                            "Assistant final response accepted by transport"
+                            if outcome_status == "accepted"
+                            else (
+                                "Assistant final response delivery outcome unknown"
+                                if outcome_status == "unknown"
+                                else "Assistant final response delivery failed"
+                            )
+                        )
                     )
                 ),
                 detail=detail,
@@ -2713,6 +3472,8 @@ class SessionStore:
         retention_seconds: int = DEFAULT_RETENTION_SECONDS,
         retention_indefinite: bool = False,
         upload_required: bool | None = None,
+        idempotency_key: str | None = None,
+        attachment_policy: str = "standard",
     ) -> dict[str, Any]:
         self.get_session(session_id, owner_id=owner_id, include_deleted=False)
         digest = str(sha256).lower()
@@ -2726,7 +3487,10 @@ class SessionStore:
         declared_size = int(size_bytes)
         if declared_size < 0:
             raise ValueError("attachment size must be non-negative")
-        if declared_size > MAX_SESSION_ATTACHMENT_BYTES:
+        _max_count, max_attachment_bytes, _max_total = _attachment_policy_limits(
+            attachment_policy
+        )
+        if declared_size > max_attachment_bytes:
             raise ValueError("attachment exceeds the configured size limit")
         is_audio = normalized_media_type.startswith("audio/")
         normalized_role = str(semantic_role or "").strip().casefold()
@@ -2740,11 +3504,78 @@ class SessionStore:
                 raise ValueError("duration_ms must be non-negative")
             if not retention_indefinite and int(retention_seconds) < MIN_RETENTION_SECONDS:
                 raise ValueError("audio retention must be at least 60 seconds")
-        elif normalized_role:
-            raise ValueError("semantic_role is only supported for audio attachments")
+        else:
+            if normalized_role:
+                raise ValueError("semantic_role is only supported for audio attachments")
+            if not retention_indefinite and int(retention_seconds) < 1:
+                raise ValueError("attachment retention must be positive")
         requires_upload = True if upload_required is None else bool(upload_required)
+        normalized_duration = int(duration_ms) if duration_ms is not None else None
+        normalized_retention_indefinite = bool(retention_indefinite)
+        normalized_retention = (
+            None if normalized_retention_indefinite else int(retention_seconds)
+        )
+        normalized_key = str(idempotency_key or "").strip()
+        if normalized_key and (
+            len(normalized_key) > 256
+            or any(ord(character) < 0x21 or ord(character) > 0x7E for character in normalized_key)
+        ):
+            raise ValueError("attachment idempotency key must be bounded printable ASCII")
+        request_digest = hashlib.sha256(
+            json.dumps(
+                {
+                    "filename": str(filename),
+                    "media_type": normalized_media_type,
+                    "size_bytes": declared_size,
+                    "sha256": digest,
+                    "semantic_role": normalized_role,
+                    "duration_ms": normalized_duration,
+                    "retention_seconds": normalized_retention,
+                    "retention_indefinite": normalized_retention_indefinite,
+                    "upload_required": bool(requires_upload),
+                    "attachment_policy": str(attachment_policy or "standard")
+                    .strip()
+                    .casefold(),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
         attachment_id, now = _new_id("att"), _utc_now()
         with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if normalized_key:
+                previous = connection.execute(
+                    """SELECT request_digest, attachment_id
+                       FROM attachment_stage_idempotency
+                       WHERE session_id=? AND owner_id=? AND idempotency_key=?""",
+                    (str(session_id), str(owner_id), normalized_key),
+                ).fetchone()
+                if previous is not None:
+                    if str(previous["request_digest"]) != request_digest:
+                        raise IdempotencyConflict(
+                            "attachment stage idempotency key was reused with different metadata"
+                        )
+                    row = connection.execute(
+                        "SELECT * FROM session_attachments WHERE attachment_id=? "
+                        "AND session_id=? AND owner_id=?",
+                        (
+                            str(previous["attachment_id"]),
+                            str(session_id),
+                            str(owner_id),
+                        ),
+                    ).fetchone()
+                    if row is None:
+                        raise SessionConflict(
+                            "idempotent attachment stage is no longer available"
+                        )
+                    result = dict(row)
+                    result["retention_indefinite"] = bool(
+                        result["retention_indefinite"]
+                    )
+                    result["upload_required"] = bool(result["upload_required"])
+                    return result
             connection.execute(
                 """INSERT INTO session_attachments(attachment_id,session_id,owner_id,filename,
                    media_type,size_bytes,sha256,semantic_role,duration_ms,
@@ -2759,13 +3590,28 @@ class SessionStore:
                     declared_size,
                     digest,
                     normalized_role,
-                    int(duration_ms) if duration_ms is not None else None,
-                    None if retention_indefinite else int(retention_seconds),
-                    int(bool(retention_indefinite)),
+                    normalized_duration,
+                    normalized_retention,
+                    int(normalized_retention_indefinite),
                     int(requires_upload),
                     now,
                 ),
             )
+            if normalized_key:
+                connection.execute(
+                    """INSERT INTO attachment_stage_idempotency(
+                           session_id,owner_id,idempotency_key,request_digest,
+                           attachment_id,created_at
+                       ) VALUES(?,?,?,?,?,?)""",
+                    (
+                        str(session_id),
+                        str(owner_id),
+                        normalized_key,
+                        request_digest,
+                        attachment_id,
+                        now,
+                    ),
+                )
             row = connection.execute(
                 "SELECT * FROM session_attachments WHERE attachment_id=?",
                 (attachment_id,),
@@ -2846,8 +3692,8 @@ class SessionStore:
         if row is None:
             raise SessionNotFound("attachment not found")
         attachment = dict(row)
-        if attachment["state"] != "staged":
-            raise SessionConflict("only staged attachments can be uploaded")
+        if str(attachment["state"]) not in {"staged", "committed"}:
+            raise SessionConflict("attachment is no longer available for upload")
         actual_digest = hashlib.sha256(payload).hexdigest()
         if len(payload) != int(attachment["size_bytes"]):
             raise SessionConflict("attachment size does not match staged metadata")
@@ -2866,6 +3712,8 @@ class SessionStore:
             else:
                 self._validated_attachment_file(attachment)
             return attachment
+        if attachment["state"] != "staged":
+            raise SessionConflict("only staged attachments can be uploaded")
 
         if str(attachment["media_type"]).casefold().startswith("audio/"):
             audio_format = normalize_audio_format(
@@ -2926,6 +3774,86 @@ class SessionStore:
             ).fetchone()
         return dict(updated)
 
+    def upload_attachment_file(
+        self,
+        *,
+        session_id: str,
+        owner_id: str,
+        attachment_id: str,
+        source_path: Path | str,
+    ) -> dict[str, Any]:
+        """Atomically copy one staged non-audio attachment without whole buffering."""
+
+        source = Path(source_path)
+        if source.is_symlink():
+            raise ValueError("attachment symlinks are not supported")
+        try:
+            source_size = source.stat().st_size
+        except OSError as exc:
+            raise SessionConflict("attachment source is unavailable") from exc
+        if not source.is_file():
+            raise ValueError("attachment source must be a regular file")
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """SELECT * FROM session_attachments
+                   WHERE attachment_id=? AND session_id=? AND owner_id=?""",
+                (str(attachment_id), str(session_id), str(owner_id)),
+            ).fetchone()
+        if row is None:
+            raise SessionNotFound("attachment not found")
+        attachment = dict(row)
+        if str(attachment["state"]) not in {"staged", "committed"}:
+            raise SessionConflict("attachment is no longer available for upload")
+        if str(attachment["media_type"]).casefold().startswith("audio/"):
+            raise ValueError("streaming Session upload requires file-backed media")
+        existing_asset = str(attachment.get("asset_id") or "")
+        if existing_asset:
+            self._validated_attachment_file(attachment)
+            return attachment
+        if attachment["state"] != "staged":
+            raise SessionConflict("only staged attachments can be uploaded")
+        if source_size != int(attachment["size_bytes"]):
+            raise SessionConflict("attachment size does not match staged metadata")
+
+        target = self._attachment_file_path(
+            str(attachment_id), str(attachment["filename"])
+        )
+        partial = target.with_suffix(f"{target.suffix}.{uuid4().hex}.partial")
+        digest = hashlib.sha256()
+        observed_size = 0
+        try:
+            with source.open("rb") as input_handle, partial.open("xb") as output_handle:
+                while chunk := input_handle.read(8 * 1024 * 1024):
+                    observed_size += len(chunk)
+                    digest.update(chunk)
+                    output_handle.write(chunk)
+                output_handle.flush()
+            if observed_size != int(attachment["size_bytes"]):
+                raise SessionConflict("attachment changed while being copied")
+            if digest.hexdigest() != str(attachment["sha256"]):
+                raise SessionConflict("attachment digest does not match staged metadata")
+            try:
+                os.chmod(partial, 0o600)
+            except OSError:
+                pass
+            partial.replace(target)
+        except Exception:
+            partial.unlink(missing_ok=True)
+            raise
+
+        now = _utc_now()
+        with self._lock, self._connection() as connection:
+            connection.execute(
+                """UPDATE session_attachments SET asset_id=?, uploaded_at=?
+                   WHERE attachment_id=? AND state='staged'""",
+                (str(attachment_id), now, str(attachment_id)),
+            )
+            updated = connection.execute(
+                "SELECT * FROM session_attachments WHERE attachment_id=?",
+                (str(attachment_id),),
+            ).fetchone()
+        return dict(updated)
+
     def commit_attachment(
         self, *, session_id: str, owner_id: str, attachment_id: str
     ) -> dict[str, Any]:
@@ -2938,6 +3866,8 @@ class SessionStore:
             ).fetchone()
             if row is None:
                 raise SessionNotFound("attachment not found")
+            if str(row["state"]) not in {"staged", "committed"}:
+                raise SessionConflict("attachment is no longer available for commit")
             if bool(row["upload_required"]) and not str(row["asset_id"] or ""):
                 raise SessionConflict("attachment bytes must be uploaded before commit")
             if str(row["asset_id"] or ""):
@@ -2964,6 +3894,84 @@ class SessionStore:
         result["retention_indefinite"] = bool(result["retention_indefinite"])
         result["upload_required"] = bool(result["upload_required"])
         return result
+
+    def discard_unbound_attachments(
+        self,
+        *,
+        session_id: str,
+        owner_id: str,
+        attachment_ids: Iterable[str],
+    ) -> list[str]:
+        """Remove a failed intake batch only while none of it is message-bound."""
+
+        normalized_ids = list(
+            dict.fromkeys(
+                self._safe_attachment_id(item)
+                for item in attachment_ids
+                if str(item or "").strip()
+            )
+        )
+        if not normalized_ids:
+            return []
+        rows: list[dict[str, Any]] = []
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for attachment_id in normalized_ids:
+                row = connection.execute(
+                    """SELECT * FROM session_attachments
+                       WHERE attachment_id=? AND session_id=? AND owner_id=?""",
+                    (attachment_id, str(session_id), str(owner_id)),
+                ).fetchone()
+                if row is None:
+                    continue
+                reference_pattern = '%"attachment_id":"' + attachment_id + '"%'
+                bound = any(
+                    connection.execute(query, parameters).fetchone() is not None
+                    for query, parameters in (
+                        (
+                            "SELECT 1 FROM messages WHERE session_id=? "
+                            "AND content_json LIKE ? LIMIT 1",
+                            (str(session_id), reference_pattern),
+                        ),
+                        (
+                            "SELECT 1 FROM run_audio_assets WHERE attachment_id=? LIMIT 1",
+                            (attachment_id,),
+                        ),
+                        (
+                            "SELECT 1 FROM run_output_attachments WHERE attachment_id=? LIMIT 1",
+                            (attachment_id,),
+                        ),
+                        (
+                            "SELECT 1 FROM voice_transcripts WHERE attachment_id=? LIMIT 1",
+                            (attachment_id,),
+                        ),
+                    )
+                )
+                if bound:
+                    raise SessionConflict(
+                        "message-bound attachments cannot be discarded"
+                    )
+                rows.append(dict(row))
+            for row in rows:
+                connection.execute(
+                    "DELETE FROM attachment_stage_idempotency WHERE attachment_id=?",
+                    (str(row["attachment_id"]),),
+                )
+                connection.execute(
+                    "DELETE FROM session_attachments WHERE attachment_id=?",
+                    (str(row["attachment_id"]),),
+                )
+        for row in rows:
+            if str(row.get("asset_id") or "") and not str(
+                row.get("media_type") or ""
+            ).casefold().startswith("audio/"):
+                try:
+                    self._attachment_file_path(
+                        str(row["attachment_id"]), str(row["filename"])
+                    ).unlink(missing_ok=True)
+                except OSError:
+                    pass
+        return [str(row["attachment_id"]) for row in rows]
 
     def attachment_bytes(
         self, *, session_id: str, owner_id: str, attachment_id: str
@@ -2993,6 +4001,7 @@ class SessionStore:
         attachment_id: str,
         item_index: int,
         semantic_role: str | None = None,
+        presentation_role: str | None = None,
         caption: str = "",
         detail: str = "",
     ) -> dict[str, Any]:
@@ -3022,12 +4031,29 @@ class SessionStore:
         role = str(
             semantic_role or attachment["semantic_role"] or "audio_attachment"
         )
+        resolved_presentation_role = str(
+            presentation_role or ""
+        ).strip().casefold()
+        if resolved_presentation_role not in {
+            "",
+            "audio",
+            "document",
+            "image",
+            "photo",
+            "video",
+            "voice",
+        }:
+            raise ValueError("attachment presentation_role is invalid")
         part = {
             "type": "media",
             "item_index": int(item_index),
             "attachment_id": str(attachment_id),
             "modality": modality,
-            "kind": "voice" if modality == "audio" and role == "voice_message" else modality,
+            "kind": (
+                "voice"
+                if modality == "audio" and role == "voice_message"
+                else resolved_presentation_role or modality
+            ),
             "mime_type": media_type,
             "filename": str(attachment["filename"]),
             "caption": str(caption or ""),
@@ -3039,6 +4065,8 @@ class SessionStore:
         if modality == "audio":
             part["semantic_role"] = role
             part["duration_ms"] = attachment["duration_ms"]
+        if resolved_presentation_role:
+            part["presentation_role"] = resolved_presentation_role
         if detail:
             part["detail"] = str(detail)
         return part
@@ -3069,7 +4097,7 @@ class SessionStore:
         with self._lock, self._connection() as connection:
             rows = connection.execute(
                 f"""
-                SELECT o.*, r.session_id, s.owner_id, r.agent_id
+                SELECT o.*, r.session_id, r.request_id, s.owner_id, r.agent_id
                 FROM run_output_attachments AS o
                 JOIN runs AS r ON r.run_id=o.run_id
                 JOIN sessions AS s ON s.session_id=r.session_id
@@ -3119,9 +4147,40 @@ class SessionStore:
         digests = {str(row["request_digest"]) for row in rows}
         if len(digests) != 1:
             raise SessionConflict("frontend attachment output group is inconsistent")
+        attachments = self._canonical_run_output_attachments(rows)
+        group_id_material = "\0".join(
+            (
+                self.instance_id,
+                str(rows[0]["session_id"]),
+                str(rows[0]["request_id"]),
+                str(rows[0]["idempotency_key"]),
+            )
+        )
+        group_id = "grp_" + hashlib.sha256(
+            group_id_material.encode("utf-8")
+        ).hexdigest()[:32]
+        media_group = normalize_media_group(
+            {
+                "type": "hashi.media-group",
+                "version": 1,
+                "group_id": group_id,
+                "retention_class": "message_bound",
+                "attachments": [
+                    {
+                        "attachment_id": str(item["attachment_id"]),
+                        "ordinal": index,
+                        "sha256": str(item["sha256"]),
+                        "filename": str(item["filename"]),
+                    }
+                    for index, item in enumerate(attachments)
+                ],
+            }
+        )
         return {
             "request_digest": next(iter(digests)),
-            "attachments": self._canonical_run_output_attachments(rows),
+            "group_id": group_id,
+            "media_group": media_group,
+            "attachments": attachments,
         }
 
     def run_output_attachment_content(
@@ -3149,6 +4208,7 @@ class SessionStore:
         idempotency_key: str,
         request_digest: str,
         attachments: Iterable[Mapping[str, Any]],
+        attachment_policy: str = "standard",
     ) -> dict[str, Any]:
         key = str(idempotency_key or "").strip()
         if not key or len(key) > 512:
@@ -3176,7 +4236,10 @@ class SessionStore:
                     "detail": detail,
                 }
             )
-        if not bindings or len(bindings) > MAX_SESSION_ATTACHMENTS_PER_MESSAGE:
+        max_count, _max_attachment_bytes, max_total_bytes = _attachment_policy_limits(
+            attachment_policy
+        )
+        if not bindings or len(bindings) > max_count:
             raise ValueError("frontend attachment binding count is invalid")
 
         now = _utc_now()
@@ -3233,7 +4296,7 @@ class SessionStore:
                 attachment_count = int(totals["attachment_count"])
                 total_bytes = int(totals["total_bytes"])
                 last_index = int(totals["last_index"])
-                if attachment_count + len(bindings) > MAX_SESSION_ATTACHMENTS_PER_MESSAGE:
+                if attachment_count + len(bindings) > max_count:
                     raise SessionConflict(
                         "assistant reply exceeds the configured attachment count limit"
                     )
@@ -3256,7 +4319,7 @@ class SessionStore:
                             "frontend attachment is unavailable or not committed"
                         )
                     total_bytes += int(attachment["size_bytes"])
-                    if total_bytes > MAX_SESSION_ATTACHMENT_TOTAL_BYTES:
+                    if total_bytes > max_total_bytes:
                         raise SessionConflict(
                             "assistant reply exceeds the configured attachment size limit"
                         )
@@ -3301,16 +4364,21 @@ class SessionStore:
         )
         if group is None:
             raise SessionConflict("frontend attachment output was not persisted")
+        durable_attachment_ids = [
+            str(part.get("attachment_id") or "")
+            for part in group["attachments"]
+            if str(part.get("attachment_id") or "")
+        ]
         durable_audio_attachment_ids = [
             str(part.get("attachment_id") or "")
             for part in group["attachments"]
             if str(part.get("modality") or "").casefold() == "audio"
             and str(part.get("attachment_id") or "")
         ]
-        if durable_audio_attachment_ids:
-            # Once audio is visible as part of the assistant Message, its
-            # lifetime follows that Message. This also repairs replayed groups
-            # created by older tool versions with preview-only retention.
+        if durable_attachment_ids:
+            # Once bytes are bound to a visible Message, their lifetime follows
+            # that Message. This also repairs replayed groups created by older
+            # tool versions with preview-only retention.
             durable_audio_assets: list[tuple[str, str]] = []
             with self._lock, self._connection() as connection:
                 for attachment_id in durable_audio_attachment_ids:
@@ -3339,7 +4407,7 @@ class SessionStore:
                        WHERE attachment_id=? AND session_id=? AND owner_id=?""",
                     [
                         (attachment_id, str(session_id), str(owner_id))
-                        for attachment_id, _asset_id in durable_audio_assets
+                        for attachment_id in durable_attachment_ids
                     ],
                 )
         return {**group, "replayed": replayed}
@@ -3441,6 +4509,120 @@ class SessionStore:
             "retention_expires_at": asset.get("retention_expires_at"),
             "retention_indefinite": asset["retention_indefinite"],
         }
+
+    def cleanup_attachments(
+        self, *, now: datetime | None = None
+    ) -> list[dict[str, Any]]:
+        """Expire only unbound, finite non-audio bytes outside active delivery."""
+
+        observed_now = now or datetime.now(timezone.utc)
+        if observed_now.tzinfo is None:
+            observed_now = observed_now.replace(tzinfo=timezone.utc)
+        expired: list[dict[str, Any]] = []
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """
+                SELECT * FROM session_attachments
+                WHERE state IN ('staged','committed')
+                  AND retention_indefinite=0
+                  AND retention_seconds IS NOT NULL
+                  AND media_type NOT LIKE 'audio/%'
+                ORDER BY created_at, attachment_id
+                """
+            ).fetchall()
+            for row in rows:
+                try:
+                    created_at = datetime.fromisoformat(
+                        str(row["created_at"]).replace("Z", "+00:00")
+                    )
+                except ValueError:
+                    continue
+                deadline = created_at + timedelta(
+                    seconds=max(1, int(row["retention_seconds"]))
+                )
+                if observed_now < deadline:
+                    continue
+                attachment_id = str(row["attachment_id"])
+                reference_pattern = (
+                    '%"attachment_id":"'
+                    + attachment_id
+                    + '"%'
+                )
+                message_bound = connection.execute(
+                    """
+                    SELECT 1 FROM messages
+                    WHERE session_id=? AND content_json LIKE ? LIMIT 1
+                    """,
+                    (str(row["session_id"]), reference_pattern),
+                ).fetchone()
+                output_bound = connection.execute(
+                    """
+                    SELECT 1 FROM run_output_attachments
+                    WHERE attachment_id=? LIMIT 1
+                    """,
+                    (attachment_id,),
+                ).fetchone()
+                if message_bound is not None or output_bound is not None:
+                    connection.execute(
+                        """
+                        UPDATE session_attachments
+                        SET retention_seconds=NULL, retention_indefinite=1
+                        WHERE attachment_id=?
+                        """,
+                        (attachment_id,),
+                    )
+                    continue
+                active_delivery = connection.execute(
+                    """
+                    SELECT 1
+                    FROM connector_delivery_tasks AS t
+                    JOIN run_events AS e ON e.event_id=t.event_id
+                    WHERE t.session_id=?
+                      AND t.state IN ('pending','retry','claimed','unknown')
+                      AND e.detail_json LIKE ?
+                    LIMIT 1
+                    """,
+                    (str(row["session_id"]), reference_pattern),
+                ).fetchone()
+                if active_delivery is not None:
+                    continue
+                if str(row["asset_id"] or ""):
+                    try:
+                        self._attachment_file_path(
+                            attachment_id, str(row["filename"])
+                        ).unlink(missing_ok=True)
+                    except OSError:
+                        continue
+                expired_at = observed_now.astimezone(timezone.utc).isoformat().replace(
+                    "+00:00", "Z"
+                )
+                connection.execute(
+                    """
+                    UPDATE session_attachments SET state='expired'
+                    WHERE attachment_id=? AND state IN ('staged','committed')
+                    """,
+                    (attachment_id,),
+                )
+                self._append_event(
+                    connection,
+                    session_id=str(row["session_id"]),
+                    run_id=None,
+                    kind="attachment.expired",
+                    status="expired",
+                    phase="retention",
+                    summary="Unbound attachment bytes expired",
+                    detail={"attachment_id": attachment_id},
+                )
+                expired.append(
+                    {
+                        "attachment_id": attachment_id,
+                        "session_id": str(row["session_id"]),
+                        "state": "expired",
+                        "expired_at": expired_at,
+                    }
+                )
+        return expired
 
     def cleanup_audio_assets(self) -> list[dict[str, Any]]:
         expired = self.audio_assets.cleanup()
@@ -3912,6 +5094,17 @@ class SessionStore:
             part.get("type") == "audio" and str(part.get("asset_id") or "")
             for part in parts
         )
+        summary_text = str(summary or "").strip()
+        if has_audio and summary_text and not any(
+            str(part.get("type") or "").casefold() == "text"
+            and str(part.get("text") or "").strip()
+            for part in parts
+        ):
+            # Provider-native audio commentary often carries its companion
+            # transcript in the typed Event summary.  Promote that semantic
+            # text into the canonical Message so every Connector sees the same
+            # audio+text result; audio-only policy remains a renderer choice.
+            parts.insert(0, {"type": "text", "text": summary_text})
         now = _utc_now()
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -4047,6 +5240,34 @@ class SessionStore:
             )
         return event
 
+    def runtime_event_delivery_target(
+        self,
+        *,
+        source_event_id: str,
+        request_id: str,
+        owner_id: str,
+    ) -> dict[str, Any] | None:
+        """Resolve a persisted provider Event to its FC delivery identity."""
+
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT c.event_id, c.session_id, c.run_id, c.kind
+                FROM runtime_event_correlations AS c
+                JOIN runs AS r ON r.run_id=c.run_id
+                JOIN sessions AS s ON s.session_id=c.session_id
+                WHERE c.source_event_id=? AND r.request_id=?
+                  AND s.instance_id=? AND s.owner_id=?
+                """,
+                (
+                    str(source_event_id),
+                    str(request_id),
+                    self.instance_id,
+                    str(owner_id),
+                ),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
     def decide_voice_transcript(
         self, *, request_id: str, confirmed: bool
     ) -> dict[str, Any]:
@@ -4119,13 +5340,16 @@ class SessionStore:
         owner_id: str,
         transcript_id: str,
         confirmed: bool,
+        expected_context_generation: int | None = None,
     ) -> dict[str, Any]:
         """Apply an authenticated generic-client Safe Voice decision."""
 
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                """SELECT vt.*, r.user_message_id, r.request_id
+                """SELECT vt.*, r.user_message_id, r.request_id,
+                          r.context_generation AS run_context_generation,
+                          s.context_generation AS current_context_generation
                    FROM voice_transcripts AS vt
                    JOIN runs AS r ON r.run_id=vt.run_id
                    JOIN sessions AS s ON s.session_id=vt.session_id
@@ -4134,6 +5358,13 @@ class SessionStore:
             ).fetchone()
             if row is None:
                 raise SessionNotFound("voice transcript not found")
+            if expected_context_generation is not None and (
+                int(row["run_context_generation"])
+                != int(expected_context_generation)
+                or int(row["current_context_generation"])
+                != int(expected_context_generation)
+            ):
+                raise SessionConflict("voice transcript belongs to a stale Session context")
             current = str(row["safe_voice_state"])
             desired = "released" if confirmed else "discarded"
             if current not in {"pending_confirmation", desired}:
@@ -4463,6 +5694,32 @@ class SessionStore:
             raise SessionNotFound(str(request_id))
         return self._run_dict(row)
 
+    def request_failure_detail(
+        self,
+        request_id: str,
+        *,
+        owner_id: str,
+        agent_id: str,
+    ) -> dict[str, Any] | None:
+        """Return the owner-scoped, durable user-safe terminal failure fields."""
+        run = self.get_run_by_request(request_id, owner_id=owner_id, agent_id=agent_id)
+        if run.get("state") != "failed":
+            return None
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """SELECT detail_json FROM run_events
+                   WHERE run_id = ? AND kind = 'run.failed'
+                   ORDER BY sequence DESC LIMIT 1""",
+                (run["run_id"],),
+            ).fetchone()
+        detail = _json_object(row["detail_json"]) if row is not None else {}
+        context = detail.get("error_context")
+        return {
+            "request_id": run["request_id"],
+            "error": str(run.get("error_text") or detail.get("error") or "Run failed"),
+            **(dict(context) if isinstance(context, Mapping) else {}),
+        }
+
     def update_session(
         self,
         session_id: str,
@@ -4523,6 +5780,28 @@ class SessionStore:
                 ),
             ).fetchall()
         return [self._message_dict(row) for row in rows]
+
+    def get_message(
+        self,
+        message_id: str,
+        *,
+        session_id: str,
+        owner_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Return one owner-scoped canonical Message by its durable identity."""
+
+        self.get_session(str(session_id), owner_id=owner_id)
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM messages
+                WHERE message_id=? AND session_id=?
+                """,
+                (str(message_id), str(session_id)),
+            ).fetchone()
+        if row is None:
+            raise SessionNotFound(str(message_id))
+        return self._message_dict(row)
 
     def recent_messages(
         self,
@@ -4635,6 +5914,7 @@ class SessionStore:
                 FROM messages AS m
                 JOIN sessions AS s ON s.session_id = m.session_id
                 WHERE s.instance_id = ? AND s.owner_id = ? AND s.agent_id = ?
+                  AND s.session_kind = 'conversation'
                   AND s.status != 'deleted' AND m.session_id = ? AND m.ordinal = ?
                   AND m.visibility = 'visible'
                 """,
@@ -4674,6 +5954,7 @@ class SessionStore:
             "s.instance_id = ?",
             "s.owner_id = ?",
             "s.agent_id = ?",
+            "s.session_kind = 'conversation'",
             "s.status != 'deleted'",
             "m.visibility = 'visible'",
         ]
@@ -4775,13 +6056,49 @@ class SessionStore:
         for item_index, part in enumerate(
             content if isinstance(content, list) else (), start=1
         ):
+            part_type = (
+                str(part.get("type") or "").casefold()
+                if isinstance(part, Mapping)
+                else ""
+            )
+            part_attachment_id = (
+                str(
+                    part.get("attachment_id")
+                    or (part.get("asset_id") if part_type == "audio" else "")
+                    or ""
+                )
+                if isinstance(part, Mapping)
+                else ""
+            )
             if (
                 isinstance(part, Mapping)
-                and str(part.get("type") or "").casefold()
-                in {"attachment", "media", "audio"}
-                and str(part.get("attachment_id") or "") == str(attachment_id)
+                and part_type in {"attachment", "media", "audio"}
+                and part_attachment_id == str(attachment_id)
             ):
-                if str(part.get("type") or "").casefold() != "attachment":
+                if part_type == "audio":
+                    metadata, local_path = self.audio_asset_path(
+                        session_id=str(session_id),
+                        owner_id=str(owner_id),
+                        asset_id=part_attachment_id,
+                    )
+                    return {
+                        **dict(part),
+                        "attachment_id": part_attachment_id,
+                        "local_ref": str(local_path),
+                        "filename": str(
+                            part.get("filename")
+                            or metadata.get("filename")
+                            or local_path.name
+                        ),
+                        "mime_type": str(
+                            part.get("mime_type")
+                            or metadata.get("mime_type")
+                            or "audio/ogg"
+                        ),
+                        "size_bytes": int(metadata.get("size_bytes") or 0),
+                        "sha256": str(metadata.get("sha256") or ""),
+                    }
+                if part_type == "media":
                     return dict(part)
                 return self.attachment_canonical_part(
                     session_id=str(session_id),
@@ -4822,6 +6139,7 @@ class SessionStore:
                 FROM messages AS m
                 JOIN sessions AS s ON s.session_id = m.session_id
                 WHERE s.instance_id = ? AND s.owner_id = ? AND s.agent_id = ?
+                  AND s.session_kind = 'conversation'
                   AND s.status != 'deleted' AND m.message_id = ?
                   AND m.visibility = 'visible'
                 """,
@@ -5003,6 +6321,11 @@ class SessionStore:
                             "source": str(row["source"]),
                             "content": [dict(part) for part in content],
                             "text": str(row["text"]),
+                            **(
+                                {"display_text": str(row["display_text"])}
+                                if row["display_text"] is not None
+                                else {}
+                            ),
                             "content_hash": str(row["content_hash"]),
                         }
                     )
@@ -5372,9 +6695,10 @@ class SessionStore:
                         INSERT INTO messages(
                             message_id, session_id, run_id, ordinal,
                             context_generation, role, author_id, source,
-                            message_context_json, content_json, text, visibility,
+                            message_context_json, content_json, text, display_text,
+                            visibility,
                             history_eligible, content_hash, created_at
-                        ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 'visible', 1, ?, ?)
+                        ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'visible', 1, ?, ?)
                         """,
                         (
                             message_id,
@@ -5387,6 +6711,7 @@ class SessionStore:
                             _json({"conversation_continuity": provenance}),
                             item["content_json"],
                             str(item.get("text") or ""),
+                            item.get("display_text"),
                             item["content_hash"],
                             str(item.get("source_created_at") or imported_at),
                         ),
@@ -5748,6 +7073,8 @@ class SessionStore:
             for session_id in empty_created_sessions:
                 for table in (
                     "delivery_outbox",
+                    "connector_delivery_receipts",
+                    "frontend_message_events",
                     "event_consumers",
                     "run_events",
                     "session_workzones",
@@ -5942,10 +7269,14 @@ class SessionStore:
         session_id: str,
         *,
         context_generation: int | None = None,
+        max_user_ordinal: int | None = None,
         limit: int = 8,
     ) -> list[dict[str, Any]]:
         session = self.get_session(session_id)
         generation = int(context_generation or session["context_generation"])
+        high_water = (
+            None if max_user_ordinal is None else max(0, int(max_user_ordinal))
+        )
         with self._lock, self._connection() as connection:
             rows = connection.execute(
                 """
@@ -5969,9 +7300,16 @@ class SessionStore:
                   AND r.state = 'completed'
                   AND u.visibility = 'visible' AND a.visibility = 'visible'
                   AND u.history_eligible = 1 AND a.history_eligible = 1
+                  AND (? IS NULL OR u.ordinal <= ?)
                 ORDER BY u.ordinal DESC LIMIT ?
                 """,
-                (str(session_id), generation, max(1, min(int(limit), 100))),
+                (
+                    str(session_id),
+                    generation,
+                    high_water,
+                    high_water,
+                    max(1, min(int(limit), 100)),
+                ),
             ).fetchall()
         return [dict(row) for row in reversed(rows)]
 
@@ -6036,6 +7374,7 @@ class SessionStore:
                 JOIN messages AS u ON u.message_id = r.user_message_id
                 JOIN messages AS a ON a.message_id = r.final_message_id
                 WHERE s.instance_id = ? AND s.owner_id = ? AND s.agent_id = ?
+                  AND s.session_kind = 'conversation'
                   AND s.status != 'deleted'
                   AND r.state = 'completed'
                   AND u.visibility = 'visible' AND a.visibility = 'visible'
@@ -6057,6 +7396,7 @@ class SessionStore:
         clauses = [
             "s.instance_id = ?",
             "s.agent_id = ?",
+            "s.session_kind = 'conversation'",
             "m.role = 'user'",
         ]
         params: list[Any] = [self.instance_id, str(agent_id)]
@@ -6176,6 +7516,365 @@ class SessionStore:
 
         with self._lock, self._connection() as connection:
             return self._workzone_set_from_connection(connection, str(session_id))
+
+    @staticmethod
+    def _agent_workzone_identity(owner_id: str, agent_id: str) -> tuple[str, str]:
+        owner = str(owner_id or "").strip()
+        agent = str(agent_id or "").strip().lower()
+        if not owner or not agent:
+            raise ValueError("owner_id and agent_id are required")
+        return owner, agent
+
+    def _agent_workzone_set_from_connection(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        owner_id: str,
+        agent_id: str,
+    ) -> dict[str, Any]:
+        owner, agent = self._agent_workzone_identity(owner_id, agent_id)
+        profile = connection.execute(
+            """
+            SELECT revision FROM agent_workzone_profiles
+            WHERE instance_id = ? AND owner_id = ? AND agent_id = ?
+            """,
+            (self.instance_id, owner, agent),
+        ).fetchone()
+        rows = connection.execute(
+            """
+            SELECT slot_id, path, enabled, label, created_at, updated_at
+            FROM agent_workzones
+            WHERE instance_id = ? AND owner_id = ? AND agent_id = ?
+            """,
+            (self.instance_id, owner, agent),
+        ).fetchall()
+        slots = []
+        for row in sorted(
+            rows,
+            key=lambda item: self._workzone_slot_sort_key(str(item["slot_id"])),
+        ):
+            item = dict(row)
+            item["enabled"] = bool(item.get("enabled"))
+            slots.append(item)
+        return {
+            "owner_id": owner,
+            "agent_id": agent,
+            "revision": int(profile["revision"] if profile is not None else 0),
+            "slots": slots,
+        }
+
+    def get_agent_workzone_set(
+        self, *, owner_id: str, agent_id: str
+    ) -> dict[str, Any]:
+        """Return the sole Agent-scoped Workzone profile; Session rows are ignored."""
+
+        with self._lock, self._connection() as connection:
+            return self._agent_workzone_set_from_connection(
+                connection, owner_id=owner_id, agent_id=agent_id
+            )
+
+    @staticmethod
+    def _check_agent_workzone_revision(
+        profile: sqlite3.Row | None, expected_revision: int | None
+    ) -> int:
+        actual = int(profile["revision"] if profile is not None else 0)
+        if expected_revision is not None and actual != int(expected_revision):
+            raise SessionConflict(
+                f"Workzone menu is stale (expected revision {expected_revision}, current {actual})"
+            )
+        return actual
+
+    def _append_agent_workzone_event(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        owner_id: str,
+        agent_id: str,
+        revision: int,
+        kind: str,
+        source: str,
+        detail: Mapping[str, Any],
+        created_at: str,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO agent_workzone_events(
+                event_id, instance_id, owner_id, agent_id, revision,
+                kind, source, detail_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _new_id("wze"),
+                self.instance_id,
+                owner_id,
+                agent_id,
+                int(revision),
+                str(kind),
+                str(source),
+                _json(detail),
+                created_at,
+            ),
+        )
+
+    def set_agent_workzone_slot(
+        self,
+        *,
+        owner_id: str,
+        agent_id: str,
+        slot_id: str,
+        path: str | None = None,
+        enabled: bool | None = None,
+        label: str | None = None,
+        expected_revision: int | None = None,
+        source: str = "telegram",
+    ) -> dict[str, Any]:
+        """Atomically create or update one Agent-scoped Workzone slot."""
+
+        owner, agent = self._agent_workzone_identity(owner_id, agent_id)
+        slot = self._require_workzone_slot(slot_id)
+        now = _utc_now()
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            profile = connection.execute(
+                """
+                SELECT revision FROM agent_workzone_profiles
+                WHERE instance_id = ? AND owner_id = ? AND agent_id = ?
+                """,
+                (self.instance_id, owner, agent),
+            ).fetchone()
+            actual_revision = self._check_agent_workzone_revision(
+                profile, expected_revision
+            )
+            existing = connection.execute(
+                """
+                SELECT * FROM agent_workzones
+                WHERE instance_id = ? AND owner_id = ? AND agent_id = ? AND slot_id = ?
+                """,
+                (self.instance_id, owner, agent, slot),
+            ).fetchone()
+            before = None
+            if existing is not None:
+                before = {
+                    "path": str(existing["path"]),
+                    "enabled": bool(existing["enabled"]),
+                    "label": str(existing["label"] or ""),
+                }
+            resolved_path = str(path).strip() if path is not None else ""
+            if not resolved_path and existing is not None:
+                resolved_path = str(existing["path"])
+            if not resolved_path:
+                raise ValueError("path is required for an empty workzone slot")
+            after = {
+                "path": resolved_path,
+                "enabled": (
+                    bool(enabled)
+                    if enabled is not None
+                    else bool(existing["enabled"] if existing is not None else True)
+                ),
+                "label": (
+                    str(label).strip()
+                    if label is not None
+                    else str(existing["label"] or "") if existing is not None else ""
+                ),
+            }
+            if before == after:
+                return self._agent_workzone_set_from_connection(
+                    connection, owner_id=owner, agent_id=agent
+                )
+            if profile is None:
+                connection.execute(
+                    """
+                    INSERT INTO agent_workzone_profiles(
+                        instance_id, owner_id, agent_id, revision, created_at, updated_at
+                    ) VALUES (?, ?, ?, 1, ?, ?)
+                    """,
+                    (self.instance_id, owner, agent, now, now),
+                )
+                revision = 1
+            else:
+                revision = actual_revision + 1
+                connection.execute(
+                    """
+                    UPDATE agent_workzone_profiles SET revision = ?, updated_at = ?
+                    WHERE instance_id = ? AND owner_id = ? AND agent_id = ?
+                    """,
+                    (revision, now, self.instance_id, owner, agent),
+                )
+            connection.execute(
+                """
+                INSERT INTO agent_workzones(
+                    instance_id, owner_id, agent_id, slot_id, path,
+                    enabled, label, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(instance_id, owner_id, agent_id, slot_id) DO UPDATE SET
+                    path = excluded.path,
+                    enabled = excluded.enabled,
+                    label = excluded.label,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    self.instance_id,
+                    owner,
+                    agent,
+                    slot,
+                    after["path"],
+                    int(after["enabled"]),
+                    after["label"],
+                    now,
+                    now,
+                ),
+            )
+            self._append_agent_workzone_event(
+                connection,
+                owner_id=owner,
+                agent_id=agent,
+                revision=revision,
+                kind="agent.workzone_slot_changed",
+                source=source,
+                detail={"slot": slot, "before": before, "after": after},
+                created_at=now,
+            )
+            return self._agent_workzone_set_from_connection(
+                connection, owner_id=owner, agent_id=agent
+            )
+
+    def delete_agent_workzone_slot(
+        self,
+        *,
+        owner_id: str,
+        agent_id: str,
+        slot_id: str,
+        expected_revision: int | None = None,
+        source: str = "telegram",
+    ) -> dict[str, Any]:
+        owner, agent = self._agent_workzone_identity(owner_id, agent_id)
+        slot = self._require_workzone_slot(slot_id)
+        now = _utc_now()
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            profile = connection.execute(
+                """SELECT revision FROM agent_workzone_profiles
+                   WHERE instance_id = ? AND owner_id = ? AND agent_id = ?""",
+                (self.instance_id, owner, agent),
+            ).fetchone()
+            actual_revision = self._check_agent_workzone_revision(
+                profile, expected_revision
+            )
+            existing = connection.execute(
+                """SELECT * FROM agent_workzones
+                   WHERE instance_id = ? AND owner_id = ? AND agent_id = ? AND slot_id = ?""",
+                (self.instance_id, owner, agent, slot),
+            ).fetchone()
+            if existing is None:
+                return self._agent_workzone_set_from_connection(
+                    connection, owner_id=owner, agent_id=agent
+                )
+            revision = actual_revision + 1
+            connection.execute(
+                """DELETE FROM agent_workzones
+                   WHERE instance_id = ? AND owner_id = ? AND agent_id = ? AND slot_id = ?""",
+                (self.instance_id, owner, agent, slot),
+            )
+            connection.execute(
+                """UPDATE agent_workzone_profiles SET revision = ?, updated_at = ?
+                   WHERE instance_id = ? AND owner_id = ? AND agent_id = ?""",
+                (revision, now, self.instance_id, owner, agent),
+            )
+            before = {
+                "path": str(existing["path"]),
+                "enabled": bool(existing["enabled"]),
+                "label": str(existing["label"] or ""),
+            }
+            self._append_agent_workzone_event(
+                connection,
+                owner_id=owner,
+                agent_id=agent,
+                revision=revision,
+                kind="agent.workzone_slot_deleted",
+                source=source,
+                detail={"slot": slot, "before": before},
+                created_at=now,
+            )
+            return self._agent_workzone_set_from_connection(
+                connection, owner_id=owner, agent_id=agent
+            )
+
+    def disable_all_agent_workzones(
+        self,
+        *,
+        owner_id: str,
+        agent_id: str,
+        expected_revision: int | None = None,
+        source: str = "telegram",
+    ) -> dict[str, Any]:
+        owner, agent = self._agent_workzone_identity(owner_id, agent_id)
+        now = _utc_now()
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            profile = connection.execute(
+                """SELECT revision FROM agent_workzone_profiles
+                   WHERE instance_id = ? AND owner_id = ? AND agent_id = ?""",
+                (self.instance_id, owner, agent),
+            ).fetchone()
+            actual_revision = self._check_agent_workzone_revision(
+                profile, expected_revision
+            )
+            changed = connection.execute(
+                """UPDATE agent_workzones SET enabled = 0, updated_at = ?
+                   WHERE instance_id = ? AND owner_id = ? AND agent_id = ? AND enabled != 0""",
+                (now, self.instance_id, owner, agent),
+            )
+            if changed.rowcount:
+                revision = actual_revision + 1
+                connection.execute(
+                    """UPDATE agent_workzone_profiles SET revision = ?, updated_at = ?
+                       WHERE instance_id = ? AND owner_id = ? AND agent_id = ?""",
+                    (revision, now, self.instance_id, owner, agent),
+                )
+                self._append_agent_workzone_event(
+                    connection,
+                    owner_id=owner,
+                    agent_id=agent,
+                    revision=revision,
+                    kind="agent.workzones_disabled",
+                    source=source,
+                    detail={"changed": int(changed.rowcount)},
+                    created_at=now,
+                )
+            return self._agent_workzone_set_from_connection(
+                connection, owner_id=owner, agent_id=agent
+            )
+
+    def record_agent_workzone_reload(
+        self,
+        *,
+        owner_id: str,
+        agent_id: str,
+        slots: Iterable[str],
+        source: str = "telegram",
+    ) -> None:
+        owner, agent = self._agent_workzone_identity(owner_id, agent_id)
+        now = _utc_now()
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            profile = connection.execute(
+                """SELECT revision FROM agent_workzone_profiles
+                   WHERE instance_id = ? AND owner_id = ? AND agent_id = ?""",
+                (self.instance_id, owner, agent),
+            ).fetchone()
+            revision = int(profile["revision"] if profile is not None else 0)
+            self._append_agent_workzone_event(
+                connection,
+                owner_id=owner,
+                agent_id=agent,
+                revision=revision,
+                kind="agent.workzones_reloaded",
+                source=source,
+                detail={
+                    "slots": [self._require_workzone_slot(slot) for slot in slots]
+                },
+                created_at=now,
+            )
 
     @staticmethod
     def _require_workzone_slot(slot_id: str) -> str:
@@ -6617,26 +8316,1112 @@ class SessionStore:
         owner_id: str | None = None,
         after_sequence: int = 0,
         limit: int = 500,
+        run_id: str | None = None,
     ) -> list[dict[str, Any]]:
         self.get_session(session_id, owner_id=owner_id)
+        normalized_run_id = str(run_id or "").strip()
         with self._lock, self._connection() as connection:
-            rows = connection.execute(
-                """
-                SELECT * FROM run_events WHERE session_id = ? AND sequence > ?
-                ORDER BY sequence ASC LIMIT ?
-                """,
-                (
-                    str(session_id),
-                    max(0, int(after_sequence)),
-                    max(1, min(int(limit), 2000)),
-                ),
-            ).fetchall()
+            if normalized_run_id:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM run_events
+                    WHERE session_id = ? AND run_id = ? AND sequence > ?
+                    ORDER BY sequence ASC LIMIT ?
+                    """,
+                    (
+                        str(session_id),
+                        normalized_run_id,
+                        max(0, int(after_sequence)),
+                        max(1, min(int(limit), 2000)),
+                    ),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM run_events WHERE session_id = ? AND sequence > ?
+                    ORDER BY sequence ASC LIMIT ?
+                    """,
+                    (
+                        str(session_id),
+                        max(0, int(after_sequence)),
+                        max(1, min(int(limit), 2000)),
+                    ),
+                ).fetchall()
         result = []
         for row in rows:
             item = dict(row)
             item["detail"] = _json_object(item.pop("detail_json", "{}"))
             result.append(item)
         return result
+
+    def frontend_event_reference(
+        self,
+        *,
+        session_id: str,
+        owner_id: str,
+        event_id: str,
+    ) -> dict[str, Any] | None:
+        """Return the visible assistant message bound to one Session Event."""
+
+        resolved_session_id = str(session_id or "").strip()
+        resolved_owner_id = str(owner_id or "").strip()
+        resolved_event_id = str(event_id or "").strip()
+        self.get_session(resolved_session_id, owner_id=resolved_owner_id)
+        if not resolved_event_id or len(resolved_event_id) > 512:
+            return None
+        with self._lock, self._connection() as connection:
+            event = connection.execute(
+                """
+                SELECT e.detail_json,
+                       fme.message_id AS presentation_message_id,
+                       r.final_message_id
+                FROM run_events AS e
+                JOIN sessions AS s ON s.session_id=e.session_id
+                LEFT JOIN frontend_message_events AS fme
+                  ON fme.event_id=e.event_id AND fme.session_id=e.session_id
+                LEFT JOIN runs AS r
+                  ON r.run_id=e.run_id AND r.session_id=e.session_id
+                WHERE e.event_id=? AND e.session_id=?
+                  AND s.owner_id=? AND s.instance_id=?
+                """,
+                (
+                    resolved_event_id,
+                    resolved_session_id,
+                    resolved_owner_id,
+                    self.instance_id,
+                ),
+            ).fetchone()
+            if event is None:
+                return None
+            detail = _json_object(event["detail_json"] or "{}")
+            message_id = str(
+                event["presentation_message_id"]
+                or event["final_message_id"]
+                or detail.get("message_id")
+                or ""
+            ).strip()
+            if not message_id:
+                return None
+            message = connection.execute(
+                """
+                SELECT message_id, role, text, created_at,
+                       context_generation, visibility
+                FROM messages WHERE message_id=? AND session_id=?
+                """,
+                (message_id, resolved_session_id),
+            ).fetchone()
+        if (
+            message is None
+            or str(message["role"] or "").casefold() != "assistant"
+            or str(message["visibility"] or "").casefold() != "visible"
+        ):
+            return None
+        return {
+            "event_id": resolved_event_id,
+            "message_id": str(message["message_id"]),
+            "role": str(message["role"]),
+            "text": str(message["text"] or ""),
+            "created_at": str(message["created_at"] or ""),
+            "context_generation": int(message["context_generation"] or 1),
+        }
+
+    def record_frontend_delivery_receipt(
+        self,
+        *,
+        session_id: str,
+        owner_id: str,
+        receipt: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Persist one endpoint's typed delivery outcome without leaking address data."""
+
+        normalized = normalize_delivery_receipt(receipt)
+        resolved_session_id = str(session_id)
+        self.get_session(resolved_session_id, owner_id=owner_id)
+        event_id = normalized["event_id"]
+        endpoint_id = normalized["endpoint_id"]
+        proof_json = _json(normalized["proof"]) if normalized["proof"] is not None else None
+        now = _utc_now()
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            event = connection.execute(
+                """
+                SELECT e.event_id
+                FROM run_events AS e
+                JOIN sessions AS s ON s.session_id = e.session_id
+                WHERE e.event_id = ? AND e.session_id = ?
+                  AND s.owner_id = ? AND s.instance_id = ?
+                """,
+                (event_id, resolved_session_id, str(owner_id), self.instance_id),
+            ).fetchone()
+            if event is None:
+                raise SessionNotFound("frontend event not found")
+            existing = connection.execute(
+                """
+                SELECT * FROM connector_delivery_receipts
+                WHERE event_id = ? AND endpoint_id = ?
+                """,
+                (event_id, endpoint_id),
+            ).fetchone()
+            if existing is not None:
+                previous_status = str(existing["status"])
+                previous_proof = existing["proof_json"]
+                if previous_status == "delivered":
+                    if normalized["status"] == "delivered" and previous_proof != proof_json:
+                        raise SessionConflict(
+                            "delivered receipt proof conflicts with the committed receipt"
+                        )
+                    result = dict(existing)
+                    result["proof"] = (
+                        _json_object(result.pop("proof_json"))
+                        if result.get("proof_json")
+                        else None
+                    )
+                    result["duplicate"] = normalized["status"] == "delivered"
+                    result["ignored_regression"] = normalized["status"] != "delivered"
+                    return result
+                if (
+                    previous_status == normalized["status"]
+                    and previous_proof == proof_json
+                ):
+                    result = dict(existing)
+                    result["proof"] = (
+                        _json_object(result.pop("proof_json"))
+                        if result.get("proof_json")
+                        else None
+                    )
+                    result["duplicate"] = True
+                    result["ignored_regression"] = False
+                    return result
+                connection.execute(
+                    """
+                    UPDATE connector_delivery_receipts
+                    SET status = ?, proof_json = ?, attempt_count = attempt_count + 1,
+                        updated_at = ?
+                    WHERE event_id = ? AND endpoint_id = ?
+                    """,
+                    (
+                        normalized["status"],
+                        proof_json,
+                        now,
+                        event_id,
+                        endpoint_id,
+                    ),
+                )
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO connector_delivery_receipts(
+                        event_id, session_id, endpoint_id, status,
+                        proof_json, attempt_count, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, 1, ?)
+                    """,
+                    (
+                        event_id,
+                        resolved_session_id,
+                        endpoint_id,
+                        normalized["status"],
+                        proof_json,
+                        now,
+                    ),
+                )
+            result = {
+                "event_id": event_id,
+                "session_id": resolved_session_id,
+                "endpoint_id": endpoint_id,
+                "status": normalized["status"],
+                "proof": normalized["proof"],
+                "attempt_count": (
+                    int(existing["attempt_count"]) + 1 if existing is not None else 1
+                ),
+                "updated_at": now,
+                "duplicate": False,
+                "ignored_regression": False,
+            }
+        return result
+
+    @staticmethod
+    def _refresh_delivery_outbox_aggregate(
+        connection: sqlite3.Connection, *, event_id: str
+    ) -> None:
+        """Project endpoint tasks into the legacy event-level rollback view."""
+
+        rows = connection.execute(
+            "SELECT state FROM connector_delivery_tasks WHERE event_id=?",
+            (str(event_id),),
+        ).fetchall()
+        if not rows:
+            return
+        states = {str(row["state"]) for row in rows}
+        error_code = None
+        completed_at = None
+        if "unknown" in states:
+            aggregate = "unknown"
+            error_code = "endpoint_outcome_unknown"
+            completed_at = _utc_now()
+        elif states & {"pending", "retry", "claimed"}:
+            aggregate = "delegated"
+        elif states & {"failed", "expired"}:
+            aggregate = "failed"
+            error_code = "endpoint_delivery_failed"
+            completed_at = _utc_now()
+        else:
+            aggregate = "completed"
+            completed_at = _utc_now()
+        connection.execute(
+            """
+            UPDATE delivery_outbox
+            SET state=?, completed_at=?, last_error_code=?
+            WHERE event_id=?
+            """,
+            (aggregate, completed_at, error_code, str(event_id)),
+        )
+
+    def claim_delivery_outbox(
+        self,
+        *,
+        session_id: str,
+        owner_id: str,
+        worker_id: str,
+        event_id: str | None = None,
+        connector_id: str | None = None,
+        endpoint_id: str | None = None,
+        limit: int = 20,
+        lease_seconds: int = 60,
+    ) -> list[dict[str, Any]]:
+        """Claim durable event deliveries with a fenced, expiring lease.
+
+        Expired claims become ``unknown`` instead of being replayed: the prior
+        worker may have caused an external side effect before it disappeared.
+        A connector may retry only after it has independently proved that the
+        previous attempt was not delivered.
+        """
+
+        resolved_session_id = str(session_id).strip()
+        resolved_owner_id = str(owner_id).strip()
+        resolved_worker_id = str(worker_id).strip()
+        if not resolved_worker_id or len(resolved_worker_id) > 128:
+            raise ValueError("delivery worker id is invalid")
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("delivery claim limit must be between 1 and 100")
+        if type(lease_seconds) is not int or not 1 <= lease_seconds <= 3600:
+            raise ValueError("delivery lease must be between 1 and 3600 seconds")
+        self.get_session(resolved_session_id, owner_id=resolved_owner_id)
+        now = datetime.now(timezone.utc)
+        now_text = now.isoformat()
+        expires_text = (now + timedelta(seconds=int(lease_seconds))).isoformat()
+        claimed: list[dict[str, Any]] = []
+        task_filters = []
+        task_params: list[Any] = [
+            resolved_session_id,
+            resolved_owner_id,
+            self.instance_id,
+        ]
+        if event_id is not None:
+            task_filters.append("t.event_id=?")
+            task_params.append(str(event_id))
+        if connector_id is not None:
+            task_filters.append("t.connector_id=?")
+            task_params.append(str(connector_id).strip().casefold())
+        if endpoint_id is not None:
+            task_filters.append("t.endpoint_id=?")
+            task_params.append(str(endpoint_id).strip())
+        task_where = "".join(f" AND {item}" for item in task_filters)
+        task_params.append(int(limit))
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            expired_tasks = connection.execute(
+                """
+                SELECT task_id, event_id FROM connector_delivery_tasks
+                WHERE session_id=? AND state='claimed'
+                  AND lease_expires_at IS NOT NULL AND lease_expires_at<=?
+                """,
+                (resolved_session_id, now_text),
+            ).fetchall()
+            for expired in expired_tasks:
+                connection.execute(
+                    """
+                    UPDATE connector_delivery_tasks
+                    SET state='unknown', completed_at=?,
+                        last_error_code='lease_expired_outcome_unknown',
+                        last_claim_token=lease_token, last_claim_status='unknown',
+                        lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL
+                    WHERE task_id=? AND state='claimed'
+                    """,
+                    (now_text, str(expired["task_id"])),
+                )
+                self._refresh_delivery_outbox_aggregate(
+                    connection, event_id=str(expired["event_id"])
+                )
+            rows = connection.execute(
+                f"""
+                SELECT t.*, e.sequence, e.kind, e.status, e.phase, e.summary,
+                       e.detail_json, e.created_at AS event_created_at,
+                       r.delivery_route_json
+                FROM connector_delivery_tasks AS t
+                JOIN run_events AS e ON e.event_id=t.event_id
+                JOIN sessions AS s ON s.session_id=t.session_id
+                LEFT JOIN runs AS r ON r.run_id=t.run_id
+                WHERE t.session_id=? AND s.owner_id=? AND s.instance_id=?
+                  AND t.state IN ('pending','retry')
+                  {task_where}
+                ORDER BY t.created_at ASC, t.task_id ASC
+                LIMIT ?
+                """,
+                task_params,
+            ).fetchall()
+            for row in rows:
+                lease_token = _new_id("lease")
+                updated = connection.execute(
+                    """
+                    UPDATE connector_delivery_tasks
+                    SET state='claimed', lease_owner=?, lease_token=?,
+                        lease_expires_at=?, attempt_count=attempt_count+1
+                    WHERE task_id=? AND state IN ('pending','retry')
+                    """,
+                    (
+                        resolved_worker_id,
+                        lease_token,
+                        expires_text,
+                        str(row["task_id"]),
+                    ),
+                )
+                if updated.rowcount != 1:
+                    continue
+                try:
+                    content_modes = json.loads(row["content_modes_json"] or "[]")
+                except (TypeError, ValueError):
+                    content_modes = []
+                claimed.append(
+                    {
+                        "outbox_id": str(row["task_id"]),
+                        "session_id": resolved_session_id,
+                        "run_id": row["run_id"],
+                        "event_id": str(row["event_id"]),
+                        "connector_id": str(row["connector_id"]),
+                        "endpoint_id": str(row["endpoint_id"]),
+                        "role": str(row["role"]),
+                        "content_modes": (
+                            list(content_modes)
+                            if isinstance(content_modes, list)
+                            else []
+                        ),
+                        "retry_class": str(row["retry_class"]),
+                        "sequence": int(row["sequence"]),
+                        "kind": str(row["kind"]),
+                        "status": row["status"],
+                        "phase": row["phase"],
+                        "summary": str(row["summary"] or ""),
+                        "detail": _json_object(row["detail_json"]),
+                        "delivery_route": _json_object(
+                            row["delivery_route_json"] or "{}"
+                        ),
+                        "attempt_count": int(row["attempt_count"]) + 1,
+                        "lease_owner": resolved_worker_id,
+                        "lease_token": lease_token,
+                        "lease_expires_at": expires_text,
+                    }
+                )
+        if claimed:
+            return claimed
+        event_filter = " AND o.event_id=?" if event_id is not None else ""
+        query_params: list[Any] = [
+            resolved_session_id,
+            resolved_owner_id,
+            self.instance_id,
+        ]
+        if event_id is not None:
+            query_params.append(str(event_id))
+        query_params.append(int(limit))
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                UPDATE delivery_outbox
+                SET state='unknown', completed_at=?,
+                    last_error_code='lease_expired_outcome_unknown',
+                    last_claim_token=lease_token, last_claim_status='unknown',
+                    lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL
+                WHERE session_id=? AND state='claimed'
+                  AND lease_expires_at IS NOT NULL AND lease_expires_at<=?
+                """,
+                (now_text, resolved_session_id, now_text),
+            )
+            rows = connection.execute(
+                f"""
+                SELECT o.outbox_id, o.session_id, o.run_id, o.event_id,
+                       o.attempt_count, o.created_at,
+                       e.sequence, e.kind, e.status, e.phase, e.summary,
+                       e.detail_json, e.created_at AS event_created_at,
+                       r.delivery_route_json
+                FROM delivery_outbox AS o
+                JOIN run_events AS e ON e.event_id=o.event_id
+                JOIN sessions AS s ON s.session_id=o.session_id
+                LEFT JOIN runs AS r ON r.run_id=o.run_id
+                WHERE o.session_id=? AND s.owner_id=? AND s.instance_id=?
+                  AND o.state IN ('pending','retry')
+                  {event_filter}
+                ORDER BY o.created_at ASC, o.outbox_id ASC
+                LIMIT ?
+                """,
+                query_params,
+            ).fetchall()
+            for row in rows:
+                lease_token = _new_id("lease")
+                updated = connection.execute(
+                    """
+                    UPDATE delivery_outbox
+                    SET state='claimed', lease_owner=?, lease_token=?,
+                        lease_expires_at=?, attempt_count=attempt_count+1
+                    WHERE outbox_id=? AND state IN ('pending','retry')
+                    """,
+                    (
+                        resolved_worker_id,
+                        lease_token,
+                        expires_text,
+                        str(row["outbox_id"]),
+                    ),
+                )
+                if updated.rowcount != 1:
+                    continue
+                detail = _json_object(row["detail_json"])
+                route = _json_object(row["delivery_route_json"] or "{}")
+                claimed.append(
+                    {
+                        "outbox_id": str(row["outbox_id"]),
+                        "session_id": resolved_session_id,
+                        "run_id": row["run_id"],
+                        "event_id": str(row["event_id"]),
+                        "sequence": int(row["sequence"]),
+                        "kind": str(row["kind"]),
+                        "status": row["status"],
+                        "phase": row["phase"],
+                        "summary": str(row["summary"] or ""),
+                        "detail": detail,
+                        "delivery_route": route,
+                        "attempt_count": int(row["attempt_count"]) + 1,
+                        "lease_owner": resolved_worker_id,
+                        "lease_token": lease_token,
+                        "lease_expires_at": expires_text,
+                    }
+                )
+        return claimed
+
+    def claim_run_delivery_outbox(
+        self,
+        *,
+        request_id: str,
+        owner_id: str,
+        surface: str,
+        channel_key: str,
+        worker_id: str,
+        lease_seconds: int = 60,
+    ) -> dict[str, Any] | None:
+        """Claim exactly one terminal Run event for its frozen legacy route.
+
+        ``None`` means this is not a canonical Run and callers may use their
+        existing compatibility sender. Once a Run has a frozen route, every
+        other result is authoritative: a mismatched destination or a prior
+        claim must not fall back to an untracked second send.
+        """
+
+        try:
+            run = self.get_run_by_request(str(request_id), owner_id=str(owner_id))
+        except SessionNotFound:
+            return None
+        route_raw = run.get("delivery_route")
+        if not route_raw:
+            return None
+        from orchestrator.frontend_delivery import normalize_run_delivery_route
+
+        try:
+            route = normalize_run_delivery_route(route_raw)
+        except ValueError as exc:
+            raise SessionConflict("Run delivery route is invalid") from exc
+        resolved_surface = str(surface or "").strip().casefold()
+        resolved_channel = str(channel_key or "").strip()
+        destinations = [route.get("primary"), *route.get("mirrors", [])]
+        if not any(
+            isinstance(item, Mapping)
+            and item.get("surface") == resolved_surface
+            and item.get("channel_key") == resolved_channel
+            for item in destinations
+        ):
+            return {
+                "managed": True,
+                "state": "suppressed",
+                "reason": "destination_not_in_frozen_route",
+                "request_id": str(request_id),
+                "session_id": str(run["session_id"]),
+            }
+        run_state = str(run.get("state") or "")
+        if run_state not in TERMINAL_RUN_STATES:
+            return {
+                "managed": True,
+                "state": "not_ready",
+                "request_id": str(request_id),
+                "session_id": str(run["session_id"]),
+            }
+        terminal_kind = "run.completed" if run_state == "completed" else f"run.{run_state}"
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT e.event_id, o.state AS outbox_state
+                FROM run_events AS e
+                JOIN delivery_outbox AS o ON o.event_id=e.event_id
+                WHERE e.run_id=? AND e.kind=? AND e.session_id=?
+                ORDER BY e.sequence DESC LIMIT 1
+                """,
+                (str(run["run_id"]), terminal_kind, str(run["session_id"])),
+            ).fetchone()
+        if row is None:
+            return {
+                "managed": True,
+                "state": "missing_outbox",
+                "request_id": str(request_id),
+                "session_id": str(run["session_id"]),
+            }
+        event_id = str(row["event_id"])
+        from orchestrator.frontend_connector_registry import (
+            canonical_connector_id,
+            endpoint_id_for,
+        )
+        from orchestrator.frontend_contracts import normalize_delivery_intent
+
+        delivery_destinations = []
+        selected_destination: dict[str, Any] | None = None
+        for raw_destination in destinations:
+            if not isinstance(raw_destination, Mapping):
+                continue
+            destination_surface = str(raw_destination.get("surface") or "")
+            destination_channel = str(raw_destination.get("channel_key") or "")
+            connector_id = canonical_connector_id(
+                destination_surface,
+                ingress_transport=destination_surface,
+                surface=destination_surface,
+            )
+            delivery_destination = {
+                "connector_id": connector_id,
+                "endpoint_id": endpoint_id_for(
+                    connector_id,
+                    ingress_transport=destination_surface,
+                    channel_key=destination_channel,
+                ),
+                "channel_key": destination_channel,
+                "role": (
+                    "primary"
+                    if route.get("primary") == raw_destination
+                    else "mirror"
+                ),
+                "content_modes": ["text"],
+                "retry_class": "query_before_retry",
+            }
+            delivery_destinations.append(delivery_destination)
+            if (
+                destination_surface == resolved_surface
+                and destination_channel == resolved_channel
+            ):
+                selected_destination = delivery_destination
+        digest_material = "\n".join(
+            [str(request_id), event_id]
+            + sorted(item["endpoint_id"] for item in delivery_destinations)
+        )
+        delivery_intent = normalize_delivery_intent(
+            {
+                "type": "hashi.delivery-intent",
+                "version": 2,
+                "scope": "run",
+                "event_id": event_id,
+                "session_id": str(run["session_id"]),
+                "idempotency_digest": "sha256:"
+                + hashlib.sha256(digest_material.encode("utf-8")).hexdigest(),
+                "destinations": delivery_destinations,
+            }
+        )
+        claims = self.claim_delivery_outbox(
+            session_id=str(run["session_id"]),
+            owner_id=str(owner_id),
+            worker_id=worker_id,
+            event_id=event_id,
+            connector_id=(
+                str(selected_destination["connector_id"])
+                if selected_destination is not None
+                else None
+            ),
+            endpoint_id=(
+                str(selected_destination["endpoint_id"])
+                if selected_destination is not None
+                else None
+            ),
+            limit=1,
+            lease_seconds=lease_seconds,
+        )
+        if claims:
+            return {
+                "managed": True,
+                "state": "claimed",
+                "request_id": str(request_id),
+                "session_id": str(run["session_id"]),
+                "run_id": str(run["run_id"]),
+                "delivery_intent": delivery_intent,
+                "claim": claims[0],
+            }
+        with self._lock, self._connection() as connection:
+            current = connection.execute(
+                """
+                SELECT state FROM connector_delivery_tasks
+                WHERE event_id=? AND endpoint_id=?
+                """,
+                (
+                    event_id,
+                    str(selected_destination["endpoint_id"])
+                    if selected_destination is not None
+                    else "",
+                ),
+            ).fetchone()
+            if current is None:
+                current = connection.execute(
+                    "SELECT state FROM delivery_outbox WHERE event_id=?",
+                    (event_id,),
+                ).fetchone()
+        return {
+            "managed": True,
+            "state": str(current["state"]) if current is not None else "missing_outbox",
+            "request_id": str(request_id),
+            "session_id": str(run["session_id"]),
+            "run_id": str(run["run_id"]),
+            "event_id": event_id,
+        }
+
+    def complete_delivery_outbox(
+        self,
+        *,
+        outbox_id: str,
+        lease_token: str,
+        status: str,
+        error_code: str | None = None,
+        retry_safe: bool = False,
+    ) -> dict[str, Any]:
+        """Complete a claimed dispatch, requiring proof of safety to retry."""
+
+        resolved_status = str(status or "").strip().casefold()
+        allowed_statuses = {
+            "completed",
+            "failed",
+            "unknown",
+            "suppressed",
+            "expired",
+            "retry",
+        }
+        if resolved_status not in allowed_statuses:
+            raise ValueError("delivery outbox status is invalid")
+        if resolved_status == "retry" and retry_safe is not True:
+            raise ValueError("delivery retry requires proof that retry is safe")
+        token = str(lease_token or "").strip()
+        if not token:
+            raise ValueError("delivery lease token is required")
+        safe_error_code = str(error_code or "").strip()
+        if len(safe_error_code) > 128 or any(
+            not (char.isalnum() or char in "._-") for char in safe_error_code
+        ):
+            raise ValueError("delivery error code is invalid")
+        now = _utc_now()
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            task = connection.execute(
+                "SELECT * FROM connector_delivery_tasks WHERE task_id=?",
+                (str(outbox_id),),
+            ).fetchone()
+            if task is not None:
+                if (
+                    str(task["state"]) != "claimed"
+                    or str(task["lease_token"] or "") != token
+                ):
+                    if (
+                        str(task["last_claim_token"] or "") == token
+                        and str(task["last_claim_status"] or "")
+                        == resolved_status
+                    ):
+                        return {
+                            "outbox_id": str(outbox_id),
+                            "state": resolved_status,
+                            "attempt_count": int(task["attempt_count"]),
+                            "connector_id": str(task["connector_id"]),
+                            "endpoint_id": str(task["endpoint_id"]),
+                            "duplicate": True,
+                        }
+                    raise SessionConflict("delivery outbox lease is stale")
+                terminal = resolved_status != "retry"
+                connection.execute(
+                    """
+                    UPDATE connector_delivery_tasks
+                    SET state=?, delivered_at=?, completed_at=?,
+                        last_error_code=?, last_claim_token=lease_token,
+                        last_claim_status=?, lease_owner=NULL,
+                        lease_token=NULL, lease_expires_at=NULL
+                    WHERE task_id=? AND state='claimed' AND lease_token=?
+                    """,
+                    (
+                        resolved_status,
+                        now if resolved_status == "completed" else None,
+                        now if terminal else None,
+                        safe_error_code or None,
+                        resolved_status,
+                        str(outbox_id),
+                        token,
+                    ),
+                )
+                self._refresh_delivery_outbox_aggregate(
+                    connection, event_id=str(task["event_id"])
+                )
+                return {
+                    "outbox_id": str(outbox_id),
+                    "state": resolved_status,
+                    "attempt_count": int(task["attempt_count"]),
+                    "connector_id": str(task["connector_id"]),
+                    "endpoint_id": str(task["endpoint_id"]),
+                    "duplicate": False,
+                }
+            row = connection.execute(
+                "SELECT * FROM delivery_outbox WHERE outbox_id=?",
+                (str(outbox_id),),
+            ).fetchone()
+            if row is None:
+                raise SessionNotFound(str(outbox_id))
+            if (
+                str(row["state"]) != "claimed"
+                or str(row["lease_token"] or "") != token
+            ):
+                if (
+                    str(row["last_claim_token"] or "") == token
+                    and str(row["last_claim_status"] or "") == resolved_status
+                ):
+                    return {
+                        "outbox_id": str(outbox_id),
+                        "state": resolved_status,
+                        "attempt_count": int(row["attempt_count"]),
+                        "duplicate": True,
+                    }
+                raise SessionConflict("delivery outbox lease is stale")
+            terminal = resolved_status != "retry"
+            connection.execute(
+                """
+                UPDATE delivery_outbox
+                SET state=?, completed_at=?, last_error_code=?,
+                    last_claim_token=lease_token, last_claim_status=?,
+                    lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL
+                WHERE outbox_id=? AND state='claimed' AND lease_token=?
+                """,
+                (
+                    resolved_status,
+                    now if terminal else None,
+                    safe_error_code or None,
+                    resolved_status,
+                    str(outbox_id),
+                    token,
+                ),
+            )
+            return {
+                "outbox_id": str(outbox_id),
+                "state": resolved_status,
+                "attempt_count": int(row["attempt_count"]),
+                "duplicate": False,
+            }
+
+    def reconcile_unknown_delivery(
+        self,
+        *,
+        outbox_id: str,
+        resolution: str,
+        proof: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Resolve an unknown endpoint only from connector query evidence."""
+
+        resolved = str(resolution or "").strip().casefold()
+        if resolved not in {"delivered", "not_delivered"}:
+            raise ValueError("unknown delivery resolution is invalid")
+        proof_type = str(proof.get("type") or "").strip()
+        proof_value = str(proof.get("value") or "").strip()
+        if (
+            not proof_type
+            or not proof_value
+            or len(proof_type) > 64
+            or len(proof_value) > 256
+            or any(ord(char) < 33 or ord(char) > 126 for char in proof_type)
+            or any(ord(char) < 33 or ord(char) > 126 for char in proof_value)
+        ):
+            raise ValueError("unknown delivery reconciliation proof is invalid")
+        now = _utc_now()
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            task = connection.execute(
+                "SELECT * FROM connector_delivery_tasks WHERE task_id=?",
+                (str(outbox_id),),
+            ).fetchone()
+            if task is None:
+                raise SessionNotFound(str(outbox_id))
+            state = str(task["state"])
+            target_state = "completed" if resolved == "delivered" else "retry"
+            if state == target_state:
+                return {
+                    "outbox_id": str(outbox_id),
+                    "state": state,
+                    "resolution": resolved,
+                    "duplicate": True,
+                }
+            if state != "unknown":
+                raise SessionConflict("delivery task is not awaiting reconciliation")
+            connection.execute(
+                """
+                UPDATE connector_delivery_tasks
+                SET state=?, delivered_at=?, completed_at=?,
+                    last_error_code=?, last_claim_status=?,
+                    lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL
+                WHERE task_id=? AND state='unknown'
+                """,
+                (
+                    target_state,
+                    now if resolved == "delivered" else None,
+                    now if resolved == "delivered" else None,
+                    (
+                        "reconciled_not_delivered"
+                        if resolved == "not_delivered"
+                        else None
+                    ),
+                    f"reconciled_{resolved}",
+                    str(outbox_id),
+                ),
+            )
+            if resolved == "delivered":
+                proof_json = _json({"type": proof_type, "value": proof_value})
+                connection.execute(
+                    """
+                    INSERT INTO connector_delivery_receipts(
+                        event_id, session_id, endpoint_id, status,
+                        proof_json, attempt_count, updated_at
+                    ) VALUES (?, ?, ?, 'delivered', ?, 1, ?)
+                    ON CONFLICT(event_id, endpoint_id) DO UPDATE SET
+                        status='delivered', proof_json=excluded.proof_json,
+                        attempt_count=connector_delivery_receipts.attempt_count+1,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        str(task["event_id"]),
+                        str(task["session_id"]),
+                        str(task["endpoint_id"]),
+                        proof_json,
+                        now,
+                    ),
+                )
+            self._refresh_delivery_outbox_aggregate(
+                connection, event_id=str(task["event_id"])
+            )
+            return {
+                "outbox_id": str(outbox_id),
+                "state": target_state,
+                "resolution": resolved,
+                "duplicate": False,
+            }
+
+    def frontend_delivery_receipts(
+        self,
+        *,
+        session_id: str,
+        owner_id: str,
+        event_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        self.get_session(str(session_id), owner_id=owner_id)
+        query = """
+            SELECT r.*
+            FROM connector_delivery_receipts AS r
+            JOIN run_events AS e ON e.event_id = r.event_id
+            WHERE r.session_id = ?
+        """
+        parameters: list[Any] = [str(session_id)]
+        if event_id is not None:
+            query += " AND r.event_id = ?"
+            parameters.append(str(event_id))
+        query += " ORDER BY r.updated_at, r.endpoint_id"
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["proof"] = (
+                _json_object(item.pop("proof_json"))
+                if item.get("proof_json")
+                else None
+            )
+            result.append(item)
+        return result
+
+    def record_frontend_transport_reference(
+        self,
+        *,
+        session_id: str,
+        owner_id: str,
+        connector_id: str,
+        endpoint_id: str,
+        transport_message_id: str,
+        event_id: str,
+    ) -> dict[str, Any]:
+        """Bind one delivered transport message to its canonical assistant Event."""
+
+        values = {
+            "connector_id": str(connector_id or "").strip().casefold(),
+            "endpoint_id": str(endpoint_id or "").strip(),
+            "transport_message_id": str(transport_message_id or "").strip(),
+            "event_id": str(event_id or "").strip(),
+        }
+        if any(not value or len(value) > 512 for value in values.values()):
+            raise ValueError("frontend transport reference identity is invalid")
+        resolved_session_id = str(session_id or "").strip()
+        resolved_owner_id = str(owner_id or "").strip()
+        self.get_session(resolved_session_id, owner_id=resolved_owner_id)
+
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                """
+                SELECT event_id FROM frontend_transport_references
+                WHERE connector_id=? AND endpoint_id=? AND transport_message_id=?
+                """,
+                (
+                    values["connector_id"],
+                    values["endpoint_id"],
+                    values["transport_message_id"],
+                ),
+            ).fetchone()
+            if existing is not None:
+                if str(existing["event_id"]) != values["event_id"]:
+                    raise SessionConflict(
+                        "transport message reference is already bound to another Event"
+                    )
+                return {
+                    "event_id": values["event_id"],
+                    "duplicate": True,
+                }
+
+            event = connection.execute(
+                """
+                SELECT e.event_id, e.detail_json,
+                       fme.message_id AS presentation_message_id,
+                       r.final_message_id
+                FROM run_events AS e
+                JOIN sessions AS s ON s.session_id=e.session_id
+                LEFT JOIN frontend_message_events AS fme
+                  ON fme.event_id=e.event_id AND fme.session_id=e.session_id
+                LEFT JOIN runs AS r
+                  ON r.run_id=e.run_id AND r.session_id=e.session_id
+                WHERE e.event_id=? AND e.session_id=?
+                  AND s.owner_id=? AND s.instance_id=?
+                """,
+                (
+                    values["event_id"],
+                    resolved_session_id,
+                    resolved_owner_id,
+                    self.instance_id,
+                ),
+            ).fetchone()
+            if event is None:
+                raise SessionNotFound("frontend Event not found")
+            detail = _json_object(event["detail_json"] or "{}")
+            message_id = str(
+                event["presentation_message_id"]
+                or event["final_message_id"]
+                or detail.get("message_id")
+                or ""
+            ).strip()
+            if not message_id:
+                raise SessionConflict(
+                    "frontend Event is not bound to a canonical message"
+                )
+            message = connection.execute(
+                """
+                SELECT role, visibility FROM messages
+                WHERE message_id=? AND session_id=?
+                """,
+                (message_id, resolved_session_id),
+            ).fetchone()
+            if (
+                message is None
+                or str(message["role"] or "").casefold() != "assistant"
+                or str(message["visibility"] or "").casefold() != "visible"
+            ):
+                raise SessionConflict(
+                    "frontend Event is not a visible assistant message"
+                )
+            connection.execute(
+                """
+                INSERT INTO frontend_transport_references(
+                    connector_id, endpoint_id, transport_message_id,
+                    session_id, owner_id, event_id, message_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    values["connector_id"],
+                    values["endpoint_id"],
+                    values["transport_message_id"],
+                    resolved_session_id,
+                    resolved_owner_id,
+                    values["event_id"],
+                    message_id,
+                    _utc_now(),
+                ),
+            )
+        return {
+            "event_id": values["event_id"],
+            "message_id": message_id,
+            "duplicate": False,
+        }
+
+    def resolve_frontend_transport_reference(
+        self,
+        *,
+        session_id: str,
+        owner_id: str,
+        connector_id: str,
+        endpoint_id: str,
+        transport_message_id: str,
+    ) -> dict[str, Any] | None:
+        """Resolve a quoted external message only in its owner and endpoint scope."""
+
+        resolved_session_id = str(session_id or "").strip()
+        resolved_owner_id = str(owner_id or "").strip()
+        self.get_session(resolved_session_id, owner_id=resolved_owner_id)
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT ref.event_id, ref.message_id, message.role,
+                       message.text, message.created_at, message.visibility
+                FROM frontend_transport_references AS ref
+                JOIN messages AS message
+                  ON message.message_id=ref.message_id
+                 AND message.session_id=ref.session_id
+                WHERE ref.session_id=? AND ref.owner_id=?
+                  AND ref.connector_id=? AND ref.endpoint_id=?
+                  AND ref.transport_message_id=?
+                """,
+                (
+                    resolved_session_id,
+                    resolved_owner_id,
+                    str(connector_id or "").strip().casefold(),
+                    str(endpoint_id or "").strip(),
+                    str(transport_message_id or "").strip(),
+                ),
+            ).fetchone()
+        if (
+            row is None
+            or str(row["role"] or "").casefold() != "assistant"
+            or str(row["visibility"] or "").casefold() != "visible"
+        ):
+            return None
+        return {
+            "event_id": str(row["event_id"]),
+            "message_id": str(row["message_id"]),
+            "role": str(row["role"]),
+            "text": str(row["text"] or ""),
+            "created_at": str(row["created_at"] or ""),
+        }
 
     def create_event_consumer(
         self,
@@ -6821,7 +9606,12 @@ class SessionStore:
         session_ids: Iterable[str] | None = None,
         limit: int = 1000,
     ) -> list[dict[str, Any]]:
-        clauses = ["r.agent_id = ?", "r.state = 'completed'", "p.run_id IS NULL"]
+        clauses = [
+            "r.agent_id = ?",
+            "r.state = 'completed'",
+            "p.run_id IS NULL",
+            "s.session_kind = 'conversation'",
+        ]
         params: list[Any] = [str(agent_id).lower()]
         selected = [str(item) for item in (session_ids or ()) if str(item)]
         if selected:
@@ -6837,6 +9627,7 @@ class SessionStore:
                        u.created_at AS user_ts, a.created_at AS assistant_ts,
                        u.source, u.text AS user_text, a.text AS assistant_text
                 FROM runs AS r
+                JOIN sessions AS s ON s.session_id = r.session_id
                 JOIN messages AS u ON u.message_id = r.user_message_id
                 JOIN messages AS a ON a.message_id = r.final_message_id
                 LEFT JOIN agent_memory_records AS p ON p.run_id = r.run_id

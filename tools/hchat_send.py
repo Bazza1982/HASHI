@@ -1155,6 +1155,7 @@ def _send_via_protocol_transport(
     from_agent: str,
     text: str,
     *,
+    attachments: list[Path] | None = None,
     private_credential_ids: list[str] | tuple[str, ...] | None = None,
     authorization_resources: list[str] | tuple[str, ...] | None = None,
 ) -> bool:
@@ -1171,6 +1172,8 @@ def _send_via_protocol_transport(
         authorization_kwargs["private_credential_ids"] = private_credential_ids
     if authorization_resources:
         authorization_kwargs["authorization_resources"] = authorization_resources
+    if attachments:
+        authorization_kwargs["attachments"] = list(attachments)
     return send_protocol_message(
         f"{to_agent}@{target_instance}",
         from_agent,
@@ -1473,6 +1476,7 @@ def send_hchat(
     text: str,
     target_instance: str | None = None,
     *,
+    attachments: list[Path] | None = None,
     source_instance: str | None = None,
     reply_route_override: dict | None = None,
     private_credential_ids: list[str] | tuple[str, ...] | None = None,
@@ -1486,6 +1490,7 @@ def send_hchat(
     local_port = _get_workbench_port(cfg)
     instance_id = _get_instance_id(cfg)
     source_instance = _normalize_instance_id(source_instance) or instance_id
+    selected_attachments = [Path(path) for path in (attachments or [])]
     reply_route = reply_route_override or _build_reply_route(cfg)
     try:
         parsed_target = parse_hchat_address(to_agent)
@@ -1493,6 +1498,13 @@ def send_hchat(
         print(f"❌ Invalid HChat address: {to_agent}", file=sys.stderr)
         return False
     if isinstance(parsed_target, PublicAddress):
+        if selected_attachments:
+            print(
+                "❌ HChat attachments are currently LAN shared-token only; "
+                "Exchange remains text-only.",
+                file=sys.stderr,
+            )
+            return False
         if target_instance:
             print(
                 "❌ A complete public address cannot be combined with --instance.",
@@ -1535,6 +1547,12 @@ def send_hchat(
         authorization_kwargs["authorization_resources"] = authorization_resources
 
     if to_agent.startswith("@"):
+        if selected_attachments:
+            print(
+                "❌ HChat attachments require one explicit cross-instance target.",
+                file=sys.stderr,
+            )
+            return False
         if target_instance:
             print("❌ Group delivery does not support cross-instance routing. Use local @group only.", file=sys.stderr)
             return False
@@ -1567,6 +1585,12 @@ def send_hchat(
         return False
 
     if not target_instance:
+        if selected_attachments:
+            print(
+                "❌ HChat attachments require agent@INSTANCE on the LAN.",
+                file=sys.stderr,
+            )
+            return False
         if _is_local_agent(cfg, to_agent):
             if _send_via_local_workbench(
                 cfg,
@@ -1587,6 +1611,12 @@ def send_hchat(
         return False
 
     if target_instance == instance_id.upper():
+        if selected_attachments:
+            print(
+                "❌ HChat attachment v2 currently supports cross-instance LAN delivery only.",
+                file=sys.stderr,
+            )
+            return False
         if _is_local_agent(cfg, to_agent):
             if _send_via_local_workbench(
                 cfg,
@@ -1606,14 +1636,23 @@ def send_hchat(
         print(f"❌ {to_agent}@{target_instance} is not a local active agent.", file=sys.stderr)
         return False
 
+    protocol_kwargs = dict(authorization_kwargs)
+    if selected_attachments:
+        protocol_kwargs["attachments"] = selected_attachments
     if _send_via_protocol_transport(
         to_agent,
         target_instance,
         from_agent,
         text,
-        **authorization_kwargs,
+        **protocol_kwargs,
     ):
         return True
+    if selected_attachments:
+        print(
+            "❌ HChat attachment delivery failed; text was not sent separately.",
+            file=sys.stderr,
+        )
+        return False
     if private_credential_ids:
         print(
             "Private authorization was selected, but the authenticated protocol "

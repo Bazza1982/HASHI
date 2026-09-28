@@ -569,7 +569,7 @@ TOOL_SCHEMAS = [
                 "Publish one or more ordered local files on the current frontend Session reply. "
                 "This is the standard frontend-neutral attachment output contract for images, "
                 "audio, video, and documents. Use one call for all files that belong to one "
-                "reply. Do not use it for Telegram (use telegram_send_file) or the built-in TUI."
+                "reply; the current Session and frozen delivery route determine where it appears."
             ),
             "parameters": {
                 "type": "object",

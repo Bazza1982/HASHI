@@ -57,7 +57,7 @@ the uninstall without deletion. Uninstall permanently deletes the local
 conversations, settings, logs, and plaintext API keys; it does not alter the
 USB bundle.
 
-The image contains HER v2, official DeepSeek defaults, configurable Qwen via
+The image contains HERV3, official DeepSeek defaults, configurable Qwen via
 the official DashScope OpenAI-compatible endpoint, TUI, the HASHI Backend API,
 Remote/LAN/HChat, Scheduler, Nagare, Superloops, browser/desktop
 tools, Tesseract OCR, FFmpeg, Edge TTS, and one Chinese Piper voice. It uses the

@@ -9,6 +9,7 @@ from telegram.ext import CallbackQueryHandler, CommandHandler, MessageHandler, f
 
 from orchestrator.command_registry import bind_runtime_commands, runtime_bot_commands, runtime_command_map
 from orchestrator.command_specs import COMMAND_SPECS
+from orchestrator.her_v2.v3_callback_contract import HER_V3_MODEL_CALLBACK_PATTERN
 from orchestrator.private_wol import private_wol_available
 from orchestrator.slash_command_audit import split_slash_command_words
 from orchestrator import ui_language
@@ -78,6 +79,10 @@ CALLBACK_BINDINGS: tuple[CallbackBinding, ...] = (
     ),
     CallbackBinding(
         r"^her_provider",
+        "callback_model",
+    ),
+    CallbackBinding(
+        HER_V3_MODEL_CALLBACK_PATTERN,
         "callback_model",
     ),
     CallbackBinding(r"^(wcfg|acfg|bcfg):", "callback_retired_agent_mode"),

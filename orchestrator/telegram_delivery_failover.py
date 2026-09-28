@@ -37,6 +37,7 @@ MAX_RECOVERY_ATTEMPTS = 3
 RECOVERY_ATTEMPT_LEASE_SECONDS = 300
 
 logger = logging.getLogger("BridgeU.TelegramDeliveryFailover")
+bridge_logger = logging.getLogger("BridgeU.Bridge")
 
 
 def _now() -> datetime:
@@ -505,19 +506,38 @@ async def _send_direct(runtime: Any, *, chat_id: int, text: str) -> None:
                     reason="telegram_send_returned_no_receipt",
                 )
             return
-        await runtime.app.bot.send_message(chat_id=chat_id, text=text)
+        raise TelegramDeliveryError(
+            "fc_sender_unavailable",
+            retryable=True,
+            permanent=False,
+            reason="runtime_has_no_frontend_connector_sender",
+        )
     except Exception as exc:
         raise classify_telegram_delivery_error(exc) from exc
 
 
 async def send_runtime_notice(
-    kernel, *, source_agent, chat_id, thread_id=None, render_text
+    kernel,
+    *,
+    source_agent,
+    chat_id,
+    thread_id=None,
+    render_text,
+    operation_id=None,
+    notice_kind="runtime",
 ):
     """Send an operational notice without depending on any Agent Worker.
 
     Keep the original destination across fallback. Only this instance's known
     bot credentials are considered; no model, poller or Agent is started.
     """
+    from orchestrator.frontend_connector_registry import (
+        require_connector_presentation_override,
+    )
+
+    require_connector_presentation_override(
+        "telegram", "delivery_failover_notice"
+    )
     from telegram import Bot
 
     workers = getattr(kernel, "function_workers", None)
@@ -536,10 +556,11 @@ async def send_runtime_notice(
     health = load_health_state(kernel)
 
     def token_for(name):
+        token_key = configs.get(name, {}).get("telegram_token_key") or name
         return str(
             getattr(ingresses.get(name), "token", "")
             or (getattr(kernel, "secrets", {}) or {}).get(
-                configs.get(name, {}).get("telegram_token_key"), ""
+                token_key, ""
             )
         )
 
@@ -581,40 +602,115 @@ async def send_runtime_notice(
         async with asyncio.timeout(15):
             for name in names:
                 if name in blocked:
+                    if name == source_agent:
+                        bridge_logger.warning(
+                            "Runtime notice attempt: operation=%s kind=%s source=%s "
+                            "candidate=%s result=skipped reason=active_delivery_block",
+                            operation_id,
+                            notice_kind,
+                            source_agent,
+                            name,
+                        )
                     continue
                 token = token_for(name)
-                if (
-                    not token
-                    or token in tried_tokens
-                    or token == "WORKBENCH_ONLY_NO_TOKEN"
-                ):
+                if not token or token == "WORKBENCH_ONLY_NO_TOKEN":
+                    if name == source_agent:
+                        bridge_logger.warning(
+                            "Runtime notice attempt: operation=%s kind=%s source=%s "
+                            "candidate=%s result=skipped reason=token_unavailable",
+                            operation_id,
+                            notice_kind,
+                            source_agent,
+                            name,
+                        )
+                    continue
+                if token in tried_tokens:
+                    if name == source_agent:
+                        bridge_logger.warning(
+                            "Runtime notice attempt: operation=%s kind=%s source=%s "
+                            "candidate=%s result=skipped reason=blocked_bot_identity",
+                            operation_id,
+                            notice_kind,
+                            source_agent,
+                            name,
+                        )
                     continue
                 tried_tokens.add(token)
                 handle = runtime_map.get(name)
                 display = handle.get_display_name() if handle else name
+                ingress = ingresses.get(name)
+                active_bot = (
+                    getattr(ingress, "bot", None)
+                    if ingress is not None
+                    and (
+                        getattr(ingress, "connected", False)
+                        or getattr(ingress, "is_running", False)
+                    )
+                    else None
+                )
+                transport = "ingress" if active_bot is not None else "fresh_bot"
                 try:
                     async with asyncio.timeout(5):
-                        async with Bot(token) as bot:
-                            message = await bot.send_message(
-                                chat_id=chat_id,
-                                message_thread_id=thread_id,
-                                text=render_text(name, display),
-                                parse_mode="HTML",
-                            )
+                        payload = {
+                            "chat_id": chat_id,
+                            "message_thread_id": thread_id,
+                            "text": render_text(name, display),
+                            "parse_mode": "HTML",
+                        }
+                        if active_bot is not None:
+                            message = await active_bot.send_message(**payload)
+                        else:
+                            async with Bot(token) as bot:
+                                message = await bot.send_message(**payload)
+                    bridge_logger.info(
+                        "Runtime notice attempt: operation=%s kind=%s source=%s "
+                        "candidate=%s via=%s result=sent message_id=%s",
+                        operation_id,
+                        notice_kind,
+                        source_agent,
+                        name,
+                        transport,
+                        message.message_id,
+                    )
                     return {
                         "sent": True,
                         "sender": name,
                         "message_id": message.message_id,
                     }
-                except RetryAfter as exc:
-                    retry_delay = max(retry_delay, retry_after_seconds(exc))
                 except Exception as exc:
                     # Raw transport errors may contain the bot's request URL.
-                    logger.warning(
-                        "Runtime notice via %s failed (%s)", name, type(exc).__name__
+                    failure = classify_telegram_delivery_error(exc)
+                    if failure.retry_after_s is not None:
+                        retry_delay = max(retry_delay, failure.retry_after_s)
+                    bridge_logger.warning(
+                        "Runtime notice attempt: operation=%s kind=%s source=%s "
+                        "candidate=%s via=%s result=failed code=%s error_type=%s retry_after_s=%s",
+                        operation_id,
+                        notice_kind,
+                        source_agent,
+                        name,
+                        transport,
+                        failure.code,
+                        failure.error_type,
+                        failure.retry_after_s,
                     )
     except TimeoutError:
-        pass
+        bridge_logger.warning(
+            "Runtime notice round: operation=%s kind=%s source=%s "
+            "result=timeout retry_after_s=%s",
+            operation_id,
+            notice_kind,
+            source_agent,
+            retry_delay,
+        )
+    bridge_logger.warning(
+        "Runtime notice round: operation=%s kind=%s source=%s "
+        "result=unsent retry_after_s=%s",
+        operation_id,
+        notice_kind,
+        source_agent,
+        retry_delay,
+    )
     return {"sent": False, "retry_after": retry_delay}
 
 

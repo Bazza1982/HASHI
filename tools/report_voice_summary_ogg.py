@@ -119,6 +119,9 @@ def send_telegram(ogg_path: Path, args: argparse.Namespace) -> None:
         cmd.extend(["--chat-id", args.telegram_chat_id])
 
     env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [str(ROOT), env.get("PYTHONPATH", "")])
+    )
     if args.telegram_agent:
         env.setdefault("HASHI_AGENT_NAME", args.telegram_agent)
 

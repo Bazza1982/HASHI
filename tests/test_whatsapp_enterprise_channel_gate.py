@@ -278,13 +278,86 @@ async def test_whatsapp_response_records_actual_connector_outcome(monkeypatch):
             None,
             {
                 "request_id": "req-wa",
-                "delivered": True,
+                "delivered": False,
                 "assistant_text": "[nana]: hello",
                 "surface": "whatsapp",
                 "channel_key": "61400000000@s.whatsapp.net",
                 "transport": "whatsapp",
                 "completion_path": "foreground",
-                "disposition": "transport_delivered",
+                "disposition": "transport_accepted",
+                "outcome_state": "accepted",
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_whatsapp_response_dispatches_canonical_fc_event_once(tmp_path):
+    from orchestrator.frontend_delivery import freeze_run_delivery_route
+    from orchestrator.session_store import SessionStore
+
+    store = SessionStore(
+        tmp_path / "state" / "sessions.sqlite3",
+        instance_id="HASHI1",
+    )
+    owner = "user:7"
+    chat_key = "61400000000@s.whatsapp.net"
+    session = store.resolve_session(
+        owner_id=owner,
+        agent_id="nana",
+        surface="whatsapp",
+        channel_key=chat_key,
+    )
+    accepted = store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="nana",
+        request_id="req-wa-fc",
+        text="question",
+        source="whatsapp",
+        idempotency_key="wa-fc-key",
+        delivery_route=freeze_run_delivery_route(
+            message_source_id="whatsapp",
+            session_surface="whatsapp",
+            session_channel_key=chat_key,
+            chat_id=0,
+            telegram_requested=False,
+        ),
+    )
+    store.mark_request_running(accepted.request_id, worker_id="test-worker")
+    store.finish_request(
+        accepted.request_id,
+        success=True,
+        assistant_text="canonical answer",
+    )
+
+    runtime = SimpleNamespace(name="nana", session_store=store)
+    transport = WhatsAppTransport.__new__(WhatsAppTransport)
+    transport._get_runtime = lambda _name: runtime
+    transport._check_whatsapp_egress_allowed = lambda **_kwargs: _async_true()
+    sent = []
+
+    async def send_text(channel, text):
+        sent.append((channel, text))
+        return True
+
+    transport._send_text = send_text
+    payload = {
+        "request_id": accepted.request_id,
+        "success": True,
+        "text": "untrusted callback copy",
+    }
+
+    await transport._on_agent_response(chat_key, "nana", payload, "single", ["nana"])
+    await transport._on_agent_response(chat_key, "nana", payload, "single", ["nana"])
+
+    assert sent == [(chat_key, "[nana]: canonical answer")]
+    receipts = store.frontend_delivery_receipts(
+        session_id=session["session_id"],
+        owner_id=owner,
+    )
+    assert receipts[-1]["status"] == "accepted"
+
+
+async def _async_true():
+    return True

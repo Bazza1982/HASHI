@@ -24,10 +24,12 @@ import aiohttp
 
 from orchestrator.process_execution import (
     decode_process_output,
+    is_wsl,
     process_group_kwargs,
     resolve_shell_invocation,
     terminate_windows_process_tree,
 )
+from tools.device_paths import DevicePathError, windows_to_wsl_path
 from tools.workbench_client import request_workbench_json, workbench_endpoint
 
 # ---------------------------------------------------------------------------
@@ -54,6 +56,8 @@ def _resolve_path(
     raw_path: str,
     access_root: Path | Sequence[Path],
     workspace_dir: Path,
+    *,
+    allow_wsl_windows_drive_paths: bool = False,
 ) -> Path:
     """
     Resolve a user-supplied path.
@@ -61,13 +65,32 @@ def _resolve_path(
     - Relative paths are resolved from workspace_dir.
     Raises ValueError if the resolved path escapes access_root.
     """
-    p = Path(raw_path)
+    translated_path: str | None = None
+    if allow_wsl_windows_drive_paths and is_wsl():
+        try:
+            translated_path = windows_to_wsl_path(raw_path)
+        except DevicePathError:
+            translated_path = None
+
+    p = Path(translated_path or raw_path)
     if not p.is_absolute():
         p = (workspace_dir / p).resolve()
     else:
         p = p.resolve()
 
-    access_roots = _access_roots(access_root)
+    access_roots = list(_access_roots(access_root))
+    if allow_wsl_windows_drive_paths and is_wsl():
+        parts = p.parts
+        if (
+            len(parts) >= 3
+            and parts[0] == "/"
+            and parts[1] == "mnt"
+            and len(parts[2]) == 1
+            and parts[2].isalpha()
+        ):
+            mounted_drive_root = (Path("/mnt") / parts[2].lower()).resolve()
+            if mounted_drive_root not in access_roots:
+                access_roots.append(mounted_drive_root)
     if not any(p == root or p.is_relative_to(root) for root in access_roots):
         rendered = ", ".join(str(root) for root in access_roots)
         raise ValueError(
@@ -1500,9 +1523,19 @@ async def execute_background_job_start(
         return f"Error: cwd is not a directory: {cwd}"
 
     context = audit_context or {}
+    activity_context = context.get("agent_activity_context")
+    activity_context = (
+        activity_context if isinstance(activity_context, Mapping) else {}
+    )
     origin = {
         "chat_id": _coerce_chat_id(context.get("chat_id")),
         "request_id": context.get("request_id"),
+        "session_id": (
+            activity_context.get("origin_session_id")
+            or context.get("hashi_session_id")
+        ),
+        "owner_id": context.get("owner_id"),
+        "session_surface": context.get("session_surface"),
         "source": context.get("request_source") or "tool:background_job_start",
         "summary": context.get("request_summary"),
         "tool": "background_job_start",
@@ -1725,7 +1758,18 @@ async def execute_telegram_send(
     args: dict,
     secrets: dict,
     agents_config: Optional[list] = None,
+    *,
+    audit_context: dict | None = None,
+    tool_call_id: str = "",
 ) -> str:
+    """Compatibility name for a destination-scoped FC notification."""
+
+    del secrets
+    from orchestrator.frontend_connector_registry import (
+        get_compatibility_adapter,
+    )
+
+    get_compatibility_adapter("telegram.explicit_notification")
     text = args.get("text", "").strip()
     if not text:
         return "Error: text is required"
@@ -1738,112 +1782,185 @@ async def execute_telegram_send(
         for ag in agents_config:
             if ag.get("id") == agent_id:
                 chat_id = ag.get("telegram_chat_id") or ag.get("chat_id")
-                token = ag.get("token") or secrets.get(f"{agent_id}_telegram_token")
                 break
         if not chat_id:
             return f"Error: could not resolve chat_id for agent '{agent_id}'"
     elif not chat_id:
         return "Error: either chat_id or agent_id must be provided"
+    context = dict(audit_context or {})
+    runtime = context.get("_runtime")
+    if runtime is None or not callable(getattr(runtime, "send_long_message", None)):
+        return "Error: standard Frontend Connector runtime is unavailable"
+    request_id = str(context.get("request_id") or "").strip()
+    stable_call = str(tool_call_id or "").strip()
+    if not request_id:
+        import hashlib
 
-    token = args.get("token") or secrets.get("telegram_bot_token")
-    if not token:
-        return "Error: no telegram token available"
-
+        request_id = "tool_" + hashlib.sha256(
+            f"{chat_id}\0{stable_call}\0{text}".encode("utf-8")
+        ).hexdigest()[:24]
+    purpose = "explicit-notification" + (
+        f":{stable_call}" if stable_call else ""
+    )
     try:
-        import httpx
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
-            )
-            data = resp.json()
-            if data.get("ok"):
-                return f"OK: message sent to {chat_id}"
-            else:
-                return f"Error: Telegram API error: {data.get('description', 'unknown')}"
-    except Exception as e:
-        return f"Error sending Telegram message: {e}"
+        _elapsed, units = await runtime.send_long_message(
+            int(chat_id),
+            text,
+            request_id=request_id,
+            purpose=purpose,
+        )
+    except (TypeError, ValueError):
+        return "Error: chat_id must be a numeric Telegram chat ID"
+    except Exception as exc:
+        return f"Error: FC notification outcome is unknown: {type(exc).__name__}"
+    if units <= 0:
+        return "Error: FC notification was not accepted for delivery"
+    return json.dumps(
+        {
+            "ok": True,
+            "connector_id": "telegram",
+            "destination": str(chat_id),
+            "request_id": request_id,
+            "delivery_state": "accepted",
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
 
 
 async def execute_telegram_send_file(
     args: dict,
     secrets: dict,
+    *,
+    access_root: Path | Sequence[Path],
+    workspace_dir: Path,
+    audit_context: dict | None = None,
+    tool_call_id: str = "",
 ) -> str:
-    """Send a file (photo, document, video, or audio) to a Telegram chat."""
+    """Compatibility wrapper for a destination-scoped FC media Event."""
+
+    del secrets
+    import hashlib
     import mimetypes
+
+    from orchestrator.frontend_connector_registry import (
+        get_compatibility_adapter,
+    )
+
+    get_compatibility_adapter("telegram.explicit_media")
 
     path = args.get("path", "").strip()
     if not path:
         return "Error: path is required"
 
-    from pathlib import Path as _Path
-    file_path = _Path(path)
-    if not file_path.exists():
-        return f"Error: file not found: {path}"
-    if not file_path.is_file():
-        return f"Error: not a file: {path}"
+    try:
+        file_path = _resolve_path(path, access_root, workspace_dir)
+    except (OSError, ValueError) as exc:
+        return f"Error: file is outside authorized Workzones: {exc}"
+    if not file_path.exists() or not file_path.is_file():
+        return f"Error: file not found: {file_path}"
 
     caption = args.get("caption", "").strip() or None
-    chat_id = args.get("chat_id") or secrets.get("_authorized_telegram_id")
+    context = dict(audit_context or {})
+    global_config = context.get("global_config")
+    chat_id = (
+        args.get("chat_id")
+        or context.get("chat_id")
+        or getattr(global_config, "authorized_id", None)
+    )
     if not chat_id:
         return "Error: chat_id not provided and authorized_telegram_id not available"
-
-    token = secrets.get("_agent_telegram_token") or secrets.get("telegram_bot_token")
-    if not token:
-        return "Error: no telegram token available"
-
-    # Determine send method
-    file_type = args.get("file_type", "auto").lower()
-    if file_type == "auto":
-        suffix = file_path.suffix.lower()
-        if suffix in (".jpg", ".jpeg", ".png", ".webp"):
-            file_type = "photo"
-        elif suffix in (".mp4", ".mov", ".avi", ".mkv"):
-            file_type = "video"
-        elif suffix in (".mp3", ".ogg", ".flac", ".wav", ".m4a"):
-            file_type = "audio"
-        else:
-            file_type = "document"
-
-    method_map = {
-        "photo": "sendPhoto",
-        "video": "sendVideo",
-        "audio": "sendAudio",
-        "document": "sendDocument",
-    }
-    field_map = {
-        "photo": "photo",
-        "video": "video",
-        "audio": "audio",
-        "document": "document",
-    }
-    api_method = method_map.get(file_type, "sendDocument")
-    field_name = field_map.get(file_type, "document")
-
+    runtime = context.get("_runtime")
+    if runtime is None:
+        return "Error: standard Frontend Connector runtime is unavailable"
     try:
-        import httpx
-        mime_type, _ = mimetypes.guess_type(str(file_path))
-        mime_type = mime_type or "application/octet-stream"
+        payload = file_path.read_bytes()
+        media_type = (
+            mimetypes.guess_type(str(file_path))[0]
+            or "application/octet-stream"
+        )
+        publication_id = str(tool_call_id or "").strip() or hashlib.sha256(
+            f"{chat_id}\0{file_path.name}\0".encode("utf-8") + payload
+        ).hexdigest()
+        from orchestrator import runtime_delivery, runtime_session
+        from orchestrator.frontend_connector_registry import endpoint_id_for
 
-        data = {"chat_id": str(chat_id)}
-        if caption:
-            data["caption"] = caption
-
-        async with httpx.AsyncClient(timeout=60) as client:
-            with open(file_path, "rb") as f:
-                files = {field_name: (file_path.name, f, mime_type)}
-                resp = await client.post(
-                    f"https://api.telegram.org/bot{token}/{api_method}",
-                    data=data,
-                    files=files,
-                )
-            result = resp.json()
-            if result.get("ok"):
-                return f"OK: {file_type} sent to {chat_id} ({file_path.name})"
-            else:
-                return f"Error: Telegram API error: {result.get('description', 'unknown')}"
-    except Exception as e:
-        return f"Error sending Telegram file: {e}"
+        publication = runtime_session.publish_frontend_media_notification(
+            runtime,
+            filename=file_path.name,
+            media_type=media_type,
+            payload=payload,
+            sha256=hashlib.sha256(payload).hexdigest(),
+            caption=str(caption or ""),
+            publication_id=publication_id,
+            surface="telegram",
+            channel_key=str(chat_id),
+        )
+        endpoint_id = endpoint_id_for(
+            "telegram",
+            ingress_transport="telegram",
+            channel_key=str(chat_id),
+        )
+        store = runtime_session.ensure_store(runtime)
+        claims = store.claim_delivery_outbox(
+            session_id=str(publication["session_id"]),
+            owner_id=str(publication["owner_id"]),
+            worker_id=f"fc-telegram-tool-{publication_id[:48]}",
+            event_id=str(publication["delivery_event_id"]),
+            connector_id="telegram",
+            endpoint_id=endpoint_id,
+            limit=1,
+        )
+        if not claims:
+            receipts = store.frontend_delivery_receipts(
+                session_id=str(publication["session_id"]),
+                owner_id=str(publication["owner_id"]),
+                event_id=str(publication["delivery_event_id"]),
+            )
+            state = str(receipts[-1]["status"] if receipts else "duplicate")
+            return json.dumps(
+                {
+                    "ok": state in {"accepted", "delivered", "duplicate"},
+                    "connector_id": "telegram",
+                    "event_id": publication["delivery_event_id"],
+                    "attachment_id": publication["attachment_id"],
+                    "delivery_state": state,
+                    "replayed": True,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        await runtime_delivery.dispatch_claimed_telegram_event(
+            runtime,
+            chat_id=int(chat_id),
+            store=store,
+            claim=claims[0],
+            frontend_owner_id=str(publication["owner_id"]),
+            request_id=str(context.get("request_id") or publication_id),
+            purpose="explicit-media-notification",
+        )
+        receipts = store.frontend_delivery_receipts(
+            session_id=str(publication["session_id"]),
+            owner_id=str(publication["owner_id"]),
+            event_id=str(publication["delivery_event_id"]),
+        )
+        state = str(receipts[-1]["status"] if receipts else "unknown")
+        return json.dumps(
+            {
+                "ok": state in {"accepted", "delivered"},
+                "connector_id": "telegram",
+                "event_id": publication["delivery_event_id"],
+                "attachment_id": publication["attachment_id"],
+                "delivery_state": state,
+                "replayed": False,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        return f"Error: {exc}"
+    except Exception as exc:
+        return f"Error: FC media delivery outcome is unknown: {type(exc).__name__}"
 
 
 async def execute_frontend_send_attachments(
@@ -1854,17 +1971,19 @@ async def execute_frontend_send_attachments(
     audit_context: dict | None,
     tool_call_id: str = "",
 ) -> str:
-    """Bind ordered local files to the current canonical assistant Message.
+    """Bind authorized, ordered local files to the current assistant Message.
 
-    ``access_root`` is accepted for dispatch compatibility but is deliberately
-    not enforced here: the agent chooses which readable local files to attach,
-    and frontend attachment paths may reference any location.
+    Every source path is resolved against the invocation's authorized roots
+    before it is read; connector display identity never widens that authority.
     """
 
     import hashlib
     import mimetypes
 
     from orchestrator.session_store import (
+        HCHAT_SESSION_ATTACHMENT_BYTES,
+        HCHAT_SESSION_ATTACHMENTS_PER_MESSAGE,
+        HCHAT_SESSION_ATTACHMENT_TOTAL_BYTES,
         MAX_SESSION_ATTACHMENT_BYTES,
         MAX_SESSION_ATTACHMENTS_PER_MESSAGE,
         MAX_SESSION_ATTACHMENT_TOTAL_BYTES,
@@ -1875,12 +1994,29 @@ async def execute_frontend_send_attachments(
     )
 
     context = dict(audit_context or {})
+    is_hchat_selection = (
+        str(context.get("request_source") or "").strip().casefold()
+        == "bridge:hchat-draft"
+    )
+    attachment_policy = "hchat" if is_hchat_selection else "standard"
+    max_attachment_count = (
+        HCHAT_SESSION_ATTACHMENTS_PER_MESSAGE
+        if is_hchat_selection
+        else MAX_SESSION_ATTACHMENTS_PER_MESSAGE
+    )
+    max_attachment_bytes = (
+        HCHAT_SESSION_ATTACHMENT_BYTES
+        if is_hchat_selection
+        else MAX_SESSION_ATTACHMENT_BYTES
+    )
+    max_total_bytes = (
+        HCHAT_SESSION_ATTACHMENT_TOTAL_BYTES
+        if is_hchat_selection
+        else MAX_SESSION_ATTACHMENT_TOTAL_BYTES
+    )
     surface = str(context.get("session_surface") or "").strip().casefold()
-    if surface == "tui":
-        return "Error: the built-in TUI uses its dedicated HASHI attachment path"
-    # Unified attachment delivery contract: the surface is a rendering hint,
-    # never an admission gate.  Telegram turns may bind to the canonical
-    # Session too; pushing to Telegram remains the caller's concern.
+    # Connector surfaces are presentation hints, not eligibility gates. All
+    # attachments bind to the same canonical Session message/group contract.
     request_id = str(context.get("request_id") or "").strip()
     session_id = str(context.get("hashi_session_id") or "").strip()
     owner_id = str(context.get("owner_id") or "").strip()
@@ -1926,7 +2062,7 @@ async def execute_frontend_send_attachments(
     raw_attachments = args.get("attachments")
     if not isinstance(raw_attachments, list) or not raw_attachments:
         return "Error: attachments must be a non-empty array"
-    if len(raw_attachments) > MAX_SESSION_ATTACHMENTS_PER_MESSAGE:
+    if len(raw_attachments) > max_attachment_count:
         return "Error: attachment count exceeds the current Session limit"
 
     prepared: list[dict[str, Any]] = []
@@ -1938,26 +2074,41 @@ async def execute_frontend_send_attachments(
             raw_path = str(raw.get("path") or "").strip()
             if not raw_path:
                 raise ValueError("each attachment requires path")
-            # No access-scope enforcement for frontend attachments: resolve the
-            # path (relative to workspace_dir when relative) without checking it
-            # against the tool access roots.
-            path = Path(raw_path)
-            if not path.is_absolute():
-                path = workspace_dir / path
-            path = path.resolve()
+            path = _resolve_path(
+                raw_path,
+                access_root,
+                workspace_dir,
+                allow_wsl_windows_drive_paths=bool(
+                    context.get("allow_wsl_windows_drive_paths")
+                ),
+            )
             if not path.exists():
                 raise ValueError(f"file not found: {path}")
             if not path.is_file():
                 raise ValueError(f"path is not a file: {path}")
             size_bytes = int(path.stat().st_size)
-            if size_bytes > MAX_SESSION_ATTACHMENT_BYTES:
+            if size_bytes > max_attachment_bytes:
                 raise ValueError(f"attachment exceeds the Session size limit: {path.name}")
             total_bytes += size_bytes
-            if total_bytes > MAX_SESSION_ATTACHMENT_TOTAL_BYTES:
+            if total_bytes > max_total_bytes:
                 raise ValueError("attachments exceed the Session total size limit")
-            payload = path.read_bytes()
-            if len(payload) != size_bytes:
-                raise SessionConflict(f"attachment changed while being read: {path.name}")
+            payload = None
+            digest = hashlib.sha256()
+            if is_hchat_selection:
+                def _hash_selected_file() -> str:
+                    selected_digest = hashlib.sha256()
+                    with path.open("rb") as handle:
+                        while chunk := handle.read(8 * 1024 * 1024):
+                            selected_digest.update(chunk)
+                    return selected_digest.hexdigest()
+
+                digest_hex = await asyncio.to_thread(_hash_selected_file)
+            else:
+                payload = path.read_bytes()
+                if len(payload) != size_bytes:
+                    raise SessionConflict(f"attachment changed while being read: {path.name}")
+                digest.update(payload)
+                digest_hex = digest.hexdigest()
             caption = str(raw.get("caption") or "").strip()
             if len(caption) > 4096:
                 raise ValueError("attachment caption exceeds 4096 characters")
@@ -1974,9 +2125,15 @@ async def execute_frontend_send_attachments(
                     "filename": path.name,
                     "caption": caption,
                     "media_type": media_type,
+                    "storage_media_type": (
+                        "application/octet-stream"
+                        if is_hchat_selection
+                        else media_type
+                    ),
                     "size_bytes": size_bytes,
-                    "sha256": hashlib.sha256(payload).hexdigest(),
+                    "sha256": digest_hex,
                     "payload": payload,
+                    "path": path,
                 }
             )
 
@@ -2019,6 +2176,8 @@ async def execute_frontend_send_attachments(
                 {
                     "ok": True,
                     "request_id": request_id,
+                    "group_id": existing["group_id"],
+                    "media_group": existing["media_group"],
                     "attachment_count": len(existing["attachments"]),
                     "attachments": existing["attachments"],
                     "bind_only": bool(bind_only),
@@ -2034,25 +2193,35 @@ async def execute_frontend_send_attachments(
                 session_id=session_id,
                 owner_id=owner_id,
                 filename=item["filename"],
-                media_type=item["media_type"],
+                media_type=item["storage_media_type"],
                 size_bytes=item["size_bytes"],
                 sha256=item["sha256"],
                 semantic_role=(
                     "audio_attachment"
-                    if item["media_type"].startswith("audio/")
+                    if item["storage_media_type"].startswith("audio/")
                     else ""
                 ),
                 # A frontend-bound output is part of the durable assistant
                 # Message, not a temporary generated-audio preview.
-                retention_indefinite=item["media_type"].startswith("audio/"),
+                retention_indefinite=item["storage_media_type"].startswith("audio/"),
+                attachment_policy=attachment_policy,
             )
-            store.upload_attachment_bytes(
-                session_id=session_id,
-                owner_id=owner_id,
-                attachment_id=staged["attachment_id"],
-                payload=item["payload"],
-                audio_direction="output",
-            )
+            if is_hchat_selection:
+                await asyncio.to_thread(
+                    store.upload_attachment_file,
+                    session_id=session_id,
+                    owner_id=owner_id,
+                    attachment_id=staged["attachment_id"],
+                    source_path=item["path"],
+                )
+            else:
+                store.upload_attachment_bytes(
+                    session_id=session_id,
+                    owner_id=owner_id,
+                    attachment_id=staged["attachment_id"],
+                    payload=item["payload"],
+                    audio_direction="output",
+                )
             store.commit_attachment(
                 session_id=session_id,
                 owner_id=owner_id,
@@ -2072,11 +2241,14 @@ async def execute_frontend_send_attachments(
             idempotency_key=idempotency_key,
             request_digest=request_digest,
             attachments=bindings,
+            attachment_policy=attachment_policy,
         )
         return json.dumps(
             {
                 "ok": True,
                 "request_id": request_id,
+                "group_id": bound["group_id"],
+                "media_group": bound["media_group"],
                 "attachment_count": len(bound["attachments"]),
                 "attachments": bound["attachments"],
                 "bind_only": bool(bind_only),

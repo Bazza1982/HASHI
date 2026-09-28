@@ -39,7 +39,7 @@ from orchestrator.terminal_console import (
 
 PRODUCT_NAME = "HASHI"
 PRODUCT_DESCRIPTION = "Professional Agentic AI System"
-PRODUCT_ENGINE = "Powered by HER-V2 - Flexible with CLI backends"
+PRODUCT_ENGINE = "Powered by HERV3 - Flexible with CLI backends"
 PRODUCT_CREDIT = "Designed by Barry Li"
 _STARTUP_RECORD_FILENAME = "startup_presentation.jsonl"
 _startup_record_lock = threading.RLock()

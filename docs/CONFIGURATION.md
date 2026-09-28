@@ -38,9 +38,9 @@ another operator's identities, paths, account IDs, tokens, or ports.
 Agent definitions explicitly use the supported Flex runtime type.
 The runtime type and the Fixed/Flex working mode are different settings.
 
-/backend selects an allowed Engine. /provider and /model configure HER v2
-Model Providers and task targets. OpenRouter and DeepSeek are provider
-adapters inside HER v2; their compatibility entries do not make them
+/backend selects an allowed Engine. /provider and /model configure HERV3's one
+active Model Provider/model target. OpenRouter and DeepSeek are provider
+adapters inside HERV3; their compatibility entries do not make them
 selectable top-level engines.
 
 Instance model and effort opt-ins belong in allowed_backends and its
@@ -50,21 +50,21 @@ require changing the shared catalogue.
 
 The shipped Codex CLI default is `gpt-5.6-sol` with explicit `medium`
 reasoning. Its shared catalogue contains only `gpt-5.5`, the Sol/Terra/Luna
-GPT-5.6 family, and `gpt-6-astra`. OpenRouter is available only as a HER v2
+GPT-5.6 family, and `gpt-6-astra`. OpenRouter is available only as a HERV3
 Model Provider and exposes the approved DeepSeek V3.2 Exp, V4 Flash, V4 Pro,
 and Gemini 3.8 Flash models. The official DeepSeek API exposes
 `deepseek-flash` (V4.1 Flash with native vision) and `deepseek-v4-pro`;
 temporary retired Flash aliases are accepted by the adapter but are not shown
 as current model choices.
 
-The HER execution modes are Direct, Strategic, and Planned, stored as zero,
-low, and medium respectively. Older high/xhigh/max HER execution values are
-migration inputs, not current selectable modes. Provider reasoning effort
-is a separate model capability.
+HERV3 has no HER execution modes or stage routes. `/effort` is a
+Provider/model capability and selects only a supported reasoning level.
+Legacy Direct/Strategic/Planned values and Quick/Pro route matrices are
+compatibility inputs, not current selectable behavior.
 
 Detailed contracts:
 [working modes](https://github.com/Bazza1982/HASHI/blob/main/docs/FIXED_FLEX_WORKING_MODES.md),
-[HER modes](https://github.com/Bazza1982/HASHI/blob/main/docs/HER_V2_THREE_MODE_DECISION.md),
+[HERV3 upgrade](https://github.com/Bazza1982/HASHI/blob/main/docs/HERV3_UPGRADE.md),
 and [runtime configuration boundaries](https://github.com/Bazza1982/HASHI/blob/main/docs/HASHI_LAYERED_RUNTIME_BOUNDARIES.md).
 
 ## Credentials and authorization
@@ -75,7 +75,7 @@ reference and the configured authorized user ID. Do not paste credentials
 into ordinary model chat.
 
 Keep secrets and OAuth stores private and out of source control. CLI engines
-manage their own authentication; HER v2 uses configured provider profiles and
+manage their own authentication; HERV3 uses configured provider profiles and
 secret references.
 
 Review permission_mode, access_scope, and tools.allowed for each engine

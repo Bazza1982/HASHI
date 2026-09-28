@@ -1,10 +1,12 @@
-# HER v2 Planned / Medium Stage-Tool Decision
+> **Legacy HERV2 archive — non-normative.** This document records the retired staged runtime. HERV3 uses one continuous main-model/tool loop with no Triage, Strategy, Planning, Replanning, Review, or stage-based Finalisation routing. Strategy Cards and Habit/Meditation remain optional. See [HERV3 upgrade](HERV3_UPGRADE.md).
+
+# HERV2 Planned / Medium Stage-Tool Decision
 
 | Field | Accepted value |
 |---|---|
 | Status | Accepted and frozen |
 | Date | 2026-08-31 |
-| Scope | HER v2 `/effort medium` / Planned only |
+| Scope | HERV2 `/effort medium` / Planned only |
 | Strategy | No tool access; resolve the goal, classify, select Strategy Cards and Habits, and provide strategic direction |
 | Planning | Mechanically read-only tools; investigate current evidence and produce the concrete execution plan |
 | Execution | Full authorised tool and side-effect access; implement, verify, and report |

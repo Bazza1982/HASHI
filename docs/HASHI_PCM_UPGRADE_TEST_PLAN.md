@@ -7,7 +7,7 @@
 | Status | Accepted and implemented test contract |
 | Accepted | 26 August 2026 |
 | Governing design | [HASHI_PCM_SYSTEM_DESIGN.md](HASHI_PCM_SYSTEM_DESIGN.md) |
-| Scope | Engine-neutral HASHI Persona-Context-Memory infrastructure; HER v2 is one consumer, not the owner of this contract |
+| Scope | Engine-neutral HASHI Persona-Context-Memory infrastructure; HERV3 is one consumer, not the owner of this contract |
 | Parent architecture | [HASHI System Architecture](../ARCHITECTURE.md) |
 
 ## 1. Purpose
@@ -71,7 +71,7 @@ The upgrade reuses, rather than replaces, the following coverage:
 - Workzone on/off behaviour, effective working directory, Tool Registry `access_root` and Gateway admission checks;
 - deterministic Memory+ date rollover, bounded carryover, archive preservation and concurrent update serialisation;
 - Tool audit redaction and truncation in sanitised operational views;
-- HER-V2 sanitised reasoning/audit views and explicit reasoning-unavailable records;
+- HERV3 sanitised reasoning/audit views and explicit reasoning-unavailable records;
 - Enterprise audit hash chains, tamper detection and WORM anchors;
 - Tool Gateway/MCP schema, permission and delegated-tool enforcement;
 - context compaction tests that retain raw turns while changing only the active context view; and
@@ -122,8 +122,8 @@ families. Parameterisation must not be replaced by duplicated test bodies.
     to the Fixed backend exactly once rather than only preparing a file or
     pending prompt.
 11. Every top-level external user request contains date, seconds, time-zone name
-    and UTC offset. Internal HER-V2 stages do not receive an independently
-    fabricated top-level time injection.
+    and UTC offset. HERV3 receives it once in the main-model request; auxiliary
+    maintenance calls do not receive an independently fabricated top-level time.
 
 History pruning is exchange-atomic. If all older exchanges have been removed
 and one remaining historical exchange still cannot fit, that historical
@@ -226,7 +226,7 @@ The PCM upgrade is complete only when:
 - no supported backend advertises an unavailable Skill or Tool;
 - canonical raw evidence is complete, access-controlled and protected from
   ordinary cleanup; and
-- the implementation no longer depends on HER-V2 to provide HASHI-owned PCM
+- the implementation no longer depends on HERV3 to provide HASHI-owned PCM
   behaviour.
 
 ## 7. Relevant verification scope

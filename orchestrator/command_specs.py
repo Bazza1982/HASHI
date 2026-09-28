@@ -320,18 +320,18 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
     CommandSpec(
         "provider",
         "cmd_provider",
-        "Choose HER v2 provider or Hybrid",
+        "Choose HERV3 Model Provider",
         "models",
         guide=CommandGuide(
-            "/provider [provider|hybrid]",
+            "/provider [provider]",
             choice_source="providers",
-            example="/provider hybrid",
+            example="/provider deepseek-api",
         ),
     ),
     CommandSpec(
         "fallback",
         "cmd_fallback",
-        "Configure HER v2 provider fallback",
+        "Configure HERV3 provider fallback",
         "models",
         guide=CommandGuide(
             "/fallback [on|off|clear|[l1|l2] <provider> <model> <light|pro>]",
@@ -636,23 +636,23 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         ),
     ),
     CommandSpec(
+        "style",
+        "cmd_style",
+        "Control HERV3 final style check",
+        "session",
+        guide=CommandGuide(
+            "/style [on|off|status]",
+            ("on", "off", "status"),
+            example="/style on",
+        ),
+    ),
+    CommandSpec(
         "metre",
         "cmd_meter",
         "Alias for /meter",
         "session",
         menu_visible=False,
         alias_of="meter",
-    ),
-    CommandSpec(
-        "herv2",
-        "cmd_herv2",
-        "Toggle per-turn HER v2 routing card",
-        "session",
-        guide=CommandGuide(
-            "/herv2 [on|off|status]",
-            ("on", "off", "status"),
-            example="/herv2 on",
-        ),
     ),
     CommandSpec(
         "stream",
@@ -713,7 +713,7 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
     CommandSpec("group", "cmd_group", "Manage agent groups", "everyday", menu_visible=False),
     CommandSpec("token", "cmd_token", "Manage API tokens", "tools", menu_visible=False, sensitive=True),
     CommandSpec("usage", "cmd_usage", "View detailed usage", "tools", menu_visible=False),
-    CommandSpec("logo", "cmd_logo", "Play startup animation", "tools"),
+    CommandSpec("logo", "cmd_logo", "Play startup animation", "tools", menu_visible=False),
     CommandSpec("move", "cmd_move", "Move an agent to another instance", "tools", menu_visible=False),
     CommandSpec("clone", "cmd_clone", "Clone an agent locally or to another instance", "tools", menu_visible=False),
     CommandSpec("wa_on", "cmd_wa_on", "Start WhatsApp transport", "tools"),

@@ -23,20 +23,20 @@ runtime reboot, deployment, release tagging, and live-provider certification.
 
 ## Integrated scope
 
-### HER v2 continuity and provider routing
+### HERV2 continuity and provider routing
 
-- HER v2 keeps unfinished observable work in a crash-safe, Agent-local WIP
+- HERV2 keeps unfinished observable work in a crash-safe, Agent-local WIP
   Journal. Error and interrupted turns preserve it; a later durable
   `COMPLETED` Ledger clears it atomically.
 - WIP lifecycle evidence is written independently as content-free
-  start/inject/preserve/clear events in the HER v2 audit log, with a durable
+  start/inject/preserve/clear events in the HERV2 audit log, with a durable
   Agent-local fallback when the primary log is unavailable.
 - Journal context is neutral background. It does not auto-resume an old task or
   override the current request.
-- OpenRouter and DeepSeek remain concrete HER v2 providers but are no longer
+- OpenRouter and DeepSeek remain concrete HERV2 providers but are no longer
   selectable top-level `/backend` engines. A legacy direct selection migrates
-  only when the Agent already authorises an explicit HER v2 row.
-- Scheduled HER v2 jobs use Direct (`zero`) execution instead of inheriting an
+  only when the Agent already authorises an explicit HERV2 row.
+- Scheduled HERV2 jobs use Direct (`zero`) execution instead of inheriting an
   interactive high-effort plan.
 
 ### Multimodal routing

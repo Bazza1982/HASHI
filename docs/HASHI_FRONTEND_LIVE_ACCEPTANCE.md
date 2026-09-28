@@ -65,7 +65,7 @@ Write it in the user's language and lead with what is actually broken:
   checklist items; and
 - follow with one sentence saying whether everything else tested worked.
 
-Keep untested scope separate from real failures. For example, a HER v2 run does
+Keep untested scope separate from real failures. For example, a HERV3 run does
 not prove or disprove a Codex-specific process-exit bug. Do not turn a dependent
 blocked item into another product defect.
 
@@ -78,7 +78,7 @@ paragraphs or bullets.
 Preferred form:
 
 > HASHI Exchange is offline. Everything else tested worked. The Codex-specific
-> exit case was not tested because this run used HER v2.
+> exit case was not tested because this run used HERV3.
 
 Avoid turning the same result into a long scoreboard of passed, failed, and
 blocked implementation details.

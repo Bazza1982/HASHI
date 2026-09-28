@@ -47,7 +47,7 @@ def test_static_startup_summary_matches_operator_contract(capsys) -> None:
     assert capsys.readouterr().out == (
         "HASHI\n"
         "Professional Agentic AI System\n"
-        "Powered by HER-V2 - Flexible with CLI backends\n"
+        "Powered by HERV3 - Flexible with CLI backends\n"
         "Designed by Barry Li\n"
         "\n"
         "Instance    HASHI3\n"
@@ -124,7 +124,7 @@ def test_legacy_ascii_logo_uses_current_brand_without_fallback_warning(capsys) -
     output = capsys.readouterr().out
     assert "HASHI" in output
     assert "Professional Agentic AI System" in output
-    assert "Powered by HER-V2 - Flexible with CLI backends" in output
+    assert "Powered by HERV3 - Flexible with CLI backends" in output
     assert "Designed by Barry Li" in output
     assert "BRIDGE-U-F" not in output
     assert "terminal is not Unicode-safe" not in output

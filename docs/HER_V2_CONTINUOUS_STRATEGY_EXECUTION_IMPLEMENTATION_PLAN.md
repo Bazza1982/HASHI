@@ -1,10 +1,12 @@
-# HER v2 Fixed Engine Sessions and Model-Provider-Neutral Strategy/Execution Implementation Record
+> **Legacy HERV2 archive — non-normative.** This document records the retired staged runtime. HERV3 uses one continuous main-model/tool loop with no Triage, Strategy, Planning, Replanning, Review, or stage-based Finalisation routing. Strategy Cards and Habit/Meditation remain optional. See [HERV3 upgrade](HERV3_UPGRADE.md).
+
+# HERV2 Fixed Engine Sessions and Model-Provider-Neutral Strategy/Execution Implementation Record
 
 | Field | Value |
 |---|---|
 | Status | Implemented architecture record; the later Session control-plane specification is current authority for recovery, accounting, and Compact |
 | Date | 2026-09-01 |
-| Product identity | HER v2 is HASHI's native fixed Engine Provider, alongside other Engine Providers selected by PAO |
+| Product identity | HERV2 is HASHI's native fixed Engine Provider, alongside other Engine Providers selected by PAO |
 | External invariant | One HASHI conversation binding opens or resumes one durable HER backend session and thereafter sends only incremental turns, PCM deltas, resource deltas, and control events |
 | Session invariant | One ordered HER-owned canonical thread spans all accepted user turns until explicit close, expiry, or unrecoverable terminal corruption |
 | Provider invariant | HER may route internal stages through HASHI API, DeepSeek, OpenRouter, or any other capability-conformant model provider without changing HER core semantics |
@@ -23,11 +25,11 @@ durable HER Engine Session.
 The current production-mode surface is Direct (`zero`), Strategic (`low`), and
 Planned (`medium`). Any retained higher-mode material is dormant. Canonical
 recovery, physical Model Provider accounting, and settled-history Compact are
-governed by [HER v2 Fixed-Session Control Plane](HER_V2_SESSION_CONTROL_PLANE.md).
+governed by [HERV2 Fixed-Session Control Plane](HER_V2_SESSION_CONTROL_PLANE.md).
 
 ## 1. Decision
 
-HER v2 is a sessionful fixed Engine from HASHI's perspective.
+HERV2 is a sessionful fixed Engine from HASHI's perspective.
 
 HASHI opens or resumes a HER backend session once. After the initial session
 snapshot is acknowledged, HASHI does not rebuild and resend the complete HER
@@ -39,7 +41,7 @@ HER owns the durable logical thread and all internal orchestration:
 
 ~~~text
 HASHI conversation
-  -> fixed backend binding: HER v2
+  -> fixed backend binding: HERV2
      -> one HER Backend Session
         -> ordered user turns
         -> materialised versioned PCM
@@ -63,7 +65,7 @@ Provider set:
 - HER may call any future provider whose adapter passes the same conformance
   contract; and
 - HER does not call Codex. If HASHI selects Codex, HASHI is using the separate
-  Codex backend rather than HER v2.
+  Codex backend rather than HERV2.
 
 The implementation retains a `ContinuousInvocation` inside each Primary Job, but it is
 now an inner execution object. It no longer defines the lifetime of the fixed
@@ -71,7 +73,7 @@ backend session.
 
 ## 2. What “fixed Engine” means
 
-HER v2 qualifies as a fixed Engine only when all of the following are true:
+HERV2 qualifies as a fixed Engine only when all of the following are true:
 
 1. HASHI binds one conversation and Agent identity to one HER session ID.
 2. The session survives multiple completed user turns.
@@ -826,7 +828,7 @@ No HER core class or Strategy prompt changes merely to add a provider.
 
 ## 12. Explicit Codex boundary
 
-Codex and HER v2 are peer backends selected by HASHI:
+Codex and HERV2 are peer backends selected by HASHI:
 
 ~~~text
 HASHI backend selection
@@ -1123,7 +1125,7 @@ definitions.
 | `orchestrator/her_v2/session_store.py` | Provider-neutral event-log and materialised-state persistence implementation |
 | `orchestrator/her_v2/context.py` | Build per-turn projections and provider-neutral compaction checkpoints from canonical state |
 | `orchestrator/her_v2/runtime.py` | Run existing HER lifecycle inside a bound session and consume immutable per-turn authority snapshots |
-| HASHI backend registry/dispatch | Advertise HER v2 as sessionful and bind HASHI conversation IDs to HER session IDs without changing the separate Codex backend |
+| HASHI backend registry/dispatch | Advertise HERV2 as sessionful and bind HASHI conversation IDs to HER session IDs without changing the separate Codex backend |
 
 ### 20.2 Strategy and execution layer
 
@@ -1155,13 +1157,13 @@ No HER implementation change is planned for `codex_cli.py` or
 |---|---|
 | `docs/HER_V2_PRODUCT_REQUIREMENTS_AND_TECHNICAL_DESIGN.md` | Make fixed-backend session semantics, incremental PCM, provider neutrality, and reasoning independence normative |
 | `docs/HER_V2_TESTING_PLAN.md` | Add session, delta, recovery, provider, reasoning, and cross-turn conformance suites |
-| Backend protocol documentation | Document HER v2 session operations and distinguish them from internal provider continuation APIs |
+| Backend protocol documentation | Document HERV2 session operations and distinguish them from internal provider continuation APIs |
 
 ## 21. Delivery phases
 
 ### Phase 0: freeze current behavior and evidence
 
-1. Preserve current HER v2 quality, Strategy Card, Smart Tool, provider-call,
+1. Preserve current HERV2 quality, Strategy Card, Smart Tool, provider-call,
    token, cost, and latency baselines.
 2. Record current HASHI -> HER full-context payload counts and sizes.
 3. Add behavior-neutral identities needed to correlate conversation, turn, job,
@@ -1243,10 +1245,10 @@ HER logical outcomes under the shared conformance suite.
 2. Test expiry, close, reload, `/stop`, `/steer`, and active-tool failure.
 3. Canary exact provider/model capabilities separately.
 4. Run same-task quality, latency, token, cost, and P95 comparisons.
-5. Make HER v2 session mode the default only after semantic and operational
+5. Make HERV2 session mode the default only after semantic and operational
    gates pass.
 
-Exit gate: HER v2 behaves as a reliable fixed backend across real multi-turn
+Exit gate: HERV2 behaves as a reliable fixed backend across real multi-turn
 sessions and qualified providers.
 
 ## 22. Test plan
@@ -1366,7 +1368,7 @@ Extend existing coverage for:
 
 ### 23.1 Fixed backend
 
-- HASHI registers HER v2 as a sessionful fixed backend.
+- HASHI registers HERV2 as a sessionful fixed backend.
 - One HASHI conversation binding maps to one active HER session/epoch.
 - Initial open sends one complete PCM snapshot.
 - Later normal turns send only new messages and deltas.
@@ -1489,7 +1491,7 @@ recovery boundaries, not as hidden normal behavior.
 
 ## 27. Definition of done
 
-HER v2 is a fixed backend when:
+HERV2 is a fixed backend when:
 
 > HASHI opens one HER session with a full authoritative snapshot. HER owns a
 > durable provider-neutral logical thread across multiple user turns. After

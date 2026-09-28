@@ -90,14 +90,15 @@ def test_public_spec_has_no_raw_agent_config_field():
     assert "preset" not in AgentCreationSpec.__dataclass_fields__
 
 
-def test_her_creation_efforts_persist_mode_without_changing_provider_profiles():
+def test_her_v3_creation_persists_one_model_and_provider_reasoning_effort():
     provider_rows = []
-    for effort in ("zero", "low", "medium"):
+    for effort in ("none", "high", "max"):
         row = build_her_backend_row(effort, HER_PROVIDER_PROFILES)
         assert row["effort"] == effort
-        profiles = row["her_v2"]["profiles"]
-        assert set(profiles) == {
-            "lightweight", "triage", "premium", "reviewer", "orchestrator"
+        assert row["model"] == "gpt-5.6-sol"
+        assert row["her_v2"]["main"] == {
+            "provider": "hashi-api",
+            "model": "gpt-5.6-sol",
         }
         encoded = json.dumps(row)
         assert "secret" not in encoded
@@ -106,6 +107,29 @@ def test_her_creation_efforts_persist_mode_without_changing_provider_profiles():
     assert provider_rows[0] == provider_rows[1] == provider_rows[2]
     with pytest.raises(InvalidEffortError):
         build_her_backend_row("unknown", HER_PROVIDER_PROFILES)
+
+
+def test_her_v3_creation_is_publicly_named_but_keeps_compatible_storage(tmp_path):
+    paths = _paths(tmp_path)
+    result = AgentCreationService(
+        paths,
+        global_config={"her_providers": {"providers": HER_PROVIDER_PROFILES}},
+    ).create(
+        AgentCreationSpec(
+            name="her-agent",
+            backend="her-v3",
+            model="gpt-5.6-sol",
+            effort="high",
+        )
+    )
+
+    stored = json.loads(paths.config_path.read_text(encoding="utf-8"))
+    assert result.active_backend == "her-v3"
+    assert stored["agents"][0]["active_backend"] == "her-v2"
+    assert stored["agents"][0]["allowed_backends"][0]["her_v2"]["main"] == {
+        "provider": "hashi-api",
+        "model": "gpt-5.6-sol",
+    }
 
 
 def test_non_selectable_backend_is_rejected():

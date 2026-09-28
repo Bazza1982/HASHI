@@ -40,7 +40,7 @@ contracts; an application version must not silently replace those versions.
 | Number | Increment condition | Example |
 |---|---|---|
 | `X`: Core generation | An explicitly authorized change to Core implementation or its contracts, including a Core defect fix | `4.1.2` to `5.0.0` |
-| `Y`: functional generation | With Core unchanged, a significant new capability or major behavior change in PCM, PAO, HER v2, or Frontend Connectors | `4.1.2` to `4.2.0` |
+| `Y`: functional generation | With Core unchanged, a significant new capability or major behavior change in PCM, PAO, HERV3, or Frontend Connectors | `4.1.2` to `4.2.0` |
 | `Z`: maintenance revision | A defect fix, small optimization, or compatibility maintenance that does not meet the `X` or `Y` criteria | `4.1.2` to `4.1.3` |
 
 Apply these rules to the reviewed release scope, not to every commit:

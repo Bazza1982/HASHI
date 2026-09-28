@@ -1,10 +1,8 @@
 """Request-scoped HER v2 execution policy for deterministic HASHI actions.
 
-Cron, heartbeat, and explicit HChat commands enter HER v2 through Direct mode
-so their authoritative instruction reaches the capable Quick agent without
-Immediate Response or Triage pre-processing.  This policy controls
-orchestration stages only.  It must never be reused as a provider reasoning
-setting or stored back into the owning Agent's global configuration.
+HERV3 has one foreground execution path. Request metadata may explain why a
+turn exists, but it must never override the Agent's selected model reasoning
+effort. Scheduled and HChat work therefore preserve the configured effort.
 """
 
 from __future__ import annotations
@@ -17,8 +15,6 @@ from .models import Effort, parse_effort
 
 
 HER_V2_JOB_EFFORT_FIELD = "her_v2_effort"
-HER_V2_SCHEDULED_EFFORT = Effort.ZERO
-HER_V2_HCHAT_EFFORT = Effort.ZERO
 HCHAT_REQUEST_SOURCES = frozenset({"bridge:hchat", "bridge:hchat-draft"})
 SCHEDULED_JOB_KINDS = frozenset({"cron", "heartbeat"})
 SCHEDULER_TRIGGERS = frozenset({"scheduled", "manual", "recovery"})
@@ -28,7 +24,7 @@ def discard_legacy_job_effort_in_place(job: dict[str, Any]) -> bool:
     """Remove the retired per-job override and report whether it was present.
 
     Older task files remain loadable, but their override cannot bypass the
-    compulsory Direct policy.  Mutation boundaries use this helper to migrate
+    selected model reasoning policy. Mutation boundaries use this helper to migrate
     those records opportunistically.
     """
 
@@ -76,11 +72,11 @@ def build_scheduler_request_context(
 
 
 def job_effort_policy(job: Mapping[str, Any]) -> dict[str, str]:
-    """Describe the effective HER v2 policy represented by a job record."""
+    """Describe the selected model reasoning policy for a job record."""
 
     return {
-        "effective": HER_V2_SCHEDULED_EFFORT.value,
-        "source": "scheduled_direct_policy",
+        "effective": "inherit",
+        "source": "herv3_model_reasoning",
         "applies_to": "her-v2",
     }
 
@@ -90,14 +86,24 @@ class EffortResolution:
     configured: Effort
     effective: Effort
     reason: str
+    model_reasoning: str
     scheduler_kind: str | None = None
     scheduler_task_id: str | None = None
     scheduler_trigger: str | None = None
 
     def metadata(self) -> dict[str, Any]:
+        # The retained Effort enum represents the binary Provider option as
+        # HIGH internally; report the configured Provider value to callers.
+        configured_value = (
+            self.model_reasoning if self.model_reasoning == "enabled"
+            else self.configured.value
+        )
         payload: dict[str, Any] = {
-            "configured": self.configured.value,
-            "effective": self.effective.value,
+            "configured": configured_value,
+            "effective": (
+                self.model_reasoning if self.model_reasoning == "enabled"
+                else self.effective.value
+            ),
             "reason": self.reason,
         }
         if self.scheduler_kind:
@@ -113,48 +119,35 @@ def resolve_request_effort(
     configured_effort: Effort | str,
     request_meta: Mapping[str, Any] | None,
 ) -> EffortResolution:
-    """Resolve one HER v2 request without mutating Agent configuration."""
+    """Preserve the selected model reasoning effort for every HERV3 request."""
 
-    configured = (
-        configured_effort
+    raw_effort = (
+        configured_effort.value
         if isinstance(configured_effort, Effort)
-        else parse_effort(str(configured_effort))
+        else str(configured_effort).strip().casefold()
+    )
+    # A binary Provider reasoning switch is a valid HERV3 model setting.
+    # HER's retained internal Effort enum needs a nonzero value for its Direct
+    # turn bookkeeping, while the Provider must still receive "enabled".
+    configured = Effort.HIGH if raw_effort == "enabled" else parse_effort(raw_effort)
+    model_reasoning = (
+        "enabled" if raw_effort == "enabled"
+        else "off" if configured is Effort.ZERO
+        else configured.value
     )
     meta = request_meta if isinstance(request_meta, Mapping) else {}
-    source = str(meta.get("source") or "").strip().casefold()
-    if source in HCHAT_REQUEST_SOURCES:
-        return EffortResolution(
-            configured=configured,
-            effective=HER_V2_HCHAT_EFFORT,
-            reason="hchat_direct_policy",
-        )
-
     raw_context = meta.get("scheduler_context")
-    if not isinstance(raw_context, Mapping):
-        return EffortResolution(
-            configured=configured,
-            effective=configured,
-            reason="agent_default",
-        )
-
-    kind = str(raw_context.get("kind") or "").strip().lower()
-    task_id = str(raw_context.get("task_id") or "").strip()
-    trigger = str(raw_context.get("trigger") or "").strip().lower()
-    if (
-        kind not in SCHEDULED_JOB_KINDS
-        or not task_id
-        or trigger not in SCHEDULER_TRIGGERS
-    ):
-        return EffortResolution(
-            configured=configured,
-            effective=configured,
-            reason="agent_default",
-        )
-
+    if isinstance(raw_context, Mapping):
+        kind = str(raw_context.get("kind") or "").strip().lower() or None
+        task_id = str(raw_context.get("task_id") or "").strip() or None
+        trigger = str(raw_context.get("trigger") or "").strip().lower() or None
+    else:
+        kind = task_id = trigger = None
     return EffortResolution(
         configured=configured,
-        effective=HER_V2_SCHEDULED_EFFORT,
-        reason="scheduled_direct_policy",
+        effective=configured,
+        reason="model_reasoning_effort",
+        model_reasoning=model_reasoning,
         scheduler_kind=kind,
         scheduler_task_id=task_id,
         scheduler_trigger=trigger,

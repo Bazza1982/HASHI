@@ -1,4 +1,4 @@
-"""HASHI-owned context compaction for stateless HER v2 turns.
+"""HASHI-owned context compaction for stateless HERV3 turns.
 
 The service in this module deliberately sits outside the HER lifecycle.  It
 owns an append-only source view, an immutable capsule/archive store, the
@@ -607,7 +607,7 @@ def reset_for_fresh_context(
     boundary_generation: int,
     cutoff_epoch: float,
 ) -> int:
-    """Start a clean HER-v2 history generation while retaining its archive."""
+    """Start a clean HERV3 history generation while retaining its archive."""
 
     store = coordinator_for(runtime).store
     generation = store.reset_active_pointer()
@@ -636,7 +636,7 @@ def _workspace_state(runtime: Any) -> dict[str, Any]:
 
 def _route_from_mapping(raw: Mapping[str, Any] | None) -> CompactRouteConfig:
     value = dict(raw or {})
-    # Compact now follows the active HER v2 Quick/Light target.  Old persisted
+    # Compact now follows the selected HERV3 main target. Old persisted
     # inherit_pro/explicit/off routes are read as the single runtime policy
     # without rewriting state during a status/read operation.  Compact
     # execution itself has no independent route switch or eligibility gate.
@@ -959,7 +959,7 @@ def _compact_provider_reasoning(provider: str, model: str) -> str:
 
 
 def resolve_compact_route(runtime: Any) -> ResolvedCompactRoute:
-    """Use the Agent's active HER v2 Fast/Quick target directly.
+    """Use the Agent's selected HERV3 main target directly.
 
     The selected HER configuration is already the authoritative runtime route.
     Compact does not maintain a second provider grant or capability gate.
@@ -1008,12 +1008,12 @@ def configure_route(
     Legacy callers may still say ``inherit_pro``; it is migrated forward to
     ``inherit_quick``. Independent provider/model/reasoning routes and an
     execution-off route are no longer accepted because Compact always follows
-    the Agent's active HER v2 setup.
+    the Agent's active HERV3 setup.
     """
 
     manager = getattr(runtime, "backend_manager", None)
     if getattr(getattr(manager, "config", None), "active_backend", None) != HER_V2_ENGINE:
-        raise ValueError("Compact is configurable only while HER v2 is active")
+        raise ValueError("Compact is configurable only while HERV3 is active")
     busy = getattr(runtime, "_backend_busy", None)
     if callable(busy) and busy():
         raise ValueError("Compact configuration is blocked while a request is running or queued")
@@ -1022,7 +1022,7 @@ def configure_route(
         normalized_mode = "inherit_quick"
     if normalized_mode != "inherit_quick":
         raise ValueError(
-            "Compact always follows the active HER v2 Quick/Light model"
+            "Compact always follows the selected HERV3 main model"
         )
     timeout_tier = str(timeout_tier or "auto").strip().lower().replace("-", "_")
     if timeout_tier not in {"auto", "tier_2", "tier_3"}:
@@ -1389,7 +1389,7 @@ def _render_timeline_entry(
     if str(entry.get("kind") or "") == "recovery_capsule":
         turn_ids = [int(item) for item in entry.get("turn_ids") or []]
         identity = (
-            f"HER v2 unfinished-work recovery capsule"
+            f"HERV3 unfinished-work recovery capsule"
             f" | turn={turn_ids[0] if turn_ids else 'recovered'}"
             f" | source={entry.get('source') or 'wip-recovery'}"
         )
@@ -3254,7 +3254,7 @@ def schedule_execution_stage(
 ) -> bool:
     """Start threshold-triggered Compact without awaiting it.
 
-    This function is called when the main HER v2 Execution stage begins.  The
+    This function is called when the HERV3 main model/tool loop begins. The
     returned task is deliberately detached from the foreground lifecycle: no
     Compact result, exception, retry, timeout, or warning delivery can delay or
     change the current model request.

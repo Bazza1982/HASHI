@@ -31,6 +31,7 @@ PRIVATE_AUTHORIZATION_CONTENT_DIGEST_METADATA_KEY = (
     "_private_authorization_content_sha256"
 )
 CONNECTOR_EVIDENCE_METADATA_KEY = "_connector_evidence"
+FRONTEND_INGRESS_ENVELOPE_METADATA_KEY = "_frontend_ingress_envelope"
 SOURCE_ID_MAX_LENGTH = 64
 SOURCE_DISPLAY_NAME_MAX_LENGTH = 128
 
@@ -158,6 +159,7 @@ def apply_connector_evidence(
         MESSAGE_CONTEXT_METADATA_KEY,
         MESSAGE_SOURCE_RESERVED_METADATA_KEY,
         HCHAT_CONTEXT_METADATA_KEY,
+        FRONTEND_INGRESS_ENVELOPE_METADATA_KEY,
         PRIVATE_AUTHORIZATION_RESULTS_METADATA_KEY,
         PRIVATE_AUTHORIZATION_CONTENT_DIGEST_METADATA_KEY,
         RUN_DELIVERY_ROUTE_METADATA_KEY,
@@ -254,10 +256,10 @@ def _legacy_source_id(source: str, chat_id: Any, metadata: Mapping[str, Any]) ->
         "scheduler",
         "scheduler-retry",
         "scheduler-skill",
-        "loop_skill",
         "heartbeat",
         "cron",
         "proactive",
+        "background:prompt",
         "background-job-event",
         "background_job_event",
         "startup",
@@ -412,6 +414,7 @@ def build_message_context_snapshot(
     chat_id: Any,
     prompt: str,
     metadata: Mapping[str, Any] | None,
+    frontend_ingress_envelope: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a fresh snapshot; previous snapshots and message text are ignored."""
 
@@ -540,6 +543,29 @@ def build_message_context_snapshot(
                     for key, value in exchange_message.items()
                     if key in allowed_message
                 }
+                message_id = str(exchange_message.get("message_id") or "").strip()
+                origin_instance_id = str(
+                    (origin or {}).get("id") if isinstance(origin, Mapping) else ""
+                ).strip().upper()
+                target_instance_id = str(snapshot["processing_instance"]).upper()
+                if message_id and origin_instance_id and target_instance_id:
+                    from orchestrator.frontend_contracts import normalize_relay_envelope
+
+                    snapshot["frontend_relay"] = normalize_relay_envelope(
+                        {
+                            "type": "hashi.frontend-relay",
+                            "version": 1,
+                            "correlation_id": message_id,
+                            "origin_instance": origin_instance_id,
+                            "target_instance": target_instance_id,
+                            "relay_chain": [origin_instance_id],
+                            "hop_limit": 8,
+                            "payload_ref": {
+                                "type": "exchange-message",
+                                "id": message_id,
+                            },
+                        }
+                    )
     else:
         origin = inputs.get("_origin_instance_evidence")
         if isinstance(origin, Mapping) and str(origin.get("id") or "").strip():
@@ -547,6 +573,14 @@ def build_message_context_snapshot(
                 "id": str(origin["id"]).strip().upper(),
                 "assurance": str(origin.get("assurance") or "declared"),
             }
+    if isinstance(frontend_ingress_envelope, Mapping):
+        from orchestrator.frontend_contracts import (
+            normalize_frontend_ingress_envelope,
+        )
+
+        snapshot["frontend_ingress"] = normalize_frontend_ingress_envelope(
+            frontend_ingress_envelope
+        )
     return copy.deepcopy(snapshot)
 
 

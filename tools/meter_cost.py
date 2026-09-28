@@ -606,6 +606,185 @@ def _format_model_names(
     return " + ".join(names)
 
 
+_MAIN_TASK_PHASES = frozenset(
+    {
+        "direct",
+        "triage",
+        "planning",
+        "execution",
+        "replanning",
+        "review",
+        "finalisation",
+    }
+)
+_METER_ROLE_BY_PHASE = {
+    **{phase: "main" for phase in _MAIN_TASK_PHASES},
+    "final_style": "style",
+    "final_style_check": "style",
+    "final_style_rewrite": "style",
+    "persona": "progress",
+    "immediate_response": "immediate",
+    "agent_companion": "companion",
+    "meditation": "background",
+    "dream": "background",
+    "wrapper": "rewrite",
+    "json_repair": "support",
+}
+_METER_ROLE_ORDER = (
+    "main",
+    "style",
+    "progress",
+    "immediate",
+    "companion",
+    "background",
+    "rewrite",
+    "support",
+    "other",
+)
+_HERV3_FINAL_PHASES = frozenset(
+    {
+        "direct",
+        "final_style",
+        "final_style_check",
+        "final_style_rewrite",
+        "persona",
+        "immediate_response",
+        "agent_companion",
+        "json_repair",
+        "wrapper",
+    }
+)
+
+
+def _format_breakdown_cost(
+    line_items: list[PerCallUsageLineItem],
+    *,
+    locale: str | None,
+) -> str:
+    """Render one model subtotal without changing its cost provenance."""
+
+    model_receipt = UsageReceipt(line_items=line_items)
+    cost = model_receipt.cost_usd
+    if cost is None and model_receipt.known_cost_usd > 0:
+        unknown = model_receipt.unknown_cost_requests
+        return _translate(
+            (
+                "meter.tail.breakdown.cost.partial.one"
+                if unknown == 1
+                else "meter.tail.breakdown.cost.partial.many"
+            ),
+            locale=locale,
+            cost=_fmt_cost(model_receipt.known_cost_usd, locale=locale),
+            unknown=unknown,
+        )
+    if cost is None:
+        return _translate("meter.tail.breakdown.cost.unknown", locale=locale)
+    rendered = _fmt_cost(cost, locale=locale)
+    if (
+        model_receipt.has_local_only
+        or model_receipt.dominant_cost_source() == "provider"
+    ):
+        return rendered
+    return _translate(
+        "meter.tail.breakdown.cost.estimated",
+        locale=locale,
+        cost=rendered,
+    )
+
+
+def _format_model_role_lines(
+    receipt: UsageReceipt,
+    *,
+    locale: str | None,
+) -> tuple[str, ...]:
+    """Group physical calls by user-meaningful role and then by model.
+
+    HERV3 records its continuous model/tool loop as ``direct`` calls and its
+    optional Persona commentary packaging as ``persona`` calls.  Keeping those
+    phases separate prevents an auxiliary presentation model from appearing to
+    co-author the task.  Receipts without phase facts retain the legacy compact
+    model list instead of guessing a role.
+    """
+
+    observed_phases = {
+        str(getattr(item, "phase", "") or "").strip().casefold()
+        for item in receipt.line_items
+    }
+    if not observed_phases.intersection(_METER_ROLE_BY_PHASE):
+        return ()
+
+    grouped: dict[str, dict[str, list[PerCallUsageLineItem]]] = {}
+    for item in receipt.line_items:
+        phase = str(getattr(item, "phase", "") or "").strip().casefold()
+        role = _METER_ROLE_BY_PHASE.get(phase, "other")
+        model = str(getattr(item, "model", "") or "").strip()
+        model_key = model or _translate("meter.tail.model.unknown", locale=locale)
+        grouped.setdefault(role, {}).setdefault(model_key, []).append(item)
+
+    lines: list[str] = []
+    separator = _translate("meter.tail.breakdown.separator", locale=locale)
+    for role in _METER_ROLE_ORDER:
+        model_groups = grouped.get(role)
+        if not model_groups:
+            continue
+        usages: list[str] = []
+        for model, line_items in model_groups.items():
+            calls = len(line_items)
+            usages.append(
+                _translate(
+                    (
+                        "meter.tail.breakdown.model.one"
+                        if calls == 1
+                        else "meter.tail.breakdown.model.many"
+                    ),
+                    locale=locale,
+                    model=model,
+                    calls=calls,
+                    cost=_format_breakdown_cost(line_items, locale=locale),
+                )
+            )
+        lines.append(
+            _translate(
+                f"meter.tail.role.{role}",
+                locale=locale,
+                usage=separator.join(usages),
+            )
+        )
+
+    main_items = [
+        item
+        for item in receipt.line_items
+        if str(getattr(item, "phase", "") or "").strip().casefold() == "direct"
+        and str(getattr(item, "model", "") or "").strip()
+    ]
+    if (
+        main_items
+        and observed_phases
+        and "" not in observed_phases
+        and observed_phases <= _HERV3_FINAL_PHASES
+    ):
+        rewrite_items = [
+            item
+            for item in receipt.line_items
+            if str(getattr(item, "phase", "") or "").strip().casefold()
+            in {"final_style_rewrite", "wrapper"}
+            and str(getattr(item, "model", "") or "").strip()
+        ]
+        final_item = rewrite_items[-1] if rewrite_items else main_items[-1]
+        lines.append(
+            _translate(
+                (
+                    "meter.tail.final.rewritten"
+                    if rewrite_items
+                    else "meter.tail.final.direct"
+                ),
+                locale=locale,
+                model=str(getattr(final_item, "model", "") or "").strip(),
+            )
+        )
+    return tuple(lines)
+
+
 def _format_receipt_lines(
     receipt: UsageReceipt,
     *,
@@ -616,6 +795,7 @@ def _format_receipt_lines(
     task_total_usd: float | None,
     total_elapsed_s: float | None,
     stage_timings_s: Mapping[str, float] | None,
+    include_model_roles: bool,
 ) -> str:
     cost = receipt.cost_usd
     resolved_label = label or _translate(label_key, locale=locale)
@@ -687,11 +867,17 @@ def _format_receipt_lines(
         locale=locale,
         providers=_format_provider_names(receipt, locale=locale),
     )
-    cost_line += _translate(
-        "meter.tail.model",
-        locale=locale,
-        models=_format_model_names(receipt, locale=locale),
+    role_lines = (
+        _format_model_role_lines(receipt, locale=locale)
+        if include_model_roles
+        else ()
     )
+    if not role_lines:
+        cost_line += _translate(
+            "meter.tail.model",
+            locale=locale,
+            models=_format_model_names(receipt, locale=locale),
+        )
 
     cache_hit = receipt.prompt_cache_hit_tokens
     cache_rate = receipt.cache_hit_percent
@@ -763,7 +949,9 @@ def _format_receipt_lines(
         stage_timings_s=stage_timings_s,
         locale=locale,
     )
-    return "\n".join((cost_line, *timing_lines, usage_line, request_line))
+    return "\n".join(
+        (cost_line, *role_lines, *timing_lines, usage_line, request_line)
+    )
 
 
 def format_cost_tail(
@@ -785,6 +973,7 @@ def format_cost_tail(
         task_total_usd=task_total_usd,
         total_elapsed_s=total_elapsed_s,
         stage_timings_s=stage_timings_s,
+        include_model_roles=True,
     )
 
 
@@ -809,4 +998,5 @@ def format_meditation_cost_tail(
         task_total_usd=task_total_usd,
         total_elapsed_s=None,
         stage_timings_s=None,
+        include_model_roles=False,
     )

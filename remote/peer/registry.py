@@ -1441,12 +1441,12 @@ class PeerRegistry:
                         or entry.get("last_seen_error") != last_seen_error
                         or entry.get("consecutive_failures") != consecutive_failures
                         or entry.get("live_status") != live_status
-                        or entry.get("last_refresh_error") != last_refresh_error
+                        or str(entry.get("last_refresh_error") or "").strip() != last_refresh_error
                         or entry.get("same_host_loopback") != same_host_loopback
                         or entry.get("address_candidates") != address_candidates
                         or entry.get("observed_candidates") != observed_candidates
-                        or entry.get("host_identity") != host_identity
-                        or entry.get("environment_kind") != environment_kind
+                        or _normalize_identity(entry.get("host_identity") or "") != host_identity
+                        or str(entry.get("environment_kind") or "").strip().lower() != environment_kind
                     ):
                         entry[host_key] = effective_host
                         entry["remote_port"] = peer.port
@@ -1506,7 +1506,7 @@ class PeerRegistry:
                         if entry.get("live_status") != live_status:
                             entry["live_status"] = live_status
                             refreshed = True
-                        if entry.get("last_refresh_error") != last_refresh_error:
+                        if str(entry.get("last_refresh_error") or "").strip() != last_refresh_error:
                             if last_refresh_error:
                                 entry["last_refresh_error"] = last_refresh_error
                             else:

@@ -495,6 +495,79 @@ def test_protocol_transport_delegates_to_protocol_send(monkeypatch):
     ]
 
 
+def test_protocol_transport_passes_hchat_attachments_without_plain_fallback(
+    monkeypatch, tmp_path
+):
+    from tools import protocol_send
+
+    attachment = tmp_path / "bundle.enc"
+    attachment.write_bytes(b"ciphertext")
+    calls = []
+    monkeypatch.setattr(hchat_send, "_shared_token_for_protocol", lambda: "shared-secret")
+    monkeypatch.setattr(
+        protocol_send,
+        "send_protocol_message",
+        lambda target, from_agent, text, **kwargs: calls.append(
+            (target, from_agent, text, kwargs)
+        )
+        or False,
+    )
+
+    assert (
+        hchat_send._send_via_protocol_transport(
+            "agent1",
+            "INTEL",
+            "zelda",
+            "hello over protocol",
+            attachments=[attachment],
+        )
+        is False
+    )
+    assert calls == [
+        (
+            "agent1@INTEL",
+            "zelda",
+            "hello over protocol",
+            {
+                "target_instance": "INTEL",
+                "shared_token": "shared-secret",
+                "attachments": [attachment],
+            },
+        )
+    ]
+
+
+def test_send_hchat_attachment_failure_does_not_downgrade_to_text_route(
+    monkeypatch, tmp_path
+):
+    cfg = _local_cfg()
+    attachment = tmp_path / "bundle.enc"
+    attachment.write_bytes(b"ciphertext")
+    monkeypatch.setattr(hchat_send, "_load_config", lambda: cfg)
+    monkeypatch.setattr(hchat_send, "_build_reply_route", lambda _cfg: {})
+    monkeypatch.setattr(hchat_send, "_shared_token_for_protocol", lambda: "shared-secret")
+    monkeypatch.setattr(
+        hchat_send,
+        "_send_via_protocol_transport",
+        lambda *args, **kwargs: False,
+    )
+    monkeypatch.setattr(
+        hchat_send,
+        "_load_instances",
+        lambda: pytest.fail("attachment delivery downgraded after protocol failure"),
+    )
+
+    assert (
+        hchat_send.send_hchat(
+            "agent1@INTEL",
+            "zelda",
+            "all or nothing",
+            attachments=[attachment],
+        )
+        is False
+    )
+
+
 def test_check_hchat_route_reports_protocol_transport_when_available(monkeypatch):
     cfg = _local_cfg()
     remote = {

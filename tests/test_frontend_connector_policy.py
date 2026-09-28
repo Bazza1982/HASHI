@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from orchestrator.frontend_delivery import (
+    delivery_intent_from_run_route,
     freeze_run_delivery_route,
     normalize_tui_run_delivery_policy,
     project_run_delivery_route,
@@ -16,7 +17,80 @@ from orchestrator.frontend_delivery import (
 from orchestrator.frontend_status import runtime_presentation_status
 
 
-def test_tui_delivery_policy_is_typed_client_bound_and_fail_visible():
+@pytest.mark.asyncio
+async def test_native_telegram_text_message_enters_admission_as_telegram(
+    tmp_path, monkeypatch
+):
+    from orchestrator import flexible_agent_runtime as runtime_module
+    from orchestrator import runtime_long, runtime_scheduler_recovery, runtime_workzone
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    accepted = {}
+
+    class _TelegramRuntime:
+        name = "testing"
+        global_config = SimpleNamespace(authorized_id=42, bridge_home=tmp_path)
+
+        def _is_authorized_user(self, user_id):
+            return user_id == 42
+
+        def _record_active_chat(self, _update):
+            return None
+
+        def _should_redirect_after_transfer(self):
+            return False
+
+        async def enqueue_request(
+            self, chat_id, prompt, source, summary, *, reply_to_message_id=None
+        ):
+            accepted.update(
+                chat_id=chat_id,
+                prompt=prompt,
+                source=source,
+                summary=summary,
+                reply_to_message_id=reply_to_message_id,
+                telegram_requested=telegram_delivery_for_admission(
+                    source=source,
+                    request_metadata=None,
+                    state_root=tmp_path,
+                ),
+            )
+            return "req-testing"
+
+    async def allow_channel(_runtime, _update, *, source_channel):
+        return source_channel == "telegram"
+
+    async def no_pending_path(_runtime, _update):
+        return False
+
+    async def no_recovery(_runtime, *, text, chat_id):
+        return False
+
+    monkeypatch.setattr(
+        FlexibleAgentRuntime, "_telegram_channel_allowed", allow_channel
+    )
+    monkeypatch.setattr(runtime_workzone, "handle_pending_path_reply", no_pending_path)
+    monkeypatch.setattr(runtime_long, "collect_text", lambda *_args: False)
+    monkeypatch.setattr(runtime_scheduler_recovery, "handle_reply", no_recovery)
+    monkeypatch.setattr(runtime_module, "_print_user_message", lambda *_args: None)
+
+    message = SimpleNamespace(text="hello from Telegram")
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=42),
+        effective_chat=SimpleNamespace(id=99),
+        message=message,
+    )
+
+    await FlexibleAgentRuntime.handle_message(_TelegramRuntime(), update, None)
+
+    assert accepted["source"] == "telegram"
+    assert accepted["telegram_requested"] is True
+    assert accepted["chat_id"] == 99
+    assert accepted["prompt"] == "hello from Telegram"
+    assert accepted["reply_to_message_id"] is None
+
+
+def test_frontend_delivery_policy_is_connector_neutral_client_bound_and_fail_visible():
     policy = tui_run_delivery_policy(
         telegram_mirror=False,
         client_id="tui-window-a",
@@ -30,10 +104,16 @@ def test_tui_delivery_policy_is_typed_client_bound_and_fail_visible():
         policy,
         client_id="tui-window-a",
     ) == policy
+    assert policy["type"] == "hashi.frontend-delivery-policy"
+    assert policy["version"] == 2
+    assert policy["connector_id"] == "tui"
+    assert policy["targets"] == [
+        {"connector_id": "telegram", "role": "mirror", "enabled": False}
+    ]
     assert telegram_delivery_for_admission(
         source="tui",
         request_metadata=metadata,
-    ) is False
+    ) is True
     assert telegram_delivery_for_admission(
         source="api",
         request_metadata=metadata,
@@ -64,13 +144,13 @@ def test_tui_delivery_policy_is_typed_client_bound_and_fail_visible():
 @pytest.mark.parametrize(
     "mutation",
     [
-        lambda value: value.update(version=2),
+        lambda value: value.update(version=1),
         lambda value: value.update(scope="session"),
-        lambda value: value.update(frontend="browser"),
-        lambda value: value.update(telegram={"mirror": "off"}),
+        lambda value: value.update(connector_id="browser"),
+        lambda value: value.update(targets=[{"connector_id": "telegram", "role": "mirror", "enabled": "off"}]),
     ],
 )
-def test_invalid_tui_delivery_policy_is_rejected(mutation):
+def test_invalid_frontend_delivery_policy_is_rejected(mutation):
     policy = tui_run_delivery_policy(
         telegram_mirror=False,
         client_id="tui-window-a",
@@ -78,6 +158,22 @@ def test_invalid_tui_delivery_policy_is_rejected(mutation):
     mutation(policy)
     with pytest.raises(ValueError):
         normalize_tui_run_delivery_policy(policy, client_id="tui-window-a")
+
+
+def test_legacy_tui_delivery_policy_is_normalized_to_generic_contract():
+    legacy = {
+        "type": "hashi.frontend-delivery",
+        "version": 1,
+        "scope": "run",
+        "frontend": "tui",
+        "client_id": "tui-window-a",
+        "telegram": {"mirror": False},
+    }
+    normalized = normalize_tui_run_delivery_policy(
+        legacy, client_id="tui-window-a"
+    )
+    assert normalized["type"] == "hashi.frontend-delivery-policy"
+    assert normalized["targets"][0]["enabled"] is False
 
 
 @pytest.mark.parametrize(
@@ -88,7 +184,7 @@ def test_invalid_tui_delivery_policy_is_rejected(mutation):
         ("tui", "workbench", True, "tui", ["telegram"]),
         ("api", "workbench", True, "workbench", ["telegram"]),
         ("hchat", "workbench", True, "hchat", ["telegram"]),
-        ("whatsapp", "whatsapp", True, "whatsapp", []),
+        ("whatsapp", "whatsapp", True, "whatsapp", ["telegram"]),
         ("hashi.internal", "scheduled", True, "telegram", []),
     ],
 )
@@ -137,6 +233,28 @@ def test_terminal_hchat_reply_routes_to_user_without_acknowledgement_loop():
     assert route_destination(route, "hchat") is None
 
 
+def test_legacy_run_route_projects_to_endpoint_level_delivery_intent():
+    route = freeze_run_delivery_route(
+        message_source_id="api",
+        session_surface="workbench",
+        session_channel_key="workbench:primary",
+        chat_id=123,
+        telegram_requested=True,
+    )
+    intent = delivery_intent_from_run_route(
+        route,
+        event_id="evt-1",
+        session_id="ses_1",
+        idempotency_key="meter:req-1",
+        content_modes=["text", "media"],
+    )
+    assert intent["version"] == 2
+    assert [
+        (item["connector_id"], item["role"])
+        for item in intent["destinations"]
+    ] == [("backend_api", "primary"), ("telegram", "mirror")]
+
+
 def test_internal_run_without_a_connector_target_is_explicitly_nonautomatic():
     route = freeze_run_delivery_route(
         message_source_id="hashi.internal",
@@ -154,21 +272,17 @@ def test_internal_run_without_a_connector_target_is_explicitly_nonautomatic():
     }
 
 
-def test_runtime_presentation_status_reports_structured_her_quick_and_pro():
-    selected = SimpleNamespace(
-        routing_mode="hybrid",
-        routing_revision=7,
-        target_for_slot=lambda slot: (
-            SimpleNamespace(provider="openai", model="gpt-quick")
-            if slot == "quick"
-            else SimpleNamespace(provider="anthropic", model="claude-pro")
-        ),
-    )
+def test_runtime_presentation_status_reports_her_v3_main_model():
+    main = SimpleNamespace(engine="anthropic", model="claude-pro")
     runtime = SimpleNamespace(
         config=SimpleNamespace(active_backend="her-v2"),
-        backend_manager=SimpleNamespace(get_her_v2_configuration=lambda: selected),
-        get_current_model=lambda: "mixed",
-        _get_current_effort=lambda: "planned",
+        backend_manager=SimpleNamespace(
+            current_backend=SimpleNamespace(
+                _v2_config=SimpleNamespace(profiles={"main": main})
+            )
+        ),
+        get_current_model=lambda: "claude-pro",
+        _get_current_effort=lambda: "high",
         _think=True,
         _verbose=False,
         _commentary=True,
@@ -176,14 +290,10 @@ def test_runtime_presentation_status_reports_structured_her_quick_and_pro():
 
     status = runtime_presentation_status(runtime)
 
-    assert status["engine"] == "her-v2"
-    assert status["her_v2"] == {
-        "routing_mode": "hybrid",
-        "quick": {"provider": "openai", "model": "gpt-quick"},
-        "pro": {"provider": "anthropic", "model": "claude-pro"},
-        "routing_revision": 7,
-    }
-    assert status["effort"] == "planned"
+    assert status["engine"] == "her-v3"
+    assert status["her_v3"] == {"main": {"provider": "anthropic", "model": "claude-pro"}}
+    assert "her_v2" not in status
+    assert status["effort"] == "high"
 
 
 def test_runtime_presentation_status_omits_provider_for_other_engines():

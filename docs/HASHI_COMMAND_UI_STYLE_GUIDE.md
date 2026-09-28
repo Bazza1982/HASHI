@@ -95,10 +95,11 @@ History, and Find views; default cards never mix archived prompts into the
 current work card. The status card describes open-item and carryover counts as
 background, never as automatically queued work.
 
-The main `/status` card always shows the active backend and model. For HER v2 it
-shows **HER execution mode** with the descriptive name and canonical value,
-such as `Planned (medium)`. Other backends continue to show **Effort**. Use `n/a`
-when the active non-HER model does not support a selectable effort level.
+The main `/status` card always shows the active backend and model. For HERV3 it
+shows the current Provider/model **reasoning** value. It must not label effort
+as an execution mode or display Direct, Strategic, Planned, Quick/Pro, or stage
+routes. Other backends continue to show **Effort**. Use `n/a` when the active
+model does not support a selectable reasoning level.
 
 Every dangerous operation shows:
 

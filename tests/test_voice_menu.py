@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from orchestrator import voice_manager as voice_manager_module
 from orchestrator.config_json import read_config_json, write_config_json
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+from orchestrator.session_store import SessionStore
 from orchestrator.voice_manager import VoiceManager
 from orchestrator.voice_synthesizer import VoiceAsset
 
@@ -41,6 +44,29 @@ def _manager(tmp_path: Path) -> VoiceManager:
             }
         ],
     )
+
+
+def _prepare_runtime_for_fc(runtime, tmp_path: Path) -> None:
+    runtime.name = "voice-test"
+    runtime.workspace_dir = tmp_path / "workspace"
+    runtime.media_dir = tmp_path / "media"
+    runtime.global_config = SimpleNamespace(
+        authorized_id=7,
+        instance_id="HASHI1",
+        project_root=tmp_path,
+    )
+    runtime.config = SimpleNamespace(
+        active_backend="codex-cli",
+        telegram_token_key="voice-test",
+        extra={"agent_lifecycle_id": "a" * 32},
+    )
+    runtime.session_store = SessionStore(
+        tmp_path / "state" / "sessions.sqlite3",
+        instance_id="HASHI1",
+    )
+    runtime.telegram_connected = True
+    runtime._notify_enabled = False
+    runtime.token = "test-token"
 
 
 def test_piper_preset_uses_standalone_executable_without_python_module(
@@ -88,6 +114,49 @@ def test_voice_profiles_resolve_supported_native_voice_and_tts_fallback(tmp_path
     assert manager._tts_voice_for_profile("calm_male", "終わりました。") == (
         "ja-JP-NaokiNeural"
     )
+
+
+def test_voice_preview_assets_fall_back_to_the_versioned_product_bundle(tmp_path):
+    bundle_root = tmp_path / "voice_preview_assets"
+    bundled = bundle_root / "v1" / "en" / "warm_female" / "tts.ogg"
+    bundled.parent.mkdir(parents=True)
+    payload = b"OggSbundled-preview"
+    bundled.write_bytes(payload)
+    (bundle_root / "v1" / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "version": "v1",
+                "entries": [
+                    {
+                        "locale": "en",
+                        "profile": "warm_female",
+                        "renderer": "tts",
+                        "path": "en/warm_female/tts.ogg",
+                        "size_bytes": len(payload),
+                        "sha256": hashlib.sha256(payload).hexdigest(),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager = VoiceManager(
+        tmp_path / "workspace",
+        tmp_path / "media",
+        preview_asset_root=bundle_root,
+    )
+
+    assert manager.get_voice_preview_assets(
+        "warm_female", renderers=("tts",), locale="en"
+    ) == (("tts", bundled),)
+
+    local = manager.voice_preview_path("warm_female", "tts", locale="en")
+    local.parent.mkdir(parents=True)
+    local.write_bytes(b"OggSlocal-preview")
+    assert manager.get_voice_preview_assets(
+        "warm_female", renderers=("tts",), locale="en"
+    ) == (("tts", local),)
 
 
 def test_voice_state_writer_normalizes_legacy_bytes_and_preserves_unknown_fields(tmp_path):
@@ -233,6 +302,7 @@ async def test_voice_profile_callback_updates_both_renderers_without_growing_men
     runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
     runtime.voice_manager = manager
     runtime._is_authorized_user = lambda _user_id: True
+    _prepare_runtime_for_fc(runtime, tmp_path)
     sent_previews = []
 
     for renderer in ("native", "tts"):
@@ -293,6 +363,103 @@ async def test_voice_profile_callback_updates_both_renderers_without_growing_men
 
 
 @pytest.mark.asyncio
+async def test_workbench_voice_preview_uses_bound_session_without_telegram(
+    tmp_path,
+):
+    manager = _manager(tmp_path)
+    manager.set_native_target("openrouter-api", "openai/gpt-audio-mini")
+    runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
+    runtime.voice_manager = manager
+    runtime._is_authorized_user = lambda _user_id: True
+    _prepare_runtime_for_fc(runtime, tmp_path)
+    owner_id = SessionStore.owner_id_for(runtime.global_config)
+    session = runtime.session_store.create_session(
+        owner_id=owner_id,
+        agent_id=runtime.name,
+        title="Workbench voice preview",
+        is_default=True,
+    )
+    runtime.default_session_id = session["session_id"]
+
+    expected_payloads = {}
+    for renderer in ("native", "tts"):
+        preview = manager.voice_preview_path("calm_male", renderer, locale="en")
+        preview.parent.mkdir(parents=True, exist_ok=True)
+        payload = b"OggS" + renderer.encode("ascii")
+        preview.write_bytes(payload)
+        expected_payloads[renderer] = payload
+
+    telegram_send = AsyncMock()
+    runtime.app = SimpleNamespace(
+        bot=SimpleNamespace(send_voice=telegram_send),
+    )
+    runtime.telegram_logger = SimpleNamespace(warning=lambda *_args: None)
+    runtime.error_logger = SimpleNamespace(error=lambda *_args: None)
+
+    class Query:
+        data = "voice:profile:calm_male"
+        from_user = SimpleNamespace(id=7)
+        message = SimpleNamespace(chat_id=7)
+
+        def __init__(self):
+            self.answers = []
+
+        async def edit_message_text(self, *_args, **_kwargs):
+            return None
+
+        async def answer(self, text=None, **kwargs):
+            self.answers.append((text, kwargs))
+
+    query = Query()
+    update = SimpleNamespace(
+        callback_query=query,
+        _hashi_session_surface="workbench",
+        _hashi_session_channel_key="default",
+        _hashi_session_owner_id=owner_id,
+        _hashi_session_id=session["session_id"],
+        _hashi_session_context_generation=session["context_generation"],
+    )
+
+    await runtime.callback_voice(update, SimpleNamespace())
+
+    telegram_send.assert_not_awaited()
+    messages = runtime.session_store.messages(
+        session["session_id"], owner_id=owner_id
+    )
+    previews = [
+        message
+        for message in messages
+        if message["source"] == "workbench.explicit-media"
+    ]
+    assert len(previews) == 2
+    assert {message["context_generation"] for message in previews} == {
+        session["context_generation"]
+    }
+    assert all(message["history_eligible"] is False for message in previews)
+    assert [message["content"][0]["semantic_role"] for message in previews] == [
+        "audio_attachment",
+        "audio_attachment",
+    ]
+    assert [message["content"][0]["presentation_role"] for message in previews] == [
+        "audio",
+        "audio",
+    ]
+    stored_payloads = []
+    for message in previews:
+        part = message["content"][0]
+        _attachment, payload = runtime.session_store.attachment_bytes(
+            session_id=session["session_id"],
+            owner_id=owner_id,
+            attachment_id=part["attachment_id"],
+        )
+        stored_payloads.append(payload)
+    assert stored_payloads == [
+        expected_payloads["native"],
+        expected_payloads["tts"],
+    ]
+
+
+@pytest.mark.asyncio
 async def test_voice_mode_callback_sends_only_matching_current_profile_preview(
     tmp_path,
 ):
@@ -313,6 +480,7 @@ async def test_voice_mode_callback_sends_only_matching_current_profile_preview(
     runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
     runtime.voice_manager = manager
     runtime._is_authorized_user = lambda _user_id: True
+    _prepare_runtime_for_fc(runtime, tmp_path)
     runtime.app = SimpleNamespace(bot=Bot())
     runtime.telegram_logger = SimpleNamespace(warning=lambda *_args: None)
     runtime.error_logger = SimpleNamespace(error=lambda *_args: None)

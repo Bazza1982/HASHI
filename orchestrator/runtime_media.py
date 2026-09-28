@@ -842,6 +842,61 @@ def disable_safe_voice(runtime: Any) -> None:
             release_event.set()
 
 
+def discard_pending_safe_voice_inputs(runtime: Any) -> int:
+    """Make every unsubmitted Safe Voice input inert at a Session boundary."""
+
+    from orchestrator.voice_confirmation_transport import (
+        discard_pending_voice_confirmations,
+    )
+
+    workbench_registry = getattr(runtime, "_workbench_voice_confirmations", None)
+    workbench_pending = (
+        sum(
+            1
+            for entry in workbench_registry.values()
+            if isinstance(entry, dict) and entry.get("state") == "pending"
+        )
+        if isinstance(workbench_registry, dict)
+        else 0
+    )
+    discard_pending_voice_confirmations(runtime)
+
+    pending_voice = getattr(runtime, "_pending_voice", None)
+    if not isinstance(pending_voice, dict):
+        pending_voice = {}
+        runtime._pending_voice = pending_voice
+    telegram_pending = len(pending_voice)
+    for pending in tuple(pending_voice.values()):
+        if not isinstance(pending, dict) or not pending.get("native_audio"):
+            continue
+        request_id = str(pending.get("request_id") or "").strip()
+        decider = getattr(
+            getattr(runtime, "session_store", None),
+            "decide_voice_transcript",
+            None,
+        )
+        if request_id and callable(decider):
+            try:
+                decider(request_id=request_id, confirmed=False)
+            except Exception as exc:
+                logger = getattr(runtime, "error_logger", None)
+                warning = getattr(logger, "warning", None)
+                if callable(warning):
+                    warning(
+                        "Unable to discard native voice transcript %s at Session boundary: %s",
+                        request_id,
+                        exc,
+                    )
+        state = getattr(runtime, "_native_voice_transcripts", {}).get(request_id)
+        if isinstance(state, dict):
+            state["status"] = "discarded"
+            release_event = state.get("release_event")
+            if isinstance(release_event, asyncio.Event):
+                release_event.set()
+    pending_voice.clear()
+    return telegram_pending + workbench_pending
+
+
 async def finish_native_voice_transcript_path(
     runtime: Any,
     request_id: str,

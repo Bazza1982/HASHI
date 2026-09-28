@@ -220,6 +220,7 @@ class ToolRegistry:
         self.max_loops = None
         self.agents_config = agents_config or []
         self.audit_context = audit_context or {}
+        self._hchat_attachment_selections: dict[str, dict[str, Any]] = {}
         self._live_runtime_policy_cache_key: tuple | None = None
         self._live_runtime_policy_cache = None
         self.canonical_audit = canonical_audit
@@ -267,6 +268,43 @@ class ToolRegistry:
         """Expose names only; permission and execution remain registry-owned."""
 
         return tuple(sorted(self._allowed))
+
+    def _hchat_attachment_selection_request_id(self, tool_name: str) -> str:
+        if tool_name != "frontend_send_attachments":
+            return ""
+        context = self._effective_audit_context()
+        if (
+            str(context.get("request_source") or "").strip().casefold()
+            != "bridge:hchat-draft"
+        ):
+            return ""
+        return str(context.get("request_id") or "").strip()
+
+    def _remember_hchat_attachment_selection(
+        self, tool_name: str, result: ToolResult
+    ) -> None:
+        request_id = self._hchat_attachment_selection_request_id(tool_name)
+        if not request_id:
+            return
+        self._hchat_attachment_selections.setdefault(
+            request_id,
+            {
+                "success": not result.is_error,
+                "error": result.output if result.is_error else "",
+                "output": result.output,
+                "tool_call_id": result.tool_call_id,
+            },
+        )
+
+    def consume_hchat_attachment_selection(
+        self, request_id: str
+    ) -> dict[str, Any] | None:
+        """Return and clear the one attachment-selection outcome for a draft."""
+
+        outcome = self._hchat_attachment_selections.pop(
+            str(request_id or "").strip(), None
+        )
+        return dict(outcome) if outcome is not None else None
 
     def is_read_only(self, tool_name: str) -> bool:
         """Return explicit safety capability for delegated/shadow execution."""
@@ -760,6 +798,39 @@ class ToolRegistry:
         effective_call_id = str(tool_call_id or "")
         if self.smart_tools.enabled and not effective_call_id:
             effective_call_id = self.smart_tools.new_call_id()
+        selection_request_id = self._hchat_attachment_selection_request_id(tool_name)
+        if (
+            selection_request_id
+            and selection_request_id in self._hchat_attachment_selections
+        ):
+            output = (
+                "Error: HChat attachment selection was already attempted for "
+                "this message; the first outcome is final"
+            )
+            first_outcome = self._hchat_attachment_selections[
+                selection_request_id
+            ]
+            if bool(first_outcome.get("success")):
+                self._hchat_attachment_selections[selection_request_id] = {
+                    "success": False,
+                    "error": output,
+                    "output": output,
+                    "tool_call_id": effective_call_id,
+                }
+            result = ToolResult(
+                tool_call_id=effective_call_id,
+                output=output,
+                is_error=True,
+                details={
+                    "control_disposition": "denied",
+                    "reason": "hchat_attachment_selection_already_attempted",
+                },
+            )
+            result = self._finalize_tool_result(
+                tool_name, arguments, result, started
+            )
+            self._record_tool_audit(tool_name, arguments, result, started)
+            return result
         admission_denial = self.evaluate_admission(
             tool_name, arguments, effective_call_id
         )
@@ -1078,6 +1149,7 @@ class ToolRegistry:
         result: ToolResult,
         started: float,
     ) -> None:
+        self._remember_hchat_attachment_selection(tool_name, result)
         artifact_id = self._register_file_write_artifact(
             tool_name, arguments, result
         )
@@ -1399,12 +1471,18 @@ class ToolRegistry:
                 arguments,
                 secrets=self.secrets,
                 agents_config=self.agents_config,
+                audit_context=self._effective_audit_context(),
+                tool_call_id=tool_call_id,
             )
 
         if tool_name == "telegram_send_file":
             return await execute_telegram_send_file(
                 arguments,
                 secrets=self.secrets,
+                access_root=self.access_roots,
+                workspace_dir=self.workspace_dir,
+                audit_context=self._effective_audit_context(),
+                tool_call_id=tool_call_id,
             )
 
         if tool_name == "frontend_send_attachments":

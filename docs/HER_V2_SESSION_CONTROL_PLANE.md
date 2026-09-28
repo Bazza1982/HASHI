@@ -1,15 +1,17 @@
-# HER v2 Fixed-Session Control Plane
+> **Legacy HERV2 archive — non-normative.** This document records the retired staged runtime. HERV3 uses one continuous main-model/tool loop with no Triage, Strategy, Planning, Replanning, Review, or stage-based Finalisation routing. Strategy Cards and Habit/Meditation remain optional. See [HERV3 upgrade](HERV3_UPGRADE.md).
+
+# HERV2 Fixed-Session Control Plane
 
 | Field | Value |
 |---|---|
 | Status | Implemented; WIP retirement remains in shadow-validation phase |
 | Date | 2026-09-03 |
-| Scope | HASHI HER v2 fixed Engine Session |
+| Scope | HASHI HERV2 fixed Engine Session |
 | Session authority | HER SQLite session/event store |
 | Provider state | Rebuildable transport state, never Session authority |
 | Parent architecture | [HASHI System Architecture](../ARCHITECTURE.md) |
 
-This document governs HER v2's **Engine Session** only. PAO and the HASHI
+This document governs HERV2's **Engine Session** only. PAO and the HASHI
 Session store retain authority over the enclosing HASHI Conversation Session,
 Messages, Runs, Events, Workzones, context generation, and Engine binding. In
 this document, `Provider` means a HER-internal Model Provider.

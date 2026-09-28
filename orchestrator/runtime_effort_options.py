@@ -32,7 +32,8 @@ def configured_model_efforts(backend: Mapping, model: str | None) -> list[str] |
 
 def get_available_efforts(engine, model=None, *, allowed_backends=(), provider=False):
     engine = canonical_backend_engine(engine)
-    # HER execution modes are Engine policy, never model reasoning overrides.
+    # HERV3 uses Provider/model reasoning levels; instance opt-ins still belong
+    # to the selected concrete Provider rather than the compatibility Engine ID.
     if engine != HER_V2_ENGINE:
         candidates = []
         for backend in allowed_backends:

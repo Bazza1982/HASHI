@@ -464,6 +464,37 @@ def discard_pending_voice_confirmations(runtime: Any) -> int:
     return len(keys)
 
 
+def discard_batch(runtime: Any) -> dict[str, int | bool]:
+    """Cancel and forget one unfinished /long batch without submitting it."""
+
+    _ensure_batch_state(runtime)
+    active = is_batch_active(runtime)
+    item_count = len(runtime._long_buffer)
+    pending_media = len(runtime._long_pending_media_ids)
+    discarded_voice = discard_pending_voice_confirmations(runtime)
+    _cancel_task(runtime, "_long_buffer_timeout_task")
+    _cancel_task(runtime, "_long_finalize_task")
+    runtime._long_buffer = []
+    runtime._long_buffer_kinds = []
+    runtime._long_buffer_summaries = []
+    runtime._long_buffer_ids = []
+    runtime._long_buffer_metadata = []
+    runtime._long_pending_media_ids = set()
+    runtime._long_buffer_active = False
+    runtime._long_buffer_state = LONG_BATCH_IDLE
+    runtime._long_buffer_chat_id = None
+    runtime._long_batch_id = None
+    runtime._long_finalize_update = None
+    runtime._long_finalize_reason = None
+    runtime._long_finalize_discarded_voice = 0
+    return {
+        "active": active,
+        "items": item_count,
+        "pending_media": pending_media,
+        "pending_voice": discarded_voice,
+    }
+
+
 def _media_label(kind: str, summary: str) -> str:
     labels = {
         "audio": "Audio",

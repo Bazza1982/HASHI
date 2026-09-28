@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from .v3_config import CompanionConfig, normalise_v3_config
 from .models import (
     DEFAULT_ROUTES_BY_STAGE,
     EXECUTION_ROUTES,
@@ -181,6 +182,8 @@ DEFAULT_STAGE_ROLES: Mapping[Stage, str] = {
 class HERv2Config:
     profiles: Mapping[str, ProviderProfile]
     stage_roles: Mapping[Stage, str]
+    agent_companion: CompanionConfig = field(default_factory=CompanionConfig)
+    commentary_interval_s: float = 150.0
     routing_mode: str = "single"
     stage_reasoning: Mapping[Stage, str] = field(default_factory=dict)
     slot_models: Mapping[str, str] = field(default_factory=dict)
@@ -296,6 +299,10 @@ class HERv2Config:
                 )
         if self.user_idle_timeout_s <= 0:
             raise HERv2ConfigurationError("idle-progress timeout must be positive")
+        if not 120.0 <= float(self.commentary_interval_s) <= 180.0:
+            raise HERv2ConfigurationError(
+                "HERV3 commentary_interval_s must be between 120 and 180 seconds"
+            )
         if self.audit_failure_terminal not in {
             TerminalState.ERROR,
             TerminalState.STOPPED,
@@ -322,6 +329,10 @@ class HERv2Config:
             fields=REMOVED_HER_V2_LIMIT_FIELDS,
             location="her_v2",
         )
+        try:
+            raw = normalise_v3_config(raw)
+        except (TypeError, ValueError) as exc:
+            raise HERv2ConfigurationError(str(exc)) from exc
         profiles_raw = raw.get("profiles")
         if not isinstance(profiles_raw, Mapping) or not profiles_raw:
             raise HERv2ConfigurationError("her_v2.profiles must be a non-empty object")
@@ -663,6 +674,8 @@ class HERv2Config:
         return cls(
             profiles=profiles,
             stage_roles=stage_roles,
+            agent_companion=CompanionConfig.from_mapping(raw.get("agent_companion")),
+            commentary_interval_s=float(raw.get("commentary_interval_s", 150.0)),
             routing_mode=routing_mode,
             stage_reasoning=stage_reasoning,
             slot_models=slot_models,
@@ -757,9 +770,8 @@ class HERv2Config:
         if reasoning is None:
             reasoning = self.stage_reasoning.get(stage)
         if reasoning is None:
-            # Zero is orchestration complexity, not a provider effort value.
-            # Its one Direct call has an independent provider default.
-            reasoning = "high" if route is Route.DIRECT else profile.reasoning
+            # HERV3 effort is provider reasoning, never orchestration policy.
+            reasoning = profile.reasoning
         return replace(
             profile,
             engine=engine,

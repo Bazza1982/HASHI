@@ -24,7 +24,7 @@ Functional ownership is split without duplicating authority:
   scheduling, recovery, verified message context, and reply routing.
 - Exchange owns Internet identity, grants, address resolution, connection
   epochs, delivery authorization, and relay receipts.
-- PCM renders the PAO-created context but grants no Exchange authority. HER v2
+- PCM renders the PAO-created context but grants no Exchange authority. HERV3
   and Protected Core are unchanged.
 
 The implementation belongs to the Functions and Instance Configuration

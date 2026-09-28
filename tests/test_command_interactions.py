@@ -5,6 +5,7 @@ import asyncio
 import dataclasses
 import json
 import unittest
+from unittest import mock
 
 import pytest
 
@@ -66,6 +67,13 @@ class MenuTests(unittest.IsolatedAsyncioTestCase):
         ref = initial.messages[0]['message_ref']
         self.assertLess(menu.message_id, 0)
         self.assertNotIn('example:next', json.dumps(initial.messages))
+        presentation = initial.messages[0]['presentation']
+        self.assertEqual(presentation['interface_kind'], 'display')
+        self.assertEqual(presentation['semantic_kind'], 'command_result')
+        self.assertEqual(
+            [block['interface_kind'] for block in presentation['content_blocks'][1:]],
+            ['button', 'button'],
+        )
         result = await self.action(menu)
         self.assertTrue(result['ok'])
         self.assertEqual(self.calls, ['example:next'])
@@ -79,10 +87,19 @@ class MenuTests(unittest.IsolatedAsyncioTestCase):
         _, menu = await self.open()
         payload = self.payload(menu)
         a, b = await asyncio.gather(self.action(menu, payload=payload), self.action(menu, payload=payload))
-        self.assertEqual(a, b)
+        fresh = next(result for result in (a, b) if not result.get('replayed', False))
+        replay = next(result for result in (a, b) if result.get('replayed', False))
         self.assertEqual(len(self.calls), 1)
-        a['messages'][0]['text'] = 'consumer mutation'
+        self.assertTrue(replay['refresh_required'])
+        self.assertNotIn('command_ui', replay['messages'][0])
+        self.assertFalse(any(
+            block.get('type') == 'action'
+            for block in replay['messages'][0]['presentation']['content_blocks']
+        ))
+        fresh['messages'][0]['text'] = 'consumer mutation'
+        replay['messages'][0]['text'] = 'consumer replay mutation'
         c = await self.action(menu, payload=payload)
+        self.assertTrue(c['replayed'])
         self.assertEqual(c['messages'][0]['text'], 'Updated ✓')
 
     async def test_stale_revision_fails_before_second_execution(self):
@@ -210,6 +227,19 @@ class MenuTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(menu.closed)
         self.assertEqual(capture.messages[0]['op'], 'delete')
         self.assertEqual(capture.messages[0]['command_ui']['rows'], [])
+
+    async def test_generated_button_id_always_satisfies_standard_action_contract(self):
+        with mock.patch(
+            'orchestrator.command_interactions.secrets.token_urlsafe',
+            return_value='-leading-url-safe-token',
+        ):
+            capture, menu = await self.open()
+
+        self.assertTrue(menu.rows[0][0]['button_id'].startswith('act_'))
+        self.assertEqual(
+            capture.messages[0]['presentation']['content_blocks'][1]['action_id'],
+            menu.rows[0][0]['button_id'],
+        )
 
     async def test_captured_menu_exposes_stable_presentation_identity_and_persists_edits(self):
         persisted = []

@@ -1,11 +1,13 @@
-# HER v2 Compulsory Replanning Repair Plan
+> **Legacy HERV2 archive — non-normative.** This document records the retired staged runtime. HERV3 uses one continuous main-model/tool loop with no Triage, Strategy, Planning, Replanning, Review, or stage-based Finalisation routing. Strategy Cards and Habit/Meditation remain optional. See [HERV3 upgrade](HERV3_UPGRADE.md).
+
+# HERV2 Compulsory Replanning Repair Plan
 
 | Field | Value |
 |---|---|
 | Status | Implemented historically; dormant while higher-mode redesign is postponed |
 | Date | 2026-08-24 |
 | Authority | Historical internal contract; superseded for the public surface by `HER_V2_THREE_MODE_DECISION.md` |
-| Scope | HER v2 work turns at Adaptive (`high`), Reviewed (`xhigh`), and Assured (`max`) execution modes |
+| Scope | HERV2 work turns at Adaptive (`high`), Reviewed (`xhigh`), and Assured (`max`) execution modes |
 | Fixed cadence | 300 monotonic seconds or 10 newly completed Execution tool results, whichever is observed first |
 | Runtime activation | Targeted Arale hot reload passed on 2026-08-24; capability-level threshold canaries remain separate |
 
@@ -18,7 +20,7 @@ not define a current production choice.
 Replace the incorrectly implemented optional high-risk checkpoint assessor with
 the approved compulsory Replanning cycle. The cadence is not a safety judge and
 does not choose whether Replanning should happen. Once either threshold is due,
-HER v2 must enter its principal `REPLANNING` lifecycle state at the next safe
+HERV2 must enter its principal `REPLANNING` lifecycle state at the next safe
 boundary, run the three required self-checks, activate a new plan version, send
 one progress commentary, and then either resume Execution or stop adding work
 when the goal is already complete.
@@ -34,7 +36,7 @@ This repair exists to keep the model aligned with the original user goal:
 
 ### 2.1 Eligibility
 
-The compulsory cadence applies to every HER v2 work classification when the
+The compulsory cadence applies to every HERV2 work classification when the
 selected execution mode is one of:
 
 - Adaptive (`high`);
@@ -375,7 +377,7 @@ Completed on 2026-08-24 in the HASHI1 working tree:
   timeout values, unbounded tool loops, and assurance-limit independence;
 - passed the complete pre-integration offline product suite (`2677 passed`,
   `2 skipped`, `40 deselected`) and the deterministic core gate (`237 passed`),
-  with the explicit HER v2 suite at `346 passed`, `1 skipped`;
+  with the explicit HERV2 suite at `346 passed`, `1 skipped`;
 - after integration with the two preceding Auto Compact commits, passed the
   combined focused suite (`403 passed`, `1 skipped`), the core gate
   (`237 passed`), and the complete offline product suite (`2685 passed`,

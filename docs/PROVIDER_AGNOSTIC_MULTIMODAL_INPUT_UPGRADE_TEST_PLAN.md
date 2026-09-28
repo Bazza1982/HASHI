@@ -6,11 +6,17 @@
 |---|---|
 | 状态 | 已合并并通过离线验证；通用热重载与 DeepSeek 原生图片路径已验收，跨 Provider 真实多图专项验收仍待执行 |
 | 批准日期 | 2026-08-23 |
-| 适用范围 | HASHI Agent Runtime、HER v2、API Gateway、Provider Adapters、Telegram /long |
+| 适用范围 | HASHI Agent Runtime、HERV3、API Gateway、Provider Adapters、Telegram /long |
 | 首要验收对象 | Momo 多图读取 |
 | 代表性原生 Provider | OpenRouter Gemini、DeepSeek `deepseek-v4-flash-vision-exp`、HASHI API 所服务的 Codex/GPT 模型 |
 | 兼容对象 | 不具备原生多模态能力的现有 backend/model |
 | 发布要求 | 在宣称具体 Provider 多模态生产可用前，须完成真实媒体专项 canary |
+
+> **HERV3 路由更新：**本文保留 2026-08-23 的 HERV2 分阶段验收证据与既有
+> 测试函数名，但它们不再定义当前前台路由。HERV3 只把媒体清单与结构化内容
+> 送入一个主模型/工具循环；不存在 Immediate Response、Triage、Planning、
+> Replanning、Review 或 Finalisation 前台阶段。当前路由以
+> [HERV3 upgrade](HERV3_UPGRADE.md) 为准。
 
 ## 1. 批准结论
 
@@ -23,8 +29,8 @@ HASHI 的多模态能力必须采用 Provider 无关、Model 精确、逐模态�
 3. HASHI API 所服务的 Codex/GPT 模型、OpenRouter Gemini 与 DeepSeek
    `deepseek-v4-flash-vision-exp` 都只是适配实例；Claude 或未来任何具备
    多模态能力的模型均应遵守同一内部契约。
-4. HER v2 的 Immediate Response、Triage 及后续前台阶段必须按各自实际选择的
-   provider/model 独立解析能力，不得依赖 HER 外层 supports_files 布尔值。
+4. HERV3 主模型必须按当前实际选择的 provider/model 精确解析能力，不得依赖
+   HER 外层 supports_files 布尔值，也不得通过旧阶段路由改变媒体判定。
 5. 图片路径、文件名及 transport receipt 只能证明媒体已接收，不能证明模型已
    看到或理解媒体内容。
 
@@ -40,12 +46,11 @@ HASHI 的多模态能力必须采用 Provider 无关、Model 精确、逐模态�
 - Codex app-server 转换层已有图片 part 支持，但目前主要由外部工具协议路径使用；
 - OpenRouterAdapter 与 HashiApiAdapter 的普通 generate_response 接口只接受
   prompt 字符串；
-- HER v2 StageRequest 当前只包含 goal 和 context，没有一等多模态输入；
+- 旧 HERV2 StageRequest 只包含 goal 和 context，没有一等多模态输入；
 - supports_files 与 supports_native_vision 无法表达逐模型、逐媒体类型及传输形状。
 
-因此，Triage 可以在逻辑上正确判定 DIRECT_RESPONSE，但 Immediate Response
-实际上可能只收到路径文字。该问题属于能力声明与实际 wire payload 不一致，而
-不是 Triage 分类错误。
+因此，旧分阶段路径即使分类正确，回答模型仍可能只收到路径文字。该问题属于
+能力声明与实际 wire payload 不一致，而不是模型任务判断错误。
 
 ## 3. 目标与非目标
 
@@ -156,25 +161,15 @@ capability source: registry | explicit config | verified probe
 同一个附件不得在同一阶段既原生直传又调用回退解释，除非原生请求明确返回可识别
 且无副作用的 modality unsupported 错误。
 
-## 5. HER v2 阶段传播契约
+## 5. HERV3 输入传播契约
 
-### 5.1 前台阶段
+### 5.1 前台主循环
 
-完整 attachment manifest 必须随 TurnState 与 StageRequest 传播到：
+完整 attachment manifest 必须随 TurnState 传播到 HERV3 的主模型请求。当前
+Provider/model 按自身精确能力决定原生直传或本地回退；工具权限与原生多模态输入
+能力是两个独立维度。JEV companion 只接收有界的可观察运行状态，不接收原始媒体。
 
-- Immediate Response
-- Triage
-- Planning
-- Execution
-- Replanning
-- Review
-- Verification
-- Finalisation
-
-每个阶段按自己的实际 profile 独立决定原生直传或回退。阶段的 allow_tools=False
-只禁止工具调用，不得禁止原生多模态输入。
-
-### 5.2 DIRECT_RESPONSE
+### 5.2 单循环回答
 
 对于内容可由 Immediate Response 直接回答的多媒体请求：
 
@@ -348,9 +343,10 @@ tests/test_api_gateway_multimodal.py：
 - test_codex_image_detail_variants_round_trip
 - test_codex_multimodal_tool_continuation_preserves_public_tool_names
 
-### 8.6 HER v2
+### 8.6 HERV3 compatibility implementation
 
-建议新增 tests/test_her_v2_multimodal.py：
+以下既有测试名保留 HERV2 阶段词汇以稳定历史回归定位；它们不是 HERV3
+前台架构名称。建议新增 tests/test_her_v2_multimodal.py：
 
 - test_direct_response_and_triage_receive_same_ordered_images
 - test_multimodal_direct_response_delivers_once_without_execution
@@ -485,7 +481,7 @@ input_modalities 与 fallback capabilities。
 ### Level 3：现有核心回归
 
 - runtime media 与 /long；
-- HER v2；
+- HERV3；
 - API Gateway；
 - HashiApiAdapter；
 - Codex bridge；
@@ -572,7 +568,7 @@ docs/her_multimedia_multimodal_plan.md 记录的是现有 HER 媒体工具结果
 - 设计已获批准；
 - Assertions、测试矩阵及旧测试处置已完成；
 - Provider 无关 canonical content、精确能力解析、逐附件路由、Gateway、Adapters、
-  HER v2、重试与 Sub-agent 传播实现已完成；
+  HERV3、重试与 Sub-agent 传播实现已完成；
 - 实现已合并至 `main` 的
   `cc010d11d69b4eb24c62c134dc57ac62ea42c277`，相关自动化覆盖已纳入通过的
   2,663 项离线产品测试和 232 项核心发布门禁；

@@ -62,6 +62,41 @@ def validate_operation(payload: Any) -> None:
         raise InteractionError("command_menu_command_invalid", 400)
 
 
+def replay_without_actions(result: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a saved outcome without reissuing now-stale interaction actions."""
+
+    replay = copy.deepcopy(dict(result))
+    replay["replayed"] = True
+    messages = replay.get("messages")
+    if not isinstance(messages, list):
+        return replay
+    sanitized = []
+    for message in messages:
+        if not isinstance(message, Mapping):
+            sanitized.append(message)
+            continue
+        item = dict(message)
+        item.pop("command_ui", None)
+        presentation = item.get("presentation")
+        if isinstance(presentation, Mapping):
+            projected = dict(presentation)
+            blocks = projected.get("content_blocks")
+            if isinstance(blocks, list):
+                projected["content_blocks"] = [
+                    block
+                    for block in blocks
+                    if not (
+                        isinstance(block, Mapping)
+                        and str(block.get("type") or "") == "action"
+                    )
+                ]
+            item["presentation"] = projected
+        sanitized.append(item)
+    replay["messages"] = sanitized
+    replay["refresh_required"] = True
+    return replay
+
+
 @dataclass(frozen=True)
 class Binding:
     """Identity must be supplied by an authenticated ingress, never a button."""
@@ -200,7 +235,7 @@ class MenuStore:
                 prior_digest, result, _ = self.requests[key]
                 if prior_digest != digest:
                     raise InteractionError("command_menu_request_conflict")
-                return copy.deepcopy(result)
+                return replay_without_actions(result)
             if len(self.requests) >= self.max_requests:
                 raise InteractionError("command_menu_request_capacity", 429)
             uncertain = InteractionError("command_menu_outcome_unknown").result()
@@ -224,9 +259,58 @@ class MenuStore:
                 "rows": copy.deepcopy(menu.rows) if not menu.closed else []}
 
     def message(self, menu: Menu, *, deleted: bool = False) -> dict:
-        return {"message_ref": "command-ui:" + menu.id, "channel": "command-ui",
-                "op": "delete" if deleted else "upsert", "text": menu.text,
-                "meta": {"parse_mode": menu.parse_mode}, "command_ui": self.render(menu)}
+        from orchestrator.frontend_contracts import normalize_content_blocks
+        from orchestrator.frontend_projection import transport_text_component
+
+        parse_mode = str(menu.parse_mode or "").strip().casefold()
+        content_blocks: list[dict[str, Any]] = [
+            transport_text_component(
+                menu.text,
+                "telegram-html"
+                if parse_mode == "html"
+                else "markdown"
+                if parse_mode.startswith("markdown")
+                else "plain-text",
+            )
+        ]
+        for row_index, row in enumerate(menu.rows):
+            for column_index, button in enumerate(row):
+                if not isinstance(button, Mapping) or bool(button.get("disabled")):
+                    continue
+                action_id = str(button.get("button_id") or "").strip()
+                payload: dict[str, Any] = {}
+                if not action_id and button.get("url"):
+                    material = (
+                        f"{menu.id}\0{row_index}\0{column_index}\0{button['url']}"
+                    )
+                    action_id = "link_" + hashlib.sha256(
+                        material.encode("utf-8")
+                    ).hexdigest()[:24]
+                    payload["url"] = str(button["url"])
+                if not action_id:
+                    continue
+                content_blocks.append(
+                    {
+                        "type": "action",
+                        "action_id": action_id,
+                        "label": str(button.get("text") or "Action"),
+                        "style": "primary",
+                        "payload": payload,
+                    }
+                )
+        return {
+            "message_ref": "command-ui:" + menu.id,
+            "channel": "command-ui",
+            "op": "delete" if deleted else "upsert",
+            "text": menu.text,
+            "meta": {"parse_mode": menu.parse_mode},
+            "command_ui": self.render(menu),
+            "presentation": {
+                "interface_kind": "display",
+                "semantic_kind": "command_result",
+                "content_blocks": normalize_content_blocks(content_blocks),
+            },
+        }
 
 
 class Capture:
@@ -285,7 +369,10 @@ class Capture:
                     if 0 < len(callback.encode("utf-8")) <= 64:
                         resolved = self.resolve_callback(callback)
                         if resolved:
-                            key = secrets.token_urlsafe(18)
+                            # ``token_urlsafe`` may begin with ``-`` or ``_``.
+                            # Prefix issued IDs so they always satisfy the
+                            # connector-neutral action token contract.
+                            key = "act_" + secrets.token_urlsafe(18)
                             # Raw callback data stays server-side.
                             actions[key] = (callback, resolved[0])
                             item = {"text": label, "button_id": key, "disabled": False}
@@ -346,7 +433,11 @@ class CapturedMessage:
 
     @property
     def _hashi_message_context(self):
-        return {"command_ui": self.capture.store.render(self.menu)}
+        projected = self.capture.store.message(self.menu)
+        return {
+            "command_ui": projected["command_ui"],
+            "frontend_presentation": projected["presentation"],
+        }
 
     def _hashi_bind_presentation_message(self, record: Mapping[str, Any] | None):
         message_id = str((record or {}).get("message_id") or "").strip()

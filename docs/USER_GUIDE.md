@@ -29,7 +29,7 @@ does not make all engines share one native conversation thread.
 | Restore task focus | /focus | Refocus work on the original request |
 | Withdraw queued work | /recall or /queue | Inspect or remove waiting requests |
 | Send a message later | /delay | Persist a delayed message for the normal queue |
-| Start a conversation | /new | Create/select a new HASHI conversation session |
+| Start a conversation | /new [title] | Create/select a new HASHI conversation session; an optional multi-word title is retained |
 | Replay a delivered result | /resend | Repeat output without new model work |
 | Retry a request | /retry | Reset the execution context and rerun the last retryable prompt |
 
@@ -41,9 +41,11 @@ for persistence and failure behavior.
 
 ## Projects and Workzones
 
-Use /workzone to attach a project to the current conversation. Backends and
-HASHI tools receive the exact enabled roots. Attaching several projects does
-not implicitly authorize their common parent directory.
+Use /workzone to attach projects to the current agent. The same revisioned
+Workzone set remains active across /new, /use, /fresh, and /archive. Backends
+and HASHI tools receive the exact enabled roots frozen when each request is
+accepted. Attaching several projects does not implicitly authorize their
+common parent directory.
 
 The agent's own workspace contains identity and continuity data; a project
 Workzone is where the requested project work belongs. Available filesystem
@@ -56,17 +58,20 @@ and preserves their native session continuity. /backend is available directly
 in both modes. A successful selection saves Fixed for a session-capable target
 and Flex for a stateless target; failure preserves the old selection and mode.
 
-Within HER v2, /provider and /model configure model routing. Its durable
-Engine Session remains bound to the HASHI conversation. Changing a HER model
-provider is distinct from selecting another top-level engine.
+Within HERV3, /provider selects a Model Provider and /model selects one of that
+Provider's configured models. Its durable Engine Session remains bound to the
+HASHI conversation. Changing a HER Model Provider is distinct from selecting
+another top-level Engine.
 
-For HER v2, /effort selects Direct, Strategic, or Planned execution.
-For other engines, it controls supported model reasoning settings. The live
-menus derive choices from configuration and capabilities; this guide does not
-maintain a second model/effort catalogue.
+For HERV3, /effort selects only a reasoning level supported by the current
+Provider/model. It never selects Direct, Strategic, Planned, or another HASHI
+workflow. HERV3 uses one continuous model/tool loop; Triage, Strategy,
+Planning, Replanning, Review, and stage-based Finalisation routing are removed.
+The live menus derive choices from configuration and capabilities; this guide
+does not maintain a second model/effort catalogue.
 
 See [working modes](https://github.com/Bazza1982/HASHI/blob/main/docs/FIXED_FLEX_WORKING_MODES.md)
-and the [HER three-mode decision](https://github.com/Bazza1982/HASHI/blob/main/docs/HER_V2_THREE_MODE_DECISION.md).
+and the [HERV3 upgrade](https://github.com/Bazza1982/HASHI/blob/main/docs/HERV3_UPGRADE.md).
 
 ## Memory and instructions
 
@@ -74,19 +79,24 @@ and the [HER three-mode decision](https://github.com/Bazza1982/HASHI/blob/main/d
 continuity layer; /notepad shows its current work card and archived pointers.
 /handoff restores recent completed exchanges for explicit context recovery.
 
-On HER v2, /fresh creates a durable context boundary and stops pre-boundary
-history and automatic continuity sources from entering new prompts. It
-preserves underlying records and files. Explicitly re-enable the desired
-memory or Habit source when needed.
+`/memory on` enables both recent-turn and saved-memory injection; `/memory
+pause` disables both. `/memory search on|off` changes only saved-memory search.
+The two choices persist independently and are reapplied by every Session
+command instead of being reset by a conversation change.
+
+On HERV3, /fresh creates a durable context boundary for Session history while
+preserving underlying records and files. It retains the user's two memory
+injection choices rather than silently enabling them.
 
 Use /sys for Agent-local instructions. Instance-global slots apply across
 agents in that instance and show confirmation for broad changes. A running
 request is not rewritten by changing a slot.
 
-HER Habit–Meditation is optional, disabled by default, and owned by HER v2.
+HER Habit–Meditation is optional, disabled by default, and owned by HERV3.
 The /habit menu controls agent-local learned advice. It is separate from
 ordinary skills and memory consolidation; it is not a guarantee that an agent
-improves after every task.
+improves after every task. Optional Strategy Cards are likewise retained as
+advice; neither feature recreates the retired staged routing pipeline.
 
 See [PCM](https://github.com/Bazza1982/HASHI/blob/main/docs/HASHI_PCM_SYSTEM_DESIGN.md),
 [Memory+](https://github.com/Bazza1982/HASHI/blob/main/docs/MEMORY_PLUS_V2.md),

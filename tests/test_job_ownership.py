@@ -205,8 +205,8 @@ def test_jobs_with_buttons_displays_owner_mismatch(tmp_path):
     text, markup = _build_jobs_with_buttons(runtime, "zelda", skill_manager, filter_agent="zelda")
 
     assert "resource owner mismatch: workspaces/lily" in text
-    assert "HER execution mode" in text
-    assert "Direct (zero) · fixed scheduler policy" in text
+    assert "HERV3 model effort" in text
+    assert "inherit current model effort" in text
     assert markup is not None
 
 

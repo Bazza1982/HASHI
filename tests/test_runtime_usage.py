@@ -42,6 +42,32 @@ async def test_usage_summary_is_owned_by_runtime_usage_module(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_her_v3_usage_retires_role_configured_model_placeholder(
+    tmp_path, monkeypatch
+):
+    tracker = types.ModuleType("tools.token_tracker")
+    tracker.get_summary = lambda *_args, **_kwargs: {
+        "all_time": {"requests": 1},
+        "session": None,
+        "by_model": {"role-configured": {"requests": 1}},
+    }
+    tracker.format_summary_text = (
+        lambda summary, **_kwargs: ",".join(summary["by_model"])
+    )
+    monkeypatch.setitem(sys.modules, "tools.token_tracker", tracker)
+    runtime, replies = _runtime(tmp_path)
+    runtime.backend_manager = SimpleNamespace(active_backend="her-v2")
+    runtime.config = SimpleNamespace(active_backend="her-v2")
+    update = SimpleNamespace(effective_user=SimpleNamespace(id=1))
+
+    with ui_language.language_scope(SimpleNamespace(), locale="zh-CN"):
+        await runtime_usage.cmd_usage(runtime, update, SimpleNamespace(args=[]))
+
+    assert "历史未归属" in replies[0][0]
+    assert "role-configured" not in replies[0][0]
+
+
+@pytest.mark.asyncio
 async def test_token_summary_handles_no_recorded_usage(tmp_path, monkeypatch):
     tracker = types.ModuleType("tools.token_tracker")
     tracker.fmt_tokens = str
@@ -125,6 +151,8 @@ async def test_token_summary_includes_localized_cache_savings_statistics(
 
     text, kwargs = replies[0]
     assert kwargs == {"parse_mode": "HTML"}
+    assert "<b>her-v3</b>" in text
+    assert "<b>her-v2</b>" not in text
     assert "服务提供方请求 40" in text
     assert "输出:52.2K（其中推理 38.1K）" in text
     assert "缓存命中 2.683M/2.916M（92.0%）" in text

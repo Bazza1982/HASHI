@@ -127,8 +127,8 @@ async def test_scheduler_list_and_status_use_hashi_authority(tmp_path):
         }
     ]
     assert list_payload["jobs"][0]["her_v2_effort_policy"] == {
-        "effective": "zero",
-        "source": "scheduled_direct_policy",
+        "effective": "inherit",
+        "source": "herv3_model_reasoning",
         "applies_to": "her-v2",
     }
 
@@ -183,6 +183,47 @@ async def test_scheduler_run_history_reads_isolated_scheduler_receipts(tmp_path)
     assert payload["count"] == 1
     assert payload["runs"][0]["request_id"] == "req-cron"
     assert payload["runs"][0]["result"] == "report sent"
+
+
+@pytest.mark.asyncio
+async def test_scheduler_run_history_uses_typed_task_identity(tmp_path):
+    server, runtime = _server(tmp_path)
+    state_dir = runtime.workspace_dir / "state"
+    state_dir.mkdir()
+    (state_dir / "cross_session_receipts.json").write_text(
+        json.dumps(
+            {
+                "version": 3,
+                "next_sequence": 2,
+                "receipts": [
+                    {
+                        "request_id": "req-typed-cron",
+                        "source": "scheduler",
+                        "activity_kind": "cron",
+                        "task_id": "daily-report",
+                        "summary": "Run the owner's morning report",
+                        "status": "completed",
+                        "completion_status": "completed",
+                        "stop_reason": "end_turn",
+                        "delivered": True,
+                        "assistant_text": "typed report sent",
+                        "last_sequence": 1,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    response = await server.handle_agent_scheduler_runs(
+        _FakeRequest(query={"kind": "cron", "job_id": "daily-report"})
+    )
+    payload = json.loads(response.text)
+
+    assert response.status == 200
+    assert payload["count"] == 1
+    assert payload["runs"][0]["request_id"] == "req-typed-cron"
+    assert payload["runs"][0]["result"] == "typed report sent"
 
 
 @pytest.mark.asyncio

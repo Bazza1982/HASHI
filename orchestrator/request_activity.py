@@ -66,10 +66,18 @@ class RequestActivityStore:
         logger: logging.Logger | None = None,
         max_requests: int = 64,
         max_events_per_request: int = 256,
+        epoch: int | None = None,
     ) -> None:
         self.logger = logger or logging.getLogger(__name__)
         self.max_requests = max(8, min(int(max_requests), 256))
         self.max_events_per_request = max(32, min(int(max_events_per_request), 1_024))
+        # This volatile epoch changes whenever the owning Function process is
+        # replaced.  Frontends keep it separate from the durable Session
+        # cursor so a restart cannot make old ephemeral positions look valid.
+        self.epoch = max(
+            1,
+            int(epoch if epoch is not None else time.time_ns() // 1_000_000),
+        )
         self._lock = threading.RLock()
         self._requests: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._presentation_settings_by_request: dict[
@@ -406,6 +414,7 @@ class RequestActivityStore:
                     "ok": False,
                     "error": "request activity not found",
                     "error_code": "request_activity_not_found",
+                    "ephemeral_epoch": self.epoch,
                 }
             events = [
                 dict(event)
@@ -415,6 +424,7 @@ class RequestActivityStore:
             return {
                 "ok": True,
                 "request_id": record["request_id"],
+                "ephemeral_epoch": self.epoch,
                 "state": record["state"],
                 "terminal": bool(record["terminal"]),
                 "success": record["success"],

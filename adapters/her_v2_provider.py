@@ -70,6 +70,11 @@ from orchestrator.her_v2.models import (
     ToolReceiptStatus,
 )
 from orchestrator.her_v2.presentation import (
+    MAX_FINAL_STYLE_TEXT_CHARS,
+    FinalStyleRenderer,
+    FinalStyleRequest,
+    FinalStyleResult,
+    PresentationRequirement,
     RenderedRequiredMessage,
     RequiredPersonaRenderer,
     RequiredUserMessage,
@@ -79,6 +84,7 @@ from orchestrator.her_v2.prompts import (
     render_direct_system_prompt,
     render_execution_environment_contract,
     render_execution_system_prompt,
+    render_final_style_system_prompt,
     render_finalisation_system_prompt,
     render_immediate_response_system_prompt,
     render_internal_stage_system_prompt,
@@ -92,6 +98,7 @@ from orchestrator.her_v2.retry import (
     DEFAULT_PROVIDER_RETRY_POLICY,
     ProviderRetryPolicy,
 )
+from orchestrator.her_v2.v3_prompt import compile_main_prompt
 from orchestrator.her_v2.task_state import (
     HASHI_TASK_DELTA_ARGUMENT,
     HERTaskState,
@@ -664,7 +671,9 @@ def _registry_is_read_only(registry: Any, tool_name: str) -> bool:
 def _manager_authorises_profile(manager: Any, profile: ProviderProfile) -> bool:
     """Accept provider/model targets configured at the HASHI instance level."""
 
-    option_getter = getattr(manager, "_her_v2_provider_option", None)
+    option_getter = getattr(manager, "_her_v3_provider_option", None)
+    if not callable(option_getter):
+        option_getter = getattr(manager, "_her_v2_provider_option", None)
     if callable(option_getter):
         option = option_getter(profile.engine)
         return bool(
@@ -1547,12 +1556,14 @@ class _CognitiveControlToolRegistry:
         audit_log: DurableAuditLog | None = None,
         provider: str = "",
         model: str = "",
+        turn_services: Any | None = None,
     ) -> None:
         self._base = base
         self._request = request
         self._audit_log = audit_log
         self._provider = str(provider or "")
         self._model = str(model or "")
+        self._turn_services = turn_services
         self._audit_serial = 0
         self.task_state = (
             request.task_state
@@ -1656,7 +1667,10 @@ class _CognitiveControlToolRegistry:
                 if str((item.get("function") or {}).get("name") or "") in allowed
             ]
         )
-        return [self._with_task_delta(item) for item in selected]
+        # HERV3 does not force the model to maintain a parallel TaskState on
+        # every tool call. The deterministic cycle detector still observes the
+        # real tool/result stream, and legacy deltas remain accepted if supplied.
+        return selected
 
     def allowed_tool_names(self) -> tuple[str, ...]:
         if self.controller.awaiting_decision:
@@ -1826,18 +1840,19 @@ class _CognitiveControlToolRegistry:
         )
         task_snapshot = self.task_state.prompt_snapshot()
         output = str(getattr(result, "output", "") or "").rstrip()
-        output += "\n\nHASHI_TASK_STATE: " + json.dumps(
-            task_snapshot,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        details.update(
-            {
-                "task_state_delta": delta_application.as_dict(),
-                "task_state": task_snapshot,
-            }
-        )
+        if delta_application.status != "missing":
+            output += "\n\nHASHI_TASK_STATE: " + json.dumps(
+                task_snapshot,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            details.update(
+                {
+                    "task_state_delta": delta_application.as_dict(),
+                    "task_state": task_snapshot,
+                }
+            )
         if interrupt is not None:
             payload = self.controller.interrupt_payload()
             self._audit(
@@ -1859,6 +1874,15 @@ class _CognitiveControlToolRegistry:
                     "cognitive_interrupt": interrupt.as_dict(),
                     "cognitive_control": self.controller.snapshot(),
                 }
+            )
+        if self._turn_services is not None:
+            self._turn_services.tool_completed(
+                name,
+                tool_call_id=str(getattr(result, "tool_call_id", "") or tool_call_id),
+                output=str(getattr(result, "output", "") or ""),
+                is_error=bool(getattr(result, "is_error", False)),
+                details=details,
+                cognitive_interrupt=(interrupt.as_dict() if interrupt is not None else None),
             )
         return self._result(
             tool_call_id=str(getattr(result, "tool_call_id", "") or tool_call_id),
@@ -1928,6 +1952,20 @@ class _CognitiveControlToolRegistry:
             )
 
         semantic_arguments, delta = self._split_arguments(arguments)
+        if self._turn_services is not None:
+            notice = str(self._turn_services.take_intervention() or "").strip()
+            if notice:
+                return self._result(
+                    tool_call_id=tool_call_id,
+                    output=(
+                        "HASHI_AGENT_COMPANION_INTERVENTION\n" + notice +
+                        "\nThe requested tool action was not executed. Decide the next "
+                        "step yourself; do not repeat mechanically."
+                    ),
+                    is_error=True,
+                    details={"control_disposition": "agent_companion_intervention"},
+                )
+            self._turn_services.tool_started(name, semantic_arguments, tool_call_id)
         delta_application = self._apply_task_delta(
             delta,
             tool_call_id=tool_call_id,
@@ -2307,6 +2345,7 @@ class HashiStageProvider(StageProvider):
         self.tool_registry = tool_registry
         self.on_stream_event = on_stream_event
         self._commentary_port: CommentaryPort | None = None
+        self._turn_services: Any | None = None
         self.silent = silent
         self.retry_policy = retry_policy or DEFAULT_PROVIDER_RETRY_POLICY
         self.audit_log = audit_log
@@ -2344,6 +2383,11 @@ class HashiStageProvider(StageProvider):
         """Bind the typed Persona lane for provider-authored commentary."""
 
         self._commentary_port = commentary
+
+    def bind_turn_services(self, services: Any | None) -> None:
+        """Bind request-local HERV3 observability/liveness sidecars."""
+
+        self._turn_services = services
 
     def _track_active_backend(self, backend: Any) -> None:
         with self._active_backend_lock:
@@ -2709,6 +2753,7 @@ class HashiStageProvider(StageProvider):
         invocation_id: str = "",
         attempt: int = 1,
         recovery_kind: str = "none",
+        notify_observer: bool = True,
     ) -> None:
         """Record one per-stage/per-persona usage line item with provenance."""
         metadata = getattr(response, "stream_metadata", None)
@@ -2869,7 +2914,8 @@ class HashiStageProvider(StageProvider):
             line_item.provider_call_latency_ms = provider_call_latency_ms
             observed_provider_request_ids.add(provider_request_id)
             self.usage_line_items.append(line_item)
-            self._notify_usage_observer(line_item)
+            if notify_observer:
+                self._notify_usage_observer(line_item)
 
     def _accumulate_usage(self, usage: TokenUsage | None) -> None:
         if usage is None:
@@ -2997,6 +3043,7 @@ class HashiStageProvider(StageProvider):
                 invocation_id=invocation_id,
                 attempt=attempt,
                 recovery_kind=recovery_kind,
+                notify_observer=phase != "final_style",
             )
 
         setter(observe)
@@ -3028,6 +3075,29 @@ class HashiStageProvider(StageProvider):
             parent_request_id="",
             line_items=list(self.usage_line_items),
         )
+
+    def mark_final_style_decision(self, request_id: str, decision: str) -> None:
+        """Classify and durably record a settled style call exactly once."""
+
+        resolved = (
+            "final_style_rewrite"
+            if str(decision or "").strip().casefold() == "rewrite"
+            else "final_style_check"
+        )
+        target = str(request_id)
+        for item in self.usage_line_items:
+            item_request = str(getattr(item, "request_id", "") or "")
+            parent_request = str(getattr(item, "parent_request_id", "") or "")
+            if (
+                target in {item_request, parent_request}
+                and str(getattr(item, "phase", "") or "") == "final_style"
+            ):
+                item.phase = resolved
+                try:
+                    self._notify_usage_observer(item)
+                except Exception:
+                    item.phase = "final_style"
+                    raise
 
     def _record_unreceipted_provider_attempt(
         self,
@@ -3225,6 +3295,25 @@ class HashiStageProvider(StageProvider):
         # HER effort label.  Adapters may consume either the explicit option or
         # their established provider-specific compatibility field.
         backend_extra = dict(getattr(backend.config, "extra", None) or {})
+        model_tool_support = backend_extra.get("model_tool_support")
+        if (
+            isinstance(model_tool_support, Mapping)
+            and model_tool_support.get(profile.model) is False
+            and request.allow_tools
+        ):
+            if request.stage not in {Stage.DIRECT, Stage.IMMEDIATE_RESPONSE}:
+                self._untrack_active_backend(backend)
+                await backend.shutdown()
+                raise StageInvocationError(
+                    f"model {profile.model!r} cannot satisfy the stage tool contract",
+                    retryable=False,
+                    code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+                    human_description=(
+                        "The selected model is configured for conversation only; "
+                        "choose a tool-capable model for this stage."
+                    ),
+                )
+            request = replace(request, allow_tools=False, allow_side_effects=False)
         if profile.reasoning is not None:
             backend_extra["provider_reasoning"] = profile.reasoning
             backend_extra["reasoning_effort"] = profile.reasoning
@@ -3370,6 +3459,7 @@ class HashiStageProvider(StageProvider):
                 audit_log=self.audit_log,
                 provider=profile.engine,
                 model=profile.model,
+                turn_services=self._turn_services,
             )
             lifecycle_task_state = cognitive_registry.task_state
             selected_registry = cognitive_registry
@@ -4018,20 +4108,33 @@ class HashiStageProvider(StageProvider):
                             if isinstance(raw_skills, (list, tuple))
                             else []
                         )
-                        system_prompt = _direct_system_prompt(
-                            source,
-                            goal=request.goal,
-                            habit_catalogue=habits,
-                            skills_catalogue=skills,
-                            tool_catalogue=tool_catalogue,
-                            strategy_playbook=(
-                                request.context.get("strategy_playbook")
-                                if isinstance(
-                                    request.context.get("strategy_playbook"), Mapping
-                                )
-                                else None
-                            ),
-                        )
+                        if request.context.get("her_v3"):
+                            pcm_input = request.context.get("pcm_input")
+                            pcm_input = (
+                                dict(pcm_input) if isinstance(pcm_input, Mapping) else {}
+                            )
+                            system_prompt, stage_prompt = compile_main_prompt(
+                                pcm_input=pcm_input,
+                                fallback_request=request.goal,
+                                context=request.context,
+                                fallback_persona=(source.guidance if source.usable else ""),
+                                tools_available=request.allow_tools,
+                            )
+                        else:
+                            system_prompt = _direct_system_prompt(
+                                source,
+                                goal=request.goal,
+                                habit_catalogue=habits,
+                                skills_catalogue=skills,
+                                tool_catalogue=tool_catalogue,
+                                strategy_playbook=(
+                                    request.context.get("strategy_playbook")
+                                    if isinstance(
+                                        request.context.get("strategy_playbook"), Mapping
+                                    )
+                                    else None
+                                ),
+                            )
                     else:
                         raw_sub_agent_results = request.context.get(
                             "sub_agent_results", []
@@ -4234,13 +4337,14 @@ class HashiStageProvider(StageProvider):
                 contracts = []
                 if cognitive_registry is not None:
                     contracts.append(cognitive_system_contract())
-                contracts.append(
-                    task_state_contract(
-                        lifecycle_task_state.prompt_snapshot(),
-                        stage=request.stage.value,
-                        tool_enabled=cognitive_registry is not None,
+                if not request.context.get("her_v3"):
+                    contracts.append(
+                        task_state_contract(
+                            lifecycle_task_state.prompt_snapshot(),
+                            stage=request.stage.value,
+                            tool_enabled=cognitive_registry is not None,
+                        )
                     )
-                )
                 contract = "\n\n".join(contracts)
                 current_system = str(getattr(backend, "sys_prompt", "") or "").strip()
                 if current_system:
@@ -4797,6 +4901,45 @@ class HashiStageProvider(StageProvider):
             max_chars=MAX_PACKAGED_COMMENTARY_CHARS,
         )
 
+    async def package_final_style(
+        self,
+        profile: ProviderProfile,
+        *,
+        request: FinalStyleRequest,
+        request_id: str,
+    ) -> str:
+        """Check and optionally rewrite one final answer without task authority."""
+
+        payload = {
+            "version": 1,
+            "main_model_draft": request.draft_text,
+            "current_user_request": request.current_request,
+            "presentation_requirements": [
+                {
+                    "key": item.key,
+                    "title": item.title,
+                    "authority": item.authority,
+                    "text": item.text,
+                }
+                for item in request.requirements
+            ],
+        }
+        return await self._package_persona_text(
+            profile,
+            prompt=(
+                "FINAL STYLE INPUT (quoted, read-only JSON)\n"
+                + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+            ),
+            system_prompt=render_final_style_system_prompt(),
+            request_id=request_id,
+            message_label="final style",
+            max_chars=MAX_FINAL_STYLE_TEXT_CHARS + 512,
+            phase="final_style",
+            role="final_style_renderer",
+            audit_stage="final_style_presentation",
+            audit_event_prefix="final_style_provider",
+        )
+
     async def _package_persona_text(
         self,
         profile: ProviderProfile,
@@ -4806,13 +4949,17 @@ class HashiStageProvider(StageProvider):
         request_id: str,
         message_label: str,
         max_chars: int,
+        phase: str = "persona",
+        role: str = "persona_packager",
+        audit_stage: str = "persona_presentation",
+        audit_event_prefix: str = "persona_provider",
     ) -> str:
         """Run one isolated, tool-free Persona call with one typed recovery."""
 
         self._persona_invocation_serial += 1
         invocation_serial = self._persona_invocation_serial
         invocation_id = (
-            f"{request_id}:persona:{message_label}:invocation:{invocation_serial}"
+            f"{request_id}:{phase}:{message_label}:invocation:{invocation_serial}"
         )
         invariant_payload = {
             "provider": profile.engine,
@@ -4840,7 +4987,7 @@ class HashiStageProvider(StageProvider):
             str(request_id),
             ("", ""),
         )
-        turn_id = bound_turn_id or f"persona:{request_id}"
+        turn_id = bound_turn_id or f"{phase}:{request_id}"
         request_ref = bound_request_ref or f"hashi-request:{request_id}"
         last_error: StageInvocationError | None = None
         for attempt in range(1, self.retry_policy.max_provider_retries + 2):
@@ -4855,15 +5002,19 @@ class HashiStageProvider(StageProvider):
                     max_chars=max_chars,
                     attempt=attempt,
                     activity=tracker,
+                    phase=phase,
+                    role=role,
+                    audit_turn_id=turn_id,
+                    audit_request_ref=request_ref,
                 )
                 if self.audit_log is not None:
                     self.audit_log.append(
                         event_id=f"{invocation_id}:attempt:{attempt}:completed",
                         turn_id=turn_id,
                         request_ref=request_ref,
-                        stage="persona_presentation",
-                        role="persona_packager",
-                        event="persona_provider_attempt_completed",
+                        stage=audit_stage,
+                        role=role,
+                        event=f"{audit_event_prefix}_attempt_completed",
                         provider=profile.engine,
                         model=profile.model,
                         attempt=attempt,
@@ -4913,9 +5064,9 @@ class HashiStageProvider(StageProvider):
                     event_id=f"{invocation_id}:attempt:{attempt}:failed",
                     turn_id=turn_id,
                     request_ref=request_ref,
-                    stage="persona_presentation",
-                    role="persona_packager",
-                    event="persona_provider_attempt_failed",
+                    stage=audit_stage,
+                    role=role,
+                    event=f"{audit_event_prefix}_attempt_failed",
                     provider=profile.engine,
                     model=profile.model,
                     attempt=attempt,
@@ -4942,9 +5093,9 @@ class HashiStageProvider(StageProvider):
                     event_id=f"{invocation_id}:attempt:{attempt}:retry-scheduled",
                     turn_id=turn_id,
                     request_ref=request_ref,
-                    stage="persona_presentation",
-                    role="persona_packager",
-                    event="persona_provider_retry_scheduled",
+                    stage=audit_stage,
+                    role=role,
+                    event=f"{audit_event_prefix}_retry_scheduled",
                     provider=profile.engine,
                     model=profile.model,
                     attempt=attempt,
@@ -4983,6 +5134,10 @@ class HashiStageProvider(StageProvider):
         max_chars: int,
         attempt: int,
         activity: ProviderActivityTracker,
+        phase: str,
+        role: str,
+        audit_turn_id: str,
+        audit_request_ref: str,
     ) -> str:
         backend = None
         try:
@@ -5034,22 +5189,18 @@ class HashiStageProvider(StageProvider):
                     code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
                     human_description="The Persona provider could not be initialized.",
                 )
-            persona_turn_id, persona_request_ref = self._persona_audit_contexts.get(
-                str(request_id),
-                ("", ""),
-            )
             self._bind_provider_call_observer(
                 backend,
                 request_id=request_id,
-                phase="persona",
+                phase=phase,
                 engine=profile.engine,
                 model=profile.model,
                 invocation_id=request_id,
                 attempt=attempt,
                 recovery_kind=("fresh_connection_retry" if attempt > 1 else "none"),
-                turn_id=persona_turn_id,
-                request_ref=persona_request_ref,
-                role="persona_packager",
+                turn_id=audit_turn_id,
+                request_ref=audit_request_ref,
+                role=role,
             )
             effective_prompt = prompt
             if not _install_system_prompt(backend, system_prompt):
@@ -5072,10 +5223,11 @@ class HashiStageProvider(StageProvider):
             self.cost_usd += float(response.cost_usd or 0.0)
             self._record_usage_line_item(
                 request_id=request_id,
-                phase="persona",
+                phase=phase,
                 engine=profile.engine,
                 model=profile.model,
                 response=response,
+                notify_observer=phase != "final_style",
             )
             text = str(response.text or "").strip()
             if not text:
@@ -5109,6 +5261,111 @@ class HashiStageProvider(StageProvider):
             if backend is not None:
                 self._untrack_active_backend(backend)
                 await backend.shutdown()
+
+
+class _ConfiguredFinalStyleRenderer(FinalStyleRenderer):
+    """Use the auxiliary profile for one fail-open presentation-only check."""
+
+    def __init__(
+        self,
+        *,
+        provider: HashiStageProvider,
+        profile: ProviderProfile,
+        source: her_persona.HERPersonaPackagingSource,
+        request_id: str,
+        logger: logging.Logger,
+    ) -> None:
+        self.provider = provider
+        self.profile = profile
+        self.source = source
+        self.request_id = request_id
+        self.logger = logger
+        self.render_index = 0
+
+    async def render(self, request: FinalStyleRequest) -> FinalStyleResult:
+        effective = request
+        if self.source.usable and not any(
+            item.authority == "persona" for item in request.requirements
+        ):
+            effective = replace(
+                request,
+                requirements=(
+                    *request.requirements,
+                    PresentationRequirement(
+                        key="agent_persona_fallback",
+                        title="Presentation Persona",
+                        authority="persona",
+                        text=self.source.guidance,
+                    ),
+                ),
+            )
+        self.render_index += 1
+        render_request_id = (
+            f"{self.request_id}:final-style:{self.render_index}"
+        )
+        try:
+            binder = getattr(self.provider, "bind_persona_audit_context", None)
+            if callable(binder):
+                binder(
+                    render_request_id,
+                    turn_id=request.turn_id,
+                    request_ref=f"hashi-request:{self.request_id}",
+                )
+            raw = await self.provider.package_final_style(
+                self.profile,
+                request=effective,
+                request_id=render_request_id,
+            )
+            try:
+                decision, text = self._parse(raw, original=request.draft_text)
+            except Exception:
+                marker = getattr(self.provider, "mark_final_style_decision", None)
+                if callable(marker):
+                    marker(render_request_id, "keep")
+                raise
+            marker = getattr(self.provider, "mark_final_style_decision", None)
+            if callable(marker):
+                marker(render_request_id, decision)
+            return FinalStyleResult(
+                source_event_id=request.event_id,
+                decision=decision,
+                text=text,
+                provenance="final_style_renderer",
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - optional style must fail open
+            marker = getattr(self.provider, "mark_final_style_decision", None)
+            if callable(marker):
+                marker(render_request_id, "keep")
+            self.logger.warning(
+                "HERV3 final style check failed safely: %s", type(exc).__name__
+            )
+            return FinalStyleResult(
+                source_event_id=request.event_id,
+                decision="keep",
+                text=request.draft_text,
+                provenance="main_model_fallback",
+                fallback=True,
+                error_type=type(exc).__name__,
+            )
+
+    @staticmethod
+    def _parse(raw: str, *, original: str) -> tuple[str, str]:
+        value = json.loads(str(raw or ""))
+        if not isinstance(value, dict):
+            raise ValueError("final style response must be a JSON object")
+        decision = value.get("decision")
+        if decision == "keep" and set(value) == {"decision"}:
+            return "keep", original
+        if decision == "rewrite" and set(value) == {"decision", "text"}:
+            text = value.get("text")
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError("final style rewrite must contain text")
+            if len(text.strip()) > MAX_FINAL_STYLE_TEXT_CHARS:
+                raise ValueError("final style rewrite exceeds the bounded size")
+            return "rewrite", text.strip()
+        raise ValueError("invalid final style decision contract")
 
 
 class _ConfiguredPersonaPackager(PersonaPackager, RequiredPersonaRenderer):

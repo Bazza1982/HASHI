@@ -587,9 +587,9 @@ async def execute_dream(
                         )
                         if not callable(invoke_model):
                             raise RuntimeError(
-                                "HER v2 JSON Repair route is unavailable"
+                                "HERV3 JSON Repair service is unavailable"
                                 if repairing_json
-                                else "HER v2 Dream route is unavailable"
+                                else "HERV3 Dream service is unavailable"
                             )
                         result = await invoke_model(
                             prompt,

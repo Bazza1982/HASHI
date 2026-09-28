@@ -6,9 +6,9 @@ import time
 from pathlib import Path
 from typing import Any, Mapping
 
-from orchestrator import runtime_retry
+from orchestrator import runtime_retry, runtime_session
 
-STATE_VERSION = 2
+STATE_VERSION = 3
 STATE_FILENAME = "cross_session_receipts.json"
 MAX_RECEIPTS = 64
 MAX_CONTEXT_RECEIPTS = 6
@@ -131,7 +131,21 @@ def _chat_matches(receipt: Mapping[str, Any], chat_id: Any) -> bool:
 
 
 def _session_matches(receipt: Mapping[str, Any], item: Any) -> bool:
-    """Keep provider-session receipts inside one HASHI Session generation."""
+    """Match conversation receipts while projecting Agent activity by owner."""
+
+    receipt_is_activity = (
+        str(receipt.get("session_surface") or "").strip().casefold()
+        == runtime_session.AGENT_ACTIVITY_SURFACE
+        or runtime_session.is_agent_activity_source(receipt.get("source"))
+    )
+    if receipt_is_activity:
+        receipt_owner = str(receipt.get("owner_id") or "").strip()
+        item_owner = str(_value(item, "owner_id", "") or "").strip()
+        if receipt_owner and item_owner:
+            return receipt_owner == item_owner
+        # Older receipts predate owner projection. Keep their original
+        # transport boundary instead of widening them during migration.
+        return _chat_matches(receipt, _value(item, "chat_id", None))
 
     session_id = str(_value(item, "session_id", "") or "")
     if not session_id:
@@ -257,8 +271,7 @@ def _next_sequence(state: dict[str, Any]) -> int:
 
 
 def _should_record(item: Any) -> bool:
-    source = str(_value(item, "source", "") or "").strip().lower()
-    return source.startswith("scheduler")
+    return runtime_session.is_agent_activity_source(_value(item, "source", ""))
 
 
 def record_turn_result(
@@ -284,6 +297,16 @@ def record_turn_result(
     sequence = _next_sequence(state)
     model = _current_model(runtime)
     backend = str(getattr(getattr(runtime, "config", None), "active_backend", "") or "")
+    request_metadata = _value(item, "request_metadata", None)
+    request_metadata = (
+        dict(request_metadata) if isinstance(request_metadata, Mapping) else {}
+    )
+    activity_context = request_metadata.get("agent_activity_context")
+    if not isinstance(activity_context, Mapping):
+        activity_context = _value(item, "scheduler_context", None)
+    activity_context = (
+        dict(activity_context) if isinstance(activity_context, Mapping) else {}
+    )
 
     receipt_id = (
         f"{getattr(runtime, 'name', 'agent')}:"
@@ -293,7 +316,21 @@ def record_turn_result(
         "receipt_id": receipt_id,
         "request_id": str(_value(item, "request_id", "") or ""),
         "chat_id": _value(item, "chat_id", None),
+        "owner_id": str(_value(item, "owner_id", "") or ""),
+        "agent_id": str(getattr(runtime, "name", "") or ""),
         "source": str(_value(item, "source", "") or ""),
+        "session_surface": str(
+            _value(item, "session_surface", "")
+            or runtime_session.AGENT_ACTIVITY_SURFACE
+        ),
+        "task_id": str(activity_context.get("task_id") or ""),
+        "activity_kind": str(activity_context.get("kind") or ""),
+        "origin_session_id": str(
+            activity_context.get("origin_session_id") or ""
+        ),
+        "origin_request_id": str(
+            activity_context.get("origin_request_id") or ""
+        ),
         "summary": _bounded_text(_value(item, "summary", ""), 1_000),
         "task_prompt": _bounded_text(
             _value(item, "prompt", ""), MAX_STORED_PROMPT_CHARS
@@ -376,14 +413,13 @@ def prepare_reply_binding(runtime: Any, item: Any, effective_prompt: str) -> str
 def context_section(runtime: Any, item: Any) -> list[tuple[str, str]]:
     """Inject recent scheduled-turn receipts into fixed and flex user turns."""
     source = str(_value(item, "source", "") or "").strip().lower()
-    if source.startswith("scheduler") or source in _SKIP_CONTEXT_SOURCES:
+    if runtime_session.is_agent_activity_source(source) or source in _SKIP_CONTEXT_SOURCES:
         return []
     state = _read_state(runtime)
     receipts = [
         receipt
         for receipt in state["receipts"]
-        if _chat_matches(receipt, _value(item, "chat_id", None))
-        and _session_matches(receipt, item)
+        if _session_matches(receipt, item)
         and _after_fresh_boundary(runtime, receipt)
     ]
     if not receipts:
@@ -426,13 +462,11 @@ def timeline_entries(runtime: Any, item: Any) -> list[dict[str, Any]]:
     """
 
     source = str(_value(item, "source", "") or "").strip().lower()
-    if source.startswith("scheduler") or source in _SKIP_CONTEXT_SOURCES:
+    if runtime_session.is_agent_activity_source(source) or source in _SKIP_CONTEXT_SOURCES:
         return []
 
     entries: list[dict[str, Any]] = []
     for receipt in _read_state(runtime)["receipts"]:
-        if not _chat_matches(receipt, _value(item, "chat_id", None)):
-            continue
         if not _session_matches(receipt, item):
             continue
         if not _after_fresh_boundary(runtime, receipt):

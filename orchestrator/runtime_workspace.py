@@ -13,9 +13,11 @@ from orchestrator.handoff_builder import HandoffBuilder
 from orchestrator.her_v2.runtime_configuration import HER_V2_CONFIGURATION_STATE_KEY
 from orchestrator.memory_index import MemoryIndex
 from orchestrator.memory_search_mode import (
-    apply_memory_search_preference,
+    apply_memory_injection_preferences,
     is_memory_search_enabled,
+    is_memory_turns_enabled,
     set_memory_search_enabled,
+    set_memory_turns_enabled,
 )
 from orchestrator.memory_plus_mode import (
     ensure_memory_plus_notepad,
@@ -126,11 +128,12 @@ async def cmd_memory(runtime: Any, update: Any, context: Any) -> None:
     if args in ("", "status"):
         from orchestrator import runtime_session
 
+        turns_enabled = is_memory_turns_enabled(runtime.workspace_dir)
         search_enabled = is_memory_search_enabled(runtime.workspace_dir)
         if assembler:
             turns_state = (
                 f"{ui_language.tr('common.on')} ✅"
-                if assembler.turns_injection_enabled
+                if turns_enabled
                 else f"{ui_language.tr('common.off')} ⏸️"
             )
             search_state = (
@@ -216,6 +219,7 @@ async def cmd_memory(runtime: Any, update: Any, context: Any) -> None:
         from orchestrator.fresh_context import resume_automatic_context
 
         set_memory_search_enabled(runtime.workspace_dir, True)
+        set_memory_turns_enabled(runtime.workspace_dir, True)
         resume_automatic_context(runtime)
         if assembler:
             assembler.turns_injection_enabled = True
@@ -223,6 +227,7 @@ async def cmd_memory(runtime: Any, update: Any, context: Any) -> None:
         await runtime._reply_text(update, ui_language.tr("memory.injection_on"))
     elif args == "pause":
         set_memory_search_enabled(runtime.workspace_dir, False)
+        set_memory_turns_enabled(runtime.workspace_dir, False)
         if assembler:
             assembler.turns_injection_enabled = False
             assembler.saved_memory_injection_enabled = False
@@ -479,7 +484,7 @@ def _reinitialize_workspace_runtime(runtime: Any) -> None:
         skill_catalog_provider=runtime._get_available_skill_catalogue,
         tool_catalog_provider=runtime._get_available_tool_catalogue,
     )
-    apply_memory_search_preference(runtime.context_assembler, runtime.workspace_dir)
+    apply_memory_injection_preferences(runtime.context_assembler, runtime.workspace_dir)
     runtime.reload_post_turn_observers()
 
 

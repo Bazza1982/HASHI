@@ -41,7 +41,7 @@ provide an opaque client/channel key. These values bind projections and delivery
 state; they do not grant authorization. Every operation rechecks the
 authenticated owner and target resource.
 
-Engine choice is also hidden from clients. HER v2 and other Engine Providers
+Engine choice is also hidden from clients. HERV3 and other Engine Providers
 receive the same outer HASHI Conversation Session identity and
 context-generation semantics. Any Engine Session or Model Provider Context
 behind that binding remains an internal boundary.

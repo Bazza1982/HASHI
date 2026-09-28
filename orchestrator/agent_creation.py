@@ -2,7 +2,7 @@
 
 Converts a public creation intent (name / display_name / backend / model /
 effort / is_active) into the internal ``agents.json`` row.  HASHI is the only
-authority for validation, backend resolution, HER v2 profile construction,
+authority for validation, backend resolution, HERV3 target construction,
 workspace creation, lifecycle identity and configuration publication.
 Workbench and other callers never build raw HASHI configuration.
 
@@ -27,23 +27,23 @@ from orchestrator.config import default_agent_mode_for_backend
 from orchestrator.config_admin import ConfigAdmin
 from orchestrator.config_json import ConfigConflictError, ConfigDurabilityError
 from orchestrator.flexible_backend_registry import (
-    BACKEND_REGISTRY,
     CLAUDE_MODEL_ALIASES,
     HER_V2_ENGINE,
     REMOVED_ENGINE_IDS,
     apply_backend_policy_defaults,
     canonical_backend_engine,
     get_available_efforts,
+    get_available_models,
     get_backend_entry,
-    get_default_effort,
     get_default_model,
     get_provider_reasoning_efforts,
     is_selectable_backend,
     normalize_effort,
+    public_backend_engine,
 )
-from orchestrator.her_v2.models import parse_effort
-from orchestrator.her_v2.runtime_configuration import (
-    build_her_v2_provider_options,
+from orchestrator.her_v2.v3_config import (
+    HERv3ModelTarget,
+    build_v3_provider_options,
 )
 from orchestrator.pathing import BridgePaths
 
@@ -54,36 +54,7 @@ logger = logging.getLogger("BridgeU.AgentCreation")
 # components, so nothing that could traverse outside workspaces_root.
 AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
-DEFAULT_HER_EFFORT = str(get_default_effort(HER_V2_ENGINE) or "medium")
-HER_CREATION_EFFORTS = frozenset(get_available_efforts(HER_V2_ENGINE))
-
-# The five HER v2 role profiles every new Agent must receive.
-HER_ROLE_ORDER: tuple[str, ...] = (
-    "lightweight",
-    "triage",
-    "premium",
-    "reviewer",
-    "orchestrator",
-)
-
-# One internal provider profile for every public orchestration effort.  HER
-# effort selects Direct / Strategic / Planned orchestration and must never
-# select provider models or provider reasoning.  Models are resolved from the
-# instance's configured HER providers, never hard-coded model names.
-_HER_DEFAULT_PROFILE_POLICY: dict[str, tuple[str, str]] = {
-    "lightweight": ("fast", "moderate"),
-    "triage": ("fast", "moderate"),
-    "premium": ("pro", "high"),
-    "reviewer": ("pro", "max"),
-    "orchestrator": ("pro", "max"),
-}
-
-_REASONING_PREFERENCE: dict[str, tuple[str, ...]] = {
-    "moderate": ("medium", "high", "low", "none", "off"),
-    "high": ("high", "xhigh", "max", "medium"),
-    "max": ("max",),
-}
-
+DEFAULT_HER_EFFORT = "high"
 
 class AgentCreationError(Exception):
     """Base class for domain errors mapped to stable HTTP error codes."""
@@ -184,157 +155,110 @@ def _provider_profiles(global_config: Any) -> dict[str, dict[str, Any]]:
     }
 
 
-def _pick_reasoning(engine: str, model: str | None, tier: str) -> str | None:
-    """Pick a valid provider reasoning value for the selected engine/model."""
-    efforts = [
-        str(value).strip().lower()
-        for value in get_provider_reasoning_efforts(engine, model)
-        if str(value or "").strip()
-    ]
-    if not efforts:
-        return None
-    if tier == "max":
-        return efforts[-1]
-    for candidate in _REASONING_PREFERENCE.get(tier, ()):
-        if candidate in efforts:
-            return candidate
-    return efforts[-1]
-
-
-def _creation_seed(provider_profiles: dict[str, dict[str, Any]]) -> dict:
-    """Build a minimal valid her_v2 seed for the provider-option builder.
-
-    ``resolve_her_v2_configuration`` validates route model slots, so the
-    seed carries all five role profiles with one placeholder engine/model.
-    The seed only makes resolution pass; the option list itself is derived
-    from the real provider profiles.  Mirrors ``_provider_engine`` naming
-    conventions and never hard-codes provider/model names.
-    """
-    for raw_name, raw_profile in provider_profiles.items():
-        name = str(raw_name).strip().lower()
-        explicit = canonical_backend_engine(
-            str(raw_profile.get("engine") or "").strip()
-        )
-        engine = explicit or (name if name.endswith("-api") else f"{name}-api")
-        models = [
-            str(model).strip()
-            for model in (
-                list(raw_profile.get("models") or [])
-                + [
-                    raw_profile.get("default_model"),
-                    raw_profile.get("model"),
-                    raw_profile.get("fast_model"),
-                    raw_profile.get("pro_model"),
-                ]
-            )
-            if isinstance(model, str)
-            and model.strip()
-            and model.strip().casefold() != "role-configured"
-        ]
-        if engine and models:
-            return {
-                "profiles": {
-                    role: {"engine": engine, "model": models[0]}
-                    for role in HER_ROLE_ORDER
-                }
-            }
-    for seed_engine, seed_entry in BACKEND_REGISTRY.items():
-        if seed_engine == HER_V2_ENGINE:
-            continue
-        seed_models = [
-            model
-            for model in list(seed_entry.get("models") or [])
-            if str(model).casefold() != "role-configured"
-        ]
-        if seed_models:
-            return {
-                "profiles": {
-                    role: {"engine": seed_engine, "model": seed_models[0]}
-                    for role in HER_ROLE_ORDER
-                }
-            }
-    raise CreationFailedError(
-        "no HER v2 provider model configuration is available"
-    )
-
-
 def _tier_choice(
     provider_profiles: dict[str, dict[str, Any]],
 ) -> tuple[str, str, str]:
-    """Resolve (engine, fast_model, pro_model) from configured providers.
-
-    Prefer an available provider that advertises distinct fast/pro tiers;
-    otherwise fall back to the first available provider using its default
-    model for both tiers.  Deterministic: never hard-codes provider names.
-    """
+    """Resolve one default HERV3 Provider/model from instance configuration."""
     if not provider_profiles:
         raise CreationFailedError(
-            "no available HER v2 provider is configured on this instance"
+            "no available HERV3 Provider is configured on this instance"
         )
-    options = build_her_v2_provider_options(
-        [],
-        provider_profiles,
-        _creation_seed(provider_profiles),
-    )
+    seed: HERv3ModelTarget | None = None
+    for name, profile in provider_profiles.items():
+        engine = canonical_backend_engine(
+            str(
+                profile.get("engine")
+                or (name if str(name).endswith("-api") else f"{name}-api")
+            )
+        )
+        models = list(
+            dict.fromkeys(
+                str(value).strip()
+                for value in [
+                    *(profile.get("models") or []),
+                    profile.get("pro_model"),
+                    profile.get("default_model"),
+                    profile.get("model"),
+                    *get_available_models(engine),
+                ]
+                if str(value or "").strip()
+                and str(value).strip().casefold() != "role-configured"
+            )
+        )
+        if engine and models:
+            seed = HERv3ModelTarget(engine, models[0])
+            break
+    if seed is None:
+        raise CreationFailedError(
+            "no usable HERV3 Provider model is configured on this instance"
+        )
+    options = build_v3_provider_options([], provider_profiles, seed)
     available = [option for option in options if option.get("available")]
     if not available:
         raise CreationFailedError(
-            "no available HER v2 provider is configured on this instance"
+            "no available HERV3 Provider is configured on this instance"
         )
-    tiered = [
-        option
-        for option in available
-        if option.get("fast_model")
-        and option.get("pro_model")
-        and option["fast_model"] != option["pro_model"]
-    ]
-    chosen = tiered[0] if tiered else available[0]
+    chosen = available[0]
     engine = str(chosen.get("engine") or "").strip()
-    fast_model = str(chosen.get("fast_model") or chosen.get("pro_model") or "").strip()
-    pro_model = str(chosen.get("pro_model") or chosen.get("fast_model") or "").strip()
-    if not engine or not fast_model or not pro_model:
+    model = str(chosen.get("default_model") or "").strip()
+    if not engine or not model:
         raise CreationFailedError(
-            "no usable HER v2 provider model configuration is available"
+            "no usable HERV3 Provider model is available"
         )
-    return engine, fast_model, pro_model
+    return engine, model, model
 
 
 def build_her_backend_row(
     effort: str,
     provider_profiles: dict[str, dict[str, Any]],
+    model: str | None = None,
 ) -> dict:
-    """Build a HER v2 row with one fixed provider profile and a public mode.
+    """Build a HERV3 row with one Provider, model and reasoning effort."""
 
-    The row contains exactly the five required role profiles with
-    engine/model/reasoning resolved from the instance provider configuration.
-    The selected effort changes orchestration only; it never changes those
-    profiles.  No provider secrets or base URLs are embedded.
-    """
-    try:
-        canonical_effort = parse_effort(effort or DEFAULT_HER_EFFORT).value
-    except ValueError as exc:
-        raise InvalidEffortError(f"invalid HER orchestration effort: {effort!r}") from exc
-    if canonical_effort not in HER_CREATION_EFFORTS:
-        raise InvalidEffortError(
-            "HER orchestration effort must be one of: "
-            f"{', '.join(sorted(HER_CREATION_EFFORTS))}"
-        )
     engine, fast_model, pro_model = _tier_choice(provider_profiles)
-    profiles: dict[str, dict[str, str]] = {}
-    for role in HER_ROLE_ORDER:
-        tier, reasoning_tier = _HER_DEFAULT_PROFILE_POLICY[role]
-        model = pro_model if tier == "pro" else fast_model
-        profile: dict[str, str] = {"engine": engine, "model": model}
-        reasoning = _pick_reasoning(engine, model, reasoning_tier)
-        if reasoning:
-            profile["reasoning"] = reasoning
-        profiles[role] = profile
-    row = apply_backend_policy_defaults(
-        {"engine": HER_V2_ENGINE, "model": "role-configured"}
+    del fast_model
+    seed = HERv3ModelTarget(engine, pro_model)
+    options = build_v3_provider_options([], provider_profiles, seed)
+    selected = seed
+    requested_model = str(model or "").strip()
+    if requested_model:
+        matches = [
+            option
+            for option in options
+            if option.get("available") and requested_model in option.get("models", [])
+        ]
+        if not matches:
+            raise InvalidModelError(
+                f"model {requested_model!r} is not available from a configured HERV3 Provider"
+            )
+        selected = HERv3ModelTarget(str(matches[0]["engine"]), requested_model)
+
+    choices = [
+        str(value).strip().casefold()
+        for value in get_provider_reasoning_efforts(
+            selected.provider,
+            selected.model,
+        )
+        if str(value or "").strip()
+    ]
+    requested_effort = str(effort or DEFAULT_HER_EFFORT).strip().casefold()
+    requested_effort = {"extra": "xhigh", "extra_high": "xhigh"}.get(
+        requested_effort,
+        requested_effort,
     )
-    row["effort"] = canonical_effort
+    if requested_effort in {"none", "zero"}:
+        requested_effort = "off" if "off" in choices else "none"
+    if choices and requested_effort not in choices:
+        raise InvalidEffortError(
+            f"HERV3 model effort must be one of: {', '.join(choices)}"
+        )
+    row = apply_backend_policy_defaults(
+        {"engine": HER_V2_ENGINE, "model": selected.model}
+    )
+    if choices:
+        row["effort"] = requested_effort
     row["her_v2"] = {
-        "profiles": profiles,
+        "main": selected.to_dict(),
         "audit_failure_terminal": "ERROR",
         "shadow_mode": False,
         "user_idle_timeout_s": 300,
@@ -398,7 +322,7 @@ def build_agent_config(spec: AgentCreationSpec, provider_profiles: dict) -> dict
     backend = canonical_backend_engine(str(spec.backend or "").strip())
     if backend in REMOVED_ENGINE_IDS:
         raise InvalidBackendError(
-            f"backend {spec.backend!r} has been removed; configure 'her-v2' instead"
+            f"backend {spec.backend!r} has been removed; configure 'her-v3' instead"
         )
     if not is_selectable_backend(backend):
         raise InvalidBackendError(f"backend {spec.backend!r} is not selectable")
@@ -406,6 +330,7 @@ def build_agent_config(spec: AgentCreationSpec, provider_profiles: dict) -> dict
         backend_row = build_her_backend_row(
             str(spec.effort or DEFAULT_HER_EFFORT).strip(),
             provider_profiles,
+            model=spec.model,
         )
     else:
         backend_row = build_ordinary_backend_row(backend, spec.model, spec.effort)
@@ -544,7 +469,7 @@ class AgentCreationService:
                     name=name,
                     display_name=display_name,
                     is_active=bool(spec.is_active),
-                    active_backend=backend,
+                    active_backend=public_backend_engine(backend),
                     workspace_created=True,
                     config_published=True,
                     durability_warning=True,
@@ -569,7 +494,7 @@ class AgentCreationService:
             name=name,
             display_name=display_name,
             is_active=bool(spec.is_active),
-            active_backend=backend,
+            active_backend=public_backend_engine(backend),
             workspace_created=True,
             config_published=True,
         )

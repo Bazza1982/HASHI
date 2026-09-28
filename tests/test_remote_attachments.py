@@ -1,20 +1,33 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from remote.api.server import _merge_attachment_text, create_app
+from remote.attachments import (
+    AttachmentStore,
+    STREAM_MAX_ATTACHMENTS_PER_MESSAGE,
+    STREAM_MAX_TOTAL_ATTACHMENT_BYTES,
+)
 from remote.security.pairing import PairingManager
 from remote.security.shared_token import build_auth_headers
 from remote.terminal.executor import TerminalExecutor
 
 
 class _ProtocolStub:
-    def __init__(self):
+    def __init__(self, *, status: int = 202, result: dict | None = None):
         self.messages: list[dict] = []
+        self.status = status
+        self.result = result or {
+            "ok": True,
+            "accepted": True,
+            "state": "delivered_to_local_queue",
+        }
 
     def get_peer_view(self, peer):
         return {"instance_id": peer.instance_id}
@@ -24,7 +37,7 @@ class _ProtocolStub:
 
     async def handle_protocol_message(self, payload: dict):
         self.messages.append(payload)
-        return 202, {"ok": True, "accepted": True, "state": "delivered_to_local_queue"}
+        return self.status, dict(self.result)
 
 
 def _write_shared_token(tmp_path: Path, token: str = "shared-secret") -> str:
@@ -35,8 +48,8 @@ def _write_shared_token(tmp_path: Path, token: str = "shared-secret") -> str:
     return token
 
 
-def _client(tmp_path: Path, *, lan_mode: bool = False):
-    protocol = _ProtocolStub()
+def _client(tmp_path: Path, *, lan_mode: bool = False, protocol=None):
+    protocol = protocol or _ProtocolStub()
     app = create_app(
         {"instance_id": "HASHI_LOCAL", "display_name": "Local", "remote_port": 8766},
         PairingManager(storage_dir=tmp_path / "pairing", lan_mode=lan_mode),
@@ -48,7 +61,15 @@ def _client(tmp_path: Path, *, lan_mode: bool = False):
     return TestClient(app), protocol
 
 
-def _signed_headers(token: str, *, method: str, path: str, from_instance: str, body: bytes):
+def _signed_headers(
+    token: str,
+    *,
+    method: str,
+    path: str,
+    from_instance: str,
+    body: bytes,
+    nonce: str | None = None,
+):
     headers = {"Content-Type": "application/json"}
     headers.update(
         build_auth_headers(
@@ -58,10 +79,93 @@ def _signed_headers(token: str, *, method: str, path: str, from_instance: str, b
             from_instance=from_instance,
             body_bytes=body,
             timestamp=int(time.time()),
-            nonce=f"nonce-{method.lower()}-{path.replace('/', '-')}",
+            nonce=nonce or f"nonce-{method.lower()}-{path.replace('/', '-')}",
         )
     )
     return headers
+
+
+def _stage_streaming_attachment(
+    client,
+    token: str,
+    *,
+    message_id: str,
+    filename: str,
+    payload: bytes,
+) -> dict:
+    digest = hashlib.sha256(payload).hexdigest()
+    begin_payload = {
+        "message_id": message_id,
+        "from_instance": "HASHI2",
+        "attachment_id": "att-1",
+        "filename": filename,
+        "mime_type": "application/octet-stream",
+        "size_bytes": len(payload),
+        "sha256": digest,
+    }
+    begin_body = json.dumps(begin_payload).encode("utf-8")
+    begin = client.post(
+        "/attachments/v2/begin",
+        content=begin_body,
+        headers=_signed_headers(
+            token,
+            method="POST",
+            path="/attachments/v2/begin",
+            from_instance="HASHI2",
+            body=begin_body,
+            nonce=f"begin-{message_id}",
+        ),
+    )
+    assert begin.status_code == 200, begin.text
+    pending_upload_id = begin.json()["attachment"]["pending_upload_id"]
+
+    offset = 0
+    for index, chunk in enumerate((payload[:5], payload[5:])):
+        if not chunk:
+            continue
+        target = f"/attachments/v2/chunk/{pending_upload_id}?offset={offset}"
+        uploaded = client.put(
+            target,
+            content=chunk,
+            headers=_signed_headers(
+                token,
+                method="PUT",
+                path=target,
+                from_instance="HASHI2",
+                body=chunk,
+                nonce=f"chunk-{message_id}-{index}",
+            ),
+        )
+        assert uploaded.status_code == 200, uploaded.text
+        offset += len(chunk)
+
+    finish_payload = {
+        "message_id": message_id,
+        "from_instance": "HASHI2",
+        "pending_upload_id": pending_upload_id,
+    }
+    finish_body = json.dumps(finish_payload).encode("utf-8")
+    finish = client.post(
+        "/attachments/v2/finish",
+        content=finish_body,
+        headers=_signed_headers(
+            token,
+            method="POST",
+            path="/attachments/v2/finish",
+            from_instance="HASHI2",
+            body=finish_body,
+            nonce=f"finish-{message_id}",
+        ),
+    )
+    assert finish.status_code == 200, finish.text
+    return {
+        "attachment_id": "att-1",
+        "pending_upload_id": pending_upload_id,
+        "filename": filename,
+        "mime_type": "application/octet-stream",
+        "size_bytes": len(payload),
+        "sha256": digest,
+    }
 
 
 def test_image_attachment_summary_exposes_opaque_image_reference():
@@ -307,3 +411,166 @@ def test_attachment_upload_uses_random_pending_ids_without_overwrite(tmp_path):
     assert first_pending != second_pending
     assert Path(first.json()["attachment"]["spool_path"]).exists()
     assert Path(second.json()["attachment"]["spool_path"]).exists()
+
+
+def test_streaming_v2_accepts_opaque_script_and_delivers_only_after_commit(tmp_path):
+    token = _write_shared_token(tmp_path)
+    client, protocol = _client(tmp_path, lan_mode=True)
+    attachment = _stage_streaming_attachment(
+        client,
+        token,
+        message_id="msg-stream",
+        filename="deploy.ps1",
+        payload=b"Write-Output 'hello'\n",
+    )
+
+    assert protocol.messages == []
+    commit_payload = {
+        "message_id": "msg-stream",
+        "conversation_id": "conv-stream",
+        "from_instance": "HASHI2",
+        "from_agent": "zhaojun",
+        "to_instance": "HASHI_LOCAL",
+        "to_agent": "lily",
+        "body": {"text": "script attached"},
+        "attachments": [attachment],
+    }
+    commit_body = json.dumps(commit_payload).encode("utf-8")
+    response = client.post(
+        "/protocol/message-with-attachments",
+        content=commit_body,
+        headers=_signed_headers(
+            token,
+            method="POST",
+            path="/protocol/message-with-attachments",
+            from_instance="HASHI2",
+            body=commit_body,
+            nonce="commit-msg-stream",
+        ),
+    )
+
+    assert response.status_code == 202, response.text
+    assert len(protocol.messages) == 1
+    delivered_attachment = protocol.messages[0]["body"]["attachments"][0]
+    assert delivered_attachment["filename"] == "deploy.ps1"
+    stored_path = Path(response.json()["attachments"][0]["stored_path"])
+    assert stored_path.read_bytes() == b"Write-Output 'hello'\n"
+
+
+def test_streaming_v2_requires_shared_token_even_when_lan_mode_is_enabled(tmp_path):
+    _write_shared_token(tmp_path)
+    client, _protocol = _client(tmp_path, lan_mode=True)
+    payload = {
+        "message_id": "msg-auth",
+        "from_instance": "HASHI2",
+        "attachment_id": "att-1",
+        "filename": "archive.7z",
+        "mime_type": "application/octet-stream",
+        "size_bytes": 0,
+        "sha256": hashlib.sha256(b"").hexdigest(),
+    }
+
+    response = client.post("/attachments/v2/begin", json=payload)
+
+    assert response.status_code == 401
+
+
+def test_streaming_v2_rolls_back_committed_files_when_message_delivery_fails(tmp_path):
+    token = _write_shared_token(tmp_path)
+    protocol = _ProtocolStub(
+        status=503,
+        result={"ok": False, "error": "local enqueue failed"},
+    )
+    client, _protocol = _client(tmp_path, lan_mode=False, protocol=protocol)
+    attachment = _stage_streaming_attachment(
+        client,
+        token,
+        message_id="msg-rollback",
+        filename="encrypted.pkg",
+        payload=b"opaque-ciphertext",
+    )
+    commit_payload = {
+        "message_id": "msg-rollback",
+        "conversation_id": "conv-rollback",
+        "from_instance": "HASHI2",
+        "from_agent": "zhaojun",
+        "to_instance": "HASHI_LOCAL",
+        "to_agent": "lily",
+        "body": {"text": "all or nothing"},
+        "attachments": [attachment],
+    }
+    commit_body = json.dumps(commit_payload).encode("utf-8")
+
+    response = client.post(
+        "/protocol/message-with-attachments",
+        content=commit_body,
+        headers=_signed_headers(
+            token,
+            method="POST",
+            path="/protocol/message-with-attachments",
+            from_instance="HASHI2",
+            body=commit_body,
+            nonce="commit-msg-rollback",
+        ),
+    )
+
+    assert response.status_code == 503
+    assert not (
+        tmp_path
+        / "state"
+        / "remote_attachments"
+        / "hashi_local"
+        / "messages"
+        / "msg-rollback"
+    ).exists()
+
+
+def test_streaming_v2_enforces_ten_files_and_one_gibibyte_without_type_filters(
+    tmp_path,
+):
+    store = AttachmentStore(root=tmp_path, instance_id="HASHI_LOCAL")
+    per_file = STREAM_MAX_TOTAL_ATTACHMENT_BYTES // STREAM_MAX_ATTACHMENTS_PER_MESSAGE
+    sizes = [per_file] * (STREAM_MAX_ATTACHMENTS_PER_MESSAGE - 1)
+    sizes.append(STREAM_MAX_TOTAL_ATTACHMENT_BYTES - sum(sizes))
+
+    for index, size_bytes in enumerate(sizes):
+        store.begin_stream_upload(
+            message_id="msg-limits",
+            from_instance="HASHI2",
+            attachment_id=f"att-{index}",
+            filename=f"opaque-{index}.pkg",
+            mime_type="application/octet-stream",
+            size_bytes=size_bytes,
+            sha256=hashlib.sha256(f"declared-{index}".encode()).hexdigest(),
+        )
+
+    with pytest.raises(ValueError, match="attachment count"):
+        store.begin_stream_upload(
+            message_id="msg-limits",
+            from_instance="HASHI2",
+            attachment_id="att-over-count",
+            filename="eleventh.sh",
+            mime_type="application/x-sh",
+            size_bytes=0,
+            sha256=hashlib.sha256(b"").hexdigest(),
+        )
+
+    store.begin_stream_upload(
+        message_id="msg-total",
+        from_instance="HASHI2",
+        attachment_id="att-full",
+        filename="full.enc",
+        mime_type="application/octet-stream",
+        size_bytes=STREAM_MAX_TOTAL_ATTACHMENT_BYTES,
+        sha256=hashlib.sha256(b"declared-full").hexdigest(),
+    )
+    with pytest.raises(ValueError, match="total attachment size"):
+        store.begin_stream_upload(
+            message_id="msg-total",
+            from_instance="HASHI2",
+            attachment_id="att-over-total",
+            filename="over.enc",
+            mime_type="application/octet-stream",
+            size_bytes=1,
+            sha256=hashlib.sha256(b"declared-over").hexdigest(),
+        )

@@ -1,11 +1,13 @@
-# HER v2 WIP Journal
+> **Legacy HERV2 archive — non-normative.** This document records the retired staged runtime. HERV3 uses one continuous main-model/tool loop with no Triage, Strategy, Planning, Replanning, Review, or stage-based Finalisation routing. Strategy Cards and Habit/Meditation remain optional. See [HERV3 upgrade](HERV3_UPGRADE.md).
+
+# HERV2 WIP Journal
 
 Status: **shadow/legacy compatibility contract; not current recovery authority**
 
 Current authority:
-[HER v2 Fixed-Session Control Plane](HER_V2_SESSION_CONTROL_PLANE.md).
+[HERV2 Fixed-Session Control Plane](HER_V2_SESSION_CONTROL_PLANE.md).
 
-The HER v2 WIP Journal is a bounded model-independent transient Context
+The HERV2 WIP Journal is a bounded model-independent transient Context
 projection retained while canonical HER Engine Session recovery completes
 shadow validation and for legacy Sessions without canonical state. It is not
 Agent Memory, Memory+, a continuation command, a Model Provider transcript, or
@@ -21,14 +23,14 @@ and apply only within that boundary.
 
 ## Lifecycle
 
-1. At the start of a HER v2 turn, HASHI resolves the Journal owned by the
+1. At the start of a HERV2 turn, HASHI resolves the Journal owned by the
    current HASHI Session context generation. A bounded legacy Agent-level
    Journal is migrated into the first current Session that encounters it.
 2. If prior records exist, HASHI sends a mandatory visible warning independent
    of `/verbose` and supplies only a deterministic bounded recovery summary to
    the new turn. The raw Journal is never copied into a provider request.
 3. HASHI durably appends a bounded request boundary for the new turn. While the
-   turn is active, selected HER v2 events are projected into small recovery
+   turn is active, selected HERV2 events are projected into small recovery
    facts only after their canonical audit records are durable.
 4. An error, interruption, or other non-`COMPLETED` Ledger state preserves the
    accumulated Journal. A normal later `COMPLETED` Ledger still clears it
@@ -84,7 +86,7 @@ Migration first writes the bounded records into an empty Session Journal, then
 compare-and-swap clears the exact legacy snapshot. A concurrent legacy append
 causes the source to be preserved; duplicate recovery is safer than data loss.
 
-The canonical HER v2 audit log remains:
+The canonical HERV2 audit log remains:
 
 ```text
 <base-logs-dir>/<agent>/her_v2_audit.jsonl
@@ -149,7 +151,7 @@ behaviour independently inspectable.
 - An empty Journal after a successful turn or successful WIP recovery Compact
   is expected.
 - A non-empty Journal after an interrupted turn or failed recovery commit is
-  expected and must produce a warning on each later HER v2 request that sees
+  expected and must produce a warning on each later HERV2 request that sees
   it.
 - Receiving a recovery summary proves only that bounded context was supplied;
   it does not prove that old work was resumed or completed.

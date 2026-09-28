@@ -555,3 +555,43 @@ async def test_safevoice_confirmation_adds_local_transcript_to_long_batch(
     assert submission.media_count == 1
     assert "please compare the totals" in submission.prompt
     assert "Voice transcript" in submission.prompt
+def test_session_boundary_discards_native_and_workbench_voice_confirmations():
+    decisions = []
+    release_event = asyncio.Event()
+    runtime = SimpleNamespace(
+        _pending_voice={
+            "42": {
+                "native_audio": True,
+                "request_id": "req-native",
+                "prompt": "draft",
+            }
+        },
+        _native_voice_transcripts={
+            "req-native": {
+                "status": "pending_confirmation",
+                "release_event": release_event,
+            }
+        },
+        _workbench_voice_confirmations={
+            "voice-one": {
+                "state": "pending",
+                "expires_at": 999.0,
+                "prompt": "draft",
+                "transcript": "draft",
+                "request_metadata": {},
+            }
+        },
+        _voice_confirmation_clock=lambda: 10.0,
+        session_store=SimpleNamespace(
+            decide_voice_transcript=lambda **values: decisions.append(values)
+        ),
+    )
+
+    discarded = runtime_media.discard_pending_safe_voice_inputs(runtime)
+
+    assert discarded == 2
+    assert decisions == [{"request_id": "req-native", "confirmed": False}]
+    assert runtime._pending_voice == {}
+    assert runtime._native_voice_transcripts["req-native"]["status"] == "discarded"
+    assert release_event.is_set()
+    assert runtime._workbench_voice_confirmations["voice-one"]["state"] == "discarded"

@@ -61,11 +61,11 @@ def test_fallback_menu_and_command_description_follow_ui_locale():
         chinese = fallback_menu_text(runtime)
         chinese_description = ui_language.command_description("fallback", "fallback")
 
-    assert "HER V2 PROVIDER FALLBACK" in english
+    assert "HERV3 PROVIDER FALLBACK" in english
     assert "Model unavailable" not in english
-    assert "HER V2 供应商 FALLBACK" in chinese
-    assert english_description == "Configure HER v2 provider fallback"
-    assert chinese_description == "配置 HER v2 供应商 fallback"
+    assert "HERV3 供应商 FALLBACK" in chinese
+    assert english_description == "Configure HERV3 provider fallback"
+    assert chinese_description == "配置 HERV3 供应商 fallback"
 
 
 def test_fallback_keyboard_callback_payloads_fit_telegram_limit():

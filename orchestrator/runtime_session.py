@@ -11,25 +11,50 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from orchestrator import ui_language
-from orchestrator.flexible_backend_registry import is_cli_backend
-from orchestrator.session_store import SessionConflict, SessionNotFound, SessionStore
+from orchestrator.flexible_backend_registry import is_cli_backend, public_backend_engine
+from orchestrator.session_store import (
+    SESSION_KIND_AGENT_ACTIVITY,
+    SESSION_KIND_CONVERSATION,
+    SessionConflict,
+    SessionNotFound,
+    SessionStore,
+)
 
 logger = logging.getLogger("HASHI.RuntimeSession")
 _SHARED_PRIMARY_SURFACES = frozenset({"telegram", "workbench"})
 _INTERNAL_NON_CHAT_SOURCES = frozenset({"startup", "system", "session_reset"})
-_SCHEDULED_SOURCES = frozenset(
+AGENT_ACTIVITY_SURFACE = "agent-activity"
+AGENT_ACTIVITY_CHANNEL = "runs"
+_AGENT_ACTIVITY_SOURCES = frozenset(
     {
         "scheduler",
         "scheduler-retry",
         "scheduler-skill",
-        "loop_skill",
         "heartbeat",
         "cron",
         "proactive",
+        "background:prompt",
         "background-job-event",
         "background_job_event",
     }
 )
+
+
+def is_agent_activity_source(source: Any) -> bool:
+    """Return whether a request is Agent-owned work outside user chat history."""
+
+    normalized = str(source or "").strip().casefold()
+    return normalized in _AGENT_ACTIVITY_SOURCES or normalized.startswith(
+        ("scheduler:", "cron:", "heartbeat:", "proactive:", "background:")
+    )
+
+
+def is_agent_activity_request(item: Any) -> bool:
+    return (
+        str(getattr(item, "session_surface", "") or "").strip().casefold()
+        == AGENT_ACTIVITY_SURFACE
+        or is_agent_activity_source(getattr(item, "source", ""))
+    )
 
 
 def _active_engine(runtime: Any) -> str:
@@ -97,11 +122,8 @@ def _surface_and_channel(
     explicit_surface = str(metadata.get("session_surface") or "").strip().lower()
     explicit_channel = str(metadata.get("session_channel_key") or "").strip()
     normalized = str(source or "").strip().lower()
-    scheduled = normalized in _SCHEDULED_SOURCES or normalized.startswith(
-        ("scheduler:", "cron:", "heartbeat:", "proactive:")
-    )
-    if scheduled:
-        return "scheduled", "default", True
+    if is_agent_activity_source(normalized):
+        return AGENT_ACTIVITY_SURFACE, AGENT_ACTIVITY_CHANNEL, False
     if explicit_surface:
         return explicit_surface, explicit_channel or "default", False
     if "whatsapp" in normalized or normalized.startswith("wa:"):
@@ -143,7 +165,19 @@ def resolve_request_session(
     )
     store = ensure_store(runtime)
     explicit_session_id = str(metadata.get("session_id") or "") or None
-    if surface in _SHARED_PRIMARY_SURFACES:
+    if surface == AGENT_ACTIVITY_SURFACE:
+        session = store.ensure_agent_activity_session(
+            owner_id=resolved_owner,
+            agent_id=runtime.name,
+        )
+        if (
+            explicit_session_id is not None
+            and explicit_session_id != session["session_id"]
+        ):
+            raise SessionConflict("Agent activity Session changed during admission")
+        if session.get("session_kind") != SESSION_KIND_AGENT_ACTIVITY:
+            raise SessionConflict("Agent activity resolved to a conversation Session")
+    elif surface in _SHARED_PRIMARY_SURFACES:
         session = store.resolve_primary_session(
             owner_id=resolved_owner,
             agent_id=runtime.name,
@@ -228,6 +262,11 @@ def accept_request(
         text=persistent_text,
         source=source,
         idempotency_key=str(idempotency_key or f"legacy:{request_id}"),
+        display_text=(
+            metadata.get("session_message_display_text")
+            if "session_message_display_text" in metadata
+            else None
+        ),
         expected_context_generation=metadata.get("session_context_generation"),
         execution_mode=str(metadata.get("execution_mode") or "") or None,
         content=blocks,
@@ -311,6 +350,298 @@ def current_session_for_update(runtime: Any, update: Any) -> dict[str, Any]:
     )
 
 
+def publish_frontend_message(
+    runtime: Any,
+    *,
+    role: str,
+    text: str,
+    source: str,
+    publication_id: str,
+    surface: str,
+    channel_key: str,
+    explicit_owner_id: str | None = None,
+    explicit_session_id: str | None = None,
+    content_format: str = "plain-text",
+    presentation_channel: str = "command",
+    message_context: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Commit a frontend event and endpoint task before the transport effect."""
+
+    from orchestrator.frontend_projection import (
+        build_frontend_presentation_context,
+    )
+
+    canonical_message_context = build_frontend_presentation_context(
+        text=text,
+        content_format=content_format,
+        presentation_channel=presentation_channel,
+        message_context=message_context,
+    )
+    store = ensure_store(runtime)
+    resolved_owner = owner_id(runtime, explicit_owner_id)
+    normalized_surface = str(surface or "").strip().casefold()
+    if normalized_surface in _SHARED_PRIMARY_SURFACES:
+        session = store.resolve_primary_session(
+            owner_id=resolved_owner,
+            agent_id=runtime.name,
+            establish=True,
+        )
+    else:
+        session = store.resolve_session(
+            owner_id=resolved_owner,
+            agent_id=runtime.name,
+            surface=normalized_surface,
+            channel_key=str(channel_key),
+            explicit_session_id=explicit_session_id,
+        )
+    from orchestrator.frontend_delivery import freeze_run_delivery_route
+
+    delivery_route = freeze_run_delivery_route(
+        message_source_id=normalized_surface,
+        session_surface=normalized_surface,
+        session_channel_key=str(channel_key),
+        chat_id=str(channel_key),
+        telegram_requested=normalized_surface == "telegram",
+    )
+    message = store.append_presentation_message(
+        session_id=session["session_id"],
+        owner_id=resolved_owner,
+        agent_id=runtime.name,
+        role=role,
+        text=text,
+        source=source,
+        idempotency_key=(
+            f"{normalized_surface}:{channel_key}:publication:{publication_id}"
+        ),
+        content_format=content_format,
+        presentation_channel=presentation_channel,
+        history_eligible=False,
+        message_context=canonical_message_context,
+        outbox=True,
+        delivery_route=delivery_route,
+    )
+    return {
+        **message,
+        "owner_id": resolved_owner,
+        "surface": normalized_surface,
+        "channel_key": str(channel_key),
+    }
+
+
+def publish_frontend_media_notification(
+    runtime: Any,
+    *,
+    filename: str,
+    media_type: str,
+    payload: bytes,
+    sha256: str,
+    caption: str,
+    publication_id: str,
+    surface: str,
+    channel_key: str,
+    semantic_role: str = "",
+    presentation_role: str = "",
+    explicit_owner_id: str | None = None,
+    explicit_session_id: str | None = None,
+    expected_context_generation: int | None = None,
+) -> dict[str, Any]:
+    """Commit a destination-scoped media notification before transport I/O."""
+
+    store = ensure_store(runtime)
+    resolved_owner = owner_id(runtime, explicit_owner_id)
+    normalized_surface = str(surface or "").strip().casefold()
+    if normalized_surface in _SHARED_PRIMARY_SURFACES and explicit_session_id is None:
+        session = store.resolve_primary_session(
+            owner_id=resolved_owner,
+            agent_id=runtime.name,
+            establish=True,
+        )
+    else:
+        session = store.resolve_session(
+            owner_id=resolved_owner,
+            agent_id=runtime.name,
+            surface=normalized_surface,
+            channel_key=str(channel_key),
+            explicit_session_id=explicit_session_id,
+        )
+    if (
+        expected_context_generation is not None
+        and int(session["context_generation"]) != int(expected_context_generation)
+    ):
+        raise SessionConflict(
+            "session context changed before frontend media publication"
+        )
+    stable_id = str(publication_id or "").strip()
+    if not stable_id:
+        raise ValueError("media notification publication_id is required")
+    is_audio = str(media_type or "").strip().casefold().startswith("audio/")
+    resolved_role = str(semantic_role or "").strip().casefold()
+    resolved_presentation_role = str(
+        presentation_role or ""
+    ).strip().casefold()
+    if resolved_presentation_role not in {
+        "",
+        "audio",
+        "document",
+        "image",
+        "photo",
+        "video",
+        "voice",
+    }:
+        raise ValueError("media notification presentation role is invalid")
+    if is_audio:
+        resolved_role = resolved_role or "audio_attachment"
+        if resolved_role not in {"audio_attachment", "voice_message"}:
+            raise ValueError("media notification audio role is invalid")
+    elif resolved_role:
+        raise ValueError("media notification role is only supported for audio")
+    attachment = store.stage_attachment(
+        session_id=str(session["session_id"]),
+        owner_id=resolved_owner,
+        filename=str(filename),
+        media_type=str(media_type),
+        size_bytes=len(payload),
+        sha256=str(sha256),
+        semantic_role=resolved_role,
+        # The asset is about to become part of a durable visible Message.
+        # Message-bound output must remain readable with its history.
+        retention_indefinite=True,
+        idempotency_key=f"explicit-media:{stable_id}:asset",
+    )
+    store.upload_attachment_bytes(
+        session_id=str(session["session_id"]),
+        owner_id=resolved_owner,
+        attachment_id=str(attachment["attachment_id"]),
+        payload=payload,
+        audio_direction="output",
+    )
+    store.commit_attachment(
+        session_id=str(session["session_id"]),
+        owner_id=resolved_owner,
+        attachment_id=str(attachment["attachment_id"]),
+    )
+    from orchestrator.frontend_delivery import freeze_run_delivery_route
+    from orchestrator.frontend_projection import (
+        build_frontend_presentation_context,
+    )
+
+    route = freeze_run_delivery_route(
+        message_source_id=normalized_surface,
+        session_surface=normalized_surface,
+        session_channel_key=str(channel_key),
+        chat_id=str(channel_key),
+        telegram_requested=normalized_surface == "telegram",
+    )
+    message = store.append_presentation_message(
+        session_id=str(session["session_id"]),
+        owner_id=resolved_owner,
+        agent_id=runtime.name,
+        role="assistant",
+        text="",
+        source=f"{normalized_surface}.explicit-media",
+        idempotency_key=(
+            f"{normalized_surface}:{channel_key}:publication:{stable_id}"
+        ),
+        presentation_channel="notification",
+        history_eligible=False,
+        message_context=build_frontend_presentation_context(
+            text="",
+            content_format="plain-text",
+            presentation_channel="notification",
+        ),
+        content=[
+            {
+                "type": "media",
+                "attachment_id": str(attachment["attachment_id"]),
+                "caption": str(caption or ""),
+                **({"semantic_role": resolved_role} if resolved_role else {}),
+                **(
+                    {"presentation_role": resolved_presentation_role}
+                    if resolved_presentation_role
+                    else {}
+                ),
+            }
+        ],
+        outbox=True,
+        delivery_route=route,
+    )
+    return {
+        **message,
+        "owner_id": resolved_owner,
+        "surface": normalized_surface,
+        "channel_key": str(channel_key),
+        "attachment_id": str(attachment["attachment_id"]),
+    }
+
+
+def publish_frontend_media_notification_for_update(
+    runtime: Any,
+    update: Any,
+    *,
+    filename: str,
+    media_type: str,
+    payload: bytes,
+    sha256: str,
+    caption: str,
+    publication_id: str,
+    semantic_role: str = "",
+    presentation_role: str = "",
+) -> dict[str, Any]:
+    """Publish media to the exact Session and generation that opened the UI."""
+
+    surface, channel_key, resolved_owner, explicit_session_id = (
+        _update_session_route(runtime, update)
+    )
+    expected_generation = getattr(
+        update, "_hashi_session_context_generation", None
+    )
+    return publish_frontend_media_notification(
+        runtime,
+        filename=filename,
+        media_type=media_type,
+        payload=payload,
+        sha256=sha256,
+        caption=caption,
+        publication_id=publication_id,
+        surface=surface,
+        channel_key=channel_key,
+        semantic_role=semantic_role,
+        presentation_role=presentation_role,
+        explicit_owner_id=resolved_owner,
+        explicit_session_id=explicit_session_id,
+        expected_context_generation=expected_generation,
+    )
+
+
+def publish_frontend_message_for_update(
+    runtime: Any,
+    update: Any,
+    *,
+    role: str,
+    text: str,
+    source: str,
+    publication_id: str,
+    content_format: str = "plain-text",
+    presentation_channel: str = "command",
+    message_context: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    surface, channel_key, resolved_owner, explicit_session_id = (
+        _update_session_route(runtime, update)
+    )
+    return publish_frontend_message(
+        runtime,
+        role=role,
+        text=text,
+        source=source,
+        publication_id=publication_id,
+        surface=surface,
+        channel_key=channel_key,
+        explicit_owner_id=resolved_owner,
+        explicit_session_id=explicit_session_id,
+        content_format=content_format,
+        presentation_channel=presentation_channel,
+        message_context=message_context,
+    )
 def record_frontend_message_for_update(
     runtime: Any,
     update: Any,
@@ -381,6 +712,16 @@ def record_frontend_message(
     if transport_message_id is None or not str(text or "").strip():
         return None
     try:
+        from orchestrator.frontend_projection import (
+            build_frontend_presentation_context,
+        )
+
+        canonical_message_context = build_frontend_presentation_context(
+            text=text,
+            content_format=content_format,
+            presentation_channel=presentation_channel,
+            message_context=message_context,
+        )
         store = ensure_store(runtime)
         resolved_owner = owner_id(runtime, explicit_owner_id)
         normalized_surface = str(surface or "").strip().casefold()
@@ -412,7 +753,7 @@ def record_frontend_message(
             content_format=content_format,
             presentation_channel=presentation_channel,
             history_eligible=False,
-            message_context=message_context,
+            message_context=canonical_message_context,
         )
     except Exception as exc:  # presentation mirroring must never block delivery
         target_logger = getattr(runtime, "logger", None) or logger
@@ -422,6 +763,54 @@ def record_frontend_message(
             type(exc).__name__,
         )
         return None
+
+
+def record_frontend_delivery_receipt(
+    runtime: Any,
+    *,
+    session_id: str,
+    owner_id: str,
+    receipt: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Best-effort persistence of one connector adapter's transport receipt."""
+
+    try:
+        store = ensure_store(runtime)
+        return store.record_frontend_delivery_receipt(
+            session_id=str(session_id),
+            owner_id=str(owner_id),
+            receipt=receipt,
+        )
+    except Exception as exc:
+        target_logger = getattr(runtime, "logger", None) or logger
+        target_logger.warning(
+            "Frontend delivery receipt persistence failed for %s (%s)",
+            getattr(runtime, "name", "unknown"),
+            type(exc).__name__,
+        )
+        return None
+
+
+def claim_run_delivery_outbox(
+    runtime: Any,
+    *,
+    request_id: str,
+    surface: str,
+    channel_key: str,
+    worker_id: str,
+    lease_seconds: int = 60,
+) -> dict[str, Any] | None:
+    """Claim the canonical Run delivery before a legacy transport adapter sends."""
+
+    store = ensure_store(runtime)
+    return store.claim_run_delivery_outbox(
+        request_id=str(request_id),
+        owner_id=owner_id(runtime),
+        surface=surface,
+        channel_key=channel_key,
+        worker_id=worker_id,
+        lease_seconds=lease_seconds,
+    )
 
 
 def record_kernel_presentation_notice(
@@ -449,6 +838,10 @@ def record_kernel_presentation_notice(
             agent_id=agent_id,
             establish=True,
         )
+        from orchestrator.frontend_projection import (
+            build_frontend_presentation_context,
+        )
+
         return store.append_presentation_message(
             session_id=session["session_id"],
             owner_id=resolved_owner,
@@ -460,6 +853,11 @@ def record_kernel_presentation_notice(
             content_format=content_format,
             presentation_channel="command",
             history_eligible=False,
+            message_context=build_frontend_presentation_context(
+                text=text,
+                content_format=content_format,
+                presentation_channel="command",
+            ),
         )
     except Exception as exc:  # operational delivery remains authoritative
         logger.warning(
@@ -532,6 +930,61 @@ def recent_exchanges(
     return ensure_store(runtime).recent_exchanges(
         session_id,
         context_generation=int(getattr(item, "context_generation", 0) or 0) or None,
+        limit=limit,
+    )
+
+
+def agent_activity_origin_exchanges(
+    runtime: Any,
+    item: Any,
+    *,
+    limit: int = 8,
+) -> list[dict[str, Any]]:
+    """Return the bounded Conversation snapshot attached to an Agent activity Run.
+
+    The activity keeps its own Session and provider lifecycle.  The origin
+    reference supplies read-only conversational context captured at admission.
+    """
+
+    if not is_agent_activity_request(item):
+        return []
+    metadata = getattr(item, "request_metadata", None)
+    if not isinstance(metadata, Mapping):
+        return []
+    activity_context = metadata.get("agent_activity_context")
+    if not isinstance(activity_context, Mapping):
+        return []
+    origin_session_id = str(activity_context.get("origin_session_id") or "").strip()
+    try:
+        origin_generation = int(activity_context.get("origin_context_generation"))
+        origin_ordinal = int(activity_context.get("origin_message_ordinal"))
+    except (TypeError, ValueError):
+        return []
+    if not origin_session_id or origin_generation < 1 or origin_ordinal < 0:
+        return []
+    resolved_owner = owner_id(
+        runtime,
+        str(getattr(item, "owner_id", "") or "").strip() or None,
+    )
+    store = ensure_store(runtime)
+    try:
+        origin = store.get_session(
+            origin_session_id,
+            owner_id=resolved_owner,
+            agent_id=runtime.name,
+            include_deleted=False,
+        )
+    except SessionNotFound:
+        return []
+    if (
+        origin.get("session_kind") != SESSION_KIND_CONVERSATION
+        or origin_generation > int(origin.get("context_generation") or 0)
+    ):
+        return []
+    return store.recent_exchanges(
+        origin_session_id,
+        context_generation=origin_generation,
+        max_user_ordinal=origin_ordinal,
         limit=limit,
     )
 
@@ -742,6 +1195,20 @@ def finish_request_from_listener(runtime: Any, request_id: str, payload: Mapping
     if not isinstance(store, SessionStore):
         return
     success = bool(payload.get("success"))
+    failure_context = None
+    if not success:
+        failure_context = {
+            key: payload[key]
+            for key in (
+                "error_code", "error_retryable", "http_status",
+                "provider_request_id", "retry_after_s", "side_effects_possible",
+            )
+            if key in payload
+        }
+        failure_context["backend"] = public_backend_engine(_active_engine(runtime))
+        session_dir = getattr(runtime, "session_dir", None)
+        if session_dir is not None:
+            failure_context["diagnostic_log"] = str(Path(session_dir) / "errors.log")
     store.finish_request(
         request_id,
         success=success,
@@ -751,8 +1218,9 @@ def finish_request_from_listener(runtime: Any, request_id: str, payload: Mapping
             if isinstance(payload.get("content"), (list, tuple))
             else None
         ),
-        assistant_source=_active_engine(runtime) or runtime.name,
+        assistant_source=public_backend_engine(_active_engine(runtime)) or runtime.name,
         error_text=str(payload.get("error") or "") or None,
+        error_context=failure_context,
     )
     capture_backend_binding(runtime, request_id=request_id)
 
@@ -891,22 +1359,49 @@ def capture_backend_binding(runtime: Any, *, request_id: str) -> None:
     )
 
 
-def _session_workzone_path(session: Mapping[str, Any]) -> Path | None:
-    value = str(session.get("workzone") or "").strip()
-    return Path(value) if value else None
-
-
 def session_workzone(runtime: Any, item: Any | None = None, *, update: Any | None = None) -> Path | None:
+    from orchestrator.workzone import primary_workzone_path
+
+    return primary_workzone_path(
+        agent_workzone_state(runtime, item, update=update)
+    )
+
+
+def agent_workzone_state(
+    runtime: Any,
+    item: Any | None = None,
+    *,
+    owner: str | None = None,
+    update: Any | None = None,
+) -> dict[str, Any]:
+    """Resolve the Agent-scoped Workzone profile or an admitted Run snapshot."""
+
+    from orchestrator.workzone import normalize_workzone_state
+
+    metadata = getattr(item, "request_metadata", None)
+    if isinstance(metadata, Mapping):
+        snapshot = metadata.get("workzone_snapshot")
+        if isinstance(snapshot, Mapping):
+            return normalize_workzone_state(snapshot)
+    resolved_owner = str(owner or "").strip()
+    if not resolved_owner and item is not None:
+        resolved_owner = str(getattr(item, "owner_id", "") or "").strip()
+    if not resolved_owner and isinstance(metadata, Mapping):
+        resolved_owner = str(metadata.get("owner_id") or "").strip()
+    if not resolved_owner and update is not None:
+        try:
+            resolved_owner = str(current_session_for_update(runtime, update)["owner_id"])
+        except (AttributeError, SessionNotFound):
+            resolved_owner = ""
+    resolved_owner = resolved_owner or owner_id(runtime)
     try:
-        if item is not None and getattr(item, "session_id", None):
-            session = ensure_store(runtime).get_session(item.session_id)
-        elif update is not None:
-            session = current_session_for_update(runtime, update)
-        else:
-            session = ensure_store(runtime).get_session(runtime.default_session_id)
+        state = ensure_store(runtime).get_agent_workzone_set(
+            owner_id=resolved_owner,
+            agent_id=runtime.name,
+        )
     except (AttributeError, SessionNotFound):
-        return None
-    return _session_workzone_path(session)
+        return {"revision": 0, "slots": []}
+    return normalize_workzone_state(state)
 
 
 def session_workzone_state(
@@ -916,48 +1411,39 @@ def session_workzone_state(
     session_id: str | None = None,
     update: Any | None = None,
 ) -> dict[str, Any]:
-    from orchestrator.workzone import normalize_workzone_state
-
-    metadata = getattr(item, "request_metadata", None)
-    if isinstance(metadata, Mapping):
-        snapshot = metadata.get("workzone_snapshot")
-        if isinstance(snapshot, Mapping):
-            return normalize_workzone_state(snapshot)
-    resolved_session_id = str(session_id or getattr(item, "session_id", "") or "")
-    try:
-        if not resolved_session_id and update is not None:
-            resolved_session_id = str(current_session_for_update(runtime, update)["session_id"])
-        if not resolved_session_id:
-            resolved_session_id = str(runtime.default_session_id)
-        store = ensure_store(runtime)
-        getter = getattr(store, "get_workzone_set", None)
-        if callable(getter):
-            return normalize_workzone_state(getter(resolved_session_id))
-        session = store.get_session(resolved_session_id)
-    except (AttributeError, SessionNotFound):
-        return {"session_id": resolved_session_id, "revision": 0, "slots": []}
-    value = str(session.get("workzone") or "").strip()
-    return normalize_workzone_state(
-        {
-            "session_id": resolved_session_id,
-            "slots": (
-                [{"slot_id": "main", "path": value, "enabled": True}]
-                if value
-                else []
-            ),
-        }
+    resolved_owner = ""
+    if session_id:
+        try:
+            resolved_owner = str(ensure_store(runtime).get_session(session_id)["owner_id"])
+        except SessionNotFound:
+            pass
+    return agent_workzone_state(
+        runtime,
+        item,
+        owner=resolved_owner or None,
+        update=update,
     )
 
 
-def apply_session_workzones(runtime: Any, session_id: str) -> dict[str, Any]:
+def apply_agent_workzones(runtime: Any, *, owner: str | None = None) -> dict[str, Any]:
     from orchestrator import runtime_workzone
 
-    state = session_workzone_state(runtime, session_id=str(session_id))
+    state = agent_workzone_state(runtime, owner=owner)
     runtime_workzone.install_runtime_state(runtime, state)
     sync = getattr(runtime, "_sync_workzone_to_backend_config", None)
     if callable(sync):
         sync()
     return state
+
+
+def apply_session_workzones(runtime: Any, session_id: str) -> dict[str, Any]:
+    """Compatibility wrapper; Session selection never changes Workzones."""
+
+    try:
+        resolved_owner = str(ensure_store(runtime).get_session(session_id)["owner_id"])
+    except SessionNotFound:
+        resolved_owner = None
+    return apply_agent_workzones(runtime, owner=resolved_owner)
 
 
 def apply_item_workzone(runtime: Any, item: Any) -> None:
@@ -976,9 +1462,6 @@ def _prepare_clean_context(
     clear_session_primer: bool = False,
 ) -> None:
     del disable_saved_memory
-    clear_transfer_state = getattr(runtime, "_clear_transfer_state", None)
-    if callable(clear_transfer_state):
-        clear_transfer_state()
     runtime._pending_auto_recall_context = None
     runtime._pending_auto_recall_session_id = None
     if clear_session_primer:
@@ -986,8 +1469,37 @@ def _prepare_clean_context(
         runtime._pending_session_primer_session_id = None
     assembler = getattr(runtime, "context_assembler", None)
     if assembler is not None:
-        assembler.turns_injection_enabled = True
-        assembler.saved_memory_injection_enabled = True
+        from orchestrator.memory_search_mode import apply_memory_injection_preferences
+
+        apply_memory_injection_preferences(assembler, runtime.workspace_dir)
+
+
+def _discard_session_transients(runtime: Any) -> dict[str, int | bool]:
+    """Discard unfinished inputs only after a Session boundary commits."""
+
+    from orchestrator import runtime_long, runtime_media
+
+    report: dict[str, int | bool] = {
+        "long_active": False,
+        "long_items": 0,
+        "voice": 0,
+        "transfer": False,
+        "workzone_path": 0,
+    }
+    long_report = runtime_long.discard_batch(runtime)
+    report["long_active"] = bool(long_report["active"])
+    report["long_items"] = int(long_report["items"])
+    report["voice"] = int(runtime_media.discard_pending_safe_voice_inputs(runtime))
+    pending_paths = getattr(runtime, "_pending_workzone_paths", None)
+    if isinstance(pending_paths, dict):
+        report["workzone_path"] = len(pending_paths)
+        pending_paths.clear()
+    transfer_state = getattr(runtime, "_transfer_state", None)
+    report["transfer"] = bool(transfer_state)
+    clear_transfer_state = getattr(runtime, "_clear_transfer_state", None)
+    if callable(clear_transfer_state):
+        clear_transfer_state()
+    return report
 
 
 async def _reset_cli_backend(runtime: Any, *, reason: str) -> str:
@@ -1010,10 +1522,15 @@ async def _reset_cli_backend(runtime: Any, *, reason: str) -> str:
 
 async def reset_for_retry(runtime: Any) -> str:
     engine = _active_engine(runtime)
-    _prepare_clean_context(runtime, disable_saved_memory=False, clear_session_primer=True)
     if _uses_cli_session_semantics(engine):
         await _reset_cli_backend(runtime, reason="cmd_retry_cli_reset")
+        _discard_session_transients(runtime)
+        _prepare_clean_context(
+            runtime, disable_saved_memory=False, clear_session_primer=True
+        )
         return "new"
+    _discard_session_transients(runtime)
+    _prepare_clean_context(runtime, disable_saved_memory=False, clear_session_primer=True)
     return "fresh"
 
 
@@ -1042,7 +1559,6 @@ async def _bind_session(runtime: Any, update: Any, session_id: str) -> None:
 
 
 async def cmd_new(runtime: Any, update: Any, context: Any) -> None:
-    del context
     if not runtime._is_authorized_user(update.effective_user.id):
         return
     if runtime_busy(runtime):
@@ -1051,34 +1567,23 @@ async def cmd_new(runtime: Any, update: Any, context: Any) -> None:
     _surface, _channel_key, resolved_owner, _explicit_session_id = (
         _update_session_route(runtime, update)
     )
+    title = " ".join(
+        str(value).strip()
+        for value in (getattr(context, "args", None) or [])
+        if str(value).strip()
+    ).strip()
     session = ensure_store(runtime).create_session(
-        owner_id=resolved_owner, agent_id=runtime.name, title="New session"
+        owner_id=resolved_owner,
+        agent_id=runtime.name,
+        title=title or "New session",
     )
-    previous_workzones = getattr(runtime, "_workzone_state", None)
-    sync = getattr(runtime, "_sync_workzone_to_backend_config", None)
     logger = getattr(runtime, "logger", None)
     try:
         await _reset_cli_backend(runtime, reason="cmd_new_session")
-        _prepare_clean_context(
-            runtime, disable_saved_memory=False, clear_session_primer=True
-        )
-        apply_session_workzones(runtime, session["session_id"])
         await _bind_session(runtime, update, session["session_id"])
     except Exception:  # noqa: BLE001 - backend adapters expose heterogeneous failures
         if logger is not None:
             logger.exception("Could not activate new Session safely")
-        from orchestrator import runtime_workzone
-
-        runtime_workzone.install_runtime_state(runtime, previous_workzones)
-        if callable(sync):
-            try:
-                sync()
-            except Exception:  # noqa: BLE001 - best-effort runtime state restoration
-                if logger is not None:
-                    logger.warning(
-                        "Could not restore the previous Workzone after Session failure",
-                        exc_info=True,
-                    )
         try:
             ensure_store(runtime).archive_session(
                 session["session_id"], deleted=True
@@ -1094,6 +1599,10 @@ async def cmd_new(runtime: Any, update: Any, context: Any) -> None:
             ui_language.tr("session.new_failed"),
         )
         return
+    _discard_session_transients(runtime)
+    _prepare_clean_context(
+        runtime, disable_saved_memory=False, clear_session_primer=True
+    )
     await runtime._reply_text(
         update,
         ui_language.tr(
@@ -1111,10 +1620,21 @@ async def cmd_fresh(runtime: Any, update: Any, context: Any) -> None:
         await runtime._reply_text(update, ui_language.tr("session.fresh_busy"))
         return
     session = current_session_for_update(runtime, update)
-    updated = ensure_store(runtime).start_fresh_generation(
-        session["session_id"], reason="user_fresh"
+    try:
+        await _reset_cli_backend(runtime, reason="cmd_fresh_context_generation")
+        updated = ensure_store(runtime).start_fresh_generation(
+            session["session_id"], reason="user_fresh"
+        )
+    except Exception as exc:
+        logger = getattr(runtime, "logger", None)
+        if logger is not None:
+            logger.exception("Could not activate fresh Session generation: %s", exc)
+        await runtime._reply_text(update, ui_language.tr("session.fresh_failed"))
+        return
+    _discard_session_transients(runtime)
+    _prepare_clean_context(
+        runtime, disable_saved_memory=False, clear_session_primer=True
     )
-    _prepare_clean_context(runtime, disable_saved_memory=False, clear_session_primer=True)
     try:
         from orchestrator.context_compaction import cancel_runtime_compaction
 
@@ -1123,7 +1643,6 @@ async def cmd_fresh(runtime: Any, update: Any, context: Any) -> None:
         logger = getattr(runtime, "logger", None)
         if logger is not None:
             logger.warning("Could not cancel old Session compaction on /fresh: %s", exc)
-    await _reset_cli_backend(runtime, reason="cmd_fresh_context_generation")
     await runtime._reply_text(
         update,
         ui_language.tr(
@@ -1203,10 +1722,19 @@ async def cmd_use(runtime: Any, update: Any, context: Any) -> None:
     except SessionNotFound:
         await runtime._reply_text(update, ui_language.tr("session.not_found"))
         return
-    await _bind_session(runtime, update, session["session_id"])
-    _prepare_clean_context(runtime, disable_saved_memory=False, clear_session_primer=True)
-    await _reset_cli_backend(runtime, reason="cmd_use_session")
-    apply_session_workzones(runtime, session["session_id"])
+    try:
+        await _reset_cli_backend(runtime, reason="cmd_use_session")
+        await _bind_session(runtime, update, session["session_id"])
+    except Exception:  # noqa: BLE001 - provider and store failures share one boundary
+        logger = getattr(runtime, "logger", None)
+        if logger is not None:
+            logger.exception("Could not activate selected Session safely")
+        await runtime._reply_text(update, ui_language.tr("session.use_failed"))
+        return
+    _discard_session_transients(runtime)
+    _prepare_clean_context(
+        runtime, disable_saved_memory=False, clear_session_primer=True
+    )
     await runtime._reply_text(
         update,
         ui_language.tr(
@@ -1239,20 +1767,31 @@ async def cmd_archive(runtime: Any, update: Any, context: Any) -> None:
     if not runtime._is_authorized_user(update.effective_user.id):
         return
     session = current_session_for_update(runtime, update)
+    if bool(session.get("is_default")):
+        await runtime._reply_text(
+            update, "the permanent default Session cannot be archived"
+        )
+        return
     try:
+        await _reset_cli_backend(runtime, reason="cmd_archive_session")
         ensure_store(runtime).archive_session(session["session_id"])
+        default = ensure_store(runtime).ensure_default_session(
+            owner_id=_update_session_route(runtime, update)[2], agent_id=runtime.name
+        )
+        await _bind_session(runtime, update, default["session_id"])
     except SessionConflict as exc:
         await runtime._reply_text(update, str(exc))
         return
-    default = ensure_store(runtime).ensure_default_session(
-        owner_id=_update_session_route(runtime, update)[2], agent_id=runtime.name
-    )
-    await _bind_session(runtime, update, default["session_id"])
+    except Exception:  # noqa: BLE001 - provider and store failures share one boundary
+        logger = getattr(runtime, "logger", None)
+        if logger is not None:
+            logger.exception("Could not archive Session safely")
+        await runtime._reply_text(update, ui_language.tr("session.archive_failed"))
+        return
+    _discard_session_transients(runtime)
     _prepare_clean_context(
         runtime, disable_saved_memory=False, clear_session_primer=True
     )
-    await _reset_cli_backend(runtime, reason="cmd_archive_session")
-    apply_session_workzones(runtime, default["session_id"])
     await runtime._reply_text(
         update,
         ui_language.tr("session.archived"),
@@ -1454,6 +1993,8 @@ def start_automatic_promotion(runtime: Any) -> None:
 __all__ = [
     "accept_request",
     "activate_backend_binding",
+    "agent_workzone_state",
+    "apply_agent_workzones",
     "apply_item_workzone",
     "apply_session_workzones",
     "bridge_recent_exchanges",
@@ -1475,6 +2016,9 @@ __all__ = [
     "owner_id",
     "promote_sessions",
     "promotion_is_due",
+    "publish_frontend_media_notification",
+    "publish_frontend_media_notification_for_update",
+    "publish_frontend_message",
     "recent_exchanges",
     "record_assistant_delivery",
     "record_working_exchange",
