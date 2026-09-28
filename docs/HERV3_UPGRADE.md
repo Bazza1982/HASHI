@@ -154,6 +154,26 @@ to roughly 2-3 minutes and only forwards substantive progress. On the first real
 operation HASHI may emit one initial acknowledgement. Commentary never becomes task
 instructions and never counts as task progress.
 
+## Optional final style check — HASHI1 pilot, 2026-09-28
+
+HASHI1 adds a workspace-scoped `/style on|off|status` pilot. With Style off,
+the continuous main model's final text goes directly to the normal Frontend
+Connector delivery boundary. With Style on, the configured HERV3 auxiliary
+model receives the completed draft, current request, and the typed PCM
+permanent/global/local system and Persona presentation sections. It returns a
+strict `keep` or expression-only `rewrite` decision before that same FC
+boundary. It has no tools, side-effect authority, routing authority, or power
+to change facts and decisions. Invalid output or Provider failure preserves the
+main-model draft exactly.
+
+This is an optional presentation pass, not a return of stage-based
+Finalisation and not a second task model. `/style` is declared once in the
+shared command catalogue, so Telegram and external Frontend Connectors use the
+same command owner. The auxiliary call is metered separately as a final style
+check; meter attribution distinguishes a kept main-model answer from an answer
+whose expression was rewritten. Provider output is never sent directly: both
+paths return one final response through FC.
+
 ## JEV Agent Companion experiment
 
 AC is an optional 5/10-minute liveness observer. JEV receives bounded observable runtime

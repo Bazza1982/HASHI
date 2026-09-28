@@ -924,3 +924,9 @@ def render_persona_commentary_system_prompt(
         )
         + "\n"
     )
+
+
+def render_final_style_system_prompt() -> str:
+    """Return the tool-free presentation-only final answer contract."""
+
+    return load_prompt_asset("system_final_style") + "\n"

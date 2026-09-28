@@ -9,6 +9,7 @@ from adapters.her_v2 import HERv2Adapter
 from orchestrator.config import AgentConfig, GlobalConfig
 from orchestrator.her_v2.config import HERv2Config
 from orchestrator.her_v2.models import Stage, StageResponse, parse_effort
+from orchestrator.her_v2.presentation import FinalStyleResult
 from orchestrator.her_v2.turn_services import parse_health
 from orchestrator.her_v2.v3_prompt import compile_main_prompt
 from orchestrator.her_v2.wip_journal import WIPJournal
@@ -77,6 +78,20 @@ class _MainProvider:
         )
 
 
+class _FinalStyleRenderer:
+    def __init__(self):
+        self.requests = []
+
+    async def render(self, request):
+        self.requests.append(request)
+        return FinalStyleResult(
+            source_event_id=request.event_id,
+            decision="rewrite",
+            text="Concise final answer.",
+            provenance="test_final_style",
+        )
+
+
 def _adapter(tmp_path: Path, provider: _MainProvider, *, fixed: bool = False):
     workspace = tmp_path / "workspace"
     workspace.mkdir(parents=True)
@@ -128,6 +143,39 @@ async def test_high_effort_keeps_one_main_model_call(tmp_path):
     assert request.context["her_v3"] is True
     assert profile.model == "deepseek-v4-pro"
     assert profile.reasoning == "high"
+
+
+@pytest.mark.asyncio
+async def test_style_switch_wires_optional_renderer_into_final_fc_response(tmp_path):
+    provider = _MainProvider()
+    renderer = _FinalStyleRenderer()
+    adapter = _adapter(tmp_path, provider)
+    adapter.config.extra["final_style_enabled"] = True
+    adapter.config._her_v2_final_style_renderer = renderer
+    assert await adapter.initialize()
+
+    response = await adapter.generate_response("Answer briefly", "request-style-on")
+
+    assert response.is_success
+    assert response.text == "Concise final answer."
+    assert len(provider.calls) == 1
+    assert len(renderer.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_style_off_bypasses_injected_renderer_and_returns_main_text(tmp_path):
+    provider = _MainProvider()
+    renderer = _FinalStyleRenderer()
+    adapter = _adapter(tmp_path, provider)
+    adapter.config._her_v2_final_style_renderer = renderer
+    assert await adapter.initialize()
+
+    response = await adapter.generate_response("Answer directly", "request-style-off")
+
+    assert response.is_success
+    assert response.text == "HERV3 main-model answer"
+    assert len(provider.calls) == 1
+    assert renderer.requests == []
 
 
 @pytest.mark.asyncio

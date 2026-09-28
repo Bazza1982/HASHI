@@ -40,7 +40,13 @@ from orchestrator.command_ui import (
     setting_card,
     status_label,
 )
-from orchestrator import runtime_audit, runtime_common, runtime_pending, terminal_console
+from orchestrator import (
+    final_style_policy,
+    runtime_audit,
+    runtime_common,
+    runtime_pending,
+    terminal_console,
+)
 from orchestrator import ui_language
 from orchestrator import runtime_background_status
 from orchestrator.browser_mode import (
@@ -4422,6 +4428,20 @@ class FlexibleAgentRuntime:
                 )
             )
 
+        elif target == "style":
+            enabled = value == "on"
+            final_style_policy.set_enabled(self, enabled)
+            await query.edit_message_text(
+                self._style_menu_text(),
+                parse_mode="HTML",
+                reply_markup=self._style_keyboard(),
+            )
+            await query.answer(
+                ui_language.tr(
+                    "menu.style.changed", state=status_label(enabled)
+                )
+            )
+
         elif target == "stream":
             await query.answer(
                 ui_language.tr("menu.stream.moved"),
@@ -6853,6 +6873,42 @@ class FlexibleAgentRuntime:
             action=ui_language.tr("menu.setting.immediate_persistent_reboot"),
         )
 
+    def _style_enabled(self) -> bool:
+        return final_style_policy.get_enabled(self)
+
+    def _style_keyboard(self) -> InlineKeyboardMarkup:
+        enabled = self._style_enabled()
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                selected_label(ui_language.tr("menu.toggle.on"), enabled),
+                callback_data="tgl:style:on",
+            ),
+            InlineKeyboardButton(
+                selected_label(ui_language.tr("menu.toggle.off"), not enabled),
+                callback_data="tgl:style:off",
+            ),
+        ]])
+
+    def _style_menu_text(self) -> str:
+        enabled = self._style_enabled()
+        return setting_card(
+            "✨",
+            "Final answer style",
+            current=f"<b>{status_label(enabled)}</b>",
+            facts=[
+                f"<b>{html.escape(ui_language.tr('common.default'))}</b> · "
+                f"<code>{html.escape(ui_language.tr('common.off'))}</code>",
+                f"<b>{html.escape(ui_language.tr('common.scope'))}</b> · "
+                f"{html.escape(ui_language.tr('menu.style.scope'))}",
+                f"<b>{html.escape(ui_language.tr('common.saved'))}</b> · "
+                f"{html.escape(ui_language.tr('menu.setting.workspace'))}",
+            ],
+            consequence=ui_language.tr(
+                "menu.style.enabled" if enabled else "menu.style.disabled"
+            ),
+            action=ui_language.tr("menu.setting.immediate_persistent_reboot"),
+        )
+
     def _herv2_enabled(self) -> bool:
         return bool(
             telegram_stream_policy.get_display_preference(self, "herv2", default=False)
@@ -6978,6 +7034,26 @@ class FlexibleAgentRuntime:
             self._meter_menu_text(),
             parse_mode="HTML",
             reply_markup=self._meter_keyboard(),
+        )
+
+    async def cmd_style(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        args = [a.strip().lower() for a in (context.args or []) if a.strip()]
+        if len(args) > 1 or (args and args[0] not in {"on", "off", "status"}):
+            await self._reply_text(
+                update,
+                ui_language.tr("menu.style.usage"),
+                parse_mode="HTML",
+            )
+            return
+        if args and args[0] in {"on", "off"}:
+            final_style_policy.set_enabled(self, args[0] == "on")
+        await self._reply_text(
+            update,
+            self._style_menu_text(),
+            parse_mode="HTML",
+            reply_markup=self._style_keyboard(),
         )
 
     async def cmd_herv2(self, update: Update, context: Any):

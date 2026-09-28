@@ -619,6 +619,9 @@ _MAIN_TASK_PHASES = frozenset(
 )
 _METER_ROLE_BY_PHASE = {
     **{phase: "main" for phase in _MAIN_TASK_PHASES},
+    "final_style": "style",
+    "final_style_check": "style",
+    "final_style_rewrite": "style",
     "persona": "progress",
     "immediate_response": "immediate",
     "agent_companion": "companion",
@@ -629,6 +632,7 @@ _METER_ROLE_BY_PHASE = {
 }
 _METER_ROLE_ORDER = (
     "main",
+    "style",
     "progress",
     "immediate",
     "companion",
@@ -640,6 +644,9 @@ _METER_ROLE_ORDER = (
 _HERV3_FINAL_PHASES = frozenset(
     {
         "direct",
+        "final_style",
+        "final_style_check",
+        "final_style_rewrite",
         "persona",
         "immediate_response",
         "agent_companion",
@@ -760,7 +767,7 @@ def _format_model_role_lines(
             item
             for item in receipt.line_items
             if str(getattr(item, "phase", "") or "").strip().casefold()
-            == "wrapper"
+            in {"final_style_rewrite", "wrapper"}
             and str(getattr(item, "model", "") or "").strip()
         ]
         final_item = rewrite_items[-1] if rewrite_items else main_items[-1]

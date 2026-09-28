@@ -79,7 +79,13 @@ from .models import (
     terminal_lifecycle,
 )
 from .policy import EffortPolicy, resolve_policy, terminal_for_execution
-from .presentation import RequiredPersonaRenderer
+from .presentation import (
+    PRESENTATION_AUTHORITIES,
+    FinalStyleRenderer,
+    FinalStyleRequest,
+    PresentationRequirement,
+    RequiredPersonaRenderer,
+)
 from .progress import ProgressTracker
 from .prompts import extract_authoritative_current_request
 from .retry import DEFAULT_PROVIDER_RETRY_POLICY, ProviderRetryPolicy
@@ -286,6 +292,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         delivery: DeliveryPort | None = None,
         commentary: CommentaryPort | None = None,
         required_persona: RequiredPersonaRenderer | None = None,
+        final_style: FinalStyleRenderer | None = None,
         habits: HabitAdvisor | None = None,
         meditation: MeditationRunner | None = None,
         dream: DreamMaintainer | None = None,
@@ -308,6 +315,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         self.delivery = delivery or RecordingDelivery()
         self.commentary = commentary or NullCommentaryPort()
         self.required_persona = required_persona
+        self.final_style = final_style
         self.habits = habits or NullHabitAdvisor()
         self.meditation = meditation or NullMeditationRunner()
         # Dream is intentionally owned by a background maintenance caller.  It
@@ -813,10 +821,11 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
             if evidence_ref not in state.evidence_refs:
                 state.evidence_refs.append(evidence_ref)
 
+        presented_text = await self._apply_final_style(state, direct_text)
         await self._deliver(
             state,
             kind="final",
-            text=direct_text,
+            text=presented_text,
             event_id=f"{state.ledger.turn_id}:final",
             required=True,
             provenance="her_v3_single_loop",
@@ -837,9 +846,73 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         return self._result(
             state,
             terminal=TerminalState.COMPLETED,
-            text=direct_text,
+            text=presented_text,
             content=tuple(response.content),
         )
+
+    async def _apply_final_style(self, state: _TurnState, draft: str) -> str:
+        """Apply the optional presentation check without risking final delivery."""
+
+        if self.final_style is None:
+            return draft
+        try:
+            event_id = f"{state.ledger.turn_id}:final-style"
+
+            def section_order(item: Mapping[str, Any]) -> tuple[int, str]:
+                try:
+                    order = int(item.get("order", 0))
+                except (TypeError, ValueError):
+                    order = 0
+                return order, str(item.get("key") or "")
+
+            sections = sorted(
+                (
+                    item
+                    for item in (self.pcm_input.get("sections") or ())
+                    if isinstance(item, Mapping)
+                ),
+                key=section_order,
+            )
+            requirements: list[PresentationRequirement] = []
+            for index, item in enumerate(sections):
+                authority = str(item.get("authority") or "").strip()
+                text = str(item.get("text") or "").strip()
+                if authority not in PRESENTATION_AUTHORITIES or not text:
+                    continue
+                requirements.append(
+                    PresentationRequirement(
+                        key=str(item.get("key") or f"presentation-{index}"),
+                        title=str(
+                            item.get("title") or item.get("key") or authority
+                        ),
+                        authority=authority,
+                        text=text,
+                    )
+                )
+            request = FinalStyleRequest(
+                event_id=event_id,
+                turn_id=state.ledger.turn_id,
+                draft_text=draft,
+                current_request=str(
+                    self.pcm_input.get("current_request")
+                    or extract_authoritative_current_request(state.goal)
+                    or state.goal
+                ),
+                requirements=tuple(requirements),
+            )
+            result = await self.final_style.render(request)
+            if result.source_event_id != event_id:
+                raise ValueError("final style result source identity mismatch")
+            if result.decision == "keep":
+                return draft
+            return result.text
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - presentation must fail open
+            self.logger.warning(
+                "HERV3 final style rendering failed safely: %s", type(exc).__name__
+            )
+            return draft
 
     async def _run_direct_after_triage(self, state: _TurnState) -> TurnResult:
         """Generate the required answer when optional Immediate was skipped.

@@ -636,6 +636,17 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         ),
     ),
     CommandSpec(
+        "style",
+        "cmd_style",
+        "Control HERV3 final style check",
+        "session",
+        guide=CommandGuide(
+            "/style [on|off|status]",
+            ("on", "off", "status"),
+            example="/style on",
+        ),
+    ),
+    CommandSpec(
         "metre",
         "cmd_meter",
         "Alias for /meter",

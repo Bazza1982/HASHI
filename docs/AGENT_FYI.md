@@ -190,6 +190,14 @@ An auxiliary presentation model must never appear to be a second task model.
 Receipts without phase evidence retain the compact model list instead of
 guessing a role.
 
+HASHI1 pilots `/style on|off|status` as one workspace preference shared by all
+Frontends. On adds a tool-free HERV3 auxiliary check of the completed main
+answer against typed system and Persona presentation requirements; it may keep
+the answer or rewrite expression without changing facts. Any failure returns
+the main answer unchanged. Off skips the call. In both cases FC remains the
+sole final-delivery path, and `/meter` separates the style call and records
+whether it actually rewrote the answer.
+
 HASHI1's 2026-09-27 instance configuration opts all 18 Agents into five exact
 OpenRouter conversation models (Venice, Cydonia, both Euryales, MythoMax).
 Their empty per-model effort declarations mean HERV3 omits reasoning on the

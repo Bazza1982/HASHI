@@ -57,6 +57,7 @@ PROMPT_ASSET_FIELDS: Mapping[str, frozenset[str]] = {
             "reviewer_findings",
         }
     ),
+    "system_final_style": frozenset(),
     "system_immediate_response": frozenset(
         {"goal", "persona_block_begin", "persona_block_end", "persona_guidance"}
     ),

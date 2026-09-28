@@ -22,6 +22,7 @@ from adapters.her_v2_provider import (
     HashiStageProvider,
     _AdapterDelivery,
     _backend_response_error,
+    _ConfiguredFinalStyleRenderer,
     _ConfiguredPersonaPackager,
     _manager_authorises_profile,
     _provider_exception_error,
@@ -64,6 +65,7 @@ from orchestrator.her_v2.retry import (
 )
 from orchestrator.her_v2.runtime import HERv2Runtime
 from orchestrator.her_v2.v3_config import normalise_v3_config
+from orchestrator import final_style_policy
 from orchestrator.her_v2.wip_journal import WIPJournal
 from orchestrator.multimodal_contract import (
     media_failure_code,
@@ -83,6 +85,7 @@ __all__ = [
     "HERv2Adapter",
     "HashiStageProvider",
     "_AdapterDelivery",
+    "_ConfiguredFinalStyleRenderer",
     "_ConfiguredPersonaPackager",
     "_UnboundedToolRegistry",
     "_backend_response_error",
@@ -214,6 +217,17 @@ class HERv2Adapter(BaseBackend):
 
     def _runtime_context(self) -> Any:
         return getattr(self.config, "_hashi_runtime", None)
+
+    def _final_style_enabled(self) -> bool:
+        """Resolve the workspace switch at turn start for immediate on/off changes."""
+
+        try:
+            return final_style_policy.get_enabled(self._runtime_context() or self)
+        except Exception as exc:  # noqa: BLE001 - keep the configured fallback
+            self.logger.warning(
+                "HERV3 final style preference unavailable: %s", type(exc).__name__
+            )
+            return False
 
     def _execution_owner(self) -> dict[str, Any]:
         runtime = self._runtime_context()
@@ -1949,17 +1963,37 @@ class HERv2Adapter(BaseBackend):
             ),
         )
         configured_packager = None
+        persona_source = None
         if isinstance(provider, HashiStageProvider):
+            persona_source = her_persona.load_persona_packaging_source(
+                self.config.system_md,
+                display_name=(self._extra.get("display_name") or self.config.name),
+            )
             configured_packager = _ConfiguredPersonaPackager(
                 provider=provider,
                 profile=runtime_config.profile_for(Stage.IMMEDIATE_RESPONSE),
-                source=her_persona.load_persona_packaging_source(
-                    self.config.system_md,
-                    display_name=(self._extra.get("display_name") or self.config.name),
-                ),
+                source=persona_source,
                 request_id=request_id,
                 logger=self.logger,
             )
+
+        final_style = None
+        if self._final_style_enabled():
+            final_style = getattr(
+                self.config, "_her_v2_final_style_renderer", None
+            )
+            if (
+                final_style is None
+                and isinstance(provider, HashiStageProvider)
+                and persona_source is not None
+            ):
+                final_style = _ConfiguredFinalStyleRenderer(
+                    provider=provider,
+                    profile=runtime_config.profile_for(Stage.IMMEDIATE_RESPONSE),
+                    source=persona_source,
+                    request_id=request_id,
+                    logger=self.logger,
+                )
 
         commentary = getattr(self.config, "_her_v2_commentary_port", None)
         commentary_packager = getattr(self.config, "_her_v2_persona_packager", None)
@@ -2046,6 +2080,7 @@ class HERv2Adapter(BaseBackend):
             delivery=delivery,
             commentary=(turn_services or commentary),
             required_persona=required_persona,
+            final_style=final_style,
             habits=habit_advisor,
             meditation=(
                 turn_learning
