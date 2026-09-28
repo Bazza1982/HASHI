@@ -73,6 +73,11 @@ HChat attachment delivery is transactional: all selected files are staged,
 hashed, streamed, committed, copied into the target Session attachment store,
 and admitted with the message as one request. Any failed file, commit, or local
 admission fails the complete delivery rather than exposing a partial message.
+The one permitted attachment-selection call is also fail-closed: a rejected,
+missing, or repeated selection aborts the complete HChat and its receipt names
+the failure instead of silently sending text alone. On WSL, a Windows absolute
+path is translated to its mounted-drive form only for an Agent with `drive`
+scope and no narrower active Workzone; ordinary scopes are not widened.
 The public HASHI Exchange path remains text-only.
 
 HASHI1 contains the source-qualified v2 implementation as of 2026-09-28. A

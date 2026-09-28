@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -168,6 +169,93 @@ async def test_hchat_attachment_selection_uses_hchat_limits_and_streaming_file_c
     )
     assert part["filename"] == "bundle.enc"
     assert part["local_ref"]
+
+
+def test_wsl_drive_scope_translates_windows_attachment_path_without_widening_default_scope(
+    tmp_path, monkeypatch
+):
+    from tools import builtins
+
+    monkeypatch.setattr(builtins, "is_wsl", lambda: True)
+    windows_path = r"C:\Users\Example\Downloads\review.xlsx"
+
+    with pytest.raises(ValueError, match="outside the allowed access scopes"):
+        builtins._resolve_path(
+            "/mnt/c/Users/Example/Downloads/review.xlsx",
+            tmp_path,
+            tmp_path,
+        )
+
+    resolved = builtins._resolve_path(
+        windows_path,
+        tmp_path,
+        tmp_path,
+        allow_wsl_windows_drive_paths=True,
+    )
+
+    assert resolved == Path("/mnt/c/Users/Example/Downloads/review.xlsx")
+
+
+@pytest.mark.asyncio
+async def test_hchat_failed_attachment_selection_is_terminal_and_observable(tmp_path):
+    store, owner, session, _accepted = _running_session(tmp_path)
+    registry = _registry(
+        tmp_path,
+        store,
+        owner,
+        session,
+        request_source="bridge:hchat-draft",
+    )
+
+    first = await registry.execute(
+        "frontend_send_attachments",
+        {"attachments": [{"path": str(tmp_path / "missing.xlsx")}]},
+        tool_call_id="hchat-selection-failure",
+    )
+    second = await registry.execute(
+        "frontend_send_attachments",
+        {"attachments": [{"path": str(tmp_path / "different.xlsx")}]},
+        tool_call_id="hchat-selection-retry",
+    )
+    selection = registry.consume_hchat_attachment_selection(
+        "request-frontend-output"
+    )
+
+    assert first.is_error is True
+    assert second.is_error is True
+    assert "already attempted" in second.output
+    assert selection is not None
+    assert selection["success"] is False
+    assert "file not found" in selection["error"]
+
+    selected_file = tmp_path / "selected.xlsx"
+    selected_file.write_bytes(b"selected")
+    successful_registry = _registry(
+        tmp_path,
+        store,
+        owner,
+        session,
+        request_source="bridge:hchat-draft",
+    )
+    selected = await successful_registry.execute(
+        "frontend_send_attachments",
+        {"attachments": [{"path": str(selected_file)}]},
+        tool_call_id="hchat-selection-success",
+    )
+    repeated = await successful_registry.execute(
+        "frontend_send_attachments",
+        {"attachments": [{"path": str(selected_file)}]},
+        tool_call_id="hchat-selection-after-success",
+    )
+    repeated_outcome = successful_registry.consume_hchat_attachment_selection(
+        "request-frontend-output"
+    )
+
+    assert selected.is_error is False
+    assert repeated.is_error is True
+    assert repeated_outcome is not None
+    assert repeated_outcome["success"] is False
+    assert "already attempted" in repeated_outcome["error"]
 
 
 def test_frontend_attachment_tool_is_standard_multi_attachment_contract():

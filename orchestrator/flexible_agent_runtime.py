@@ -6573,7 +6573,9 @@ class FlexibleAgentRuntime:
         ]])
 
     def _verbose_menu_text(self) -> str:
-        backend = getattr(getattr(self, "backend_manager", None), "current_backend", None)
+        backend = getattr(
+            getattr(self, "backend_manager", None), "current_backend", None
+        )
         capabilities = getattr(backend, "capabilities", None)
         progress_available = bool(getattr(capabilities, "supports_progress_stream", False))
         tools_available = bool(getattr(capabilities, "supports_tool_stream", False))
@@ -7335,8 +7337,34 @@ class FlexibleAgentRuntime:
         sender = getattr(self, "_hchat_draft_sender", None)
         attachment_paths: list[Path] = []
         attachment_error: str | None = None
+        selection_outcome: Mapping[str, Any] | None = None
+        backend = getattr(getattr(self, "backend_manager", None), "current_backend", None)
+        registry = getattr(backend, "tool_registry", None)
+        consume_selection = getattr(
+            registry, "consume_hchat_attachment_selection", None
+        )
+        if callable(consume_selection):
+            try:
+                selection_outcome = consume_selection(item.request_id)
+            except Exception as exc:
+                attachment_error = (
+                    "attachment selection status unavailable: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+        if selection_outcome is not None and not bool(
+            selection_outcome.get("success")
+        ):
+            selection_error = str(
+                selection_outcome.get("error")
+                or "attachment selection failed without an error detail"
+            ).strip()
+            attachment_error = f"attachment selection failed: {selection_error}"
         store = getattr(self, "session_store", None)
-        if store is not None and hasattr(store, "run_output_attachment_content"):
+        if (
+            attachment_error is None
+            and store is not None
+            and hasattr(store, "run_output_attachment_content")
+        ):
             try:
                 output_attachments = await asyncio.to_thread(
                     store.run_output_attachment_content,
@@ -7351,6 +7379,14 @@ class FlexibleAgentRuntime:
                     attachment_paths.append(Path(local_ref))
             except Exception as exc:
                 attachment_error = f"attachment selection unavailable: {type(exc).__name__}: {exc}"
+        elif attachment_error is None and selection_outcome is not None:
+            attachment_error = "attachment selection storage is unavailable"
+        if (
+            attachment_error is None
+            and selection_outcome is not None
+            and not attachment_paths
+        ):
+            attachment_error = "attachment selection produced no deliverable files"
         if attachment_error:
             result = HChatDeliveryResult(
                 success=False,

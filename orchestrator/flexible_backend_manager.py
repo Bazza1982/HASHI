@@ -1811,6 +1811,13 @@ class FlexibleBackendManager:
                 )
             primary = workzone_module.primary_workzone_path(state)
             workspace_dir = primary or adapter_cfg.workspace_dir
+            access_scope = str(
+                getattr(adapter_cfg, "access_scope", "project") or "project"
+            ).strip().casefold()
+            allow_wsl_windows_drive_paths = (
+                access_scope == "drive"
+                and not workzone_module.active_workzone_slots(state)
+            )
             access_roots = workzone_module.access_roots_for_workzones(
                 adapter_cfg.resolve_access_root(),
                 state,
@@ -1838,6 +1845,8 @@ class FlexibleBackendManager:
                 audit_context={
                     "agent_name": getattr(adapter_cfg, "name", workspace_dir.name),
                     "workspace_dir": str(workspace_dir),
+                    "access_scope": access_scope,
+                    "allow_wsl_windows_drive_paths": allow_wsl_windows_drive_paths,
                     "safety_mode": "read_write",
                     "live_runtime_prefix": str(Path(sys.prefix).resolve()),
                     "global_config": self.global_config,

@@ -124,7 +124,10 @@ under shared-token HMAC, permits every file type as inert bytes, and admits the
 message plus files atomically into the target Session. V1 and plain protocol
 chat remain compatible; Exchange and group/all stay text-only. This is offline
 source qualification only; live Worker adoption requires a separately
-authorized `/reboot`.
+authorized `/reboot`. HChat attachment selection itself is fail-closed: WSL
+accepts Windows absolute paths only within effective drive authority, and any
+missing, rejected, or repeated selection returns an explicit failure without
+sending a text-only remainder.
 
 Remote trust retains accepted peers until definitive revalidation. Health
 clears recovered Remote warnings, not other problems. Remote has a separate

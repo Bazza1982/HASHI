@@ -24,10 +24,12 @@ import aiohttp
 
 from orchestrator.process_execution import (
     decode_process_output,
+    is_wsl,
     process_group_kwargs,
     resolve_shell_invocation,
     terminate_windows_process_tree,
 )
+from tools.device_paths import DevicePathError, windows_to_wsl_path
 from tools.workbench_client import request_workbench_json, workbench_endpoint
 
 # ---------------------------------------------------------------------------
@@ -54,6 +56,8 @@ def _resolve_path(
     raw_path: str,
     access_root: Path | Sequence[Path],
     workspace_dir: Path,
+    *,
+    allow_wsl_windows_drive_paths: bool = False,
 ) -> Path:
     """
     Resolve a user-supplied path.
@@ -61,13 +65,32 @@ def _resolve_path(
     - Relative paths are resolved from workspace_dir.
     Raises ValueError if the resolved path escapes access_root.
     """
-    p = Path(raw_path)
+    translated_path: str | None = None
+    if allow_wsl_windows_drive_paths and is_wsl():
+        try:
+            translated_path = windows_to_wsl_path(raw_path)
+        except DevicePathError:
+            translated_path = None
+
+    p = Path(translated_path or raw_path)
     if not p.is_absolute():
         p = (workspace_dir / p).resolve()
     else:
         p = p.resolve()
 
-    access_roots = _access_roots(access_root)
+    access_roots = list(_access_roots(access_root))
+    if allow_wsl_windows_drive_paths and is_wsl():
+        parts = p.parts
+        if (
+            len(parts) >= 3
+            and parts[0] == "/"
+            and parts[1] == "mnt"
+            and len(parts[2]) == 1
+            and parts[2].isalpha()
+        ):
+            mounted_drive_root = (Path("/mnt") / parts[2].lower()).resolve()
+            if mounted_drive_root not in access_roots:
+                access_roots.append(mounted_drive_root)
     if not any(p == root or p.is_relative_to(root) for root in access_roots):
         rendered = ", ".join(str(root) for root in access_roots)
         raise ValueError(
@@ -2051,7 +2074,14 @@ async def execute_frontend_send_attachments(
             raw_path = str(raw.get("path") or "").strip()
             if not raw_path:
                 raise ValueError("each attachment requires path")
-            path = _resolve_path(raw_path, access_root, workspace_dir)
+            path = _resolve_path(
+                raw_path,
+                access_root,
+                workspace_dir,
+                allow_wsl_windows_drive_paths=bool(
+                    context.get("allow_wsl_windows_drive_paths")
+                ),
+            )
             if not path.exists():
                 raise ValueError(f"file not found: {path}")
             if not path.is_file():

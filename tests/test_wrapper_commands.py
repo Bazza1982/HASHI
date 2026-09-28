@@ -705,6 +705,42 @@ async def test_hchat_draft_success_forwards_bound_output_attachments(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_hchat_draft_attachment_selection_failure_aborts_delivery(tmp_path):
+    runtime, _sent, _voices = _make_background_runtime(tmp_path)
+    sender_calls = []
+
+    class FailedSelectionRegistry:
+        def consume_hchat_attachment_selection(self, request_id):
+            assert request_id == "req-001"
+            return {
+                "success": False,
+                "error": "Error: file not found: /mnt/c/missing.xlsx",
+            }
+
+    runtime.backend_manager.current_backend = SimpleNamespace(
+        tool_registry=FailedSelectionRegistry()
+    )
+    runtime._hchat_draft_sender = lambda *args, **kwargs: (
+        sender_calls.append((args, kwargs)) or True
+    )
+    item = _queued_request_from("bridge:hchat-draft")
+    item.request_metadata = {HCHAT_TARGET_METADATA_KEY: "akane@HASHI2"}
+
+    result = await FlexibleAgentRuntime._prepare_hchat_draft_success(
+        runtime,
+        item,
+        core_raw="Please inspect the workbook.",
+        completion_path="foreground",
+    )
+
+    assert result.visible_text.startswith(
+        "❌ Hchat delivery failed for akane@HASHI2."
+    )
+    assert "file not found" in result.visible_text
+    assert sender_calls == []
+
+
+@pytest.mark.asyncio
 async def test_hchat_draft_cannot_redirect_frozen_target(tmp_path):
     runtime, _sent, _voices = _make_background_runtime(tmp_path)
     sender_calls = []

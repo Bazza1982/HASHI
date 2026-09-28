@@ -27,6 +27,11 @@ the earlier assumption that `/hchat` would remain text-only:
 - Delivery is all-or-none. Upload failure cancels the batch; commit or local
   admission failure removes the committed inbox; no text-only fallback occurs
   after an attachment attempt starts.
+- Attachment selection is part of that all-or-none boundary. The draft may
+  make one selection call; rejection, missing files, or a repeated call aborts
+  the HChat with an explicit receipt. On WSL, Windows absolute paths are
+  translated only under effective `drive` authority and never widen an active
+  Workzone.
 - `message_attachments_v1` remains available for upgraded-to-legacy peer
   compatibility with its original 4-file/32 MiB aggregate limits. Ordinary text
   protocol messaging remains unchanged.
