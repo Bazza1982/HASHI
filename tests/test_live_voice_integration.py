@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
+import aiohttp
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -459,6 +460,68 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         self.assertEqual(close_calls, [("sk-test-fake", "prov-1")])
         snap = asyncio.run(self.manager._op_snapshot(self.owner_id, self.scope))
         self.assertEqual(snap["snapshot"]["phase"], "interrupted")
+        self.assertEqual(snap["snapshot"]["provider_close_state"], "confirmed")
+
+    def test_append_error_is_scoped_to_the_update_and_call_stays_alive(self):
+        manager = self.manager
+        binding = self.binding
+
+        class ProviderSocket:
+            closed = False
+
+            def __init__(self):
+                self.messages = iter((
+                    type("Message", (), {
+                        "type": aiohttp.WSMsgType.TEXT,
+                        "data": json.dumps({
+                            "type": "error",
+                            "event_id": "provider-error-1",
+                            "error": {
+                                "code": "context_append_content_too_long",
+                                "client_event_id": "update-too-large",
+                            },
+                        }),
+                    })(),
+                    type("Message", (), {
+                        "type": aiohttp.WSMsgType.TEXT,
+                        "data": json.dumps({
+                            "type": "session.closed",
+                            "event_id": "provider-close-1",
+                            "usage": {"total_tokens": 5},
+                        }),
+                    })(),
+                ))
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                try:
+                    return next(self.messages)
+                except StopIteration as exc:
+                    raise StopAsyncIteration from exc
+
+            async def close(self):
+                self.closed = True
+
+        @asynccontextmanager
+        async def fake_http():
+            yield object()
+
+        async def fake_attach(_http, *, key, provider_session_id):
+            return ProviderSocket()
+
+        async def scenario():
+            waiter = asyncio.get_running_loop().create_future()
+            manager._update_waiters[(binding.call_id, "update-too-large")] = waiter
+            with patch("orchestrator.frontend_live_voice.manager.provider_http_session", fake_http), \
+                 patch("orchestrator.frontend_live_voice.manager.attach_provider", fake_attach):
+                await manager._run_sideband(binding, "sk-test-fake", "prov-1")
+            return waiter.result()
+
+        self.assertFalse(asyncio.run(scenario()))
+        snap = asyncio.run(self.manager._op_snapshot(self.owner_id, self.scope))
+        self.assertEqual(snap["snapshot"]["phase"], "ended")
         self.assertEqual(snap["snapshot"]["provider_close_state"], "confirmed")
 
     def test_automatic_admission_retry_reuses_reserved_pao_idempotency(self):

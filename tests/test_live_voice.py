@@ -8,6 +8,7 @@ from orchestrator.frontend_live_voice.protocol import CallBinding, Fragment, Liv
 from orchestrator.frontend_live_voice.delegation import build_proposal
 from orchestrator.frontend_live_voice.service import LiveVoiceEventService
 from orchestrator.frontend_live_voice.openai_live import session_request, append_update, safe_sideband_event
+from orchestrator.frontend_live_voice.manager import _live_text_chunks
 
 BINDING=CallBinding('person@example.test','hashi4','generation-7','zelda','session-example',8,'call-example',1,'live_example')
 
@@ -78,8 +79,12 @@ class ProviderTests(unittest.TestCase):
         self.assertIsNone(safe_sideband_event(json.dumps({'type':'response.function_call','arguments':'danger'})))
     def test_provider_update_acknowledgements_are_accepted(self):
         for event_type in ('session.commentary.appended','session.thinking.appended','session.instructions.appended'):
-            event=safe_sideband_event(json.dumps({'type':event_type,'event_id':'update-1'}))
+            event=safe_sideband_event(json.dumps({'type':event_type,'event_id':'provider-1','client_event_id':'update-1'}))
             self.assertEqual(event['type'],event_type)
+    def test_cjk_result_chunks_keep_a_conservative_provider_margin(self):
+        chunks=_live_text_chunks('训练记录。'*400)
+        self.assertGreater(len(chunks),1)
+        self.assertTrue(all(len(chunk.encode('utf-8'))<=512 for chunk in chunks))
     def test_frame_cap(self):
         with self.assertRaises(LiveVoiceError):safe_sideband_event('x'*262145)
 

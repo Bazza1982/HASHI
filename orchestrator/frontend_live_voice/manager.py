@@ -29,7 +29,8 @@ logger = logging.getLogger(__name__)
 ACTIVE_PHASES = {"connecting", "active", "ending"}
 TERMINAL_PHASES = {"ended", "failed", "interrupted"}
 CALL_EVENT_SCHEMA = "hashi.live_voice.event.v1"
-LIVE_UPDATE_TOKEN_LIMIT = 420
+LIVE_UPDATE_TOKEN_LIMIT = 320
+LIVE_UPDATE_BYTE_LIMIT = 512
 
 
 def _utc_now_dt() -> datetime:
@@ -68,19 +69,36 @@ def _event_usage(event: Mapping[str, Any]) -> dict[str, int] | None:
     return direct or (_public_usage(session.get("usage")) if isinstance(session, Mapping) else None)
 
 
-def _live_text_chunks(value: Any, *, token_limit: int = LIVE_UPDATE_TOKEN_LIMIT) -> list[str]:
-    """Split user-visible text below the provider's 500-token append ceiling."""
+def _live_text_chunks(
+    value: Any,
+    *,
+    token_limit: int = LIVE_UPDATE_TOKEN_LIMIT,
+    byte_limit: int = LIVE_UPDATE_BYTE_LIMIT,
+) -> list[str]:
+    """Split text conservatively below the provider's 500-token append ceiling.
+
+    The local token estimate is useful for metering but is not the provider's
+    tokenizer. The byte ceiling keeps CJK, emoji, paths, and Markdown from
+    producing a nominally valid chunk that the provider rejects.
+    """
 
     remaining = str(value or "").strip()
     chunks: list[str] = []
+
+    def fits(text: str) -> bool:
+        return (
+            estimate_tokens(text) <= token_limit
+            and len(text.encode("utf-8")) <= byte_limit
+        )
+
     while remaining:
-        if estimate_tokens(remaining) <= token_limit:
+        if fits(remaining):
             chunks.append(remaining)
             break
         low, high, accepted = 1, len(remaining), 1
         while low <= high:
             middle = (low + high) // 2
-            if estimate_tokens(remaining[:middle]) <= token_limit:
+            if fits(remaining[:middle]):
                 accepted = middle
                 low = middle + 1
             else:
@@ -95,6 +113,29 @@ def _live_text_chunks(value: Any, *, token_limit: int = LIVE_UPDATE_TOKEN_LIMIT)
         chunks.append(remaining[:boundary].strip())
         remaining = remaining[boundary:].strip()
     return [chunk for chunk in chunks if chunk]
+
+
+def _provider_client_event_id(event: Mapping[str, Any]) -> str:
+    """Return the outgoing client event correlated by an ack or error."""
+
+    error = event.get("error")
+    nested = error if isinstance(error, Mapping) else {}
+    for candidate in (
+        event.get("client_event_id"),
+        nested.get("client_event_id"),
+        nested.get("event_id"),
+        event.get("event_id"),
+    ):
+        if isinstance(candidate, str) and candidate:
+            return candidate
+    return ""
+
+
+def _provider_error_code(event: Mapping[str, Any]) -> str:
+    error = event.get("error")
+    candidate = error.get("code") if isinstance(error, Mapping) else None
+    value = str(candidate or "provider_error")
+    return value if value.replace("_", "").replace("-", "").isalnum() else "provider_error"
 
 
 class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
@@ -787,7 +828,9 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             self._update_waiters[identity] = waiter
             try:
                 await ws.send_json(payload)
-                if await asyncio.wait_for(waiter, timeout=1.0) is not True:
+                if await asyncio.wait_for(
+                    waiter, timeout=self._control_timeout_seconds
+                ) is not True:
                     return False
             except Exception:
                 return False
@@ -1497,22 +1540,34 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                         if event is None:
                             continue
                         event_type = event.get("type")
-                        event_id = str(event.get("event_id") or event.get("client_event_id") or "")
-                        if event_type in {"session.input_audio.muted", "session.input_audio.unmuted"} and event_id:
-                            waiter = self._control_waiters.get((binding.call_id, event_id))
+                        client_event_id = _provider_client_event_id(event)
+                        if event_type in {"session.input_audio.muted", "session.input_audio.unmuted"} and client_event_id:
+                            waiter = self._control_waiters.get((binding.call_id, client_event_id))
                             if waiter is not None and not waiter.done():
                                 waiter.set_result(True)
                         if event_type in {
                             "session.commentary.appended",
                             "session.thinking.appended",
                             "session.instructions.appended",
-                        } and event_id:
-                            waiter = self._update_waiters.get((binding.call_id, event_id))
+                        } and client_event_id:
+                            waiter = self._update_waiters.get((binding.call_id, client_event_id))
                             if waiter is not None and not waiter.done():
                                 waiter.set_result(True)
                         if event_type == "error":
-                            self._sideband_failures[binding.call_id] = "live_provider_error"
-                            raise LiveVoiceError("live_provider_error", 502)
+                            for waiters in (self._update_waiters, self._control_waiters):
+                                waiter = waiters.get((binding.call_id, client_event_id))
+                                if waiter is not None and not waiter.done():
+                                    waiter.set_result(False)
+                            logger.warning(
+                                "Live Voice provider rejected %s for %s (%s)",
+                                client_event_id or "an uncorrelated event",
+                                binding.call_id,
+                                _provider_error_code(event),
+                            )
+                            # Live errors are operation-scoped. The provider
+                            # will emit session.closed or close the socket if
+                            # the whole conversation is no longer usable.
+                            continue
                         if event_type == "session.started":
                             with self.session_store._lock, self.session_store._connection() as connection:
                                 row = connection.execute("SELECT phase FROM live_calls WHERE call_id = ?", (binding.call_id,)).fetchone()
