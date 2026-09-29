@@ -19,7 +19,15 @@ from orchestrator.phone_catalog import (
     OPENAI_LIVE_VOICE_PRESENTATIONS,
 )
 from .delegation import Proposal, build_proposal
-from .openai_live import append_update, attach_provider, create_provider_session, provider_http_session, safe_sideband_event, session_request
+from .openai_live import (
+    append_update,
+    attach_provider,
+    create_provider_session,
+    fit_live_session_input,
+    provider_http_session,
+    safe_sideband_event,
+    session_request,
+)
 from .ports import AdmissionPort, DurableVoicePort, LiveApplicationPort
 from .protocol import CallBinding, Fragment, LiveVoiceError, identifier, positive_int, stable_digest
 from .service import LiveVoiceEventService
@@ -1157,6 +1165,42 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             )
         try:
             async with provider_http_session() as http:
+                context_audit = phone_session["context_audit"]
+                required_message_count = context_audit.get(
+                    "required_message_count", len(phone_session["input"])
+                )
+                history_unit_message_counts = context_audit.get(
+                    "history_unit_message_counts", []
+                )
+                provider_input, exact_audit = await fit_live_session_input(
+                    http,
+                    key=self._get_api_key(),
+                    model=phone_session["model"],
+                    input_messages=phone_session["input"],
+                    required_message_count=required_message_count,
+                    history_unit_message_counts=history_unit_message_counts,
+                )
+                phone_record.update(
+                    {
+                        "input_sha256": stable_digest({"input": provider_input}),
+                        "input_messages": len(provider_input),
+                        **exact_audit,
+                    }
+                )
+                phone_record_json = json.dumps(
+                    phone_record, ensure_ascii=False, separators=(",", ":")
+                )
+                with self.session_store._lock, self.session_store._connection() as connection:
+                    connection.execute(
+                        "UPDATE live_call_attempts SET phone_config_json = ?, updated_at = ? WHERE attempt_id = ?",
+                        (phone_record_json, _utc_now(), attempt_id),
+                    )
+                logger.info(
+                    "GPT-Live startup input fitted messages=%s exact_tokens=%s omitted_history_units=%s",
+                    len(provider_input),
+                    exact_audit["input_tokens_exact"],
+                    exact_audit["history_omitted_units"],
+                )
                 provider = await create_provider_session(
                     http, key=self._get_api_key(),
                     request=session_request(
@@ -1164,7 +1208,8 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                         instructions=phone_session["instructions"],
                         model=phone_session["model"],
                         voice=phone_session["voice"],
-                        input_messages=phone_session["input"],
+                        input_messages=provider_input,
+                        input_token_count_exact=exact_audit["input_tokens_exact"],
                     ),
                 )
         except LiveVoiceError as exc:

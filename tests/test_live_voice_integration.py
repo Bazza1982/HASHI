@@ -675,9 +675,28 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
             )
         provider_calls = []
 
+        class FakeContent:
+            async def iter_chunked(self, _size):
+                yield b'{"input_tokens":42}'
+
+        class FakeResponse:
+            status = 200
+            headers = {"x-request-id": "req-count-contract"}
+            content = FakeContent()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+        class FakeHttp:
+            def post(self, *_args, **_kwargs):
+                return FakeResponse()
+
         @asynccontextmanager
         async def fake_http():
-            yield object()
+            yield FakeHttp()
 
         async def fake_create(_http, *, key, request):
             provider_calls.append((key, request))
@@ -723,6 +742,8 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
             self.assertEqual(snapshot["public"]["voice"], "willow")
             self.assertEqual(snapshot["public"]["revision"], PHONE_REVISION)
             self.assertEqual(len(snapshot["instructions_sha256"]), 64)
+            self.assertEqual(snapshot["input_tokens_exact"], 42)
+            self.assertEqual(snapshot["provider_count_requests"], 1)
             self.assertNotIn("instructions", snapshot)
             self.assertNotIn("Safe projected test Persona", raw_snapshot)
 

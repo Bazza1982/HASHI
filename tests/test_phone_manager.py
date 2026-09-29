@@ -74,6 +74,9 @@ def test_defaults_resolve_full_authoritative_pcm_and_history(tmp_path: Path):
     assert "HIGHEST PRIORITY" in resolved["instructions"]
     assert "not a separate assistant" in resolved["instructions"]
     assert "explicitly confirm" not in resolved["instructions"]
+    assert resolved["context_audit"]["provider_exact_count_required"] is True
+    assert resolved["context_audit"]["required_message_count"] == 3
+    assert resolved["context_audit"]["history_unit_message_counts"] == [2]
     assert resolved["instructions"].endswith(
         "You are Moon throughout the call. HASHI is your execution capability, not another Agent. Delegate tool work automatically, keep the conversation coherent while it runs, and never represent delegated work as completed without a reliable HASHI result."
     )
@@ -95,11 +98,14 @@ def test_live_input_keeps_hcc_and_newest_complete_exchange_then_drops_oldest():
     assert "USER-89-" in encoded and "ASSISTANT-89-" in encoded
     assert "USER-0-" not in encoded and "ASSISTANT-0-" not in encoded
     assert len(items) <= 128
-    assert audit["tokens_est"] <= 8192
+    assert audit["provider_exact_count_required"] is True
+    assert audit["required_message_count"] + sum(
+        audit["history_unit_message_counts"]
+    ) == len(items)
     assert audit["history_omitted_units"] > 0
 
 
-def test_live_input_keeps_estimator_margin_below_provider_token_ceiling():
+def test_live_input_uses_full_message_capacity_before_provider_exact_count():
     recent = []
     for index in range(90):
         unit = f"round-{index}"
@@ -110,25 +116,24 @@ def test_live_input_keeps_estimator_margin_below_provider_token_ceiling():
             ]
         )
 
-    _items, audit = build_live_voice_input(
+    items, audit = build_live_voice_input(
         _pcm_payload(hcc="FULL_HCC_SENTINEL"),
         recent,
         token_count=len,
     )
 
-    # The provider enforces an exact 8,192-token ceiling while HASHI uses a
-    # heuristic estimator. Keep 512 estimated tokens free so rounding and
-    # tokenizer differences cannot turn a locally valid call into a 502.
-    assert audit["tokens_est"] <= 7_680
-    assert audit["tokens_est_budget"] == 7_680
+    assert len(items) == 127
     assert audit["provider_tokens_limit"] == 8_192
-    assert audit["token_estimator_reserve"] == 512
+    assert audit["provider_exact_count_required"] is True
+    assert "tokens_est_budget" not in audit
+    assert "token_estimator_reserve" not in audit
 
 
-def test_live_input_never_silently_truncates_oversized_hcc():
-    with pytest.raises(Exception) as caught:
-        build_live_voice_input(_pcm_payload(hcc="汉" * 13000), [])
-    assert getattr(caught.value, "code", "") == "pcm_live_history_capacity_exceeded"
+def test_live_input_preserves_full_hcc_for_provider_exact_count():
+    items, audit = build_live_voice_input(_pcm_payload(hcc="汉" * 13000), [])
+    assert "汉" * 13000 in json.dumps(items, ensure_ascii=False)
+    assert audit["required_message_count"] == 3
+    assert audit["provider_exact_count_required"] is True
 
 
 def test_instruction_limit_is_token_based_not_old_character_cap(tmp_path: Path):

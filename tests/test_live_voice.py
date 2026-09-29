@@ -10,6 +10,7 @@ from orchestrator.frontend_live_voice.service import LiveVoiceEventService
 from orchestrator.frontend_live_voice.openai_live import (
     append_update,
     create_provider_session,
+    fit_live_session_input,
     safe_sideband_event,
     session_request,
 )
@@ -61,6 +62,114 @@ class ProposalTests(unittest.TestCase):
         with self.assertRaises(LiveVoiceError):build_proposal(BINDING,'d1',[fragment(text='x'*40000)],after_ms=0,cutoff_ms=600,expires_at='2099')
 
 class ProviderTests(unittest.TestCase):
+    def test_exact_provider_count_drops_only_oldest_complete_history_units(self):
+        weights = {
+            "MANDATORY": 4_000,
+            "OLD-USER": 1_500,
+            "OLD-ASSISTANT": 1_500,
+            "MIDDLE": 1_800,
+            "NEWEST": 1_500,
+        }
+
+        class FakeContent:
+            def __init__(self, payload):
+                self.payload = payload
+
+            async def iter_chunked(self, _size):
+                yield json.dumps(self.payload).encode()
+
+        class FakeResponse:
+            status = 200
+            headers = {"x-request-id": "req-count-1"}
+
+            def __init__(self, payload):
+                self.content = FakeContent(payload)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+        class FakeHttp:
+            def post(self, _url, *, json, **_kwargs):
+                tokens = sum(
+                    weights[part["text"]]
+                    for item in json["input"]
+                    for part in item["content"]
+                )
+                return FakeResponse({"input_tokens": tokens})
+
+        def item(role, text):
+            content_type = "output_text" if role == "assistant" else "input_text"
+            return {
+                "type": "message",
+                "role": role,
+                "content": [{"type": content_type, "text": text}],
+            }
+
+        candidate = [
+            item("developer", "MANDATORY"),
+            item("user", "OLD-USER"),
+            item("assistant", "OLD-ASSISTANT"),
+            item("user", "MIDDLE"),
+            item("assistant", "NEWEST"),
+        ]
+        fitted, audit = asyncio.run(
+            fit_live_session_input(
+                FakeHttp(),
+                key="test-key",
+                model="gpt-live-1",
+                input_messages=candidate,
+                required_message_count=1,
+                history_unit_message_counts=[2, 1, 1],
+            )
+        )
+
+        texts = [item["content"][0]["text"] for item in fitted]
+        self.assertEqual(texts, ["MANDATORY", "MIDDLE", "NEWEST"])
+        self.assertEqual(audit["input_tokens_exact"], 7_300)
+        self.assertEqual(audit["history_included_units"], 2)
+        self.assertEqual(audit["history_omitted_units"], 1)
+
+    def test_exact_provider_count_rejects_mandatory_context_over_limit(self):
+        class FakeContent:
+            async def iter_chunked(self, _size):
+                yield b'{"input_tokens":9000}'
+
+        class FakeResponse:
+            status = 200
+            headers = {}
+            content = FakeContent()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+        class FakeHttp:
+            def post(self, *_args, **_kwargs):
+                return FakeResponse()
+
+        mandatory = [{
+            "type": "message",
+            "role": "developer",
+            "content": [{"type": "input_text", "text": "FULL-HCC"}],
+        }]
+        with self.assertRaises(LiveVoiceError) as caught:
+            asyncio.run(
+                fit_live_session_input(
+                    FakeHttp(),
+                    key="test-key",
+                    model="gpt-live-1",
+                    input_messages=mandatory,
+                    required_message_count=1,
+                    history_unit_message_counts=[],
+                )
+            )
+        self.assertEqual(caught.exception.code, "live_input_mandatory_limit")
+
     def test_client_delegation_and_recording_off(self):
         history=[{'type':'message','role':'user','content':[{'type':'input_text','text':'Remember this.'}]}]
         req=session_request('v=0\r\n','Voice style only.', voice='willow', input_messages=history)

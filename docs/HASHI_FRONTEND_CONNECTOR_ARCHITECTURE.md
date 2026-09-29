@@ -509,14 +509,16 @@ messages enter provider startup `input`; they are not rewritten into another
 memory store. Credentials and raw PCM files remain excluded.
 
 The OpenAI GPT-Live adapter keeps the provider's 16,384-token instruction limit
-and the 128-message/8,192-token startup-input hard limits. Because HASHI's local
-token count is an estimate rather than the provider tokenizer's authoritative
-count, startup-input selection leaves a 512-token estimator reserve below the
-hard ceiling. HCC is never clipped. Selection retains whole conversation units,
-keeps the newest unit first, then adds older units from newest to oldest; if
-mandatory context cannot fit, startup fails visibly rather than silently
-truncating a sentence or cache. `store:false` remains mandatory, so HASHI's
-Session record, not a provider recording, owns continuity.
+and the 128-message/8,192-token startup-input hard limits. PCM first supplies the
+largest whole-message candidate allowed by the message limit. At call start the
+adapter asks OpenAI's authoritative `/v1/responses/input_tokens` counter for the
+exact input size, then removes only the oldest complete conversation units until
+the candidate fits. Local estimates remain audit telemetry and never decide
+provider admission. HCC and the other mandatory context are never clipped; if
+they alone exceed the exact ceiling, or the newest complete dialogue unit cannot
+fit beside them, startup fails visibly rather than truncating a sentence or
+cache. `store:false` remains mandatory, so HASHI's Session record, not a
+provider recording, owns continuity.
 
 The live phone is another transport for the selected Agent, not a second Agent
 or a reduced-permission assistant. GPT-Live supplies speech recognition, voice,

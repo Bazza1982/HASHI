@@ -189,8 +189,10 @@ enabled Memory+ and bounded same-Session dialogue. Live transcript fragments
 write to HASHI as they arrive and feed later text or phone turns; the visible
 call card is only a derived view. Keep provider storage off and never clip HCC
 or part of an utterance to make a call fit. Startup-history selection leaves a
-small estimator reserve below the provider's hard token ceiling because local
-counts are approximate; only the oldest complete dialogue units yield to it.
+candidate up to the provider's full message limit, then uses OpenAI's exact
+input-token count before session creation. Only the oldest complete dialogue
+units yield when the exact 8,192-token ceiling requires it; local estimates are
+telemetry only.
 
 Commands follow the [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md); `/help`
 derives from metadata. Workbench and Telegram may share a Session while UI rows

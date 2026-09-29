@@ -20,10 +20,6 @@ from tools.token_tracker import estimate_tokens
 MAX_LIVE_INSTRUCTION_TOKENS = 16_384
 MAX_LIVE_INPUT_MESSAGES = 128
 MAX_LIVE_INPUT_TOKENS = 8_192
-LIVE_INPUT_TOKEN_RESERVE = 512
-LIVE_INPUT_ESTIMATED_TOKEN_BUDGET = (
-    MAX_LIVE_INPUT_TOKENS - LIVE_INPUT_TOKEN_RESERVE
-)
 LIVE_MESSAGE_OVERHEAD_TOKENS = 4
 
 
@@ -236,13 +232,14 @@ def build_live_voice_input(
     recent_history: Iterable[Mapping[str, Any]],
     *,
     token_count: Callable[[str], int] = estimate_tokens,
-) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    """Build bounded startup history without clipping HCC or any utterance.
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Build the complete provider-count candidate without clipping context.
 
     Context blocks are whole developer messages. Conversation is admitted in
     whole history units, newest first for selection and chronological in the
-    provider request. If mandatory context plus the newest unit cannot fit,
-    the call fails explicitly rather than silently truncating a fact or HCC.
+    provider request. This synchronous PCM step enforces only the provider's
+    message-count limit. The OpenAI adapter performs the authoritative token
+    count at call start and removes only oldest complete history units.
     """
 
     sections = _transport_sections(pcm_payload)
@@ -294,13 +291,10 @@ def build_live_voice_input(
         units.setdefault(row["unit"], []).append(row["item"])
 
     base_tokens = sum(_message_tokens(item, token_count) for item in developer_items)
-    if (
-        len(developer_items) > MAX_LIVE_INPUT_MESSAGES
-        or base_tokens > LIVE_INPUT_ESTIMATED_TOKEN_BUDGET
-    ):
+    if len(developer_items) > MAX_LIVE_INPUT_MESSAGES:
         raise PCMValidationError(
             "pcm_live_history_capacity_exceeded",
-            "HCC, long-term memory, and Memory+ exceed the safe estimated GPT-Live startup-history budget; no context was truncated",
+            "HCC, long-term memory, and Memory+ exceed the GPT-Live startup message limit; no context was truncated",
         )
 
     selected_units: set[str] = set()
@@ -310,14 +304,11 @@ def build_live_voice_input(
     for unit_id, unit_items in reversed(ordered_units):
         unit_messages = len(unit_items)
         unit_tokens = sum(_message_tokens(item, token_count) for item in unit_items)
-        if (
-            used_messages + unit_messages > MAX_LIVE_INPUT_MESSAGES
-            or used_tokens + unit_tokens > LIVE_INPUT_ESTIMATED_TOKEN_BUDGET
-        ):
+        if used_messages + unit_messages > MAX_LIVE_INPUT_MESSAGES:
             if not selected_units:
                 raise PCMValidationError(
                     "pcm_live_history_capacity_exceeded",
-                    "The complete newest conversation turn does not fit beside mandatory phone context; nothing was truncated",
+                    "The complete newest conversation turn does not fit beside mandatory phone context within the provider message limit; nothing was truncated",
                 )
             break
         selected_units.add(unit_id)
@@ -327,13 +318,21 @@ def build_live_voice_input(
     conversation_items = [
         row["item"] for row in history_rows if row["unit"] in selected_units
     ]
+    selected_ordered_units = [
+        unit_items
+        for unit_id, unit_items in ordered_units
+        if unit_id in selected_units
+    ]
     items = [*developer_items, *conversation_items]
     return items, {
         "messages": len(items),
         "tokens_est": used_tokens,
-        "tokens_est_budget": LIVE_INPUT_ESTIMATED_TOKEN_BUDGET,
         "provider_tokens_limit": MAX_LIVE_INPUT_TOKENS,
-        "token_estimator_reserve": LIVE_INPUT_TOKEN_RESERVE,
+        "provider_exact_count_required": True,
+        "required_message_count": len(developer_items),
+        "history_unit_message_counts": [
+            len(unit_items) for unit_items in selected_ordered_units
+        ],
         "history_requested_units": len(units),
         "history_included_units": len(selected_units),
         "history_omitted_units": len(units) - len(selected_units),
