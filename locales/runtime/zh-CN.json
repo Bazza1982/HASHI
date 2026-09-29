@@ -2543,6 +2543,8 @@
     "phone.language.zh-TW": "繁体中文",
     "phone.language.en": "英语",
     "phone.language.ja": "日语",
+    "phone.voice.feminine": "女性声线",
+    "phone.voice.masculine": "男性声线",
     "phone.style.natural": "自然",
     "phone.style.warm": "温柔",
     "phone.style.clear": "清晰",

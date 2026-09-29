@@ -63,6 +63,7 @@ def test_phone_settings_are_separate_persistent_and_change_revision(tmp_path: Pa
     assert state["style"] == "warm"
     assert state["style_instructions"] == "语速稍慢，停顿自然。"
     assert second["public"]["custom_style"] is True
+    assert second["public"]["voice_presentation"] == "feminine"
     assert second["public"]["revision"] != first["public"]["revision"]
     assert not (workspace / "voice_state.json").exists()
 
@@ -109,3 +110,13 @@ def test_every_exposed_voice_is_qualified_for_the_selected_model(tmp_path: Path)
     exposed = {voice for voice, _label in manager.voice_options()}
     qualified = set(manager.PROVIDERS["openai"]["models"]["gpt-live-1"]["voices"])
     assert exposed == qualified
+
+
+def test_voice_presentations_use_only_official_metadata(tmp_path: Path):
+    manager = PhoneManager(_workspace(tmp_path))
+
+    assert manager.voice_presentation("marin") is None
+    assert manager.voice_presentation("quartz") == "feminine"
+    assert manager.voice_presentation("ripple") == "masculine"
+    assert set(manager.VOICE_PRESENTATIONS) == set(manager.VOICE_LABELS) - {"marin"}
+    assert set(manager.VOICE_PRESENTATIONS.values()) == {"feminine", "masculine"}

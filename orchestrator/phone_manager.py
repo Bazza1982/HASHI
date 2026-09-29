@@ -14,7 +14,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 from orchestrator.config_json import ConfigConflictError, read_config_json, write_config_json
-from orchestrator.phone_catalog import PHONE_LANGUAGES, PHONE_PROVIDERS, PHONE_STYLES
+from orchestrator.phone_catalog import (
+    OPENAI_LIVE_VOICE_PRESENTATIONS,
+    PHONE_LANGUAGES,
+    PHONE_PROVIDERS,
+    PHONE_STYLES,
+)
 from orchestrator.pcm_voice_projection import build_live_voice_instructions, load_phone_persona
 
 
@@ -34,6 +39,7 @@ class PhoneManager:
         voice: voice.title()
         for voice in PROVIDERS["openai"]["models"]["gpt-live-1"]["voices"]
     }
+    VOICE_PRESENTATIONS = OPENAI_LIVE_VOICE_PRESENTATIONS
     LANGUAGES = PHONE_LANGUAGES
     STYLES = PHONE_STYLES
     DEFAULT_STATE = {
@@ -142,6 +148,10 @@ class PhoneManager:
         return tuple((voice, self.VOICE_LABELS.get(voice, voice.title())) for voice in voices)
 
     @classmethod
+    def voice_presentation(cls, voice: str) -> str | None:
+        return cls.VOICE_PRESENTATIONS.get(str(voice))
+
+    @classmethod
     def language_options(cls) -> tuple[tuple[str, str], ...]:
         return tuple((key, str(value["label"])) for key, value in cls.LANGUAGES.items())
 
@@ -244,6 +254,7 @@ class PhoneManager:
             "model_label": self.PROVIDERS[state["provider"]]["models"][state["model"]]["label"],
             "voice": state["voice"],
             "voice_label": self.VOICE_LABELS.get(state["voice"], state["voice"].title()),
+            "voice_presentation": self.voice_presentation(state["voice"]),
             "language": state["language"],
             "language_label": self.LANGUAGES[state["language"]]["label"],
             "style": state["style"],

@@ -13,7 +13,10 @@ from uuid import uuid4
 
 import aiohttp
 
-from orchestrator.phone_catalog import OPENAI_LIVE_VOICES
+from orchestrator.phone_catalog import (
+    OPENAI_LIVE_VOICES,
+    OPENAI_LIVE_VOICE_PRESENTATIONS,
+)
 from .delegation import Proposal, build_proposal
 from .openai_live import append_update, attach_provider, create_provider_session, provider_http_session, safe_sideband_event, session_request
 from .ports import AdmissionPort, DurableVoicePort, LiveApplicationPort
@@ -191,11 +194,16 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             "provider": provider, "model": model, "voice": voice,
         }.items()):
             raise LiveVoiceError("live_phone_configuration_invalid", 503)
+        if (
+            "voice_presentation" in public
+            and public.get("voice_presentation") != OPENAI_LIVE_VOICE_PRESENTATIONS.get(voice)
+        ):
+            raise LiveVoiceError("live_phone_configuration_invalid", 503)
         allowed_public = {
             key: public[key]
             for key in (
                 "revision", "provider", "provider_label", "model", "model_label",
-                "voice", "voice_label", "language", "language_label", "style",
+                "voice", "voice_label", "voice_presentation", "language", "language_label", "style",
                 "style_label", "custom_style", "persona_projected",
             )
             if key in public

@@ -37,6 +37,7 @@ def resolved_phone_session(_agent_id="zelda"):
             "model_label": "GPT Live 1",
             "voice": "willow",
             "voice_label": "Willow",
+            "voice_presentation": "feminine",
             "language": "auto",
             "language_label": "Automatic",
             "style": "natural",
@@ -149,6 +150,7 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         self.assertEqual(result["binding"]["agent_id"], self.agent_id)
         self.assertTrue(result["capability"]["available"])
         self.assertEqual(result["capability"]["phone"]["voice"], "willow")
+        self.assertEqual(result["capability"]["phone"]["voice_presentation"], "feminine")
 
     def test_append_fragment_deduplication(self):
         frag = Fragment(provider_event_id="evt-1", speaker="user", text="hello world", start_ms=0, end_ms=500)

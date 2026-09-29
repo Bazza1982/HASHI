@@ -3791,10 +3791,16 @@ class FlexibleAgentRuntime:
         )
         return InlineKeyboardMarkup(rows)
 
+    def _phone_voice_label(self, voice: str) -> str:
+        label = self.phone_manager.VOICE_LABELS.get(voice, voice.title())
+        presentation = self.phone_manager.voice_presentation(voice)
+        if not presentation:
+            return label
+        return f"{label} · {ui_language.tr(f'phone.voice.{presentation}')}"
+
     def _phone_menu_text(self) -> str:
         state = self.phone_manager.get_state()
         provider = self.phone_manager.PROVIDERS[state["provider"]]
-        model = provider["models"][state["model"]]
         style_label = ui_language.tr(f"phone.style.{state['style']}")
         language_label = ui_language.tr(f"phone.language.{state['language']}")
         custom = state["style_instructions"]
@@ -3817,7 +3823,7 @@ class FlexibleAgentRuntime:
             current=(
                 f"{html.escape(str(provider['label']))} · "
                 f"<code>{html.escape(state['model'])}</code> · "
-                f"{html.escape(self.phone_manager.VOICE_LABELS[state['voice']])}"
+                f"{html.escape(self._phone_voice_label(state['voice']))}"
             ),
             facts=(
                 f"<b>{html.escape(ui_language.tr('phone.field.language'))}</b> · {html.escape(language_label)}",
@@ -3835,7 +3841,7 @@ class FlexibleAgentRuntime:
         labels = {
             "provider": self.phone_manager.PROVIDERS[state["provider"]]["label"],
             "model": self.phone_manager.PROVIDERS[state["provider"]]["models"][state["model"]]["label"],
-            "voice": self.phone_manager.VOICE_LABELS[state["voice"]],
+            "voice": self._phone_voice_label(state["voice"]),
             "language": ui_language.tr(f"phone.language.{state['language']}"),
             "style": ui_language.tr(f"phone.style.{state['style']}"),
         }
@@ -3867,7 +3873,10 @@ class FlexibleAgentRuntime:
         elif field == "model":
             options = self.phone_manager.model_options()
         elif field == "voice":
-            options = self.phone_manager.voice_options()
+            options = tuple(
+                (key, self._phone_voice_label(key))
+                for key, _label in self.phone_manager.voice_options()
+            )
         elif field == "language":
             options = tuple(
                 (key, ui_language.tr(f"phone.language.{key}"))

@@ -32,6 +32,7 @@ def _runtime(tmp_path):
 
 def test_phone_menu_uses_localized_labels_in_chinese(tmp_path):
     runtime = _runtime(tmp_path)
+    runtime.phone_manager.set_voice("willow")
 
     with ui_language.language_scope(SimpleNamespace(), locale="zh-CN"):
         text = runtime._phone_menu_text()
@@ -40,11 +41,17 @@ def test_phone_menu_uses_localized_labels_in_chinese(tmp_path):
             for row in runtime._phone_keyboard().inline_keyboard
             for button in row
         ]
+        voice_labels = [
+            button.text
+            for row in runtime._phone_keyboard("voice").inline_keyboard[:-1]
+            for button in row
+        ]
 
     assert "<b>语言</b> · 自动跟随" in text
     assert "<b>说话风格</b> · 自然" in text
     assert "<b>PCM 人格</b> · 已安全投影" in text
     assert "这是当前代理的工作区设置" in text
+    assert "Willow · 女性声线" in text
     assert button_labels == [
         "服务商",
         "模型",
@@ -55,6 +62,11 @@ def test_phone_menu_uses_localized_labels_in_chinese(tmp_path):
     ]
     assert "phone." not in text
     assert all("phone." not in label for label in button_labels)
+    assert "Marin" in voice_labels
+    assert "Quartz · 女性声线" in voice_labels
+    assert "Ripple · 男性声线" in voice_labels
+    assert "✓ Willow · 女性声线" in voice_labels
+    assert all("phone." not in label for label in voice_labels)
 
 
 @pytest.mark.asyncio

@@ -7,6 +7,24 @@ OPENAI_LIVE_VOICES = (
     "meridian", "bossa", "tempo", "beacon", "delta", "cinder",
 )
 
+# OpenAI calls this field "Presentation" in the GPT Live voice catalogue.
+# Marin is intentionally absent because the official catalogue does not assign
+# it a feminine or masculine presentation.
+OPENAI_LIVE_VOICE_PRESENTATIONS = {
+    "quartz": "feminine",
+    "ripple": "masculine",
+    "vesper": "masculine",
+    "willow": "feminine",
+    "stone": "masculine",
+    "gleam": "feminine",
+    "meridian": "masculine",
+    "bossa": "feminine",
+    "tempo": "masculine",
+    "beacon": "masculine",
+    "delta": "feminine",
+    "cinder": "masculine",
+}
+
 PHONE_PROVIDERS = {
     "openai": {
         "label": "OpenAI",
