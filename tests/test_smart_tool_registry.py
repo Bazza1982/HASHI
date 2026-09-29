@@ -159,6 +159,17 @@ def test_unreachable_scheduler_rerun_keeps_side_effect_unknown() -> None:
     assert outcome.error.code == "scheduler_unreachable"
 
 
+def test_resolved_scheduler_recovery_repeat_reports_no_change() -> None:
+    _spec, outcome = adapt_legacy_result(
+        "hashi_scheduler_recovery_resolve",
+        output='{"ok": true, "state_changed": false}',
+        raw_is_error=False,
+    )
+
+    assert outcome.status == "success"
+    assert outcome.effect == "no_change"
+
+
 def test_legacy_unavailable_detail_maps_to_unavailable() -> None:
     _spec, outcome = adapt_legacy_result(
         "verification_run",

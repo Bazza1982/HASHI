@@ -204,6 +204,7 @@ async def test_gateway_exposes_authoritative_hashi_scheduler_tools(tmp_path, mon
             "hashi_scheduler_status",
             "hashi_scheduler_run_history",
             "hashi_scheduler_rerun",
+            "hashi_scheduler_recovery_resolve",
         },
         workbench_api_base_url="http://10.255.255.254:18800",
     )
@@ -222,6 +223,7 @@ async def test_gateway_exposes_authoritative_hashi_scheduler_tools(tmp_path, mon
         "hashi_scheduler_status",
         "hashi_scheduler_run_history",
         "hashi_scheduler_rerun",
+        "hashi_scheduler_recovery_resolve",
     } <= names
     listed = await gateway.call("hashi_scheduler_list", {"kind": "cron"}, "list-1")
     assert listed["isError"] is False
@@ -250,6 +252,26 @@ async def test_gateway_exposes_authoritative_hashi_scheduler_tools(tmp_path, mon
             "job_id": "daily",
             "requested_by": "hashi_tool_gateway",
             "authorization": "explicit_user_authorization",
+        },
+    )
+
+    resolved = await gateway.call(
+        "hashi_scheduler_recovery_resolve",
+        {
+            "batch_id": "recovery-1",
+            "action": "rerun_selected",
+            "counts": {"daily": 2},
+        },
+        "resolve-1",
+    )
+    assert resolved["isError"] is False
+    assert calls[-1] == (
+        "POST",
+        "http://10.255.255.254:18800/api/agents/momo/scheduler/recovery/recovery-1/resolve",
+        {
+            "action": "rerun_selected",
+            "counts": {"daily": 2},
+            "requested_by": "hashi_tool_gateway",
         },
     )
 

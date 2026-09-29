@@ -218,6 +218,13 @@ Scheduler recurrence stores UTC instants, wall time, and IANA zone; legacy
 unknown zones use UTC. Recovery binds instance, lifecycle, and Bot, with
 bounded retries honoring `RetryAfter`.
 
+Missed-trigger decisions are normal FC-managed Conversation exchanges. HASHI
+Scheduler admits the facts, the Agent asks the question, and the user may reply
+in natural language from Telegram, TUI, Backend API, or any registered
+Connector. Never parse reply words or menu numbers in a Connector. Only call
+`hashi_scheduler_recovery_resolve` for an unambiguous decision and the exact
+pending batch; answer questions or clarify without changing Scheduler state.
+
 Use authorized capabilities only; device actions need a same-instance Worker.
 Prefer `log_query`; work foreground unless `/bg` is explicit. Tests prove
 scope, not adoption; preserve user work.

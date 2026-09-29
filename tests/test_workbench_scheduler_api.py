@@ -11,8 +11,10 @@ from orchestrator.workbench_api import WorkbenchApiServer
 
 
 class _FakeRequest:
-    def __init__(self, *, name="momo", query=None, payload=None):
+    def __init__(self, *, name="momo", batch_id=None, query=None, payload=None):
         self.match_info = {"name": name}
+        if batch_id is not None:
+            self.match_info["batch_id"] = batch_id
         self.query = query or {}
         self._payload = payload or {}
 
@@ -27,6 +29,7 @@ class _FakeRuntime:
         self.workspace_dir = workspace_dir
         self.skill_manager = skill_manager
         self.reruns = []
+        self.recovery_resolutions = []
 
     async def _run_job_now(self, job, *, kind=None):
         self.reruns.append((kind, dict(job)))
@@ -63,6 +66,22 @@ def _server(tmp_path: Path) -> tuple[WorkbenchApiServer, _FakeRuntime]:
     workspace.mkdir(parents=True)
     manager = SkillManager(tmp_path, tasks_path)
     runtime = _FakeRuntime(workspace, manager)
+    async def resolve_recovery_batch(**kwargs):
+        runtime.recovery_resolutions.append(dict(kwargs))
+        return {
+            "batch_id": kwargs["batch_id"],
+            "agent": kwargs["agent_name"],
+            "status": "resolved",
+            "state_changed": True,
+            "resolution": {
+                "action": "skip",
+                "executed_total": 0,
+                "failed_total": 0,
+                "skipped_total": 2,
+                "items": {},
+            },
+        }
+
     scheduler = SimpleNamespace(
         state={
             "crons": {"daily-report": 1_723_456_789.0},
@@ -84,7 +103,8 @@ def _server(tmp_path: Path) -> tuple[WorkbenchApiServer, _FakeRuntime]:
                     ],
                 }
             },
-        }
+        },
+        resolve_recovery_batch=resolve_recovery_batch,
     )
     config_path = tmp_path / "agents.json"
     config_path.write_text(
@@ -257,6 +277,45 @@ async def test_scheduler_gateway_rerun_requires_exact_single_job_authorization(t
     assert payload["ok"] is True
     assert [(kind, job["id"]) for kind, job in runtime.reruns] == [
         ("cron", "daily-report")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_scheduler_recovery_resolution_is_typed_and_agent_scoped(tmp_path):
+    server, runtime = _server(tmp_path)
+
+    direct = await server.handle_agent_scheduler_recovery_resolve(
+        _FakeRequest(
+            batch_id="batch-1",
+            payload={"action": "skip"},
+        )
+    )
+    assert direct.status == 403
+    assert runtime.recovery_resolutions == []
+
+    response = await server.handle_agent_scheduler_recovery_resolve(
+        _FakeRequest(
+            batch_id="batch-1",
+            payload={
+                "action": "skip",
+                "requested_by": "hashi_tool_gateway",
+            },
+        )
+    )
+    payload = json.loads(response.text)
+
+    assert response.status == 200
+    assert payload["authority"] == "HASHI Scheduler"
+    assert payload["batch_id"] == "batch-1"
+    assert payload["resolution"]["skipped_total"] == 2
+    assert runtime.recovery_resolutions == [
+        {
+            "agent_name": "momo",
+            "batch_id": "batch-1",
+            "action": "skip",
+            "counts": None,
+            "runtime_map": {"momo": runtime},
+        }
     ]
 
 

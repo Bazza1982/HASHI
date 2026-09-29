@@ -97,6 +97,22 @@ async def execute_hashi_scheduler_tool(
                     "authorization": "explicit_user_authorization",
                 },
             )
+        elif tool_name == "hashi_scheduler_recovery_resolve":
+            batch_id = str(args.get("batch_id") or "").strip()
+            if not batch_id:
+                return "Error: hashi_scheduler_recovery_resolve requires batch_id"
+            payload = {
+                "action": str(args.get("action") or "").strip().lower(),
+                "requested_by": "hashi_tool_gateway",
+            }
+            if args.get("counts") is not None:
+                payload["counts"] = dict(args.get("counts") or {})
+            status, payload = await _request_json(
+                "POST",
+                f"{base_url}/api/agents/{encoded_agent}/scheduler/recovery/"
+                f"{quote(batch_id, safe='')}/resolve",
+                payload=payload,
+            )
         elif tool_name == "hashi_scheduler_create":
             payload = dict(args)
             payload["requested_by"] = "hashi_tool_gateway"

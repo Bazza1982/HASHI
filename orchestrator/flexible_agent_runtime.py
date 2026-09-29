@@ -11011,8 +11011,6 @@ class FlexibleAgentRuntime:
         # /long is scoped to the chat that started it.
         if runtime_long.collect_text(self, update.effective_chat.id, text):
             return
-        if await runtime_scheduler_recovery.handle_reply(self, text=text, chat_id=update.effective_chat.id):
-            return
         _print_user_message(self.name, text)
         reply_to_message = getattr(update.message, "reply_to_message", None)
         await self.enqueue_request(

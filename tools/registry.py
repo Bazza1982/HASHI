@@ -42,6 +42,7 @@ TOOL_TIERS: dict[str, list[str]] = {
         "hashi_scheduler_status",
         "hashi_scheduler_run_history",
         "hashi_scheduler_rerun",
+        "hashi_scheduler_recovery_resolve",
         "hashi_scheduler_create",
         "hashi_scheduler_update",
         "hashi_scheduler_delete",

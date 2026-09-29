@@ -120,6 +120,26 @@ New and edited declarations use the revision-aware Scheduler writer and retain
 unrelated fields. Merely reading a legacy declaration does not publish a
 migration.
 
+#### Scheduler recovery conversation contract (2026-09-30)
+
+When persisted missed triggers require a decision, HASHI Scheduler creates one
+system-authored Run through normal PAO admission in the owner's current primary
+Conversation. The missed-trigger facts are the canonical Message content; the
+Agent asks the user what to do, and the resulting question is delivered by FC.
+Scheduled work remains in the Agent Activity Session; only the human decision
+exchange belongs to the Conversation.
+
+The user's later reply is always ordinary Conversation input, regardless of
+whether it arrives from Telegram, TUI, Backend API, or another registered
+Connector. PAO must not intercept it with transport-specific callbacks or
+interpret it using numbers, keywords, exact phrases, or regular expressions.
+The selected Engine reasons over the ordered Conversation and durable recovery
+facts. A clear decision becomes one typed
+`hashi_scheduler_recovery_resolve` invocation bound to the exact Agent and
+batch; questions and ambiguous replies do not mutate Scheduler state. The
+internal mutation endpoint accepts only the Agent Tool Gateway and remains
+idempotent after a batch is resolved.
+
 ### 2.4 Skills, Tools, permissions, and execution
 
 PAO owns the HASHI-level capability registry and execution authority:

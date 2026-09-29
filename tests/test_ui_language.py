@@ -324,7 +324,8 @@ def test_scheduler_notice_is_english_by_default_and_chinese_when_selected() -> N
     chinese = render_notice(batch, locale="zh-CN")
     assert chinese.startswith("⏰ HASHI 离线恢复")
     assert "内容：test task" in chinese
-    assert "全部补跑" in chinese
+    assert "自然语言" in chinese
+    assert "1." not in chinese
 
 
 @pytest.mark.asyncio

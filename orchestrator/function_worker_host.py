@@ -139,20 +139,6 @@ class WorkerSchedulerFacade:
             return ""
         return str(self.snapshot.get("recovery_context") or "")
 
-    async def handle_recovery_reply(
-        self,
-        *,
-        agent_name: str,
-        text: str,
-        runtime_map: Mapping[str, Any] | None = None,
-    ) -> str | None:
-        del runtime_map
-        result = await self.peer.request(
-            "core.scheduler.handle_recovery_reply",
-            {"agent_name": str(agent_name), "text": str(text)},
-        )
-        return None if result is None else str(result)
-
 
 class WorkerServiceManagerFacade:
     """Worker control surface for shared Functions; legacy wire names stay stable."""

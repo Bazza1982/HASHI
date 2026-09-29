@@ -853,6 +853,10 @@ class WorkbenchApiServer:
             self.handle_agent_scheduler_runs,
         )
         self.app.router.add_post(
+            "/api/agents/{name}/scheduler/recovery/{batch_id}/resolve",
+            self.handle_agent_scheduler_recovery_resolve,
+        )
+        self.app.router.add_post(
             "/api/agents/{name}/jobs/run", self.handle_agent_run_job
         )
         self.app.router.add_get(
@@ -9352,6 +9356,66 @@ class WorkbenchApiServer:
     @staticmethod
     def _scheduler_task_id_valid(task_id: str) -> bool:
         return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", task_id or ""))
+
+    async def handle_agent_scheduler_recovery_resolve(self, request):
+        """Resolve one exact recovery batch through the Agent tool gateway."""
+
+        agent_name = str(request.match_info.get("name") or "").strip()
+        batch_id = str(request.match_info.get("batch_id") or "").strip()
+        runtime = self._runtime_map().get(agent_name)
+        if runtime is None:
+            return web.json_response(
+                {"ok": False, "error": "agent not found"}, status=404
+            )
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response(
+                {"ok": False, "error": "invalid JSON body"}, status=400
+            )
+        if not isinstance(payload, dict):
+            return web.json_response(
+                {"ok": False, "error": "request body must be an object"},
+                status=400,
+            )
+        if payload.get("requested_by") != "hashi_tool_gateway":
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "scheduler recovery decisions must come from the Agent tool gateway",
+                },
+                status=403,
+            )
+        scheduler = self._task_scheduler()
+        resolver = getattr(scheduler, "resolve_recovery_batch", None)
+        if not callable(resolver):
+            return web.json_response(
+                {"ok": False, "error": "scheduler recovery is unavailable"},
+                status=503,
+            )
+        try:
+            result = await resolver(
+                agent_name=agent_name,
+                batch_id=batch_id,
+                action=str(payload.get("action") or ""),
+                counts=payload.get("counts"),
+                runtime_map={agent_name: runtime},
+            )
+        except KeyError as exc:
+            return web.json_response(
+                {"ok": False, "error": str(exc)}, status=404
+            )
+        except ValueError as exc:
+            return web.json_response(
+                {"ok": False, "error": str(exc)}, status=400
+            )
+        return web.json_response(
+            {
+                "ok": True,
+                "authority": "HASHI Scheduler",
+                **dict(result or {}),
+            }
+        )
 
     async def handle_agent_scheduler_create(self, request):
         """Create one Agent-owned scheduler task through the typed API."""

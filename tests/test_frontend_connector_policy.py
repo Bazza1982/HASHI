@@ -63,15 +63,22 @@ async def test_native_telegram_text_message_enters_admission_as_telegram(
     async def no_pending_path(_runtime, _update):
         return False
 
-    async def no_recovery(_runtime, *, text, chat_id):
-        return False
+    async def forbidden_recovery_interceptor(_runtime, *, text, chat_id):
+        raise AssertionError(
+            "ordinary Telegram text must not be intercepted before FC/PAO admission"
+        )
 
     monkeypatch.setattr(
         FlexibleAgentRuntime, "_telegram_channel_allowed", allow_channel
     )
     monkeypatch.setattr(runtime_workzone, "handle_pending_path_reply", no_pending_path)
     monkeypatch.setattr(runtime_long, "collect_text", lambda *_args: False)
-    monkeypatch.setattr(runtime_scheduler_recovery, "handle_reply", no_recovery)
+    monkeypatch.setattr(
+        runtime_scheduler_recovery,
+        "handle_reply",
+        forbidden_recovery_interceptor,
+        raising=False,
+    )
     monkeypatch.setattr(runtime_module, "_print_user_message", lambda *_args: None)
 
     message = SimpleNamespace(text="hello from Telegram")

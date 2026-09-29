@@ -1995,6 +1995,47 @@ HASHI_SCHEDULER_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "hashi_scheduler_recovery_resolve",
+            "description": (
+                "Resolve exactly one pending missed-trigger recovery batch after "
+                "interpreting the user's current ordinary-language reply. Call only "
+                "when that reply clearly chooses to rerun all replayable occurrences, "
+                "rerun exact selected counts, or skip the batch. If the user only asks "
+                "a question or their intent is ambiguous, answer or clarify and do not "
+                "call this tool. The batch and Agent ownership are verified by HASHI."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "batch_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Exact pending recovery batch ID from context.",
+                    },
+                    "action": {
+                        "type": "string",
+                        "enum": ["rerun_all", "rerun_selected", "skip"],
+                    },
+                    "counts": {
+                        "type": "object",
+                        "description": (
+                            "For rerun_selected only: exact task IDs mapped to the "
+                            "number of replayable occurrences to rerun."
+                        ),
+                        "additionalProperties": {
+                            "type": "integer",
+                            "minimum": 1,
+                        },
+                    },
+                },
+                "required": ["batch_id", "action"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "hashi_scheduler_create",
             "description": (
                 "Create one cron, heartbeat, or idle nudge owned by the current Agent. "

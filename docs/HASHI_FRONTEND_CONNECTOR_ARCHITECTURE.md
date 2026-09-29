@@ -435,6 +435,16 @@ connected Agent to local-only mode. The Worker records the failed stage and
 retries menu registration independently until success or a permanent rejection;
 shutdown cancels the retry task.
 
+Scheduler missed-trigger recovery is also connector-neutral. Scheduler admits
+one internal system Message/Run into the owner's primary Conversation, the Agent
+asks the recovery question, and FC projects that exchange to every attached
+frontend using the normal Session feed and frozen delivery route. A user's
+reply from Telegram, TUI, Backend API, or any later Connector follows the same
+ordinary-message admission path. No Connector may consume recovery prose,
+recognize menu tokens, or mutate Scheduler state directly. After the Engine
+interprets a clear reply, the Agent invokes the exact-batch typed Scheduler tool;
+ambiguous replies remain conversation until clarified.
+
 Final replies from standard non-Telegram Runs publish enabled meter and HER
 presentations after the final Message through the same Session Event boundary.
 Telegram mirroring is a destination choice, not a prerequisite for creating

@@ -130,6 +130,7 @@ _SIDE_EFFECT_ACTION_TOOLS = frozenset(
         "browser_type_text",
         "background_job_start",
         "hashi_scheduler_rerun",
+        "hashi_scheduler_recovery_resolve",
         "hashi_scheduler_create",
         "hashi_scheduler_update",
         "hashi_scheduler_delete",
@@ -159,6 +160,7 @@ _TOOL_ADAPTERS = {
     "hashi_scheduler_status": "scheduler",
     "hashi_scheduler_run_history": "scheduler",
     "hashi_scheduler_rerun": "scheduler",
+    "hashi_scheduler_recovery_resolve": "scheduler",
     "hashi_scheduler_create": "scheduler",
     "hashi_scheduler_update": "scheduler",
     "hashi_scheduler_delete": "scheduler",
@@ -718,11 +720,17 @@ def _scheduler_outcome(
     outcome = _generic_outcome(spec, text, raw_is_error, details)
     if outcome.status == "success" and spec.name in {
         "hashi_scheduler_rerun",
+        "hashi_scheduler_recovery_resolve",
         "hashi_scheduler_create",
         "hashi_scheduler_update",
         "hashi_scheduler_delete",
     }:
-        return replace(outcome, effect="changed")
+        effect = (
+            _effect_from_data(outcome.data, fallback="changed")
+            if spec.name == "hashi_scheduler_recovery_resolve"
+            else "changed"
+        )
+        return replace(outcome, effect=effect)
     return outcome
 
 
