@@ -1,14 +1,13 @@
-"""A bounded event/admission coordinator; process lifecycle is supplied by Functions."""
+"""A bounded provider-event coordinator; process lifecycle is supplied by Functions."""
 from __future__ import annotations
-import hmac
 from collections.abc import Mapping
 from typing import Any
-from .ports import AdmissionPort, DurableVoicePort
-from .protocol import CallBinding, LiveVoiceError, identifier, normalize_transcript, positive_int, stable_digest
+from .ports import DurableVoicePort
+from .protocol import CallBinding, LiveVoiceError, identifier, normalize_transcript
 
 class LiveVoiceEventService:
-    def __init__(self, durable: DurableVoicePort, admission: AdmissionPort):
-        self.durable, self.admission = durable, admission
+    def __init__(self, durable: DurableVoicePort):
+        self.durable = durable
 
     async def on_provider_event(self, binding: CallBinding, event: Mapping[str, Any]) -> None:
         # CallBinding is resolved from the owning sideband, never a browser's callback payload.
@@ -29,23 +28,3 @@ class LiveVoiceEventService:
             raise LiveVoiceError("live_delegation_invalid")
         if await self.durable.register_delegation_once(binding, delegation_id, offset):
             await self.durable.schedule_proposal(binding, delegation_id, offset)
-
-    async def decide(self, binding: CallBinding, payload: Mapping[str, Any]) -> Mapping[str, Any]:
-        if set(payload) != {"delegation_id", "proposal_version", "proposal_digest", "decision", "idempotency_key"}:
-            raise LiveVoiceError("live_decision_invalid")
-        if payload["decision"] not in {"confirm", "discard"}:
-            raise LiveVoiceError("live_decision_invalid")
-        key = identifier(payload["idempotency_key"])
-        positive_int(payload["proposal_version"])
-        request_digest = stable_digest(dict(payload))
-        prior = await self.admission.find_decision(binding, idempotency_key=key, request_digest=request_digest)
-        if prior is not None:
-            return prior
-        proposal = await self.durable.read_proposal(binding, identifier(payload["delegation_id"]))
-        digest = payload["proposal_digest"]
-        if not isinstance(digest, str) or not hmac.compare_digest(digest, proposal.digest) or payload["proposal_version"] != proposal.version:
-            raise LiveVoiceError("live_proposal_changed", 409)
-        if payload["decision"] == "confirm" and (proposal.ambiguous or not proposal.text.strip()):
-            raise LiveVoiceError("live_clarification_required", 409)
-        return await self.admission.decide_and_admit(binding, proposal, decision=payload["decision"],
-                                                    idempotency_key=key, request_digest=request_digest)

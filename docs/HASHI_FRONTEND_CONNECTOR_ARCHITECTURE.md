@@ -503,9 +503,23 @@ the effective public projection but may not select or override it.
 PCM owns the live personality projection. Only the canonical `persona` section
 is projected; system, memory, HCC, credentials, paths, and raw PCM source are
 excluded. Fixed live-call safety and client-delegation instructions remain
-higher priority than persona and speaking style. The live provider may discuss
-and propose an action, but an ordinary HASHI confirmation and admission path
-must authorize any effect.
+higher priority than persona and speaking style.
+
+The live phone is another transport for the selected Agent, not a second Agent
+or a reduced-permission assistant. GPT-Live supplies speech recognition, voice,
+and turn-taking. Its client delegation automatically carries tool-dependent
+speech into that same Agent's current Session through the ordinary PAO ingress.
+There is no phone-specific confirmation gate. The Agent's existing HASHI
+permissions and normal approval behaviour remain authoritative exactly as they
+are in text chat; the provider receives neither credentials nor direct tool
+authority.
+
+While delegated work runs, HASHI returns safe progress and the canonical final
+result to the same GPT-Live delegation so the Agent can report it naturally in
+the call. The frontend keeps one non-collapsible call panel visible from start
+through closure, with live captions, microphone mute, and hang-up controls.
+When the call becomes terminal, HASHI projects the complete durable transcript
+as one presentation-only call record in the current conversation.
 
 Context preflight returns a public `/phone` snapshot and revision. Start must
 present that exact revision, resolves the snapshot again at the trusted Backend

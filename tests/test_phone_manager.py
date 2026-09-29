@@ -38,8 +38,10 @@ def test_defaults_resolve_safe_persona_only(tmp_path: Path):
     assert "MEMORY_SENTINEL" not in resolved["instructions"]
     assert "HCC_SENTINEL" not in resolved["instructions"]
     assert "HIGHEST PRIORITY" in resolved["instructions"]
+    assert "not a separate assistant" in resolved["instructions"]
+    assert "explicitly confirm" not in resolved["instructions"]
     assert resolved["instructions"].endswith(
-        "Discuss freely; propose actions explicitly; never represent a proposed or delegated action as completed without a reliable HASHI result."
+        "You are Moon throughout the call. HASHI is your execution capability, not another Agent. Delegate tool work automatically, keep the conversation coherent while it runs, and never represent delegated work as completed without a reliable HASHI result."
     )
 
 

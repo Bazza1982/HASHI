@@ -1,4 +1,4 @@
-"""Freeze a reviewable transcript proposal. This never admits a Run by itself."""
+"""Freeze a bounded transcript slice for client delegation. This builder never admits a Run."""
 from __future__ import annotations
 from dataclasses import asdict, dataclass
 from collections.abc import Iterable

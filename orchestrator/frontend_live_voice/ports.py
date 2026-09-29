@@ -28,19 +28,19 @@ class DurableVoicePort(Protocol):
         ...
 
 class AdmissionPort(Protocol):
-    async def find_decision(self, binding: CallBinding, *, idempotency_key: str,
+    async def find_admission(self, binding: CallBinding, *, idempotency_key: str,
                             request_digest: str) -> Mapping[str, Any] | None:
         """Return matching prior receipt; conflicting key/digest raises 409, even after expiry."""
         ...
 
-    async def decide_and_admit(self, binding: CallBinding, proposal: Proposal, *, decision: str,
+    async def admit_delegation(self, binding: CallBinding, proposal: Proposal, *,
                                idempotency_key: str, request_digest: str) -> Mapping[str, Any]:
-        """Revalidate current authority/scope/expiry/gate and atomically decide + admit once.
+        """Revalidate current authority/scope/expiry and atomically admit once.
 
-        Confirm uses canonical PAO Session/Message/Run and normal permission,
-        delivery-freezing and dispatch/outbox. Discard admits nothing. Replays
-        return the prior receipt even if response was lost. Return applied=false
-        for unresolved outcomes; never submit a second Run on a timeout.
+        Client delegation uses canonical PAO Session/Message/Run and the Agent's
+        normal permission, delivery-freezing and dispatch/outbox behaviour.
+        Replays return the prior receipt even if response was lost; never submit
+        a second Run on a timeout.
         """
         ...
 
@@ -50,8 +50,8 @@ class LiveApplicationPort(Protocol):
     async def invoke(self, operation: str, authority: Any, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         """Dispatch only routes.py's declared operations; inspect existing authenticated owner.
 
-        Implement: context, start, cancel_start, attempt, snapshot, events,
-        control, decision. start/cancel_start share a durable attempt ledger;
+        Implement: context, start, cancel_start, attempt, snapshot, events and
+        control. start/cancel_start share a durable attempt ledger;
         every call-bound operation checks stored CallBinding. Response projection
         contains no secret/internal provider errors. No client-supplied principal.
         """

@@ -17,7 +17,6 @@ ROUTES = (
     ("GET", "/calls/{call_id}", "snapshot"),
     ("GET", "/calls/{call_id}/events", "events"),
     ("POST", "/calls/{call_id}/controls", "control"),
-    ("POST", "/calls/{call_id}/delegations/{delegation_id}/decision", "decision"),
 )
 
 
@@ -70,7 +69,7 @@ def register_live_voice_routes(app: Any, service: LiveApplicationPort,
                 value = await service.invoke(operation, authority, payload)
                 return web.json_response(dict(value), headers={"Cache-Control": "no-store"})
             except LiveVoiceError as exc:
-                return web.json_response({"ok": False, "error_code": exc.code, "accepted": None if exc.status >= 500 and operation in {"start", "control", "decision"} else False},
+                return web.json_response({"ok": False, "error_code": exc.code, "accepted": None if exc.status >= 500 and operation in {"start", "control"} else False},
                                          status=exc.status, headers={"Cache-Control": "no-store"})
             except json.JSONDecodeError:
                 return web.json_response({"ok": False, "error_code": "live_body_invalid", "accepted": False}, status=400,

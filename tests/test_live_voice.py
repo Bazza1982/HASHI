@@ -2,8 +2,6 @@
 import asyncio
 from dataclasses import replace
 import json
-from pathlib import Path
-import sys
 import unittest
 
 from orchestrator.frontend_live_voice.protocol import CallBinding, Fragment, LiveVoiceError, normalize_transcript
@@ -78,6 +76,10 @@ class ProviderTests(unittest.TestCase):
         self.assertIsNone(safe_sideband_event(json.dumps({'type':'session.output_audio.delta','delta':'raw'})))
     def test_unknown_sideband_type_ignored(self):
         self.assertIsNone(safe_sideband_event(json.dumps({'type':'response.function_call','arguments':'danger'})))
+    def test_provider_update_acknowledgements_are_accepted(self):
+        for event_type in ('session.commentary.appended','session.thinking.appended','session.instructions.appended'):
+            event=safe_sideband_event(json.dumps({'type':event_type,'event_id':'update-1'}))
+            self.assertEqual(event['type'],event_type)
     def test_frame_cap(self):
         with self.assertRaises(LiveVoiceError):safe_sideband_event('x'*262145)
 
@@ -90,19 +92,6 @@ class FakeDurable:
         self.delegations.add(delegation_id);return True
     async def schedule_proposal(self,binding,delegation_id,offset):self.scheduled.append(delegation_id)
     async def read_proposal(self,binding,delegation_id):return self.proposal
-class FakeAdmission:
-    def __init__(self):self.receipts={};self.count=0
-    async def find_decision(self,binding,*,idempotency_key,request_digest):
-        prior=self.receipts.get(idempotency_key)
-        if prior and prior[0]!=request_digest:raise LiveVoiceError('live_idempotency_conflict',409)
-        return prior[1] if prior else None
-    async def decide_and_admit(self,binding,proposal,*,decision,idempotency_key,request_digest):
-        # A real implementation uses the PAO transaction; this tests coordinator wiring only.
-        prior=await self.find_decision(binding,idempotency_key=idempotency_key,request_digest=request_digest)
-        if prior:return prior
-        if decision=='confirm':self.count+=1
-        result={'ok':True,'run_id':'run-1' if decision=='confirm' else None}
-        self.receipts[idempotency_key]=(request_digest,result);return result
 
 def run_async(fn):
     def wrapper(self, *args, **kwargs):
@@ -113,11 +102,7 @@ def run_async(fn):
 class ServiceTests(unittest.TestCase):
     def setUp(self):
         self.store = FakeDurable()
-        self.admission = FakeAdmission()
-        self.service = LiveVoiceEventService(self.store, self.admission)
-
-    def body(self, **changes):
-        return dict({'delegation_id': 'delegation-1', 'proposal_version': 1, 'proposal_digest': self.store.proposal.digest, 'decision': 'confirm', 'idempotency_key': 'decision-1'}, **changes)
+        self.service = LiveVoiceEventService(self.store)
 
     @run_async
     async def test_delegation_duplicate_has_one_outbox_wakeup(self):
@@ -125,52 +110,10 @@ class ServiceTests(unittest.TestCase):
         await self.service.on_provider_event(BINDING, e)
         await self.service.on_provider_event(BINDING, e)
         self.assertEqual(self.store.scheduled, ['delegation-1'])
-        self.assertEqual(self.admission.count, 0)
 
     @run_async
-    async def test_caption_does_not_admit_task(self):
+    async def test_caption_alone_does_not_schedule_agent_work(self):
         await self.service.on_provider_event(BINDING, {'type': 'session.input_transcript.delta', 'event_id': 'e1', 'delta': 'do it', 'start_ms': 0, 'end_ms': 50})
-        self.assertEqual(self.admission.count, 0)
-
-    @run_async
-    async def test_confirmation_replay_returns_same_receipt(self):
-        a = await self.service.decide(BINDING, self.body())
-        b = await self.service.decide(BINDING, self.body())
-        self.assertEqual(a, b)
-        self.assertEqual(self.admission.count, 1)
-
-    @run_async
-    async def test_same_key_different_payload_conflicts(self):
-        await self.service.decide(BINDING, self.body())
-        with self.assertRaises(LiveVoiceError):
-            await self.service.decide(BINDING, self.body(decision='discard'))
-
-    @run_async
-    async def test_changed_digest_rejected_before_admission(self):
-        with self.assertRaises(LiveVoiceError):
-            await self.service.decide(BINDING, self.body(proposal_digest='0'*64))
-        self.assertEqual(self.admission.count, 0)
-
-    @run_async
-    async def test_discard_creates_no_run(self):
-        await self.service.decide(BINDING, self.body(decision='discard'))
-        self.assertEqual(self.admission.count, 0)
-
-    @run_async
-    async def test_boolean_proposal_version_rejected(self):
-        with self.assertRaises(LiveVoiceError):
-            await self.service.decide(BINDING, self.body(proposal_version=True))
-
-    @run_async
-    async def test_unknown_browser_fields_rejected(self):
-        with self.assertRaises(LiveVoiceError):
-            await self.service.decide(BINDING, self.body(owner_id='admin'))
-
-    @run_async
-    async def test_replay_resolved_before_new_proposal_gate(self):
-        body = self.body()
-        expected = await self.service.decide(BINDING, body)
-        self.store.proposal = replace(self.store.proposal, version=2, digest='1'*64)
-        self.assertEqual(await self.service.decide(BINDING, body), expected)
+        self.assertEqual(self.store.scheduled, [])
 
 if __name__=='__main__':unittest.main()

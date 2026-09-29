@@ -414,6 +414,7 @@ class WorkbenchApiServer:
             global_config=self.global_config,
             secrets=self.secrets,
             admit_run=self._admit_live_voice_run,
+            poll_run_activity=self._poll_live_voice_run_activity,
             resolve_phone_session=self._resolve_live_voice_phone_session,
         )
         register_live_voice_routes(
@@ -5285,7 +5286,7 @@ class WorkbenchApiServer:
     async def _admit_live_voice_run(
         self, binding, proposal, idempotency_key: str
     ) -> dict[str, str]:
-        """Enter a confirmed voice proposal through the normal PAO ingress."""
+        """Enter delegated speech through the selected Agent's normal PAO ingress."""
 
         from orchestrator.frontend_live_voice.protocol import LiveVoiceError
 
@@ -5334,6 +5335,40 @@ class WorkbenchApiServer:
             "request_id": str(request_id),
             "run_id": str(run["run_id"]),
             "message_id": str(run["user_message_id"]),
+        }
+
+    async def _poll_live_voice_run_activity(
+        self, binding, request_id: str, after_sequence: int, limit: int
+    ) -> dict[str, Any]:
+        """Read the selected Agent's existing safe activity projection for GPT-Live."""
+
+        from orchestrator.frontend_live_voice.protocol import LiveVoiceError
+
+        runtime = self._runtime_map().get(binding.agent_id)
+        poll = getattr(runtime, "poll_request_activity", None) if runtime is not None else None
+        if not callable(poll):
+            return {"ok": False, "error_code": "request_activity_unavailable"}
+        try:
+            run = self.session_store.get_run_by_request(
+                request_id,
+                owner_id=binding.owner_id,
+                agent_id=binding.agent_id,
+            )
+        except Exception as exc:
+            raise LiveVoiceError("live_run_not_found", 404) from exc
+        if (
+            run["session_id"] != binding.session_id
+            or int(run["context_generation"]) != binding.context_generation
+        ):
+            raise LiveVoiceError("live_scope_changed", 409)
+        result = await poll(
+            request_id,
+            after_sequence=max(0, int(after_sequence)),
+            limit=max(1, min(int(limit), 100)),
+        )
+        return dict(result) if isinstance(result, Mapping) else {
+            "ok": False,
+            "error_code": "request_activity_unavailable",
         }
 
     def _agent_history_cursor_key(self) -> bytes:

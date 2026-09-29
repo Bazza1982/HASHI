@@ -15,15 +15,18 @@ import aiohttp
 
 from orchestrator.phone_catalog import OPENAI_LIVE_VOICES
 from .delegation import Proposal, build_proposal
-from .openai_live import attach_provider, create_provider_session, provider_http_session, safe_sideband_event, session_request
+from .openai_live import append_update, attach_provider, create_provider_session, provider_http_session, safe_sideband_event, session_request
 from .ports import AdmissionPort, DurableVoicePort, LiveApplicationPort
 from .protocol import CallBinding, Fragment, LiveVoiceError, identifier, positive_int, stable_digest
 from .service import LiveVoiceEventService
+from orchestrator.session_store import TERMINAL_RUN_STATES
+from tools.token_tracker import estimate_tokens
 
 logger = logging.getLogger(__name__)
 ACTIVE_PHASES = {"connecting", "active", "ending"}
 TERMINAL_PHASES = {"ended", "failed", "interrupted"}
 CALL_EVENT_SCHEMA = "hashi.live_voice.event.v1"
+LIVE_UPDATE_TOKEN_LIMIT = 420
 
 
 def _utc_now_dt() -> datetime:
@@ -62,6 +65,35 @@ def _event_usage(event: Mapping[str, Any]) -> dict[str, int] | None:
     return direct or (_public_usage(session.get("usage")) if isinstance(session, Mapping) else None)
 
 
+def _live_text_chunks(value: Any, *, token_limit: int = LIVE_UPDATE_TOKEN_LIMIT) -> list[str]:
+    """Split user-visible text below the provider's 500-token append ceiling."""
+
+    remaining = str(value or "").strip()
+    chunks: list[str] = []
+    while remaining:
+        if estimate_tokens(remaining) <= token_limit:
+            chunks.append(remaining)
+            break
+        low, high, accepted = 1, len(remaining), 1
+        while low <= high:
+            middle = (low + high) // 2
+            if estimate_tokens(remaining[:middle]) <= token_limit:
+                accepted = middle
+                low = middle + 1
+            else:
+                high = middle - 1
+        boundary = max(1, accepted)
+        preferred = max(
+            remaining.rfind("\n", 0, boundary),
+            remaining.rfind(" ", 0, boundary),
+        )
+        if preferred >= max(1, boundary // 2):
+            boundary = preferred + 1
+        chunks.append(remaining[:boundary].strip())
+        remaining = remaining[boundary:].strip()
+    return [chunk for chunk in chunks if chunk]
+
+
 class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
     def __init__(
         self,
@@ -70,6 +102,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         secrets: Mapping[str, Any] | None = None,
         *,
         admit_run: Callable[[CallBinding, Proposal, str], Awaitable[Mapping[str, Any]]] | None = None,
+        poll_run_activity: Callable[[CallBinding, str, int, int], Awaitable[Mapping[str, Any]]] | None = None,
         resolve_phone_session: Callable[[str], Mapping[str, Any]] | None = None,
         proposal_grace_seconds: float = 0.25,
         control_timeout_seconds: float = 5.0,
@@ -83,19 +116,22 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         self._feature_enabled = bool(getattr(global_config, "live_voice_v1", False))
         self._availability_override: bool | None = None
         self._admit_run = admit_run
+        self._poll_run_activity = poll_run_activity
         self._resolve_phone_session = resolve_phone_session
         self._proposal_grace_seconds = max(0.0, float(proposal_grace_seconds))
         self._control_timeout_seconds = max(0.05, float(control_timeout_seconds))
         self._close_timeout_seconds = max(0.05, float(close_timeout_seconds))
-        self.service = LiveVoiceEventService(self, self)
+        self.service = LiveVoiceEventService(self)
         self._sideband_tasks: set[asyncio.Task[Any]] = set()
         self._proposal_tasks: set[asyncio.Task[Any]] = set()
+        self._relay_tasks: set[asyncio.Task[Any]] = set()
         self._recovery_tasks: set[asyncio.Task[Any]] = set()
         self._active_sockets: dict[str, Any] = {}
         self._sideband_ready_events: dict[str, asyncio.Event] = {}
         self._sideband_failures: dict[str, str] = {}
         self._session_closed_events: dict[str, asyncio.Event] = {}
         self._control_waiters: dict[tuple[str, str], asyncio.Future[bool]] = {}
+        self._update_waiters: dict[tuple[str, str], asyncio.Future[bool]] = {}
         self._attempt_sdp_answers: dict[str, str] = {}
         self._sweeper_task: asyncio.Task[Any] | None = None
         self._closing = False
@@ -244,13 +280,15 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 """
                 SELECT r.idempotency_key, r.request_digest, r.receipt_json, c.*
                 FROM live_control_receipts AS r JOIN live_calls AS c ON c.call_id = r.call_id
-                WHERE r.operation = 'decision_pending'
+                WHERE r.operation IN ('decision_pending', 'admission_pending')
                 """
             ).fetchall()
         if active_rows and self._get_api_key():
             await asyncio.gather(*(
                 self._recover_orphan_provider(self._binding_from_row(row)) for row in active_rows
             ))
+        for row in active_rows:
+            self._persist_call_record(self._binding_from_row(row))
         for row in proposal_rows:
             binding = self._binding_from_row(row)
             self._track(asyncio.create_task(
@@ -260,8 +298,8 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         for row in decision_rows:
             binding = self._binding_from_row(row)
             self._track(asyncio.create_task(
-                self._resume_pending_decision(binding, row["idempotency_key"], row["request_digest"], row["receipt_json"]),
-                name=f"hashi-live-decision-{row['idempotency_key']}",
+                self._resume_pending_admission(binding, row["idempotency_key"], row["request_digest"], row["receipt_json"]),
+                name=f"hashi-live-admission-{row['idempotency_key']}",
             ), self._recovery_tasks)
         self._sweeper_task = asyncio.create_task(self._sweeper_loop(), name="hashi-live-voice-sweeper")
 
@@ -281,7 +319,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             self._sweeper_task.cancel()
             await asyncio.gather(self._sweeper_task, return_exceptions=True)
             self._sweeper_task = None
-        for collection in (self._proposal_tasks, self._recovery_tasks):
+        for collection in (self._proposal_tasks, self._relay_tasks, self._recovery_tasks):
             for task in tuple(collection):
                 task.cancel()
             if collection:
@@ -318,6 +356,8 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                     (now, binding.call_id),
                 )
                 self._append_call_state(connection, binding, "interrupted", "Live call interrupted during shutdown")
+        for row in rows:
+            self._persist_call_record(self._binding_from_row(row))
 
     async def _sweeper_loop(self) -> None:
         while True:
@@ -515,6 +555,58 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                         "cutoff_ms": proposal.cutoff_ms, "expires_at": proposal.expires_at,
                         "source_event_ids": list(proposal.source_event_ids)},
             )
+        await self._admit_ready_delegation(binding, proposal)
+
+    async def _admit_ready_delegation(self, binding: CallBinding, proposal: Proposal) -> None:
+        """Admit provider delegation as an ordinary Agent turn, without a phone-only gate."""
+
+        if proposal.ambiguous or not proposal.text.strip():
+            await self._send_provider_update(
+                binding,
+                kind="commentary",
+                content=(
+                    "I could not recover an unambiguous spoken request. Ask the user to "
+                    "repeat it before starting any work."
+                ),
+                delegation_id=proposal.delegation_id,
+            )
+            return
+        admission = {
+            "delegation_id": proposal.delegation_id,
+            "proposal_version": proposal.version,
+            "proposal_digest": proposal.digest,
+            "mode": "automatic_agent_turn",
+        }
+        request_digest = stable_digest(admission)
+        idempotency_key = f"live-auto-{request_digest[:32]}"
+        for attempt in range(2):
+            try:
+                await self.admit_delegation(
+                    binding,
+                    proposal,
+                    idempotency_key=idempotency_key,
+                    request_digest=request_digest,
+                )
+                return
+            except LiveVoiceError as exc:
+                if exc.code == "live_outcome_unknown" and attempt == 0:
+                    await asyncio.sleep(0.25)
+                    continue
+                logger.warning(
+                    "Live Voice delegation was not admitted for %s (%s)",
+                    proposal.delegation_id,
+                    exc.code,
+                )
+                await self._send_provider_update(
+                    binding,
+                    kind="commentary",
+                    content=(
+                        "I could not start the requested work. Tell the user plainly that it "
+                        "was not started and ask whether they want to try again."
+                    ),
+                    delegation_id=proposal.delegation_id,
+                )
+                return
 
     async def read_proposal(self, binding: CallBinding, delegation_id: str) -> Proposal:
         with self.session_store._lock, self.session_store._connection() as connection:
@@ -545,8 +637,8 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 cutoff_ms=int(row["cutoff_ms"]), expires_at=row["expires_at"],
             )
 
-    # Decision admission ----------------------------------------------------
-    async def find_decision(self, binding: CallBinding, *, idempotency_key: str, request_digest: str) -> Mapping[str, Any] | None:
+    # Automatic delegation admission ---------------------------------------
+    async def find_admission(self, binding: CallBinding, *, idempotency_key: str, request_digest: str) -> Mapping[str, Any] | None:
         with self.session_store._lock, self.session_store._connection() as connection:
             row = connection.execute(
                 "SELECT request_digest, operation, receipt_json FROM live_control_receipts WHERE call_id = ? AND idempotency_key = ?",
@@ -556,22 +648,18 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             return None
         if row["request_digest"] != request_digest:
             raise LiveVoiceError("live_idempotency_conflict", 409)
-        return None if row["operation"] == "decision_pending" else json.loads(row["receipt_json"])
+        return None if row["operation"] in {"decision_pending", "admission_pending"} else json.loads(row["receipt_json"])
 
-    async def decide_and_admit(
-        self, binding: CallBinding, proposal: Proposal, *, decision: str,
+    async def admit_delegation(
+        self, binding: CallBinding, proposal: Proposal, *,
         idempotency_key: str, request_digest: str,
     ) -> Mapping[str, Any]:
-        prior = await self.find_decision(binding, idempotency_key=idempotency_key, request_digest=request_digest)
+        prior = await self.find_admission(binding, idempotency_key=idempotency_key, request_digest=request_digest)
         if prior is not None:
             return prior
         session = self.session_store.get_session(binding.session_id, owner_id=binding.owner_id, agent_id=binding.agent_id)
         if int(session["context_generation"]) != binding.context_generation:
             raise LiveVoiceError("live_scope_changed", 409)
-        if decision == "discard":
-            return self._discard_proposal(binding, proposal, idempotency_key, request_digest)
-        if decision != "confirm":
-            raise LiveVoiceError("live_decision_invalid", 400)
         if self._admit_run is None:
             raise LiveVoiceError("live_admission_unavailable", 503)
         with self.session_store._lock, self.session_store._connection() as connection:
@@ -586,60 +674,32 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             ).fetchone()
             if row is None:
                 raise LiveVoiceError("live_proposal_not_found", 404)
-            if row["decision"] not in (None, "confirming"):
+            if row["decision"] not in (None, "confirming", "admitting"):
                 raise LiveVoiceError("live_delegation_already_decided", 409)
-            if row["decision"] == "confirming" and (
+            if row["decision"] in {"confirming", "admitting"} and (
                 row["decision_key"] != idempotency_key or row["decision_digest"] != request_digest
             ):
                 raise LiveVoiceError("live_delegation_already_decided", 409)
             pending = {"ok": False, "pending": True, "delegation_id": proposal.delegation_id,
                        "proposal_version": proposal.version, "proposal_digest": proposal.digest}
             connection.execute(
-                "UPDATE live_delegations SET decision = 'confirming', decision_key = ?, decision_digest = ? WHERE call_id = ? AND call_epoch = ? AND delegation_id = ?",
+                "UPDATE live_delegations SET decision = 'admitting', decision_key = ?, decision_digest = ? WHERE call_id = ? AND call_epoch = ? AND delegation_id = ?",
                 (idempotency_key, request_digest, binding.call_id, binding.call_epoch, proposal.delegation_id),
             )
             connection.execute(
                 """INSERT OR REPLACE INTO live_control_receipts(
                 call_id, idempotency_key, request_digest, operation, receipt_json, created_at
-                ) VALUES (?, ?, ?, 'decision_pending', ?, ?)""",
+                ) VALUES (?, ?, ?, 'admission_pending', ?, ?)""",
                 (binding.call_id, idempotency_key, request_digest, json.dumps(pending), _utc_now()),
             )
-        return await self._complete_pending_confirm(binding, proposal, idempotency_key, request_digest)
+        return await self._complete_pending_admission(binding, proposal, idempotency_key, request_digest)
 
-    def _discard_proposal(self, binding: CallBinding, proposal: Proposal, idempotency_key: str, request_digest: str) -> Mapping[str, Any]:
-        result = {"ok": True, "accepted": True, "applied": True, "run_id": None, "decision": "discard"}
-        now = _utc_now()
-        with self.session_store._lock, self.session_store._connection() as connection:
-            row = connection.execute(
-                "SELECT decision FROM live_delegations WHERE call_id = ? AND call_epoch = ? AND delegation_id = ?",
-                (binding.call_id, binding.call_epoch, proposal.delegation_id),
-            ).fetchone()
-            if row is None:
-                raise LiveVoiceError("live_proposal_not_found", 404)
-            if row["decision"]:
-                raise LiveVoiceError("live_delegation_already_decided", 409)
-            connection.execute(
-                "UPDATE live_delegations SET decision = 'discard', decision_key = ?, decision_digest = ?, decided_at = ? WHERE call_id = ? AND call_epoch = ? AND delegation_id = ?",
-                (idempotency_key, request_digest, now, binding.call_id, binding.call_epoch, proposal.delegation_id),
-            )
-            connection.execute(
-                "INSERT INTO live_control_receipts(call_id, idempotency_key, request_digest, operation, receipt_json, created_at) VALUES (?, ?, ?, 'decision', ?, ?)",
-                (binding.call_id, idempotency_key, request_digest, json.dumps(result), now),
-            )
-            self.session_store._append_event(
-                connection, session_id=binding.session_id, run_id=None,
-                kind="voice.live.delegation.decided", summary="Live delegation discarded",
-                detail={"schema": CALL_EVENT_SCHEMA, "scope": binding.public_scope(),
-                        "delegation_id": proposal.delegation_id, "decision": "discard"},
-            )
-        return result
-
-    async def _complete_pending_confirm(
+    async def _complete_pending_admission(
         self, binding: CallBinding, proposal: Proposal, idempotency_key: str, request_digest: str,
     ) -> Mapping[str, Any]:
         try:
             accepted = await self._admit_run(  # type: ignore[misc]
-                binding, proposal, f"live-decision-{idempotency_key}"
+                binding, proposal, f"live-delegation-{idempotency_key}"
             )
         except LiveVoiceError:
             raise
@@ -649,7 +709,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         message_id = identifier(str(accepted.get("message_id") or ""))
         request_id = identifier(str(accepted.get("request_id") or ""))
         result = {"ok": True, "accepted": True, "applied": True, "run_id": run_id,
-                  "message_id": message_id, "request_id": request_id, "decision": "confirm"}
+                  "message_id": message_id, "request_id": request_id, "admission": "automatic"}
         now = _utc_now()
         with self.session_store._lock, self.session_store._connection() as connection:
             current = connection.execute(
@@ -658,35 +718,239 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             ).fetchone()
             if current is None or current["request_digest"] != request_digest:
                 raise LiveVoiceError("live_idempotency_conflict", 409)
-            if current["operation"] == "decision":
+            if current["operation"] in {"decision", "admission"}:
                 return json.loads(current["receipt_json"])
             connection.execute(
-                """UPDATE live_delegations SET decision = 'confirm', accepted_message_id = ?,
+                """UPDATE live_delegations SET decision = 'admitted', accepted_message_id = ?,
                 accepted_run_id = ?, decided_at = ? WHERE call_id = ? AND call_epoch = ? AND delegation_id = ?""",
                 (message_id, run_id, now, binding.call_id, binding.call_epoch, proposal.delegation_id),
             )
             connection.execute(
-                "UPDATE live_control_receipts SET operation = 'decision', receipt_json = ?, created_at = ? WHERE call_id = ? AND idempotency_key = ?",
+                "UPDATE live_control_receipts SET operation = 'admission', receipt_json = ?, created_at = ? WHERE call_id = ? AND idempotency_key = ?",
                 (json.dumps(result), now, binding.call_id, idempotency_key),
             )
             self.session_store._append_event(
                 connection, session_id=binding.session_id, run_id=run_id,
-                kind="voice.live.delegation.decided", summary=f"Live delegation confirmed: {run_id}",
+                kind="voice.live.delegation.admitted", summary=f"Live delegation admitted: {run_id}",
                 detail={"schema": CALL_EVENT_SCHEMA, "scope": binding.public_scope(),
-                        "delegation_id": proposal.delegation_id, "decision": "confirm",
+                        "delegation_id": proposal.delegation_id, "admission": "automatic",
                         "run_id": run_id, "message_id": message_id, "request_id": request_id},
             )
+        self._track(
+            asyncio.create_task(
+                self._relay_run(binding, proposal.delegation_id, run_id, request_id),
+                name=f"hashi-live-relay-{proposal.delegation_id}",
+            ),
+            self._relay_tasks,
+        )
         return result
 
-    async def _resume_pending_decision(self, binding: CallBinding, idempotency_key: str, request_digest: str, receipt_json: str) -> None:
+    async def _resume_pending_admission(self, binding: CallBinding, idempotency_key: str, request_digest: str, receipt_json: str) -> None:
         try:
             pending = json.loads(receipt_json or "{}")
             proposal = await self.read_proposal(binding, identifier(pending.get("delegation_id")))
             if proposal.version != int(pending.get("proposal_version")) or proposal.digest != pending.get("proposal_digest"):
                 raise LiveVoiceError("live_proposal_changed", 409)
-            await self._complete_pending_confirm(binding, proposal, idempotency_key, request_digest)
+            await self._complete_pending_admission(binding, proposal, idempotency_key, request_digest)
         except Exception as exc:
-            logger.warning("Pending Live Voice decision remains recoverable (%s)", type(exc).__name__)
+            logger.warning("Pending Live Voice admission remains recoverable (%s)", type(exc).__name__)
+
+    async def _send_provider_update(
+        self,
+        binding: CallBinding,
+        *,
+        kind: str,
+        content: str,
+        delegation_id: str | None,
+    ) -> bool:
+        """Append bounded context/results to GPT-Live through the trusted sideband."""
+
+        ws = self._active_sockets.get(binding.call_id)
+        if ws is None or getattr(ws, "closed", True):
+            return False
+        chunks = _live_text_chunks(content)
+        if not chunks:
+            return False
+        for chunk in chunks:
+            event_id = f"live-update-{uuid4().hex}"
+            payload = append_update(kind, chunk, delegation_id, event_id, estimate_tokens)
+            waiter: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+            identity = (binding.call_id, event_id)
+            self._update_waiters[identity] = waiter
+            try:
+                await ws.send_json(payload)
+                if await asyncio.wait_for(waiter, timeout=1.0) is not True:
+                    return False
+            except Exception:
+                return False
+            finally:
+                self._update_waiters.pop(identity, None)
+        return True
+
+    @staticmethod
+    def _activity_update(event: Mapping[str, Any]) -> tuple[str, str] | None:
+        channel = str(event.get("presentation_channel") or "").strip().casefold()
+        if channel in {"", "internal", "thinking", "reasoning", "answer"}:
+            return None
+        if channel not in {"commentary", "control", "verbose", "technical", "status", "progress"}:
+            return None
+        if channel in {"commentary", "control"} and not (
+            event.get("presentation_enabled") is True or event.get("required") is True
+        ):
+            return None
+        summary = str(event.get("summary") or "").strip()
+        detail = event.get("detail")
+        detail_text = str(detail).strip() if isinstance(detail, str) else ""
+        content = summary or detail_text
+        if not content:
+            return None
+        return ("commentary" if channel in {"commentary", "control"} else "thinking", content)
+
+    async def _relay_run(
+        self,
+        binding: CallBinding,
+        delegation_id: str,
+        run_id: str,
+        request_id: str,
+    ) -> None:
+        """Return one normal Agent Run's safe progress and final result to GPT-Live."""
+
+        if binding.call_id not in self._active_sockets:
+            return
+        await self._send_provider_update(
+            binding,
+            kind="thinking",
+            content=(
+                "Your HASHI execution for this delegation has started. Treat it as your own "
+                "ongoing work and wait for verified updates before claiming completion."
+            ),
+            delegation_id=delegation_id,
+        )
+        activity_after = 0
+        last_state = ""
+        while not self._closing:
+            with self.session_store._lock, self.session_store._connection() as connection:
+                call = connection.execute(
+                    "SELECT phase FROM live_calls WHERE call_id = ?", (binding.call_id,)
+                ).fetchone()
+            if call is None or str(call["phase"]) in TERMINAL_PHASES:
+                return
+            if callable(self._poll_run_activity):
+                try:
+                    activity = await self._poll_run_activity(
+                        binding, request_id, activity_after, 100
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        "Live Voice activity polling unavailable for %s (%s)",
+                        run_id,
+                        type(exc).__name__,
+                    )
+                    activity = {}
+                if isinstance(activity, Mapping) and activity.get("ok"):
+                    for raw_event in activity.get("events") or ():
+                        if not isinstance(raw_event, Mapping):
+                            continue
+                        sequence = raw_event.get("sequence")
+                        if isinstance(sequence, int) and not isinstance(sequence, bool):
+                            activity_after = max(activity_after, sequence)
+                        update = self._activity_update(raw_event)
+                        if update is not None:
+                            update_kind, update_text = update
+                            await self._send_provider_update(
+                                binding,
+                                kind=update_kind,
+                                content=update_text,
+                                delegation_id=delegation_id,
+                            )
+            try:
+                run = self.session_store.get_run(run_id, owner_id=binding.owner_id)
+            except Exception:
+                return
+            state = str(run.get("state") or "")
+            if state == "awaiting_approval" and state != last_state:
+                await self._send_provider_update(
+                    binding,
+                    kind="commentary",
+                    content=(
+                        "This work is waiting for an approval under your normal HASHI policy. "
+                        "Explain the approval request naturally and accept the user's spoken response."
+                    ),
+                    delegation_id=delegation_id,
+                )
+            last_state = state
+            if state in TERMINAL_RUN_STATES:
+                if state == "completed" and run.get("final_message_id"):
+                    try:
+                        message = self.session_store.get_message(
+                            run["final_message_id"],
+                            session_id=binding.session_id,
+                            owner_id=binding.owner_id,
+                        )
+                        final_text = str(message.get("text") or "").strip()
+                    except Exception:
+                        final_text = ""
+                    if final_text:
+                        chunks = _live_text_chunks(final_text)
+                        if len(chunks) == 1:
+                            relayed = await self._send_provider_update(
+                                binding,
+                                kind="commentary",
+                                content=chunks[0],
+                                delegation_id=delegation_id,
+                            )
+                        else:
+                            relayed = True
+                            for chunk in chunks:
+                                relayed = await self._send_provider_update(
+                                    binding,
+                                    kind="thinking",
+                                    content=chunk,
+                                    delegation_id=delegation_id,
+                                ) and relayed
+                            relayed = await self._send_provider_update(
+                                binding,
+                                kind="commentary",
+                                content=(
+                                    "Your HASHI work is complete. Tell the user the result now in your "
+                                    "own voice, using all result context appended for this delegation."
+                                ),
+                                delegation_id=delegation_id,
+                            ) and relayed
+                    else:
+                        relayed = await self._send_provider_update(
+                            binding,
+                            kind="commentary",
+                            content="The work completed and its result is available in the current chat.",
+                            delegation_id=delegation_id,
+                        )
+                else:
+                    error = str(run.get("error_text") or state or "the work stopped")
+                    relayed = await self._send_provider_update(
+                        binding,
+                        kind="commentary",
+                        content=f"The requested work did not complete: {error}",
+                        delegation_id=delegation_id,
+                    )
+                if relayed:
+                    with self.session_store._lock, self.session_store._connection() as connection:
+                        self.session_store._append_event(
+                            connection,
+                            session_id=binding.session_id,
+                            run_id=run_id,
+                            kind="voice.live.delegation.result_relayed",
+                            status=state,
+                            phase="terminal",
+                            summary="Live delegation result returned to the voice session",
+                            detail={
+                                "schema": CALL_EVENT_SCHEMA,
+                                "scope": binding.public_scope(),
+                                "delegation_id": delegation_id,
+                                "request_id": request_id,
+                            },
+                        )
+                return
+            await asyncio.sleep(0.5)
 
     # Public operations -----------------------------------------------------
     async def invoke(self, operation: str, authority: Any, payload: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -1014,11 +1278,6 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             )
         return result
 
-    async def _op_decision(self, owner_id: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
-        binding, _row = self._call_binding(owner_id, payload)
-        scope_fields = {"call_id", "call_epoch", "instance_id", "instance_generation", "agent_id", "session_id", "context_generation"}
-        return await self.service.decide(binding, {key: value for key, value in payload.items() if key not in scope_fields})
-
     # Provider controls and lifetime ---------------------------------------
     async def _send_control(self, binding: CallBinding, action: str, event_id: str) -> bool:
         ws = self._active_sockets.get(binding.call_id)
@@ -1066,11 +1325,97 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         return {"phase": row["phase"], "provider_close_state": row["provider_close_state"],
                 "usage": usage, "usage_finalization": "final" if usage else "unavailable"}
 
+    def _persist_call_record(self, binding: CallBinding) -> None:
+        """Project the complete durable transcript as one visible chat record."""
+
+        try:
+            with self.session_store._lock, self.session_store._connection() as connection:
+                call = connection.execute(
+                    "SELECT started_at, ended_at FROM live_calls WHERE call_id = ?",
+                    (binding.call_id,),
+                ).fetchone()
+                rows = connection.execute(
+                    """SELECT f.provider_event_id, f.start_ms, f.end_ms, e.detail_json
+                    FROM live_fragments AS f JOIN run_events AS e ON e.event_id = f.event_id
+                    WHERE f.owner_id = ? AND f.session_id = ? AND f.call_id = ?
+                      AND f.call_epoch = ?
+                    ORDER BY f.start_ms, f.end_ms, f.provider_event_id""",
+                    (
+                        binding.owner_id,
+                        binding.session_id,
+                        binding.call_id,
+                        binding.call_epoch,
+                    ),
+                ).fetchall()
+            if call is None:
+                return
+            segments: list[dict[str, Any]] = []
+            for row in rows:
+                detail = json.loads(row["detail_json"] or "{}")
+                speaker = str(detail.get("speaker") or "")
+                text = detail.get("text")
+                if speaker not in {"user", "assistant"} or not isinstance(text, str):
+                    continue
+                start_ms, end_ms = int(row["start_ms"]), int(row["end_ms"])
+                previous = segments[-1] if segments else None
+                if (
+                    previous is not None
+                    and previous["speaker"] == speaker
+                    and start_ms - int(previous["end_ms"]) <= 1200
+                ):
+                    previous["text"] += text
+                    previous["end_ms"] = max(int(previous["end_ms"]), end_ms)
+                else:
+                    segments.append(
+                        {"speaker": speaker, "text": text, "start_ms": start_ms, "end_ms": end_ms}
+                    )
+
+            def timestamp(milliseconds: int) -> str:
+                seconds = max(0, int(milliseconds) // 1000)
+                return f"{seconds // 60}:{seconds % 60:02d}"
+
+            lines = ["☎ Live call transcript"]
+            if segments:
+                for segment in segments:
+                    marker = "🎙️" if segment["speaker"] == "user" else "🔊"
+                    lines.extend(("", f"[{timestamp(segment['start_ms'])}] {marker} {segment['text']}"))
+            else:
+                lines.extend(("", "(No speech was transcribed.)"))
+            self.session_store.append_presentation_message(
+                session_id=binding.session_id,
+                owner_id=binding.owner_id,
+                agent_id=binding.agent_id,
+                role="assistant",
+                text="\n".join(lines),
+                source="live-phone",
+                idempotency_key=f"live-call-record:{binding.call_id}:{binding.call_epoch}",
+                content_format="plain-text",
+                presentation_channel="final",
+                history_eligible=False,
+                message_context={
+                    "live_call_record": {
+                        "schema": "hashi.live_voice.transcript.v1",
+                        "call_id": binding.call_id,
+                        "call_epoch": binding.call_epoch,
+                        "started_at": str(call["started_at"] or ""),
+                        "ended_at": str(call["ended_at"] or ""),
+                        "segment_count": len(segments),
+                    }
+                },
+            )
+        except Exception as exc:
+            logger.warning(
+                "Live Voice transcript record could not be projected for %s (%s)",
+                binding.call_id,
+                type(exc).__name__,
+            )
+
     def _mark_terminal(
         self, binding: CallBinding, phase: str, *, provider_close_state: str,
         summary: str, usage: Mapping[str, Any] | None = None,
     ) -> None:
         public_usage = _public_usage(usage)
+        became_terminal = False
         with self.session_store._lock, self.session_store._connection() as connection:
             row = connection.execute(
                 "SELECT phase, provider_close_state, usage_json FROM live_calls WHERE call_id = ?",
@@ -1103,6 +1448,9 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             )
             self._append_call_state(connection, binding, phase, summary,
                                     provider_close_state=provider_close_state, usage=public_usage)
+            became_terminal = True
+        if became_terminal:
+            self._persist_call_record(binding)
 
     async def _close_provider_session(self, key: str, provider_session_id: str) -> tuple[str, dict[str, int] | None]:
         try:
@@ -1144,6 +1492,14 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                         event_id = str(event.get("event_id") or event.get("client_event_id") or "")
                         if event_type in {"session.input_audio.muted", "session.input_audio.unmuted"} and event_id:
                             waiter = self._control_waiters.get((binding.call_id, event_id))
+                            if waiter is not None and not waiter.done():
+                                waiter.set_result(True)
+                        if event_type in {
+                            "session.commentary.appended",
+                            "session.thinking.appended",
+                            "session.instructions.appended",
+                        } and event_id:
+                            waiter = self._update_waiters.get((binding.call_id, event_id))
                             if waiter is not None and not waiter.done():
                                 waiter.set_result(True)
                         if event_type == "error":

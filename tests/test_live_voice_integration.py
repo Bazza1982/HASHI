@@ -181,69 +181,45 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         self.assertEqual(proposal.text, "build a website")
         self.assertFalse(proposal.ambiguous)
         self.assertEqual(len(proposal.source_event_ids), 2)
+        self.assertEqual(len(self.admit_calls), 1)
+        self.assertTrue(self.admit_calls[0].startswith("live-delegation-live-auto-"))
+        with self.store._lock, self.store._connection() as conn:
+            row = conn.execute(
+                "SELECT decision, accepted_run_id FROM live_delegations WHERE call_id = ? AND delegation_id = ?",
+                (self.call_id, "del-1"),
+            ).fetchone()
+        self.assertEqual(row["decision"], "admitted")
+        self.assertTrue(row["accepted_run_id"])
 
-    def test_decision_confirm_and_replay(self):
+    def test_automatic_admission_is_idempotent(self):
         frag = Fragment("e1", "user", "deploy to production", 0, 500)
         asyncio.run(self.manager.append_fragment_once(self.binding, frag))
         asyncio.run(self.manager.register_delegation_once(self.binding, "del-deploy", 600))
         asyncio.run(self.manager.schedule_proposal(self.binding, "del-deploy", 600))
-        proposal = asyncio.run(self.manager.read_proposal(self.binding, "del-deploy"))
+        asyncio.run(self.manager.schedule_proposal(self.binding, "del-deploy", 600))
+        self.assertEqual(len(self.admit_calls), 1)
+        with self.store._lock, self.store._connection() as conn:
+            receipt = conn.execute(
+                "SELECT operation, receipt_json FROM live_control_receipts WHERE call_id = ?",
+                (self.call_id,),
+            ).fetchone()
+        self.assertEqual(receipt["operation"], "admission")
+        self.assertTrue(json.loads(receipt["receipt_json"])["accepted"])
 
-        payload = {
-            "delegation_id": "del-deploy",
-            "proposal_version": proposal.version,
-            "proposal_digest": proposal.digest,
-            "decision": "confirm",
-            "idempotency_key": "dec-key-1",
-        }
+    def test_ambiguous_spoken_request_is_not_admitted(self):
+        fragment = Fragment("crosses-cutoff", "user", "check the", 500, 700)
+        asyncio.run(self.manager.append_fragment_once(self.binding, fragment))
+        asyncio.run(self.manager.register_delegation_once(self.binding, "del-ambiguous", 600))
+        asyncio.run(self.manager.schedule_proposal(self.binding, "del-ambiguous", 600))
 
-        result = asyncio.run(self.manager._op_decision(self.owner_id, {
-            **self.scope,
-            **payload,
-        }))
-        self.assertTrue(result["ok"])
-        self.assertTrue(result["accepted"])
-        self.assertIsNotNone(result["run_id"])
-        first_run_id = result["run_id"]
+        proposal = asyncio.run(self.manager.read_proposal(self.binding, "del-ambiguous"))
+        self.assertTrue(proposal.ambiguous)
+        self.assertEqual(self.admit_calls, [])
 
-        replay = asyncio.run(self.manager._op_decision(self.owner_id, {
-            **self.scope,
-            **payload,
-        }))
-        self.assertTrue(replay["ok"])
-        self.assertEqual(replay["run_id"], first_run_id)
-        self.assertEqual(self.admit_calls, ["live-decision-dec-key-1"])
-
-        with self.assertRaises(LiveVoiceError) as ctx:
-            asyncio.run(self.manager._op_decision(self.owner_id, {
-                **self.scope,
-                **payload,
-                "decision": "discard",
-            }))
-        self.assertEqual(ctx.exception.code, "live_idempotency_conflict")
-
-    def test_decision_discard(self):
-        frag = Fragment("e1", "user", "cancel that action", 0, 500)
-        asyncio.run(self.manager.append_fragment_once(self.binding, frag))
-        asyncio.run(self.manager.register_delegation_once(self.binding, "del-disc", 600))
-        asyncio.run(self.manager.schedule_proposal(self.binding, "del-disc", 600))
-        proposal = asyncio.run(self.manager.read_proposal(self.binding, "del-disc"))
-
-        payload = {
-            "delegation_id": "del-disc",
-            "proposal_version": proposal.version,
-            "proposal_digest": proposal.digest,
-            "decision": "discard",
-            "idempotency_key": "dec-disc-1",
-        }
-
-        result = asyncio.run(self.manager._op_decision(self.owner_id, {
-            **self.scope,
-            **payload,
-        }))
-        self.assertTrue(result["ok"])
-        self.assertTrue(result["accepted"])
-        self.assertIsNone(result["run_id"])
+    def test_phone_specific_decision_operation_is_not_exposed(self):
+        with self.assertRaises(LiveVoiceError) as caught:
+            asyncio.run(self.manager.invoke("decision", {"owner_id": self.owner_id}, self.scope))
+        self.assertEqual(caught.exception.code, "live_operation_unsupported")
 
     def test_control_operations(self):
         hb = asyncio.run(self.manager._op_control(self.owner_id, {
@@ -483,13 +459,7 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         self.assertEqual(snap["snapshot"]["phase"], "interrupted")
         self.assertEqual(snap["snapshot"]["provider_close_state"], "confirmed")
 
-    def test_confirm_retry_reuses_reserved_pao_idempotency(self):
-        asyncio.run(self.manager.append_fragment_once(
-            self.binding, Fragment("retry-frag", "user", "inspect logs", 0, 500)
-        ))
-        asyncio.run(self.manager.register_delegation_once(self.binding, "retry-delegation", 600))
-        asyncio.run(self.manager.schedule_proposal(self.binding, "retry-delegation", 600))
-        proposal = asyncio.run(self.manager.read_proposal(self.binding, "retry-delegation"))
+    def test_automatic_admission_retry_reuses_reserved_pao_idempotency(self):
         calls = []
 
         async def flaky(binding, frozen, key):
@@ -499,15 +469,109 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
             return await self._admit_run(binding, frozen, key)
 
         self.manager._admit_run = flaky
-        payload = {**self.scope, "delegation_id": proposal.delegation_id,
-                   "proposal_version": proposal.version, "proposal_digest": proposal.digest,
-                   "decision": "confirm", "idempotency_key": "retry-decision-1"}
-        with self.assertRaises(LiveVoiceError) as caught:
-            asyncio.run(self.manager._op_decision(self.owner_id, payload))
-        self.assertEqual(caught.exception.code, "live_outcome_unknown")
-        result = asyncio.run(self.manager._op_decision(self.owner_id, payload))
-        self.assertTrue(result["accepted"])
-        self.assertEqual(calls, ["live-decision-retry-decision-1"] * 2)
+        asyncio.run(self.manager.append_fragment_once(
+            self.binding, Fragment("retry-frag", "user", "inspect logs", 0, 500)
+        ))
+        asyncio.run(self.manager.register_delegation_once(self.binding, "retry-delegation", 600))
+        asyncio.run(self.manager.schedule_proposal(self.binding, "retry-delegation", 600))
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0], calls[1])
+        self.assertTrue(calls[0].startswith("live-delegation-live-auto-"))
+        with self.store._lock, self.store._connection() as conn:
+            row = conn.execute(
+                "SELECT decision FROM live_delegations WHERE call_id = ? AND delegation_id = ?",
+                (self.call_id, "retry-delegation"),
+            ).fetchone()
+        self.assertEqual(row["decision"], "admitted")
+
+    def test_agent_result_is_returned_to_same_live_voice(self):
+        sent = []
+        manager = self.manager
+        binding = self.binding
+
+        async def poll_activity(_binding, _request_id, _after, _limit):
+            return {
+                "ok": True,
+                "latest_sequence": 2,
+                "events": [
+                    {
+                        "sequence": 1,
+                        "delivery_class": "technical",
+                        "presentation_channel": "verbose",
+                        "presentation_enabled": False,
+                        "summary": "Checking service health.",
+                    },
+                    {
+                        "sequence": 2,
+                        "delivery_class": "reasoning",
+                        "presentation_channel": "thinking",
+                        "presentation_enabled": True,
+                        "summary": "private reasoning must stay hidden",
+                    },
+                ],
+            }
+
+        class FakeSocket:
+            closed = False
+
+            async def send_json(self, value):
+                sent.append(value)
+                event_id = value.get("event_id")
+                waiter = manager._update_waiters.get((binding.call_id, event_id))
+                if waiter is not None and not waiter.done():
+                    waiter.set_result(True)
+
+        async def scenario():
+            manager._active_sockets[binding.call_id] = FakeSocket()
+            manager._poll_run_activity = poll_activity
+            await manager.append_fragment_once(
+                binding, Fragment("relay-frag", "user", "check the service", 0, 500)
+            )
+            await manager.register_delegation_once(binding, "relay-delegation", 600)
+            await manager.schedule_proposal(binding, "relay-delegation", 600)
+            request_id = f"req-{self.admit_calls[-1]}"
+            token = self.store.mark_request_running(request_id, worker_id="test-worker")
+            self.assertIsNotNone(token)
+            self.store.finish_request(
+                request_id,
+                success=True,
+                assistant_text="The service is healthy.",
+                assistant_source="test",
+                fencing_token=token,
+            )
+            if manager._relay_tasks:
+                await asyncio.gather(*tuple(manager._relay_tasks))
+
+        asyncio.run(scenario())
+        thinking = [item for item in sent if item["type"] == "session.thinking.append"]
+        commentary = [item for item in sent if item["type"] == "session.commentary.append"]
+        self.assertTrue(any("Checking service health" in item["content"] for item in thinking))
+        self.assertFalse(any("private reasoning" in item["content"] for item in sent))
+        self.assertTrue(any("service is healthy" in item["content"] for item in commentary))
+        self.assertTrue(all(item["delegation_id"] == "relay-delegation" for item in commentary))
+
+    def test_terminal_call_creates_one_complete_chat_record(self):
+        asyncio.run(self.manager.append_fragment_once(
+            self.binding, Fragment("record-user", "user", "Please check it.", 0, 500)
+        ))
+        asyncio.run(self.manager.append_fragment_once(
+            self.binding, Fragment("record-agent", "assistant", "I am checking it.", 600, 1100)
+        ))
+        self.manager._mark_terminal(
+            self.binding,
+            "ended",
+            provider_close_state="confirmed",
+            summary="Live call ended",
+        )
+        self.manager._persist_call_record(self.binding)
+        records = [
+            item for item in self.store.messages(self.session_id, owner_id=self.owner_id)
+            if item.get("source") == "live-phone"
+        ]
+        self.assertEqual(len(records), 1)
+        self.assertIn("Please check it.", records[0]["text"])
+        self.assertIn("I am checking it.", records[0]["text"])
+        self.assertTrue(records[0]["message_context"]["live_call_record"])
 
     def test_start_contract_waits_for_sideband_and_never_persists_sdp(self):
         with self.store._lock, self.store._connection() as conn:

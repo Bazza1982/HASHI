@@ -118,6 +118,8 @@ def safe_sideband_event(raw: str) -> dict[str, Any] | None:
     if value.get("type") not in {
         "session.started", "session.closed", "session.input_transcript.delta",
         "session.output_transcript.delta", "session.delegation.created",
+        "session.commentary.appended", "session.thinking.appended",
+        "session.instructions.appended",
         "session.input_audio.muted", "session.input_audio.unmuted", "error",
     }:
         return None
