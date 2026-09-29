@@ -79,6 +79,12 @@ the current Agent Workzone revision into each admitted Run so an in-flight Run
 cannot observe a later menu change. Legacy Session Workzone rows remain inert
 compatibility records and are not silently migrated or merged.
 
+Configuration mutations may commit while Runs are active or queued. Every Run
+already admitted keeps its frozen snapshot, while the next admission after the
+commit reads the new revision. PAO defers runtime, Tool-root, and Engine-session
+activation to a Run boundary. Explicit Workzone `reload`/`reset` remains
+idle-only because it immediately resets the selected Engine Session.
+
 ### 2.3 Outer orchestration
 
 PAO owns orchestration across Agents, Engines, Runs, Sessions, time, or HASHI

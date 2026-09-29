@@ -56,9 +56,11 @@ Worker, and private `<bridge_home>/exp` content is never published.
 
 Tool wildcard grants permission, not capability. Workzones expose exact enabled
 roots; their only writable source is the owner/Agent profile. Each admitted Run
-freezes its Workzone revision. Naming a path grants nothing. Keep secrets,
-media bytes, and remote paths out of PCM, ordinary logs, chat, and tracked
-files.
+freezes its Workzone revision. Configuration may change while Runs are active
+or queued: admitted Runs keep their snapshots and later admissions read the new
+revision. Explicit Workzone reload remains idle-only. Naming a path grants
+nothing. Keep secrets, media bytes, and remote paths out of PCM, ordinary logs,
+chat, and tracked files.
 
 JSON writers validate private candidates under locks, revisions, and atomic
 replacement. Display fallback is read-only. On conflict, read fresh state and
