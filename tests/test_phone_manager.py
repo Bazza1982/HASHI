@@ -99,6 +99,32 @@ def test_live_input_keeps_hcc_and_newest_complete_exchange_then_drops_oldest():
     assert audit["history_omitted_units"] > 0
 
 
+def test_live_input_keeps_estimator_margin_below_provider_token_ceiling():
+    recent = []
+    for index in range(90):
+        unit = f"round-{index}"
+        recent.extend(
+            [
+                {"message_id": f"u-{index}", "history_unit_id": unit, "role": "user", "text": "U" + ("x" * 120)},
+                {"message_id": f"a-{index}", "history_unit_id": unit, "role": "assistant", "text": "A" + ("y" * 120)},
+            ]
+        )
+
+    _items, audit = build_live_voice_input(
+        _pcm_payload(hcc="FULL_HCC_SENTINEL"),
+        recent,
+        token_count=len,
+    )
+
+    # The provider enforces an exact 8,192-token ceiling while HASHI uses a
+    # heuristic estimator. Keep 512 estimated tokens free so rounding and
+    # tokenizer differences cannot turn a locally valid call into a 502.
+    assert audit["tokens_est"] <= 7_680
+    assert audit["tokens_est_budget"] == 7_680
+    assert audit["provider_tokens_limit"] == 8_192
+    assert audit["token_estimator_reserve"] == 512
+
+
 def test_live_input_never_silently_truncates_oversized_hcc():
     with pytest.raises(Exception) as caught:
         build_live_voice_input(_pcm_payload(hcc="汉" * 13000), [])

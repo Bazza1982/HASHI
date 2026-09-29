@@ -7,7 +7,12 @@ import unittest
 from orchestrator.frontend_live_voice.protocol import CallBinding, Fragment, LiveVoiceError, normalize_transcript
 from orchestrator.frontend_live_voice.delegation import build_proposal
 from orchestrator.frontend_live_voice.service import LiveVoiceEventService
-from orchestrator.frontend_live_voice.openai_live import session_request, append_update, safe_sideband_event
+from orchestrator.frontend_live_voice.openai_live import (
+    append_update,
+    create_provider_session,
+    safe_sideband_event,
+    session_request,
+)
 from orchestrator.frontend_live_voice.manager import _live_text_chunks
 
 BINDING=CallBinding('person@example.test','hashi4','generation-7','zelda','session-example',8,'call-example',1,'live_example')
@@ -95,6 +100,51 @@ class ProviderTests(unittest.TestCase):
         self.assertTrue(all(len(chunk.encode('utf-8'))<=512 for chunk in chunks))
     def test_frame_cap(self):
         with self.assertRaises(LiveVoiceError):safe_sideband_event('x'*262145)
+
+    def test_provider_rejection_logs_safe_diagnostics_without_error_message(self):
+        class FakeContent:
+            async def iter_chunked(self, _size):
+                yield json.dumps(
+                    {
+                        'error': {
+                            'type': 'invalid_request_error',
+                            'code': 'context_length_exceeded',
+                            'param': 'session.input',
+                            'message': 'SENSITIVE PROVIDER DETAIL',
+                        }
+                    }
+                ).encode()
+
+        class FakeResponse:
+            status = 400
+            headers = {'x-request-id': 'req-safe-1'}
+            content = FakeContent()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+        class FakeHttp:
+            def post(self, *_args, **_kwargs):
+                return FakeResponse()
+
+        with self.assertLogs(
+            'orchestrator.frontend_live_voice.openai_live', level='WARNING'
+        ) as captured:
+            with self.assertRaises(LiveVoiceError) as caught:
+                asyncio.run(
+                    create_provider_session(
+                        FakeHttp(), key='test-key', request={'session': {}}
+                    )
+                )
+
+        logged = '\n'.join(captured.output)
+        self.assertEqual(caught.exception.code, 'live_provider_create_failed')
+        self.assertIn('context_length_exceeded', logged)
+        self.assertIn('session.input', logged)
+        self.assertNotIn('SENSITIVE PROVIDER DETAIL', logged)
 
 class FakeDurable:
     """TEST ONLY. Not a persistence implementation or authorization system."""

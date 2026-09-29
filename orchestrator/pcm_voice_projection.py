@@ -20,6 +20,10 @@ from tools.token_tracker import estimate_tokens
 MAX_LIVE_INSTRUCTION_TOKENS = 16_384
 MAX_LIVE_INPUT_MESSAGES = 128
 MAX_LIVE_INPUT_TOKENS = 8_192
+LIVE_INPUT_TOKEN_RESERVE = 512
+LIVE_INPUT_ESTIMATED_TOKEN_BUDGET = (
+    MAX_LIVE_INPUT_TOKENS - LIVE_INPUT_TOKEN_RESERVE
+)
 LIVE_MESSAGE_OVERHEAD_TOKENS = 4
 
 
@@ -292,11 +296,11 @@ def build_live_voice_input(
     base_tokens = sum(_message_tokens(item, token_count) for item in developer_items)
     if (
         len(developer_items) > MAX_LIVE_INPUT_MESSAGES
-        or base_tokens > MAX_LIVE_INPUT_TOKENS
+        or base_tokens > LIVE_INPUT_ESTIMATED_TOKEN_BUDGET
     ):
         raise PCMValidationError(
             "pcm_live_history_capacity_exceeded",
-            "HCC, long-term memory, and Memory+ exceed the GPT-Live startup-history limit; no context was truncated",
+            "HCC, long-term memory, and Memory+ exceed the safe estimated GPT-Live startup-history budget; no context was truncated",
         )
 
     selected_units: set[str] = set()
@@ -308,7 +312,7 @@ def build_live_voice_input(
         unit_tokens = sum(_message_tokens(item, token_count) for item in unit_items)
         if (
             used_messages + unit_messages > MAX_LIVE_INPUT_MESSAGES
-            or used_tokens + unit_tokens > MAX_LIVE_INPUT_TOKENS
+            or used_tokens + unit_tokens > LIVE_INPUT_ESTIMATED_TOKEN_BUDGET
         ):
             if not selected_units:
                 raise PCMValidationError(
@@ -327,6 +331,9 @@ def build_live_voice_input(
     return items, {
         "messages": len(items),
         "tokens_est": used_tokens,
+        "tokens_est_budget": LIVE_INPUT_ESTIMATED_TOKEN_BUDGET,
+        "provider_tokens_limit": MAX_LIVE_INPUT_TOKENS,
+        "token_estimator_reserve": LIVE_INPUT_TOKEN_RESERVE,
         "history_requested_units": len(units),
         "history_included_units": len(selected_units),
         "history_omitted_units": len(units) - len(selected_units),

@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 import json
+import logging
 from urllib.parse import quote
 from orchestrator.phone_catalog import OPENAI_LIVE_VOICES
 from orchestrator.pcm_voice_projection import (
@@ -23,6 +24,49 @@ from .protocol import LiveVoiceError, identifier
 CREATE_URL = "https://api.openai.com/v1/live/sessions"
 ATTACH_ROOT = "wss://api.openai.com/v1/live/sessions"
 MAX_FRAME_BYTES = 262144
+_LOGGER = logging.getLogger(__name__)
+
+
+async def _response_bytes(response: Any, *, limit: int) -> bytes:
+    chunks: list[bytes] = []
+    length = 0
+    async for chunk in response.content.iter_chunked(16384):
+        length += len(chunk)
+        if length > limit:
+            raise LiveVoiceError("live_provider_response_limit", 502)
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _safe_provider_field(value: object) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "unknown"
+    cleaned = "".join(
+        character
+        for character in raw[:160]
+        if character.isalnum() or character in "._:/-"
+    )
+    return cleaned or "unknown"
+
+
+def _log_provider_rejection(response: Any, body: bytes) -> None:
+    try:
+        payload = json.loads(body)
+    except (TypeError, ValueError):
+        payload = {}
+    error = payload.get("error") if isinstance(payload, Mapping) else None
+    error = error if isinstance(error, Mapping) else {}
+    headers = getattr(response, "headers", {})
+    request_id = headers.get("x-request-id") if isinstance(headers, Mapping) else ""
+    _LOGGER.warning(
+        "GPT-Live session creation rejected status=%s request_id=%s error_type=%s error_code=%s error_param=%s",
+        int(getattr(response, "status", 0) or 0),
+        _safe_provider_field(request_id),
+        _safe_provider_field(error.get("type")),
+        _safe_provider_field(error.get("code")),
+        _safe_provider_field(error.get("param")),
+    )
 
 
 def session_request(
@@ -118,14 +162,10 @@ async def create_provider_session(http: Any, *, key: str, request: Mapping[str, 
     try:
         async with http.post(CREATE_URL, json=dict(request), headers={"Authorization": f"Bearer {key}"}, allow_redirects=False) as response:
             if response.status != 200 and response.status != 201:
+                body = await _response_bytes(response, limit=65536)
+                _log_provider_rejection(response, body)
                 raise LiveVoiceError("live_provider_create_failed", 502)
-            chunks, length = [], 0
-            async for chunk in response.content.iter_chunked(16384):
-                length += len(chunk)
-                if length > 1048576:
-                    raise LiveVoiceError("live_provider_response_limit", 502)
-                chunks.append(chunk)
-            value = json.loads(b"".join(chunks))
+            value = json.loads(await _response_bytes(response, limit=1048576))
     except LiveVoiceError:
         raise
     except Exception as exc:
