@@ -363,7 +363,7 @@ class SessionStore:
     per-Session working files are derived state used by Memory+ and Compact.
     """
 
-    SCHEMA_VERSION = 14
+    SCHEMA_VERSION = 17
 
     def __init__(
         self,
@@ -990,7 +990,229 @@ class SessionStore:
                     FOREIGN KEY(session_id) REFERENCES sessions(session_id),
                     FOREIGN KEY(run_id) REFERENCES runs(run_id)
                 );
+
+                CREATE TABLE IF NOT EXISTS live_call_attempts (
+                    attempt_id TEXT PRIMARY KEY,
+                    owner_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    instance_id TEXT NOT NULL,
+                    instance_generation TEXT NOT NULL,
+                    context_generation INTEGER NOT NULL,
+                    request_digest TEXT NOT NULL,
+                    phone_config_json TEXT NOT NULL DEFAULT '{}',
+                    state TEXT NOT NULL DEFAULT 'reserved',
+                    cancel_requested INTEGER NOT NULL DEFAULT 0,
+                    provider_id TEXT,
+                    call_id TEXT,
+                    outcome_json TEXT,
+                    cleanup_state TEXT NOT NULL DEFAULT 'none',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id)
+                );
+                CREATE INDEX IF NOT EXISTS live_call_attempts_session
+                    ON live_call_attempts(session_id, created_at);
+
+                CREATE TABLE IF NOT EXISTS live_calls (
+                    call_id TEXT PRIMARY KEY,
+                    owner_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    instance_id TEXT NOT NULL,
+                    instance_generation TEXT NOT NULL,
+                    context_generation INTEGER NOT NULL,
+                    call_epoch INTEGER NOT NULL DEFAULT 1,
+                    provider_session_id TEXT NOT NULL,
+                    phase TEXT NOT NULL DEFAULT 'connecting',
+                    controller_lease TEXT NOT NULL,
+                    lease_expiry TEXT NOT NULL,
+                    latest_session_event_sequence INTEGER NOT NULL DEFAULT 0,
+                    started_at TEXT NOT NULL,
+                    max_ends_at TEXT NOT NULL,
+                    ended_at TEXT,
+                    provider_close_state TEXT NOT NULL DEFAULT 'pending',
+                    usage_json TEXT,
+                    phone_config_json TEXT NOT NULL DEFAULT '{}',
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id)
+                );
+                CREATE INDEX IF NOT EXISTS live_calls_owner_agent_active
+                    ON live_calls(owner_id, agent_id, phase);
+                CREATE TABLE IF NOT EXISTS live_delegations (
+                    call_id TEXT NOT NULL,
+                    call_epoch INTEGER NOT NULL,
+                    delegation_id TEXT NOT NULL,
+                    offset_ms INTEGER NOT NULL,
+                    after_ms INTEGER NOT NULL DEFAULT 0,
+                    cutoff_ms INTEGER NOT NULL,
+                    source_event_ids_json TEXT NOT NULL DEFAULT '[]',
+                    proposal_version INTEGER NOT NULL DEFAULT 1,
+                    proposal_digest TEXT NOT NULL DEFAULT '',
+                    proposal_text TEXT NOT NULL DEFAULT '',
+                    ambiguous INTEGER NOT NULL DEFAULT 0,
+                    proposal_state TEXT NOT NULL DEFAULT 'pending',
+                    proposal_ready_after TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    decision TEXT,
+                    decision_key TEXT,
+                    decision_digest TEXT,
+                    accepted_message_id TEXT,
+                    accepted_run_id TEXT,
+                    created_at TEXT NOT NULL,
+                    decided_at TEXT,
+                    PRIMARY KEY(call_id, call_epoch, delegation_id),
+                    FOREIGN KEY(call_id) REFERENCES live_calls(call_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS live_control_receipts (
+                    call_id TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    request_digest TEXT NOT NULL,
+                    operation TEXT NOT NULL,
+                    receipt_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(call_id, idempotency_key),
+                    FOREIGN KEY(call_id) REFERENCES live_calls(call_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS live_fragments (
+                    owner_id TEXT NOT NULL,
+                    provider_event_id TEXT NOT NULL,
+                    call_id TEXT NOT NULL,
+                    call_epoch INTEGER NOT NULL,
+                    session_id TEXT NOT NULL,
+                    speaker TEXT NOT NULL,
+                    start_ms INTEGER NOT NULL,
+                    end_ms INTEGER NOT NULL,
+                    event_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(owner_id, session_id, call_id, call_epoch, provider_event_id),
+                    FOREIGN KEY(call_id) REFERENCES live_calls(call_id),
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id)
+                );
+                CREATE INDEX IF NOT EXISTS live_fragments_call_epoch
+                    ON live_fragments(call_id, call_epoch, start_ms);
                 """
+            )
+            attempt_columns = {
+                str(row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(live_call_attempts)"
+                ).fetchall()
+            }
+            if "instance_generation" not in attempt_columns:
+                connection.execute(
+                    "ALTER TABLE live_call_attempts ADD COLUMN "
+                    "instance_generation TEXT NOT NULL DEFAULT '1'"
+                )
+            if "phone_config_json" not in attempt_columns:
+                connection.execute(
+                    "ALTER TABLE live_call_attempts ADD COLUMN "
+                    "phone_config_json TEXT NOT NULL DEFAULT '{}'"
+                )
+            call_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(live_calls)").fetchall()
+            }
+            for column, declaration in {
+                "max_ends_at": "TEXT",
+                "provider_close_state": "TEXT NOT NULL DEFAULT 'pending'",
+                "usage_json": "TEXT",
+                "phone_config_json": "TEXT NOT NULL DEFAULT '{}'",
+            }.items():
+                if column not in call_columns:
+                    connection.execute(
+                        f"ALTER TABLE live_calls ADD COLUMN {column} {declaration}"
+                    )
+            delegation_columns = {
+                str(row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(live_delegations)"
+                ).fetchall()
+            }
+            for column, declaration in {
+                "proposal_state": "TEXT NOT NULL DEFAULT 'ready'",
+                "proposal_ready_after": "TEXT",
+                "decision_key": "TEXT",
+                "decision_digest": "TEXT",
+            }.items():
+                if column not in delegation_columns:
+                    connection.execute(
+                        f"ALTER TABLE live_delegations ADD COLUMN {column} {declaration}"
+                    )
+            fragment_info = connection.execute(
+                "PRAGMA table_info(live_fragments)"
+            ).fetchall()
+            fragment_columns = {str(row["name"]) for row in fragment_info}
+            fragment_pk = tuple(
+                str(row["name"])
+                for row in sorted(fragment_info, key=lambda item: int(item["pk"]))
+                if int(row["pk"])
+            )
+            expected_fragment_pk = (
+                "owner_id", "session_id", "call_id", "call_epoch", "provider_event_id"
+            )
+            if "text" in fragment_columns or fragment_pk != expected_fragment_pk:
+                connection.execute("ALTER TABLE live_fragments RENAME TO live_fragments_v15")
+                connection.executescript(
+                    """
+                    CREATE TABLE live_fragments (
+                        owner_id TEXT NOT NULL,
+                        provider_event_id TEXT NOT NULL,
+                        call_id TEXT NOT NULL,
+                        call_epoch INTEGER NOT NULL,
+                        session_id TEXT NOT NULL,
+                        speaker TEXT NOT NULL,
+                        start_ms INTEGER NOT NULL,
+                        end_ms INTEGER NOT NULL,
+                        event_id TEXT NOT NULL,
+                        sequence INTEGER NOT NULL,
+                        created_at TEXT NOT NULL,
+                        PRIMARY KEY(owner_id, session_id, call_id, call_epoch, provider_event_id),
+                        FOREIGN KEY(call_id) REFERENCES live_calls(call_id),
+                        FOREIGN KEY(session_id) REFERENCES sessions(session_id)
+                    );
+                    INSERT OR IGNORE INTO live_fragments(
+                        owner_id, provider_event_id, call_id, call_epoch, session_id,
+                        speaker, start_ms, end_ms, event_id, sequence, created_at
+                    )
+                    SELECT calls.owner_id, old.provider_event_id, old.call_id,
+                           old.call_epoch, old.session_id, old.speaker, old.start_ms,
+                           old.end_ms, old.event_id, old.sequence, old.created_at
+                    FROM live_fragments_v15 AS old
+                    JOIN live_calls AS calls ON calls.call_id = old.call_id
+                    WHERE old.event_id IS NOT NULL AND old.sequence IS NOT NULL;
+                    DROP TABLE live_fragments_v15;
+                    CREATE INDEX live_fragments_call_epoch
+                        ON live_fragments(call_id, call_epoch, start_ms);
+                    """
+                )
+            # A pre-qualified prototype could leave more than one active row
+            # for an owner/Agent. Preserve the newest and close older rows
+            # before installing the database-enforced singleton invariant.
+            active_live_rows = connection.execute(
+                """SELECT rowid, owner_id, agent_id FROM live_calls
+                WHERE phase IN ('connecting', 'active', 'ending')
+                ORDER BY owner_id, agent_id, started_at DESC, rowid DESC"""
+            ).fetchall()
+            active_live_keys: set[tuple[str, str]] = set()
+            for row in active_live_rows:
+                key = (str(row["owner_id"]), str(row["agent_id"]))
+                if key in active_live_keys:
+                    connection.execute(
+                        """UPDATE live_calls
+                        SET phase = 'interrupted', ended_at = COALESCE(ended_at, ?),
+                            provider_close_state = 'unconfirmed'
+                        WHERE rowid = ?""",
+                        (_utc_now(), int(row["rowid"])),
+                    )
+                else:
+                    active_live_keys.add(key)
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS one_live_call_per_owner_agent "
+                "ON live_calls(owner_id, agent_id) "
+                "WHERE phase IN ('connecting', 'active', 'ending')"
             )
             consumer_columns = {
                 str(row["name"])

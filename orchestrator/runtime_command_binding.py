@@ -91,6 +91,7 @@ CALLBACK_BINDINGS: tuple[CallbackBinding, ...] = (
     CallbackBinding(r"^npad:", "callback_notepad"),
     CallbackBinding(r"^privacy:", "callback_privacy"),
     CallbackBinding(r"^voice:", "callback_voice"),
+    CallbackBinding(r"^phone:", "callback_phone"),
     CallbackBinding(r"^safevoice:", "callback_safevoice"),
     CallbackBinding(r"^sys:", "callback_sys"),
     CallbackBinding(r"^wz:", "callback_workzone"),

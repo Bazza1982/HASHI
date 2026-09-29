@@ -406,6 +406,22 @@ class WorkbenchApiServer:
                                    middlewares=[runtime_admission])
         self.demo_connector = DemoConnector(self)
         self.demo_connector.register(self.app)
+        from orchestrator.frontend_live_voice.manager import LiveVoiceManager
+        from orchestrator.frontend_live_voice.routes import register_live_voice_routes
+
+        self.live_voice_manager = LiveVoiceManager(
+            session_store=self.session_store,
+            global_config=self.global_config,
+            secrets=self.secrets,
+            admit_run=self._admit_live_voice_run,
+            resolve_phone_session=self._resolve_live_voice_phone_session,
+        )
+        register_live_voice_routes(
+            self.app,
+            self.live_voice_manager,
+            self._authorize_live_voice,
+            qualified=True,
+        )
         self.app.router.add_post("/api/auth/login", self.handle_auth_login)
         self.app.router.add_post("/api/auth/logout", self.handle_auth_logout)
         self.app.router.add_get("/api/auth/me", self.handle_auth_me)
@@ -945,7 +961,50 @@ class WorkbenchApiServer:
         return entries if isinstance(entries, (list, dict)) else []
 
     def _runtime_map(self) -> dict:
-        return {runtime.name: runtime for runtime in self._runtime_list()}
+        return {
+            str(runtime.name).strip().casefold(): runtime
+            for runtime in self._runtime_list()
+        }
+
+    def _resolve_live_voice_phone_session(self, agent_id: str) -> dict:
+        """Resolve an Agent-owned /phone snapshot without trusting the browser."""
+
+        from orchestrator.phone_manager import PhoneConfigError, PhoneManager
+
+        target = str(agent_id or "").strip().casefold()
+        runtime = self._runtime_map().get(target)
+        manager = getattr(runtime, "phone_manager", None)
+        display_name = None
+        if manager is not None and callable(getattr(manager, "resolve_live_session", None)):
+            display = getattr(runtime, "get_display_name", None)
+            display_name = display() if callable(display) else getattr(runtime, "display_name", None)
+            return manager.resolve_live_session(
+                agent_id=target,
+                display_name=str(display_name or target),
+            )
+
+        raw = self._load_raw_agent_config()
+        rows = raw.get("agents", []) if isinstance(raw, dict) else []
+        agent = next(
+            (
+                row for row in rows
+                if isinstance(row, dict)
+                and str(row.get("name") or "").strip().casefold() == target
+            ),
+            None,
+        )
+        if agent is None:
+            raise PhoneConfigError("phone_agent_unavailable", "The selected Agent has no phone configuration owner.")
+        workspace_value = str(agent.get("workspace_dir") or "").strip()
+        if not workspace_value:
+            raise PhoneConfigError("phone_workspace_unavailable", "The selected Agent has no workspace.")
+        workspace = Path(workspace_value).expanduser()
+        if not workspace.is_absolute():
+            workspace = self.config_path.parent / workspace
+        return PhoneManager(workspace.resolve()).resolve_live_session(
+            agent_id=target,
+            display_name=str(agent.get("display_name") or agent.get("name") or target)
+        )
 
     def _is_governed_profile(self) -> bool:
         return (
@@ -1492,6 +1551,7 @@ class WorkbenchApiServer:
     async def start(self):
         await asyncio.to_thread(self.session_store.cleanup_attachments)
         await asyncio.to_thread(self.session_store.cleanup_audio_assets)
+        await self.live_voice_manager.start()
         self.runner = web.AppRunner(self.app)
         await self.runner.setup()
         bind_host = self._select_bind_host()
@@ -1677,6 +1737,8 @@ class WorkbenchApiServer:
                 *self._audio_transcript_tasks, return_exceptions=True
             )
             self._audio_transcript_tasks.clear()
+        if hasattr(self, "live_voice_manager"):
+            await self.live_voice_manager.shutdown()
         if self.runner:
             await self.runner.cleanup()
         transfer_store = getattr(self, "transfer_store", None)
@@ -5211,6 +5273,69 @@ class WorkbenchApiServer:
             return f"enterprise:{user.id}" if user is not None else None
         return SessionStore.owner_id_for(self.global_config)
 
+    async def _authorize_live_voice(
+        self, request, operation: str, payload: dict
+    ) -> dict[str, Any]:
+        owner_id = self._v1_owner_id(request)
+        if not owner_id:
+            from orchestrator.frontend_live_voice.protocol import LiveVoiceError
+            raise LiveVoiceError("live_not_authenticated", 401)
+        return {"owner_id": owner_id, "admin": self._check_admin_auth(request)}
+
+    async def _admit_live_voice_run(
+        self, binding, proposal, idempotency_key: str
+    ) -> dict[str, str]:
+        """Enter a confirmed voice proposal through the normal PAO ingress."""
+
+        from orchestrator.frontend_live_voice.protocol import LiveVoiceError
+
+        runtime = self._runtime_map().get(binding.agent_id)
+        if runtime is None:
+            raise LiveVoiceError("live_agent_unavailable", 503)
+        try:
+            request_id = await runtime.enqueue_request(
+                runtime._primary_chat_id(),
+                proposal.text,
+                "session-api",
+                proposal.text[:160],
+                deliver_to_telegram=True,
+                idempotency_key=idempotency_key,
+                request_metadata={
+                    "session_id": binding.session_id,
+                    "owner_id": binding.owner_id,
+                    "session_surface": "workbench",
+                    "session_channel_key": "default",
+                    "session_message_text": proposal.text,
+                    "session_message_display_text": proposal.text,
+                    "session_context_generation": binding.context_generation,
+                    "live_voice": {
+                        "call_id": binding.call_id,
+                        "call_epoch": binding.call_epoch,
+                        "delegation_id": proposal.delegation_id,
+                        "proposal_version": proposal.version,
+                        "proposal_digest": proposal.digest,
+                    },
+                },
+            )
+            if not request_id:
+                raise LiveVoiceError("live_admission_rejected", 409)
+            run = self.session_store.get_run_by_request(str(request_id))
+        except LiveVoiceError:
+            raise
+        except Exception as exc:
+            raise LiveVoiceError("live_outcome_unknown", 502) from exc
+        if (
+            run["session_id"] != binding.session_id
+            or run["agent_id"] != binding.agent_id
+            or int(run["context_generation"]) != binding.context_generation
+        ):
+            raise LiveVoiceError("live_scope_changed", 409)
+        return {
+            "request_id": str(request_id),
+            "run_id": str(run["run_id"]),
+            "message_id": str(run["user_message_id"]),
+        }
+
     def _agent_history_cursor_key(self) -> bytes:
         """Bind opaque paging tokens to this Function instance's authority."""
 
@@ -5508,6 +5633,12 @@ class WorkbenchApiServer:
                         },
                     }
                 )
+        if hasattr(self, "live_voice_manager") and self.live_voice_manager.available:
+            capabilities["live_voice"] = {
+                "version": "1.0",
+                "available": True,
+                "protocol_version": "1.0",
+            }
         return web.json_response(capabilities)
 
     async def handle_v2_frontend_capabilities(self, request):

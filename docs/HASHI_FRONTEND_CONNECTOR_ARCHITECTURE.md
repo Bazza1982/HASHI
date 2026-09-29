@@ -492,6 +492,34 @@ The user approved the Function, HASHI1 deployment-template, and local-instance
 changes on 2026-09-28. Offline validation and running-Function adoption remain
 separate; approval did not authorize a reboot or replacement.
 
+### 8.5 Agent-owned live phone configuration (2026-09-29)
+
+`/voice` continues to own rendered TTS replies and previews. `/phone` separately
+owns an Agent's full-duplex live provider, model, output voice, conversation
+language, speaking style, and bounded custom speaking-style instruction. The
+configuration is persisted in that Agent's workspace. A frontend may display
+the effective public projection but may not select or override it.
+
+PCM owns the live personality projection. Only the canonical `persona` section
+is projected; system, memory, HCC, credentials, paths, and raw PCM source are
+excluded. Fixed live-call safety and client-delegation instructions remain
+higher priority than persona and speaking style. The live provider may discuss
+and propose an action, but an ordinary HASHI confirmation and admission path
+must authorize any effect.
+
+Context preflight returns a public `/phone` snapshot and revision. Start must
+present that exact revision, resolves the snapshot again at the trusted Backend
+API boundary, and fails if PCM, identity, or phone configuration changed. The
+provider model and voice are frozen for the resulting call. Persistent call
+records contain only the public snapshot and an instruction digest, never the
+projected persona or full provider prompt.
+
+The initial qualified provider is OpenAI `gpt-live-1`. Its supported voice
+catalogue is maintained as Function configuration and is applied before the
+session begins, following the provider's live-conversation contract. Source,
+offline qualification, real-provider canary, running-generation adoption, and
+user microphone acceptance remain distinct delivery states.
+
 ## 9. Engineering-layer placement
 
 Connector business behaviour belongs in the Functions layer. Stable process

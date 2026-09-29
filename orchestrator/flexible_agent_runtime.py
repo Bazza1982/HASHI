@@ -163,6 +163,7 @@ from orchestrator.telegram_notifications import (
     notification_mode,
 )
 from orchestrator.voice_manager import VoiceManager
+from orchestrator.phone_manager import PhoneConfigError, PhoneManager
 from orchestrator.wrapper_mode import SESSION_RESET_SOURCE, load_wrapper_config, visible_wrapper_slots
 from orchestrator.audit_mode import (
     AuditTelemetryCollector,
@@ -352,6 +353,7 @@ class FlexibleAgentRuntime:
             secrets=self.secrets,
             native_capabilities=list(config.allowed_backends or ()),
         )
+        self.phone_manager = PhoneManager(self.workspace_dir)
         self._authorized_telegram_ids = resolve_authorized_telegram_ids(self.config.extra, self.global_config.authorized_id)
         self._active_chat_ids: dict[int, int] = {}  # user_id -> chat_id, populated on first message
         self._channel_gate = self._build_channel_gate()
@@ -3789,6 +3791,107 @@ class FlexibleAgentRuntime:
         )
         return InlineKeyboardMarkup(rows)
 
+    def _phone_menu_text(self) -> str:
+        state = self.phone_manager.get_state()
+        provider = self.phone_manager.PROVIDERS[state["provider"]]
+        model = provider["models"][state["model"]]
+        style_label = ui_language.tr(f"phone.style.{state['style']}")
+        language_label = ui_language.tr(f"phone.language.{state['language']}")
+        custom = state["style_instructions"]
+        try:
+            resolved = self.phone_manager.resolve_live_session(
+                display_name=self.get_display_name()
+            )
+            persona_label = ui_language.tr("phone.persona.ready")
+            revision = str(resolved["public"]["revision"])[:8]
+        except Exception:
+            persona_label = ui_language.tr("phone.persona.unavailable")
+            revision = "—"
+        custom_label = (
+            f"<code>{html.escape(custom)}</code>"
+            if custom else ui_language.tr("phone.custom.none")
+        )
+        return setting_card(
+            "☎️",
+            ui_language.tr("phone.title"),
+            current=(
+                f"{html.escape(str(provider['label']))} · "
+                f"<code>{html.escape(state['model'])}</code> · "
+                f"{html.escape(self.phone_manager.VOICE_LABELS[state['voice']])}"
+            ),
+            facts=(
+                f"<b>{html.escape(ui_language.tr('phone.field.language'))}</b> · {html.escape(language_label)}",
+                f"<b>{html.escape(ui_language.tr('phone.field.style'))}</b> · {html.escape(style_label)}",
+                f"<b>{html.escape(ui_language.tr('phone.field.persona'))}</b> · {html.escape(persona_label)}",
+                f"<b>{html.escape(ui_language.tr('phone.field.custom'))}</b> · {custom_label}",
+                f"<b>{html.escape(ui_language.tr('phone.field.revision'))}</b> · <code>{revision}</code>",
+            ),
+            consequence=ui_language.tr("phone.effect"),
+            action=ui_language.tr("phone.action"),
+        )
+
+    def _phone_choice_text(self, field: str) -> str:
+        state = self.phone_manager.get_state()
+        labels = {
+            "provider": self.phone_manager.PROVIDERS[state["provider"]]["label"],
+            "model": self.phone_manager.PROVIDERS[state["provider"]]["models"][state["model"]]["label"],
+            "voice": self.phone_manager.VOICE_LABELS[state["voice"]],
+            "language": ui_language.tr(f"phone.language.{state['language']}"),
+            "style": ui_language.tr(f"phone.style.{state['style']}"),
+        }
+        return setting_card(
+            "☎️",
+            ui_language.tr(f"phone.choose.{field}"),
+            current=html.escape(str(labels[field])),
+            consequence=ui_language.tr("phone.next_call"),
+            action=ui_language.tr("phone.choose.action"),
+        )
+
+    def _phone_keyboard(self, field: str | None = None) -> InlineKeyboardMarkup:
+        state = self.phone_manager.get_state()
+        if field is None:
+            return InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(ui_language.tr("phone.button.provider"), callback_data="phone:view:provider"),
+                    InlineKeyboardButton(ui_language.tr("phone.button.model"), callback_data="phone:view:model"),
+                ],
+                [
+                    InlineKeyboardButton(ui_language.tr("phone.button.voice"), callback_data="phone:view:voice"),
+                    InlineKeyboardButton(ui_language.tr("phone.button.language"), callback_data="phone:view:language"),
+                ],
+                [InlineKeyboardButton(ui_language.tr("phone.button.style"), callback_data="phone:view:style")],
+                [InlineKeyboardButton(ui_language.tr("phone.button.reset"), callback_data="phone:reset:default")],
+            ])
+        if field == "provider":
+            options = self.phone_manager.provider_options()
+        elif field == "model":
+            options = self.phone_manager.model_options()
+        elif field == "voice":
+            options = self.phone_manager.voice_options()
+        elif field == "language":
+            options = tuple(
+                (key, ui_language.tr(f"phone.language.{key}"))
+                for key, _label in self.phone_manager.language_options()
+            )
+        elif field == "style":
+            options = tuple(
+                (key, ui_language.tr(f"phone.style.{key}"))
+                for key, _label in self.phone_manager.style_options()
+            )
+        else:
+            return self._phone_keyboard()
+        current = str(state[field])
+        buttons = [
+            InlineKeyboardButton(
+                selected_label(str(label), key == current),
+                callback_data=f"phone:{field}:{key}",
+            )
+            for key, label in options
+        ]
+        rows = [buttons[index:index + 2] for index in range(0, len(buttons), 2)]
+        rows.append([InlineKeyboardButton(back_label(), callback_data="phone:back:menu")])
+        return InlineKeyboardMarkup(rows)
+
     async def _send_voice_profile_previews(
         self,
         update: Any,
@@ -4291,6 +4394,49 @@ class FlexibleAgentRuntime:
                 preview_profile,
                 preview_assets,
             )
+
+    async def callback_phone(self, update: Update, context: Any):
+        query = update.callback_query
+        if not self._is_authorized_user(query.from_user.id):
+            return
+        parts = (query.data or "").split(":", 2)
+        action = parts[1] if len(parts) > 1 else "back"
+        value = parts[2] if len(parts) > 2 else "menu"
+        if action == "view":
+            if value not in {"provider", "model", "voice", "language", "style"}:
+                await query.answer(ui_language.tr("phone.error.invalid"), show_alert=True)
+                return
+            await query.edit_message_text(
+                self._phone_choice_text(value),
+                reply_markup=self._phone_keyboard(value),
+                parse_mode="HTML",
+            )
+            await query.answer()
+            return
+        try:
+            if action == "provider":
+                self.phone_manager.set_provider(value)
+            elif action == "model":
+                self.phone_manager.set_model(value)
+            elif action == "voice":
+                self.phone_manager.set_voice(value)
+            elif action == "language":
+                self.phone_manager.set_language(value)
+            elif action == "style":
+                self.phone_manager.set_style(value)
+            elif action == "reset":
+                self.phone_manager.reset()
+            elif action != "back":
+                raise PhoneConfigError("phone_action_invalid", "Unknown /phone action.")
+        except PhoneConfigError as exc:
+            await query.answer(str(exc), show_alert=True)
+            return
+        await query.edit_message_text(
+            self._phone_menu_text(),
+            reply_markup=self._phone_keyboard(),
+            parse_mode="HTML",
+        )
+        await query.answer(ui_language.tr("phone.updated"))
 
     # ── toggle callback ──────────────────────────────────────────────────────────
     # Handles: tgl:terminal:quiet/activity/debug/raw, tgl:verbose:on/off,
@@ -5492,6 +5638,61 @@ class FlexibleAgentRuntime:
                 ui_language.tr("safevoice.confirmation_expired")
             )
             await query.answer(ui_language.tr("safevoice.expired"))
+
+    async def cmd_phone(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        args = [str(value).strip() for value in (context.args or []) if str(value).strip()]
+        action = args[0].casefold() if args else "status"
+        if action in {"status", "menu"}:
+            await self._reply_text(
+                update,
+                self._phone_menu_text(),
+                reply_markup=self._phone_keyboard(),
+                parse_mode="HTML",
+            )
+            return
+        aliases = {"providers": "provider", "models": "model", "voices": "voice", "styles": "style"}
+        action = aliases.get(action, action)
+        if action in {"provider", "model", "voice", "language", "style"} and len(args) == 1:
+            await self._reply_text(
+                update,
+                self._phone_choice_text(action),
+                reply_markup=self._phone_keyboard(action),
+                parse_mode="HTML",
+            )
+            return
+        try:
+            if action == "provider" and len(args) == 2:
+                self.phone_manager.set_provider(args[1])
+            elif action == "model" and len(args) == 2:
+                self.phone_manager.set_model(args[1])
+            elif action == "voice" and len(args) == 2:
+                self.phone_manager.set_voice(args[1])
+            elif action == "language" and len(args) == 2:
+                self.phone_manager.set_language(args[1])
+            elif action == "style" and len(args) == 2:
+                self.phone_manager.set_style(args[1])
+            elif action == "instructions":
+                if len(args) == 1:
+                    await self._reply_text(update, ui_language.tr("phone.instructions.usage"))
+                    return
+                value = "" if args[1].casefold() in {"clear", "reset", "off"} else " ".join(args[1:])
+                self.phone_manager.set_style_instructions(value)
+            elif action == "reset" and len(args) == 1:
+                self.phone_manager.reset()
+            else:
+                await self._reply_text(update, ui_language.tr("phone.usage"))
+                return
+        except PhoneConfigError as exc:
+            await self._reply_text(update, str(exc))
+            return
+        await self._reply_text(
+            update,
+            self._phone_menu_text(),
+            reply_markup=self._phone_keyboard(),
+            parse_mode="HTML",
+        )
 
     async def cmd_voice(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
