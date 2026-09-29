@@ -398,7 +398,7 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
     def test_startup_recovery_closes_orphaned_provider_session(self):
         calls = []
 
-        async def close_provider(key, provider_id):
+        async def close_provider(key, provider_id, **_kwargs):
             calls.append((key, provider_id))
             return "confirmed", {"total_tokens": 7}
 
@@ -466,7 +466,7 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         async def fake_attach(_http, *, key, provider_session_id):
             return DisconnectedSocket()
 
-        async def fake_close(key, provider_session_id):
+        async def fake_close(key, provider_session_id, **_kwargs):
             close_calls.append((key, provider_session_id))
             return "confirmed", {"total_tokens": 3}
 
@@ -478,6 +478,155 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         snap = asyncio.run(self.manager._op_snapshot(self.owner_id, self.scope))
         self.assertEqual(snap["snapshot"]["phase"], "interrupted")
         self.assertEqual(snap["snapshot"]["provider_close_state"], "confirmed")
+
+    def test_provider_close_reason_is_preserved_in_independent_call_audit(self):
+        class ProviderSocket:
+            closed = False
+
+            def __init__(self):
+                self.messages = iter((type("Message", (), {
+                    "type": aiohttp.WSMsgType.TEXT,
+                    "data": json.dumps({
+                        "type": "session.closed",
+                        "event_id": "provider-close-reason-1",
+                        "session": {"reason": "connection_lost"},
+                    }),
+                })(),))
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                try:
+                    return next(self.messages)
+                except StopIteration as exc:
+                    raise StopAsyncIteration from exc
+
+            async def close(self):
+                self.closed = True
+
+        @asynccontextmanager
+        async def fake_http():
+            yield object()
+
+        async def fake_attach(_http, *, key, provider_session_id):
+            return ProviderSocket()
+
+        with patch("orchestrator.frontend_live_voice.manager.provider_http_session", fake_http), \
+             patch("orchestrator.frontend_live_voice.manager.attach_provider", fake_attach):
+            asyncio.run(self.manager._run_sideband(self.binding, "sk-test-fake", "prov-1"))
+
+        audit_text = self.manager.audit.path_for(self.binding).read_text(encoding="utf-8")
+        records = [
+            json.loads(line)
+            for line in audit_text.splitlines()
+        ]
+        closed = next(item for item in records if item["event"] == "provider.session_closed")
+        self.assertEqual(closed["detail"]["provider_reason"], "connection_lost")
+
+    def test_sideband_exception_keeps_full_failure_evidence_outside_session_events(self):
+        class ProviderSocket:
+            closed = False
+
+            def __init__(self):
+                self.sent = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.sent:
+                    raise StopAsyncIteration
+                self.sent = True
+                return type("Message", (), {
+                    "type": aiohttp.WSMsgType.TEXT,
+                    "data": json.dumps({
+                        "type": "session.input_transcript.delta",
+                        "event_id": "provider-fragment-race-1",
+                        "delta": "hello",
+                        "start_ms": 0,
+                        "end_ms": 100,
+                    }),
+                })()
+
+            async def close(self):
+                self.closed = True
+
+        @asynccontextmanager
+        async def fake_http():
+            yield object()
+
+        async def fake_attach(_http, *, key, provider_session_id):
+            return ProviderSocket()
+
+        async def fail_persistence(_binding, _event):
+            raise sqlite3.IntegrityError(
+                "UNIQUE constraint failed: run_events.session_id, run_events.sequence"
+            )
+
+        async def fake_close(_key, _provider_session_id, **_kwargs):
+            return "unconfirmed", None
+
+        self.manager.service.on_provider_event = fail_persistence
+        self.manager._close_provider_session = fake_close
+        with patch("orchestrator.frontend_live_voice.manager.provider_http_session", fake_http), \
+             patch("orchestrator.frontend_live_voice.manager.attach_provider", fake_attach):
+            asyncio.run(self.manager._run_sideband(self.binding, "sk-test-fake", "prov-1"))
+
+        audit_text = self.manager.audit.path_for(self.binding).read_text(encoding="utf-8")
+        self.assertNotIn("hello", audit_text)
+        records = [
+            json.loads(line)
+            for line in audit_text.splitlines()
+        ]
+        failure = next(item for item in records if item["event"] == "sideband.exception")
+        self.assertEqual(failure["detail"]["exception_type"], "IntegrityError")
+        self.assertIn("run_events.sequence", failure["detail"]["exception_message"])
+
+    def test_client_lifecycle_observation_is_audited_without_transcript_content(self):
+        result = asyncio.run(self.manager._op_observe(self.owner_id, {
+            **self.scope,
+            "event": "client.peer_connection_state",
+            "event_id": "client-observation-1",
+            "observed_at": "2026-09-30T00:00:00Z",
+            "client_sequence": 3,
+            "detail": {"state": "failed", "reason": "transport_failure"},
+        }))
+        self.assertTrue(result["ok"])
+        records = [
+            json.loads(line)
+            for line in self.manager.audit.path_for(self.binding).read_text(encoding="utf-8").splitlines()
+        ]
+        observed = next(item for item in records if item["event"] == "client.peer_connection_state")
+        self.assertEqual(observed["detail"]["state"], "failed")
+        self.assertEqual(observed["detail"]["client_sequence"], 3)
+
+    def test_end_control_records_explicit_user_hangup_authority(self):
+        result = asyncio.run(self.manager._op_control(self.owner_id, {
+            **self.scope,
+            "action": "end",
+            "idempotency_key": "user-hangup-1",
+            "termination_initiator": "user",
+            "termination_reason": "user_hangup",
+        }))
+        self.assertTrue(result["ok"])
+        records = [
+            json.loads(line)
+            for line in self.manager.audit.path_for(self.binding).read_text(encoding="utf-8").splitlines()
+        ]
+        request = next(item for item in records if item["event"] == "termination.requested")
+        self.assertEqual(request["detail"]["initiator"], "user")
+        self.assertEqual(request["detail"]["reason"], "user_hangup")
+
+    def test_non_user_fault_cannot_be_labelled_as_user_hangup(self):
+        with self.assertRaisesRegex(LiveVoiceError, "live_termination_invalid"):
+            asyncio.run(self.manager._op_control(self.owner_id, {
+                **self.scope,
+                "action": "end",
+                "idempotency_key": "false-user-hangup-1",
+                "termination_initiator": "client_fault",
+                "termination_reason": "user_hangup",
+            }))
 
     def test_append_error_is_scoped_to_the_update_and_call_stays_alive(self):
         manager = self.manager

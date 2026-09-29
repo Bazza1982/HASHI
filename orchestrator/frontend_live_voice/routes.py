@@ -16,6 +16,7 @@ ROUTES = (
     ("GET", "/attempts/{attempt_id}", "attempt"),
     ("GET", "/calls/{call_id}", "snapshot"),
     ("GET", "/calls/{call_id}/events", "events"),
+    ("POST", "/calls/{call_id}/observations", "observe"),
     ("POST", "/calls/{call_id}/controls", "control"),
 )
 

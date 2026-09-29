@@ -91,6 +91,42 @@ arrives and participates in later text and phone history. A terminal call card
 is a Connector view derived from those fragments; it is not a second message
 authority or a replacement for the role-preserving transcript.
 
+#### Live Phone foreground arbitration contract (2026-09-30)
+
+While one logical Live Phone call is engaged, PAO binds that authenticated
+owner's instance-wide foreground conversation to the call's Agent and
+Conversation Session. There is at most one such foreground binding per owner
+and instance. The logical call is not the same object as an OpenAI session,
+WebRTC connection, browser component, or Function generation; those are
+replaceable transport epochs beneath it.
+
+Every other Run or event is background relative to that call. This includes a
+spoken request delegated to the Agent, concurrent text/API input, Scheduler
+cron and heartbeat work, HChat, Remote coordination, and Agent-initiated work.
+Background work keeps its normal Session, authority, persistence, and approval
+boundaries. It may append attributable facts or reportable results to the
+foreground model, but it cannot mutate, cancel, close, or compete with the
+foreground conversation. A background result that would normally create a
+separate user-facing reply is instead routed to the active foreground call;
+if delivery is temporarily unavailable, PAO retains it for replay or later
+ordinary delivery rather than ending the call.
+
+Only an authenticated explicit hang-up action bound to the current call may
+normally terminate it as `ended`. Provider expiry or closure, WebRTC/data-
+channel loss, lease loss, navigation, page reload, Function replacement,
+process failure, persistence failure, or a background task is a transport or
+runtime fault. PAO and FC first recover or replace that transport epoch; an
+unrecoverable case terminates as `failed` or `interrupted`, never as a user
+hang-up. Provider duration limits therefore require pre-expiry rollover, not a
+normal logical-call ending.
+
+Each logical call has an append-only diagnostic timeline independent of the
+ordinary Session-event sequence. It correlates PAO Runs, FC/browser states,
+provider lifecycle and close reason, transport epochs, persistence failures,
+recovery attempts, and the actor/reason for every termination request. It does
+not duplicate transcript text, audio, instructions, credentials, or secrets;
+the role-preserving Session transcript remains canonical.
+
 ### 2.3 Outer orchestration
 
 PAO owns orchestration across Agents, Engines, Runs, Sessions, time, or HASHI

@@ -550,6 +550,34 @@ recent history. When the call becomes terminal, HASHI additionally projects the
 complete transcript as one presentation-only call record; that card is a view,
 not a second history authority.
 
+The call panel controls one durable logical call, not the lifetime of one
+browser or provider connection. Only its explicit hang-up button may submit a
+user termination. Scope navigation, component disposal, page lifecycle,
+WebRTC/data-channel failure, Provider closure, API replacement, and lease or
+duration expiry must be reported as distinct automatic/fault sources; none may
+be labelled `user_hangup`. FC keeps the call globally reachable across ordinary
+Workbench navigation and reconnects or rolls over replaceable transport epochs
+where possible. If recovery ultimately fails, the call is visibly faulted and
+never rendered as a normal user-ended call.
+
+FC writes a privacy-bounded JSONL diagnostic timeline for every call under the
+instance logs. Server-side lifecycle evidence does not share the PAO Session
+event sequence, so the failure being diagnosed cannot suppress its own record.
+Workbench contributes bounded observations for peer connection, ICE, data
+channel, media track, page visibility, network state, polling, heartbeat,
+scope departure, and termination source. Provider events record their type,
+identifier, timing/size metadata, close reason and bounded exception frames;
+raw audio, transcript text, projected context, SDP, credentials and secrets are
+excluded. The canonical Session transcript continues to own conversational
+content.
+
+PAO background-result routing uses the Provider's supported append channels:
+factual/progress context enters `session.thinking.append`, while a result that
+the foreground voice should say enters `session.commentary.append`. Every
+append remains correlated with its source Run/delegation and acknowledgement.
+An unavailable sideband queues or defers that delivery; it never grants the
+background Run authority over the call lifecycle.
+
 Context preflight returns a public `/phone` snapshot and revision. Start must
 present that exact revision, resolves the snapshot again at the trusted Backend
 API boundary, and fails if PCM, identity, or phone configuration changed. The

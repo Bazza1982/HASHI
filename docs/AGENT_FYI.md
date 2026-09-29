@@ -194,6 +194,14 @@ input-token count before session creation. Only the oldest complete dialogue
 units yield when the exact 8,192-token ceiling requires it; local estimates are
 telemetry only.
 
+An engaged `/phone` call is the owner's foreground conversation. All other
+Runs/events—including delegated work, text/API input, cron, heartbeat, HChat,
+and proactive work—stay background and feed attributable results to it; they
+never compete with or end it. Only explicit hang-up is a normal user ending.
+Every other stop is recovery/fault evidence, never `user_hangup`. Keep a
+privacy-bounded per-call lifecycle log independent of Session event sequencing;
+transcript content remains canonical in the Session.
+
 Commands follow the [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md); `/help`
 derives from metadata. Workbench and Telegram may share a Session while UI rows
 stay out of model history. An active Run does not close command ingress:

@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import inspect
 import json
 import logging
+from pathlib import Path
 import sqlite3
 from typing import Any
 from uuid import uuid4
@@ -18,6 +19,7 @@ from orchestrator.phone_catalog import (
     OPENAI_LIVE_VOICES,
     OPENAI_LIVE_VOICE_PRESENTATIONS,
 )
+from .audit import LiveVoiceAuditLog, exception_evidence
 from .delegation import Proposal, build_proposal
 from .openai_live import (
     append_update,
@@ -40,6 +42,36 @@ TERMINAL_PHASES = {"ended", "failed", "interrupted"}
 CALL_EVENT_SCHEMA = "hashi.live_voice.event.v1"
 LIVE_UPDATE_TOKEN_LIMIT = 320
 LIVE_UPDATE_BYTE_LIMIT = 512
+CLIENT_OBSERVATION_EVENTS = frozenset({
+    "client.data_channel_state",
+    "client.event_poll_failed",
+    "client.event_poll_recovered",
+    "client.heartbeat_failed",
+    "client.heartbeat_recovered",
+    "client.ice_connection_state",
+    "client.ice_gathering_state",
+    "client.media_track_state",
+    "client.network_state",
+    "client.page_visibility",
+    "client.peer_connection_state",
+    "client.playback_blocked",
+    "client.scope_departure",
+    "client.session_started",
+    "client.start_failed",
+    "client.termination_requested",
+})
+CLIENT_OBSERVATION_DETAIL_KEYS = frozenset({
+    "consecutive_failures", "error_code", "initiator", "online", "reason",
+    "state", "visible",
+})
+TERMINATION_INITIATORS = frozenset({"client_fault", "system", "unknown", "user"})
+TERMINATION_REASONS = frozenset({
+    "component_dispose", "data_channel_closed", "data_channel_error",
+    "lease_expired", "legacy_unspecified", "maximum_duration_reached", "network_offline",
+    "page_unload", "peer_connection_closed", "peer_connection_failed",
+    "provider_closed", "scope_departure", "service_shutdown", "sideband_disconnected",
+    "start_cancelled", "startup_failed", "user_hangup",
+})
 
 
 def _utc_now_dt() -> datetime:
@@ -147,6 +179,14 @@ def _provider_error_code(event: Mapping[str, Any]) -> str:
     return value if value.replace("_", "").replace("-", "").isalnum() else "provider_error"
 
 
+def _provider_close_reason(event: Mapping[str, Any]) -> str:
+    session = event.get("session")
+    nested = session if isinstance(session, Mapping) else {}
+    candidate = nested.get("reason") or event.get("reason") or "unspecified"
+    value = str(candidate or "unspecified").strip().casefold()
+    return value if value.replace("_", "").replace("-", "").isalnum() else "unspecified"
+
+
 class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
     def __init__(
         self,
@@ -174,6 +214,9 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         self._proposal_grace_seconds = max(0.0, float(proposal_grace_seconds))
         self._control_timeout_seconds = max(0.05, float(control_timeout_seconds))
         self._close_timeout_seconds = max(0.05, float(close_timeout_seconds))
+        configured_logs = getattr(global_config, "base_logs_dir", None)
+        default_logs = Path(self.session_store.db_path).parent.parent / "logs"
+        self.audit = LiveVoiceAuditLog(Path(configured_logs or default_logs) / "voice_sessions")
         self.service = LiveVoiceEventService(self)
         self._sideband_tasks: set[asyncio.Task[Any]] = set()
         self._proposal_tasks: set[asyncio.Task[Any]] = set()
@@ -311,8 +354,13 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         public = value.get("public") if isinstance(value, Mapping) else None
         return dict(public) if isinstance(public, Mapping) else None
 
-    @staticmethod
-    def _track(task: asyncio.Task[Any], collection: set[asyncio.Task[Any]]) -> asyncio.Task[Any]:
+    def _track(
+        self,
+        task: asyncio.Task[Any],
+        collection: set[asyncio.Task[Any]],
+        *,
+        binding: CallBinding | None = None,
+    ) -> asyncio.Task[Any]:
         collection.add(task)
         def finished(done: asyncio.Task[Any]) -> None:
             collection.discard(done)
@@ -324,6 +372,13 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 return
             if error is not None:
                 logger.warning("Tracked Live Voice task failed safely: %s", type(error).__name__)
+                if binding is not None:
+                    self.audit.record(
+                        binding,
+                        "background.task_failed",
+                        task_name=done.get_name(),
+                        **exception_evidence(error),
+                    )
         task.add_done_callback(finished)
         return task
 
@@ -358,11 +413,23 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             ).fetchall()
             for row in active_rows:
                 binding = self._binding_from_row(row)
+                self.audit.record(
+                    binding,
+                    "runtime.recovery_detected",
+                    phase=str(row["phase"]),
+                    reason="service_shutdown",
+                )
                 connection.execute(
                     "UPDATE live_calls SET phase = 'interrupted', ended_at = ?, provider_close_state = 'unconfirmed' WHERE call_id = ?",
                     (now, binding.call_id),
                 )
-                self._append_call_state(connection, binding, "interrupted", "Live call interrupted during recovery")
+                self._append_call_state(
+                    connection,
+                    binding,
+                    "interrupted",
+                    "Live call interrupted during recovery",
+                    reason="service_shutdown",
+                )
             proposal_rows = connection.execute(
                 """
                 SELECT d.delegation_id, d.offset_ms, c.*
@@ -388,18 +455,18 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             self._track(asyncio.create_task(
                 self.schedule_proposal(binding, row["delegation_id"], int(row["offset_ms"])),
                 name=f"hashi-live-proposal-{row['delegation_id']}",
-            ), self._proposal_tasks)
+            ), self._proposal_tasks, binding=binding)
         for row in decision_rows:
             binding = self._binding_from_row(row)
             self._track(asyncio.create_task(
                 self._resume_pending_admission(binding, row["idempotency_key"], row["request_digest"], row["receipt_json"]),
                 name=f"hashi-live-admission-{row['idempotency_key']}",
-            ), self._recovery_tasks)
+            ), self._recovery_tasks, binding=binding)
         self._sweeper_task = asyncio.create_task(self._sweeper_loop(), name="hashi-live-voice-sweeper")
 
     async def _recover_orphan_provider(self, binding: CallBinding) -> None:
         close_state, usage = await self._close_provider_session(
-            self._get_api_key(), binding.provider_session_id
+            self._get_api_key(), binding.provider_session_id, binding=binding
         )
         if close_state == "confirmed":
             self._mark_terminal(
@@ -425,7 +492,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             ).fetchall()
         if active_rows:
             await asyncio.gather(*(
-                self._finish_call(self._binding_from_row(row), reason="shutdown")
+                self._finish_call(self._binding_from_row(row), reason="service_shutdown")
                 for row in active_rows
             ), return_exceptions=True)
         for ws in tuple(self._active_sockets.values()):
@@ -449,7 +516,13 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                     "UPDATE live_calls SET phase = 'interrupted', ended_at = ?, provider_close_state = 'unconfirmed' WHERE call_id = ?",
                     (now, binding.call_id),
                 )
-                self._append_call_state(connection, binding, "interrupted", "Live call interrupted during shutdown")
+                self._append_call_state(
+                    connection,
+                    binding,
+                    "interrupted",
+                    "Live call interrupted during shutdown",
+                    reason="service_shutdown",
+                )
         for row in rows:
             self._persist_call_record(self._binding_from_row(row))
 
@@ -467,10 +540,16 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                     ).fetchall()
                 for row in rows:
                     binding = self._binding_from_row(row)
+                    maximum = _parse_utc(row["max_ends_at"])
+                    reason = (
+                        "maximum_duration_reached"
+                        if maximum is not None and maximum <= now
+                        else "lease_expired"
+                    )
                     self._track(asyncio.create_task(
-                        self._finish_call(binding, reason="lease_expired"),
+                        self._finish_call(binding, reason=reason),
                         name=f"hashi-live-expire-{binding.call_id}",
-                    ), self._recovery_tasks)
+                    ), self._recovery_tasks, binding=binding)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -515,11 +594,20 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         return binding, row
 
     def _append_call_state(self, connection: Any, binding: CallBinding, phase: str, summary: str, **detail: Any) -> Mapping[str, Any]:
-        return self.session_store._append_event(
+        event = self.session_store._append_event(
             connection, session_id=binding.session_id, run_id=None,
             kind="voice.live.call.state", summary=summary,
             detail={"schema": CALL_EVENT_SCHEMA, "scope": binding.public_scope(), "phase": phase, **detail},
         )
+        self.audit.record(
+            binding,
+            "call.phase",
+            phase=phase,
+            sequence=event.get("sequence"),
+            reason=detail.get("reason"),
+            provider_close_state=detail.get("provider_close_state"),
+        )
+        return event
 
     # Durable transcript and proposal state ---------------------------------
     async def append_fragment_once(self, binding: CallBinding, fragment: Fragment) -> Mapping[str, Any]:
@@ -601,7 +689,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             self._track(asyncio.create_task(
                 self._materialize_proposal(binding, delegation_id, delay),
                 name=f"hashi-live-proposal-{delegation_id}",
-            ), self._proposal_tasks)
+            ), self._proposal_tasks, binding=binding)
             return
         await self._materialize_proposal(binding, delegation_id, 0.0)
 
@@ -836,6 +924,15 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 name=f"hashi-live-relay-{proposal.delegation_id}",
             ),
             self._relay_tasks,
+            binding=binding,
+        )
+        self.audit.record(
+            binding,
+            "background.run_admitted",
+            delegation_id=proposal.delegation_id,
+            run_id=run_id,
+            request_id=request_id,
+            outcome="accepted",
         )
         return result
 
@@ -861,23 +958,64 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
 
         ws = self._active_sockets.get(binding.call_id)
         if ws is None or getattr(ws, "closed", True):
+            self.audit.record(
+                binding,
+                "background.update_unavailable",
+                operation=kind,
+                delegation_id=delegation_id,
+                reason="sideband_disconnected",
+            )
             return False
         chunks = _live_text_chunks(content)
         if not chunks:
             return False
-        for chunk in chunks:
+        for index, chunk in enumerate(chunks, start=1):
             event_id = f"live-update-{uuid4().hex}"
             payload = append_update(kind, chunk, delegation_id, event_id, estimate_tokens)
             waiter: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
             identity = (binding.call_id, event_id)
             self._update_waiters[identity] = waiter
             try:
+                self.audit.record(
+                    binding,
+                    "background.update_sent",
+                    operation=kind,
+                    delegation_id=delegation_id,
+                    client_event_id=event_id,
+                    chunk_index=index,
+                    chunk_count=len(chunks),
+                    text_bytes=len(chunk.encode("utf-8")),
+                )
                 await ws.send_json(payload)
                 if await asyncio.wait_for(
                     waiter, timeout=self._control_timeout_seconds
                 ) is not True:
+                    self.audit.record(
+                        binding,
+                        "background.update_rejected",
+                        operation=kind,
+                        delegation_id=delegation_id,
+                        client_event_id=event_id,
+                        acknowledged=False,
+                    )
                     return False
-            except Exception:
+                self.audit.record(
+                    binding,
+                    "background.update_acknowledged",
+                    operation=kind,
+                    delegation_id=delegation_id,
+                    client_event_id=event_id,
+                    acknowledged=True,
+                )
+            except Exception as exc:
+                self.audit.record(
+                    binding,
+                    "background.update_failed",
+                    operation=kind,
+                    delegation_id=delegation_id,
+                    client_event_id=event_id,
+                    **exception_evidence(exc),
+                )
                 return False
             finally:
                 self._update_waiters.pop(identity, None)
@@ -912,7 +1050,22 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         """Return one normal Agent Run's safe progress and final result to GPT-Live."""
 
         if binding.call_id not in self._active_sockets:
+            self.audit.record(
+                binding,
+                "background.relay_skipped",
+                delegation_id=delegation_id,
+                run_id=run_id,
+                request_id=request_id,
+                reason="sideband_disconnected",
+            )
             return
+        self.audit.record(
+            binding,
+            "background.relay_started",
+            delegation_id=delegation_id,
+            run_id=run_id,
+            request_id=request_id,
+        )
         await self._send_provider_update(
             binding,
             kind="thinking",
@@ -1045,6 +1198,23 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                                 "request_id": request_id,
                             },
                         )
+                    self.audit.record(
+                        binding,
+                        "background.result_relayed",
+                        delegation_id=delegation_id,
+                        run_id=run_id,
+                        request_id=request_id,
+                        outcome=state,
+                    )
+                else:
+                    self.audit.record(
+                        binding,
+                        "background.result_relay_failed",
+                        delegation_id=delegation_id,
+                        run_id=run_id,
+                        request_id=request_id,
+                        outcome=state,
+                    )
                 return
             await asyncio.sleep(0.5)
 
@@ -1118,6 +1288,11 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         phone_record_json = json.dumps(phone_record, ensure_ascii=False, separators=(",", ":"))
         sdp = payload.get("sdp")
         attempt_id = identifier(payload.get("idempotency_key"))
+        self.audit.record_attempt(
+            attempt_id,
+            "dial.request_received",
+            source="workbench",
+        )
         request_digest = stable_digest(dict(payload))
         with self.session_store._lock, self.session_store._connection() as connection:
             attempt = connection.execute("SELECT * FROM live_call_attempts WHERE attempt_id = ?", (attempt_id,)).fetchone()
@@ -1153,7 +1328,13 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                     "UPDATE live_calls SET phase = 'interrupted', ended_at = ?, provider_close_state = 'unconfirmed' WHERE call_id = ?",
                     (now, old.call_id),
                 )
-                self._append_call_state(connection, old, "interrupted", "Live call lease expired")
+                self._append_call_state(
+                    connection,
+                    old,
+                    "interrupted",
+                    "Live call lease expired",
+                    reason="lease_expired",
+                )
             connection.execute(
                 """INSERT INTO live_call_attempts(
                 attempt_id, owner_id, session_id, agent_id, instance_id, instance_generation,
@@ -1163,6 +1344,11 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                  self.instance_generation, expected["context_generation"], request_digest,
                  phone_record_json, now, now),
             )
+        self.audit.record_attempt(
+            attempt_id,
+            "dial.reserved",
+            phase="connecting",
+        )
         try:
             async with provider_http_session() as http:
                 context_audit = phone_session["context_audit"]
@@ -1201,6 +1387,13 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                     exact_audit["input_tokens_exact"],
                     exact_audit["history_omitted_units"],
                 )
+                self.audit.record_attempt(
+                    attempt_id,
+                    "dial.context_fitted",
+                    input_messages=len(provider_input),
+                    input_tokens=exact_audit["input_tokens_exact"],
+                    history_omitted_units=exact_audit["history_omitted_units"],
+                )
                 provider = await create_provider_session(
                     http, key=self._get_api_key(),
                     request=session_request(
@@ -1219,8 +1412,19 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                     "UPDATE live_call_attempts SET state = ?, outcome_json = ?, updated_at = ? WHERE attempt_id = ?",
                     (state, json.dumps({"ok": False, "error_code": exc.code}), _utc_now(), attempt_id),
                 )
+            self.audit.record_attempt(
+                attempt_id,
+                "dial.provider_create_failed",
+                phase=state,
+                error_code=exc.code,
+            )
             raise
         provider_id, answer = provider["provider_session_id"], provider["sdp_answer"]
+        self.audit.record_attempt(
+            attempt_id,
+            "dial.provider_created",
+            phase="provider_created",
+        )
         binding = CallBinding(owner_id, self.instance_id, self.instance_generation, expected["agent_id"],
                               expected["session_id"], expected["context_generation"],
                               f"call-{uuid4().hex[:16]}", 1, provider_id)
@@ -1250,8 +1454,16 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                     )
                     self._append_call_state(connection, binding, "connecting", "Live call connecting")
         except Exception as exc:
-            close_state, usage = await self._close_provider_session(self._get_api_key(), provider_id)
+            close_state, usage = await self._close_provider_session(self._get_api_key(), provider_id, binding=binding)
             error_code = "live_call_already_active" if isinstance(exc, sqlite3.IntegrityError) else "live_start_failed"
+            self.audit.record_attempt(
+                attempt_id,
+                "dial.call_persistence_failed",
+                phase="failed",
+                cleanup_state=close_state,
+                error_code=error_code,
+                **exception_evidence(exc),
+            )
             with suppress(Exception), self.session_store._lock, self.session_store._connection() as connection:
                 connection.execute(
                     "UPDATE live_call_attempts SET state = 'failed', cleanup_state = ?, outcome_json = ?, updated_at = ? WHERE attempt_id = ?",
@@ -1261,8 +1473,18 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             if isinstance(exc, sqlite3.IntegrityError):
                 raise LiveVoiceError(error_code, 409) from exc
             raise
+        if not cancelled:
+            self.audit.record(
+                binding,
+                "call.created",
+                phase="connecting",
+                attempt_id=attempt_id,
+                input_messages=phone_record.get("input_messages"),
+                input_tokens=phone_record.get("input_tokens_exact") or phone_record.get("input_tokens_est"),
+                history_omitted_units=phone_record.get("history_omitted_units"),
+            )
         if cancelled:
-            await self._close_provider_session(self._get_api_key(), provider_id)
+            await self._close_provider_session(self._get_api_key(), provider_id, binding=binding)
             with self.session_store._lock, self.session_store._connection() as connection:
                 connection.execute(
                     "UPDATE live_call_attempts SET state = 'cancelled', cleanup_state = 'closed', updated_at = ? WHERE attempt_id = ?",
@@ -1275,14 +1497,14 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         self._track(asyncio.create_task(
             self._run_sideband(binding, self._get_api_key(), provider_id),
             name=f"hashi-live-sideband-{binding.call_id}",
-        ), self._sideband_tasks)
+        ), self._sideband_tasks, binding=binding)
         try:
             await asyncio.wait_for(ready.wait(), timeout=10)
         except TimeoutError:
             self._sideband_failures[binding.call_id] = "live_sideband_timeout"
         failure = self._sideband_failures.pop(binding.call_id, None)
         if failure:
-            close_state, usage = await self._close_provider_session(self._get_api_key(), provider_id)
+            close_state, usage = await self._close_provider_session(self._get_api_key(), provider_id, binding=binding)
             self._mark_terminal(binding, "failed", provider_close_state=close_state,
                                 summary="Live call sideband failed", usage=usage)
             with self.session_store._lock, self.session_store._connection() as connection:
@@ -1310,6 +1532,12 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 "UPDATE live_call_attempts SET state = 'completed', call_id = ?, outcome_json = ?, updated_at = ? WHERE attempt_id = ?",
                 (binding.call_id, json.dumps(outcome, separators=(",", ":")), _utc_now(), attempt_id),
             )
+        self.audit.record_attempt(
+            attempt_id,
+            "dial.completed",
+            phase="active",
+            outcome="accepted",
+        )
         return {**outcome, "sdp_answer": answer}
 
     async def _op_cancel_start(self, owner_id: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -1388,6 +1616,52 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         return {"ok": True, "events": events,
                 "next_after": next_after, "reset_required": False}
 
+    async def _op_observe(self, owner_id: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Append bounded browser lifecycle evidence outside Session events."""
+
+        binding, _row = self._call_binding(owner_id, payload)
+        event = str(payload.get("event") or "")
+        if event not in CLIENT_OBSERVATION_EVENTS:
+            raise LiveVoiceError("live_observation_invalid", 400)
+        event_id = identifier(payload.get("event_id"))
+        observed_at = str(payload.get("observed_at") or "")
+        if _parse_utc(observed_at) is None:
+            raise LiveVoiceError("live_observation_invalid", 400)
+        sequence = payload.get("client_sequence")
+        if (
+            isinstance(sequence, bool)
+            or not isinstance(sequence, int)
+            or not 0 <= sequence <= 2**53 - 1
+        ):
+            raise LiveVoiceError("live_observation_invalid", 400)
+        raw_detail = payload.get("detail")
+        if raw_detail is None:
+            raw_detail = {}
+        if not isinstance(raw_detail, Mapping) or any(
+            key not in CLIENT_OBSERVATION_DETAIL_KEYS for key in raw_detail
+        ):
+            raise LiveVoiceError("live_observation_invalid", 400)
+        detail: dict[str, Any] = {}
+        for key, value in raw_detail.items():
+            if isinstance(value, bool):
+                detail[key] = value
+            elif isinstance(value, int) and not isinstance(value, bool):
+                detail[key] = max(0, min(value, 1_000_000))
+            elif isinstance(value, str) and len(value) <= 160:
+                detail[key] = value
+            else:
+                raise LiveVoiceError("live_observation_invalid", 400)
+        accepted = self.audit.record(
+            binding,
+            event,
+            source="workbench",
+            client_event_id=event_id,
+            observed_at=observed_at,
+            client_sequence=sequence,
+            **detail,
+        )
+        return {"ok": True, "accepted": accepted}
+
     async def _op_control(self, owner_id: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         binding, row = self._call_binding(owner_id, payload)
         action = str(payload.get("action") or "")
@@ -1405,7 +1679,13 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 raise LiveVoiceError("live_idempotency_conflict", 409)
             return json.loads(prior["receipt_json"])
         if action == "end":
-            receipt = await self._finish_call(binding, reason="user_end")
+            initiator = str(payload.get("termination_initiator") or "unknown")
+            reason = str(payload.get("termination_reason") or "legacy_unspecified")
+            if initiator not in TERMINATION_INITIATORS or reason not in TERMINATION_REASONS:
+                raise LiveVoiceError("live_termination_invalid", 400)
+            if (initiator == "user") != (reason == "user_hangup"):
+                raise LiveVoiceError("live_termination_invalid", 400)
+            receipt = await self._finish_call(binding, reason=reason, initiator=initiator)
             result = {"ok": True, "applied": True, **receipt}
         elif row["phase"] in TERMINAL_PHASES or row["phase"] == "ending":
             raise LiveVoiceError("live_call_terminal", 409)
@@ -1415,6 +1695,12 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             expiry = min(now + timedelta(seconds=45), maximum).isoformat().replace("+00:00", "Z")
             with self.session_store._lock, self.session_store._connection() as connection:
                 connection.execute("UPDATE live_calls SET lease_expiry = ? WHERE call_id = ?", (expiry, binding.call_id))
+            self.audit.record(
+                binding,
+                "client.heartbeat_received",
+                expires_at=expiry,
+                acknowledged=True,
+            )
             result = {"ok": True, "applied": True, "action": "heartbeat", "renewed": True, "expires_at": expiry}
         else:
             result = {"ok": True, "applied": await self._send_control(binding, action, key), "action": action}
@@ -1429,19 +1715,63 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
     async def _send_control(self, binding: CallBinding, action: str, event_id: str) -> bool:
         ws = self._active_sockets.get(binding.call_id)
         if ws is None or getattr(ws, "closed", True):
+            self.audit.record(
+                binding,
+                "client.control_unavailable",
+                action=action,
+                client_event_id=event_id,
+                reason="sideband_disconnected",
+            )
             return False
         waiter: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
         identity = (binding.call_id, event_id)
         self._control_waiters[identity] = waiter
         try:
+            self.audit.record(
+                binding,
+                "client.control_sent",
+                action=action,
+                client_event_id=event_id,
+            )
             await ws.send_json({"type": f"session.input_audio.{action}", "event_id": event_id})
-            return await asyncio.wait_for(waiter, timeout=self._control_timeout_seconds)
-        except Exception:
+            applied = await asyncio.wait_for(waiter, timeout=self._control_timeout_seconds)
+            self.audit.record(
+                binding,
+                "client.control_acknowledged",
+                action=action,
+                client_event_id=event_id,
+                acknowledged=bool(applied),
+            )
+            return applied
+        except Exception as exc:
+            self.audit.record(
+                binding,
+                "client.control_failed",
+                action=action,
+                client_event_id=event_id,
+                **exception_evidence(exc),
+            )
             return False
         finally:
             self._control_waiters.pop(identity, None)
 
-    async def _finish_call(self, binding: CallBinding, *, reason: str) -> dict[str, Any]:
+    async def _finish_call(
+        self,
+        binding: CallBinding,
+        *,
+        reason: str,
+        initiator: str | None = None,
+    ) -> dict[str, Any]:
+        if initiator is None:
+            initiator = "system"
+            if reason in {"peer_connection_closed", "peer_connection_failed", "data_channel_closed", "data_channel_error", "network_offline"}:
+                initiator = "client_fault"
+        self.audit.record(
+            binding,
+            "termination.requested",
+            initiator=initiator,
+            reason=reason,
+        )
         with self.session_store._lock, self.session_store._connection() as connection:
             row = connection.execute("SELECT * FROM live_calls WHERE call_id = ?", (binding.call_id,)).fetchone()
             if row is None:
@@ -1456,12 +1786,34 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         ws = self._active_sockets.get(binding.call_id)
         closed = self._session_closed_events.setdefault(binding.call_id, asyncio.Event())
         if ws is not None and not getattr(ws, "closed", True):
-            with suppress(Exception):
+            try:
                 await ws.send_json({"type": "session.close", "event_id": f"close-{uuid4().hex[:16]}"})
+                self.audit.record(
+                    binding,
+                    "provider.close_requested",
+                    initiator=initiator,
+                    reason=reason,
+                    close_sent=True,
+                )
+            except Exception as exc:
+                self.audit.record(
+                    binding,
+                    "provider.close_request_failed",
+                    initiator=initiator,
+                    reason=reason,
+                    close_sent=False,
+                    **exception_evidence(exc),
+                )
             try:
                 await asyncio.wait_for(closed.wait(), timeout=self._close_timeout_seconds)
             except TimeoutError:
-                pass
+                self.audit.record(
+                    binding,
+                    "provider.close_timeout",
+                    initiator=initiator,
+                    reason=reason,
+                    provider_close_state="unconfirmed",
+                )
         with self.session_store._lock, self.session_store._connection() as connection:
             row = connection.execute("SELECT * FROM live_calls WHERE call_id = ?", (binding.call_id,)).fetchone()
         if row["phase"] not in TERMINAL_PHASES:
@@ -1524,11 +1876,21 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                     }
                 },
             )
+            self.audit.record(
+                binding,
+                "call.transcript_projected",
+                outcome="completed",
+            )
         except Exception as exc:
             logger.warning(
                 "Live Voice transcript record could not be projected for %s (%s)",
                 binding.call_id,
                 type(exc).__name__,
+            )
+            self.audit.record(
+                binding,
+                "call.transcript_projection_failed",
+                **exception_evidence(exc),
             )
 
     def _mark_terminal(
@@ -1561,6 +1923,12 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                         detail={"schema": CALL_EVENT_SCHEMA, "scope": binding.public_scope(),
                                 "provider_close_state": "confirmed", "usage": public_usage},
                     )
+                    self.audit.record(
+                        binding,
+                        "call.provider_close_finalized",
+                        provider_close_state="confirmed",
+                        usage=public_usage,
+                    )
                 return
             connection.execute(
                 "UPDATE live_calls SET phase = ?, ended_at = ?, provider_close_state = ?, usage_json = ? WHERE call_id = ?",
@@ -1573,7 +1941,15 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         if became_terminal:
             self._persist_call_record(binding)
 
-    async def _close_provider_session(self, key: str, provider_session_id: str) -> tuple[str, dict[str, int] | None]:
+    async def _close_provider_session(
+        self,
+        key: str,
+        provider_session_id: str,
+        *,
+        binding: CallBinding | None = None,
+    ) -> tuple[str, dict[str, int] | None]:
+        if binding is not None:
+            self.audit.record(binding, "provider.cleanup_started", source="server")
         try:
             async with provider_http_session() as http:
                 ws = await attach_provider(http, key=key, provider_session_id=provider_session_id)
@@ -1584,26 +1960,55 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                             if msg.type == aiohttp.WSMsgType.TEXT:
                                 event = safe_sideband_event(msg.data)
                                 if event and event.get("type") == "session.closed":
+                                    if binding is not None:
+                                        self.audit.record(
+                                            binding,
+                                            "provider.cleanup_confirmed",
+                                            provider_close_state="confirmed",
+                                            provider_reason=_provider_close_reason(event),
+                                            usage=_event_usage(event),
+                                        )
                                     return "confirmed", _event_usage(event)
                 finally:
                     if not ws.closed:
                         await ws.close()
-        except Exception:
+        except Exception as exc:
+            if binding is not None:
+                self.audit.record(
+                    binding,
+                    "provider.cleanup_failed",
+                    provider_close_state="unconfirmed",
+                    **exception_evidence(exc),
+                )
             return "unconfirmed", None
+        if binding is not None:
+            self.audit.record(
+                binding,
+                "provider.cleanup_unconfirmed",
+                provider_close_state="unconfirmed",
+            )
         return "unconfirmed", None
 
     async def _run_sideband(self, binding: CallBinding, key: str, provider_session_id: str) -> None:
         ready = self._sideband_ready_events.setdefault(binding.call_id, asyncio.Event())
         confirmed_close = False
+        self.audit.record(binding, "sideband.attach_started", source="provider")
         try:
             async with provider_http_session() as http:
                 ws = await attach_provider(http, key=key, provider_session_id=provider_session_id)
                 self._active_sockets[binding.call_id] = ws
+                self.audit.record(binding, "sideband.connected", source="provider")
                 ready.set()
                 try:
                     async for msg in ws:
                         if msg.type != aiohttp.WSMsgType.TEXT:
                             if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                                self.audit.record(
+                                    binding,
+                                    "sideband.socket_closed",
+                                    ws_message_type=str(msg.type),
+                                    ws_close_code=getattr(ws, "close_code", None),
+                                )
                                 break
                             continue
                         event = safe_sideband_event(msg.data)
@@ -1611,6 +2016,21 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                             continue
                         event_type = event.get("type")
                         client_event_id = _provider_client_event_id(event)
+                        event_detail: dict[str, Any] = {
+                            "provider_event_type": str(event_type or "unknown"),
+                            "provider_event_id": str(event.get("event_id") or "")[:160],
+                        }
+                        if event_type in {
+                            "session.input_transcript.delta",
+                            "session.output_transcript.delta",
+                        }:
+                            event_detail.update({
+                                "speaker": "user" if event_type == "session.input_transcript.delta" else "assistant",
+                                "start_ms": event.get("start_ms"),
+                                "end_ms": event.get("end_ms"),
+                                "text_bytes": len(str(event.get("delta") or "").encode("utf-8")),
+                            })
+                        self.audit.record(binding, "provider.event_received", **event_detail)
                         if event_type in {"session.input_audio.muted", "session.input_audio.unmuted"} and client_event_id:
                             waiter = self._control_waiters.get((binding.call_id, client_event_id))
                             if waiter is not None and not waiter.done():
@@ -1634,11 +2054,18 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                                 binding.call_id,
                                 _provider_error_code(event),
                             )
+                            self.audit.record(
+                                binding,
+                                "provider.operation_error",
+                                client_event_id=client_event_id,
+                                error_code=_provider_error_code(event),
+                            )
                             # Live errors are operation-scoped. The provider
                             # will emit session.closed or close the socket if
                             # the whole conversation is no longer usable.
                             continue
                         if event_type == "session.started":
+                            self.audit.record(binding, "provider.session_started", source="provider")
                             with self.session_store._lock, self.session_store._connection() as connection:
                                 row = connection.execute("SELECT phase FROM live_calls WHERE call_id = ?", (binding.call_id,)).fetchone()
                                 if row is not None and row["phase"] == "connecting":
@@ -1646,6 +2073,13 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                                     self._append_call_state(connection, binding, "active", "Live call active")
                         elif event_type == "session.closed":
                             confirmed_close = True
+                            self.audit.record(
+                                binding,
+                                "provider.session_closed",
+                                provider_reason=_provider_close_reason(event),
+                                provider_close_state="confirmed",
+                                usage=_event_usage(event),
+                            )
                             self._mark_terminal(binding, "ended", provider_close_state="confirmed",
                                 summary="Live call ended",
                                 usage=_event_usage(event))
@@ -1657,16 +2091,25 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                     if not ws.closed:
                         await ws.close()
         except asyncio.CancelledError:
+            self.audit.record(binding, "sideband.cancelled", reason="task_cancelled")
             raise
         except Exception as exc:
             self._sideband_failures.setdefault(binding.call_id, "live_sideband_unavailable")
             logger.warning("Live Voice sideband interrupted for %s: %s", binding.call_id, type(exc).__name__)
+            self.audit.record(binding, "sideband.exception", **exception_evidence(exc))
         finally:
             ready.set()
             if not confirmed_close and not self._closing:
+                self.audit.record(
+                    binding,
+                    "sideband.disconnected",
+                    provider_close_state="unconfirmed",
+                )
                 self._mark_terminal(binding, "interrupted", provider_close_state="unconfirmed",
                                     summary="Live call sideband disconnected")
-                close_state, usage = await self._close_provider_session(key, provider_session_id)
+                close_state, usage = await self._close_provider_session(
+                    key, provider_session_id, binding=binding
+                )
                 if close_state == "confirmed":
                     self._mark_terminal(
                         binding, "interrupted", provider_close_state="confirmed",
