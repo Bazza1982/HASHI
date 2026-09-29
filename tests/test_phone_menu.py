@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from orchestrator import ui_language
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.pcm import render_pcm_document
 from orchestrator.phone_manager import PhoneManager
@@ -27,6 +28,33 @@ def _runtime(tmp_path):
     runtime._is_authorized_user = lambda _user_id: True
     runtime._reply_text = AsyncMock()
     return runtime
+
+
+def test_phone_menu_uses_localized_labels_in_chinese(tmp_path):
+    runtime = _runtime(tmp_path)
+
+    with ui_language.language_scope(SimpleNamespace(), locale="zh-CN"):
+        text = runtime._phone_menu_text()
+        button_labels = [
+            button.text
+            for row in runtime._phone_keyboard().inline_keyboard
+            for button in row
+        ]
+
+    assert "<b>语言</b> · 自动跟随" in text
+    assert "<b>说话风格</b> · 自然" in text
+    assert "<b>PCM 人格</b> · 已安全投影" in text
+    assert "这是当前代理的工作区设置" in text
+    assert button_labels == [
+        "服务商",
+        "模型",
+        "声音",
+        "语言",
+        "说话风格",
+        "重置电话设置",
+    ]
+    assert "phone." not in text
+    assert all("phone." not in label for label in button_labels)
 
 
 @pytest.mark.asyncio
