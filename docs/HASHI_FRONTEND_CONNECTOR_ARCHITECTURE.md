@@ -500,10 +500,21 @@ language, speaking style, and bounded custom speaking-style instruction. The
 configuration is persisted in that Agent's workspace. A frontend may display
 the effective public projection but may not select or override it.
 
-PCM owns the live personality projection. Only the canonical `persona` section
-is projected; system, memory, HCC, credentials, paths, and raw PCM source are
-excluded. Fixed live-call safety and client-delegation instructions remain
-higher priority than persona and speaking style.
+PCM owns the live bootstrap projection. The provider's formal `instructions`
+contain the canonical `[sys]`, active instance-global `/sys`, active Agent-local
+`/sys`, HCC usage rules, Persona, and fixed live-call transport rules with their
+authority kept explicit. HCC reference data, `[memory]`, enabled Memory+
+continuity, and the same Conversation Session's real recent user/assistant
+messages enter provider startup `input`; they are not rewritten into another
+memory store. Credentials and raw PCM files remain excluded.
+
+The OpenAI GPT-Live adapter uses the provider limits directly: instructions are
+bounded at 16,384 tokens, while startup input is bounded at 128 messages and
+8,192 combined tokens. HCC is never clipped. Selection retains whole
+conversation units, keeps the newest unit first, then adds older units from
+newest to oldest; if mandatory context cannot fit, startup fails visibly rather
+than silently truncating a sentence or cache. `store:false` remains mandatory,
+so HASHI's Session record, not a provider recording, owns continuity.
 
 The live phone is another transport for the selected Agent, not a second Agent
 or a reduced-permission assistant. GPT-Live supplies speech recognition, voice,
@@ -518,8 +529,12 @@ While delegated work runs, HASHI returns safe progress and the canonical final
 result to the same GPT-Live delegation so the Agent can report it naturally in
 the call. The frontend keeps one non-collapsible call panel visible from start
 through closure, with live captions, microphone mute, and hang-up controls.
-When the call becomes terminal, HASHI projects the complete durable transcript
-as one presentation-only call record in the current conversation.
+Each transcript delta is durably written to the bound HASHI Session as it
+arrives. PCM derives role-preserving utterances from those canonical fragments,
+so concurrent text chat and the next call can use phone speech as ordinary
+recent history. When the call becomes terminal, HASHI additionally projects the
+complete transcript as one presentation-only call record; that card is a view,
+not a second history authority.
 
 Context preflight returns a public `/phone` snapshot and revision. Start must
 present that exact revision, resolves the snapshot again at the trusted Backend

@@ -182,6 +182,14 @@ media. Workbench receives a Session `audio_attachment`; Telegram uses its
 voice renderer. Report voice sidecars prepend the HASHI root before calling the
 standard media CLI. Never route non-Telegram previews through Telegram.
 
+`/phone` is the same Agent and Conversation Session over GPT-Live, not a
+Persona-only assistant. Formal startup instructions carry `[sys]`, both `/sys`
+layers and Persona; startup history carries complete enabled HCC, `[memory]`,
+enabled Memory+ and bounded same-Session dialogue. Live transcript fragments
+write to HASHI as they arrive and feed later text or phone turns; the visible
+call card is only a derived view. Keep provider storage off and never clip HCC
+or part of an utterance to make a call fit.
+
 Commands follow the [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md); `/help`
 derives from metadata. Workbench and Telegram may share a Session while UI rows
 stay out of model history. An active Run does not close command ingress:

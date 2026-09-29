@@ -6,7 +6,7 @@
 | ------------------------ | --------- |
 | Purpose | Define how HASHI maintains and distributes Persona, Context, and Memory to Engine (Harness) Providers while distinguishing current implementation, target design, and known gaps. |
 | Status | Authoritative PCM module specification under the [HASHI System Architecture](../ARCHITECTURE.md). |
-| Revision | 1 September 2026 — aligned PCM with PAO ownership, fixed HER Engine Sessions, incremental PCM, and canonical HER recovery. |
+| Revision | 29 September 2026 — aligned Live Voice bootstrap with full PCM authority, same-Session history, and HASHI-owned continuity. |
 
 ## 1. Overview
 
@@ -504,6 +504,7 @@ The following decisions were accepted on 26 August 2026. They are normative and 
 | PCM-DEC-006 | Unfinished work is transient Context, not Agent Memory. HERV3's canonical Engine Session control plane owns durable recovery evidence; the former WIP Journal is shadow compatibility evidence only. | Interrupted work is reconstructed from canonical typed Turn, Tool, side-effect, and checkpoint evidence. Later HER Turns receive quoted recovery Context with visible uncertainty where required. Provider requests and raw assembled envelopes are excluded. `/compact` operates on settled Session history. Memory+ is not responsible for crash recovery. |
 | PCM-DEC-007 | Natural-language referents are resolved by the Engine from the current user message and chronologically ordered Conversation history, not by PAO/PCM hard binding. | Preserve ordinary user text verbatim, including bare choices such as `3` and words such as `continue`. Out-of-session results may enter Context only as timestamped, read-only user-assistant history. Do not infer a reply target from prose, rewrite the current request, synthesize option wording, or create Connector reply controls. Explicit typed slash/control operations retain their own contracts. |
 | PCM-DEC-008 | PCM transports context and resource facts but never decides which historical topic or attachment is relevant to the current conversation. | Bind each attachment projection to its originating Message/Turn. Present only the current Message's attachments as current references; keep attachments from completed Turns inside their chronologically ordered historical exchanges, and never promote resources from failed or cancelled Turns. A cumulative Engine Session resource registry is transport/audit state, not a current-request or relevance selector. |
+| PCM-DEC-009 | A provider-hosted live voice session is an ephemeral transport for the same Agent and Conversation Session, not a Persona-only assistant or a second memory owner. | Put `[sys]`, both active `/sys` layers, HCC usage rules and Persona into formal provider instructions. Put complete enabled HCC, `[memory]`, enabled Memory+ and same-Session role-preserving recent messages into provider startup history within the provider's 128-message/8,192-token limit. Persist live transcript fragments to the HASHI Session as they arrive, derive later history and the visible call card from those fragments, keep provider storage disabled, and fail visibly instead of clipping HCC or an utterance. |
 
 The WIP Journal remains temporarily as a bounded shadow/legacy compatibility
 projection while canonical HER recovery is validated. It must not be re-ingested

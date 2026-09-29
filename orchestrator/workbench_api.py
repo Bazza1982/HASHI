@@ -967,44 +967,129 @@ class WorkbenchApiServer:
             for runtime in self._runtime_list()
         }
 
-    def _resolve_live_voice_phone_session(self, agent_id: str) -> dict:
-        """Resolve an Agent-owned /phone snapshot without trusting the browser."""
+    def _resolve_live_voice_phone_session(
+        self,
+        agent_id: str,
+        *,
+        owner_id: str | None = None,
+        session_id: str | None = None,
+        context_generation: int | None = None,
+    ) -> dict:
+        """Resolve Agent PCM and same-Session history at the trusted API edge."""
 
+        from orchestrator.bridge_memory import (
+            BridgeContextAssembler,
+            BridgeMemoryStore,
+            SysPromptManager,
+        )
+        from orchestrator.memory_plus_mode import (
+            build_memory_plus_context,
+            is_memory_plus_enabled,
+            memory_plus_config,
+            prepare_memory_plus_store,
+        )
+        from orchestrator.pcm import canonical_agent_md
         from orchestrator.phone_manager import PhoneConfigError, PhoneManager
 
         target = str(agent_id or "").strip().casefold()
         runtime = self._runtime_map().get(target)
         manager = getattr(runtime, "phone_manager", None)
         display_name = None
+        workspace: Path | None = None
+        assembler = getattr(runtime, "context_assembler", None)
         if manager is not None and callable(getattr(manager, "resolve_live_session", None)):
             display = getattr(runtime, "get_display_name", None)
             display_name = display() if callable(display) else getattr(runtime, "display_name", None)
-            return manager.resolve_live_session(
-                agent_id=target,
-                display_name=str(display_name or target),
+            workspace = Path(getattr(runtime, "workspace_dir"))
+        else:
+            raw = self._load_raw_agent_config()
+            rows = raw.get("agents", []) if isinstance(raw, dict) else []
+            agent = next(
+                (
+                    row for row in rows
+                    if isinstance(row, dict)
+                    and str(row.get("name") or "").strip().casefold() == target
+                ),
+                None,
+            )
+            if agent is None:
+                raise PhoneConfigError("phone_agent_unavailable", "The selected Agent has no phone configuration owner.")
+            workspace_value = str(agent.get("workspace_dir") or "").strip()
+            if not workspace_value:
+                raise PhoneConfigError("phone_workspace_unavailable", "The selected Agent has no workspace.")
+            workspace = Path(workspace_value).expanduser()
+            if not workspace.is_absolute():
+                workspace = self.config_path.parent / workspace
+            workspace = workspace.resolve()
+            manager = PhoneManager(workspace)
+            display_name = str(agent.get("display_name") or agent.get("name") or target)
+
+        if workspace is None:
+            raise PhoneConfigError("phone_workspace_unavailable", "The selected Agent has no workspace.")
+        if assembler is None:
+            assembler = BridgeContextAssembler(
+                BridgeMemoryStore(workspace),
+                canonical_agent_md(workspace),
+                sys_prompt_manager=SysPromptManager(workspace),
+                global_sys_prompt_manager=SysPromptManager.for_instance(self.global_config),
             )
 
-        raw = self._load_raw_agent_config()
-        rows = raw.get("agents", []) if isinstance(raw, dict) else []
-        agent = next(
-            (
-                row for row in rows
-                if isinstance(row, dict)
-                and str(row.get("name") or "").strip().casefold() == target
-            ),
-            None,
+        extra_sections: list[tuple[str, str, dict[str, Any]]] = []
+        recent_history: list[dict[str, Any]] = []
+        if owner_id and session_id and context_generation is not None:
+            session = self.session_store.get_session(
+                session_id,
+                owner_id=owner_id,
+                agent_id=target,
+            )
+            generation = int(context_generation)
+            if int(session["context_generation"]) != generation:
+                raise PhoneConfigError(
+                    "phone_session_changed",
+                    "The selected Session changed while phone context was prepared.",
+                )
+            if is_memory_plus_enabled(workspace):
+                session_workspace = self.session_store.session_workspace(
+                    session_id,
+                    generation,
+                )
+                memory_plus_cfg = memory_plus_config(workspace)
+                memory_plus_state = prepare_memory_plus_store(
+                    session_workspace,
+                    memory_plus_cfg,
+                )
+                extra_sections.append(
+                    (
+                        "Memory+ Continuity",
+                        build_memory_plus_context(
+                            memory_plus_state,
+                            cfg=memory_plus_cfg,
+                            include_update_contract=False,
+                        ),
+                        {"key": "memory_plus_continuity", "protected": True},
+                    )
+                )
+            recent_history = self.session_store.recent_history_messages(
+                session_id,
+                owner_id=owner_id,
+                context_generation=generation,
+                limit=128,
+            )
+
+        pcm_payload = assembler.build_prompt_payload(
+            "",
+            "gpt-live-1",
+            incremental=False,
+            extra_sections=extra_sections,
+            inject_memory=False,
+            recent_exchanges=[],
+            explicit_history_context=False,
         )
-        if agent is None:
-            raise PhoneConfigError("phone_agent_unavailable", "The selected Agent has no phone configuration owner.")
-        workspace_value = str(agent.get("workspace_dir") or "").strip()
-        if not workspace_value:
-            raise PhoneConfigError("phone_workspace_unavailable", "The selected Agent has no workspace.")
-        workspace = Path(workspace_value).expanduser()
-        if not workspace.is_absolute():
-            workspace = self.config_path.parent / workspace
-        return PhoneManager(workspace.resolve()).resolve_live_session(
+        return manager.resolve_live_session(
             agent_id=target,
-            display_name=str(agent.get("display_name") or agent.get("name") or target)
+            display_name=str(display_name or target),
+            pcm_payload=pcm_payload,
+            recent_history=recent_history,
         )
 
     def _is_governed_profile(self) -> bool:

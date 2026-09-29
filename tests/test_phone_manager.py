@@ -5,7 +5,9 @@ from pathlib import Path
 
 import pytest
 
+from orchestrator.hcc import HCC_USAGE_PROMPT
 from orchestrator.pcm import render_pcm_document
+from orchestrator.pcm_voice_projection import build_live_voice_input
 from orchestrator.phone_manager import PhoneConfigError, PhoneManager
 
 
@@ -24,9 +26,31 @@ def _workspace(tmp_path: Path) -> Path:
     return workspace
 
 
-def test_defaults_resolve_safe_persona_only(tmp_path: Path):
+def _pcm_payload(*, system: str = "SYSTEM_SENTINEL must govern the call.", hcc: str = "HCC_SENTINEL", memory: str = "MEMORY_SENTINEL") -> dict:
+    sections = [
+        {"key": "permanent_system", "title": "PERMANENT SYSTEM INSTRUCTIONS", "text": system, "authority": "permanent_system"},
+        {"key": "instance_global_sys", "title": "INSTANCE-GLOBAL /sys", "text": "GLOBAL_SYS_SENTINEL", "authority": "global_system"},
+        {"key": "agent_local_sys", "title": "AGENT-LOCAL /sys", "text": "LOCAL_SYS_SENTINEL", "authority": "local_system"},
+        {"key": "hcc_usage", "title": "HCC USAGE INSTRUCTIONS", "text": HCC_USAGE_PROMPT, "authority": "local_system"},
+        {"key": "hcc", "title": "HASHI CONTEXT CACHE", "text": hcc, "authority": "runtime_context"},
+        {"key": "permanent_memory", "title": "LONG-TERM MEMORY FROM agent.md", "text": memory, "authority": "memory"},
+        {"key": "memory_plus_continuity", "title": "Memory+ Continuity", "text": "MEMORY_PLUS_SENTINEL", "authority": "runtime_context"},
+        {"key": "persona", "title": "CURRENT PRESENTATION PERSONA", "text": "You are Moon. Address the user respectfully.", "authority": "persona"},
+    ]
+    return {"transport_snapshot": {"version": 1, "sections": sections}}
+
+
+def test_defaults_resolve_full_authoritative_pcm_and_history(tmp_path: Path):
     manager = PhoneManager(_workspace(tmp_path))
-    resolved = manager.resolve_live_session(display_name="Moon")
+    recent = [
+        {"message_id": "m1", "history_unit_id": "r1", "role": "user", "text": "What changed today?"},
+        {"message_id": "m2", "history_unit_id": "r1", "role": "assistant", "text": "The phone UI was fixed."},
+    ]
+    resolved = manager.resolve_live_session(
+        display_name="Moon",
+        pcm_payload=_pcm_payload(),
+        recent_history=recent,
+    )
 
     assert resolved["provider"] == "openai"
     assert resolved["model"] == "gpt-live-1"
@@ -34,15 +58,60 @@ def test_defaults_resolve_safe_persona_only(tmp_path: Path):
     assert resolved["public"]["persona_projected"] is True
     assert resolved["public"]["revision"]
     assert "You are Moon" in resolved["instructions"]
-    assert "SYSTEM_SENTINEL" not in resolved["instructions"]
+    assert "SYSTEM_SENTINEL" in resolved["instructions"]
+    assert "GLOBAL_SYS_SENTINEL" in resolved["instructions"]
+    assert "LOCAL_SYS_SENTINEL" in resolved["instructions"]
+    assert HCC_USAGE_PROMPT in resolved["instructions"]
     assert "MEMORY_SENTINEL" not in resolved["instructions"]
     assert "HCC_SENTINEL" not in resolved["instructions"]
+    input_text = json.dumps(resolved["input"], ensure_ascii=False)
+    assert "HCC_SENTINEL" in input_text
+    assert "MEMORY_SENTINEL" in input_text
+    assert "MEMORY_PLUS_SENTINEL" in input_text
+    assert "What changed today?" in input_text
+    assert "The phone UI was fixed." in input_text
+    assert [item["role"] for item in resolved["input"][-2:]] == ["user", "assistant"]
     assert "HIGHEST PRIORITY" in resolved["instructions"]
     assert "not a separate assistant" in resolved["instructions"]
     assert "explicitly confirm" not in resolved["instructions"]
     assert resolved["instructions"].endswith(
         "You are Moon throughout the call. HASHI is your execution capability, not another Agent. Delegate tool work automatically, keep the conversation coherent while it runs, and never represent delegated work as completed without a reliable HASHI result."
     )
+
+
+def test_live_input_keeps_hcc_and_newest_complete_exchange_then_drops_oldest():
+    recent = []
+    for index in range(90):
+        unit = f"round-{index}"
+        recent.extend(
+            [
+                {"message_id": f"u-{index}", "history_unit_id": unit, "role": "user", "text": f"USER-{index}-" + ("x" * 120)},
+                {"message_id": f"a-{index}", "history_unit_id": unit, "role": "assistant", "text": f"ASSISTANT-{index}-" + ("y" * 120)},
+            ]
+        )
+    items, audit = build_live_voice_input(_pcm_payload(hcc="FULL_HCC_SENTINEL"), recent)
+    encoded = json.dumps(items, ensure_ascii=False)
+    assert "FULL_HCC_SENTINEL" in encoded
+    assert "USER-89-" in encoded and "ASSISTANT-89-" in encoded
+    assert "USER-0-" not in encoded and "ASSISTANT-0-" not in encoded
+    assert len(items) <= 128
+    assert audit["tokens_est"] <= 8192
+    assert audit["history_omitted_units"] > 0
+
+
+def test_live_input_never_silently_truncates_oversized_hcc():
+    with pytest.raises(Exception) as caught:
+        build_live_voice_input(_pcm_payload(hcc="汉" * 13000), [])
+    assert getattr(caught.value, "code", "") == "pcm_live_history_capacity_exceeded"
+
+
+def test_instruction_limit_is_token_based_not_old_character_cap(tmp_path: Path):
+    manager = PhoneManager(_workspace(tmp_path))
+    resolved = manager.resolve_live_session(
+        display_name="Moon",
+        pcm_payload=_pcm_payload(system="S" * 20000),
+    )
+    assert len(resolved["instructions"]) > 14000
 
 
 def test_phone_settings_are_separate_persistent_and_change_revision(tmp_path: Path):

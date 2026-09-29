@@ -6,11 +6,18 @@ The application owns start attempts, close recovery, leases and metering.
 """
 from __future__ import annotations
 from contextlib import asynccontextmanager
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 import json
 from urllib.parse import quote
 from orchestrator.phone_catalog import OPENAI_LIVE_VOICES
+from orchestrator.pcm_voice_projection import (
+    LIVE_MESSAGE_OVERHEAD_TOKENS,
+    MAX_LIVE_INPUT_MESSAGES,
+    MAX_LIVE_INPUT_TOKENS,
+    MAX_LIVE_INSTRUCTION_TOKENS,
+)
+from tools.token_tracker import estimate_tokens
 from .protocol import LiveVoiceError, identifier
 
 CREATE_URL = "https://api.openai.com/v1/live/sessions"
@@ -23,21 +30,56 @@ def session_request(
     instructions: str,
     model: str = "gpt-live-1",
     voice: str = "marin",
+    input_messages: Sequence[Mapping[str, Any]] | None = None,
+    token_count: Callable[[str], int] = estimate_tokens,
 ) -> dict[str, Any]:
     if not isinstance(sdp, str) or not sdp.startswith("v=0") or len(sdp.encode("utf-8")) > 65536:
         raise LiveVoiceError("live_sdp_invalid")
-    # The provider limit is token-based. HASHI projects at most 14k characters
-    # and keeps a separate transport-byte ceiling so CJK text is not rejected
-    # merely for using multi-byte UTF-8.
-    if (not isinstance(instructions, str) or not instructions
-            or len(instructions) > 14000
-            or len(instructions.encode("utf-8")) > 56000):
+    if (
+        not isinstance(instructions, str)
+        or not instructions
+        or token_count(instructions) > MAX_LIVE_INSTRUCTION_TOKENS
+    ):
         raise LiveVoiceError("live_instructions_invalid")
     if model != "gpt-live-1":  # Extend only with a separately qualified configured model.
         raise LiveVoiceError("live_model_unqualified")
     if voice not in OPENAI_LIVE_VOICES:
         raise LiveVoiceError("live_voice_unqualified")
-    return {"session": {"model": model, "instructions": instructions, "store": False,
+    normalized_input: list[dict[str, Any]] = []
+    input_tokens = 0
+    for raw in input_messages or ():
+        if not isinstance(raw, Mapping) or raw.get("type") != "message":
+            raise LiveVoiceError("live_input_invalid")
+        role = str(raw.get("role") or "")
+        if role not in {"developer", "user", "assistant"}:
+            raise LiveVoiceError("live_input_invalid")
+        content = raw.get("content")
+        if (
+            not isinstance(content, Sequence)
+            or isinstance(content, (str, bytes))
+            or len(content) != 1
+            or not isinstance(content[0], Mapping)
+        ):
+            raise LiveVoiceError("live_input_invalid")
+        part = content[0]
+        expected_types = {"output_text", "text"} if role == "assistant" else {"input_text"}
+        text = part.get("text")
+        if part.get("type") not in expected_types or not isinstance(text, str) or not text:
+            raise LiveVoiceError("live_input_invalid")
+        input_tokens += token_count(text) + LIVE_MESSAGE_OVERHEAD_TOKENS
+        normalized_input.append(
+            {
+                "type": "message",
+                "role": role,
+                "content": [{"type": str(part["type"]), "text": text}],
+            }
+        )
+    if (
+        len(normalized_input) > MAX_LIVE_INPUT_MESSAGES
+        or input_tokens > MAX_LIVE_INPUT_TOKENS
+    ):
+        raise LiveVoiceError("live_input_limit")
+    return {"session": {"model": model, "instructions": instructions, "input": normalized_input, "store": False,
                         "audio": {"output": {"voice": voice}},
                         "delegation": {"type": "client"}},
             "transport": {"type": "webrtc", "sdp": sdp}}

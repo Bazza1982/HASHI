@@ -5,6 +5,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
+import inspect
 import json
 import logging
 import sqlite3
@@ -147,7 +148,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         *,
         admit_run: Callable[[CallBinding, Proposal, str], Awaitable[Mapping[str, Any]]] | None = None,
         poll_run_activity: Callable[[CallBinding, str, int, int], Awaitable[Mapping[str, Any]]] | None = None,
-        resolve_phone_session: Callable[[str], Mapping[str, Any]] | None = None,
+        resolve_phone_session: Callable[..., Mapping[str, Any]] | None = None,
         proposal_grace_seconds: float = 0.25,
         control_timeout_seconds: float = 5.0,
         close_timeout_seconds: float = 8.0,
@@ -195,11 +196,36 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         import os
         return str(self.secrets.get("openai_api_key") or os.environ.get("OPENAI_API_KEY", "")).strip()
 
-    def _phone_session(self, agent_id: str) -> dict[str, Any]:
+    def _phone_session(
+        self,
+        agent_id: str,
+        *,
+        owner_id: str | None = None,
+        session_id: str | None = None,
+        context_generation: int | None = None,
+    ) -> dict[str, Any]:
         if not callable(self._resolve_phone_session):
             raise LiveVoiceError("live_phone_configuration_unavailable", 503)
         try:
-            value = self._resolve_phone_session(agent_id)
+            resolver = self._resolve_phone_session
+            parameters = inspect.signature(resolver).parameters
+            accepts_scope = any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters.values()
+            ) or all(
+                key in parameters
+                for key in ("owner_id", "session_id", "context_generation")
+            )
+            value = (
+                resolver(
+                    agent_id,
+                    owner_id=owner_id,
+                    session_id=session_id,
+                    context_generation=context_generation,
+                )
+                if accepts_scope
+                else resolver(agent_id)
+            )
         except LiveVoiceError:
             raise
         except Exception as exc:
@@ -220,12 +246,21 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             raise LiveVoiceError("live_model_unqualified", 503)
         if voice not in OPENAI_LIVE_VOICES:
             raise LiveVoiceError("live_voice_unqualified", 503)
-        if (
-            not isinstance(instructions, str)
-            or not instructions
-            or len(instructions) > 14000
-        ):
+        if not isinstance(instructions, str) or not instructions:
             raise LiveVoiceError("live_instructions_invalid", 503)
+        input_messages = value.get("input", [])
+        if not isinstance(input_messages, list):
+            raise LiveVoiceError("live_input_invalid", 503)
+        try:
+            validated = session_request(
+                sdp="v=0",
+                instructions=instructions,
+                model=model,
+                voice=voice,
+                input_messages=input_messages,
+            )["session"]["input"]
+        except LiveVoiceError as exc:
+            raise LiveVoiceError(exc.code, 503) from exc
         if not isinstance(public, Mapping):
             raise LiveVoiceError("live_phone_configuration_invalid", 503)
         revision = str(public.get("revision") or "")
@@ -254,6 +289,8 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             "model": model,
             "voice": voice,
             "instructions": instructions,
+            "input": validated,
+            "context_audit": dict(value.get("context_audit") or {}),
             "public": allowed_public,
         }
 
@@ -1027,7 +1064,12 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         phone = None
         configuration_error = None
         try:
-            phone = self._phone_session(agent_id)["public"]
+            phone = self._phone_session(
+                agent_id,
+                owner_id=owner_id,
+                session_id=session_id,
+                context_generation=generation,
+            )["public"]
         except LiveVoiceError as exc:
             configuration_error = exc.code
         return {
@@ -1049,13 +1091,21 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         session = self.session_store.get_session(expected["session_id"], owner_id=owner_id, agent_id=expected["agent_id"])
         if int(session["context_generation"]) != expected["context_generation"]:
             raise LiveVoiceError("live_scope_changed", 409)
-        phone_session = self._phone_session(expected["agent_id"])
+        phone_session = self._phone_session(
+            expected["agent_id"],
+            owner_id=owner_id,
+            session_id=expected["session_id"],
+            context_generation=expected["context_generation"],
+        )
         expected_phone_revision = str(payload.get("phone_revision") or "")
         if expected_phone_revision != phone_session["public"]["revision"]:
             raise LiveVoiceError("live_phone_configuration_changed", 409)
         phone_record = {
             "public": phone_session["public"],
             "instructions_sha256": stable_digest({"instructions": phone_session["instructions"]}),
+            "input_sha256": stable_digest({"input": phone_session["input"]}),
+            "input_messages": len(phone_session["input"]),
+            "input_tokens_est": int(phone_session["context_audit"].get("tokens_est") or 0),
         }
         phone_record_json = json.dumps(phone_record, ensure_ascii=False, separators=(",", ":"))
         sdp = payload.get("sdp")
@@ -1114,6 +1164,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                         instructions=phone_session["instructions"],
                         model=phone_session["model"],
                         voice=phone_session["voice"],
+                        input_messages=phone_session["input"],
                     ),
                 )
         except LiveVoiceError as exc:
@@ -1385,41 +1436,15 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                     "SELECT started_at, ended_at FROM live_calls WHERE call_id = ?",
                     (binding.call_id,),
                 ).fetchone()
-                rows = connection.execute(
-                    """SELECT f.provider_event_id, f.start_ms, f.end_ms, e.detail_json
-                    FROM live_fragments AS f JOIN run_events AS e ON e.event_id = f.event_id
-                    WHERE f.owner_id = ? AND f.session_id = ? AND f.call_id = ?
-                      AND f.call_epoch = ?
-                    ORDER BY f.start_ms, f.end_ms, f.provider_event_id""",
-                    (
-                        binding.owner_id,
-                        binding.session_id,
-                        binding.call_id,
-                        binding.call_epoch,
-                    ),
-                ).fetchall()
             if call is None:
                 return
-            segments: list[dict[str, Any]] = []
-            for row in rows:
-                detail = json.loads(row["detail_json"] or "{}")
-                speaker = str(detail.get("speaker") or "")
-                text = detail.get("text")
-                if speaker not in {"user", "assistant"} or not isinstance(text, str):
-                    continue
-                start_ms, end_ms = int(row["start_ms"]), int(row["end_ms"])
-                previous = segments[-1] if segments else None
-                if (
-                    previous is not None
-                    and previous["speaker"] == speaker
-                    and start_ms - int(previous["end_ms"]) <= 1200
-                ):
-                    previous["text"] += text
-                    previous["end_ms"] = max(int(previous["end_ms"]), end_ms)
-                else:
-                    segments.append(
-                        {"speaker": speaker, "text": text, "start_ms": start_ms, "end_ms": end_ms}
-                    )
+            segments = self.session_store.live_transcript_segments(
+                binding.session_id,
+                owner_id=binding.owner_id,
+                context_generation=binding.context_generation,
+                call_id=binding.call_id,
+                call_epoch=binding.call_epoch,
+            )
 
             def timestamp(milliseconds: int) -> str:
                 seconds = max(0, int(milliseconds) // 1000)
@@ -1428,7 +1453,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             lines = ["☎ Live call transcript"]
             if segments:
                 for segment in segments:
-                    marker = "🎙️" if segment["speaker"] == "user" else "🔊"
+                    marker = "🎙️" if segment["role"] == "user" else "🔊"
                     lines.extend(("", f"[{timestamp(segment['start_ms'])}] {marker} {segment['text']}"))
             else:
                 lines.extend(("", "(No speech was transcribed.)"))

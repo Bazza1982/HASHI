@@ -57,9 +57,11 @@ class ProposalTests(unittest.TestCase):
 
 class ProviderTests(unittest.TestCase):
     def test_client_delegation_and_recording_off(self):
-        req=session_request('v=0\r\n','Voice style only.', voice='willow')
+        history=[{'type':'message','role':'user','content':[{'type':'input_text','text':'Remember this.'}]}]
+        req=session_request('v=0\r\n','Voice style only.', voice='willow', input_messages=history)
         self.assertEqual(req['session']['delegation'],{'type':'client'});self.assertFalse(req['session']['store'])
         self.assertEqual(req['session']['audio']['output']['voice'],'willow')
+        self.assertEqual(req['session']['input'],history)
         self.assertEqual(req['transport']['type'],'webrtc')
     def test_unqualified_model_not_silently_selected(self):
         with self.assertRaises(LiveVoiceError):session_request('v=0','style','other')
@@ -68,6 +70,12 @@ class ProviderTests(unittest.TestCase):
     def test_cjk_instructions_use_character_projection_not_utf8_byte_count(self):
         req=session_request('v=0','温柔地说话。'*1200)
         self.assertEqual(req['session']['model'],'gpt-live-1')
+    def test_instruction_budget_uses_provider_token_limit_not_old_14k_character_cap(self):
+        req=session_request('v=0','S'*20000)
+        self.assertEqual(req['session']['instructions'],'S'*20000)
+    def test_startup_history_message_limit_is_enforced(self):
+        history=[{'type':'message','role':'user','content':[{'type':'input_text','text':str(index)}]} for index in range(129)]
+        with self.assertRaises(LiveVoiceError):session_request('v=0','style',input_messages=history)
     def test_token_budget_not_character_length(self):
         with self.assertRaises(LiveVoiceError):append_update('commentary','short','d1','e1',lambda _text:501)
     def test_public_update_identity(self):

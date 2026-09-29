@@ -6054,6 +6054,223 @@ class SessionStore:
             ).fetchall()
         return [self._message_dict(row) for row in reversed(rows)]
 
+    def live_transcript_segments(
+        self,
+        session_id: str,
+        *,
+        owner_id: str | None = None,
+        context_generation: int | None = None,
+        call_id: str | None = None,
+        call_epoch: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return a derived, role-preserving view of durable Live fragments."""
+
+        session = self.get_session(session_id, owner_id=owner_id)
+        generation = int(
+            context_generation
+            if context_generation is not None
+            else session["context_generation"]
+        )
+        clauses = [
+            "f.session_id = ?",
+            "f.owner_id = ?",
+            "c.context_generation = ?",
+        ]
+        params: list[Any] = [
+            str(session_id),
+            str(session["owner_id"]),
+            generation,
+        ]
+        if call_id is not None:
+            clauses.append("f.call_id = ?")
+            params.append(str(call_id))
+        if call_epoch is not None:
+            clauses.append("f.call_epoch = ?")
+            params.append(int(call_epoch))
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT f.call_id, f.call_epoch, f.provider_event_id,
+                       f.speaker, f.start_ms, f.end_ms, f.sequence,
+                       f.created_at, e.detail_json, c.started_at
+                FROM live_fragments AS f
+                JOIN live_calls AS c ON c.call_id = f.call_id
+                JOIN run_events AS e ON e.event_id = f.event_id
+                WHERE {" AND ".join(clauses)}
+                ORDER BY c.started_at, f.call_epoch, f.start_ms, f.end_ms,
+                         f.sequence, f.provider_event_id
+                """,
+                params,
+            ).fetchall()
+
+        segments: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                detail = json.loads(row["detail_json"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            speaker = str(row["speaker"] or detail.get("speaker") or "")
+            text = detail.get("text")
+            if speaker not in {"user", "assistant"} or not isinstance(text, str):
+                continue
+            start_ms, end_ms = int(row["start_ms"]), int(row["end_ms"])
+            call_key = (str(row["call_id"]), int(row["call_epoch"]))
+            previous = segments[-1] if segments else None
+            if (
+                previous is not None
+                and previous["call_key"] == call_key
+                and previous["role"] == speaker
+                and start_ms - int(previous["end_ms"]) <= 1200
+            ):
+                previous["text"] += text
+                previous["end_ms"] = max(int(previous["end_ms"]), end_ms)
+                previous["provider_event_ids"].append(str(row["provider_event_id"]))
+                previous["last_sequence"] = max(
+                    int(previous["last_sequence"]), int(row["sequence"])
+                )
+                continue
+            segments.append(
+                {
+                    "call_key": call_key,
+                    "call_id": call_key[0],
+                    "call_epoch": call_key[1],
+                    "role": speaker,
+                    "text": text,
+                    "start_ms": start_ms,
+                    "end_ms": end_ms,
+                    "sequence": int(row["sequence"]),
+                    "last_sequence": int(row["sequence"]),
+                    "created_at": str(row["created_at"] or row["started_at"] or ""),
+                    "provider_event_ids": [str(row["provider_event_id"])],
+                }
+            )
+        return segments
+
+    def _live_history_messages(
+        self,
+        session_id: str,
+        *,
+        owner_id: str | None = None,
+        context_generation: int | None = None,
+    ) -> list[dict[str, Any]]:
+        segments = self.live_transcript_segments(
+            session_id,
+            owner_id=owner_id,
+            context_generation=context_generation,
+        )
+        result: list[dict[str, Any]] = []
+        current_call: tuple[str, int] | None = None
+        current_unit = ""
+        current_roles: set[str] = set()
+        unit_number = 0
+        for segment in segments:
+            call_key = segment["call_key"]
+            if call_key != current_call:
+                current_call = call_key
+                current_unit = ""
+                current_roles = set()
+                unit_number = 0
+            role = str(segment["role"])
+            may_complete_user = role == "assistant" and current_roles == {"user"}
+            if not current_unit or not may_complete_user:
+                unit_number += 1
+                current_unit = (
+                    f"live:{segment['call_id']}:{segment['call_epoch']}:{unit_number}"
+                )
+                current_roles = set()
+            current_roles.add(role)
+            identity_material = "\n".join(segment["provider_event_ids"])
+            history_id = "live_" + hashlib.sha256(
+                identity_material.encode("utf-8")
+            ).hexdigest()[:32]
+            result.append(
+                {
+                    "message_id": history_id,
+                    "history_id": history_id,
+                    "history_unit_id": current_unit,
+                    "session_id": str(session_id),
+                    "role": role,
+                    "text": segment["text"],
+                    "source": "live-phone",
+                    "created_at": segment["created_at"],
+                    "sequence": int(segment["sequence"]),
+                    "call_id": segment["call_id"],
+                    "call_epoch": int(segment["call_epoch"]),
+                    "start_ms": int(segment["start_ms"]),
+                    "end_ms": int(segment["end_ms"]),
+                    "transcript_provenance": "gpt_live_transcript",
+                }
+            )
+        return result
+
+    def recent_history_messages(
+        self,
+        session_id: str,
+        *,
+        owner_id: str | None = None,
+        context_generation: int | None = None,
+        limit: int = 128,
+    ) -> list[dict[str, Any]]:
+        """Return completed chat plus Live speech as one canonical timeline."""
+
+        session = self.get_session(session_id, owner_id=owner_id)
+        generation = int(
+            context_generation
+            if context_generation is not None
+            else session["context_generation"]
+        )
+        bounded = max(1, min(int(limit), 1000))
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT m.* FROM messages AS m
+                JOIN runs AS r ON r.run_id = m.run_id
+                WHERE m.session_id=? AND m.context_generation=?
+                  AND m.visibility='visible' AND m.history_eligible=1
+                  AND r.state='completed'
+                  AND (m.message_id=r.user_message_id OR m.message_id=r.final_message_id)
+                ORDER BY m.created_at DESC, m.ordinal DESC
+                LIMIT ?
+                """,
+                (str(session_id), generation, bounded * 2),
+            ).fetchall()
+        normal: list[dict[str, Any]] = []
+        for row in reversed(rows):
+            item = self._message_dict(row)
+            item["history_id"] = str(item["message_id"])
+            item["history_unit_id"] = f"run:{item['run_id']}"
+            item["sequence"] = int(item["ordinal"])
+            normal.append(item)
+        combined = normal + self._live_history_messages(
+            session_id,
+            owner_id=str(session["owner_id"]),
+            context_generation=generation,
+        )
+
+        def order_key(item: Mapping[str, Any]) -> tuple[str, int, str]:
+            return (
+                str(item.get("created_at") or ""),
+                int(item.get("sequence") or 0),
+                str(item.get("history_id") or item.get("message_id") or ""),
+            )
+
+        combined.sort(key=order_key)
+        units: dict[str, list[dict[str, Any]]] = {}
+        for item in combined:
+            units.setdefault(str(item["history_unit_id"]), []).append(item)
+        selected: set[str] = set()
+        selected_count = 0
+        ordered_units = sorted(
+            units.items(),
+            key=lambda pair: max(order_key(item) for item in pair[1]),
+        )
+        for unit_id, items in reversed(ordered_units):
+            if selected_count + len(items) > bounded:
+                break
+            selected.add(unit_id)
+            selected_count += len(items)
+        return [item for item in combined if item["history_unit_id"] in selected]
+
     def recent_visible_messages(
         self,
         session_id: str,
@@ -7533,7 +7750,68 @@ class SessionStore:
                     max(1, min(int(limit), 100)),
                 ),
             ).fetchall()
-        return [dict(row) for row in reversed(rows)]
+        exchanges = [dict(row) for row in reversed(rows)]
+        for exchange in exchanges:
+            exchange["exchange_id"] = str(exchange.get("run_id") or "")
+
+        live_units: dict[str, list[dict[str, Any]]] = {}
+        if high_water is None:
+            for item in self._live_history_messages(
+                session_id,
+                owner_id=str(session["owner_id"]),
+                context_generation=generation,
+            ):
+                live_units.setdefault(str(item["history_unit_id"]), []).append(item)
+        for unit_id, items in live_units.items():
+            user = next((item for item in items if item["role"] == "user"), None)
+            assistant = next(
+                (item for item in items if item["role"] == "assistant"),
+                None,
+            )
+            if user is None and assistant is None:
+                continue
+            sequences = [int(item.get("sequence") or 0) for item in items]
+            exchanges.append(
+                {
+                    "run_id": None,
+                    "exchange_id": unit_id,
+                    "sequence": min(sequences) if sequences else 0,
+                    "user_message_id": user.get("message_id") if user else None,
+                    "assistant_message_id": (
+                        assistant.get("message_id") if assistant else None
+                    ),
+                    "user_ts": user.get("created_at") if user else None,
+                    "assistant_ts": (
+                        assistant.get("created_at") if assistant else None
+                    ),
+                    "user_source": user.get("source") if user else None,
+                    "assistant_source": (
+                        assistant.get("source") if assistant else None
+                    ),
+                    "user_text": user.get("text", "") if user else "",
+                    "assistant_text": (
+                        assistant.get("text", "") if assistant else ""
+                    ),
+                    "user_transcript_provenance": (
+                        "gpt_live_transcript" if user else ""
+                    ),
+                    "assistant_transcript_provenance": (
+                        "gpt_live_transcript" if assistant else ""
+                    ),
+                }
+            )
+
+        def exchange_time(item: Mapping[str, Any]) -> str:
+            return str(item.get("user_ts") or item.get("assistant_ts") or "")
+
+        exchanges.sort(
+            key=lambda item: (
+                exchange_time(item),
+                int(item.get("sequence") or 0),
+                str(item.get("exchange_id") or item.get("run_id") or ""),
+            )
+        )
+        return exchanges[-max(1, min(int(limit), 100)) :]
 
     def recent_agent_exchanges(
         self,

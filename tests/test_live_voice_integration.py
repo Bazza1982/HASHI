@@ -24,12 +24,29 @@ from orchestrator.session_store import SessionStore
 PHONE_REVISION = "a" * 64
 
 
-def resolved_phone_session(_agent_id="zelda"):
+def resolved_phone_session(_agent_id="zelda", **_scope):
     return {
         "provider": "openai",
         "model": "gpt-live-1",
         "voice": "willow",
         "instructions": "Safe projected test Persona with explicit client delegation.",
+        "input": [
+            {
+                "type": "message",
+                "role": "developer",
+                "content": [{"type": "input_text", "text": "HCC test context."}],
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Remember our last turn."}],
+            },
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "I remember it."}],
+            },
+        ],
         "public": {
             "revision": PHONE_REVISION,
             "provider": "openai",
@@ -622,6 +639,18 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         asyncio.run(self.manager.append_fragment_once(
             self.binding, Fragment("record-agent", "assistant", "I am checking it.", 600, 1100)
         ))
+        live_history = self.store.recent_history_messages(
+            self.session_id,
+            owner_id=self.owner_id,
+            context_generation=1,
+        )
+        self.assertEqual(
+            [(item["role"], item["text"]) for item in live_history],
+            [("user", "Please check it."), ("assistant", "I am checking it.")],
+        )
+        live_exchanges = self.store.recent_exchanges(self.session_id)
+        self.assertEqual(live_exchanges[-1]["user_text"], "Please check it.")
+        self.assertEqual(live_exchanges[-1]["assistant_text"], "I am checking it.")
         self.manager._mark_terminal(
             self.binding,
             "ended",
@@ -670,6 +699,10 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
             replay = asyncio.run(self.manager._op_start(self.owner_id, payload))
         self.assertEqual(len(provider_calls), 1)
         self.assertEqual(provider_calls[0][1]["session"]["audio"]["output"]["voice"], "willow")
+        self.assertEqual(
+            [item["role"] for item in provider_calls[0][1]["session"]["input"]],
+            ["developer", "user", "assistant"],
+        )
         self.assertEqual(first["sdp_answer"], "v=0\r\nanswer")
         self.assertEqual(first["binding"]["call_id"], first["call_id"])
         self.assertEqual(replay["call_id"], first["call_id"])

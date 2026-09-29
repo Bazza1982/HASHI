@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Status | **Authoritative PAO module specification** |
-| Effective date | 2026-09-01 |
+| Effective date | 2026-09-29 |
 | Parent architecture | [HASHI System Architecture](../ARCHITECTURE.md) |
 | Scope | HASHI outer control plane, Conversation Sessions, Engine binding, capabilities, workflows, Jobs, and cross-agent coordination |
 
@@ -84,6 +84,12 @@ already admitted keeps its frozen snapshot, while the next admission after the
 commit reads the new revision. PAO defers runtime, Tool-root, and Engine-session
 activation to a Run boundary. Explicit Workzone `reload`/`reset` remains
 idle-only because it immediately resets the selected Engine Session.
+
+A live phone call is another transport bound to the same Conversation Session.
+Each role-labelled transcript fragment is durable PAO Session evidence as it
+arrives and participates in later text and phone history. A terminal call card
+is a Connector view derived from those fragments; it is not a second message
+authority or a replacement for the role-preserving transcript.
 
 ### 2.3 Outer orchestration
 

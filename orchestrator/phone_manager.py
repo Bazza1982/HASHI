@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any, Callable
 
@@ -20,7 +21,12 @@ from orchestrator.phone_catalog import (
     PHONE_PROVIDERS,
     PHONE_STYLES,
 )
-from orchestrator.pcm_voice_projection import build_live_voice_instructions, load_phone_persona
+from orchestrator.pcm_voice_projection import (
+    build_live_voice_input,
+    build_live_voice_instructions,
+    load_phone_pcm_payload,
+    load_phone_persona,
+)
 
 
 class PhoneConfigError(RuntimeError):
@@ -216,11 +222,18 @@ class PhoneManager:
         *,
         display_name: str,
         agent_id: str | None = None,
+        pcm_payload: Mapping[str, Any] | None = None,
+        recent_history: Iterable[Mapping[str, Any]] = (),
     ) -> dict[str, Any]:
-        """Freeze the effective provider request without exposing the prompt."""
+        """Freeze the effective provider request without exposing private PCM."""
 
         state, _state_revision = self._read()
         persona = load_phone_persona(self.workspace_dir)
+        effective_pcm = (
+            dict(pcm_payload)
+            if isinstance(pcm_payload, Mapping)
+            else load_phone_pcm_payload(self.workspace_dir)
+        )
         resolved_agent_id = str(agent_id or self.workspace_dir.name)
         resolved_display_name = str(display_name or resolved_agent_id)
         instructions = build_live_voice_instructions(
@@ -230,6 +243,11 @@ class PhoneManager:
             language_instruction=self.LANGUAGES[state["language"]]["instruction"],
             style_instruction=self.STYLES[state["style"]]["instruction"],
             custom_style_instruction=state["style_instructions"],
+            pcm_payload=effective_pcm,
+        )
+        startup_input, context_audit = build_live_voice_input(
+            effective_pcm,
+            recent_history,
         )
         revision_payload = {
             "schema_version": self.SCHEMA_VERSION,
@@ -240,6 +258,9 @@ class PhoneManager:
             "style": state["style"],
             "style_instructions": state["style_instructions"],
             "pcm_sha256": persona.content_sha256,
+            "instructions_sha256": hashlib.sha256(
+                instructions.encode("utf-8")
+            ).hexdigest(),
             "agent_id": resolved_agent_id,
             "display_name": resolved_display_name,
         }
@@ -267,5 +288,7 @@ class PhoneManager:
             "model": state["model"],
             "voice": state["voice"],
             "instructions": instructions,
+            "input": startup_input,
+            "context_audit": context_audit,
             "public": public,
         }

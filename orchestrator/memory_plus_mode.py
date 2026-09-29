@@ -181,15 +181,7 @@ class MemoryPlusObserver(PreTurnContextProvider):
         return str(state.get("agent_mode") or "").strip().lower() == "dual-brain"
 
     def _config(self) -> MemoryPlusConfig:
-        state = WorkspaceStateStore(self.workspace_dir).read()
-        block = state.get("memory_plus") if isinstance(state.get("memory_plus"), Mapping) else {}
-        return MemoryPlusConfig(
-            context_max_chars=_read_int(block, "context_max_chars", 4000),
-            today_max_chars=_read_int(block, "today_max_chars", 2000),
-            carryover_max_chars=_read_int(block, "carryover_max_chars", 800),
-            lookup_max_chars=_read_int(block, "lookup_max_chars", 2000),
-            archive_on_day_change=_read_bool(block, "archive_on_day_change", True),
-        )
+        return memory_plus_config(self.workspace_dir)
 
     @classmethod
     def _should_bypass_source(cls, source: str, *, is_bridge_request: bool) -> bool:
@@ -246,6 +238,20 @@ def is_memory_plus_enabled(workspace_dir: Path) -> bool:
     if "enabled" in block:
         return _read_bool(block, "enabled", False)
     return str(state.get("agent_mode") or "").strip().lower() == "memory+"
+
+
+def memory_plus_config(workspace_dir: Path) -> MemoryPlusConfig:
+    """Return the Agent-owned bounds used by every Memory+ projection."""
+
+    state = WorkspaceStateStore(Path(workspace_dir)).read()
+    block = state.get("memory_plus") if isinstance(state.get("memory_plus"), Mapping) else {}
+    return MemoryPlusConfig(
+        context_max_chars=_read_int(block, "context_max_chars", 4000),
+        today_max_chars=_read_int(block, "today_max_chars", 2000),
+        carryover_max_chars=_read_int(block, "carryover_max_chars", 800),
+        lookup_max_chars=_read_int(block, "lookup_max_chars", 2000),
+        archive_on_day_change=_read_bool(block, "archive_on_day_change", True),
+    )
 
 
 def set_memory_plus_enabled(workspace_dir: Path, enabled: bool) -> bool:
