@@ -677,6 +677,17 @@ def _bash_outcome(
     return SmartToolOutcome(status="success", effect="unknown", data=_result_data(text))
 
 
+def _backend_api_context_unavailable(lowered: str) -> bool:
+    return any(
+        marker in lowered
+        for marker in (
+            "backend api is unavailable",
+            "workbench api is unavailable",
+            "gateway context",
+        )
+    )
+
+
 def _scheduler_outcome(
     spec: SmartToolSpec,
     output: str,
@@ -685,7 +696,7 @@ def _scheduler_outcome(
 ) -> SmartToolOutcome:
     text = str(output or "")
     lowered = text.casefold()
-    if "workbench api is unavailable" in lowered or "gateway context" in lowered:
+    if _backend_api_context_unavailable(lowered):
         return SmartToolOutcome(
             status="unavailable",
             effect="no_change",
@@ -742,7 +753,7 @@ def _superloop_outcome(
 ) -> SmartToolOutcome:
     text = str(output or "")
     lowered = text.casefold()
-    if "workbench api is unavailable" in lowered or "gateway context" in lowered:
+    if _backend_api_context_unavailable(lowered):
         return SmartToolOutcome(
             status="unavailable",
             effect="no_change",

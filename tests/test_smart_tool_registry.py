@@ -130,7 +130,7 @@ async def test_scheduler_without_gateway_is_unavailable_and_not_retryable(
     registry = _registry(tmp_path, "hashi_scheduler_list")
 
     async def fake_dispatch(_tool_name, _arguments, **_kwargs):
-        return "Error: HASHI Workbench API is unavailable in this gateway context"
+        return "Error: HASHI Backend API is unavailable in this tool context"
 
     monkeypatch.setattr(registry, "_dispatch", fake_dispatch)
     result = await registry.execute("hashi_scheduler_list", {}, "call-1")

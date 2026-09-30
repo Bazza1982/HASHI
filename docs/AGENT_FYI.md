@@ -267,6 +267,10 @@ in natural language from Telegram, TUI, Backend API, or any registered
 Connector. Never parse reply words or menu numbers in a Connector. Only call
 `hashi_scheduler_recovery_resolve` for an unambiguous decision and the exact
 pending batch; answer questions or clarify without changing Scheduler state.
+HERV3's direct Tool Registry reaches Scheduler through the Backend API endpoint
+published in its same-instance Worker topology. Isolated CLI gateways use the
+serialized form of that same endpoint; neither path invents a port or creates a
+Connector-specific Scheduler route.
 
 Use authorized capabilities only; device actions need a same-instance Worker.
 Prefer `log_query`; work foreground unless `/bg` is explicit. Tests prove

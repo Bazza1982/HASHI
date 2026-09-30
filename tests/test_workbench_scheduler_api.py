@@ -5,7 +5,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from aiohttp.test_utils import TestServer
 
+from orchestrator.flexible_backend_manager import FlexibleBackendManager
 from orchestrator.skill_manager import SkillManager
 from orchestrator.workbench_api import WorkbenchApiServer
 
@@ -308,6 +310,79 @@ async def test_scheduler_recovery_resolution_is_typed_and_agent_scoped(tmp_path)
     assert payload["authority"] == "HASHI Scheduler"
     assert payload["batch_id"] == "batch-1"
     assert payload["resolution"]["skipped_total"] == 2
+    assert runtime.recovery_resolutions == [
+        {
+            "agent_name": "momo",
+            "batch_id": "batch-1",
+            "action": "skip",
+            "counts": None,
+            "runtime_map": {"momo": runtime},
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_herv3_registry_resolves_recovery_through_worker_topology(tmp_path):
+    server, runtime = _server(tmp_path)
+
+    async with TestServer(server.app) as live_server:
+        base_url = str(live_server.make_url("")).rstrip("/")
+        resolutions = []
+
+        def resolve_service_endpoint(service, *, expected_instance=None):
+            resolutions.append((service, expected_instance))
+            return {
+                "service": service,
+                "instance_id": "HASHI1",
+                "base_url": base_url,
+            }
+
+        worker_facade = SimpleNamespace(
+            is_function_worker_facade=True,
+            resolve_service_endpoint=resolve_service_endpoint,
+        )
+        manager = FlexibleBackendManager.__new__(FlexibleBackendManager)
+        manager.current_backend = SimpleNamespace(tool_registry=None)
+        manager.secrets = {}
+        manager.global_config = SimpleNamespace(
+            instance_id="HASHI1",
+            authorized_id=None,
+        )
+        manager.config = SimpleNamespace(name="momo", telegram_token_key="")
+        manager.logger = SimpleNamespace(
+            error=lambda *_args, **_kwargs: None,
+            info=lambda *_args, **_kwargs: None,
+        )
+        manager.runtime = SimpleNamespace(
+            name="momo",
+            orchestrator=worker_facade,
+            canonical_audit=None,
+        )
+        adapter_config = SimpleNamespace(
+            name="momo",
+            extra={},
+            workspace_dir=tmp_path,
+            access_scope="project",
+            resolve_access_root=lambda: tmp_path,
+        )
+        manager._attach_tool_registry(
+            {"allowed": ["hashi_scheduler_recovery_resolve"]},
+            adapter_config,
+        )
+        registry = manager.current_backend.tool_registry
+        registry.audit_context["workbench_api_base_url"] = "http://127.0.0.1:9"
+
+        result = await registry.execute(
+            "hashi_scheduler_recovery_resolve",
+            {"batch_id": "batch-1", "action": "skip"},
+            "resolve-herv3-1",
+        )
+
+    assert result.is_error is False, result.output
+    payload = json.loads(result.output)
+    assert payload["batch_id"] == "batch-1"
+    assert payload["resolution"]["skipped_total"] == 2
+    assert resolutions == [("workbench", "HASHI1")]
     assert runtime.recovery_resolutions == [
         {
             "agent_name": "momo",

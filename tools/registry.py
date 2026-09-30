@@ -1,7 +1,8 @@
 """
-ToolRegistry — permission-checked tool dispatcher for HASHI V2.2.
+ToolRegistry — permission-checked tool dispatcher for HASHI.
 
-HER v2 and other Engine adapters consume it through the HASHI Tool Gateway.
+HERV3 consumes it directly inside its Function Worker. Isolated CLI Engines
+consume the same registry through the HASHI Tool Gateway.
 """
 from __future__ import annotations
 

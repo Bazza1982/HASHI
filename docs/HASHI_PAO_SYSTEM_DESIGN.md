@@ -209,6 +209,13 @@ batch; questions and ambiguous replies do not mutate Scheduler state. The
 internal mutation endpoint accepts only the Agent Tool Gateway and remains
 idempotent after a batch is resolved.
 
+PAO tool execution resolves that Backend API endpoint from the Function
+Worker's authoritative same-instance service topology. Isolated CLI Tool
+Gateways receive a serialized snapshot derived from the same live endpoint.
+Live topology takes precedence over compatibility snapshots; configured ports,
+wildcard hosts, stale snapshots, and endpoints published by another instance
+must never be guessed or accepted as substitutes.
+
 ### 2.4 Skills, Tools, permissions, and execution
 
 PAO owns the HASHI-level capability registry and execution authority:
