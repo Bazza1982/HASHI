@@ -32,6 +32,17 @@ def test_malformed_contract_diagnostics_are_bounded_and_never_include_prose():
         parse_decision({**raw, "route": "act", "actions": raw["actions"][:1]}, known_action_ids=set())
 
 
+def test_progress_preference_is_typed_without_changing_action_intent():
+    base = {"route": "act", "complete": True, "reply": "", "actions": [
+        {"kind": "query", "request": "Check the existing news", "relation": "new", "target_action_id": None}]}
+    off = parse_decision({**base, "progress_preference": "off"}, known_action_ids=set())
+    assert off.progress_preference == "off"
+    assert off.actions[0].request == "Check the existing news"
+    assert parse_decision(base, known_action_ids=set()).progress_preference == "unchanged"
+    with pytest.raises(LiveVoiceError, match="live_semantic_result_invalid"):
+        parse_decision({**base, "progress_preference": ["off"]}, known_action_ids=set())
+
+
 @pytest.mark.asyncio
 async def test_optional_background_reference_yields_before_mandatory_context(
     monkeypatch,

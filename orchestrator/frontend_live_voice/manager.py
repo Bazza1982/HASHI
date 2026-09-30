@@ -1373,10 +1373,11 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             )
         await self._admit_ready_delegation(binding, proposal)
 
-    def _action_event(self, binding: CallBinding, kind: str, detail: Mapping[str, Any]) -> None:
+    def _action_event(self, binding: CallBinding, kind: str, detail: Mapping[str, Any],
+                      *, run_id: str | None = None) -> None:
         with self.session_store._lock, self.session_store._connection() as connection:
             self.session_store._append_event(
-                connection, session_id=binding.session_id, run_id=None,
+                connection, session_id=binding.session_id, run_id=run_id,
                 kind="voice.live.action." + kind, summary="Phone action " + kind,
                 detail={"schema": CALL_EVENT_SCHEMA, "scope": binding.public_scope(), **detail},
             )
@@ -1392,6 +1393,32 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 locale = public.get("interface_language") or "en"
         return tr("phone.action." + key, locale=locale)
 
+    def _progress_enabled(self, binding: CallBinding) -> bool:
+        """Read the latest call-scoped spoken-progress choice from durable events."""
+        with self.session_store._lock, self.session_store._connection() as connection:
+            row = connection.execute(
+                """SELECT detail_json FROM run_events WHERE session_id=?
+                AND kind='voice.live.progress.preference'
+                AND json_extract(detail_json, '$.scope.call_id')=?
+                ORDER BY sequence DESC LIMIT 1""",
+                (binding.session_id, binding.call_id),
+            ).fetchone()
+        return row is None or json.loads(row["detail_json"]).get("enabled") is True
+
+    def _set_progress_preference(self, binding: CallBinding, preference: str) -> None:
+        if preference == "unchanged":
+            return
+        enabled = preference == "on"
+        if self._progress_enabled(binding) == enabled:
+            return
+        with self.session_store._lock, self.session_store._connection() as connection:
+            self.session_store._append_event(
+                connection, session_id=binding.session_id, run_id=None,
+                kind="voice.live.progress.preference", summary="Phone progress preference changed",
+                detail={"schema": CALL_EVENT_SCHEMA, "scope": binding.public_scope(),
+                        "enabled": enabled},
+            )
+
     def _semantic_context(self, binding: CallBinding, proposal: Proposal) -> dict[str, Any]:
         with self.session_store._lock, self.session_store._connection() as connection:
             rows = connection.execute(
@@ -1400,6 +1427,26 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 WHERE f.call_id = ? ORDER BY f.call_epoch DESC, f.start_ms DESC LIMIT 60""",
                 (binding.call_id,),
             ).fetchall()
+            result_rows = connection.execute(
+                """SELECT a.action_id, r.final_message_id, r.state AS run_state FROM live_actions a
+                LEFT JOIN runs r ON r.run_id=a.run_id WHERE a.call_id=?""",
+                (binding.call_id,),
+            ).fetchall()
+            route_rows = connection.execute(
+                """SELECT e.run_id, e.detail_json FROM run_events e
+                JOIN live_actions a ON a.run_id=e.run_id
+                WHERE a.call_id=? AND e.kind='voice.live.action.model_route'
+                ORDER BY e.sequence DESC LIMIT 24""",
+                (binding.call_id,),
+            ).fetchall()
+        results_available = {row["action_id"]: bool(row["final_message_id"]) for row in result_rows}
+        run_states = {row["action_id"]: row["run_state"] for row in result_rows}
+        routes_by_run = {}
+        for row in route_rows:
+            detail = json.loads(row["detail_json"] or "{}")
+            routes_by_run.setdefault(row["run_id"], {
+                key: detail[key] for key in ("engine", "model_provider", "model", "route_status", "attempt")
+                if key in detail})
         conversation = []
         for row in reversed(rows):
             detail = json.loads(row["detail_json"] or "{}")
@@ -1408,14 +1455,22 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 conversation[-1]["text"] += text
             else:
                 conversation.append({"speaker": row["speaker"], "text": text})
+        action_rows = self.actions.rows(binding)[-12:]
         state = {
             "utterance": proposal.text,
+            "progress_updates": self._progress_enabled(binding),
             "conversation": [{**item, "text": item["text"][-800:],
                               "truncated": len(item["text"]) > 800} for item in conversation[-8:]],
-            "actions": [{**item, "summary": item["summary"][:700],
-                         "summary_truncated": len(item["summary"]) > 700,
-                         "spoken_receipt": item["spoken_receipt"][:400]}
-                        for item in self.actions.snapshot(binding)[-12:]],
+            "actions": [{**PhoneActions.public(item),
+                         "summary": item["request"][:700],
+                         "summary_truncated": len(item["request"]) > 700,
+                         "spoken_receipt": item["receipt"][:400],
+                         "effect_status": item["status"],
+                         "run_state": run_states.get(item["action_id"]),
+                         "answer_available": results_available.get(item["action_id"], False),
+                         "full_result_available": results_available.get(item["action_id"], False),
+                         "model_route": routes_by_run.get(item["run_id"], {})}
+                        for item in action_rows],
         }
         # Derive this small judgment input from PCM's existing projection. Keep
         # reference context (including HCC) explicitly represented before recent
@@ -1511,21 +1566,34 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 if not callable(self._judge_action):
                     raise LiveVoiceError("live_semantic_service_unavailable", 503)
                 state = self._semantic_context(binding, proposal)
-                raw = await asyncio.wait_for(self._judge_action(binding, state), timeout=8.0)
-                # Fresh speech invalidates even a malformed response to the old
-                # fragment. Never consume its prefix through the parse-error path.
-                if self._proposal_has_newer_speech(binding, proposal):
-                    self._action_event(binding, "judgment_discarded", {"source_id": proposal.delegation_id,
-                        "reason": "new_speech", "shape": decision_shape(raw)})
-                    await self._finish_delegation_without_run(binding, proposal, decision="superseded",
-                        reason="new_speech_during_judgment", provider_reply="")
-                    return
-                decision = parse_decision(raw, known_action_ids={item["action_id"] for item in state["actions"]})
+                for attempt in range(2):
+                    raw = await asyncio.wait_for(self._judge_action(binding, state), timeout=8.0)
+                    # New speech wins over either a valid or malformed old judgment.
+                    if self._proposal_has_newer_speech(binding, proposal):
+                        self._action_event(binding, "judgment_discarded", {"source_id": proposal.delegation_id,
+                            "reason": "new_speech", "shape": decision_shape(raw)})
+                        await self._finish_delegation_without_run(binding, proposal, decision="superseded",
+                            reason="new_speech_during_judgment", provider_reply="")
+                        return
+                    try:
+                        decision = parse_decision(raw,
+                            known_action_ids={item["action_id"] for item in state["actions"]})
+                        break
+                    except LiveVoiceError as exc:
+                        if (attempt or isinstance(raw, Mapping) and raw.get("complete") is False or
+                                exc.code not in {"live_semantic_result_invalid", "live_semantic_target_invalid"}):
+                            raise
+                        self._action_event(binding, "judgment_repair", {"source_id": proposal.delegation_id,
+                            "shape": decision_shape(raw), "error_code": exc.code})
+                        state = {**state, "contract_repair": {
+                            "invalid_shape": decision_shape(raw),
+                            "requirement": "Return a valid complete judgment. route=act requires at least one fully resolved action."}}
                 interpreted = True
                 if not decision.complete:
                     await self._finish_delegation_without_run(binding, proposal, decision="incomplete",
                         reason="semantic_incomplete", provider_reply="")
                     return
+                self._set_progress_preference(binding, decision.progress_preference)
                 if decision.route is not DelegationRoute.EXECUTE:
                     reply = decision.reply if decision.reply_needed else ""
                     await self._finish_delegation_without_run(binding, proposal,
@@ -1535,13 +1603,25 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 existing = {item["action_id"]: item for item in self.actions.rows(binding)}
                 admitted = []
                 references = []
+                reused_reports = []
                 for intent in decision.actions:
                     target = existing.get(intent.target_action_id or "")
                     if intent.relation == "reuse":
                         references.append(PhoneActions.public(target))
+                        if target["kind"] == "query" and target.get("run_id"):
+                            with suppress(Exception):
+                                prior_run = self.session_store.get_run(str(target["run_id"]), owner_id=binding.owner_id)
+                                report = self._canonical_run_report(binding, prior_run)
+                                if report:
+                                    reused_reports.append(report)
                         continue
                     if intent.relation in {"revise", "cancel"} and target:
-                        if target["status"] in {"accepted", "running"}:
+                        active_unknown = False
+                        if target["status"] == "unknown" and target.get("run_id"):
+                            with suppress(Exception):
+                                prior = self.session_store.get_run(str(target["run_id"]), owner_id=binding.owner_id)
+                                active_unknown = prior.get("state") not in TERMINAL_RUN_STATES
+                        if target["status"] in {"accepted", "running"} or active_unknown:
                             stopped = await self._cancel_existing_action(binding, target)
                             references.append(stopped)
                             if stopped["status"] not in {"cancelled", "verified"}:
@@ -1556,7 +1636,10 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                             continue
                     admitted.append(intent)
                 if not admitted:
-                    reply = json.dumps({"action_facts": references}, ensure_ascii=False)
+                    reply = "\n".join(f"{fact['summary']}: {fact['spoken_receipt']}" for fact in references)
+                    if reused_reports:
+                        reply += "\n" + self._action_text(binding, "result_reported")
+                        reply += "\n" + "\n".join(reused_reports)
                     await self._finish_delegation_without_run(binding, proposal, decision="reused",
                         reason="existing_action_state", provider_reply=reply)
                     return
@@ -1599,13 +1682,45 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         return latest is not None and int(latest) > proposal.cutoff_ms
 
     async def _cancel_existing_action(self, binding: CallBinding, action: Mapping[str, Any]) -> dict[str, Any]:
+        if self._stop_was_requested(binding, str(action["action_id"])):
+            current = next((row for row in self.actions.rows(binding)
+                            if row["action_id"] == action["action_id"]), None)
+            if current is not None:
+                return PhoneActions.public(current)
         result = {}
-        if callable(self._cancel_action_run) and action.get("run_id"):
-            result = await self._cancel_action_run(binding, str(action["run_id"]))
-        status = "cancelled" if result.get("cancelled_before_start") is True else "unknown"
+        if action.get("run_id"):
+            self._action_event(binding, "stop_intended", {
+                "action_id": str(action["action_id"]), "run_id": str(action["run_id"])})
+        try:
+            if callable(self._cancel_action_run) and action.get("run_id"):
+                result = await self._cancel_action_run(binding, str(action["run_id"]))
+        except Exception as exc:
+            self.audit.record(binding, "action.stop_request_unconfirmed",
+                action_id=str(action["action_id"]),
+                error_code=str(getattr(exc, "code", "stop_request_unavailable")))
+        removed = result.get("cancelled_before_start") is True
+        interrupt_sent = result.get("interrupted") is True
+        status = "cancelled" if removed else "running" if interrupt_sent else "unknown"
+        if removed or interrupt_sent:
+            self._action_event(binding, "stop_requested", {
+                "action_id": str(action["action_id"]), "run_id": action.get("run_id"),
+                "request_accepted": True, "removed_before_start": removed,
+                "interrupt_sent": interrupt_sent,
+                "evidence_ref": result.get("evidence_ref"),
+            })
+        elif action.get("run_id"):
+            self._action_event(binding, "stop_unconfirmed", {
+                "action_id": str(action["action_id"]), "run_id": str(action["run_id"])})
+        current = next((row for row in self.actions.rows(binding)
+                        if row["action_id"] == action["action_id"]), None)
+        if current and current["status"] in {"verified", "failed", "cancelled"}:
+            return PhoneActions.public(current)
+        if current and current["status"] == "unknown" and interrupt_sent:
+            status = "unknown"
         return self.actions.transition(binding, str(action["action_id"]), status,
             evidence_refs=[str(result["evidence_ref"])] if result.get("evidence_ref") else [],
-            receipt=self._action_text(binding, "cancelled" if status == "cancelled" else "stop_unconfirmed"))
+            receipt=self._action_text(binding, "cancelled" if removed else
+                                      "stop_requested" if interrupt_sent else "stop_unconfirmed"))
 
     async def _admit_action_rows(self, binding: CallBinding, proposal: Proposal,
                                  actions: list[dict[str, Any]]) -> None:
@@ -2070,23 +2185,74 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         return True
 
     @staticmethod
-    def _activity_update(event: Mapping[str, Any]) -> tuple[str, str] | None:
+    def _activity_update(event: Mapping[str, Any], *, phone_progress_enabled: bool) -> tuple[str, str] | None:
         channel = str(event.get("presentation_channel") or "").strip().casefold()
-        if channel in {"", "internal", "thinking", "reasoning", "answer"}:
+        # The Worker already projects which commentary is intended for users.
+        # Reasoning, tool chatter and status telemetry are never spoken as filler.
+        if channel not in {"commentary", "control"}:
             return None
-        if channel not in {"commentary", "control", "verbose", "technical", "status", "progress"}:
-            return None
-        if channel in {"commentary", "control"} and not (
-            event.get("presentation_enabled") is True or event.get("required") is True
-        ):
+        phone_commentary = (phone_progress_enabled and channel == "commentary"
+                            and event.get("delivery_class") == "user_commentary")
+        if (event.get("presentation_enabled") is not True and event.get("required") is not True
+                and not phone_commentary):
             return None
         summary = str(event.get("summary") or "").strip()
         detail = event.get("detail")
         detail_text = str(detail).strip() if isinstance(detail, str) else ""
         content = summary or detail_text
-        if not content:
+        if not content or len(content) > 320:
             return None
-        return ("commentary" if channel in {"commentary", "control"} else "thinking", content)
+        return (channel, content)
+
+    @staticmethod
+    def _model_route_activity(event: Mapping[str, Any]) -> dict[str, Any] | None:
+        if event.get("kind") != "model_route" or event.get("engine") != "her-v3":
+            return None
+        status = event.get("route_status")
+        provider, model = event.get("model_provider"), event.get("model")
+        attempt = event.get("attempt")
+        if (status not in {"selected", "returned"} or not isinstance(provider, str)
+                or not isinstance(model, str) or not provider or not model
+                or len(provider) > 160 or len(model) > 240 or not isinstance(attempt, int)
+                or isinstance(attempt, bool) or not 1 <= attempt <= 1_000_000
+                or any(ch.isspace() or ord(ch) < 32 for ch in provider + model)):
+            return None
+        return {"engine": "her-v3", "model_provider": provider, "model": model,
+                "route_status": status, "attempt": attempt}
+
+    async def _record_model_route(self, binding: CallBinding, run_id: str,
+                                  epoch: str, event: Mapping[str, Any]) -> bool:
+        route = self._model_route_activity(event)
+        if route is None:
+            return False
+        sequence = int(event.get("sequence") or 0)
+        with self.session_store._lock, self.session_store._connection() as connection:
+            previous = connection.execute(
+                """SELECT 1 FROM run_events WHERE session_id=? AND run_id=?
+                AND kind='voice.live.action.model_route'
+                AND json_extract(detail_json, '$.source_epoch')=?
+                AND json_extract(detail_json, '$.source_sequence')=? LIMIT 1""",
+                (binding.session_id, run_id, epoch, sequence),
+            ).fetchone()
+        if previous is not None:
+            return True
+        self._action_event(binding, "model_route", {
+            "run_id": run_id, "source_epoch": epoch,
+            "source_sequence": sequence, **route}, run_id=run_id)
+        route_fact = (
+            f"Internal task route: provider {route['model_provider']}, "
+            f"model {route['model']} was selected for attempt {route['attempt']}; "
+            "a response is not yet established."
+            if route["route_status"] == "selected" else
+            f"Internal task route: the selected {route['model_provider']} "
+            f"adapter returned a response under model {route['model']} "
+            f"on attempt {route['attempt']}. This route label comes from "
+            "the configured adapter, not independent vendor attestation "
+            "or proof that the user's task succeeded."
+        )
+        await self._send_provider_update(binding, kind="thinking",
+            content=route_fact, delegation_id=None)
+        return True
 
     def _recover_action_relays(self, *, settle_orphans: bool = False,
                               call_id: str | None = None) -> None:
@@ -2129,10 +2295,59 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             self._track(asyncio.create_task(self._relay_run(binding, row["delegation_id"],
                 row["run_id"], row["request_id"]), name=name), self._relay_tasks, binding=binding)
 
+    def _stop_was_requested(self, binding: CallBinding, action_id: str) -> bool:
+        with self.session_store._lock, self.session_store._connection() as connection:
+            row = connection.execute(
+                """SELECT kind FROM run_events WHERE session_id=?
+                AND kind IN ('voice.live.action.stop_intended',
+                             'voice.live.action.stop_requested', 'voice.live.action.stop_unconfirmed')
+                AND json_extract(detail_json, '$.scope.call_id')=?
+                AND json_extract(detail_json, '$.action_id')=?
+                ORDER BY sequence DESC LIMIT 1""",
+                (binding.session_id, binding.call_id, action_id),
+            ).fetchone()
+        return row is not None and row["kind"] != "voice.live.action.stop_unconfirmed"
+
+    def _progress_checkpoint(self, binding: CallBinding, run_id: str) -> tuple[bool, str, int]:
+        with self.session_store._lock, self.session_store._connection() as connection:
+            started = connection.execute(
+                """SELECT 1 FROM run_events WHERE session_id=?
+                AND kind='voice.live.action.progress_started'
+                AND json_extract(detail_json, '$.scope.call_id')=?
+                AND json_extract(detail_json, '$.run_id')=? LIMIT 1""",
+                (binding.session_id, binding.call_id, run_id),
+            ).fetchone() is not None
+            row = connection.execute(
+                """SELECT detail_json FROM run_events WHERE session_id=?
+                AND kind IN ('voice.live.action.progress_observed', 'voice.live.action.progress_relayed')
+                AND json_extract(detail_json, '$.scope.call_id')=?
+                AND json_extract(detail_json, '$.run_id')=?
+                ORDER BY sequence DESC LIMIT 1""",
+                (binding.session_id, binding.call_id, run_id),
+            ).fetchone()
+        relayed = json.loads(row["detail_json"]) if row else {}
+        return started, str(relayed.get("source_epoch") or ""), int(relayed.get("source_sequence") or 0)
+
+    def _canonical_run_report(self, binding: CallBinding, run: Mapping[str, Any]) -> str:
+        """Read the full PAO answer; it is information, never an effect receipt."""
+        message_id = run.get("final_message_id")
+        if not message_id or run.get("session_id") != binding.session_id or run.get("agent_id") != binding.agent_id:
+            return ""
+        try:
+            message = self.session_store.get_message(str(message_id),
+                session_id=binding.session_id, owner_id=binding.owner_id)
+        except Exception:
+            return ""
+        return str(message.get("text") or "") if message.get("role") == "assistant" else ""
+
     async def _relay_run(self, binding: CallBinding, delegation_id: str,
                          run_id: str, request_id: str) -> None:
         """Observe execution and concrete effects even while audio is disconnected."""
         last_state = ""
+        progress_started, activity_epoch, activity_cursor = self._progress_checkpoint(binding, run_id)
+        pending_progress: tuple[int, str] | None = None
+        last_progress_at = monotonic() if progress_started or activity_cursor else 0.0
+        next_activity_poll_at = 0.0
         while not self._closing:
             try:
                 run = self.session_store.get_run(run_id, owner_id=binding.owner_id)
@@ -2146,21 +2361,84 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 return
             state = str(run.get("state") or "")
             actions = self.actions.rows(binding, delegation_id=delegation_id)
+            stopping = any(self._stop_was_requested(binding, item["action_id"]) for item in actions)
             if state == "running" and last_state != state:
                 for item in actions:
-                    self.actions.transition(binding, item["action_id"], "running", run_id=run_id)
-                await self._send_provider_update(binding, kind="thinking",
-                    content=json.dumps({"action_state": "running", "requests": [item["request"] for item in actions]}, ensure_ascii=False),
-                    delegation_id=None)
+                    if not stopping:
+                        self.actions.transition(binding, item["action_id"], "running", run_id=run_id)
+                if self._progress_enabled(binding) and not progress_started and not stopping:
+                    if await self._send_provider_update(binding, kind="commentary",
+                            content=self._action_text(binding, "progress_started"), delegation_id=None):
+                        last_progress_at = monotonic()
+                        progress_started = True
+                        self._action_event(binding, "progress_started", {"run_id": run_id})
             if state == "awaiting_approval" and last_state != state:
                 await self._send_provider_update(binding, kind="commentary",
                     content=self._action_text(binding, "approval"),
                     delegation_id=None)
             last_state = state
             if state not in TERMINAL_RUN_STATES:
+                if (callable(self._poll_run_activity) and state == "running" and not stopping
+                        and monotonic() >= next_activity_poll_at):
+                    next_activity_poll_at = monotonic() + 2.0
+                    try:
+                        activity = await asyncio.wait_for(
+                            self._poll_run_activity(binding, request_id, activity_cursor, 64), timeout=2.0)
+                        if activity.get("ok") is True:
+                            epoch = str(activity.get("ephemeral_epoch") or "")
+                            before = activity_cursor
+                            if activity_epoch and epoch != activity_epoch:
+                                # A replaced Worker has a different ephemeral
+                                # stream. Do not replay its old activity page.
+                                activity_cursor = int(activity.get("latest_sequence") or 0)
+                                pending_progress = None
+                            else:
+                                for event in activity.get("events") or []:
+                                    if not isinstance(event, Mapping):
+                                        continue
+                                    sequence = int(event.get("sequence") or 0)
+                                    activity_cursor = max(activity_cursor, sequence)
+                                    if await self._record_model_route(binding, run_id, epoch, event):
+                                        continue
+                                    update = self._activity_update(event,
+                                        phone_progress_enabled=self._progress_enabled(binding))
+                                    if update is None:
+                                        continue
+                                    channel, content = update
+                                    if channel == "control" and event.get("required") is True:
+                                        await self._send_provider_update(binding, kind="commentary",
+                                            content=content, delegation_id=None)
+                                    elif channel == "commentary":
+                                        pending_progress = (sequence, content)
+                                if activity_cursor == before:
+                                    epoch = activity_epoch
+                            if epoch != activity_epoch or activity_cursor != before:
+                                self._action_event(binding, "progress_observed", {
+                                    "run_id": run_id, "source_epoch": epoch,
+                                    "source_sequence": activity_cursor})
+                            activity_epoch = epoch
+                    except Exception as exc:
+                        self.audit.record(binding, "action.progress_poll_failed", run_id=run_id,
+                            error_code=str(getattr(exc, "code", "progress_unavailable")))
+                if stopping or not self._progress_enabled(binding):
+                    pending_progress = None
+                elif pending_progress and monotonic() - last_progress_at >= 25.0:
+                    source_sequence, content = pending_progress
+                    if await self._send_provider_update(binding, kind="commentary",
+                            content=content, delegation_id=None):
+                        last_progress_at = monotonic()
+                        pending_progress = None
+                        self._action_event(binding, "progress_relayed", {
+                            "run_id": run_id, "source_epoch": activity_epoch,
+                            "source_sequence": source_sequence})
                 await asyncio.sleep(0.5)
                 continue
+            terminal_activity = None
+            if callable(self._poll_run_activity):
+                terminal_activity = asyncio.create_task(
+                    self._poll_run_activity(binding, request_id, activity_cursor, 64))
             results = {}
+            tool_observations = []
             unresolved = [item for item in actions if item["status"] not in {"verified", "cancelled", "failed"}]
             if callable(self._inspect_action_results) and unresolved:
                 try:
@@ -2168,9 +2446,37 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                         self._inspect_action_results(binding, request_id, unresolved), timeout=9.0)
                     results = {str(item.get("action_id")): item for item in inspection.get("actions", [])
                                if isinstance(item, Mapping)}
+                    tool_observations = [row for row in inspection.get("tool_observations", [])
+                                         if isinstance(row, Mapping)]
                 except Exception as exc:
                     self.audit.record(binding, "action.effect_inspection_failed", run_id=run_id,
                                       error_code=str(getattr(exc, "code", "effect_inspection_unavailable")))
+            if terminal_activity is not None:
+                try:
+                    # Request activity is bounded. Catch up across its pages
+                    # without delaying the final answer beyond two seconds.
+                    cursor = activity_cursor
+                    async with asyncio.timeout(2.0):
+                        for page in range(16):
+                            activity = (await terminal_activity if page == 0 else
+                                        await self._poll_run_activity(binding, request_id, cursor, 64))
+                            if activity.get("ok") is not True:
+                                break
+                            epoch = str(activity.get("ephemeral_epoch") or "")
+                            if activity_epoch and epoch != activity_epoch:
+                                break
+                            before_page = cursor
+                            for event in activity.get("events") or []:
+                                if isinstance(event, Mapping):
+                                    cursor = max(cursor, int(event.get("sequence") or 0))
+                                    await self._record_model_route(binding, run_id, epoch, event)
+                            latest = int(activity.get("latest_sequence") or cursor)
+                            if cursor <= before_page or cursor >= latest:
+                                break
+                except Exception as exc:
+                    self.audit.record(binding, "action.terminal_activity_unavailable", run_id=run_id,
+                                      error_code=str(getattr(exc, "code", "progress_unavailable")))
+            report = self._canonical_run_report(binding, run)
             facts = []
             for item in actions:
                 if item["status"] in {"verified", "cancelled", "failed"}:
@@ -2178,16 +2484,70 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                     continue
                 result = results.get(item["action_id"], {})
                 refs = result.get("evidence_refs", [])
-                verified = result.get("status") == "verified" and isinstance(refs, list) and bool(refs)
-                receipt = str(result.get("receipt") or "") if verified else (
-                    self._action_text(binding, "write_unconfirmed" if item["kind"] in {"write", "modify", "execute"} else "query_unconfirmed")
-                )
+                verified = (result.get("status") == "verified" and isinstance(refs, list) and bool(refs)
+                            and (state == "completed" or item["kind"] in {"write", "modify"}))
+                stop_requested = self._stop_was_requested(binding, item["action_id"])
+                stop_confirmed = stop_requested and state in {"stopped", "interrupted"}
+                if stop_confirmed:
+                    self._action_event(binding, "stop_confirmed", {
+                        "action_id": item["action_id"], "run_id": run_id,
+                        "run_state": state, "effect_verified": verified})
+                if verified:
+                    receipt = str(result.get("receipt") or "")
+                    if stop_confirmed:
+                        receipt = self._action_text(binding, "stop_confirmed") + " " + receipt
+                    elif state == "stopped":
+                        receipt = self._action_text(binding, "stopped_unattributed") + " " + receipt
+                    elif state == "interrupted":
+                        receipt = self._action_text(binding, "interrupted_unattributed") + " " + receipt
+                    elif stop_requested and state == "completed":
+                        receipt = self._action_text(binding, "stop_too_late") + " " + receipt
+                    status = "verified"
+                elif stop_confirmed:
+                    status = "cancelled"
+                    receipt = self._action_text(binding, "stop_confirmed")
+                    if item["kind"] == "query" and not report:
+                        read_count = sum(row.get("action_id") == item["action_id"] and row.get("kind") == "read"
+                                         for row in tool_observations)
+                        receipt += " " + (self._action_text(binding, "partial_reads").format(count=read_count)
+                                          if read_count else self._action_text(binding, "no_final_result"))
+                    if item["kind"] in {"write", "modify", "execute"}:
+                        receipt += " " + self._action_text(binding, "write_unconfirmed")
+                elif state in {"stopped", "interrupted"}:
+                    status = "unknown"
+                    receipt = self._action_text(binding, "stopped_unattributed" if state == "stopped"
+                                                else "interrupted_unattributed")
+                    if item["kind"] == "query" and not report:
+                        read_count = sum(row.get("action_id") == item["action_id"] and row.get("kind") == "read"
+                                         for row in tool_observations)
+                        receipt += " " + (self._action_text(binding, "partial_reads").format(count=read_count)
+                                          if read_count else self._action_text(binding, "no_final_result"))
+                    if item["kind"] in {"write", "modify", "execute"}:
+                        receipt += " " + self._action_text(binding, "write_unconfirmed")
+                elif state == "failed":
+                    status = "failed" if item["kind"] == "query" else "unknown"
+                    receipt = self._action_text(binding, "run_failed")
+                    if item["kind"] == "query" and not report:
+                        receipt += " " + self._action_text(binding, "no_final_result")
+                    if item["kind"] in {"write", "modify", "execute"}:
+                        receipt += " " + self._action_text(binding, "write_unconfirmed")
+                else:
+                    status = "unknown"
+                    receipt = (self._action_text(binding, "query_result_unverified")
+                               if report and item["kind"] == "query" else
+                               self._action_text(binding, "write_unconfirmed" if item["kind"] in
+                                   {"write", "modify", "execute"} else "query_unconfirmed"))
+                    if stop_requested and state == "completed":
+                        receipt = self._action_text(binding, "stop_too_late") + " " + receipt
                 facts.append(self.actions.transition(binding, item["action_id"],
-                    "verified" if verified else "unknown", run_id=run_id,
+                    status, run_id=run_id,
                     evidence_refs=refs if verified else [], receipt=receipt))
-            # The completed model message is intentionally not a success receipt.
-            # Commentary carries concrete findings/uncertainty, not an instruction-only update.
+            # The canonical final Message carries the complete answer. It is not
+            # evidence that any write succeeded or that every source was verified.
             content = "\n".join(f"{fact['summary']}: {fact['spoken_receipt']}" for fact in facts)
+            if report and (any(item["kind"] == "query" for item in actions)
+                           or any(fact["status"] == "unknown" for fact in facts)):
+                content += "\n" + self._action_text(binding, "result_reported") + "\n" + report
             if not content:
                 content = self._action_text(binding, "judgment_unavailable")
             relayed = await self._offer_action_reply(binding, "result-" + delegation_id, content, run_id=run_id)
@@ -2198,7 +2558,10 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                         summary="Verified action facts returned to the voice connection",
                         detail={"schema": CALL_EVENT_SCHEMA, "scope": binding.public_scope(),
                                 "delegation_id": delegation_id, "request_id": request_id,
-                                "actions": facts, "audible_delivery": "unverified"})
+                                "actions": facts, "run_state": state,
+                                "run_final_message_id": run.get("final_message_id"),
+                                "full_result_available": bool(report),
+                                "audible_delivery": "unverified"})
             self.audit.record(binding, "background.result_relayed" if relayed else "background.result_relay_failed",
                               delegation_id=delegation_id, run_id=run_id, request_id=request_id, outcome=state)
             return

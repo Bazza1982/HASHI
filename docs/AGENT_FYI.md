@@ -224,6 +224,22 @@ not repeat a greeting. Never hardcode a family title into shared instructions.
 Instruction acceptance, generated audio, player activity and device listening
 are different evidence. A movable or collapsed Phone window is display state
 and cannot hang up or recreate the connection.
+The compact Phone's “收起通话” control collapses it without changing chats.
+For delegated queries, use the complete canonical PAO final Message even if
+an effect check remains uncertain; the final text is information, not proof
+that a write committed or every source was verified. When asked for all
+findings, reuse that answer rather than starting the same query again.
+Stopping a running Run requires a later terminal confirmation; an unconfirmed
+interrupt is not a confirmed stop. A stopped query's partial reads
+are not a completed answer, while a saved record with readback may still be
+verified after stopping. The Run state and the effect remain separate.
+The foreground may switch brief spoken
+progress on or off from the caller's request. When enabled, relay only real,
+user-presentable activity at a restrained cadence; always deliver required
+approvals and final results. The backend's configured model route may be known
+without inferring task success or independent provider attestation.
+The Phone choice can show existing user-commentary activity even when another
+Connector's commentary display switch is off; private reasoning stays private.
 Continuous silent audio must not suppress the opening. Failed interpretation
 must retain an unexecuted partial request when later speech completes it.
 A confirmed opening with a continuously observed silent output window permits

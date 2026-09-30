@@ -64,8 +64,11 @@ class PhoneActions:
                                      (binding.call_id, action_id)).fetchone()
             if row is None:
                 raise LiveVoiceError("live_action_not_found", 404)
-            # A terminal effect cannot silently re-enter execution on reconnect.
-            if row["status"] in {"verified", "failed", "unknown", "cancelled"} and status in {"accepted", "running"}:
+            # A settled effect cannot be downgraded by a late cancellation or
+            # reconnect. Unknown may still be reconciled with real evidence.
+            if row["status"] in {"verified", "failed", "cancelled"} and status != row["status"]:
+                return self.public(row)
+            if row["status"] == "unknown" and status in {"accepted", "running"}:
                 return self.public(row)
             now = datetime.now(timezone.utc).isoformat()
             connection.execute(

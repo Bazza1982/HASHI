@@ -172,6 +172,33 @@ interpretation produces a visible unresolved result, never an invented success.
 Action completion requires attributable effect evidence rather than an Engine's
 terminal reply. Unknown commit outcomes stay unknown until reconciled.
 
+The canonical PAO final Message remains available as the complete informational
+answer to a query even when an independent effect inspection fails. Its text
+does not certify a write or every source. Effect inspection deduplicates tool
+receipts and bounds its verifier input; an over-budget inspection remains
+unknown rather than discarding the final answer. A repeated request for all
+findings reuses that Message and the existing action instead of starting a
+duplicate query. Terminal stopped/interrupted queries never become verified
+from partial reads. A stopped write can still have a verified independent
+save/readback effect; the stop state and the effect outcome remain separate.
+
+Phone reports cancellation in two stages: an accepted interrupt request and
+the later terminal Run state. A queued task removed before start may settle
+immediately; a running task is confirmed stopped only when its Run terminates.
+An unconfirmed stop request remains uncertain and does not suppress later
+progress. Completion before an interrupt is a distinct, factual outcome.
+Progress speech is an Agent-controlled call preference: the foreground model
+may turn it on or off from the caller's complete request. With progress on,
+PAO emits one start notice and only bounded, user-presentable commentary from
+real request activity; with it off, interim notices stop while required
+approvals and final results remain. Activity is observed by cursor without an
+extra model inference. A Phone-specific on choice may present an event already
+typed as user commentary even when a separate Connector's display preference
+is off; it never promotes private reasoning or tool telemetry to speech.
+Backend model route facts may enter foreground context
+as internal state, but a configured route or adapter response is not proof of
+task success or independent vendor model attestation.
+
 PAO also owns the durable opening identifier and its separate request,
 acceptance, output and player observations. Opening content comes from PCM,
 wire commands from the selected Connector adapter. The same logical call

@@ -506,6 +506,11 @@ The following decisions were accepted on 26 August 2026. They are normative and 
 | PCM-DEC-008 | PCM transports context and resource facts but never decides which historical topic or attachment is relevant to the current conversation. | Bind each attachment projection to its originating Message/Turn. Present only the current Message's attachments as current references; keep attachments from completed Turns inside their chronologically ordered historical exchanges, and never promote resources from failed or cancelled Turns. A cumulative Engine Session resource registry is transport/audit state, not a current-request or relevance selector. |
 | PCM-DEC-009 | A provider-hosted live voice session is an ephemeral transport for the same Agent and Conversation Session, not a Persona-only assistant or a second memory owner. | Put `[sys]`, both active `/sys` layers, HCC usage rules and Persona into formal provider instructions. Project complete enabled HCC, `[memory]`, enabled Memory+ and same-Session role-preserving recent messages as provider-neutral history; the qualified adapter encodes that history and applies its declared limits. Persist live transcript fragments to the HASHI Session as they arrive, derive later history and the visible call card from those fragments, keep provider storage disabled, and fail visibly instead of clipping HCC or an utterance. Express the user's subject and concrete outcomes in their effective language and Persona, with complete useful answers. PAO triggers the once-per-call opening only after media readiness; its wording is generated from these effective instructions and existing context, never a shared hardcoded name or relationship. |
 
+For Live Phone capacity pruning, a completed Run's final answer enters recent
+history at its actual completion time. An earlier user request must not anchor
+that later answer before newer speech and cause a fresh report to be evicted.
+Chronological presentation and whole-message capacity limits still apply.
+
 The WIP Journal remains temporarily as a bounded shadow/legacy compatibility
 projection while canonical HER recovery is validated. It must not be re-ingested
 when canonical recovery is available and must not become a competing authority.

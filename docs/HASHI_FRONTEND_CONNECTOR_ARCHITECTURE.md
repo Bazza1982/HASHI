@@ -584,6 +584,9 @@ Ordinary free model audio is not thereby certified before playback.
 The frontend retains one globally mounted call owner with captions, mute and
 explicit hang-up. Window movement, collapsing, restoring and navigation are
 display preferences, and do not recreate media or change logical call state.
+In the compact floating Phone, the text control reads “收起通话” in Chinese
+and collapses the call in place; it does not navigate to another chat. The
+existing application theme continues to own its appearance.
 The external frontend owns responsive layout and inherits its existing theme.
 Each transcript delta is durably written to the bound HASHI Session as it
 arrives. PCM derives role-preserving utterances from those canonical fragments,
@@ -621,6 +624,13 @@ the foreground voice should say enters `session.commentary.append`. Every
 append remains correlated with its source Run/delegation and acknowledgement.
 An unavailable sideband queues or defers that delivery; it never grants the
 background Run authority over the call lifecycle.
+The Phone reads the canonical PAO final Message directly for complete query
+content; a bounded effect check must not turn a completed report into “no
+results.” It separately tracks accepted interruption, terminal stop, and
+possible effects before stopping. Optional spoken progress comes from real
+presentable request activity and obeys the foreground call's on/off choice.
+Neither acceptance of provider updates nor one observed speech fragment
+proves that a long answer was spoken in full or heard on the user's device.
 
 The sideband stages each normalized transcript or typed delegation in a durable
 SessionStore inbox before placing it in the process-only projection queue. A

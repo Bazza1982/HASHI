@@ -129,6 +129,44 @@ async def test_stopped_query_cannot_be_verified_from_partial_successful_reads(ph
     assert inspected["run_result"] is None
     assert calls == []
 
+
+@pytest.mark.asyncio
+async def test_stopped_write_keeps_real_saved_readback_separate_from_stop(phone, tmp_path, monkeypatch):
+    accepted = phone.store.accept_run(
+        session_id=phone.session_id, owner_id=phone.owner_id, agent_id=phone.agent_id,
+        request_id="phone-stopped-write", text="Save the exercise record",
+        source="session-api", idempotency_key="phone-stopped-write",
+        expected_context_generation=phone.binding.context_generation,
+    )
+    runtime = SimpleNamespace(workspace_dir=tmp_path, name=phone.agent_id,
+                              session_store=phone.store)
+    registry = ToolRegistry(allowed_tools=["file_write"], access_root=tmp_path,
+                            workspace_dir=tmp_path, secrets={}, audit_context={
+        "_runtime": runtime, "owner_id": phone.owner_id,
+        "hashi_session_id": phone.session_id, "hashi_run_id": accepted.run_id,
+        "request_id": accepted.request_id})
+    saved = await registry.execute("file_write", {"path": "fitness.txt",
+        "content": "Exercise: 40 minutes\n"}, "save-before-stop")
+    assert not saved.is_error
+    phone.store.cancel_run(accepted.run_id, owner_id=phone.owner_id, reason="user_stop")
+
+    async def verify_saved_effect(_runtime, state, **_kwargs):
+        row = state["actions"][0]
+        receipt = row["receipts"][0]
+        assert row["kind"] == "write" and receipt["readback"] is True
+        assert receipt["observed"] == "Exercise: 40 minutes\n"
+        return {"actions": [{"action_id": row["action_id"], "verified": True,
+                             "evidence_refs": [receipt["evidence_ref"]],
+                             "receipt": "The exercise record was saved and read back."}]}
+
+    monkeypatch.setattr(worker_actions, "invoke_phone_judgment", verify_saved_effect)
+    inspected = await worker_actions.inspect_phone_action_results(runtime, accepted.request_id,
+        [{"action_id": "fitness", "kind": "write", "request": "Save the exercise record"}])
+    assert inspected["run_state"] == "stopped"
+    assert inspected["actions"][0]["status"] == "verified"
+    assert inspected["actions"][0]["evidence_refs"]
+    assert (tmp_path / "fitness.txt").read_text() == "Exercise: 40 minutes\n"
+
 @pytest.mark.asyncio
 async def test_failed_optional_verifier_preserves_completed_run_answer(phone, tmp_path, monkeypatch):
     accepted = phone.store.accept_run(

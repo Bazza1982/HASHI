@@ -267,13 +267,14 @@ async def inspect_phone_action_results(runtime: Any, request_id: str, actions: l
                "tool_observations": observations}
     if result_error:
         handoff["result_error"] = result_error
-    # A stopped/failed Run may have read some sources without finishing the
-    # user's request. Those partial effects must never certify a full result.
-    if run_state in {"stopped", "failed", "superseded", "interrupted"}:
+    # A stopped Run may still have a durable write with an independent
+    # readback. Partial query reads cannot certify the whole query.
+    unsettled_run = run_state in {"stopped", "failed", "superseded", "interrupted"}
+    verifiable_actions = ([item for item in actions if item["kind"] in {"write", "modify"}]
+                          if unsettled_run else actions)
+    if not verifiable_actions or not any(candidates[item["action_id"]] for item in verifiable_actions):
         return {**handoff, "actions": _unverified_actions(actions)}
-    if not any(candidates.values()):
-        return {**handoff, "actions": _unverified_actions(actions)}
-    state = _bounded_verification_state(actions, candidates,
+    state = _bounded_verification_state(verifiable_actions, candidates,
         reply_language=reply_language, fallback_language=fallback_language)
     if state is None:
         return {**handoff, "actions": _unverified_actions(actions),
@@ -299,6 +300,9 @@ async def inspect_phone_action_results(runtime: Any, request_id: str, actions: l
     claimed_refs: dict[str, str] = {}
     supplied_by_id = {item["action_id"]: item for item in state["actions"]}
     for item in actions:
+        if item["action_id"] not in supplied_by_id:
+            verified.extend(_unverified_actions([item]))
+            continue
         raw = raw_by_id.get(item["action_id"], {})
         supplied = supplied_by_id[item["action_id"]]
         allowed = {receipt["evidence_ref"] for receipt in supplied["receipts"]}
