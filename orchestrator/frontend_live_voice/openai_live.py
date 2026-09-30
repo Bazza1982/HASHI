@@ -8,8 +8,13 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
+import array
+import base64
+import binascii
 import json
 import logging
+import math
+import sys
 from urllib.parse import quote
 from orchestrator.phone_catalog import OPENAI_LIVE_VOICES
 from .openai_limits import (
@@ -26,6 +31,36 @@ ATTACH_ROOT = "wss://api.openai.com/v1/live/sessions"
 COUNT_INPUT_URL = "https://api.openai.com/v1/responses/input_tokens"
 MAX_FRAME_BYTES = 262144
 _LOGGER = logging.getLogger(__name__)
+
+
+def _reflected_output_activity(candidate: Mapping[str, Any]) -> dict[str, Any]:
+    """Reduce GPT-Live sideband PCM16LE mono 24 kHz to non-content evidence.
+
+    Digital silence permits at most one quantization bit. This is deliberately
+    not a speech classifier: quiet/unknown audio must never authorize a retry.
+    """
+    start, end = candidate.get("start_ms"), candidate.get("end_ms")
+    result = {"type": "output.generated", "activity": "unknown", "completion": "unknown",
+              "start_ms": start, "end_ms": end}
+    if (any(isinstance(value, bool) or not isinstance(value, (int, float))
+            or value < 0 or value > 2**53 - 1 or not math.isfinite(value) for value in (start, end))
+            or end <= start):
+        return result
+    encoded = candidate.get("delta")
+    if not isinstance(encoded, str) or not encoded:
+        return result
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError):
+        return result
+    if not raw or len(raw) % 2 or abs(len(raw) / 48 - (end - start)) > 1 / 24:
+        return result
+    samples = array.array("h")
+    samples.frombytes(raw)
+    if sys.byteorder != "little":
+        samples.byteswap()
+    result["activity"] = "silent" if all(-1 <= sample <= 1 for sample in samples) else "non_silent"
+    return result
 
 
 async def _response_bytes(response: Any, *, limit: int) -> bytes:
@@ -433,8 +468,7 @@ class OpenAILiveProvider:
         except (TypeError, ValueError) as exc:
             raise LiveVoiceError("live_provider_event_invalid", 502) from exc
         if isinstance(candidate, dict) and candidate.get("type") == "session.output_audio.delta":
-            return {"type": "output.generated", "start_ms": candidate.get("start_ms"),
-                    "end_ms": candidate.get("end_ms"), "completion": "unknown"}
+            return _reflected_output_activity(candidate)
         event = safe_sideband_event(raw)
         if event is None:
             return None

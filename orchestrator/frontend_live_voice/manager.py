@@ -11,6 +11,7 @@ import json
 import logging
 from pathlib import Path
 import sqlite3
+from time import monotonic
 from typing import Any
 from uuid import uuid4
 
@@ -25,7 +26,7 @@ from .delegation_policy import (
 )
 from .actions import PhoneActions
 from .provider import VoiceProvider, default_registry, select_provider
-from .opening import CallOpening, new_opening, opening_goal
+from .opening import CallOpening, OpeningAudioObservation, new_opening, opening_goal
 from .ports import AdmissionPort, DurableVoicePort, LiveApplicationPort
 from .protocol import CallBinding, Fragment, LiveVoiceError, identifier, normalize_transcript, positive_int, stable_digest
 from .service import LiveVoiceEventService
@@ -33,6 +34,15 @@ from orchestrator.session_store import SessionConflict, TERMINAL_RUN_STATES
 from tools.token_tracker import estimate_tokens
 
 logger = logging.getLogger(__name__)
+
+
+async def _wait_for_monotonic_deadline(deadline: float, *, clock=monotonic, sleep=asyncio.sleep) -> None:
+    # Windows event loops may wake up one timer tick early. An awaited sleep is
+    # not proof that the no-output observation window has actually elapsed.
+    while (remaining := deadline - clock()) > 0:
+        await sleep(max(0.02, remaining))
+
+
 ACTIVE_PHASES = {"connecting", "active", "ending", "recovering"}
 PROVIDER_SESSION_MAX_DURATION_SECONDS = 1800
 PROVIDER_SESSION_ROLLOVER_MARGIN_SECONDS = 90
@@ -233,6 +243,8 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         self._control_timeout_seconds = max(0.05, float(control_timeout_seconds))
         self._close_timeout_seconds = max(0.05, float(close_timeout_seconds))
         self._opening_grace_seconds = max(0.0, float(opening_grace_seconds))
+        self._opening_output_timeout_seconds = 8.0
+        self._opening_audio: dict[tuple[str, int, str], OpeningAudioObservation] = {}
         configured_logs = getattr(global_config, "base_logs_dir", None)
         default_logs = Path(self.session_store.db_path).parent.parent / "logs"
         self.audit = LiveVoiceAuditLog(Path(configured_logs or default_logs) / "voice_sessions")
@@ -425,39 +437,74 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         ), self._opening_tasks, binding=binding)
 
     async def _request_opening(self, binding: CallBinding, opening_id: str) -> None:
-        identity = (binding.call_id, opening_id)
-        waiter = asyncio.get_running_loop().create_future()
-        self._update_waiters[identity] = waiter
+        audio_key = (binding.call_id, binding.call_epoch, binding.provider_session_id)
+        observation = OpeningAudioObservation(maximum_arrival_gap=min(1.0, self._opening_output_timeout_seconds / 2))
+        self._opening_audio[audio_key] = observation
         try:
-            # Give the caller's local speech hint time to cross ingress before
-            # sending an unsolicited first sentence. Cancellation still wins.
-            await asyncio.sleep(self._opening_grace_seconds)
-            if not self._is_current_provider_binding(binding):
-                return
-            with self.session_store._lock, self.session_store._connection() as connection:
-                row = connection.execute("SELECT * FROM live_calls WHERE call_id = ?", (binding.call_id,)).fetchone()
-            if row is None or row["phase"] != "active" or self.opening.read(binding).get("state") != "requested":
-                return
-            adapter = self._provider_for(binding)
-            payload = adapter.opening(opening_goal(self._stored_phone_public(row) or {}), opening_id)
-            ws = self._active_sockets.get(binding.call_id)
-            if ws is None or getattr(ws, "closed", True):
-                self.opening.change(binding, "uncertain", reason="sideband_unavailable")
-                return
-            sent = self.opening.change(binding, "sent")
-            if sent.get("state") != "requested" or not sent.get("request_sent"):
-                return
-            await asyncio.wait_for(ws.send_json(payload), timeout=self._control_timeout_seconds)
-            accepted = await asyncio.wait_for(waiter, timeout=self._control_timeout_seconds)
-            self.opening.change(binding, "accepted" if accepted else "rejected")
+            for attempt in (1, 2):
+                # Both the first request and the single proven-silent
+                # continuation yield to the caller before sending anything.
+                await asyncio.sleep(self._opening_grace_seconds)
+                if not self._is_current_provider_binding(binding):
+                    return
+                with self.session_store._lock, self.session_store._connection() as connection:
+                    row = connection.execute("SELECT * FROM live_calls WHERE call_id = ?", (binding.call_id,)).fetchone()
+                state = self.opening.read(binding)
+                if row is None or row["phase"] != "active" or state.get("state") != "requested":
+                    return
+                if attempt == 2 and observation.silence_proof(elapsed_seconds=self._opening_output_timeout_seconds) is None:
+                    self.opening.change(binding, "uncertain", reason="opening_silence_evidence_changed")
+                    return
+                event_id = opening_id if attempt == 1 else opening_id + "-continuation"
+                adapter = self._provider_for(binding)
+                payload = adapter.opening(opening_goal(self._stored_phone_public(row) or {}, continuation=attempt == 2), event_id)
+                ws = self._active_sockets.get(binding.call_id)
+                if ws is None or getattr(ws, "closed", True):
+                    self.opening.change(binding, "uncertain", reason="sideband_unavailable")
+                    return
+                identity = (binding.call_id, event_id)
+                waiter = asyncio.get_running_loop().create_future()
+                self._update_waiters[identity] = waiter
+                try:
+                    sent = self.opening.change(binding, "sent", event_id=event_id)
+                    if sent.get("state") != "requested" or not sent.get("request_sent"):
+                        return
+                    await asyncio.wait_for(ws.send_json(payload), timeout=self._control_timeout_seconds)
+                    accepted = await asyncio.wait_for(waiter, timeout=self._control_timeout_seconds)
+                    self.opening.change(binding, "accepted" if accepted else "rejected")
+                    if not accepted:
+                        return
+                finally:
+                    self._update_waiters.pop(identity, None)
+                if attempt == 1:
+                    observation.acknowledge()
+                await _wait_for_monotonic_deadline(monotonic() + self._opening_output_timeout_seconds)
+                if not self._is_current_provider_binding(binding):
+                    return
+                state = self.opening.read(binding)
+                if state.get("state") != "accepted" or state.get("output_observed") or state.get("user_started"):
+                    return
+                proof = observation.silence_proof(elapsed_seconds=self._opening_output_timeout_seconds)
+                self.audit.record(binding, "opening.output_window", opening_id=opening_id,
+                    attempt=attempt, outcome="continuous_silence" if proof else "unconfirmed",
+                    reason="non_silent_audio" if observation.non_silent else "audio_observation_unknown"
+                    if observation.uncertain else "observation_window",
+                    continuation_evidence=proof)
+                if attempt != 1 or proof is None:
+                    self.opening.change(binding, "uncertain", reason="opening_output_unconfirmed")
+                    return
+                if not self.opening.change(binding, "continuation.claim", silence_proof=proof):
+                    return
         except asyncio.CancelledError:
-            self.opening.change(binding, "uncertain", reason="opening_interrupted")
+            if not self.opening.read(binding).get("output_observed"):
+                self.opening.change(binding, "uncertain", reason="opening_interrupted")
             raise
         except Exception as exc:
             self.opening.change(binding, "uncertain", reason="opening_confirmation_unavailable")
             self.audit.record(binding, "opening.failed", **exception_evidence(exc))
         finally:
-            self._update_waiters.pop(identity, None)
+            if self._opening_audio.get(audio_key) is observation:
+                self._opening_audio.pop(audio_key, None)
 
     def _observe_opening_provider(self, binding: CallBinding, event: Mapping[str, Any]) -> None:
         try:
@@ -473,7 +520,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                     self.opening.change(binding, "speech.generated")
             elif kind in {"update.accepted", "provider.error"}:
                 state = self.opening.read(binding)
-                if state and _provider_client_event_id(event) == state.get("opening_id"):
+                if state and _provider_client_event_id(event) == state.get("request_event_id", state.get("opening_id")):
                     self.opening.change(binding, "accepted" if kind == "update.accepted" else "rejected")
 
         except Exception as exc:
@@ -3620,15 +3667,17 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                         if event is None:
                             continue
                         event_type = event.get("type")
+                        if event_type == "output.generated":
+                            # Samples never reach PAO. While an opening is pending,
+                            # retain only bounded in-memory activity/timing evidence.
+                            # This fast path performs no per-packet SQLite or audit writes.
+                            observation = self._opening_audio.get((binding.call_id, binding.call_epoch, binding.provider_session_id))
+                            if observation is not None:
+                                observation.observe(event)
+                            continue
                         if not self._is_current_provider_binding(binding):
                             self.audit.record(binding, "provider.stale_epoch_event_ignored",
                                               provider_event_type=str(event_type or "unknown"))
-                            continue
-                        if event_type == "output.generated":
-                            # Continuous media includes silence before any speech.
-                            # A packet cannot consume the opening reservation or
-                            # prove a greeting was generated. Transcript evidence
-                            # after the request is sent is observed separately.
                             continue
                         if event_type in {"conversation.user.delta", "conversation.assistant.delta"}:
                             # Observe ordering when received, before a slow durable

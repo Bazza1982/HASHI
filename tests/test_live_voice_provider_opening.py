@@ -4,15 +4,18 @@ The alternate protocol is an offline fixture, not a qualified product provider.
 """
 
 import asyncio
+import base64
 from contextlib import asynccontextmanager
 import json
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 import aiohttp
 import pytest
-from orchestrator.frontend_live_voice.manager import LiveVoiceManager
+from orchestrator.frontend_live_voice.manager import LiveVoiceManager, _wait_for_monotonic_deadline
+from orchestrator.frontend_live_voice.opening import OpeningAudioObservation
 from orchestrator.frontend_live_voice.openai_live import OpenAILiveProvider
 from orchestrator.frontend_live_voice.protocol import CallBinding, LiveVoiceError
 from orchestrator.frontend_live_voice.provider import (
@@ -115,7 +118,9 @@ class AlternateProvider:
                 "type": "update.accepted",
                 "client_event_id": item.get("request"),
             },
-            "audio": {"type": "output.generated", "completion": "unknown"},
+            "audio": {"type": "output.generated", "completion": "unknown",
+                      "activity": item.get("activity", "unknown"),
+                      "start_ms": item.get("start_ms"), "end_ms": item.get("end_ms")},
             "assistant": {
                 "type": "conversation.assistant.delta",
                 "event_id": item.get("event_id", "assistant-opening-1"),
@@ -242,6 +247,173 @@ class TestPhoneProviderOpening:
             await asyncio.sleep(0.01)
             if not self.manager._opening_tasks:
                 break
+
+    async def until(self, predicate):
+        async with asyncio.timeout(5):
+            while not predicate():
+                await asyncio.sleep(0.005)
+
+    def audio_observation(self):
+        return self.manager._opening_audio.get((self.binding.call_id, self.binding.call_epoch,
+                                               self.binding.provider_session_id))
+
+    async def feed_silence(self, *, defect=None, callback=None, prior_baseline=True, lose_second_ack=False):
+        # Model continuous PCM independently of the caller task. Gate the first
+        # ACK explicitly so slow SQLite/Windows scheduling cannot accidentally
+        # make the test exercise a different protocol phase.
+        self.manager._opening_output_timeout_seconds = 0.6
+        self.manager._control_timeout_seconds = 1.0
+        self.adapter.acknowledge = False
+        await self.observe("client.media_ready", input_active=True, playback_unlocked=True)
+        await self.until(lambda: any(packet["command"] == "greet" for packet in self.adapter.sent))
+        await self.until(lambda: self.audio_observation() is not None)
+        stream_ready = asyncio.Event()
+        inject_defect = asyncio.Event()
+        async def stream():
+            position = 0
+            began = asyncio.get_running_loop().time()
+            while True:
+                end = max(position + 1, round((asyncio.get_running_loop().time() - began) * 1000))
+                selected = defect if inject_defect.is_set() else None
+                inject_defect.clear()
+                self.adapter.sockets[0].incoming.put_nowait({
+                    "signal": "audio", "activity": selected if selected and selected != "gap" else "silent",
+                    "start_ms": position + (1 if selected == "gap" else 0), "end_ms": end,
+                })
+                position = end
+                stream_ready.set()
+                await asyncio.sleep(0.01)
+        task = None
+        try:
+            if prior_baseline:
+                task = asyncio.create_task(stream())
+                await stream_ready.wait()
+                await self.until(lambda: self.audio_observation().last_end_ms is not None)
+            first = next(packet for packet in self.adapter.sent if packet["command"] == "greet")
+            self.adapter.sockets[0].incoming.put_nowait({"signal": "accepted", "request": first["request"]})
+            await self.until(lambda: self.audio_observation().acknowledged_at is not None)
+            self.adapter.acknowledge = not lose_second_ack
+            if task is None:
+                task = asyncio.create_task(stream())
+            if defect:
+                inject_defect.set()
+            if callback is not None:
+                await callback()
+            await self.until(lambda: not self.manager._opening_tasks)
+        finally:
+            if task is not None:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    async def test_confirmed_continuous_silence_gets_only_one_opening_continuation(self):
+        await self.start_call()
+        await self.feed_silence()
+        await self.settle()
+        greetings = [packet for packet in self.adapter.sent if packet["command"] == "greet"]
+        assert len(greetings) == 2
+        assert greetings[0]["request"] != greetings[1]["request"]
+        state = self.manager.opening.read(self.binding)
+        assert state["continuation_reserved"] is True
+        assert state["continuation_sent"] is True
+        assert not state["output_observed"]
+        await self.observe("client.media_ready", input_active=True, playback_unlocked=True)
+        await self.settle()
+        assert len([packet for packet in self.adapter.sent if packet["command"] == "greet"]) == 2
+
+    async def test_early_timer_wakeup_still_waits_for_actual_monotonic_deadline(self):
+        current = 0.0
+        waits = []
+        async def early_sleep(duration):
+            nonlocal current
+            waits.append(duration)
+            current += duration - 0.01 if len(waits) == 1 else duration
+        await _wait_for_monotonic_deadline(8.0, clock=lambda: current, sleep=early_sleep)
+        assert current >= 8.0
+        assert waits == [8.0, 0.02]
+
+    async def test_uncertain_or_non_silent_audio_cannot_be_washed_away_by_silence(self):
+        await self.start_call()
+        await self.feed_silence(defect="non_silent")
+        await self.settle()
+        assert len([packet for packet in self.adapter.sent if packet["command"] == "greet"]) == 1
+        assert not self.manager.opening.read(self.binding).get("continuation_reserved")
+
+    async def test_missing_audio_frame_cannot_authorize_opening_continuation(self):
+        await self.start_call()
+        await self.feed_silence(defect="gap")
+        await self.settle()
+        assert len([packet for packet in self.adapter.sent if packet["command"] == "greet"]) == 1
+
+    async def test_unknown_audio_cannot_be_washed_away_by_later_silence(self):
+        await self.start_call()
+        await self.feed_silence(defect="unknown")
+        await self.settle()
+        assert len([packet for packet in self.adapter.sent if packet["command"] == "greet"]) == 1
+
+    async def test_user_speech_during_silence_observation_cancels_continuation(self):
+        await self.start_call()
+        await self.feed_silence(callback=lambda: self.observe("client.user_speech_started"))
+        await self.settle()
+        assert len([packet for packet in self.adapter.sent if packet["command"] == "greet"]) == 1
+        assert self.manager.opening.read(self.binding)["user_started"]
+
+    async def test_missing_continuation_ack_never_sends_a_third_request(self):
+        await self.start_call()
+        await self.feed_silence(lose_second_ack=True)
+        await self.settle()
+        state = self.manager.opening.read(self.binding)
+        assert state["continuation_sent"] and not state["continuation_accepted"]
+        assert state["state"] == "uncertain"
+        assert len([packet for packet in self.adapter.sent if packet["command"] == "greet"]) == 2
+        await self.observe("client.media_ready", input_active=True, playback_unlocked=True)
+        await self.settle()
+        assert len([packet for packet in self.adapter.sent if packet["command"] == "greet"]) == 2
+
+    async def test_only_silence_after_ack_without_prior_pcm_baseline_is_uncertain(self):
+        await self.start_call()
+        await self.feed_silence(prior_baseline=False)
+        await self.settle()
+        assert len([packet for packet in self.adapter.sent if packet["command"] == "greet"]) == 1
+
+    async def test_epoch_change_during_observation_never_continues_old_opening(self):
+        await self.start_call()
+        async def change_epoch():
+            with self.store._lock, self.store._connection() as connection:
+                connection.execute("UPDATE live_calls SET call_epoch=2,provider_session_id='next-provider' WHERE call_id=?",
+                                   (self.binding.call_id,))
+        await self.feed_silence(callback=change_epoch)
+        await self.settle()
+        assert len([packet for packet in self.adapter.sent if packet["command"] == "greet"]) == 1
+        assert not self.manager._opening_audio
+
+    async def test_audio_observations_do_not_read_or_write_session_state_per_packet(self):
+        self.manager._control_timeout_seconds = 1.0
+        await self.start_call()
+        await self.observe("client.media_ready", input_active=True, playback_unlocked=True)
+        await self.until(lambda: self.audio_observation() is not None
+                         and self.audio_observation().acknowledged_at is not None)
+        with patch.object(self.store, "_connection", wraps=self.store._connection) as connections:
+            for index in range(100):
+                self.adapter.sockets[0].incoming.put_nowait({"signal": "audio", "activity": "silent",
+                    "start_ms": index * 10, "end_ms": (index + 1) * 10})
+            await self.until(lambda: self.audio_observation().last_end_ms == 1000)
+            assert connections.call_count == 0
+        observation = self.manager._opening_audio[(self.binding.call_id, 1, self.binding.provider_session_id)]
+        assert observation.last_end_ms == 1000
+
+    async def test_native_reflected_pcm_silence_is_validated_without_exposing_audio(self):
+        adapter = OpenAILiveProvider()
+        audio = base64.b64encode(b"\0\0" * 240).decode()
+        raw = {"type": "session.output_audio.delta", "delta": audio, "start_ms": 0, "end_ms": 10}
+        event = adapter.normalize_event(json.dumps(raw))
+        assert event["activity"] == "silent"
+        assert "delta" not in event and "audio" not in event
+        for changed in ({"delta": ""}, {"delta": "bad"}, {"delta": base64.b64encode(b"\0").decode()},
+                        {"start_ms": True}, {"end_ms": 11}, {"end_ms": float("nan")},
+                        {"start_ms": 10**1000, "end_ms": 10**1000 + 10}):
+            assert adapter.normalize_event(json.dumps({**raw, **changed}))["activity"] == "unknown"
+        speaking = base64.b64encode(b"\x20\x00" * 240).decode()
+        assert adapter.normalize_event(json.dumps({**raw, "delta": speaking}))["activity"] == "non_silent"
 
     async def test_alternate_protocol_waits_for_media_and_separates_ack_audio_playback(
         self,
@@ -453,6 +625,43 @@ class TestPhoneProviderOpening:
 
 
 class QualifiedAdapterTests(unittest.TestCase):
+    def test_stale_pre_ack_baseline_and_delayed_first_frame_are_unknown(self):
+        stale = OpeningAudioObservation()
+        stale.observe({"activity": "silent", "start_ms": 0, "end_ms": 10}, now=0)
+        stale.acknowledge(now=2)
+        assert stale.uncertain is True
+        delayed = OpeningAudioObservation()
+        delayed.observe({"activity": "silent", "start_ms": 0, "end_ms": 10}, now=0)
+        delayed.acknowledge(now=0)
+        delayed.observe({"activity": "silent", "start_ms": 10, "end_ms": 20}, now=2)
+        assert delayed.uncertain is True
+        invalid = OpeningAudioObservation()
+        invalid.observe({"activity": "silent", "start_ms": 10**1000, "end_ms": 10**1000 + 10}, now=0)
+        assert invalid.uncertain is True
+
+    def test_sparse_arrival_then_old_frame_burst_cannot_prove_continuous_silence(self):
+        observation = OpeningAudioObservation()
+        observation.observe({"activity": "silent", "start_ms": 0, "end_ms": 10}, now=0)
+        observation.acknowledge(now=0)
+        observation.observe({"activity": "silent", "start_ms": 10, "end_ms": 20}, now=0.1)
+        for index in range(80):
+            observation.observe({"activity": "silent", "start_ms": 20 + index * 100,
+                                 "end_ms": 120 + index * 100}, now=7.9)
+        assert observation.silence_proof(elapsed_seconds=8, now=8) is None
+        assert observation.uncertain is True
+
+    def test_burst_old_frames_and_absent_pre_ack_audio_cannot_prove_live_silence(self):
+        observation = OpeningAudioObservation()
+        observation.observe({"activity": "silent", "start_ms": 0, "end_ms": 10}, now=0)
+        observation.acknowledge(now=0)
+        observation.observe({"activity": "silent", "start_ms": 10, "end_ms": 7010}, now=8)
+        assert observation.silence_proof(elapsed_seconds=8, now=8.1) is None
+        missing = OpeningAudioObservation()
+        missing.acknowledge(now=0)
+        for index in range(9):
+            missing.observe({"activity": "silent", "start_ms": index * 1000, "end_ms": (index + 1) * 1000}, now=index)
+        assert missing.silence_proof(elapsed_seconds=8, now=8.1) is None
+
     def test_default_registry_and_reflected_audio_are_honest(self):
         assert set(default_registry()) == {"openai"}
         adapter = OpenAILiveProvider()
@@ -467,6 +676,7 @@ class QualifiedAdapterTests(unittest.TestCase):
             )
         ) == {
             "type": "output.generated",
+            "activity": "unknown",
             "start_ms": 1,
             "end_ms": 20,
             "completion": "unknown",

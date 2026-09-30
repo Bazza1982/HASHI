@@ -53,6 +53,7 @@ _ALLOWED_DETAIL_KEYS = frozenset({
     "visible", "ws_close_code", "ws_message_type",
     "opening_id", "request_sent", "request_accepted", "output_observed",
     "output_evidence", "playback_observed",
+    "continuation_reserved", "continuation_sent", "continuation_accepted", "continuation_evidence",
 })
 _SECRET_PATTERNS = (
     re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~-]+"),

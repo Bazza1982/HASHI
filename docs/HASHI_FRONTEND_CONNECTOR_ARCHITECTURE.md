@@ -541,6 +541,9 @@ or a reduced-permission assistant. The foreground model answers from supplied
 facts and presents the user's subject, with enough substance for the requested
 detail. PCM retains effective Persona, address, language and authority layers;
 shared Phone instructions never hardcode a personal address or relationship.
+Spoken results identify records by short names and requested contents. Detailed
+paths, links and code are supplied when requested, keeping ordinary speech
+suited to listening while preserving the caller's explicit presentation rules.
 
 PAO interprets a complete request with recent conversation and real action
 state through a bounded, configured semantic capability. It does not infer
@@ -676,6 +679,12 @@ Continuous audio packets may contain silence and cannot consume an opening
 reservation. Only valid assistant speech text observed after the opening was
 sent advances its generation observation; a moving playback clock alone is
 insufficient.
+After a confirmed opening request, a single persisted continuation may be
+reserved only when current-epoch PCM and local observation both establish a
+continuous silent window. Missing frames, stalled observations, unknown audio,
+any non-silent output or caller speech prevent it. This bounded observation
+stays in memory; audio packets create no per-packet Session or audit writes.
+Lost acceptance never authorizes this continuation or an additional retry.
 
 ## 9. Engineering-layer placement
 

@@ -205,7 +205,9 @@ privacy-bounded per-call lifecycle log independent of Session event sequencing;
 transcript content remains canonical in the Session.
 
 Live speech presents the user's facts and requested level of detail. Phone
-action interpretation uses complete conversational meaning, not keyword lists:
+results identify saved items by a short name and their contents; long paths and
+code are supplied when requested rather than added to ordinary spoken results.
+Phone action interpretation uses complete conversational meaning, not keyword lists:
 recording, modification, query and cancellation must preserve their actual
 targets. Urgency does not duplicate a task, while independent new work remains
 admissible. Verified completion needs attributable execution evidence; a model's
@@ -224,6 +226,9 @@ are different evidence. A movable or collapsed Phone window is display state
 and cannot hang up or recreate the connection.
 Continuous silent audio must not suppress the opening. Failed interpretation
 must retain an unexecuted partial request when later speech completes it.
+A confirmed opening with a continuously observed silent output window permits
+one durable continuation; missing or uncertain audio and lost acceptance do
+not. Raw samples and per-packet state are not persisted.
 
 Phone admission follows the existing primary-Session fence before media setup
 and before Worker invocation. Save/readback steps for one outcome belong to one
