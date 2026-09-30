@@ -515,26 +515,29 @@ contain the canonical `[sys]`, active instance-global `/sys`, active Agent-local
 `/sys`, HCC usage rules, Persona, and fixed live-call transport rules with their
 authority kept explicit. HCC reference data, `[memory]`, enabled Memory+
 continuity, and the same Conversation Session's real recent user/assistant
-messages enter provider startup `input`. PAO also projects a bounded window of
-that Agent's completed activity results so recent cron, heartbeat, HChat, and
-proactive outcomes already known to HASHI are available without another Run;
+messages enter provider startup `input`. PAO retrieves that Agent's recent
+completed activity results so cron, heartbeat, HChat, and proactive outcomes
+already known to HASHI can be made available without another Run;
 task prompts, progress notices, cost cards, and other presentation-only rows do
 not enter this reference. None of these facts is rewritten into another memory
 store. Credentials and raw PCM files remain excluded.
 
 The OpenAI GPT-Live adapter keeps the provider's 16,384-token instruction limit
-and the 128-message/8,192-token startup-input hard limits. PCM first supplies the
-largest whole-message candidate allowed by the message limit. At call start the
-adapter asks OpenAI's authoritative `/v1/responses/input_tokens` counter for the
-exact input size, then removes only the oldest complete conversation units until
-the candidate fits. The recent completed-activity reference is optional and
-yields before any conversation unit; HCC, memory, and the newest complete
-dialogue remain protected. Local estimates remain audit telemetry and never decide
-provider admission. HCC and the other mandatory context are never clipped; if
-they alone exceed the exact ceiling, or the newest complete dialogue unit cannot
-fit beside them, startup fails visibly rather than truncating a sentence or
-cache. `store:false` remains mandatory, so HASHI's Session record, not a
-provider recording, owns continuity.
+and the 128-message/8,192-token startup-input hard limits. PCM and the adapter
+must fit whole conversation units while preserving effective instructions,
+configured memory/HCC, and access to recent completed results needed for an
+immediate answer. In the 2026-10-01 Sunny call, capacity fitting omitted the
+earlier same-Session Gmail and Hong Kong news final Messages. The separate
+completed-activity reference, if admitted at the PCM stage, was the first
+optional history unit and could not survive the recorded prefix pruning.
+Neither loss is an accepted capacity policy. A shortened reference must
+disclose its boundary and retain access to the complete original result. The
+adapter uses the provider's exact input counter and must record a privacy-safe
+section inclusion/omission manifest; the manifest is not yet implemented.
+Local estimates remain audit telemetry. If required foreground facts cannot be
+made available within the provider limit, startup fails visibly instead of
+presenting a falsely informed assistant. `store:false` remains mandatory, so
+HASHI's Session record, not a provider recording, owns continuity.
 
 The live phone is another transport for the selected Agent, not a second Agent
 or a reduced-permission assistant. The foreground model answers from supplied

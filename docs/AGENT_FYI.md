@@ -182,19 +182,17 @@ media. Workbench receives a Session `audio_attachment`; Telegram uses its
 voice renderer. Report voice sidecars prepend the HASHI root before calling the
 standard media CLI. Never route non-Telegram previews through Telegram.
 
-`/phone` is the same Agent and Conversation Session over GPT-Live, not a
-Persona-only assistant. Formal startup instructions carry `[sys]`, both `/sys`
-layers and Persona; startup history carries complete enabled HCC, `[memory]`,
-enabled Memory+ and bounded same-Session dialogue. Live transcript fragments
-write to HASHI as they arrive and feed later text or phone turns; the visible
-call card is only a derived view. A bounded reference of recent completed
-Agent-activity results also enters startup context; task prompts, progress,
-cost, and presentation-only rows do not. Keep provider storage off and never
-clip HCC or part of an utterance to make a call fit. Startup-history selection
-leaves a candidate up to the provider's full message limit, then uses OpenAI's
-exact input-token count before session creation. The optional activity
-reference yields first, followed only by oldest complete dialogue units when
-the exact 8,192-token ceiling requires it; local estimates are telemetry only.
+`/phone` places voice in the foreground while the same selected HASHI Agent
+does delegated work in the background. Formal startup instructions carry
+`[sys]`, both `/sys` layers and Persona; startup context carries configured
+HCC and memory, recent conversation, and completed cron/job results needed
+for an immediate answer. Live transcript fragments write to HASHI as they
+arrive; the visible call card is only a derived view. Keep provider storage
+off. Capacity fitting must preserve access to relevant original results and
+record which sections actually reached the provider. The 2026-10-01 Sunny call
+lost earlier same-Session news and mail reports and could not retain its
+separate optional activity reference; neither is an accepted rule. See the PCM
+and Frontend Connector decisions.
 
 An engaged `/phone` call is the owner's foreground conversation. All other
 Runs/events—including delegated work, text/API input, cron, heartbeat, HChat,
@@ -229,6 +227,10 @@ For delegated queries, use the complete canonical PAO final Message even if
 an effect check remains uncertain; the final text is information, not proof
 that a write committed or every source was verified. When asked for all
 findings, reuse that answer rather than starting the same query again.
+The foreground must be able to read that final Message from durable PAO state.
+Provider append acceptance proves only that the submitted text was accepted;
+it does not prove the foreground model used the complete result. Any later
+speech fragment does not prove full content coverage or playback.
 Stopping a running Run requires a later terminal confirmation; an unconfirmed
 interrupt is not a confirmed stop. A stopped query's partial reads
 are not a completed answer, while a saved record with readback may still be

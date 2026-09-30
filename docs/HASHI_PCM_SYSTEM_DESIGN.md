@@ -511,6 +511,27 @@ history at its actual completion time. An earlier user request must not anchor
 that later answer before newer speech and cause a fresh report to be evicted.
 Chronological presentation and whole-message capacity limits still apply.
 
+### Live Phone foreground initiation correction (2026-10-01)
+
+The voice model is the foreground for the current call; the selected HASHI
+Agent performs delegated work in the background. This is one Agent identity,
+not two independent assistants. At the opening turn, PCM must project the
+effective instructions, Persona, configured memory and HCC, recent
+conversation, and completed Agent activity including cron/job results. A
+completed result needed for an immediate answer must remain available with
+its subject, status, provenance, and full original content. A shortened
+reference must identify itself as such and retain an addressable original;
+it may not silently masquerade as the whole result. Capacity fitting must not
+silently remove all access to a relevant completed result. If the required
+foreground facts cannot be made available, initiation reports that limitation
+instead of asking the Agent to guess or re-run completed work.
+
+This clarification supersedes the earlier rule that the entire recent
+activity reference simply yields before conversation history. A privacy-safe
+inclusion manifest must show which PCM sections and completed-result references
+were actually supplied to the provider, which were omitted, and why. A Session
+record or visible chat card alone does not prove foreground model access.
+
 The WIP Journal remains temporarily as a bounded shadow/legacy compatibility
 projection while canonical HER recovery is validated. It must not be re-ingested
 when canonical recovery is available and must not become a competing authority.

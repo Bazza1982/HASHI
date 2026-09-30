@@ -199,6 +199,31 @@ Backend model route facts may enter foreground context
 as internal state, but a configured route or adapter response is not proof of
 task success or independent vendor model attestation.
 
+#### Live Phone background-result handoff correction (2026-10-01)
+
+The foreground voice and background execution belong to the same selected
+Agent. PAO must retain each delegated Run's terminal state and, when produced,
+its complete final Message as one addressable result correlated to the spoken
+request. A short status receipt, UI card, or provider append acknowledgement
+is not the result. The foreground must have a way to read the original result
+without repeating the background Run; long results need explicit content
+boundaries and continuation position so an answer requested in full cannot
+silently shrink to a few items.
+
+Handoff evidence distinguishes the persisted result, the material offered to
+the provider, provider acceptance, the foreground's observed response content,
+and local playback. Any assistant fragment proves only that some output was
+generated; it does not prove the result was understood, covered in full, or
+heard. If the provider offers no consumption acknowledgement, record that
+limit honestly and verify content coverage at the product boundary. A later
+foreground turn must be able to recover the same result from PAO state.
+
+The 2026-10-01 Sunny incident is a failed acceptance case: completed Gmail and
+Hong Kong news final Messages existed, while the then-running Phone relay sent
+only short uncertainty receipts. Later source changes that read the canonical final
+Message still require a real completed-Run handoff and spoken-coverage check;
+provider acceptance or a generic speech fragment cannot close this case.
+
 PAO also owns the durable opening identifier and its separate request,
 acceptance, output and player observations. Opening content comes from PCM,
 wire commands from the selected Connector adapter. The same logical call
