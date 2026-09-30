@@ -7,8 +7,9 @@ from types import SimpleNamespace
 import pytest
 
 from orchestrator.frontend_live_voice import worker_actions
-from tests.test_live_voice_actions import phone
 from tools.registry import ToolRegistry
+
+pytest_plugins = ("tests.test_live_voice_actions",)
 
 
 @pytest.mark.asyncio
