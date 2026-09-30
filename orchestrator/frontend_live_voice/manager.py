@@ -70,7 +70,8 @@ CLIENT_OBSERVATION_DETAIL_KEYS = frozenset({
 TERMINATION_INITIATORS = frozenset({"client_fault", "system", "unknown", "user"})
 TERMINATION_REASONS = frozenset({
     "component_dispose", "data_channel_closed", "data_channel_error",
-    "lease_expired", "legacy_unspecified", "maximum_duration_reached", "network_offline",
+    "lease_expired", "legacy_unspecified", "maximum_duration_reached",
+    "media_track_ended", "network_offline",
     "page_unload", "peer_connection_closed", "peer_connection_failed",
     "provider_closed", "scope_departure", "service_shutdown", "sideband_disconnected",
     "start_cancelled", "startup_failed", "user_hangup",

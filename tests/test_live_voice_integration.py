@@ -256,7 +256,7 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
 
         fault = asyncio.run(self.manager._op_control(self.owner_id, {
             **self.scope, "action": "end", "idempotency_key": "ctrl-fault-1",
-            "termination_initiator": "client_fault", "termination_reason": "network_offline",
+            "termination_initiator": "client_fault", "termination_reason": "media_track_ended",
         }))
         self.assertTrue(fault["ok"])
         self.assertFalse(fault["applied"])
