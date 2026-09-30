@@ -21,6 +21,11 @@ from orchestrator.phone_catalog import (
 )
 from .audit import LiveVoiceAuditLog, exception_evidence
 from .delegation import Proposal, build_proposal
+from .delegation_policy import (
+    DelegationRoute,
+    is_affirmative_confirmation,
+    route_delegation,
+)
 from .openai_live import (
     append_update,
     attach_provider,
@@ -1209,7 +1214,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         await self._admit_ready_delegation(binding, proposal)
 
     async def _admit_ready_delegation(self, binding: CallBinding, proposal: Proposal) -> None:
-        """Admit provider delegation as an ordinary Agent turn, without a phone-only gate."""
+        """Route a provider proposal without letting conversation become queued work."""
 
         if proposal.ambiguous or not proposal.text.strip():
             await self._send_provider_update(
@@ -1220,6 +1225,52 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                     "repeat it before starting any work."
                 ),
                 delegation_id=proposal.delegation_id,
+            )
+            return
+        proposal, confirmed = self._promote_confirmed_backend_check(binding, proposal)
+        route = route_delegation(proposal.text)
+        if confirmed:
+            route = route_delegation("inspect the requested current backend state")
+        if route.route is DelegationRoute.DIRECT:
+            await self._finish_delegation_without_run(
+                binding,
+                proposal,
+                decision="handled_locally",
+                reason=route.reason,
+                confidence=route.confidence,
+                provider_instruction=(
+                    "Do not start a HASHI run for this utterance. Answer the user now from "
+                    "the supplied conversation and reference context. This is a correction, "
+                    "follow-up, or ordinary foreground conversation."
+                ),
+            )
+            return
+        if route.route is DelegationRoute.CONFIRM:
+            await self._finish_delegation_without_run(
+                binding,
+                proposal,
+                decision="confirmation_requested",
+                reason=route.reason,
+                confidence=route.confidence,
+                provider_instruction=(
+                    "Do not start a HASHI run yet. First answer with the relevant facts already "
+                    "present in the supplied context. Then ask one short question: whether the "
+                    "user wants a fresh backend check. Delegate only after an explicit yes."
+                ),
+            )
+            return
+        if self._call_has_active_delegation(binding, proposal.delegation_id):
+            await self._finish_delegation_without_run(
+                binding,
+                proposal,
+                decision="coalesced",
+                reason="one_background_run_already_active",
+                confidence=1.0,
+                provider_instruction=(
+                    "A HASHI background run for this call is already active. Do not queue "
+                    "another run. Treat this utterance as a foreground correction or follow-up, "
+                    "reply naturally, and use the existing run result when it arrives."
+                ),
             )
             return
         admission = {
@@ -1258,6 +1309,196 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                     delegation_id=proposal.delegation_id,
                 )
                 return
+
+    def _promote_confirmed_backend_check(
+        self, binding: CallBinding, proposal: Proposal
+    ) -> tuple[Proposal, bool]:
+        if not is_affirmative_confirmation(proposal.text):
+            return proposal, False
+        with self.session_store._lock, self.session_store._connection() as connection:
+            prior = connection.execute(
+                """SELECT delegation_id, proposal_text, proposal_digest,
+                          source_event_ids_json
+                   FROM live_delegations
+                   WHERE call_id = ? AND call_epoch = ?
+                     AND delegation_id != ?
+                     AND decision = 'confirmation_requested'
+                     AND expires_at >= ?
+                   ORDER BY created_at DESC
+                   LIMIT 1""",
+                (
+                    binding.call_id,
+                    binding.call_epoch,
+                    proposal.delegation_id,
+                    _utc_now(),
+                ),
+            ).fetchone()
+            if prior is None:
+                return proposal, False
+            prior_text = str(prior["proposal_text"] or "").strip()
+            if not prior_text:
+                return proposal, False
+            try:
+                prior_sources = tuple(json.loads(prior["source_event_ids_json"] or "[]"))
+            except (TypeError, ValueError):
+                prior_sources = ()
+            source_event_ids = tuple(dict.fromkeys((*prior_sources, *proposal.source_event_ids)))
+            confirmed_text = (
+                "Perform the fresh backend check the user explicitly confirmed for this "
+                f"request: {prior_text}"
+            )
+            confirmed_digest = stable_digest(
+                {
+                    "kind": "confirmed_live_backend_check",
+                    "prior_delegation_id": str(prior["delegation_id"]),
+                    "prior_digest": str(prior["proposal_digest"]),
+                    "confirmation_digest": proposal.digest,
+                    "text": confirmed_text,
+                }
+            )
+            connection.execute(
+                """UPDATE live_delegations
+                   SET proposal_text = ?, proposal_digest = ?, source_event_ids_json = ?
+                   WHERE call_id = ? AND call_epoch = ? AND delegation_id = ?
+                     AND decision IS NULL""",
+                (
+                    confirmed_text,
+                    confirmed_digest,
+                    json.dumps(list(source_event_ids)),
+                    binding.call_id,
+                    binding.call_epoch,
+                    proposal.delegation_id,
+                ),
+            )
+            connection.execute(
+                """UPDATE live_delegations SET decision = 'confirmed', decided_at = ?
+                   WHERE call_id = ? AND call_epoch = ? AND delegation_id = ?
+                     AND decision = 'confirmation_requested'""",
+                (
+                    _utc_now(),
+                    binding.call_id,
+                    binding.call_epoch,
+                    str(prior["delegation_id"]),
+                ),
+            )
+            self.session_store._append_event(
+                connection,
+                session_id=binding.session_id,
+                run_id=None,
+                kind="voice.live.delegation.confirmed",
+                summary="User confirmed a fresh backend check",
+                detail={
+                    "schema": CALL_EVENT_SCHEMA,
+                    "scope": binding.public_scope(),
+                    "delegation_id": proposal.delegation_id,
+                    "confirmed_delegation_id": str(prior["delegation_id"]),
+                },
+            )
+        return (
+            Proposal(
+                delegation_id=proposal.delegation_id,
+                version=proposal.version,
+                text=confirmed_text,
+                source_event_ids=source_event_ids,
+                digest=confirmed_digest,
+                ambiguous=False,
+                cutoff_ms=proposal.cutoff_ms,
+                expires_at=proposal.expires_at,
+            ),
+            True,
+        )
+
+    def _call_has_active_delegation(
+        self, binding: CallBinding, current_delegation_id: str
+    ) -> bool:
+        terminal = tuple(sorted(TERMINAL_RUN_STATES))
+        placeholders = ", ".join("?" for _ in terminal)
+        with self.session_store._lock, self.session_store._connection() as connection:
+            row = connection.execute(
+                f"""SELECT 1
+                    FROM live_delegations AS d
+                    LEFT JOIN runs AS r ON r.run_id = d.accepted_run_id
+                    WHERE d.call_id = ? AND d.call_epoch = ?
+                      AND d.delegation_id != ?
+                      AND (
+                        d.decision IN ('confirming', 'admitting')
+                        OR (
+                          d.decision = 'admitted'
+                          AND (r.state IS NULL OR r.state NOT IN ({placeholders}))
+                        )
+                      )
+                    LIMIT 1""",
+                (
+                    binding.call_id,
+                    binding.call_epoch,
+                    current_delegation_id,
+                    *terminal,
+                ),
+            ).fetchone()
+        return row is not None
+
+    async def _finish_delegation_without_run(
+        self,
+        binding: CallBinding,
+        proposal: Proposal,
+        *,
+        decision: str,
+        reason: str,
+        confidence: float,
+        provider_instruction: str,
+    ) -> None:
+        now = _utc_now()
+        applied = False
+        with self.session_store._lock, self.session_store._connection() as connection:
+            current = connection.execute(
+                """SELECT decision FROM live_delegations
+                   WHERE call_id = ? AND call_epoch = ? AND delegation_id = ?""",
+                (binding.call_id, binding.call_epoch, proposal.delegation_id),
+            ).fetchone()
+            if current is not None and current["decision"] is None:
+                connection.execute(
+                    """UPDATE live_delegations SET decision = ?, decided_at = ?
+                       WHERE call_id = ? AND call_epoch = ? AND delegation_id = ?""",
+                    (
+                        decision,
+                        now,
+                        binding.call_id,
+                        binding.call_epoch,
+                        proposal.delegation_id,
+                    ),
+                )
+                self.session_store._append_event(
+                    connection,
+                    session_id=binding.session_id,
+                    run_id=None,
+                    kind="voice.live.delegation.routed",
+                    summary=f"Live delegation routed without Run: {decision}",
+                    detail={
+                        "schema": CALL_EVENT_SCHEMA,
+                        "scope": binding.public_scope(),
+                        "delegation_id": proposal.delegation_id,
+                        "decision": decision,
+                        "reason": reason,
+                        "confidence": confidence,
+                    },
+                )
+                applied = True
+        if not applied:
+            return
+        self.audit.record(
+            binding,
+            "background.delegation_routed_without_run",
+            delegation_id=proposal.delegation_id,
+            decision=decision,
+            reason=reason,
+            confidence=confidence,
+        )
+        await self._send_provider_update(
+            binding,
+            kind="instructions",
+            content=provider_instruction,
+            delegation_id=proposal.delegation_id,
+        )
 
     async def read_proposal(self, binding: CallBinding, delegation_id: str) -> Proposal:
         with self.session_store._lock, self.session_store._connection() as connection:
@@ -1832,13 +2073,20 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 history_unit_message_counts = context_audit.get(
                     "history_unit_message_counts", []
                 )
+                fit_kwargs = {
+                    "key": self._get_api_key(),
+                    "model": phone_session["model"],
+                    "input_messages": phone_session["input"],
+                    "required_message_count": required_message_count,
+                    "history_unit_message_counts": history_unit_message_counts,
+                }
+                optional_units = int(
+                    context_audit.get("optional_reference_units", 0)
+                )
+                if optional_units:
+                    fit_kwargs["optional_prefix_unit_count"] = optional_units
                 provider_input, exact_audit = await fit_live_session_input(
-                    http,
-                    key=self._get_api_key(),
-                    model=phone_session["model"],
-                    input_messages=phone_session["input"],
-                    required_message_count=required_message_count,
-                    history_unit_message_counts=history_unit_message_counts,
+                    http, **fit_kwargs
                 )
                 phone_record.update(
                     {
@@ -2185,12 +2433,15 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         context_audit = phone_session["context_audit"]
         required_count = int(context_audit.get("required_message_count", len(input_messages)))
         unit_counts = list(context_audit.get("history_unit_message_counts", []))
+        optional_units = int(context_audit.get("optional_reference_units", 0))
         input_messages.extend(history)
         unit_counts.extend([1] * len(history))
         # Remove only whole oldest history messages to respect the provider's 128-message ceiling.
         while len(input_messages) > MAX_LIVE_INPUT_MESSAGES and unit_counts:
             drop_count = int(unit_counts.pop(0))
             del input_messages[required_count:required_count + drop_count]
+            if optional_units:
+                optional_units -= 1
         if len(input_messages) > MAX_LIVE_INPUT_MESSAGES:
             self._mark_recovering(binding, reason="resume_context_too_large",
                                   summary="Transport recovery needs smaller complete history units")
@@ -2202,10 +2453,17 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             raise LiveVoiceError("live_input_mandatory_limit", 503)
         try:
             async with provider_http_session() as http:
+                fit_kwargs = {
+                    "key": self._get_api_key(),
+                    "model": phone_session["model"],
+                    "input_messages": input_messages,
+                    "required_message_count": required_count,
+                    "history_unit_message_counts": unit_counts,
+                }
+                if optional_units:
+                    fit_kwargs["optional_prefix_unit_count"] = optional_units
                 provider_input, exact_audit = await fit_live_session_input(
-                    http, key=self._get_api_key(), model=phone_session["model"],
-                    input_messages=input_messages, required_message_count=required_count,
-                    history_unit_message_counts=unit_counts,
+                    http, **fit_kwargs
                 )
                 config.update({"input_sha256": stable_digest({"input": provider_input}),
                                "input_messages": len(provider_input), **exact_audit})

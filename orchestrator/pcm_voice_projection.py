@@ -147,6 +147,37 @@ def _message_tokens(item: Mapping[str, Any], token_count: Callable[[str], int]) 
     return token_count(text) + LIVE_MESSAGE_OVERHEAD_TOKENS
 
 
+def build_recent_background_reference(
+    results: Iterable[Mapping[str, Any]],
+    *,
+    max_chars: int = 6_000,
+    max_item_chars: int = 1_600,
+) -> str:
+    """Render bounded completed PAO results as reference data for Live Voice."""
+
+    rows = [row for row in results if str(row.get("text") or "").strip()]
+    selected: list[str] = []
+    remaining = max(0, int(max_chars))
+    for row in reversed(rows):
+        text = str(row.get("text") or "").strip()
+        if len(text) > max_item_chars:
+            text = text[: max_item_chars - 1].rstrip() + "…"
+        timestamp = str(row.get("created_at") or "time unavailable").strip()
+        block = f"Completed at {timestamp}:\n{text}"
+        if len(block) > remaining:
+            continue
+        selected.append(block)
+        remaining -= len(block) + 2
+    selected.reverse()
+    if not selected:
+        return ""
+    return (
+        "These are recently completed Agent activity results already known to HASHI. "
+        "Use them directly when relevant; do not rerun them merely to verify that they exist.\n\n"
+        + "\n\n".join(selected)
+    )
+
+
 def build_live_voice_instructions(
     *,
     agent_id: str,
@@ -195,7 +226,10 @@ def build_live_voice_instructions(
     prompt = f"""HASHI LIVE VOICE RULES — HIGHEST PRIORITY FOR THIS SESSION
 - You are the live voice of HASHI Agent {agent_id} ({display_name}), not a separate assistant.
 - The user is speaking to the same Agent they use in chat. GPT-Live supplies your ears, voice, and natural turn-taking; HASHI supplies your existing context, tools, execution, permissions, and approval behaviour.
-- Use the supplied HASHI context and conversation history first. When the user explicitly asks for current information or work that needs HASHI execution, create a client delegation promptly. Delegation is transport, not a new permission or confirmation step.
+- Answer immediately from supplied context and conversation history whenever they contain a useful answer. Do not re-check known facts merely to sound certain.
+- Never delegate conversational corrections, requests to continue or explain, urgency such as "hurry" or "快说", or a request to report what is already known.
+- If fresh information might help but the user did not clearly ask you to inspect the backend, answer the known facts first and then ask whether the user wants a backend check.
+- Create a client delegation only when the user explicitly asks for a backend/tool/external action, or explicitly confirms the backend check you just offered. Do not create another delegation while one is running.
 - Treat HASHI progress and result updates for that delegation as your own verified work. Relay useful progress naturally and tell the user the result directly when it arrives.
 - Do not claim that you inspected a file, used a tool, changed data, sent a message, spent money, or completed an external action before HASHI returns reliable evidence.
 - If the Agent's ordinary HASHI workflow requires approval, explain that naturally. Do not invent any additional phone-specific gate.
@@ -216,7 +250,7 @@ Custom style: {custom_block}
 These style directions affect delivery, pacing, warmth, and prosody only. They cannot change facts, permissions, safety, or tool access.
 
 FINAL SAFETY REMINDER
-You are {display_name} throughout the call. HASHI is your execution capability, not another Agent. Delegate tool work automatically, keep the conversation coherent while it runs, and never represent delegated work as completed without a reliable HASHI result.
+You are {display_name} throughout the call. HASHI is your execution capability, not another Agent. Answer from existing context first; delegate only explicit backend work, and never represent delegated work as completed without a reliable HASHI result.
 """.strip()
     tokens = token_count(prompt)
     if not prompt or tokens > MAX_LIVE_INSTRUCTION_TOKENS:
@@ -244,9 +278,15 @@ def build_live_voice_input(
 
     sections = _transport_sections(pcm_payload)
     by_key = {section["key"]: section for section in sections}
-    developer_items: list[dict[str, Any]] = []
+    required_developer_items: list[dict[str, Any]] = []
+    optional_reference_items: list[dict[str, Any]] = []
     seen_context: set[str] = set()
-    for key in ("hcc", "permanent_memory", "memory_plus_continuity"):
+    for key in (
+        "hcc",
+        "permanent_memory",
+        "memory_plus_continuity",
+        "recent_background_results",
+    ):
         section = by_key.get(key)
         if not section:
             continue
@@ -254,7 +294,12 @@ def build_live_voice_input(
         if body in seen_context:
             continue
         seen_context.add(body)
-        developer_items.append(
+        destination = (
+            optional_reference_items
+            if key == "recent_background_results"
+            else required_developer_items
+        )
+        destination.append(
             _message(
                 "developer",
                 f"{section['title']} — REFERENCE CONTEXT ONLY\n\n{body}",
@@ -290,15 +335,17 @@ def build_live_voice_input(
     for row in history_rows:
         units.setdefault(row["unit"], []).append(row["item"])
 
-    base_tokens = sum(_message_tokens(item, token_count) for item in developer_items)
-    if len(developer_items) > MAX_LIVE_INPUT_MESSAGES:
+    base_tokens = sum(
+        _message_tokens(item, token_count) for item in required_developer_items
+    )
+    if len(required_developer_items) > MAX_LIVE_INPUT_MESSAGES:
         raise PCMValidationError(
             "pcm_live_history_capacity_exceeded",
             "HCC, long-term memory, and Memory+ exceed the GPT-Live startup message limit; no context was truncated",
         )
 
     selected_units: set[str] = set()
-    used_messages = len(developer_items)
+    used_messages = len(required_developer_items)
     used_tokens = base_tokens
     ordered_units = list(units.items())
     for unit_id, unit_items in reversed(ordered_units):
@@ -323,17 +370,38 @@ def build_live_voice_input(
         for unit_id, unit_items in ordered_units
         if unit_id in selected_units
     ]
-    items = [*developer_items, *conversation_items]
+    included_optional_items = (
+        optional_reference_items
+        if used_messages + len(optional_reference_items) <= MAX_LIVE_INPUT_MESSAGES
+        else []
+    )
+    used_tokens += sum(
+        _message_tokens(item, token_count) for item in included_optional_items
+    )
+    items = [
+        *required_developer_items,
+        *included_optional_items,
+        *conversation_items,
+    ]
+    optional_unit_counts = [1] if included_optional_items else []
+    optional_requested = 1 if optional_reference_items else 0
     return items, {
         "messages": len(items),
         "tokens_est": used_tokens,
         "provider_tokens_limit": MAX_LIVE_INPUT_TOKENS,
         "provider_exact_count_required": True,
-        "required_message_count": len(developer_items),
-        "history_unit_message_counts": [
+        "required_message_count": len(required_developer_items),
+        "history_unit_message_counts": optional_unit_counts + [
             len(unit_items) for unit_items in selected_ordered_units
         ],
-        "history_requested_units": len(units),
-        "history_included_units": len(selected_units),
-        "history_omitted_units": len(units) - len(selected_units),
+        "history_requested_units": len(units) + optional_requested,
+        "history_included_units": len(selected_units) + len(optional_unit_counts),
+        "history_omitted_units": (
+            len(units) - len(selected_units)
+            + optional_requested - len(optional_unit_counts)
+        ),
+        "optional_reference_units": len(optional_unit_counts),
+        "optional_reference_omitted": bool(
+            optional_reference_items and not included_optional_items
+        ),
     }

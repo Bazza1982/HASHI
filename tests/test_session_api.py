@@ -275,6 +275,39 @@ def test_live_phone_resolver_uses_authoritative_pcm_and_same_session_history(tmp
         assistant_text="RECENT_ASSISTANT_PHONE_SENTINEL",
         assistant_source="test-backend",
     )
+    activity = server.session_store.ensure_agent_activity_session(
+        owner_id=owner_id,
+        agent_id="lily",
+    )
+    activity_run = server.session_store.accept_run(
+        session_id=activity["session_id"],
+        owner_id=owner_id,
+        agent_id="lily",
+        request_id="phone-activity-request",
+        text="SCHEDULER_PROMPT_MUST_NOT_ENTER_PHONE",
+        source="scheduler",
+        idempotency_key="phone-activity-run",
+    )
+    server.session_store.mark_request_running(
+        activity_run.request_id,
+        worker_id="scheduler-worker",
+    )
+    server.session_store.finish_request(
+        activity_run.request_id,
+        success=True,
+        assistant_text="TODAY_COMPLETED_BACKGROUND_RESULT_SENTINEL",
+        assistant_source="test-backend",
+    )
+    server.session_store.append_presentation_message(
+        session_id=activity["session_id"],
+        owner_id=owner_id,
+        agent_id="lily",
+        role="assistant",
+        text="METER_AND_PROGRESS_NOISE_MUST_NOT_ENTER_PHONE",
+        source="meter-cost",
+        idempotency_key="phone-meter-noise",
+        presentation_channel="meter",
+    )
     session_workspace = server.session_store.session_workspace(
         session["session_id"],
         int(session["context_generation"]),
@@ -300,6 +333,9 @@ def test_live_phone_resolver_uses_authoritative_pcm_and_same_session_history(tmp
     assert "MEMORY_PLUS_PHONE_SENTINEL" in startup
     assert "RECENT_USER_PHONE_SENTINEL" in startup
     assert "RECENT_ASSISTANT_PHONE_SENTINEL" in startup
+    assert "TODAY_COMPLETED_BACKGROUND_RESULT_SENTINEL" in startup
+    assert "SCHEDULER_PROMPT_MUST_NOT_ENTER_PHONE" not in startup
+    assert "METER_AND_PROGRESS_NOISE_MUST_NOT_ENTER_PHONE" not in startup
 
 
 @pytest.mark.asyncio

@@ -211,6 +211,116 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         self.assertEqual(row["decision"], "admitted")
         self.assertTrue(row["accepted_run_id"])
 
+    def test_report_from_existing_context_requires_confirmation_not_a_run(self):
+        asyncio.run(self.manager.append_fragment_once(
+            self.binding,
+            Fragment("report-today", "user", "给我详细报告一下今天的情况", 0, 500),
+        ))
+        asyncio.run(self.manager.register_delegation_once(
+            self.binding, "del-report-today", 600
+        ))
+        asyncio.run(self.manager.schedule_proposal(
+            self.binding, "del-report-today", 600
+        ))
+
+        self.assertEqual(self.admit_calls, [])
+        with self.store._lock, self.store._connection() as conn:
+            row = conn.execute(
+                "SELECT decision FROM live_delegations WHERE call_id = ? AND delegation_id = ?",
+                (self.call_id, "del-report-today"),
+            ).fetchone()
+        self.assertEqual(row["decision"], "confirmation_requested")
+
+    def test_conversational_correction_never_becomes_a_background_run(self):
+        asyncio.run(self.manager.append_fragment_once(
+            self.binding,
+            Fragment("answer-known", "user", "不用核对，知道什么就说什么，快说", 0, 500),
+        ))
+        asyncio.run(self.manager.register_delegation_once(
+            self.binding, "del-answer-known", 600
+        ))
+        asyncio.run(self.manager.schedule_proposal(
+            self.binding, "del-answer-known", 600
+        ))
+
+        self.assertEqual(self.admit_calls, [])
+        with self.store._lock, self.store._connection() as conn:
+            row = conn.execute(
+                "SELECT decision FROM live_delegations WHERE call_id = ? AND delegation_id = ?",
+                (self.call_id, "del-answer-known"),
+            ).fetchone()
+        self.assertEqual(row["decision"], "handled_locally")
+
+    def test_explicit_yes_promotes_the_pending_freshness_check(self):
+        asyncio.run(self.manager.append_fragment_once(
+            self.binding,
+            Fragment("report-first", "user", "给我报告一下今天的情况", 0, 500),
+        ))
+        asyncio.run(self.manager.register_delegation_once(
+            self.binding, "del-report-first", 600
+        ))
+        asyncio.run(self.manager.schedule_proposal(
+            self.binding, "del-report-first", 600
+        ))
+        asyncio.run(self.manager.append_fragment_once(
+            self.binding, Fragment("report-confirm", "user", "好", 700, 900)
+        ))
+        asyncio.run(self.manager.register_delegation_once(
+            self.binding, "del-report-confirm", 1000
+        ))
+        asyncio.run(self.manager.schedule_proposal(
+            self.binding, "del-report-confirm", 1000
+        ))
+
+        self.assertEqual(len(self.admit_calls), 1)
+        run = self.store.get_run_by_request(
+            f"req-{self.admit_calls[0]}"
+        )
+        user_message = self.store.get_message(
+            run["user_message_id"],
+            session_id=self.session_id,
+            owner_id=self.owner_id,
+        )
+        self.assertIn("今天的情况", user_message["text"])
+        with self.store._lock, self.store._connection() as conn:
+            decisions = {
+                row["delegation_id"]: row["decision"]
+                for row in conn.execute(
+                    "SELECT delegation_id, decision FROM live_delegations WHERE call_id = ?",
+                    (self.call_id,),
+                ).fetchall()
+            }
+        self.assertEqual(decisions["del-report-first"], "confirmed")
+        self.assertEqual(decisions["del-report-confirm"], "admitted")
+
+    def test_only_one_background_run_can_be_active_for_a_call(self):
+        asyncio.run(self.manager.append_fragment_once(
+            self.binding, Fragment("first-check", "user", "inspect the current logs", 0, 500)
+        ))
+        asyncio.run(self.manager.register_delegation_once(
+            self.binding, "del-first-check", 600
+        ))
+        asyncio.run(self.manager.schedule_proposal(
+            self.binding, "del-first-check", 600
+        ))
+        asyncio.run(self.manager.append_fragment_once(
+            self.binding, Fragment("second-check", "user", "查一下最新队列", 700, 1000)
+        ))
+        asyncio.run(self.manager.register_delegation_once(
+            self.binding, "del-second-check", 1100
+        ))
+        asyncio.run(self.manager.schedule_proposal(
+            self.binding, "del-second-check", 1100
+        ))
+
+        self.assertEqual(len(self.admit_calls), 1)
+        with self.store._lock, self.store._connection() as conn:
+            row = conn.execute(
+                "SELECT decision FROM live_delegations WHERE call_id = ? AND delegation_id = ?",
+                (self.call_id, "del-second-check"),
+            ).fetchone()
+        self.assertEqual(row["decision"], "coalesced")
+
     def test_automatic_admission_is_idempotent(self):
         frag = Fragment("e1", "user", "deploy to production", 0, 500)
         asyncio.run(self.manager.append_fragment_once(self.binding, frag))

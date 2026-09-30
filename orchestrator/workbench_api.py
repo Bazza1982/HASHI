@@ -993,6 +993,9 @@ class WorkbenchApiServer:
             prepare_memory_plus_store,
         )
         from orchestrator.pcm import canonical_agent_md
+        from orchestrator.pcm_voice_projection import (
+            build_recent_background_reference,
+        )
         from orchestrator.phone_manager import PhoneConfigError, PhoneManager
 
         target = str(agent_id or "").strip().casefold()
@@ -1079,6 +1082,25 @@ class WorkbenchApiServer:
                 context_generation=generation,
                 limit=128,
             )
+            recent_background = build_recent_background_reference(
+                self.session_store.recent_agent_activity_results(
+                    owner_id=owner_id,
+                    agent_id=target,
+                    limit=8,
+                    since_hours=24,
+                )
+            )
+            if recent_background:
+                extra_sections.append(
+                    (
+                        "RECENT COMPLETED BACKGROUND RESULTS",
+                        recent_background,
+                        {
+                            "key": "recent_background_results",
+                            "protected": True,
+                        },
+                    )
+                )
 
         pcm_payload = assembler.build_prompt_payload(
             "",
@@ -8161,7 +8183,7 @@ class WorkbenchApiServer:
         if source.casefold() == "tui":
             client_id = str(payload.get("client_id") or "").strip()
             try:
-                normalized_policy = normalize_tui_run_delivery_policy(
+                _normalized_policy = normalize_tui_run_delivery_policy(
                     supplied_delivery_policy,
                     client_id=client_id,
                 )

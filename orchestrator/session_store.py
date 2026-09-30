@@ -1633,9 +1633,12 @@ class SessionStore:
     ) -> None:
         """Route canonical visible conversation messages to the active phone inbox."""
         row = connection.execute(
-            """SELECT m.role, m.source, m.text, m.visibility, m.message_context_json,
+            """SELECT m.role, m.source, m.text, m.visibility, m.history_eligible,
+                      m.message_context_json, m.run_id,
+                      r.message_context_json AS run_message_context_json,
                       s.owner_id, s.agent_id
                FROM messages AS m JOIN sessions AS s ON s.session_id = m.session_id
+               LEFT JOIN runs AS r ON r.run_id = m.run_id
                WHERE m.message_id = ? AND m.session_id = ?""",
             (str(message_id), str(session_id)),
         ).fetchone()
@@ -1643,10 +1646,18 @@ class SessionStore:
             return
         if str(row["source"] or "") == "live-phone" or row["visibility"] != "visible":
             return
+        if not bool(row["history_eligible"]):
+            return
         if not str(row["text"] or "").strip():
             return
         context = _json_object(row["message_context_json"])
-        if context.get("live_voice") or context.get("live_call_record"):
+        run_context = _json_object(row["run_message_context_json"])
+        if (
+            context.get("live_voice")
+            or context.get("live_call_record")
+            or context.get("presentation_only")
+            or run_context.get("live_voice")
+        ):
             return
         calls = connection.execute(
             """SELECT call_id FROM live_calls
@@ -1712,6 +1723,63 @@ class SessionStore:
                    ) VALUES (?, ?, ?, ?, 'pending', ?)""",
                 (_new_id("fge"), str(call["call_id"]), str(session_id), str(event_id), now),
             )
+
+    def resolve_live_voice_origin(
+        self,
+        *,
+        owner_id: str,
+        session_id: str,
+        agent_id: str,
+        context_generation: int,
+        candidate: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Validate and normalize an internal Live delegation origin marker."""
+
+        value = dict(candidate or {})
+        try:
+            call_id = str(value["call_id"])
+            call_epoch = int(value["call_epoch"])
+            delegation_id = str(value["delegation_id"])
+            proposal_version = int(value["proposal_version"])
+            proposal_digest = str(value["proposal_digest"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise SessionConflict("live_voice_origin_invalid") from exc
+        if not all((call_id, delegation_id, proposal_digest)):
+            raise SessionConflict("live_voice_origin_invalid")
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """SELECT c.call_id
+                   FROM live_calls AS c
+                   JOIN live_delegations AS d
+                     ON d.call_id = c.call_id AND d.call_epoch = c.call_epoch
+                   WHERE c.call_id = ? AND c.call_epoch = ?
+                     AND c.owner_id = ? AND c.session_id = ? AND c.agent_id = ?
+                     AND c.context_generation = ?
+                     AND c.phase IN ('connecting', 'active', 'ending', 'recovering')
+                     AND d.delegation_id = ? AND d.proposal_version = ?
+                     AND d.proposal_digest = ?
+                     AND d.decision IN ('admitting', 'admitted')""",
+                (
+                    call_id,
+                    call_epoch,
+                    str(owner_id),
+                    str(session_id),
+                    str(agent_id).lower(),
+                    int(context_generation),
+                    delegation_id,
+                    proposal_version,
+                    proposal_digest,
+                ),
+            ).fetchone()
+        if row is None:
+            raise SessionConflict("live_voice_origin_invalid")
+        return {
+            "call_id": call_id,
+            "call_epoch": call_epoch,
+            "delegation_id": delegation_id,
+            "proposal_version": proposal_version,
+            "proposal_digest": proposal_digest,
+        }
 
     def stage_live_provider_fragment(
         self, *, owner_id: str, provider_event_id: str, call_id: str,
@@ -6833,6 +6901,46 @@ class SessionStore:
             selected.add(unit_id)
             selected_count += len(items)
         return [item for item in combined if item["history_unit_id"] in selected]
+
+    def recent_agent_activity_results(
+        self,
+        *,
+        owner_id: str,
+        agent_id: str,
+        limit: int = 8,
+        since_hours: int = 24,
+    ) -> list[dict[str, Any]]:
+        """Return bounded completed Agent-activity results for foreground context."""
+
+        bounded_limit = max(1, min(int(limit), 32))
+        bounded_hours = max(1, min(int(since_hours), 168))
+        since = (
+            datetime.now(timezone.utc) - timedelta(hours=bounded_hours)
+        ).isoformat().replace("+00:00", "Z")
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """SELECT m.message_id, m.text, m.source, m.created_at,
+                          r.run_id, s.session_id
+                   FROM sessions AS s
+                   JOIN runs AS r ON r.session_id = s.session_id
+                   JOIN messages AS m ON m.message_id = r.final_message_id
+                   WHERE s.instance_id = ? AND s.owner_id = ? AND s.agent_id = ?
+                     AND s.session_kind = 'agent_activity' AND s.status != 'deleted'
+                     AND r.state = 'completed'
+                     AND m.role = 'assistant' AND m.visibility = 'visible'
+                     AND m.history_eligible = 1 AND m.created_at >= ?
+                     AND TRIM(m.text) != ''
+                   ORDER BY m.created_at DESC, m.ordinal DESC
+                   LIMIT ?""",
+                (
+                    self.instance_id,
+                    str(owner_id),
+                    str(agent_id).lower(),
+                    since,
+                    bounded_limit,
+                ),
+            ).fetchall()
+        return [dict(row) for row in reversed(rows)]
 
     def recent_visible_messages(
         self,

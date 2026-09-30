@@ -3075,6 +3075,101 @@ def test_background_messages_and_events_from_any_agent_enter_active_phone_inbox(
     assert store.pending_live_foreground_events(dormant_call_id) == []
 
 
+def test_phone_inbox_excludes_presentation_noise_and_its_own_delegated_run(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:phone-self"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    call_id = "call-phone-self"
+    with store._lock, store._connection() as connection:
+        connection.execute(
+            """INSERT INTO live_calls(
+                call_id, owner_id, session_id, agent_id, instance_id, instance_generation,
+                context_generation, call_epoch, provider_session_id, phase, controller_lease,
+                lease_expiry, started_at, max_ends_at
+            ) VALUES (?, ?, ?, 'lily', 'HASHI1', '1', 1, 1, 'provider1', 'active',
+                      'lease1', '2099-01-01T00:00:00Z', '2026-09-30T00:00:00Z',
+                      '2099-01-01T00:30:00Z')""",
+            (call_id, owner, session["session_id"]),
+        )
+        connection.execute(
+            """INSERT INTO live_delegations(
+                call_id, call_epoch, delegation_id, offset_ms, after_ms, cutoff_ms,
+                proposal_version, proposal_digest, proposal_text, proposal_state,
+                proposal_ready_after, expires_at, decision, created_at
+            ) VALUES (?, 1, 'del-self', 600, 0, 600, 1, 'digest-self',
+                      'inspect logs', 'ready', '2026-09-30T00:00:00Z',
+                      '2099-01-01T00:00:00Z', 'admitting', '2026-09-30T00:00:00Z')""",
+            (call_id,),
+        )
+
+    presentation = store.append_presentation_message(
+        session_id=session["session_id"], owner_id=owner, agent_id="lily",
+        role="assistant", text="meter noise", source="meter-cost",
+        idempotency_key="meter-noise", history_eligible=False,
+    )
+    assert presentation["history_eligible"] is False
+
+    origin = store.resolve_live_voice_origin(
+        owner_id=owner,
+        session_id=session["session_id"],
+        agent_id="lily",
+        context_generation=1,
+        candidate={
+            "call_id": call_id,
+            "call_epoch": 1,
+            "delegation_id": "del-self",
+            "proposal_version": 1,
+            "proposal_digest": "digest-self",
+        },
+    )
+    accepted = store.accept_run(
+        session_id=session["session_id"], owner_id=owner, agent_id="lily",
+        request_id="req-live-self", text="inspect logs", source="session-api",
+        idempotency_key="live-self", message_context={"live_voice": origin},
+    )
+    store.mark_request_running(accepted.request_id, worker_id="worker")
+    store.finish_request(
+        accepted.request_id,
+        success=True,
+        assistant_text="same call final result",
+        assistant_source="test-backend",
+    )
+
+    assert store.pending_live_foreground_messages(call_id) == []
+    assert store.pending_live_foreground_events(call_id) == []
+
+
+def test_recent_agent_activity_results_include_only_completed_assistant_results(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:activity-context"
+    activity = store.ensure_agent_activity_session(owner_id=owner, agent_id="lily")
+    accepted = store.accept_run(
+        session_id=activity["session_id"], owner_id=owner, agent_id="lily",
+        request_id="req-activity-context", text="private scheduler prompt",
+        source="scheduler", idempotency_key="activity-context",
+    )
+    store.mark_request_running(accepted.request_id, worker_id="worker")
+    store.finish_request(
+        accepted.request_id,
+        success=True,
+        assistant_text="completed patrol result",
+        assistant_source="test-backend",
+    )
+    store.append_presentation_message(
+        session_id=activity["session_id"], owner_id=owner, agent_id="lily",
+        role="assistant", text="cost noise", source="meter-cost",
+        idempotency_key="activity-cost-noise", history_eligible=False,
+    )
+
+    results = store.recent_agent_activity_results(
+        owner_id=owner,
+        agent_id="lily",
+        limit=8,
+    )
+
+    assert [item["text"] for item in results] == ["completed patrol result"]
+
+
 def test_phone_inbox_uses_one_globally_ordered_page_across_messages_and_events(tmp_path):
     store = _store(tmp_path)
     owner = "user:phone-order"

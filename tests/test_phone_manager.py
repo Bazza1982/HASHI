@@ -26,7 +26,7 @@ def _workspace(tmp_path: Path) -> Path:
     return workspace
 
 
-def _pcm_payload(*, system: str = "SYSTEM_SENTINEL must govern the call.", hcc: str = "HCC_SENTINEL", memory: str = "MEMORY_SENTINEL") -> dict:
+def _pcm_payload(*, system: str = "SYSTEM_SENTINEL must govern the call.", hcc: str = "HCC_SENTINEL", memory: str = "MEMORY_SENTINEL", background: str = "") -> dict:
     sections = [
         {"key": "permanent_system", "title": "PERMANENT SYSTEM INSTRUCTIONS", "text": system, "authority": "permanent_system"},
         {"key": "instance_global_sys", "title": "INSTANCE-GLOBAL /sys", "text": "GLOBAL_SYS_SENTINEL", "authority": "global_system"},
@@ -37,6 +37,11 @@ def _pcm_payload(*, system: str = "SYSTEM_SENTINEL must govern the call.", hcc: 
         {"key": "memory_plus_continuity", "title": "Memory+ Continuity", "text": "MEMORY_PLUS_SENTINEL", "authority": "runtime_context"},
         {"key": "persona", "title": "CURRENT PRESENTATION PERSONA", "text": "You are Moon. Address the user respectfully.", "authority": "persona"},
     ]
+    if background:
+        sections.insert(
+            -1,
+            {"key": "recent_background_results", "title": "RECENT COMPLETED BACKGROUND RESULTS", "text": background, "authority": "runtime_context"},
+        )
     return {"transport_snapshot": {"version": 1, "sections": sections}}
 
 
@@ -48,7 +53,7 @@ def test_defaults_resolve_full_authoritative_pcm_and_history(tmp_path: Path):
     ]
     resolved = manager.resolve_live_session(
         display_name="Moon",
-        pcm_payload=_pcm_payload(),
+        pcm_payload=_pcm_payload(background="BACKGROUND_RESULT_SENTINEL"),
         recent_history=recent,
     )
 
@@ -68,17 +73,20 @@ def test_defaults_resolve_full_authoritative_pcm_and_history(tmp_path: Path):
     assert "HCC_SENTINEL" in input_text
     assert "MEMORY_SENTINEL" in input_text
     assert "MEMORY_PLUS_SENTINEL" in input_text
+    assert "BACKGROUND_RESULT_SENTINEL" in input_text
     assert "What changed today?" in input_text
     assert "The phone UI was fixed." in input_text
     assert [item["role"] for item in resolved["input"][-2:]] == ["user", "assistant"]
     assert "HIGHEST PRIORITY" in resolved["instructions"]
     assert "not a separate assistant" in resolved["instructions"]
-    assert "explicitly confirm" not in resolved["instructions"]
+    assert "Answer immediately from supplied context" in resolved["instructions"]
+    assert "ask whether the user wants a backend check" in resolved["instructions"]
+    assert "Never delegate conversational corrections" in resolved["instructions"]
     assert resolved["context_audit"]["provider_exact_count_required"] is True
     assert resolved["context_audit"]["required_message_count"] == 3
-    assert resolved["context_audit"]["history_unit_message_counts"] == [2]
+    assert resolved["context_audit"]["history_unit_message_counts"] == [1, 2]
     assert resolved["instructions"].endswith(
-        "You are Moon throughout the call. HASHI is your execution capability, not another Agent. Delegate tool work automatically, keep the conversation coherent while it runs, and never represent delegated work as completed without a reliable HASHI result."
+        "You are Moon throughout the call. HASHI is your execution capability, not another Agent. Answer from existing context first; delegate only explicit backend work, and never represent delegated work as completed without a reliable HASHI result."
     )
 
 

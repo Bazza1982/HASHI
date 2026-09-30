@@ -180,6 +180,7 @@ async def fit_live_session_input(
     input_messages: Sequence[Mapping[str, Any]],
     required_message_count: int,
     history_unit_message_counts: Sequence[int],
+    optional_prefix_unit_count: int = 0,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Fit startup input using the provider's authoritative token counter.
 
@@ -203,6 +204,12 @@ async def fit_live_session_input(
     ):
         raise LiveVoiceError("live_input_plan_invalid", 503)
     if required_message_count + sum(unit_counts) != len(normalized):
+        raise LiveVoiceError("live_input_plan_invalid", 503)
+    if (
+        isinstance(optional_prefix_unit_count, bool)
+        or not isinstance(optional_prefix_unit_count, int)
+        or not 0 <= optional_prefix_unit_count <= len(unit_counts)
+    ):
         raise LiveVoiceError("live_input_plan_invalid", 503)
 
     required = normalized[:required_message_count]
@@ -253,11 +260,11 @@ async def fit_live_session_input(
             low = midpoint + 1
         else:
             high = midpoint - 1
-    if total_units and best == 0:
+    if total_units > optional_prefix_unit_count and best == 0:
         raise LiveVoiceError("live_input_newest_unit_limit", 503)
     fitted = candidate(best)
     return fitted, {
-        "input_tokens_exact": counts[best],
+        "input_tokens_exact": counts.get(best, required_count),
         "provider_tokens_limit": MAX_LIVE_INPUT_TOKENS,
         "history_included_units": best,
         "history_omitted_units": total_units - best,

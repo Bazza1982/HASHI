@@ -1117,6 +1117,17 @@ class FlexibleAgentRuntime:
             chat_id=chat_id,
             metadata=metadata,
         )
+        live_voice_origin = None
+        if metadata.get("live_voice") is not None:
+            live_voice_origin = await asyncio.to_thread(
+                runtime_session.ensure_store(self).resolve_live_voice_origin,
+                owner_id=resolved_owner,
+                session_id=str(resolved_session["session_id"]),
+                agent_id=self.name,
+                context_generation=int(resolved_session["context_generation"]),
+                candidate=metadata.get("live_voice"),
+            )
+            metadata["live_voice"] = live_voice_origin
         existing_idempotent_run = None
         if idempotency_key:
             existing_idempotent_run = await asyncio.to_thread(
@@ -1254,6 +1265,8 @@ class FlexibleAgentRuntime:
             prompt=clean_prompt,
             metadata=metadata,
         )
+        if live_voice_origin is not None:
+            message_context_snapshot["live_voice"] = live_voice_origin
         if reply_reference is not None:
             message_context_snapshot["reply_reference"] = {
                 "event_id": str(reply_reference["event_id"]),

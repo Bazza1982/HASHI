@@ -138,6 +138,80 @@ async def test_typed_tui_run_policy_cannot_disable_central_telegram_mirroring(
 
 
 @pytest.mark.asyncio
+async def test_validated_live_voice_origin_survives_canonical_context_rebuild(
+    tmp_path,
+    monkeypatch,
+):
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.name = "visibility"
+    runtime.global_config = SimpleNamespace(project_root=None)
+    runtime.next_request_id = lambda: "req-live-origin"
+    origin = {
+        "call_id": "call-origin",
+        "call_epoch": 1,
+        "delegation_id": "delegation-origin",
+        "proposal_version": 1,
+        "proposal_digest": "digest-origin",
+    }
+    runtime.session_store = SimpleNamespace(
+        session_workspace=lambda *args: tmp_path,
+        resolve_live_voice_origin=Mock(return_value=origin),
+    )
+    runtime.message_logger = Mock()
+    runtime.request_activity = Mock()
+    runtime.queue = asyncio.Queue()
+    monkeypatch.setattr(
+        runtime_session,
+        "accept_request",
+        lambda *args, **kwargs: (
+            {"session_id": "session-live", "context_generation": 1},
+            SimpleNamespace(
+                replayed=False,
+                run_id="run-live",
+                message_id="message-live",
+                request_id="req-live-origin",
+            ),
+            "user:123",
+            "workbench",
+            "default",
+        ),
+    )
+    monkeypatch.setattr(
+        runtime_session,
+        "resolve_request_session",
+        lambda *args, **kwargs: (
+            {"session_id": "session-live", "context_generation": 1},
+            "user:123",
+            "workbench",
+            "default",
+        ),
+    )
+    monkeypatch.setattr(runtime_session, "ensure_store", lambda _runtime: runtime.session_store)
+    monkeypatch.setattr(
+        runtime_session, "session_workzone_state", lambda *args, **kwargs: {}
+    )
+
+    result = await runtime.enqueue_request(
+        123,
+        "inspect logs",
+        "session-api",
+        "inspect logs",
+        request_metadata={
+            "session_id": "session-live",
+            "owner_id": "user:123",
+            "session_surface": "workbench",
+            "session_channel_key": "default",
+            "live_voice": origin,
+        },
+    )
+
+    item = runtime.queue.get_nowait()
+    assert result == "req-live-origin"
+    assert item.request_metadata["message_context_snapshot"]["live_voice"] == origin
+    runtime.session_store.resolve_live_voice_origin.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_exchange_source_fails_closed_without_verified_connector_evidence(
     tmp_path,
 ):

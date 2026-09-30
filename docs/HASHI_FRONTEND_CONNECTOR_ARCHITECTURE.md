@@ -515,15 +515,21 @@ contain the canonical `[sys]`, active instance-global `/sys`, active Agent-local
 `/sys`, HCC usage rules, Persona, and fixed live-call transport rules with their
 authority kept explicit. HCC reference data, `[memory]`, enabled Memory+
 continuity, and the same Conversation Session's real recent user/assistant
-messages enter provider startup `input`; they are not rewritten into another
-memory store. Credentials and raw PCM files remain excluded.
+messages enter provider startup `input`. PAO also projects a bounded window of
+that Agent's completed activity results so recent cron, heartbeat, HChat, and
+proactive outcomes already known to HASHI are available without another Run;
+task prompts, progress notices, cost cards, and other presentation-only rows do
+not enter this reference. None of these facts is rewritten into another memory
+store. Credentials and raw PCM files remain excluded.
 
 The OpenAI GPT-Live adapter keeps the provider's 16,384-token instruction limit
 and the 128-message/8,192-token startup-input hard limits. PCM first supplies the
 largest whole-message candidate allowed by the message limit. At call start the
 adapter asks OpenAI's authoritative `/v1/responses/input_tokens` counter for the
 exact input size, then removes only the oldest complete conversation units until
-the candidate fits. Local estimates remain audit telemetry and never decide
+the candidate fits. The recent completed-activity reference is optional and
+yields before any conversation unit; HCC, memory, and the newest complete
+dialogue remain protected. Local estimates remain audit telemetry and never decide
 provider admission. HCC and the other mandatory context are never clipped; if
 they alone exceed the exact ceiling, or the newest complete dialogue unit cannot
 fit beside them, startup fails visibly rather than truncating a sentence or
@@ -532,12 +538,25 @@ provider recording, owns continuity.
 
 The live phone is another transport for the selected Agent, not a second Agent
 or a reduced-permission assistant. GPT-Live supplies speech recognition, voice,
-and turn-taking. Its client delegation automatically carries tool-dependent
-speech into that same Agent's current Session through the ordinary PAO ingress.
-There is no phone-specific confirmation gate. The Agent's existing HASHI
-permissions and normal approval behaviour remain authoritative exactly as they
-are in text chat; the provider receives neither credentials nor direct tool
-authority.
+and turn-taking. The foreground model answers from supplied context first.
+Conversational corrections, requests to continue or explain, urgency, and
+requests to report known facts never become Runs. If freshness might help but
+the user has not clearly requested a backend check, the model reports what is
+already known and asks one short intent question. Only an explicit backend,
+tool, or external action (including an explicitly confirmed fresh check) may
+enter that same Agent's current Session through ordinary PAO ingress. This
+intent check is not new authority: the Agent's existing HASHI permissions and
+normal approval behaviour remain authoritative exactly as they are in text
+chat; the provider receives neither credentials nor direct tool authority.
+
+PAO enforces this three-way route independently of the provider prompt and
+defaults uncertain speech to foreground conversation. One logical call may
+have at most one non-terminal phone-originated background Run; later speech is
+handled as a correction or follow-up instead of accumulating a queue. The
+origin marker is validated against the durable call and proposal before Run
+admission. Messages, status events, and presentation-only cost/progress rows
+from that Run are excluded from the generic foreground inbox because its
+dedicated delegation relay already owns progress and final-result delivery.
 
 While delegated work runs, HASHI returns safe progress and the canonical final
 result to the same GPT-Live delegation so the Agent can report it naturally in

@@ -187,12 +187,14 @@ Persona-only assistant. Formal startup instructions carry `[sys]`, both `/sys`
 layers and Persona; startup history carries complete enabled HCC, `[memory]`,
 enabled Memory+ and bounded same-Session dialogue. Live transcript fragments
 write to HASHI as they arrive and feed later text or phone turns; the visible
-call card is only a derived view. Keep provider storage off and never clip HCC
-or part of an utterance to make a call fit. Startup-history selection leaves a
-candidate up to the provider's full message limit, then uses OpenAI's exact
-input-token count before session creation. Only the oldest complete dialogue
-units yield when the exact 8,192-token ceiling requires it; local estimates are
-telemetry only.
+call card is only a derived view. A bounded reference of recent completed
+Agent-activity results also enters startup context; task prompts, progress,
+cost, and presentation-only rows do not. Keep provider storage off and never
+clip HCC or part of an utterance to make a call fit. Startup-history selection
+leaves a candidate up to the provider's full message limit, then uses OpenAI's
+exact input-token count before session creation. The optional activity
+reference yields first, followed only by oldest complete dialogue units when
+the exact 8,192-token ceiling requires it; local estimates are telemetry only.
 
 An engaged `/phone` call is the owner's foreground conversation. All other
 Runs/events—including delegated work, text/API input, cron, heartbeat, HChat,
@@ -202,15 +204,23 @@ Every other stop is recovery/fault evidence, never `user_hangup`. Keep a
 privacy-bounded per-call lifecycle log independent of Session event sequencing;
 transcript content remains canonical in the Session.
 
+Live speech answers from supplied context first. PAO routes provider proposals
+as direct foreground speech, a short intent confirmation for a possible fresh
+check, or an explicit backend Run. Corrections, explanations, urgency, and
+reports of known facts never create Runs. One call has at most one non-terminal
+phone-originated Run. Validate its durable call/proposal origin and exclude its
+own messages, status, progress, and cost rows from the generic foreground inbox;
+the dedicated delegation relay alone returns its progress and final result.
+
 Implementation note (2026-09-30): PAO now reserves one live foreground call per
 owner, allocates Session ordinals atomically, and queues attributable background
 messages and status events by reference until the Provider acknowledges delivery.
 Browser/Provider connections use replaceable call epochs; passive disconnect,
 Function replacement, and the approaching Provider limit recover the logical call.
 The Connector sends its call epoch on state-changing requests, rejecting stale
-transport faults while retaining an explicit user hang-up. Source checks pass;
-HASHI1 runtime adoption and live continuity acceptance still require the safe
-Agent-and-Scheduler idle window.
+transport faults while retaining an explicit user hang-up. Instance adoption
+and live acceptance evidence belong in the owning delivery task, not this
+cross-instance contract.
 
 Schema 21 preserves legacy call and staged-event records. Context lookup exposes
 the recovering binding so Workbench can reattach without browser storage. A late
@@ -224,9 +234,8 @@ one ordered SessionStore recovery inbox before adding it to the process queue.
 Projection and staged-row removal commit atomically; startup replays pending
 rows in order, including the receive-to-queue replacement window. Staging
 failures apply backpressure and emit redacted retry evidence. The independent
-call audit never stores transcript text. This source change still requires
-focused validation and HASHI1 adoption after a fresh Agent-and-Scheduler idle
-window; no live continuity test has been performed for this checkpoint.
+call audit never stores transcript text. Track focused validation, runtime
+adoption, and live continuity acceptance independently for each instance.
 
 Commands follow the [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md); `/help`
 derives from metadata. Workbench and Telegram may share a Session while UI rows
