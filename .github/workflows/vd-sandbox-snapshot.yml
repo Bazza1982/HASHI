@@ -1,0 +1,22 @@
+name: Virtual desktop sandbox snapshot
+on:
+  push:
+    branches: [feature-virtual-desktop]
+    paths: ['.github/workflows/vd-sandbox-snapshot.yml']
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    if: github.ref == 'refs/heads/feature-virtual-desktop'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - run: git archive --format=zip HEAD -o source.zip
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: virtual-desktop-source
+          path: source.zip
+          retention-days: 1
