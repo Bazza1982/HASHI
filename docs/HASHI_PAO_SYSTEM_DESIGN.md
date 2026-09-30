@@ -127,6 +127,39 @@ recovery attempts, and the actor/reason for every termination request. It does
 not duplicate transcript text, audio, instructions, credentials, or secrets;
 the role-preserving Session transcript remains canonical.
 
+Implementation checkpoint (2026-09-30): PAO now assigns one foreground call per
+owner, routes attributable background messages and status through a durable
+inbox, and retains legacy calls as recoverable unless the stored record proves
+an explicit user hang-up. Authenticated context lookup returns the current
+recoverable binding so the Connector can restore a call after older clients
+cleared their local hint. Function replacement and Provider close preserve the
+logical call; only an explicit user hang-up becomes normal completion.
+
+The event reader suppresses historical terminal phase events while the
+canonical call phase remains nonterminal, so an old cursor cannot close a
+recovering call before receiving its recovery state. PAO merges pending
+background messages and status events by source timestamp and stops the batch
+when delivery or acknowledgement is uncertain.
+
+The sideband durably stages each normalized transcript or typed delegation before
+placing it in the process-only per-call projection queue. One SessionStore inbox
+assigns a persistent order across both event types. Canonical transcript
+projection and inbox removal share one transaction; delegation admission also
+removes its staged row atomically. Startup replays pending inbox rows in that
+order, including rows left between receipt and projection by Function
+replacement. If staging fails, the reader applies backpressure and records
+redacted retry evidence; it does not acknowledge the event into volatile memory.
+The independent diagnostic audit stores lifecycle and error metadata only,
+never transcript text. User hang-up and Provider cleanup bound WebSocket send
+and close operations separately, so a stalled socket cannot block the cleanup
+path or the normal user-requested terminal record.
+
+The event feed reads canonical call phase and Session events from one SQLite
+snapshot, so a concurrent user-ended event cannot be filtered using an older
+phase. PAO selects one globally oldest page across pending background messages
+and status events by their source timestamps; separate per-type page limits may
+not overtake an older item still waiting in the other inbox.
+
 ### 2.3 Outer orchestration
 
 PAO owns orchestration across Agents, Engines, Runs, Sessions, time, or HASHI

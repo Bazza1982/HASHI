@@ -11,6 +11,16 @@ from .protocol import CallBinding, Fragment
 from .delegation import Proposal
 
 class DurableVoicePort(Protocol):
+    async def stage_fragment_once(self, binding: CallBinding, fragment: Fragment) -> None:
+        """Durably stage normalized transcript for recovery across Function replacement."""
+        ...
+
+    async def stage_delegation_once(
+        self, binding: CallBinding, event_id: str, delegation_id: str, offset_ms: int
+    ) -> None:
+        """Durably stage a typed foreground delegation for generation recovery."""
+        ...
+
     async def append_fragment_once(self, binding: CallBinding, fragment: Fragment) -> Mapping[str, Any]:
         """In one SessionStore transaction deduplicate, append canonical event and assign sequence."""
         ...
@@ -50,8 +60,8 @@ class LiveApplicationPort(Protocol):
     async def invoke(self, operation: str, authority: Any, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         """Dispatch only routes.py's declared operations; inspect existing authenticated owner.
 
-        Implement: context, start, cancel_start, attempt, snapshot, events and
-        control. start/cancel_start share a durable attempt ledger;
+        Implement: context, start, resume, cancel_start, attempt, snapshot, events and
+        control. start/resume/cancel_start share a durable attempt ledger;
         every call-bound operation checks stored CallBinding. Response projection
         contains no secret/internal provider errors. No client-supplied principal.
         """

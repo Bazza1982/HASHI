@@ -26,18 +26,21 @@ from .openai_live import (
     attach_provider,
     create_provider_session,
     fit_live_session_input,
+    MAX_LIVE_INPUT_MESSAGES,
     provider_http_session,
     safe_sideband_event,
     session_request,
 )
 from .ports import AdmissionPort, DurableVoicePort, LiveApplicationPort
-from .protocol import CallBinding, Fragment, LiveVoiceError, identifier, positive_int, stable_digest
+from .protocol import CallBinding, Fragment, LiveVoiceError, identifier, normalize_transcript, positive_int, stable_digest
 from .service import LiveVoiceEventService
-from orchestrator.session_store import TERMINAL_RUN_STATES
+from orchestrator.session_store import SessionConflict, TERMINAL_RUN_STATES
 from tools.token_tracker import estimate_tokens
 
 logger = logging.getLogger(__name__)
-ACTIVE_PHASES = {"connecting", "active", "ending"}
+ACTIVE_PHASES = {"connecting", "active", "ending", "recovering"}
+PROVIDER_SESSION_MAX_DURATION_SECONDS = 1800
+PROVIDER_SESSION_ROLLOVER_MARGIN_SECONDS = 90
 TERMINAL_PHASES = {"ended", "failed", "interrupted"}
 CALL_EVENT_SCHEMA = "hashi.live_voice.event.v1"
 LIVE_UPDATE_TOKEN_LIMIT = 320
@@ -219,8 +222,16 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         self.audit = LiveVoiceAuditLog(Path(configured_logs or default_logs) / "voice_sessions")
         self.service = LiveVoiceEventService(self)
         self._sideband_tasks: set[asyncio.Task[Any]] = set()
+        self._provider_event_queues: dict[
+            str, asyncio.Queue[tuple[CallBinding, Mapping[str, Any]]]
+        ] = {}
+        self._provider_event_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._provider_event_tasks_set: set[asyncio.Task[Any]] = set()
+        self._terminal_record_tasks: set[asyncio.Task[Any]] = set()
         self._proposal_tasks: set[asyncio.Task[Any]] = set()
         self._relay_tasks: set[asyncio.Task[Any]] = set()
+        self._foreground_tasks: set[asyncio.Task[Any]] = set()
+        self._foreground_call_tasks: dict[str, asyncio.Task[Any]] = {}
         self._recovery_tasks: set[asyncio.Task[Any]] = set()
         self._active_sockets: dict[str, Any] = {}
         self._sideband_ready_events: dict[str, asyncio.Event] = {}
@@ -382,6 +393,136 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         task.add_done_callback(finished)
         return task
 
+    def _enqueue_provider_event(self, binding: CallBinding, event: Mapping[str, Any]) -> None:
+        queue = self._provider_event_queues.setdefault(binding.call_id, asyncio.Queue())
+        queue.put_nowait((binding, dict(event)))
+        task = self._provider_event_tasks.get(binding.call_id)
+        if task is not None and not task.done():
+            return
+        task = asyncio.create_task(
+            self._run_provider_event_queue(binding.call_id, queue),
+            name=f"hashi-live-provider-events-{binding.call_id}",
+        )
+        self._provider_event_tasks[binding.call_id] = task
+        self._track(task, self._provider_event_tasks_set, binding=binding)
+
+    async def _run_provider_event_queue(
+        self,
+        call_id: str,
+        queue: asyncio.Queue[tuple[CallBinding, Mapping[str, Any]]],
+    ) -> None:
+        current: tuple[CallBinding, Mapping[str, Any]] | None = None
+        attempts = 0
+        try:
+            while True:
+                if self._closing and queue.empty():
+                    return
+                try:
+                    current = await asyncio.wait_for(queue.get(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    if queue.empty():
+                        with self.session_store._lock, self.session_store._connection() as connection:
+                            call = connection.execute(
+                                "SELECT phase FROM live_calls WHERE call_id = ?", (call_id,)
+                            ).fetchone()
+                        if call is None or str(call["phase"]) in TERMINAL_PHASES:
+                            return
+                    continue
+
+                binding, event = current
+                event_type = str(event.get("type") or "unknown")
+                event_id = str(event.get("event_id") or "")[:160]
+                attempts = 0
+                while True:
+                    try:
+                        await self.service.on_provider_event(binding, event)
+                    except asyncio.CancelledError:
+                        if attempts:
+                            try:
+                                self.audit.record(
+                                    binding, "provider.event_persistence_interrupted",
+                                    provider_event_type=event_type,
+                                    provider_event_id=event_id,
+                                    failed_attempts=attempts,
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "Unable to audit interrupted provider event persistence for %s",
+                                    binding.call_id,
+                                )
+                        raise
+                    except (LiveVoiceError, SessionConflict) as exc:
+                        self.audit.record(
+                            binding, "provider.event_persistence_rejected",
+                            provider_event_type=event_type,
+                            provider_event_id=event_id,
+                            error_code=getattr(exc, "code", "session_conflict"),
+                            reason="non_retryable",
+                        )
+                        break
+                    except Exception as exc:
+                        attempts += 1
+                        retry_delay = min(0.1 * attempts, 5.0)
+                        if attempts == 1 or attempts % 12 == 0:
+                            try:
+                                self.audit.record(
+                                    binding, "provider.event_processing_failed",
+                                    provider_event_type=event_type,
+                                    provider_event_id=event_id,
+                                    attempt=attempts,
+                                    retry_delay_s=round(retry_delay, 2),
+                                    **exception_evidence(exc),
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "Unable to audit provider event persistence failure for %s",
+                                    binding.call_id,
+                                )
+                            logger.warning(
+                                "Live Voice event persistence is retrying for %s (%s), attempt %s",
+                                binding.call_id, type(exc).__name__, attempts,
+                            )
+                        await asyncio.sleep(retry_delay)
+                    else:
+                        if attempts:
+                            try:
+                                self.audit.record(
+                                    binding, "provider.event_persistence_recovered",
+                                    provider_event_type=event_type,
+                                    provider_event_id=event_id,
+                                    attempts=attempts + 1,
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "Unable to audit provider event persistence recovery for %s",
+                                    binding.call_id,
+                                )
+                        break
+                queue.task_done()
+                current = None
+                attempts = 0
+                if queue.empty():
+                    with self.session_store._lock, self.session_store._connection() as connection:
+                        call = connection.execute(
+                            "SELECT * FROM live_calls WHERE call_id = ?", (call_id,)
+                        ).fetchone()
+                    if call is not None and str(call["phase"]) in TERMINAL_PHASES:
+                        self._persist_call_record(self._binding_from_row(call))
+                        return
+        finally:
+            if current is not None:
+                with suppress(ValueError):
+                    queue.task_done()
+            if self._provider_event_tasks.get(call_id) is asyncio.current_task():
+                self._provider_event_tasks.pop(call_id, None)
+            if queue.empty() and self._provider_event_queues.get(call_id) is queue:
+                self._provider_event_queues.pop(call_id, None)
+
+    async def _drain_provider_events(self, call_id: str) -> None:
+        queue = self._provider_event_queues.get(call_id)
+        if queue is not None:
+            await queue.join()
+
     def _sanitize_persisted_attempts(self) -> None:
         """Remove SDP written by the pre-qualified prototype."""
         with self.session_store._lock, self.session_store._connection() as connection:
@@ -406,50 +547,67 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
 
     async def start(self) -> None:
         self._closing = False
-        now = _utc_now()
         with self.session_store._lock, self.session_store._connection() as connection:
-            active_rows = connection.execute(
-                "SELECT * FROM live_calls WHERE phase IN ('connecting', 'active', 'ending')"
+            user_hangups = connection.execute(
+                """SELECT * FROM live_calls
+                   WHERE termination_initiator = 'user' AND termination_reason = 'user_hangup'
+                     AND phase NOT IN ('ended', 'failed', 'interrupted')"""
             ).fetchall()
+            user_hangup_ids = {str(row["call_id"]) for row in user_hangups}
+            active_rows = connection.execute(
+                "SELECT * FROM live_calls WHERE foreground = 1 AND phase IN ('connecting', 'active', 'ending', 'recovering')"
+            ).fetchall()
+            active_rows = [row for row in active_rows if str(row["call_id"]) not in user_hangup_ids]
             for row in active_rows:
                 binding = self._binding_from_row(row)
                 self.audit.record(
                     binding,
                     "runtime.recovery_detected",
                     phase=str(row["phase"]),
-                    reason="service_shutdown",
+                    reason="function_generation_replaced",
                 )
                 connection.execute(
-                    "UPDATE live_calls SET phase = 'interrupted', ended_at = ?, provider_close_state = 'unconfirmed' WHERE call_id = ?",
-                    (now, binding.call_id),
+                    "UPDATE live_calls SET phase = 'recovering', ended_at = NULL, provider_close_state = 'unconfirmed' WHERE call_id = ?",
+                    (binding.call_id,),
                 )
                 self._append_call_state(
-                    connection,
-                    binding,
-                    "interrupted",
-                    "Live call interrupted during recovery",
-                    reason="service_shutdown",
+                    connection, binding, "recovering",
+                    "Live call is recovering after Function replacement",
+                    reason="function_generation_replaced",
                 )
             proposal_rows = connection.execute(
-                """
-                SELECT d.delegation_id, d.offset_ms, c.*
-                FROM live_delegations AS d JOIN live_calls AS c ON c.call_id = d.call_id
-                WHERE d.proposal_state = 'pending'
-                """
+                """SELECT d.delegation_id, d.offset_ms, c.*
+                   FROM live_delegations AS d JOIN live_calls AS c ON c.call_id = d.call_id
+                   WHERE d.proposal_state = 'pending'
+                     AND c.foreground = 1
+                     AND c.phase IN ('connecting', 'active', 'recovering')
+                     AND NOT (c.termination_initiator = 'user' AND c.termination_reason = 'user_hangup')"""
             ).fetchall()
             decision_rows = connection.execute(
-                """
-                SELECT r.idempotency_key, r.request_digest, r.receipt_json, c.*
-                FROM live_control_receipts AS r JOIN live_calls AS c ON c.call_id = r.call_id
-                WHERE r.operation IN ('decision_pending', 'admission_pending')
-                """
+                """SELECT r.idempotency_key, r.request_digest, r.receipt_json, c.*
+                   FROM live_control_receipts AS r JOIN live_calls AS c ON c.call_id = r.call_id
+                   WHERE r.operation IN ('decision_pending', 'admission_pending')
+                     AND c.foreground = 1
+                     AND c.phase IN ('connecting', 'active', 'recovering')
+                     AND NOT (c.termination_initiator = 'user' AND c.termination_reason = 'user_hangup')"""
             ).fetchall()
-        if active_rows and self._get_api_key():
-            await asyncio.gather(*(
-                self._recover_orphan_provider(self._binding_from_row(row)) for row in active_rows
-            ))
+        self._requeue_pending_provider_events()
+        user_hangup_ids = {str(row["call_id"]) for row in user_hangups}
+        for row in user_hangups:
+            binding = self._binding_from_row(row)
+            self._track(asyncio.create_task(
+                self._finish_call(binding, reason="user_hangup", initiator="user"),
+                name=f"hashi-live-finish-user-hangup-{binding.call_id}",
+            ), self._recovery_tasks, binding=binding)
         for row in active_rows:
-            self._persist_call_record(self._binding_from_row(row))
+            if str(row["call_id"]) in user_hangup_ids:
+                continue
+            binding = self._binding_from_row(row)
+            self._track(asyncio.create_task(
+                self._run_sideband(binding, self._get_api_key(), binding.provider_session_id),
+                name=f"hashi-live-sideband-recover-{binding.call_id}",
+            ), self._sideband_tasks, binding=binding)
+            self._ensure_foreground_router(binding)
         for row in proposal_rows:
             binding = self._binding_from_row(row)
             self._track(asyncio.create_task(
@@ -464,92 +622,111 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             ), self._recovery_tasks, binding=binding)
         self._sweeper_task = asyncio.create_task(self._sweeper_loop(), name="hashi-live-voice-sweeper")
 
-    async def _recover_orphan_provider(self, binding: CallBinding) -> None:
-        close_state, usage = await self._close_provider_session(
-            self._get_api_key(), binding.provider_session_id, binding=binding
-        )
-        if close_state == "confirmed":
-            self._mark_terminal(
-                binding, "interrupted", provider_close_state="confirmed",
-                summary="Recovered provider session was closed", usage=usage,
-            )
-
     async def shutdown(self) -> None:
         self._closing = True
         if self._sweeper_task is not None:
             self._sweeper_task.cancel()
             await asyncio.gather(self._sweeper_task, return_exceptions=True)
             self._sweeper_task = None
-        for collection in (self._proposal_tasks, self._relay_tasks, self._recovery_tasks):
+        for collection in (self._proposal_tasks, self._relay_tasks, self._foreground_tasks, self._recovery_tasks):
             for task in tuple(collection):
                 task.cancel()
             if collection:
                 await asyncio.gather(*tuple(collection), return_exceptions=True)
                 collection.clear()
-        with self.session_store._lock, self.session_store._connection() as connection:
-            active_rows = connection.execute(
-                "SELECT * FROM live_calls WHERE phase IN ('connecting', 'active', 'ending')"
-            ).fetchall()
-        if active_rows:
-            await asyncio.gather(*(
-                self._finish_call(self._binding_from_row(row), reason="service_shutdown")
-                for row in active_rows
-            ), return_exceptions=True)
         for ws in tuple(self._active_sockets.values()):
             if not getattr(ws, "closed", True):
-                with suppress(Exception):
-                    await ws.close()
+                await self._close_sideband_socket(ws, operation="function_shutdown_close")
         for task in tuple(self._sideband_tasks):
             task.cancel()
         if self._sideband_tasks:
             await asyncio.gather(*tuple(self._sideband_tasks), return_exceptions=True)
             self._sideband_tasks.clear()
+        queues = tuple(self._provider_event_queues.values())
+        if queues:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*(queue.join() for queue in queues)),
+                    timeout=min(5.0, self._close_timeout_seconds),
+                )
+            except asyncio.TimeoutError:
+                pass
+        for queue in queues:
+            while True:
+                try:
+                    binding, event = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                try:
+                    staged = self._stage_provider_event_for_recovery(binding, event)
+                    self.audit.record(
+                        binding, "provider.event_persistence_interrupted",
+                        provider_event_type=str(event.get("type") or "unknown"),
+                        provider_event_id=str(event.get("event_id") or "")[:160],
+                        failed_attempts=0,
+                        reason="function_shutdown_staged" if staged else "function_shutdown",
+                    )
+                except Exception as exc:
+                    self.audit.record(
+                        binding, "provider.event_persistence_interrupted",
+                        provider_event_type=str(event.get("type") or "unknown"),
+                        provider_event_id=str(event.get("event_id") or "")[:160],
+                        failed_attempts=0,
+                        reason="function_shutdown_stage_failed",
+                        **exception_evidence(exc),
+                    )
+                queue.task_done()
+        for task in tuple(self._provider_event_tasks_set):
+            task.cancel()
+        if self._provider_event_tasks_set:
+            await asyncio.gather(*tuple(self._provider_event_tasks_set), return_exceptions=True)
+            self._provider_event_tasks_set.clear()
+        self._provider_event_tasks.clear()
+        self._provider_event_queues.clear()
+        if self._terminal_record_tasks:
+            await asyncio.gather(*tuple(self._terminal_record_tasks), return_exceptions=True)
+            self._terminal_record_tasks.clear()
         self._active_sockets.clear()
-        now = _utc_now()
         with self.session_store._lock, self.session_store._connection() as connection:
             rows = connection.execute(
-                "SELECT * FROM live_calls WHERE phase IN ('connecting', 'active', 'ending')"
+                "SELECT * FROM live_calls WHERE foreground = 1 AND phase IN ('connecting', 'active', 'recovering')"
             ).fetchall()
             for row in rows:
                 binding = self._binding_from_row(row)
                 connection.execute(
-                    "UPDATE live_calls SET phase = 'interrupted', ended_at = ?, provider_close_state = 'unconfirmed' WHERE call_id = ?",
-                    (now, binding.call_id),
+                    "UPDATE live_calls SET phase = 'recovering', ended_at = NULL, provider_close_state = 'unconfirmed' WHERE call_id = ?",
+                    (binding.call_id,),
                 )
                 self._append_call_state(
-                    connection,
-                    binding,
-                    "interrupted",
-                    "Live call interrupted during shutdown",
-                    reason="service_shutdown",
+                    connection, binding, "recovering",
+                    "Live call is recovering after Function shutdown",
+                    reason="function_shutdown",
                 )
+
+    async def _sweep_expiring_transports(self) -> None:
+        now_dt = _utc_now_dt()
+        now = now_dt.isoformat().replace("+00:00", "Z")
+        rollover_before = (now_dt + timedelta(seconds=PROVIDER_SESSION_ROLLOVER_MARGIN_SECONDS)).isoformat().replace("+00:00", "Z")
+        with self.session_store._lock, self.session_store._connection() as connection:
+            rows = connection.execute(
+                """SELECT * FROM live_calls
+                   WHERE foreground = 1 AND phase IN ('connecting', 'active')
+                     AND (lease_expiry <= ? OR max_ends_at <= ?)""",
+                (now, rollover_before),
+            ).fetchall()
         for row in rows:
-            self._persist_call_record(self._binding_from_row(row))
+            binding = self._binding_from_row(row)
+            lease_expired = str(row["lease_expiry"] or "") <= now
+            reason = "client_lease_expired" if lease_expired else "provider_rollover_due"
+            summary = ("Phone transport lease expired; logical call remains open" if lease_expired
+                       else "Provider transport is approaching its limit; replacing it before expiry")
+            self._mark_recovering(binding, reason=reason, summary=summary)
 
     async def _sweeper_loop(self) -> None:
         while True:
             await asyncio.sleep(5)
             try:
-                now = _utc_now()
-                with self.session_store._lock, self.session_store._connection() as connection:
-                    rows = connection.execute(
-                        """SELECT * FROM live_calls
-                        WHERE phase IN ('connecting', 'active', 'ending')
-                          AND (lease_expiry <= ? OR (max_ends_at IS NOT NULL AND max_ends_at <= ?))""",
-                        (now, now),
-                    ).fetchall()
-                for row in rows:
-                    binding = self._binding_from_row(row)
-                    maximum = _parse_utc(row["max_ends_at"])
-                    reason = (
-                        "maximum_duration_reached"
-                        if maximum is not None and maximum <= now
-                        else "lease_expired"
-                    )
-                    self._track(asyncio.create_task(
-                        self._finish_call(binding, reason=reason),
-                        name=f"hashi-live-expire-{binding.call_id}",
-                    ), self._recovery_tasks, binding=binding)
+                await self._sweep_expiring_transports()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -583,7 +760,9 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             "context_generation": generation,
         }
 
-    def _call_binding(self, owner_id: str, payload: Mapping[str, Any]) -> tuple[CallBinding, Mapping[str, Any]]:
+    def _call_binding(
+        self, owner_id: str, payload: Mapping[str, Any], *, require_current_transport: bool = False,
+    ) -> tuple[CallBinding, Mapping[str, Any]]:
         call_id = identifier(payload.get("call_id"))
         with self.session_store._lock, self.session_store._connection() as connection:
             row = connection.execute("SELECT * FROM live_calls WHERE call_id = ?", (call_id,)).fetchone()
@@ -591,6 +770,12 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             raise LiveVoiceError("live_not_found", 404)
         binding = self._binding_from_row(row)
         binding.require_scope(self._expected_scope(payload), authenticated_owner=owner_id)
+        if require_current_transport:
+            epoch = payload.get("call_epoch")
+            if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 1:
+                raise LiveVoiceError("live_transport_epoch_required", 409)
+            if epoch != binding.call_epoch:
+                raise LiveVoiceError("live_transport_epoch_changed", 409)
         return binding, row
 
     def _append_call_state(self, connection: Any, binding: CallBinding, phase: str, summary: str, **detail: Any) -> Mapping[str, Any]:
@@ -609,7 +794,256 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         )
         return event
 
+    def _ensure_foreground_router(self, binding: CallBinding) -> None:
+        existing = self._foreground_call_tasks.get(binding.call_id)
+        if existing is not None and not existing.done():
+            return
+        task = asyncio.create_task(
+            self._run_foreground_router(binding),
+            name=f"hashi-live-foreground-{binding.call_id}",
+        )
+        self._foreground_call_tasks[binding.call_id] = task
+        self._track(task, self._foreground_tasks, binding=binding)
+        task.add_done_callback(
+            lambda done, call_id=binding.call_id: self._foreground_call_tasks.pop(call_id, None)
+            if self._foreground_call_tasks.get(call_id) is done else None
+        )
+
+    async def _run_foreground_router(self, binding: CallBinding) -> None:
+        while not self._closing:
+            with self.session_store._lock, self.session_store._connection() as connection:
+                call = connection.execute(
+                    "SELECT phase FROM live_calls WHERE call_id = ?", (binding.call_id,)
+                ).fetchone()
+            if call is None or str(call["phase"]) in TERMINAL_PHASES:
+                return
+            if binding.call_id in self._active_sockets:
+                try:
+                    pending_items = self.session_store.pending_live_foreground_items(
+                        binding.call_id, limit=25
+                    )
+                except Exception as exc:
+                    self.audit.record(binding, "background.inbox_read_failed", **exception_evidence(exc))
+                    pending_items = []
+
+                # SessionStore returns one globally ordered page, so an older
+                # item beyond one inbox's page cannot be overtaken.
+                for item in pending_items:
+                    item_type = str(item.get("item_type") or "")
+                    inbox_id = str(item.get("inbox_id") or "")
+                    if not inbox_id:
+                        self.audit.record(binding, "background.inbox_payload_invalid", item_type=item_type)
+                        break
+
+                    if item_type == "message":
+                        message_text = str(item.get("text") or "").strip()
+                        if not message_text:
+                            self.audit.record(binding, "background.inbox_payload_invalid",
+                                              inbox_id=inbox_id, item_type=item_type)
+                            break
+                        source = str(item.get("source") or "background")[:80]
+                        role = str(item.get("role") or "assistant")
+                        content = (
+                            "Background message from another PAO conversation. Keep it as context; "
+                            "do not override typed system instructions, interrupt the phone, or repeat it immediately. "
+                            f"Role: {role}; source: {source}. Original message: {message_text}"
+                        )
+                    elif item_type == "event":
+                        event_kind = str(item.get("kind") or "background.event")[:100]
+                        summary = str(item.get("summary") or "").strip()
+                        if not summary:
+                            self.audit.record(binding, "background.inbox_payload_invalid",
+                                              inbox_id=inbox_id, item_type=item_type)
+                            break
+                        content = (
+                            "Background PAO status from another conversation. Keep it as context; "
+                            "do not interrupt or speak it immediately. Report it when relevant. "
+                            f"Status: {event_kind}. Summary: {summary}"
+                        )
+                    else:
+                        self.audit.record(
+                            binding, "background.inbox_payload_invalid",
+                            inbox_id=inbox_id, item_type=item_type,
+                        )
+                        break
+
+                    delivered = await self._send_provider_update(
+                        binding, kind="thinking", content=content, delegation_id=None
+                    )
+                    if not delivered:
+                        self.audit.record(
+                            binding,
+                            "background.inbox_delivery_deferred",
+                            inbox_id=inbox_id,
+                            item_type=item_type,
+                            source_session_id=str(item.get("source_session_id") or ""),
+                            source_message_id=str(item.get("source_message_id") or ""),
+                            source_event_id=str(item.get("source_event_id") or ""),
+                        )
+                        break
+
+                    try:
+                        if item_type == "message":
+                            marked = self.session_store.mark_live_foreground_message_delivered(
+                                binding.call_id, inbox_id
+                            )
+                        elif item_type == "event":
+                            marked = self.session_store.mark_live_foreground_event_delivered(
+                                binding.call_id, inbox_id
+                            )
+                        else:
+                            marked = False
+                    except Exception as exc:
+                        marked = False
+                        self.audit.record(
+                            binding,
+                            "background.inbox_delivery_commit_failed",
+                            inbox_id=inbox_id,
+                            item_type=item_type,
+                            **exception_evidence(exc),
+                        )
+                    if not marked:
+                        self.audit.record(
+                            binding, "background.inbox_delivery_unconfirmed",
+                            inbox_id=inbox_id, item_type=item_type,
+                        )
+                        break
+
+                    if item_type == "message":
+                        self.audit.record(
+                            binding, "background.inbox_delivered", inbox_id=inbox_id,
+                            source_session_id=str(item.get("source_session_id") or ""),
+                            source_message_id=str(item.get("source_message_id") or ""),
+                        )
+                    else:
+                        self.audit.record(
+                            binding, "background.event_inbox_delivered", inbox_id=inbox_id,
+                            source_session_id=str(item.get("source_session_id") or ""),
+                            source_event_id=str(item.get("source_event_id") or ""),
+                            event_kind=event_kind,
+                        )
+            await asyncio.sleep(0.5)
+
     # Durable transcript and proposal state ---------------------------------
+    def _requeue_pending_provider_events(self) -> None:
+        for item in self.session_store.pending_live_provider_events():
+            binding = CallBinding(
+                owner_id=str(item["owner_id"]),
+                instance_id=str(item["instance_id"]),
+                instance_generation=str(item["instance_generation"]),
+                agent_id=str(item["agent_id"]),
+                session_id=str(item["session_id"]),
+                context_generation=int(item["context_generation"]),
+                call_id=str(item["call_id"]),
+                call_epoch=int(item["call_epoch"]),
+                provider_session_id=str(item["provider_session_id"]),
+            )
+            if str(item["event_type"]) == "transcript":
+                speaker = str(item["speaker"])
+                event = {
+                    "type": (
+                        "session.input_transcript.delta"
+                        if speaker == "user" else "session.output_transcript.delta"
+                    ),
+                    "event_id": str(item["provider_event_id"]),
+                    "delta": str(item["text"]),
+                    "start_ms": int(item["start_ms"]),
+                    "end_ms": int(item["end_ms"]),
+                }
+            else:
+                event = {
+                    "type": "session.delegation.created",
+                    "event_id": str(item["provider_event_id"]),
+                    "delegation": {"target": "client", "id": str(item["delegation_id"])},
+                    "offset_ms": int(item["offset_ms"]),
+                }
+            self._enqueue_provider_event(binding, event)
+
+    async def stage_fragment_once(self, binding: CallBinding, fragment: Fragment) -> None:
+        self.session_store.stage_live_provider_fragment(
+            owner_id=binding.owner_id,
+            provider_event_id=fragment.provider_event_id,
+            call_id=binding.call_id,
+            call_epoch=binding.call_epoch,
+            session_id=binding.session_id,
+            speaker=fragment.speaker,
+            text=fragment.text,
+            start_ms=fragment.start_ms,
+            end_ms=fragment.end_ms,
+        )
+
+    async def stage_delegation_once(
+        self, binding: CallBinding, event_id: str, delegation_id: str, offset_ms: int
+    ) -> None:
+        self.session_store.stage_live_provider_delegation(
+            owner_id=binding.owner_id,
+            provider_event_id=event_id,
+            call_id=binding.call_id,
+            call_epoch=binding.call_epoch,
+            session_id=binding.session_id,
+            delegation_id=delegation_id,
+            offset_ms=offset_ms,
+        )
+
+    @staticmethod
+    def _validate_provider_event_for_recovery(event: Mapping[str, Any]) -> bool:
+        """Validate content before storage retries; return false for irrelevant events."""
+        if normalize_transcript(event) is not None:
+            return True
+        if event.get("type") != "session.delegation.created":
+            return False
+        delegation = event.get("delegation")
+        if not isinstance(delegation, Mapping) or delegation.get("target") != "client":
+            return False
+        offset = event.get("offset_ms")
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise LiveVoiceError("live_delegation_invalid")
+        identifier(event.get("event_id"))
+        identifier(delegation.get("id"))
+        return True
+
+    def _stage_provider_event_for_recovery(
+        self, binding: CallBinding, event: Mapping[str, Any]
+    ) -> bool:
+        fragment = normalize_transcript(event)
+        if fragment is not None:
+            self.session_store.stage_live_provider_fragment(
+                owner_id=binding.owner_id,
+                provider_event_id=fragment.provider_event_id,
+                call_id=binding.call_id,
+                call_epoch=binding.call_epoch,
+                session_id=binding.session_id,
+                speaker=fragment.speaker,
+                text=fragment.text,
+                start_ms=fragment.start_ms,
+                end_ms=fragment.end_ms,
+            )
+            return True
+        if event.get("type") != "session.delegation.created":
+            return False
+        delegation = event.get("delegation")
+        offset = event.get("offset_ms")
+        if (
+            not isinstance(delegation, Mapping)
+            or delegation.get("target") != "client"
+            or isinstance(offset, bool)
+            or not isinstance(offset, int)
+            or offset < 0
+        ):
+            return False
+        event_id = identifier(event.get("event_id"))
+        delegation_id = identifier(delegation.get("id"))
+        self.session_store.stage_live_provider_delegation(
+            owner_id=binding.owner_id,
+            provider_event_id=event_id,
+            call_id=binding.call_id,
+            call_epoch=binding.call_epoch,
+            session_id=binding.session_id,
+            delegation_id=delegation_id,
+            offset_ms=offset,
+        )
+        return True
+
     async def append_fragment_once(self, binding: CallBinding, fragment: Fragment) -> Mapping[str, Any]:
         identity = (binding.owner_id, binding.session_id, binding.call_id, binding.call_epoch, fragment.provider_event_id)
         with self.session_store._lock, self.session_store._connection() as connection:
@@ -625,6 +1059,13 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                             "start_ms": fragment.start_ms, "end_ms": fragment.end_ms}
                 if any(detail.get(key) != value for key, value in expected.items()):
                     raise LiveVoiceError("live_event_identity_conflict", 409)
+                connection.execute(
+                    """DELETE FROM live_provider_event_inbox
+                       WHERE owner_id = ? AND session_id = ? AND call_id = ?
+                         AND call_epoch = ? AND provider_event_id = ?
+                         AND event_type = 'transcript'""",
+                    identity,
+                )
                 return {}
             event = self.session_store._append_event(
                 connection, session_id=binding.session_id, run_id=None,
@@ -643,6 +1084,13 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                  event["event_id"], event["sequence"], event["created_at"]),
             )
             connection.execute(
+                """DELETE FROM live_provider_event_inbox
+                   WHERE owner_id = ? AND session_id = ? AND call_id = ?
+                     AND call_epoch = ? AND provider_event_id = ?
+                     AND event_type = 'transcript'""",
+                identity,
+            )
+            connection.execute(
                 "UPDATE live_calls SET latest_session_event_sequence = ? WHERE call_id = ?",
                 (event["sequence"], binding.call_id),
             )
@@ -656,6 +1104,16 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 (binding.call_id, binding.call_epoch, delegation_id),
             ).fetchone()
             if existing is not None:
+                connection.execute(
+                    """DELETE FROM live_provider_event_inbox
+                       WHERE owner_id = ? AND session_id = ? AND call_id = ?
+                         AND call_epoch = ? AND delegation_id = ?
+                         AND event_type = 'delegation'""",
+                    (
+                        binding.owner_id, binding.session_id, binding.call_id,
+                        binding.call_epoch, delegation_id,
+                    ),
+                )
                 return False
             prior = connection.execute(
                 "SELECT COALESCE(MAX(cutoff_ms), 0) AS watermark FROM live_delegations WHERE call_id = ? AND call_epoch = ?",
@@ -671,6 +1129,16 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                  (now + timedelta(seconds=self._proposal_grace_seconds)).isoformat().replace("+00:00", "Z"),
                  (now + timedelta(seconds=300)).isoformat().replace("+00:00", "Z"),
                  now.isoformat().replace("+00:00", "Z")),
+            )
+            connection.execute(
+                """DELETE FROM live_provider_event_inbox
+                   WHERE owner_id = ? AND session_id = ? AND call_id = ?
+                     AND call_epoch = ? AND delegation_id = ?
+                     AND event_type = 'delegation'""",
+                (
+                    binding.owner_id, binding.session_id, binding.call_id,
+                    binding.call_epoch, delegation_id,
+                ),
             )
             return True
 
@@ -1250,14 +1718,31 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             )["public"]
         except LiveVoiceError as exc:
             configuration_error = exc.code
+        foreground_call = None
+        with self.session_store._lock, self.session_store._connection() as connection:
+            active_call = connection.execute(
+                """SELECT * FROM live_calls
+                   WHERE owner_id = ? AND foreground = 1
+                     AND phase IN ('recovering', 'ending')
+                   ORDER BY started_at DESC, rowid DESC LIMIT 1""",
+                (owner_id,),
+            ).fetchone()
+        if active_call is not None:
+            active_binding = self._binding_from_row(active_call)
+            foreground_call = {
+                "call_id": active_binding.call_id,
+                "phase": str(active_call["phase"]),
+                "binding": active_binding.public_scope(),
+            }
         return {
             "ok": True,
             "binding": {"instance_id": self.instance_id, "instance_generation": self.instance_generation,
                         "agent_id": agent_id, "session_id": session_id, "context_generation": generation},
+            "foreground_call": foreground_call,
             "capability": {"protocol_version": "1.0", "available": bool(self.available and phone),
                            "phone": phone, "configuration_error": configuration_error,
                            "heartbeat_interval_seconds": 10, "lease_expiry_seconds": 45,
-                           "max_call_duration_seconds": 1800},
+                           "provider_session_max_duration_seconds": PROVIDER_SESSION_MAX_DURATION_SECONDS},
         }
 
     async def _op_start(self, owner_id: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -1317,24 +1802,12 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 raise LiveVoiceError("live_outcome_unknown", 502)
             now = _utc_now()
             active = connection.execute(
-                "SELECT * FROM live_calls WHERE owner_id = ? AND agent_id = ? AND phase IN ('connecting', 'active', 'ending')",
-                (owner_id, expected["agent_id"]),
+                "SELECT * FROM live_calls WHERE owner_id = ? AND foreground = 1 AND phase IN ('connecting', 'active', 'ending', 'recovering')",
+                (owner_id,),
             ).fetchone()
             if active is not None:
-                if active["lease_expiry"] > now:
-                    raise LiveVoiceError("live_call_already_active", 409)
-                old = self._binding_from_row(active)
-                connection.execute(
-                    "UPDATE live_calls SET phase = 'interrupted', ended_at = ?, provider_close_state = 'unconfirmed' WHERE call_id = ?",
-                    (now, old.call_id),
-                )
-                self._append_call_state(
-                    connection,
-                    old,
-                    "interrupted",
-                    "Live call lease expired",
-                    reason="lease_expired",
-                )
+                code = "live_call_recovery_required" if active["phase"] == "recovering" else "live_call_already_active"
+                raise LiveVoiceError(code, 409)
             connection.execute(
                 """INSERT INTO live_call_attempts(
                 attempt_id, owner_id, session_id, agent_id, instance_id, instance_generation,
@@ -1449,7 +1922,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                          self.instance_generation, binding.context_generation, provider_id, attempt_id,
                          (now_dt + timedelta(seconds=45)).isoformat().replace("+00:00", "Z"),
                          now_dt.isoformat().replace("+00:00", "Z"),
-                         (now_dt + timedelta(seconds=1800)).isoformat().replace("+00:00", "Z"),
+                         (now_dt + timedelta(seconds=PROVIDER_SESSION_MAX_DURATION_SECONDS)).isoformat().replace("+00:00", "Z"),
                          phone_record_json),
                     )
                     self._append_call_state(connection, binding, "connecting", "Live call connecting")
@@ -1498,15 +1971,17 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             self._run_sideband(binding, self._get_api_key(), provider_id),
             name=f"hashi-live-sideband-{binding.call_id}",
         ), self._sideband_tasks, binding=binding)
+        self._ensure_foreground_router(binding)
         try:
             await asyncio.wait_for(ready.wait(), timeout=10)
-        except TimeoutError:
+        except asyncio.TimeoutError:
             self._sideband_failures[binding.call_id] = "live_sideband_timeout"
         failure = self._sideband_failures.pop(binding.call_id, None)
         if failure:
-            close_state, usage = await self._close_provider_session(self._get_api_key(), provider_id, binding=binding)
-            self._mark_terminal(binding, "failed", provider_close_state=close_state,
-                                summary="Live call sideband failed", usage=usage)
+            close_state, _usage = await self._close_provider_session(self._get_api_key(), provider_id, binding=binding)
+            self._mark_recovering(binding, reason=failure,
+                                  summary="Initial sideband failed; logical phone remains open",
+                                  provider_close_state=close_state)
             with self.session_store._lock, self.session_store._connection() as connection:
                 connection.execute(
                     "UPDATE live_call_attempts SET state = 'failed', outcome_json = ?, updated_at = ? WHERE attempt_id = ?",
@@ -1519,7 +1994,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         with self.session_store._lock, self.session_store._connection() as connection:
             check = connection.execute("SELECT cancel_requested FROM live_call_attempts WHERE attempt_id = ?", (attempt_id,)).fetchone()
         if check is not None and check["cancel_requested"]:
-            await self._finish_call(binding, reason="start_cancelled")
+            await self._finish_call(binding, reason="user_hangup", initiator="user")
             with self.session_store._lock, self.session_store._connection() as connection:
                 connection.execute(
                     "UPDATE live_call_attempts SET state = 'cancelled', cleanup_state = 'closed', updated_at = ? WHERE attempt_id = ?",
@@ -1540,8 +2015,304 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         )
         return {**outcome, "sdp_answer": answer}
 
+    async def _op_resume(self, owner_id: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Replace only the provider/browser transport while preserving one logical call."""
+        binding, _current = self._call_binding(owner_id, payload)
+        sdp = payload.get("sdp")
+        if not isinstance(sdp, str) or not sdp.strip():
+            raise LiveVoiceError("live_sdp_invalid", 400)
+        attempt_id = identifier(payload.get("idempotency_key"))
+        digest = stable_digest(dict(payload))
+        with self.session_store._lock, self.session_store._connection() as connection:
+            prior = connection.execute(
+                "SELECT * FROM live_call_attempts WHERE attempt_id = ?", (attempt_id,)
+            ).fetchone()
+            if prior is not None:
+                if prior["owner_id"] != owner_id or prior["request_digest"] != digest:
+                    raise LiveVoiceError("live_idempotency_conflict", 409)
+                if prior["state"] == "completed" and prior["outcome_json"]:
+                    answer = self._attempt_sdp_answers.get(attempt_id)
+                    if answer is None:
+                        raise LiveVoiceError("live_outcome_unknown", 502)
+                    return {**json.loads(prior["outcome_json"]), "sdp_answer": answer}
+                if prior["state"] in {"reserved", "provider_created"}:
+                    raise LiveVoiceError("live_attempt_in_progress", 409)
+                if prior["state"] == "failed" and prior["outcome_json"]:
+                    failure = json.loads(prior["outcome_json"])
+                    raise LiveVoiceError(str(failure.get("error_code") or "live_provider_replacement_failed"), 502)
+                raise LiveVoiceError("live_outcome_unknown", 502)
+        binding, current = self._call_binding(owner_id, payload, require_current_transport=True)
+        if str(current["phase"]) != "recovering":
+            raise LiveVoiceError("live_call_not_recovering", 409)
+        phone_session = self._phone_session(
+            binding.agent_id, owner_id=owner_id, session_id=binding.session_id,
+            context_generation=binding.context_generation,
+        )
+        expected_revision = str(payload.get("phone_revision") or "")
+        if expected_revision != str(phone_session["public"].get("revision") or ""):
+            raise LiveVoiceError("live_phone_configuration_changed", 409)
+        with self.session_store._lock, self.session_store._connection() as connection:
+            prior = connection.execute(
+                "SELECT * FROM live_call_attempts WHERE attempt_id = ?", (attempt_id,)
+            ).fetchone()
+            if prior is not None:
+                if prior["owner_id"] != owner_id or prior["request_digest"] != digest:
+                    raise LiveVoiceError("live_idempotency_conflict", 409)
+                if prior["state"] == "completed" and prior["outcome_json"]:
+                    answer = self._attempt_sdp_answers.get(attempt_id)
+                    if answer is None:
+                        raise LiveVoiceError("live_outcome_unknown", 502)
+                    return {**json.loads(prior["outcome_json"]), "sdp_answer": answer}
+                if prior["state"] in {"reserved", "provider_created"}:
+                    raise LiveVoiceError("live_attempt_in_progress", 409)
+                raise LiveVoiceError("live_outcome_unknown", 502)
+            row = connection.execute(
+                "SELECT * FROM live_calls WHERE call_id = ?", (binding.call_id,)
+            ).fetchone()
+            if row is None or row["phase"] != "recovering":
+                raise LiveVoiceError("live_call_not_recovering", 409)
+            previous_provider_id = str(row["provider_session_id"] or "")
+            now = _utc_now()
+            config = {
+                "public": phone_session["public"],
+                "instructions_sha256": stable_digest({"instructions": phone_session["instructions"]}),
+                "input_sha256": stable_digest({"input": phone_session["input"]}),
+                "input_messages": len(phone_session["input"]),
+                "input_tokens_est": int(phone_session["context_audit"].get("tokens_est") or 0),
+            }
+            attempt_inserted = False
+            try:
+                connection.execute(
+                    """INSERT INTO live_call_attempts(
+                       attempt_id, owner_id, session_id, agent_id, instance_id, instance_generation,
+                       context_generation, request_digest, phone_config_json, state, created_at, updated_at,
+                       call_id
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?, ?, ?)""",
+                    (attempt_id, owner_id, binding.session_id, binding.agent_id,
+                     self.instance_id, self.instance_generation, binding.context_generation,
+                     digest, json.dumps(config, ensure_ascii=False, separators=(",", ":")),
+                     now, now, binding.call_id),
+                )
+                attempt_inserted = True
+                updated = connection.execute(
+                    """UPDATE live_calls
+                       SET phase = 'connecting', foreground = 1, call_epoch = call_epoch + 1,
+                           controller_lease = ?, lease_expiry = ?, provider_close_state = 'pending'
+                       WHERE call_id = ? AND phase = 'recovering'
+                         AND call_epoch = ? AND provider_session_id = ?""",
+                    (attempt_id, (_utc_now_dt() + timedelta(seconds=45)).isoformat().replace("+00:00", "Z"),
+                     binding.call_id, binding.call_epoch, binding.provider_session_id),
+                )
+                if updated.rowcount != 1:
+                    raise LiveVoiceError("live_call_resume_in_progress", 409)
+                reserved_row = connection.execute(
+                    "SELECT * FROM live_calls WHERE call_id = ?", (binding.call_id,)
+                ).fetchone()
+                if reserved_row is None:
+                    raise LiveVoiceError("live_call_resume_in_progress", 409)
+                binding = self._binding_from_row(reserved_row)
+                self._append_call_state(
+                    connection, binding, "connecting", "Replacing phone transport",
+                    reason="transport_resume_requested",
+                )
+            except sqlite3.IntegrityError as exc:
+                raise LiveVoiceError("live_call_resume_in_progress", 409) from exc
+        if not attempt_inserted:
+            raise LiveVoiceError("live_call_resume_in_progress", 409)
+        self.audit.record(binding, "transport.resume_reserved", attempt_id=attempt_id)
+        previous_router = self._foreground_call_tasks.pop(binding.call_id, None)
+        if previous_router is not None and not previous_router.done():
+            previous_router.cancel()
+            await asyncio.gather(previous_router, return_exceptions=True)
+        old_socket = self._active_sockets.get(binding.call_id)
+        if old_socket is not None and not getattr(old_socket, "closed", True):
+            try:
+                await self._close_sideband_socket(
+                    old_socket, binding=binding, operation="transport_resume_close"
+                )
+            except Exception as exc:
+                self.audit.record(binding, "sideband.old_socket_close_failed", **exception_evidence(exc))
+        if previous_provider_id:
+            await self._close_provider_session(
+                self._get_api_key(), previous_provider_id, binding=binding
+            )
+        old_sideband_tasks = [
+            task for task in tuple(self._sideband_tasks)
+            if binding.call_id in task.get_name()
+        ]
+        if old_sideband_tasks:
+            _done, pending_tasks = await asyncio.wait(old_sideband_tasks, timeout=2)
+            for task in pending_tasks:
+                task.cancel()
+            if pending_tasks:
+                await asyncio.gather(*pending_tasks, return_exceptions=True)
+        self._sideband_failures.pop(binding.call_id, None)
+        # Include every event already read from the old Provider in recovered history.
+        try:
+            await self._drain_provider_events(binding.call_id)
+        except asyncio.CancelledError:
+            self._mark_recovering(
+                binding, reason="provider_event_drain_interrupted",
+                summary="Transport replacement was cancelled while saving received speech",
+            )
+            raise
+        history = []
+        for segment in self.session_store.live_transcript_segments(
+            binding.session_id,
+            owner_id=binding.owner_id,
+            context_generation=binding.context_generation,
+            call_id=binding.call_id,
+            call_epoch=None,
+        ):
+            text = str(segment.get("text") or "").strip()
+            role = str(segment.get("role") or "")
+            if text and role in {"user", "assistant"}:
+                history.append({"role": role, "content": [{"type": "input_text", "text": text}]})
+        for item in self.session_store.live_foreground_history(binding.call_id):
+            text = str(item.get("content") or "").strip()
+            role = str(item.get("role") or "assistant")
+            if not text:
+                continue
+            if item.get("item_type") == "event":
+                text = f"Background PAO status from another conversation: {text}"
+            else:
+                source = str(item.get("source") or "background")[:80]
+                text = f"Background message from another PAO conversation, source {source}: {text}"
+            history.append({"role": role if role in {"user", "assistant"} else "assistant",
+                            "content": [{"type": "input_text", "text": text}]})
+        input_messages = list(phone_session["input"])
+        context_audit = phone_session["context_audit"]
+        required_count = int(context_audit.get("required_message_count", len(input_messages)))
+        unit_counts = list(context_audit.get("history_unit_message_counts", []))
+        input_messages.extend(history)
+        unit_counts.extend([1] * len(history))
+        # Remove only whole oldest history messages to respect the provider's 128-message ceiling.
+        while len(input_messages) > MAX_LIVE_INPUT_MESSAGES and unit_counts:
+            drop_count = int(unit_counts.pop(0))
+            del input_messages[required_count:required_count + drop_count]
+        if len(input_messages) > MAX_LIVE_INPUT_MESSAGES:
+            self._mark_recovering(binding, reason="resume_context_too_large",
+                                  summary="Transport recovery needs smaller complete history units")
+            with self.session_store._lock, self.session_store._connection() as connection:
+                connection.execute(
+                    "UPDATE live_call_attempts SET state = 'failed', outcome_json = ?, updated_at = ? WHERE attempt_id = ?",
+                    (json.dumps({"ok": False, "error_code": "live_input_mandatory_limit"}), _utc_now(), attempt_id),
+                )
+            raise LiveVoiceError("live_input_mandatory_limit", 503)
+        try:
+            async with provider_http_session() as http:
+                provider_input, exact_audit = await fit_live_session_input(
+                    http, key=self._get_api_key(), model=phone_session["model"],
+                    input_messages=input_messages, required_message_count=required_count,
+                    history_unit_message_counts=unit_counts,
+                )
+                config.update({"input_sha256": stable_digest({"input": provider_input}),
+                               "input_messages": len(provider_input), **exact_audit})
+                provider = await create_provider_session(
+                    http, key=self._get_api_key(),
+                    request=session_request(
+                        sdp=sdp, instructions=phone_session["instructions"],
+                        model=phone_session["model"], voice=phone_session["voice"],
+                        input_messages=provider_input,
+                        input_token_count_exact=exact_audit["input_tokens_exact"],
+                    ),
+                )
+        except LiveVoiceError as exc:
+            self._mark_recovering(binding, reason=exc.code,
+                                  summary="Provider replacement failed; logical phone remains open")
+            with self.session_store._lock, self.session_store._connection() as connection:
+                connection.execute(
+                    "UPDATE live_call_attempts SET state = 'failed', outcome_json = ?, updated_at = ? WHERE attempt_id = ?",
+                    (json.dumps({"ok": False, "error_code": exc.code}), _utc_now(), attempt_id),
+                )
+            self.audit.record(binding, "transport.resume_failed", error_code=exc.code)
+            raise
+        except Exception as exc:
+            self._mark_recovering(binding, reason="provider_replacement_failed",
+                                  summary="Provider replacement failed; logical phone remains open")
+            with self.session_store._lock, self.session_store._connection() as connection:
+                connection.execute(
+                    "UPDATE live_call_attempts SET state = 'failed', outcome_json = ?, updated_at = ? WHERE attempt_id = ?",
+                    (json.dumps({"ok": False, "error_code": "live_provider_replacement_failed"}), _utc_now(), attempt_id),
+                )
+            self.audit.record(binding, "transport.resume_failed",
+                              error_code="live_provider_replacement_failed", **exception_evidence(exc))
+            raise LiveVoiceError("live_provider_replacement_failed", 502) from exc
+        provider_id, answer = provider["provider_session_id"], provider["sdp_answer"]
+        new_epoch = binding.call_epoch
+        current_row = None
+        with self.session_store._lock, self.session_store._connection() as connection:
+            updated = connection.execute(
+                """UPDATE live_calls SET provider_session_id = ?, phase = 'connecting',
+                   provider_close_state = 'pending', phone_config_json = ?, max_ends_at = ?
+                   WHERE call_id = ? AND phase = 'connecting' AND controller_lease = ?
+                     AND call_epoch = ? AND provider_session_id = ?""",
+                (provider_id, json.dumps(config, ensure_ascii=False, separators=(",", ":")),
+                 (_utc_now_dt() + timedelta(seconds=PROVIDER_SESSION_MAX_DURATION_SECONDS)).isoformat().replace("+00:00", "Z"),
+                 binding.call_id, attempt_id, new_epoch, previous_provider_id),
+            )
+            if updated.rowcount == 1:
+                connection.execute(
+                    "UPDATE live_call_attempts SET state = 'provider_created', provider_id = ?, updated_at = ? WHERE attempt_id = ?",
+                    (provider_id, _utc_now(), attempt_id),
+                )
+                current_row = connection.execute("SELECT * FROM live_calls WHERE call_id = ?", (binding.call_id,)).fetchone()
+                self._append_call_state(connection, self._binding_from_row(current_row), "connecting",
+                                        "Replacement Provider transport created", reason="provider_replaced")
+        if current_row is None:
+            await self._close_provider_session(self._get_api_key(), provider_id, binding=binding)
+            raise LiveVoiceError("live_call_resume_superseded", 409)
+        new_binding = self._binding_from_row(current_row)
+        self._session_closed_events[binding.call_id] = asyncio.Event()
+        self._sideband_ready_events[binding.call_id] = asyncio.Event()
+        self._sideband_failures.pop(binding.call_id, None)
+        self._track(asyncio.create_task(
+            self._run_sideband(new_binding, self._get_api_key(), provider_id),
+            name=f"hashi-live-sideband-resume-{binding.call_id}-{new_epoch}",
+        ), self._sideband_tasks, binding=new_binding)
+        self._ensure_foreground_router(new_binding)
+        ready = self._sideband_ready_events[binding.call_id]
+        failure = None
+        try:
+            await asyncio.wait_for(ready.wait(), timeout=10)
+        except asyncio.TimeoutError:
+            failure = "live_sideband_timeout"
+            self._mark_recovering(new_binding, reason=failure,
+                                  summary="Replacement sideband did not connect")
+        if failure is None:
+            failure = self._sideband_failures.pop(binding.call_id, None)
+        if failure:
+            await self._close_provider_session(self._get_api_key(), provider_id, binding=new_binding)
+            self._mark_recovering(new_binding, reason=failure,
+                                  summary="Replacement sideband failed; logical phone remains open")
+            with self.session_store._lock, self.session_store._connection() as connection:
+                connection.execute(
+                    "UPDATE live_call_attempts SET state = 'failed', outcome_json = ?, updated_at = ? WHERE attempt_id = ?",
+                    (json.dumps({"ok": False, "error_code": failure}), _utc_now(), attempt_id),
+                )
+            raise LiveVoiceError(failure, 502)
+        outcome = {"ok": True, "accepted": True, "call_id": binding.call_id,
+                   "provider_session_id": provider_id, "sideband_ready": True,
+                   "binding": new_binding.public_scope(), "phone": phone_session["public"]}
+        with self.session_store._lock, self.session_store._connection() as connection:
+            connection.execute(
+                "UPDATE live_call_attempts SET state = 'completed', outcome_json = ?, updated_at = ? WHERE attempt_id = ?",
+                (json.dumps(outcome, separators=(",", ":")), _utc_now(), attempt_id),
+            )
+        self._attempt_sdp_answers[attempt_id] = answer
+        self.audit.record(binding, "transport.resume_completed", call_epoch=new_epoch,
+                          input_messages=len(provider_input), input_tokens=exact_audit["input_tokens_exact"],
+                          omitted_history_units=exact_audit["history_omitted_units"])
+        return {**outcome, "sdp_answer": answer}
+
     async def _op_cancel_start(self, owner_id: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         attempt_id = identifier(payload.get("attempt_id") or payload.get("idempotency_key"))
+        initiator = str(payload.get("termination_initiator") or "unknown")
+        reason = str(payload.get("termination_reason") or "legacy_unspecified")
+        if initiator not in TERMINATION_INITIATORS or reason not in TERMINATION_REASONS:
+            raise LiveVoiceError("live_termination_invalid", 400)
+        if (initiator == "user") != (reason == "user_hangup"):
+            raise LiveVoiceError("live_termination_invalid", 400)
         expected = self._expected_scope(payload)
         with self.session_store._lock, self.session_store._connection() as connection:
             row = connection.execute("SELECT * FROM live_call_attempts WHERE attempt_id = ?", (attempt_id,)).fetchone()
@@ -1550,20 +2321,36 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             for key in ("instance_id", "instance_generation", "agent_id", "session_id", "context_generation"):
                 if str(row[key]) != str(expected[key]):
                     raise LiveVoiceError("live_scope_changed", 409)
-            connection.execute(
-                "UPDATE live_call_attempts SET cancel_requested = 1, updated_at = ? WHERE attempt_id = ?",
-                (_utc_now(), attempt_id),
-            )
             call_id, provider_id = row["call_id"], row["provider_id"]
+            if initiator == "user" or not call_id:
+                connection.execute(
+                    "UPDATE live_call_attempts SET cancel_requested = 1, updated_at = ? WHERE attempt_id = ?",
+                    (_utc_now(), attempt_id),
+                )
         close_state = "not_created"
         if call_id:
             with self.session_store._lock, self.session_store._connection() as connection:
                 call = connection.execute("SELECT * FROM live_calls WHERE call_id = ?", (call_id,)).fetchone()
             if call is not None:
-                close_state = (await self._finish_call(self._binding_from_row(call), reason="start_cancelled"))["provider_close_state"]
+                binding = self._binding_from_row(call)
+                if initiator == "user":
+                    receipt = await self._finish_call(binding, reason="user_hangup", initiator="user")
+                    close_state = str(receipt.get("provider_close_state") or "unconfirmed")
+                else:
+                    self._mark_recovering(
+                        binding, reason=reason,
+                        summary="Non-user startup cancellation retained as a recoverable call",
+                    )
+                    self.audit.record(binding, "termination.rejected_as_end", initiator=initiator, reason=reason)
+                    return {"ok": True, "applied": False, "cancelled": False,
+                            "phase": "recovering", "call_id": call_id,
+                            "provider_close_state": str(call["provider_close_state"] or "unconfirmed")}
         elif provider_id:
+            # There is no durable logical call yet. Close this incomplete dial attempt
+            # so a passive browser fault cannot leave an unowned Provider session.
             close_state, _usage = await self._close_provider_session(self._get_api_key(), provider_id)
-        return {"ok": True, "applied": True, "cancelled": True, "provider_close_state": close_state}
+        return {"ok": True, "applied": initiator == "user", "cancelled": initiator == "user",
+                "provider_close_state": close_state}
 
     async def _op_attempt(self, owner_id: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         attempt_id = identifier(payload.get("attempt_id") or payload.get("idempotency_key"))
@@ -1585,10 +2372,11 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         return {"ok": True, "snapshot": {"scope": binding.public_scope(), "phase": row["phase"],
                 "latest_sequence": int(row["latest_session_event_sequence"]), "started_at": row["started_at"],
                 "ended_at": row["ended_at"], "provider_close_state": row["provider_close_state"], "usage": usage,
+                "resume_required": str(row["phase"]) == "recovering",
                 "phone": self._stored_phone_public(row)}}
 
     async def _op_events(self, owner_id: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
-        binding, _row = self._call_binding(owner_id, payload)
+        binding, _call_row = self._call_binding(owner_id, payload)
         try:
             after, limit = int(payload.get("after", 0)), int(payload.get("limit", 200))
         except (TypeError, ValueError) as exc:
@@ -1597,6 +2385,11 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             raise LiveVoiceError("live_page_invalid", 400)
         scan_limit = min(2000, max(limit * 4, limit))
         with self.session_store._lock, self.session_store._connection() as connection:
+            connection.execute("BEGIN")
+            call = connection.execute(
+                "SELECT phase FROM live_calls WHERE call_id = ?", (binding.call_id,)
+            ).fetchone()
+            current_phase = str(call["phase"]) if call is not None else "interrupted"
             rows = connection.execute(
                 "SELECT sequence, kind, detail_json FROM run_events WHERE session_id = ? AND kind LIKE 'voice.live.%' AND sequence > ? ORDER BY sequence LIMIT ?",
                 (binding.session_id, after, scan_limit),
@@ -1607,6 +2400,16 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             next_after = int(row["sequence"])
             detail = json.loads(row["detail_json"] or "{}")
             if detail.get("scope") != binding.public_scope():
+                continue
+            # A recovering logical call supersedes historical passive terminal
+            # events. Keep those rows in the audit history, but do not let an
+            # older browser apply one before it sees the recovery state.
+            event_phase = str(detail.get("phase") or "")
+            if (
+                current_phase not in TERMINAL_PHASES
+                and row["kind"] == "voice.live.call.state"
+                and event_phase in TERMINAL_PHASES
+            ):
                 continue
             events.append({"schema": detail.get("schema", CALL_EVENT_SCHEMA), "scope": binding.public_scope(),
                            "sequence": int(row["sequence"]), "kind": str(row["kind"]).removeprefix("voice.live."),
@@ -1619,7 +2422,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
     async def _op_observe(self, owner_id: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         """Append bounded browser lifecycle evidence outside Session events."""
 
-        binding, _row = self._call_binding(owner_id, payload)
+        binding, _row = self._call_binding(owner_id, payload, require_current_transport=True)
         event = str(payload.get("event") or "")
         if event not in CLIENT_OBSERVATION_EVENTS:
             raise LiveVoiceError("live_observation_invalid", 400)
@@ -1663,10 +2466,17 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         return {"ok": True, "accepted": accepted}
 
     async def _op_control(self, owner_id: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
-        binding, row = self._call_binding(owner_id, payload)
         action = str(payload.get("action") or "")
         if action not in {"heartbeat", "mute", "unmute", "end"}:
             raise LiveVoiceError("live_action_invalid", 400)
+        initiator = str(payload.get("termination_initiator") or "unknown") if action == "end" else ""
+        reason = str(payload.get("termination_reason") or "legacy_unspecified") if action == "end" else ""
+        allow_user_hangup_from_prior_epoch = (
+            action == "end" and initiator == "user" and reason == "user_hangup"
+        )
+        binding, row = self._call_binding(
+            owner_id, payload, require_current_transport=not allow_user_hangup_from_prior_epoch,
+        )
         key = identifier(payload.get("idempotency_key"))
         digest = stable_digest(dict(payload))
         with self.session_store._lock, self.session_store._connection() as connection:
@@ -1679,20 +2489,26 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 raise LiveVoiceError("live_idempotency_conflict", 409)
             return json.loads(prior["receipt_json"])
         if action == "end":
-            initiator = str(payload.get("termination_initiator") or "unknown")
-            reason = str(payload.get("termination_reason") or "legacy_unspecified")
             if initiator not in TERMINATION_INITIATORS or reason not in TERMINATION_REASONS:
                 raise LiveVoiceError("live_termination_invalid", 400)
             if (initiator == "user") != (reason == "user_hangup"):
                 raise LiveVoiceError("live_termination_invalid", 400)
-            receipt = await self._finish_call(binding, reason=reason, initiator=initiator)
-            result = {"ok": True, "applied": True, **receipt}
+            if initiator == "user":
+                receipt = await self._finish_call(binding, reason="user_hangup", initiator="user")
+                result = {"ok": True, "applied": True, **receipt}
+            else:
+                self._mark_recovering(
+                    binding, reason=reason,
+                    summary="Phone transport fault recorded; logical call remains open",
+                )
+                self.audit.record(binding, "termination.rejected_as_end", initiator=initiator, reason=reason)
+                result = {"ok": True, "applied": False, "phase": "recovering",
+                          "termination_initiator": initiator, "termination_reason": reason}
         elif row["phase"] in TERMINAL_PHASES or row["phase"] == "ending":
             raise LiveVoiceError("live_call_terminal", 409)
         elif action == "heartbeat":
             now = _utc_now_dt()
-            maximum = _parse_utc(row["max_ends_at"]) or (now + timedelta(seconds=1800))
-            expiry = min(now + timedelta(seconds=45), maximum).isoformat().replace("+00:00", "Z")
+            expiry = (now + timedelta(seconds=45)).isoformat().replace("+00:00", "Z")
             with self.session_store._lock, self.session_store._connection() as connection:
                 connection.execute("UPDATE live_calls SET lease_expiry = ? WHERE call_id = ?", (expiry, binding.call_id))
             self.audit.record(
@@ -1762,16 +2578,15 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         reason: str,
         initiator: str | None = None,
     ) -> dict[str, Any]:
-        if initiator is None:
-            initiator = "system"
-            if reason in {"peer_connection_closed", "peer_connection_failed", "data_channel_closed", "data_channel_error", "network_offline"}:
-                initiator = "client_fault"
-        self.audit.record(
-            binding,
-            "termination.requested",
-            initiator=initiator,
-            reason=reason,
-        )
+        initiator = str(initiator or "unknown")
+        self.audit.record(binding, "termination.requested", initiator=initiator, reason=reason)
+        if initiator != "user" or reason != "user_hangup":
+            self._mark_recovering(
+                binding, reason=reason,
+                summary="Non-user termination request retained as a recoverable call",
+            )
+            return {"phase": "recovering", "provider_close_state": "unconfirmed",
+                    "usage": None, "usage_finalization": "unavailable"}
         with self.session_store._lock, self.session_store._connection() as connection:
             row = connection.execute("SELECT * FROM live_calls WHERE call_id = ?", (binding.call_id,)).fetchone()
             if row is None:
@@ -1781,48 +2596,59 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 return {"phase": row["phase"], "provider_close_state": row["provider_close_state"],
                         "usage": usage, "usage_finalization": "final" if usage else "unavailable"}
             if row["phase"] != "ending":
-                connection.execute("UPDATE live_calls SET phase = 'ending' WHERE call_id = ?", (binding.call_id,))
-                self._append_call_state(connection, binding, "ending", "Live call ending", reason=reason)
+                connection.execute(
+                    """UPDATE live_calls SET phase = 'ending', termination_initiator = 'user',
+                       termination_reason = 'user_hangup' WHERE call_id = ?""",
+                    (binding.call_id,),
+                )
+                self._append_call_state(connection, binding, "ending", "User requested hangup",
+                                        termination_initiator="user", termination_reason="user_hangup")
         ws = self._active_sockets.get(binding.call_id)
         closed = self._session_closed_events.setdefault(binding.call_id, asyncio.Event())
         if ws is not None and not getattr(ws, "closed", True):
             try:
-                await ws.send_json({"type": "session.close", "event_id": f"close-{uuid4().hex[:16]}"})
-                self.audit.record(
-                    binding,
-                    "provider.close_requested",
-                    initiator=initiator,
-                    reason=reason,
-                    close_sent=True,
+                await self._await_bounded(
+                    ws.send_json({"type": "session.close", "event_id": f"close-{uuid4().hex[:16]}"}),
+                    operation="user_hangup_send",
                 )
+                self.audit.record(binding, "provider.close_requested", initiator="user",
+                                  reason="user_hangup", close_sent=True)
             except Exception as exc:
-                self.audit.record(
-                    binding,
-                    "provider.close_request_failed",
-                    initiator=initiator,
-                    reason=reason,
-                    close_sent=False,
-                    **exception_evidence(exc),
-                )
+                self.audit.record(binding, "provider.close_request_failed", initiator="user",
+                                  reason="user_hangup", close_sent=False, **exception_evidence(exc))
             try:
                 await asyncio.wait_for(closed.wait(), timeout=self._close_timeout_seconds)
-            except TimeoutError:
-                self.audit.record(
-                    binding,
-                    "provider.close_timeout",
-                    initiator=initiator,
-                    reason=reason,
-                    provider_close_state="unconfirmed",
-                )
+            except asyncio.TimeoutError:
+                self.audit.record(binding, "provider.close_timeout", initiator="user",
+                                  reason="user_hangup", provider_close_state="unconfirmed")
         with self.session_store._lock, self.session_store._connection() as connection:
             row = connection.execute("SELECT * FROM live_calls WHERE call_id = ?", (binding.call_id,)).fetchone()
-        if row["phase"] not in TERMINAL_PHASES:
-            self._mark_terminal(binding, "interrupted", provider_close_state="unconfirmed", summary="Live call close was not confirmed")
+        close_state, usage = "unconfirmed", None
+        if row is not None and row["phase"] == "ended":
+            close_state = str(row["provider_close_state"] or "unconfirmed")
+            usage = _public_usage(json.loads(row["usage_json"])) if row["usage_json"] else None
+        else:
+            if ws is not None and not getattr(ws, "closed", True):
+                if await self._close_sideband_socket(
+                    ws, binding=binding, operation="user_hangup_sideband_close"
+                ):
+                    self.audit.record(
+                        binding, "provider.sideband_closed_for_cleanup",
+                        initiator="user", reason="user_hangup",
+                    )
+            close_state, usage = await self._close_provider_session(
+                self._get_api_key(), binding.provider_session_id, binding=binding
+            )
+            self._mark_terminal(binding, "ended", provider_close_state=close_state,
+                                summary="User ended the live phone call", usage=usage)
             with self.session_store._lock, self.session_store._connection() as connection:
                 row = connection.execute("SELECT * FROM live_calls WHERE call_id = ?", (binding.call_id,)).fetchone()
-        usage = _public_usage(json.loads(row["usage_json"])) if row["usage_json"] else None
-        return {"phase": row["phase"], "provider_close_state": row["provider_close_state"],
-                "usage": usage, "usage_finalization": "final" if usage else "unavailable"}
+            if row is not None:
+                close_state = str(row["provider_close_state"] or close_state)
+                usage = _public_usage(json.loads(row["usage_json"])) if row["usage_json"] else usage
+        public_usage = _public_usage(usage)
+        return {"phase": "ended", "provider_close_state": close_state,
+                "usage": public_usage, "usage_finalization": "final" if public_usage else "unavailable"}
 
     def _persist_call_record(self, binding: CallBinding) -> None:
         """Project the complete durable transcript as one visible chat record."""
@@ -1835,12 +2661,18 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 ).fetchone()
             if call is None:
                 return
+            if self.session_store.has_pending_live_provider_fragments(binding.call_id):
+                self.audit.record(
+                    binding, "call.transcript_projection_deferred",
+                    reason="provider_fragment_pending",
+                )
+                return
             segments = self.session_store.live_transcript_segments(
                 binding.session_id,
                 owner_id=binding.owner_id,
                 context_generation=binding.context_generation,
                 call_id=binding.call_id,
-                call_epoch=binding.call_epoch,
+                call_epoch=None,
             )
 
             def timestamp(milliseconds: int) -> str:
@@ -1851,7 +2683,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             if segments:
                 for segment in segments:
                     marker = "🎙️" if segment["role"] == "user" else "🔊"
-                    lines.extend(("", f"[{timestamp(segment['start_ms'])}] {marker} {segment['text']}"))
+                    lines.extend(("", f"[?? {segment['call_epoch']} ? {timestamp(segment['start_ms'])}] {marker} {segment['text']}"))
             else:
                 lines.extend(("", "(No speech was transcribed.)"))
             self.session_store.append_presentation_message(
@@ -1893,6 +2725,54 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 **exception_evidence(exc),
             )
 
+    def _is_current_provider_binding(self, binding: CallBinding) -> bool:
+        with self.session_store._lock, self.session_store._connection() as connection:
+            row = connection.execute(
+                "SELECT call_epoch, provider_session_id FROM live_calls WHERE call_id = ?",
+                (binding.call_id,),
+            ).fetchone()
+        return bool(row and int(row["call_epoch"]) == binding.call_epoch
+                    and str(row["provider_session_id"] or "") == binding.provider_session_id)
+
+    def _mark_recovering(
+        self,
+        binding: CallBinding,
+        *,
+        reason: str,
+        summary: str,
+        provider_close_state: str | None = None,
+    ) -> bool:
+        changed = False
+        with self.session_store._lock, self.session_store._connection() as connection:
+            row = connection.execute(
+                "SELECT phase, termination_initiator, termination_reason, provider_close_state, "
+                "call_epoch, provider_session_id FROM live_calls WHERE call_id = ?",
+                (binding.call_id,),
+            ).fetchone()
+            if row is None or row["phase"] in TERMINAL_PHASES:
+                return False
+            if (int(row["call_epoch"]) != binding.call_epoch
+                    or str(row["provider_session_id"] or "") != binding.provider_session_id):
+                self.audit.record(binding, "call.stale_transport_state_ignored", requested_phase="recovering")
+                return False
+            if (row["phase"] == "ending" and row["termination_initiator"] == "user"
+                    and row["termination_reason"] == "user_hangup"):
+                return False
+            close_state = provider_close_state or str(row["provider_close_state"] or "pending")
+            if row["phase"] == "recovering" and row["provider_close_state"] == close_state:
+                return False
+            connection.execute(
+                "UPDATE live_calls SET phase = 'recovering', ended_at = NULL, provider_close_state = ? WHERE call_id = ?",
+                (close_state, binding.call_id),
+            )
+            self._append_call_state(connection, binding, "recovering", summary,
+                                    reason=reason, provider_close_state=close_state)
+            changed = True
+        if changed:
+            self.audit.record(binding, "call.recovery_required", reason=reason,
+                              provider_close_state=close_state)
+        return changed
+
     def _mark_terminal(
         self, binding: CallBinding, phase: str, *, provider_close_state: str,
         summary: str, usage: Mapping[str, Any] | None = None,
@@ -1901,10 +2781,22 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         became_terminal = False
         with self.session_store._lock, self.session_store._connection() as connection:
             row = connection.execute(
-                "SELECT phase, provider_close_state, usage_json FROM live_calls WHERE call_id = ?",
+                "SELECT phase, provider_close_state, usage_json, termination_initiator, termination_reason, "
+                "call_epoch, provider_session_id FROM live_calls WHERE call_id = ?",
                 (binding.call_id,),
             ).fetchone()
             if row is None:
+                return
+            if (int(row["call_epoch"]) != binding.call_epoch
+                    or str(row["provider_session_id"] or "") != binding.provider_session_id):
+                self.audit.record(binding, "call.stale_transport_state_ignored", requested_phase=phase)
+                return
+            if phase == "ended" and not (
+                row["termination_initiator"] == "user"
+                and row["termination_reason"] == "user_hangup"
+            ):
+                self.audit.record(binding, "provider.close_without_user_hangup",
+                                  requested_phase=phase, provider_close_state=provider_close_state)
                 return
             if row["phase"] in TERMINAL_PHASES:
                 if provider_close_state == "confirmed" and (
@@ -1939,7 +2831,71 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                                     provider_close_state=provider_close_state, usage=public_usage)
             became_terminal = True
         if became_terminal:
-            self._persist_call_record(binding)
+            queue = self._provider_event_queues.get(binding.call_id)
+            if queue is not None and queue._unfinished_tasks:
+                task = asyncio.create_task(
+                    self._project_terminal_record_after_events(binding, queue),
+                    name=f"hashi-live-call-record-{binding.call_id}",
+                )
+                self._track(task, self._terminal_record_tasks, binding=binding)
+            else:
+                self._persist_call_record(binding)
+
+    async def _project_terminal_record_after_events(
+        self,
+        binding: CallBinding,
+        queue: asyncio.Queue[tuple[CallBinding, Mapping[str, Any]]],
+    ) -> None:
+        await queue.join()
+        with self.session_store._lock, self.session_store._connection() as connection:
+            call = connection.execute(
+                "SELECT * FROM live_calls WHERE call_id = ?", (binding.call_id,)
+            ).fetchone()
+        if call is not None and str(call["phase"]) in TERMINAL_PHASES:
+            self._persist_call_record(self._binding_from_row(call))
+
+    async def _await_bounded(self, awaitable: Awaitable[Any], *, operation: str) -> Any:
+        """Return after the close budget even if a WebSocket coroutine ignores cancellation."""
+        task = asyncio.create_task(awaitable, name=f"hashi-live-{operation}")
+        done, _pending = await asyncio.wait({task}, timeout=self._close_timeout_seconds)
+        if task not in done:
+            task.cancel()
+            task.add_done_callback(self._consume_detached_operation)
+            raise asyncio.TimeoutError(f"Live Phone {operation} exceeded its time limit")
+        return await task
+
+    @staticmethod
+    def _consume_detached_operation(task: asyncio.Task[Any]) -> None:
+        if task.cancelled():
+            return
+        with suppress(Exception):
+            task.exception()
+
+    async def _close_sideband_socket(
+        self,
+        ws: Any,
+        *,
+        operation: str,
+        binding: CallBinding | None = None,
+    ) -> bool:
+        if getattr(ws, "closed", True):
+            return True
+        try:
+            await self._await_bounded(ws.close(), operation=operation)
+        except Exception as exc:
+            if binding is not None:
+                self.audit.record(
+                    binding, "provider.socket_operation_failed",
+                    operation=operation,
+                    **exception_evidence(exc),
+                )
+            else:
+                logger.warning(
+                    "Live Phone %s did not finish cleanly (%s)",
+                    operation, type(exc).__name__,
+                )
+            return False
+        return True
 
     async def _close_provider_session(
         self,
@@ -1954,24 +2910,37 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             async with provider_http_session() as http:
                 ws = await attach_provider(http, key=key, provider_session_id=provider_session_id)
                 try:
-                    await ws.send_json({"type": "session.close", "event_id": f"close-{uuid4().hex[:16]}"})
-                    async with asyncio.timeout(self._close_timeout_seconds):
+                    await self._await_bounded(
+                        ws.send_json({"type": "session.close", "event_id": f"close-{uuid4().hex[:16]}"}),
+                        operation="provider_cleanup_send",
+                    )
+
+                    async def receive_close_event() -> Mapping[str, Any] | None:
                         async for msg in ws:
                             if msg.type == aiohttp.WSMsgType.TEXT:
                                 event = safe_sideband_event(msg.data)
                                 if event and event.get("type") == "session.closed":
-                                    if binding is not None:
-                                        self.audit.record(
-                                            binding,
-                                            "provider.cleanup_confirmed",
-                                            provider_close_state="confirmed",
-                                            provider_reason=_provider_close_reason(event),
-                                            usage=_event_usage(event),
-                                        )
-                                    return "confirmed", _event_usage(event)
+                                    return event
+                        return None
+
+                    event = await asyncio.wait_for(
+                        receive_close_event(), timeout=self._close_timeout_seconds
+                    )
+                    if event is not None:
+                        if binding is not None:
+                            self.audit.record(
+                                binding,
+                                "provider.cleanup_confirmed",
+                                provider_close_state="confirmed",
+                                provider_reason=_provider_close_reason(event),
+                                usage=_event_usage(event),
+                            )
+                        return "confirmed", _event_usage(event)
                 finally:
                     if not ws.closed:
-                        await ws.close()
+                        await self._close_sideband_socket(
+                            ws, binding=binding, operation="provider_cleanup_socket_close"
+                        )
         except Exception as exc:
             if binding is not None:
                 self.audit.record(
@@ -1988,6 +2957,127 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 provider_close_state="unconfirmed",
             )
         return "unconfirmed", None
+
+    async def _stage_provider_event_before_enqueue(
+        self, binding: CallBinding, event: Mapping[str, Any]
+    ) -> bool:
+        event_type = str(event.get("type") or "unknown")
+        event_id = str(event.get("event_id") or "")[:160]
+        try:
+            eligible = self._validate_provider_event_for_recovery(event)
+        except (LiveVoiceError, TypeError, ValueError, UnicodeError) as exc:
+            try:
+                self.audit.record(
+                    binding, "provider.event_staging_rejected",
+                    provider_event_type=event_type,
+                    provider_event_id=event_id,
+                    error_code=getattr(exc, "code", "live_provider_event_invalid"),
+                    reason="non_retryable_validation",
+                )
+            except Exception:
+                logger.exception(
+                    "Unable to audit rejected provider event for %s",
+                    binding.call_id,
+                )
+            return False
+        if not eligible:
+            return False
+        attempts = 0
+        interrupted = False
+        stage_task = asyncio.create_task(
+            asyncio.to_thread(self._stage_provider_event_for_recovery, binding, event)
+        )
+        while True:
+            try:
+                staged = await asyncio.shield(stage_task)
+            except asyncio.CancelledError:
+                # A Function replacement may cancel this reader while SQLite
+                # is writing. Let that transaction settle before acknowledging
+                # cancellation; on failure, keep retrying until it is durable.
+                if not interrupted:
+                    interrupted = True
+                    try:
+                        self.audit.record(
+                            binding, "provider.event_staging_interrupted",
+                            provider_event_type=event_type,
+                            provider_event_id=event_id,
+                            reason="waiting_for_durable_stage",
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Unable to audit provider event staging interruption for %s",
+                            binding.call_id,
+                        )
+                continue
+            except (LiveVoiceError, SessionConflict) as exc:
+                try:
+                    self.audit.record(
+                        binding, "provider.event_staging_rejected",
+                        provider_event_type=event_type,
+                        provider_event_id=event_id,
+                        error_code=getattr(exc, "code", "session_conflict"),
+                        reason="non_retryable_validation",
+                    )
+                except Exception:
+                    logger.exception(
+                        "Unable to audit rejected provider event for %s",
+                        binding.call_id,
+                    )
+                return False
+            except Exception as exc:
+                attempts += 1
+                retry_delay = min(0.1 * attempts, 5.0)
+                if attempts == 1 or attempts % 12 == 0:
+                    try:
+                        self.audit.record(
+                            binding, "provider.event_staging_failed",
+                            provider_event_type=event_type,
+                            provider_event_id=event_id,
+                            attempt=attempts,
+                            retry_delay_s=round(retry_delay, 2),
+                            **exception_evidence(exc),
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Unable to audit provider event staging failure for %s",
+                            binding.call_id,
+                        )
+                stage_task = asyncio.create_task(
+                    asyncio.to_thread(self._stage_provider_event_for_recovery, binding, event)
+                )
+                try:
+                    await asyncio.sleep(retry_delay)
+                except asyncio.CancelledError:
+                    interrupted = True
+                    try:
+                        self.audit.record(
+                            binding, "provider.event_staging_interrupted",
+                            provider_event_type=event_type,
+                            provider_event_id=event_id,
+                            reason="waiting_for_durable_stage",
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Unable to audit provider event staging interruption for %s",
+                            binding.call_id,
+                        )
+                continue
+            if staged:
+                try:
+                    self.audit.record(
+                        binding, "provider.event_staged",
+                        provider_event_type=event_type,
+                        provider_event_id=event_id,
+                        attempts=attempts + 1,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Unable to audit staged provider event for %s",
+                        binding.call_id,
+                    )
+            if interrupted:
+                raise asyncio.CancelledError
+            return bool(staged)
 
     async def _run_sideband(self, binding: CallBinding, key: str, provider_session_id: str) -> None:
         ready = self._sideband_ready_events.setdefault(binding.call_id, asyncio.Event())
@@ -2015,6 +3105,10 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                         if event is None:
                             continue
                         event_type = event.get("type")
+                        if not self._is_current_provider_binding(binding):
+                            self.audit.record(binding, "provider.stale_epoch_event_ignored",
+                                              provider_event_type=str(event_type or "unknown"))
+                            continue
                         client_event_id = _provider_client_event_id(event)
                         event_detail: dict[str, Any] = {
                             "provider_event_type": str(event_type or "unknown"),
@@ -2028,9 +3122,21 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                                 "speaker": "user" if event_type == "session.input_transcript.delta" else "assistant",
                                 "start_ms": event.get("start_ms"),
                                 "end_ms": event.get("end_ms"),
-                                "text_bytes": len(str(event.get("delta") or "").encode("utf-8")),
+                                "text_bytes": len(
+                                    str(event.get("delta") or "").encode("utf-8", errors="replace")
+                                ),
                             })
                         self.audit.record(binding, "provider.event_received", **event_detail)
+                        if event_type in {
+                            "session.input_transcript.delta",
+                            "session.output_transcript.delta",
+                            "session.delegation.created",
+                        }:
+                            # Do not accept critical foreground content into a
+                            # process-only queue before a durable recovery copy exists.
+                            staged = await self._stage_provider_event_before_enqueue(binding, event)
+                            if not staged:
+                                continue
                         if event_type in {"session.input_audio.muted", "session.input_audio.unmuted"} and client_event_id:
                             waiter = self._control_waiters.get((binding.call_id, client_event_id))
                             if waiter is not None and not waiter.done():
@@ -2067,51 +3173,72 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                         if event_type == "session.started":
                             self.audit.record(binding, "provider.session_started", source="provider")
                             with self.session_store._lock, self.session_store._connection() as connection:
-                                row = connection.execute("SELECT phase FROM live_calls WHERE call_id = ?", (binding.call_id,)).fetchone()
-                                if row is not None and row["phase"] == "connecting":
-                                    connection.execute("UPDATE live_calls SET phase = 'active' WHERE call_id = ?", (binding.call_id,))
-                                    self._append_call_state(connection, binding, "active", "Live call active")
+                                row = connection.execute(
+                                    "SELECT phase, call_epoch, provider_session_id FROM live_calls WHERE call_id = ?",
+                                    (binding.call_id,),
+                                ).fetchone()
+                                is_current = bool(
+                                    row is not None
+                                    and int(row["call_epoch"]) == binding.call_epoch
+                                    and str(row["provider_session_id"] or "") == binding.provider_session_id
+                                )
+                                if is_current and row["phase"] == "connecting":
+                                    updated = connection.execute(
+                                        """UPDATE live_calls SET phase = 'active'
+                                           WHERE call_id = ? AND phase = 'connecting'
+                                             AND call_epoch = ? AND provider_session_id = ?""",
+                                        (binding.call_id, binding.call_epoch, binding.provider_session_id),
+                                    )
+                                    if updated.rowcount == 1:
+                                        self._append_call_state(connection, binding, "active", "Live call active")
+                                elif not is_current:
+                                    self.audit.record(binding, "provider.stale_session_started_ignored")
                         elif event_type == "session.closed":
                             confirmed_close = True
-                            self.audit.record(
-                                binding,
-                                "provider.session_closed",
-                                provider_reason=_provider_close_reason(event),
-                                provider_close_state="confirmed",
-                                usage=_event_usage(event),
-                            )
-                            self._mark_terminal(binding, "ended", provider_close_state="confirmed",
-                                summary="Live call ended",
-                                usage=_event_usage(event))
-                            self._session_closed_events.setdefault(binding.call_id, asyncio.Event()).set()
+                            provider_reason = _provider_close_reason(event)
+                            self.audit.record(binding, "provider.session_closed",
+                                              provider_reason=provider_reason,
+                                              provider_close_state="confirmed", usage=_event_usage(event))
+                            with self.session_store._lock, self.session_store._connection() as connection:
+                                call = connection.execute(
+                                    "SELECT termination_initiator, termination_reason FROM live_calls WHERE call_id = ?",
+                                    (binding.call_id,),
+                                ).fetchone()
+                            if call is not None and call["termination_initiator"] == "user" and call["termination_reason"] == "user_hangup":
+                                self._mark_terminal(binding, "ended", provider_close_state="confirmed",
+                                                    summary="User ended the live phone call", usage=_event_usage(event))
+                            else:
+                                self._mark_recovering(binding, reason="provider_session_closed",
+                                                      summary="Provider transport closed; logical phone remains open",
+                                                      provider_close_state="confirmed")
+                            if self._is_current_provider_binding(binding):
+                                self._session_closed_events.setdefault(binding.call_id, asyncio.Event()).set()
                             break
-                        await self.service.on_provider_event(binding, event)
+                        # Persist asynchronously in per-call order. A slow Session write
+                        # must not stop this reader from seeing session.closed or a user hangup.
+                        self._enqueue_provider_event(binding, event)
                 finally:
-                    self._active_sockets.pop(binding.call_id, None)
+                    if self._active_sockets.get(binding.call_id) is ws:
+                        self._active_sockets.pop(binding.call_id, None)
                     if not ws.closed:
-                        await ws.close()
+                        await self._close_sideband_socket(
+                            ws, binding=binding, operation="sideband_socket_close"
+                        )
         except asyncio.CancelledError:
             self.audit.record(binding, "sideband.cancelled", reason="task_cancelled")
             raise
         except Exception as exc:
-            self._sideband_failures.setdefault(binding.call_id, "live_sideband_unavailable")
+            try:
+                if self._is_current_provider_binding(binding):
+                    self._sideband_failures.setdefault(binding.call_id, "live_sideband_unavailable")
+            except Exception:
+                pass
             logger.warning("Live Voice sideband interrupted for %s: %s", binding.call_id, type(exc).__name__)
             self.audit.record(binding, "sideband.exception", **exception_evidence(exc))
         finally:
             ready.set()
             if not confirmed_close and not self._closing:
-                self.audit.record(
-                    binding,
-                    "sideband.disconnected",
-                    provider_close_state="unconfirmed",
-                )
-                self._mark_terminal(binding, "interrupted", provider_close_state="unconfirmed",
-                                    summary="Live call sideband disconnected")
-                close_state, usage = await self._close_provider_session(
-                    key, provider_session_id, binding=binding
-                )
-                if close_state == "confirmed":
-                    self._mark_terminal(
-                        binding, "interrupted", provider_close_state="confirmed",
-                        summary="Disconnected provider session was closed", usage=usage,
-                    )
+                self.audit.record(binding, "sideband.disconnected", provider_close_state="unconfirmed")
+                self._mark_recovering(binding, reason="sideband_disconnected",
+                                      summary="Phone sideband disconnected; logical call remains open",
+                                      provider_close_state="unconfirmed")

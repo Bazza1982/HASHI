@@ -258,6 +258,8 @@ class ProviderTests(unittest.TestCase):
 class FakeDurable:
     """TEST ONLY. Not a persistence implementation or authorization system."""
     def __init__(self):self.fragments={};self.delegations=set();self.scheduled=[];self.proposal=proposal()
+    async def stage_fragment_once(self,binding,item):return None
+    async def stage_delegation_once(self,binding,event_id,delegation_id,offset):return None
     async def append_fragment_once(self,binding,item):self.fragments.setdefault(item.provider_event_id,item);return{}
     async def register_delegation_once(self,binding,delegation_id,offset):
         if delegation_id in self.delegations:return False
@@ -278,7 +280,7 @@ class ServiceTests(unittest.TestCase):
 
     @run_async
     async def test_delegation_duplicate_has_one_outbox_wakeup(self):
-        e = {'type': 'session.delegation.created', 'offset_ms': 600, 'delegation': {'id': 'delegation-1', 'target': 'client'}}
+        e = {'type': 'session.delegation.created', 'event_id': 'event-delegation-1', 'offset_ms': 600, 'delegation': {'id': 'delegation-1', 'target': 'client'}}
         await self.service.on_provider_event(BINDING, e)
         await self.service.on_provider_event(BINDING, e)
         self.assertEqual(self.store.scheduled, ['delegation-1'])

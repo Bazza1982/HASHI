@@ -63,3 +63,34 @@ def test_failed_dial_attempt_has_evidence_before_a_call_id_exists(tmp_path: Path
     record = json.loads(audit.attempt_path("attempt-1").read_text(encoding="utf-8"))
     assert record["scope"] == {"attempt_id": "attempt-1"}
     assert record["detail"]["error_code"] == "provider_rejected"
+
+
+def test_call_audit_keeps_bounded_provider_retry_evidence_durable(tmp_path: Path):
+    audit = LiveVoiceAuditLog(tmp_path)
+    binding = _binding()
+
+    assert audit.record(
+        binding,
+        "provider.event_processing_failed",
+        provider_event_type="session.input_transcript.delta",
+        provider_event_id="provider-event-1",
+        attempt=12,
+        retry_delay_s=1.2,
+        source_session_id="session-background",
+        source_message_id="message-1",
+        item_type="message",
+    )
+    assert audit.record(
+        binding,
+        "provider.event_persistence_recovered",
+        provider_event_id="provider-event-1",
+        attempts=13,
+    )
+
+    records = [json.loads(line) for line in audit.path_for(binding).read_text(encoding="utf-8").splitlines()]
+    assert records[0]["detail"]["attempt"] == 12
+    assert records[0]["detail"]["retry_delay_s"] == 1.2
+    assert records[0]["detail"]["source_session_id"] == "session-background"
+    assert records[0]["detail"]["source_message_id"] == "message-1"
+    assert records[0]["detail"]["item_type"] == "message"
+    assert records[1]["detail"]["attempts"] == 13

@@ -15,6 +15,7 @@ class LiveVoiceEventService:
             return
         fragment = normalize_transcript(event)
         if fragment is not None:
+            await self.durable.stage_fragment_once(binding, fragment)
             await self.durable.append_fragment_once(binding, fragment)
             return
         if event.get("type") != "session.delegation.created":
@@ -23,8 +24,12 @@ class LiveVoiceEventService:
         if not isinstance(delegation, Mapping) or delegation.get("target") != "client":
             return
         delegation_id = identifier(delegation.get("id"))
+        event_id = identifier(event.get("event_id"))
         offset = event.get("offset_ms")
         if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
             raise LiveVoiceError("live_delegation_invalid")
+        await self.durable.stage_delegation_once(
+            binding, event_id, delegation_id, offset
+        )
         if await self.durable.register_delegation_once(binding, delegation_id, offset):
             await self.durable.schedule_proposal(binding, delegation_id, offset)

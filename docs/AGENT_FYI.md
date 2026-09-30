@@ -202,6 +202,32 @@ Every other stop is recovery/fault evidence, never `user_hangup`. Keep a
 privacy-bounded per-call lifecycle log independent of Session event sequencing;
 transcript content remains canonical in the Session.
 
+Implementation note (2026-09-30): PAO now reserves one live foreground call per
+owner, allocates Session ordinals atomically, and queues attributable background
+messages and status events by reference until the Provider acknowledges delivery.
+Browser/Provider connections use replaceable call epochs; passive disconnect,
+Function replacement, and the approaching Provider limit recover the logical call.
+The Connector sends its call epoch on state-changing requests, rejecting stale
+transport faults while retaining an explicit user hang-up. Source checks pass;
+HASHI1 runtime adoption and live continuity acceptance still require the safe
+Agent-and-Scheduler idle window.
+
+Schema 21 preserves legacy call and staged-event records. Context lookup exposes
+the recovering binding so Workbench can reattach without browser storage. A late
+start response keeps its Provider epoch for a retryable user hang-up. Event
+replay reads call phase and events from one database snapshot, so a concurrent
+explicit hang-up cannot be skipped. Background messages and events use one
+globally ordered source-time page; uncertain delivery stops the batch.
+
+The Provider sideband stages each normalized transcript or typed delegation in
+one ordered SessionStore recovery inbox before adding it to the process queue.
+Projection and staged-row removal commit atomically; startup replays pending
+rows in order, including the receive-to-queue replacement window. Staging
+failures apply backpressure and emit redacted retry evidence. The independent
+call audit never stores transcript text. This source change still requires
+focused validation and HASHI1 adoption after a fresh Agent-and-Scheduler idle
+window; no live continuity test has been performed for this checkpoint.
+
 Commands follow the [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md); `/help`
 derives from metadata. Workbench and Telegram may share a Session while UI rows
 stay out of model history. An active Run does not close command ingress:

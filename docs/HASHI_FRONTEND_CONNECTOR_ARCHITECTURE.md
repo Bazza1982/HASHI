@@ -558,7 +558,9 @@ duration expiry must be reported as distinct automatic/fault sources; none may
 be labelled `user_hangup`. FC keeps the call globally reachable across ordinary
 Workbench navigation and reconnects or rolls over replaceable transport epochs
 where possible. If recovery ultimately fails, the call is visibly faulted and
-never rendered as a normal user-ended call.
+never rendered as a normal user-ended call. When reloading an older event
+cursor, the canonical call phase takes precedence: the backend does not project
+superseded passive terminal events for a call that is still recoverable.
 
 FC writes a privacy-bounded JSONL diagnostic timeline for every call under the
 instance logs. Server-side lifecycle evidence does not share the PAO Session
@@ -578,12 +580,34 @@ append remains correlated with its source Run/delegation and acknowledgement.
 An unavailable sideband queues or defers that delivery; it never grants the
 background Run authority over the call lifecycle.
 
+The sideband stages each normalized transcript or typed delegation in a durable
+SessionStore inbox before placing it in the process-only projection queue. A
+single persistent queue sequence preserves receive order across both event
+types. Function startup replays staged items in order; transcript projection
+and inbox removal commit together. If staging fails, the reader applies
+backpressure and records redacted retry evidence instead of accepting volatile
+content. The independent audit never records transcript text. Explicit user
+hang-up uses its authenticated call-control path and does not wait for the
+projection queue to drain.
+
+Authenticated event polling reads call phase and Session events from one SQLite
+snapshot. Background inbox pagination selects a single globally ordered source-
+time page across messages and status events, preventing a deep queue in one type
+from letting a later item in the other type go first.
+
 Context preflight returns a public `/phone` snapshot and revision. Start must
 present that exact revision, resolves the snapshot again at the trusted Backend
 API boundary, and fails if PCM, identity, or phone configuration changed. The
 provider model and voice are frozen for the resulting call. Persistent call
 records contain only the public snapshot and an instruction digest, never the
 projected persona or full provider prompt.
+
+Authenticated context preflight returns a recoverable foreground-call binding
+as well as capability data. Workbench uses that binding to rediscover an old
+call even if a previous client cleared its per-tab hint, and presents a pending
+user hang-up as retryable until confirmed. A late start response is bound to its
+Provider epoch before cancellation handling, so an uncertain user hang-up can
+retry against the canonical call.
 
 The initial qualified provider is OpenAI `gpt-live-1`. Its supported voice
 catalogue is maintained as Function configuration and is applied before the

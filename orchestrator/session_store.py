@@ -363,7 +363,7 @@ class SessionStore:
     per-Session working files are derived state used by Memory+ and Compact.
     """
 
-    SCHEMA_VERSION = 17
+    SCHEMA_VERSION = 21
 
     def __init__(
         self,
@@ -1025,6 +1025,7 @@ class SessionStore:
                     call_epoch INTEGER NOT NULL DEFAULT 1,
                     provider_session_id TEXT NOT NULL,
                     phase TEXT NOT NULL DEFAULT 'connecting',
+                    foreground INTEGER NOT NULL DEFAULT 1,
                     controller_lease TEXT NOT NULL,
                     lease_expiry TEXT NOT NULL,
                     latest_session_event_sequence INTEGER NOT NULL DEFAULT 0,
@@ -1038,6 +1039,36 @@ class SessionStore:
                 );
                 CREATE INDEX IF NOT EXISTS live_calls_owner_agent_active
                     ON live_calls(owner_id, agent_id, phase);
+                CREATE TABLE IF NOT EXISTS live_foreground_inbox (
+                    inbox_id TEXT PRIMARY KEY,
+                    call_id TEXT NOT NULL,
+                    source_session_id TEXT NOT NULL,
+                    source_message_id TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'pending',
+                    created_at TEXT NOT NULL,
+                    delivered_at TEXT,
+                    UNIQUE(call_id, source_message_id),
+                    FOREIGN KEY(call_id) REFERENCES live_calls(call_id),
+                    FOREIGN KEY(source_session_id) REFERENCES sessions(session_id),
+                    FOREIGN KEY(source_message_id) REFERENCES messages(message_id)
+                );
+                CREATE INDEX IF NOT EXISTS live_foreground_inbox_pending
+                    ON live_foreground_inbox(call_id, state, created_at);
+                CREATE TABLE IF NOT EXISTS live_foreground_event_inbox (
+                    inbox_id TEXT PRIMARY KEY,
+                    call_id TEXT NOT NULL,
+                    source_session_id TEXT NOT NULL,
+                    source_event_id TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'pending',
+                    created_at TEXT NOT NULL,
+                    delivered_at TEXT,
+                    UNIQUE(call_id, source_event_id),
+                    FOREIGN KEY(call_id) REFERENCES live_calls(call_id),
+                    FOREIGN KEY(source_session_id) REFERENCES sessions(session_id),
+                    FOREIGN KEY(source_event_id) REFERENCES run_events(event_id)
+                );
+                CREATE INDEX IF NOT EXISTS live_foreground_event_inbox_pending
+                    ON live_foreground_event_inbox(call_id, state, created_at);
                 CREATE TABLE IF NOT EXISTS live_delegations (
                     call_id TEXT NOT NULL,
                     call_epoch INTEGER NOT NULL,
@@ -1075,6 +1106,59 @@ class SessionStore:
                     FOREIGN KEY(call_id) REFERENCES live_calls(call_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS live_provider_delegation_inbox (
+                    owner_id TEXT NOT NULL,
+                    provider_event_id TEXT NOT NULL,
+                    call_id TEXT NOT NULL,
+                    call_epoch INTEGER NOT NULL,
+                    session_id TEXT NOT NULL,
+                    delegation_id TEXT NOT NULL,
+                    offset_ms INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(owner_id, session_id, call_id, call_epoch, provider_event_id),
+                    FOREIGN KEY(call_id) REFERENCES live_calls(call_id),
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id)
+                );
+                CREATE INDEX IF NOT EXISTS live_provider_delegation_inbox_pending
+                    ON live_provider_delegation_inbox(call_id, call_epoch, created_at);
+                CREATE TABLE IF NOT EXISTS live_provider_fragment_inbox (
+                    owner_id TEXT NOT NULL,
+                    provider_event_id TEXT NOT NULL,
+                    call_id TEXT NOT NULL,
+                    call_epoch INTEGER NOT NULL,
+                    session_id TEXT NOT NULL,
+                    speaker TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    start_ms INTEGER NOT NULL,
+                    end_ms INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(owner_id, session_id, call_id, call_epoch, provider_event_id),
+                    FOREIGN KEY(call_id) REFERENCES live_calls(call_id),
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id)
+                );
+                CREATE INDEX IF NOT EXISTS live_provider_fragment_inbox_pending
+                    ON live_provider_fragment_inbox(call_id, call_epoch, created_at);
+                CREATE TABLE IF NOT EXISTS live_provider_event_inbox (
+                    queue_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    owner_id TEXT NOT NULL,
+                    provider_event_id TEXT NOT NULL,
+                    call_id TEXT NOT NULL,
+                    call_epoch INTEGER NOT NULL,
+                    session_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL CHECK(event_type IN ('transcript', 'delegation')),
+                    speaker TEXT,
+                    text TEXT,
+                    start_ms INTEGER,
+                    end_ms INTEGER,
+                    delegation_id TEXT,
+                    offset_ms INTEGER,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(owner_id, session_id, call_id, call_epoch, provider_event_id),
+                    FOREIGN KEY(call_id) REFERENCES live_calls(call_id),
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id)
+                );
+                CREATE INDEX IF NOT EXISTS live_provider_event_inbox_pending
+                    ON live_provider_event_inbox(call_id, call_epoch, queue_sequence);
                 CREATE TABLE IF NOT EXISTS live_fragments (
                     owner_id TEXT NOT NULL,
                     provider_event_id TEXT NOT NULL,
@@ -1095,6 +1179,35 @@ class SessionStore:
                     ON live_fragments(call_id, call_epoch, start_ms);
                 """
             )
+            # Upgrade older split inboxes into one sequence so transcript and
+            # delegation replay keeps the Provider's per-call receive order.
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO live_provider_event_inbox(
+                    owner_id, provider_event_id, call_id, call_epoch, session_id,
+                    event_type, speaker, text, start_ms, end_ms, delegation_id,
+                    offset_ms, created_at
+                )
+                SELECT owner_id, provider_event_id, call_id, call_epoch, session_id,
+                       event_type, speaker, text, start_ms, end_ms, delegation_id,
+                       offset_ms, created_at
+                FROM (
+                    SELECT owner_id, provider_event_id, call_id, call_epoch, session_id,
+                           'transcript' AS event_type, speaker, text, start_ms, end_ms,
+                           NULL AS delegation_id, NULL AS offset_ms, created_at
+                    FROM live_provider_fragment_inbox
+                    UNION ALL
+                    SELECT owner_id, provider_event_id, call_id, call_epoch, session_id,
+                           'delegation' AS event_type, NULL AS speaker, NULL AS text,
+                           NULL AS start_ms, NULL AS end_ms, delegation_id, offset_ms,
+                           created_at
+                    FROM live_provider_delegation_inbox
+                )
+                ORDER BY created_at, call_id, call_epoch, provider_event_id
+                """
+            )
+            connection.execute("DELETE FROM live_provider_fragment_inbox")
+            connection.execute("DELETE FROM live_provider_delegation_inbox")
             attempt_columns = {
                 str(row["name"])
                 for row in connection.execute(
@@ -1115,11 +1228,15 @@ class SessionStore:
                 str(row["name"])
                 for row in connection.execute("PRAGMA table_info(live_calls)").fetchall()
             }
+            foreground_migration_needed = "foreground" not in call_columns
             for column, declaration in {
                 "max_ends_at": "TEXT",
                 "provider_close_state": "TEXT NOT NULL DEFAULT 'pending'",
                 "usage_json": "TEXT",
                 "phone_config_json": "TEXT NOT NULL DEFAULT '{}'",
+                "termination_initiator": "TEXT",
+                "termination_reason": "TEXT",
+                "foreground": "INTEGER NOT NULL DEFAULT 1",
             }.items():
                 if column not in call_columns:
                     connection.execute(
@@ -1188,31 +1305,134 @@ class SessionStore:
                         ON live_fragments(call_id, call_epoch, start_ms);
                     """
                 )
-            # A pre-qualified prototype could leave more than one active row
-            # for an owner/Agent. Preserve the newest and close older rows
-            # before installing the database-enforced singleton invariant.
+            schema_version_row = connection.execute(
+                "SELECT value FROM schema_metadata WHERE key = 'schema_version'"
+            ).fetchone()
+            try:
+                stored_schema_version = int(schema_version_row["value"]) if schema_version_row else 0
+            except (TypeError, ValueError):
+                stored_schema_version = 0
+            if stored_schema_version < self.SCHEMA_VERSION:
+                legacy_terminal_rows = connection.execute(
+                    """SELECT rowid, * FROM live_calls
+                       WHERE phase IN ('ended', 'failed', 'interrupted')"""
+                ).fetchall()
+                for row in legacy_terminal_rows:
+                    explicit_user_hangup = (
+                        str(row["termination_initiator"] or "") == "user"
+                        and str(row["termination_reason"] or "") == "user_hangup"
+                    )
+                    if not explicit_user_hangup:
+                        event_rows = connection.execute(
+                            "SELECT detail_json FROM run_events WHERE session_id = ? "
+                            "AND kind = 'voice.live.call.state'",
+                            (str(row["session_id"]),),
+                        ).fetchall()
+                        for event_row in event_rows:
+                            try:
+                                detail = json.loads(event_row["detail_json"] or "{}")
+                            except (TypeError, ValueError):
+                                continue
+                            call_scope = detail.get("scope") if isinstance(detail, Mapping) else None
+                            if not isinstance(call_scope, Mapping) or str(call_scope.get("call_id") or "") != str(row["call_id"]):
+                                continue
+                            if ((detail.get("termination_initiator") == "user"
+                                 and detail.get("termination_reason") == "user_hangup")
+                                    or detail.get("reason") == "user_hangup"):
+                                explicit_user_hangup = True
+                                break
+                    if explicit_user_hangup:
+                        continue
+                    legacy_phase = str(row["phase"])
+                    prior_close_state = str(row["provider_close_state"] or "unconfirmed")
+                    connection.execute(
+                        """UPDATE live_calls
+                           SET phase = 'recovering', ended_at = NULL,
+                               provider_close_state = CASE WHEN provider_close_state = 'confirmed'
+                                                           THEN 'confirmed' ELSE 'unconfirmed' END
+                           WHERE rowid = ?""",
+                        (int(row["rowid"]),),
+                    )
+                    self._append_event(
+                        connection, session_id=str(row["session_id"]), run_id=None,
+                        kind="voice.live.call.state",
+                        summary="Legacy call retained for explicit recovery",
+                        detail={
+                            "scope": {
+                                "instance_id": str(row["instance_id"]),
+                                "instance_generation": str(row["instance_generation"]),
+                                "agent_id": str(row["agent_id"]),
+                                "session_id": str(row["session_id"]),
+                                "context_generation": int(row["context_generation"]),
+                                "call_id": str(row["call_id"]),
+                                "call_epoch": int(row["call_epoch"]),
+                            },
+                            "phase": "recovering",
+                            "reason": "legacy_terminal_recovery",
+                            "legacy_phase": legacy_phase,
+                            "provider_close_state": prior_close_state,
+                        },
+                    )
+            # A pre-qualified prototype could leave multiple live calls per owner.
+            # Keep one foreground call and preserve every other call as recoverable
+            # background state before installing the owner-level foreground invariant.
             active_live_rows = connection.execute(
-                """SELECT rowid, owner_id, agent_id FROM live_calls
-                WHERE phase IN ('connecting', 'active', 'ending')
-                ORDER BY owner_id, agent_id, started_at DESC, rowid DESC"""
+                """SELECT rowid, * FROM live_calls
+                WHERE phase IN ('connecting', 'active', 'ending', 'recovering')
+                  AND (? = 1 OR foreground = 1)
+                ORDER BY owner_id, foreground DESC,
+                    CASE WHEN phase IN ('connecting', 'active', 'ending') THEN 0 ELSE 1 END,
+                    started_at DESC, rowid DESC""",
+                (int(foreground_migration_needed),),
             ).fetchall()
-            active_live_keys: set[tuple[str, str]] = set()
+            active_live_keys: set[str] = set()
             for row in active_live_rows:
-                key = (str(row["owner_id"]), str(row["agent_id"]))
+                key = str(row["owner_id"])
                 if key in active_live_keys:
                     connection.execute(
                         """UPDATE live_calls
-                        SET phase = 'interrupted', ended_at = COALESCE(ended_at, ?),
-                            provider_close_state = 'unconfirmed'
+                        SET phase = 'recovering', ended_at = NULL,
+                            foreground = 0, provider_close_state = 'unconfirmed'
                         WHERE rowid = ?""",
-                        (_utc_now(), int(row["rowid"])),
+                        (int(row["rowid"]),),
+                    )
+                    self._append_event(
+                        connection, session_id=str(row["session_id"]), run_id=None,
+                        kind="voice.live.call.state",
+                        summary="Older live call retained for explicit recovery",
+                        detail={
+                            "scope": {
+                                "instance_id": str(row["instance_id"]),
+                                "instance_generation": str(row["instance_generation"]),
+                                "agent_id": str(row["agent_id"]),
+                                "session_id": str(row["session_id"]),
+                                "context_generation": int(row["context_generation"]),
+                                "call_id": str(row["call_id"]),
+                                "call_epoch": int(row["call_epoch"]),
+                            },
+                            "phase": "recovering",
+                            "reason": "owner_singleton_migration",
+                            "foreground": False,
+                        },
                     )
                 else:
                     active_live_keys.add(key)
+                    if foreground_migration_needed:
+                        connection.execute(
+                            "UPDATE live_calls SET foreground = 1 WHERE rowid = ?",
+                            (int(row["rowid"]),),
+                        )
+            connection.execute("DROP INDEX IF EXISTS one_live_call_per_owner_agent")
+            foreground_index = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'index' "
+                "AND name = 'one_live_call_per_owner'"
+            ).fetchone()
+            if foreground_index and "foreground" not in str(foreground_index["sql"] or "").lower():
+                connection.execute("DROP INDEX one_live_call_per_owner")
             connection.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS one_live_call_per_owner_agent "
-                "ON live_calls(owner_id, agent_id) "
-                "WHERE phase IN ('connecting', 'active', 'ending')"
+                "CREATE UNIQUE INDEX IF NOT EXISTS one_live_call_per_owner "
+                "ON live_calls(owner_id) "
+                "WHERE foreground = 1 AND phase IN ('connecting', 'active', 'ending', 'recovering')"
             )
             consumer_columns = {
                 str(row["name"])
@@ -1398,17 +1618,341 @@ class SessionStore:
 
     def _next_ordinal(self, connection: sqlite3.Connection, session_id: str) -> int:
         row = connection.execute(
-            "SELECT next_message_ordinal FROM sessions WHERE session_id = ?",
+            """UPDATE sessions
+            SET next_message_ordinal = next_message_ordinal + 1
+            WHERE session_id = ?
+            RETURNING next_message_ordinal - 1 AS ordinal""",
             (session_id,),
         ).fetchone()
         if row is None:
             raise SessionNotFound(session_id)
-        ordinal = int(row["next_message_ordinal"])
-        connection.execute(
-            "UPDATE sessions SET next_message_ordinal = ? WHERE session_id = ?",
-            (ordinal + 1, session_id),
+        return int(row["ordinal"])
+
+    def _queue_foreground_message(
+        self, connection: sqlite3.Connection, *, session_id: str, message_id: str
+    ) -> None:
+        """Route canonical visible conversation messages to the active phone inbox."""
+        row = connection.execute(
+            """SELECT m.role, m.source, m.text, m.visibility, m.message_context_json,
+                      s.owner_id, s.agent_id
+               FROM messages AS m JOIN sessions AS s ON s.session_id = m.session_id
+               WHERE m.message_id = ? AND m.session_id = ?""",
+            (str(message_id), str(session_id)),
+        ).fetchone()
+        if row is None or row["role"] not in {"user", "assistant"}:
+            return
+        if str(row["source"] or "") == "live-phone" or row["visibility"] != "visible":
+            return
+        if not str(row["text"] or "").strip():
+            return
+        context = _json_object(row["message_context_json"])
+        if context.get("live_voice") or context.get("live_call_record"):
+            return
+        calls = connection.execute(
+            """SELECT call_id FROM live_calls
+               WHERE owner_id = ? AND foreground = 1
+                 AND phase IN ('connecting', 'active', 'ending', 'recovering')
+               ORDER BY CASE WHEN phase IN ('connecting', 'active', 'ending') THEN 0 ELSE 1 END,
+                        started_at DESC, rowid DESC
+               LIMIT 1""",
+            (str(row["owner_id"]),),
+        ).fetchall()
+        now = _utc_now()
+        for call in calls:
+            connection.execute(
+                """INSERT OR IGNORE INTO live_foreground_inbox(
+                       inbox_id, call_id, source_session_id, source_message_id,
+                       state, created_at
+                   ) VALUES (?, ?, ?, ?, 'pending', ?)""",
+                (_new_id("fg"), str(call["call_id"]), str(session_id), str(message_id), now),
+            )
+
+    def _queue_foreground_event(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        session_id: str,
+        event_id: str,
+        kind: str,
+        run_id: str | None,
+    ) -> None:
+        """Route PAO activity events (including failures) without copying event payloads."""
+        normalized_kind = str(kind or "")
+        if not (normalized_kind.startswith("run.") or normalized_kind.startswith("assistant.output.")):
+            return
+        if normalized_kind == "run.completed":
+            return
+        source = connection.execute(
+            """SELECT owner_id, agent_id FROM sessions WHERE session_id = ?""",
+            (str(session_id),),
+        ).fetchone()
+        if source is None:
+            return
+        if run_id:
+            run = connection.execute(
+                "SELECT message_context_json FROM runs WHERE run_id = ? AND session_id = ?",
+                (str(run_id), str(session_id)),
+            ).fetchone()
+            if run is not None and _json_object(run["message_context_json"]).get("live_voice"):
+                return
+        calls = connection.execute(
+            """SELECT call_id FROM live_calls
+               WHERE owner_id = ? AND foreground = 1
+                 AND phase IN ('connecting', 'active', 'ending', 'recovering')
+               ORDER BY CASE WHEN phase IN ('connecting', 'active', 'ending') THEN 0 ELSE 1 END,
+                        started_at DESC, rowid DESC
+               LIMIT 1""",
+            (str(source["owner_id"]),),
+        ).fetchall()
+        now = _utc_now()
+        for call in calls:
+            connection.execute(
+                """INSERT OR IGNORE INTO live_foreground_event_inbox(
+                       inbox_id, call_id, source_session_id, source_event_id, state, created_at
+                   ) VALUES (?, ?, ?, ?, 'pending', ?)""",
+                (_new_id("fge"), str(call["call_id"]), str(session_id), str(event_id), now),
+            )
+
+    def stage_live_provider_fragment(
+        self, *, owner_id: str, provider_event_id: str, call_id: str,
+        call_epoch: int, session_id: str, speaker: str, text: str,
+        start_ms: int, end_ms: int,
+    ) -> None:
+        """Durably stage a transcript in the shared Provider event order."""
+        identity = (
+            str(owner_id), str(session_id), str(call_id), int(call_epoch),
+            str(provider_event_id),
         )
-        return ordinal
+        values = (
+            str(speaker), str(text), int(start_ms), int(end_ms),
+        )
+        with self._lock, self._connection() as connection:
+            existing = connection.execute(
+                """SELECT 1 FROM live_fragments
+                   WHERE owner_id = ? AND session_id = ? AND call_id = ?
+                     AND call_epoch = ? AND provider_event_id = ?""",
+                identity,
+            ).fetchone()
+            if existing is not None:
+                return
+            existing = connection.execute(
+                """SELECT event_type, speaker, text, start_ms, end_ms
+                   FROM live_provider_event_inbox
+                   WHERE owner_id = ? AND session_id = ? AND call_id = ?
+                     AND call_epoch = ? AND provider_event_id = ?""",
+                identity,
+            ).fetchone()
+            if existing is not None:
+                if tuple(existing) != ("transcript", *values):
+                    raise SessionConflict("provider transcript identity conflicts with pending fragment")
+                return
+            connection.execute(
+                """INSERT INTO live_provider_event_inbox(
+                       owner_id, provider_event_id, call_id, call_epoch, session_id,
+                       event_type, speaker, text, start_ms, end_ms, created_at
+                   ) VALUES (?, ?, ?, ?, ?, 'transcript', ?, ?, ?, ?, ?)""",
+                (*identity[:1], identity[4], identity[2], identity[3], identity[1],
+                 *values, _utc_now()),
+            )
+
+    def pending_live_provider_fragments(self) -> list[dict[str, Any]]:
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """SELECT i.*, c.agent_id, c.instance_id, c.instance_generation,
+                          c.context_generation, c.provider_session_id
+                   FROM live_provider_event_inbox AS i
+                   JOIN live_calls AS c ON c.call_id = i.call_id
+                   WHERE i.event_type = 'transcript'
+                   ORDER BY i.queue_sequence"""
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def stage_live_provider_delegation(
+        self, *, owner_id: str, provider_event_id: str, call_id: str,
+        call_epoch: int, session_id: str, delegation_id: str, offset_ms: int,
+    ) -> None:
+        """Durably stage a typed delegation in the shared Provider event order."""
+        identity = (
+            str(owner_id), str(session_id), str(call_id), int(call_epoch),
+            str(provider_event_id),
+        )
+        values = (str(delegation_id), int(offset_ms))
+        with self._lock, self._connection() as connection:
+            existing = connection.execute(
+                """SELECT event_type, delegation_id, offset_ms
+                   FROM live_provider_event_inbox
+                   WHERE owner_id = ? AND session_id = ? AND call_id = ?
+                     AND call_epoch = ? AND provider_event_id = ?""",
+                identity,
+            ).fetchone()
+            if existing is not None:
+                if tuple(existing) != ("delegation", *values):
+                    raise SessionConflict("provider delegation identity conflicts with pending event")
+                return
+            connection.execute(
+                """INSERT INTO live_provider_event_inbox(
+                       owner_id, provider_event_id, call_id, call_epoch, session_id,
+                       event_type, delegation_id, offset_ms, created_at
+                   ) VALUES (?, ?, ?, ?, ?, 'delegation', ?, ?, ?)""",
+                (*identity[:1], identity[4], identity[2], identity[3], identity[1],
+                 *values, _utc_now()),
+            )
+
+    def pending_live_provider_delegations(self) -> list[dict[str, Any]]:
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """SELECT i.*, c.agent_id, c.instance_id, c.instance_generation,
+                          c.context_generation, c.provider_session_id
+                   FROM live_provider_event_inbox AS i
+                   JOIN live_calls AS c ON c.call_id = i.call_id
+                   WHERE i.event_type = 'delegation'
+                   ORDER BY i.queue_sequence"""
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def pending_live_provider_events(self) -> list[dict[str, Any]]:
+        """Return all staged typed Provider events in their durable receive order."""
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """SELECT i.*, c.agent_id, c.instance_id, c.instance_generation,
+                          c.context_generation, c.provider_session_id
+                   FROM live_provider_event_inbox AS i
+                   JOIN live_calls AS c ON c.call_id = i.call_id
+                   ORDER BY i.queue_sequence"""
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def has_pending_live_provider_fragments(self, call_id: str) -> bool:
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM live_provider_event_inbox WHERE call_id = ? AND event_type = 'transcript' LIMIT 1",
+                (str(call_id),),
+            ).fetchone()
+        return row is not None
+
+    def clear_staged_live_provider_fragment(
+        self, *, owner_id: str, provider_event_id: str, call_id: str,
+        call_epoch: int, session_id: str,
+    ) -> None:
+        with self._lock, self._connection() as connection:
+            connection.execute(
+                """DELETE FROM live_provider_event_inbox
+                   WHERE owner_id = ? AND session_id = ? AND call_id = ?
+                     AND call_epoch = ? AND provider_event_id = ?""",
+                (
+                    str(owner_id), str(session_id), str(call_id),
+                    int(call_epoch), str(provider_event_id),
+                ),
+            )
+
+    def pending_live_foreground_events(
+        self, call_id: str, *, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        bounded = max(1, min(int(limit), 100))
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """SELECT i.inbox_id, i.call_id, i.source_session_id, i.source_event_id,
+                          e.kind, e.status, e.phase, e.summary, e.created_at
+                   FROM live_foreground_event_inbox AS i
+                   JOIN run_events AS e ON e.event_id = i.source_event_id
+                   WHERE i.call_id = ? AND i.state = 'pending'
+                   ORDER BY i.created_at, i.inbox_id LIMIT ?""",
+                (str(call_id), bounded),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def mark_live_foreground_event_delivered(
+        self, call_id: str, inbox_id: str
+    ) -> bool:
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                """UPDATE live_foreground_event_inbox
+                   SET state = 'delivered', delivered_at = ?
+                   WHERE call_id = ? AND inbox_id = ? AND state = 'pending'""",
+                (_utc_now(), str(call_id), str(inbox_id)),
+            )
+            return cursor.rowcount == 1
+
+    def live_foreground_history(self, call_id: str, *, limit: int = 256) -> list[dict[str, Any]]:
+        bounded = max(1, min(int(limit), 512))
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """SELECT i.created_at AS routed_at, i.source_session_id,
+                          m.role, m.source, m.text AS content,
+                          'message' AS item_type, '' AS event_kind
+                   FROM live_foreground_inbox AS i
+                   JOIN messages AS m ON m.message_id = i.source_message_id
+                   WHERE i.call_id = ?
+                   UNION ALL
+                   SELECT i.created_at AS routed_at, i.source_session_id,
+                          'assistant' AS role, e.kind AS source, e.summary AS content,
+                          'event' AS item_type, e.kind AS event_kind
+                   FROM live_foreground_event_inbox AS i
+                   JOIN run_events AS e ON e.event_id = i.source_event_id
+                   WHERE i.call_id = ?
+                   ORDER BY routed_at, source_session_id LIMIT ?""",
+                (str(call_id), str(call_id), bounded),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def pending_live_foreground_messages(
+        self, call_id: str, *, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        bounded = max(1, min(int(limit), 100))
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """SELECT i.inbox_id, i.call_id, i.source_session_id,
+                          i.source_message_id, m.role, m.source, m.text, m.created_at
+                   FROM live_foreground_inbox AS i
+                   JOIN messages AS m ON m.message_id = i.source_message_id
+                   WHERE i.call_id = ? AND i.state = 'pending'
+                   ORDER BY i.created_at, i.inbox_id LIMIT ?""",
+                (str(call_id), bounded),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def pending_live_foreground_items(
+        self, call_id: str, *, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        """Return one globally ordered page from both foreground inboxes."""
+        bounded = max(1, min(int(limit), 100))
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """SELECT * FROM (
+                       SELECT 'message' AS item_type, i.inbox_id,
+                              i.source_session_id, i.source_message_id,
+                              '' AS source_event_id, m.role, m.source, '' AS kind,
+                              m.text, '' AS summary, m.created_at
+                       FROM live_foreground_inbox AS i
+                       JOIN messages AS m ON m.message_id = i.source_message_id
+                       WHERE i.call_id = ? AND i.state = 'pending'
+                       UNION ALL
+                       SELECT 'event' AS item_type, i.inbox_id,
+                              i.source_session_id, '' AS source_message_id,
+                              i.source_event_id, 'assistant' AS role, e.kind AS source,
+                              e.kind, '' AS text, e.summary, e.created_at
+                       FROM live_foreground_event_inbox AS i
+                       JOIN run_events AS e ON e.event_id = i.source_event_id
+                       WHERE i.call_id = ? AND i.state = 'pending'
+                   )
+                   ORDER BY created_at, inbox_id LIMIT ?""",
+                (str(call_id), str(call_id), bounded),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def mark_live_foreground_message_delivered(
+        self, call_id: str, inbox_id: str
+    ) -> bool:
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                """UPDATE live_foreground_inbox
+                   SET state = 'delivered', delivered_at = ?
+                   WHERE call_id = ? AND inbox_id = ? AND state = 'pending'""",
+                (_utc_now(), str(call_id), str(inbox_id)),
+            )
+            return cursor.rowcount == 1
 
     def _append_event(
         self,
@@ -1425,16 +1969,15 @@ class SessionStore:
         delivery_route: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         row = connection.execute(
-            "SELECT next_event_sequence FROM sessions WHERE session_id = ?",
+            """UPDATE sessions
+            SET next_event_sequence = next_event_sequence + 1
+            WHERE session_id = ?
+            RETURNING next_event_sequence - 1 AS sequence""",
             (session_id,),
         ).fetchone()
         if row is None:
             raise SessionNotFound(session_id)
-        sequence = int(row["next_event_sequence"])
-        connection.execute(
-            "UPDATE sessions SET next_event_sequence = ? WHERE session_id = ?",
-            (sequence + 1, session_id),
-        )
+        sequence = int(row["sequence"])
         event_id = _new_id("evt")
         created_at = _utc_now()
         connection.execute(
@@ -1456,6 +1999,13 @@ class SessionStore:
                 _json(dict(detail or {})),
                 created_at,
             ),
+        )
+        self._queue_foreground_event(
+            connection,
+            session_id=session_id,
+            event_id=event_id,
+            kind=kind,
+            run_id=run_id,
         )
         if outbox:
             connection.execute(
@@ -2644,6 +3194,9 @@ class SessionStore:
                     now,
                 ),
             )
+            self._queue_foreground_message(
+                connection, session_id=session_id, message_id=message_id
+            )
             connection.execute(
                 """
                 INSERT INTO runs(
@@ -2918,6 +3471,9 @@ class SessionStore:
                     content_hash,
                     now,
                 ),
+            )
+            self._queue_foreground_message(
+                connection, session_id=str(session_id), message_id=message_id
             )
             presentation_event = self._append_event(
                 connection,
@@ -3424,6 +3980,10 @@ class SessionStore:
                 # but must not enqueue the same text/audio a second time.
                 outbox=not terminal_content_already_published,
             )
+            if success and final_message_id:
+                self._queue_foreground_message(
+                    connection, session_id=session_id, message_id=str(final_message_id)
+                )
             projection = {
                 "run_id": str(run["run_id"]),
                 "session_id": session_id,
@@ -5403,6 +5963,9 @@ class SessionStore:
                     )
                 else:
                     message_id = str(existing_message["message_id"])
+                self._queue_foreground_message(
+                    connection, session_id=str(run["session_id"]), message_id=message_id
+                )
                 detail = {
                     "message_id": message_id,
                     "request_id": str(request_id),

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -3000,3 +3001,140 @@ def test_frontend_transport_references_resolve_only_inside_their_endpoint(tmp_pa
             transport_message_id="7788",
             event_id="evt_other",
         )
+
+
+def test_message_and_event_ordinals_are_atomic_across_store_processes(tmp_path):
+    store_a = _store(tmp_path)
+    session = store_a.ensure_default_session(owner_id="user:atomic", agent_id="lily")
+    store_b = SessionStore(store_a.db_path, instance_id="HASHI1")
+
+    def next_message(index):
+        store = store_a if index % 2 else store_b
+        with store._lock, store._connection() as connection:
+            return store._next_ordinal(connection, session["session_id"])
+
+    def next_event(index):
+        store = store_a if index % 2 else store_b
+        with store._lock, store._connection() as connection:
+            return store._append_event(
+                connection, session_id=session["session_id"], run_id=None,
+                kind="test.concurrent", summary=f"parallel {index}",
+            )["sequence"]
+
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        message_ordinals = list(pool.map(next_message, range(120)))
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        event_sequences = list(pool.map(next_event, range(120)))
+
+    assert len(set(message_ordinals)) == 120
+    assert len(set(event_sequences)) == 120
+
+
+def test_background_messages_and_events_from_any_agent_enter_active_phone_inbox(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:phone"
+    foreground = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    background = store.ensure_default_session(owner_id=owner, agent_id="zelda")
+    call_id = "call-foreground"
+    with store._lock, store._connection() as connection:
+        connection.execute(
+            """INSERT INTO live_calls(
+                call_id, owner_id, session_id, agent_id, instance_id, instance_generation,
+                context_generation, call_epoch, provider_session_id, phase, controller_lease,
+                lease_expiry, started_at, max_ends_at
+            ) VALUES (?, ?, ?, 'lily', 'HASHI1', '1', 1, 1, 'provider1', 'active',
+                      'lease1', '2099-01-01T00:00:00Z', '2026-09-30T00:00:00Z', '2099-01-01T00:30:00Z')""",
+            (call_id, owner, foreground["session_id"]),
+        )
+    dormant_call_id = "call-dormant-background"
+    with store._lock, store._connection() as connection:
+        connection.execute(
+            """INSERT INTO live_calls(
+                call_id, owner_id, session_id, agent_id, instance_id, instance_generation,
+                context_generation, call_epoch, provider_session_id, phase, foreground,
+                controller_lease, lease_expiry, started_at, max_ends_at
+            ) VALUES (?, ?, ?, 'zelda', 'HASHI1', '1', 1, 1, 'provider-old', 'recovering', 0,
+                      'lease-old', '2099-01-01T00:00:00Z', '2026-09-29T00:00:00Z', '2099-01-01T00:30:00Z')""",
+            (dormant_call_id, owner, background["session_id"]),
+        )
+    message = store.append_presentation_message(
+        session_id=background["session_id"], owner_id=owner, agent_id="zelda",
+        role="assistant", text="background result", source="workbench.run",
+        idempotency_key="background-result-1", history_eligible=True,
+    )
+    with store._lock, store._connection() as connection:
+        store._append_event(
+            connection, session_id=background["session_id"], run_id=None,
+            kind="run.failed", summary="background run needs attention",
+        )
+    pending_messages = store.pending_live_foreground_messages(call_id)
+    pending_events = store.pending_live_foreground_events(call_id)
+    assert [item["source_message_id"] for item in pending_messages] == [message["message_id"]]
+    assert [item["kind"] for item in pending_events] == ["run.failed"]
+    assert store.pending_live_foreground_messages(dormant_call_id) == []
+    assert store.pending_live_foreground_events(dormant_call_id) == []
+
+
+def test_phone_inbox_uses_one_globally_ordered_page_across_messages_and_events(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:phone-order"
+    foreground = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    background = store.ensure_default_session(owner_id=owner, agent_id="zelda")
+    call_id = "call-foreground-order"
+    with store._lock, store._connection() as connection:
+        connection.execute(
+            """INSERT INTO live_calls(
+                call_id, owner_id, session_id, agent_id, instance_id, instance_generation,
+                context_generation, call_epoch, provider_session_id, phase, controller_lease,
+                lease_expiry, started_at, max_ends_at
+            ) VALUES (?, ?, ?, 'lily', 'HASHI1', '1', 1, 1, 'provider1', 'active',
+                      'lease1', '2099-01-01T00:00:00Z', '2026-09-30T00:00:00Z',
+                      '2099-01-01T00:30:00Z')""",
+            (call_id, owner, foreground["session_id"]),
+        )
+
+    message_ids = []
+    for index in range(1, 31):
+        message = store.append_presentation_message(
+            session_id=background["session_id"], owner_id=owner, agent_id="zelda",
+            role="assistant", text=f"message-{index}", source="workbench.run",
+            idempotency_key=f"ordered-message-{index}", history_eligible=True,
+        )
+        message_ids.append(message["message_id"])
+
+    event_ids = []
+    for index in range(1, 31):
+        with store._lock, store._connection() as connection:
+            event = store._append_event(
+                connection, session_id=background["session_id"], run_id=None,
+                kind="run.failed", summary=f"event-{index}",
+            )
+        event_ids.append(event["event_id"])
+
+    with store._lock, store._connection() as connection:
+        for index, message_id in enumerate(message_ids, start=1):
+            connection.execute(
+                "UPDATE messages SET created_at = ? WHERE message_id = ?",
+                (f"2026-09-30T00:00:{index:02d}Z", message_id),
+            )
+        for index, event_id in enumerate(event_ids, start=50):
+            connection.execute(
+                "UPDATE run_events SET created_at = ? WHERE event_id = ?",
+                (f"2026-09-30T00:00:{index:02d}Z", event_id),
+            )
+
+    first_page = store.pending_live_foreground_items(call_id, limit=25)
+    assert [item["item_type"] for item in first_page] == ["message"] * 25
+    assert [item["text"] for item in first_page] == [f"message-{i}" for i in range(1, 26)]
+    for item in first_page:
+        assert store.mark_live_foreground_message_delivered(call_id, item["inbox_id"])
+
+    second_page = store.pending_live_foreground_items(call_id, limit=25)
+    assert [item["item_type"] for item in second_page[:5]] == ["message"] * 5
+    assert [item["text"] for item in second_page[:5]] == [
+        f"message-{i}" for i in range(26, 31)
+    ]
+    assert [item["item_type"] for item in second_page[5:]] == ["event"] * 20
+    assert [item["summary"] for item in second_page[5:]] == [
+        f"event-{i}" for i in range(1, 21)
+    ]

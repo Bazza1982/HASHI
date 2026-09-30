@@ -28,21 +28,29 @@ _SAFE_FILE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}\Z")
 _MAX_RECORD_BYTES = 16_384
 _MAX_STRING = 512
 _DURABLE_EVENTS = frozenset({
-    "provider.session_closed", "runtime.recovery_detected", "sideband.cancelled",
-    "sideband.disconnected", "sideband.exception", "termination.requested",
+    "provider.event_persistence_interrupted", "provider.event_persistence_recovered",
+    "provider.event_persistence_rejected", "provider.event_processing_failed",
+    "provider.event_staging_failed", "provider.event_staging_interrupted",
+    "provider.event_staging_rejected",
+    "provider.socket_operation_failed",
+    "provider.session_closed", "call.transcript_projection_deferred",
+    "runtime.recovery_detected", "sideband.cancelled", "sideband.disconnected",
+    "sideband.exception", "termination.requested",
 })
 _ALLOWED_DETAIL_KEYS = frozenset({
-    "acknowledged", "action", "attempt_id", "call_epoch", "chunk_count",
-    "chunk_index", "cleanup_state", "client_event_id", "client_sequence",
-    "close_sent", "consecutive_failures", "delegation_id", "detail_truncated",
-    "duration_ms", "end_ms", "error_code", "exception_frames",
-    "exception_message", "exception_type", "expires_at", "history_omitted_units",
-    "initiator", "input_messages", "input_tokens", "maximum_at", "observed_at",
-    "online", "operation", "outcome", "phase", "previous_phase",
-    "provider_close_state", "provider_event_id", "provider_event_type",
-    "provider_reason", "reason", "request_id", "run_id", "sequence", "source",
-    "speaker", "start_ms", "state", "summary_code", "task_name", "text_bytes",
-    "usage", "visible", "ws_close_code", "ws_message_type",
+    "acknowledged", "action", "attempt", "attempt_id", "attempts", "call_epoch",
+    "chunk_count", "chunk_index", "cleanup_state", "client_event_id",
+    "client_sequence", "close_sent", "consecutive_failures",
+    "delegation_id", "detail_truncated", "duration_ms", "end_ms", "error_code",
+    "exception_frames", "exception_message", "exception_type", "expires_at",
+    "failed_attempts", "history_omitted_units", "initiator", "input_messages",
+    "input_tokens", "item_type", "maximum_at", "observed_at", "online",
+    "operation", "outcome", "phase", "previous_phase", "provider_close_state",
+    "provider_event_id", "provider_event_type", "provider_reason", "reason",
+    "request_id", "retry_delay_s", "run_id", "sequence", "source",
+    "source_event_id", "source_message_id", "source_session_id", "speaker",
+    "start_ms", "state", "summary_code", "task_name", "text_bytes", "usage",
+    "visible", "ws_close_code", "ws_message_type",
 })
 _SECRET_PATTERNS = (
     re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~-]+"),
