@@ -6,7 +6,6 @@ role/text history; the selected adapter owns wire encoding and budgets.
 """
 from __future__ import annotations
 
-from collections import OrderedDict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -362,9 +361,14 @@ def build_live_voice_input(
             }
         )
 
-    units: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
+    # A Run can start before phone speech and finish after it. Its final
+    # report belongs at completion time, so only contiguous rows form one
+    # history unit for the provider's oldest-unit trimming.
+    ordered_units: list[tuple[str, list[dict[str, Any]]]] = []
     for row in history_rows:
-        units.setdefault(row["unit"], []).append(row["item"])
+        if not ordered_units or ordered_units[-1][0] != row["unit"]:
+            ordered_units.append((row["unit"], []))
+        ordered_units[-1][1].append(row["item"])
 
     base_tokens = sum(
         _message_tokens(item, token_count) for item in required_developer_items
@@ -375,11 +379,11 @@ def build_live_voice_input(
             "HCC, long-term memory, and Memory+ exceed the selected startup message limit; no context was truncated",
         )
 
-    selected_units: set[str] = set()
+    selected_units: set[int] = set()
     used_messages = len(required_developer_items)
     used_tokens = base_tokens
-    ordered_units = list(units.items())
-    for unit_id, unit_items in reversed(ordered_units):
+    for unit_index in range(len(ordered_units) - 1, -1, -1):
+        unit_items = ordered_units[unit_index][1]
         unit_messages = len(unit_items)
         unit_tokens = sum(_message_tokens(item, token_count) for item in unit_items)
         if used_messages + unit_messages > message_limit:
@@ -389,17 +393,17 @@ def build_live_voice_input(
                     "The complete newest conversation turn does not fit beside mandatory phone context within the provider message limit; nothing was truncated",
                 )
             break
-        selected_units.add(unit_id)
+        selected_units.add(unit_index)
         used_messages += unit_messages
         used_tokens += unit_tokens
 
-    conversation_items = [
-        row["item"] for row in history_rows if row["unit"] in selected_units
-    ]
     selected_ordered_units = [
         unit_items
-        for unit_id, unit_items in ordered_units
-        if unit_id in selected_units
+        for unit_index, (_, unit_items) in enumerate(ordered_units)
+        if unit_index in selected_units
+    ]
+    conversation_items = [
+        item for unit_items in selected_ordered_units for item in unit_items
     ]
     included_optional_items = (
         optional_reference_items
@@ -425,10 +429,10 @@ def build_live_voice_input(
         "history_unit_message_counts": optional_unit_counts + [
             len(unit_items) for unit_items in selected_ordered_units
         ],
-        "history_requested_units": len(units) + optional_requested,
+        "history_requested_units": len(ordered_units) + optional_requested,
         "history_included_units": len(selected_units) + len(optional_unit_counts),
         "history_omitted_units": (
-            len(units) - len(selected_units)
+            len(ordered_units) - len(selected_units)
             + optional_requested - len(optional_unit_counts)
         ),
         "optional_reference_units": len(optional_unit_counts),

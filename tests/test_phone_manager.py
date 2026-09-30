@@ -106,6 +106,24 @@ def test_live_input_keeps_hcc_and_newest_complete_exchange_then_drops_oldest():
     assert audit["history_omitted_units"] > 0
 
 
+def test_live_input_keeps_completed_report_after_interleaved_call_speech():
+    recent = [
+        {"message_id": "query", "history_unit_id": "run-news", "role": "user", "text": "Find the news"},
+        {"message_id": "during-1", "history_unit_id": "speech-1", "role": "user", "text": "Still searching?"},
+        {"message_id": "during-2", "history_unit_id": "speech-2", "role": "assistant", "text": "I am checking"},
+        {"message_id": "report", "history_unit_id": "run-news", "role": "assistant", "text": "NEWS REPORT: 23 items"},
+        {"message_id": "after-1", "history_unit_id": "speech-3", "role": "user", "text": "Tell me all of them"},
+        {"message_id": "after-2", "history_unit_id": "speech-4", "role": "assistant", "text": "I found eight"},
+    ]
+
+    items, audit = build_live_voice_input(_pcm_payload(), recent, message_limit=6)
+
+    assert [item["text"] for item in items[-3:]] == [
+        "NEWS REPORT: 23 items", "Tell me all of them", "I found eight",
+    ]
+    assert audit["history_unit_message_counts"] == [1, 1, 1]
+
+
 def test_live_input_uses_full_message_capacity_before_provider_exact_count():
     recent = []
     for index in range(90):
