@@ -974,6 +974,23 @@ class WorkbenchApiServer:
             for runtime in self._runtime_list()
         }
 
+    def _require_live_voice_session_scope(
+        self, *, owner_id: str, agent_id: str, session_id: str, context_generation: int
+    ) -> dict:
+        """Use the same primary Session fence as interactive PAO admission."""
+        from orchestrator.frontend_live_voice.protocol import LiveVoiceError
+
+        try:
+            session = self.session_store.get_session(
+                session_id, owner_id=owner_id, agent_id=agent_id, include_deleted=False)
+            primary = self.session_store.resolve_primary_session(owner_id=owner_id, agent_id=agent_id)
+        except (SessionNotFound, SessionConflict) as exc:
+            raise LiveVoiceError("live_scope_changed", 409) from exc
+        if (session["session_id"] != primary["session_id"]
+                or int(session["context_generation"]) != int(context_generation)):
+            raise LiveVoiceError("live_scope_changed", 409)
+        return session
+
     def _resolve_live_voice_phone_session(
         self,
         agent_id: str,
@@ -984,6 +1001,10 @@ class WorkbenchApiServer:
         frozen_selection: Mapping[str, Any] | None = None,
     ) -> dict:
         """Resolve Agent PCM and same-Session history at the trusted API edge."""
+
+        if owner_id and session_id and context_generation is not None:
+            self._require_live_voice_session_scope(owner_id=owner_id, agent_id=agent_id,
+                session_id=session_id, context_generation=context_generation)
 
         from orchestrator.bridge_memory import (
             BridgeContextAssembler,
@@ -5407,6 +5428,13 @@ class WorkbenchApiServer:
 
         from orchestrator.frontend_live_voice.protocol import LiveVoiceError
 
+        try:
+            self._require_live_voice_session_scope(owner_id=binding.owner_id, agent_id=binding.agent_id,
+                session_id=binding.session_id, context_generation=binding.context_generation)
+        except LiveVoiceError as exc:
+            # This check is strictly before invoking the Worker. Its code can
+            # close an admission receipt as rejected, unlike an uncertain RPC.
+            raise LiveVoiceError("live_admission_scope_changed", 409) from exc
         runtime = self._runtime_map().get(binding.agent_id)
         if runtime is None:
             raise LiveVoiceError("live_agent_unavailable", 503)

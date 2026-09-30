@@ -562,6 +562,14 @@ validated before Run admission; its messages, status, progress and cost rows
 stay out of the generic foreground inbox because the dedicated relay owns
 their delivery.
 
+One action represents an independently useful outcome. Ordered prerequisites,
+the write itself and its readback stay in that same action and Run; a readback
+must not race the write as an unrelated query. Stored action order retains the
+input order even when a batch shares one timestamp. Phone validates the current
+primary Session before preparing media and again before invoking a Worker.
+A first, definite rejection before invoking a Worker settles as failed; a later
+scope change cannot erase uncertainty from an earlier unacknowledged invocation.
+
 While delegated work runs, HASHI returns attributable progress and effects.
 A completed model response is not an action-completion receipt. Public action
 state distinguishes accepted, running, verified, failed, unknown and cancelled;

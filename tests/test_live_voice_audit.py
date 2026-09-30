@@ -69,6 +69,17 @@ def test_failed_dial_attempt_has_evidence_before_a_call_id_exists(tmp_path: Path
     assert record["detail"]["error_code"] == "provider_rejected"
 
 
+def test_admission_codes_survive_while_unknown_live_tokens_remain_redacted(tmp_path: Path):
+    audit = LiveVoiceAuditLog(tmp_path)
+    binding = _binding()
+    audit.record(binding, "action.admission_rejected", error_code="live_admission_scope_changed", action_id="action-one")
+    audit.record(binding, "action.admission_unconfirmed", error_code="live_private-credential", exception_message="live_private-credential")
+    rows = [json.loads(line) for line in audit.path_for(binding).read_text(encoding="utf-8").splitlines()]
+    assert rows[0]["detail"] == {"error_code": "live_admission_scope_changed", "action_id": "action-one"}
+    assert rows[1]["detail"]["error_code"] == "[REDACTED]"
+    assert "live_private-credential" not in json.dumps(rows)
+
+
 def test_call_audit_keeps_bounded_provider_retry_evidence_durable(tmp_path: Path):
     audit = LiveVoiceAuditLog(tmp_path)
     binding = _binding()

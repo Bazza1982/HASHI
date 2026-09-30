@@ -225,6 +225,12 @@ and cannot hang up or recreate the connection.
 Continuous silent audio must not suppress the opening. Failed interpretation
 must retain an unexecuted partial request when later speech completes it.
 
+Phone admission follows the existing primary-Session fence before media setup
+and before Worker invocation. Save/readback steps for one outcome belong to one
+action; batch order remains stable even when timestamps are identical. A known
+pre-Worker rejection is failed, while an uncertain prior invocation remains
+unknown and is not blindly repeated.
+
 Implementation note (2026-09-30): PAO now reserves one live foreground call per
 owner, allocates Session ordinals atomically, and queues attributable background
 messages and status events by reference until the Provider acknowledges delivery.

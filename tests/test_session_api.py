@@ -256,6 +256,9 @@ def test_live_phone_resolver_uses_authoritative_pcm_and_same_session_history(tmp
         agent_id="lily",
         title="Phone continuity",
     )
+    server.session_store.bind_primary_session(
+        owner_id=owner_id, agent_id="lily", session_id=session["session_id"]
+    )
     accepted = server.session_store.accept_run(
         session_id=session["session_id"],
         owner_id=owner_id,

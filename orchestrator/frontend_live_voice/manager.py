@@ -1602,8 +1602,17 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             except Exception as exc:
                 self.actions.transition(binding, action_id, "unknown",
                     receipt=self._action_text(binding, "admission_unconfirmed"))
+                cause = exc
+                for _ in range(4):
+                    if cause.__cause__ is None:
+                        break
+                    cause = cause.__cause__
+                evidence = exception_evidence(cause)
+                evidence.pop("exception_message", None)
+                self._action_event(binding, "admission_unconfirmed", {"action_id": action_id,
+                    "error_code": str(getattr(exc, "code", "live_outcome_unknown")), **evidence})
                 self.audit.record(binding, "action.admission_unconfirmed", action_id=action_id,
-                                  error_code=str(getattr(exc, "code", "live_outcome_unknown")))
+                                  error_code=str(getattr(exc, "code", "live_outcome_unknown")), **evidence)
                 await self._send_provider_update(binding, kind="commentary",
                     content=self._action_text(binding, "admission_unconfirmed"),
                     delegation_id=None)
@@ -1805,6 +1814,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 row["decision_key"] != idempotency_key or row["decision_digest"] != request_digest
             ):
                 raise LiveVoiceError("live_delegation_already_decided", 409)
+            first_attempt = row["decision"] is None
             pending = {"ok": False, "pending": True, "delegation_id": proposal.delegation_id,
                        "proposal_version": proposal.version, "proposal_digest": proposal.digest}
             connection.execute(
@@ -1817,10 +1827,12 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 ) VALUES (?, ?, ?, 'admission_pending', ?, ?)""",
                 (binding.call_id, idempotency_key, request_digest, json.dumps(pending), _utc_now()),
             )
-        return await self._complete_pending_admission(binding, proposal, idempotency_key, request_digest)
+        return await self._complete_pending_admission(binding, proposal, idempotency_key, request_digest,
+                                                     first_attempt=first_attempt)
 
     async def _complete_pending_admission(
         self, binding: CallBinding, proposal: Proposal, idempotency_key: str, request_digest: str,
+        *, first_attempt: bool = False,
     ) -> Mapping[str, Any]:
         actions = self.actions.rows(binding, delegation_id=proposal.delegation_id)
         if actions:
@@ -1843,7 +1855,30 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             accepted = await self._admit_run(  # type: ignore[misc]
                 binding, proposal, f"live-delegation-{idempotency_key}"
             )
-        except LiveVoiceError:
+        except LiveVoiceError as exc:
+            if first_attempt and exc.code == "live_admission_scope_changed":
+                # Only this locally generated pre-Worker error proves no initial
+                # admission happened. Recovery after an earlier uncertain RPC
+                # remains unknown; a later scope error cannot undo prior effects.
+                result = {"ok": False, "accepted": False, "rejected": True, "error_code": exc.code}
+                now = _utc_now()
+                with self.session_store._lock, self.session_store._connection() as connection:
+                    connection.execute(
+                        "UPDATE live_delegations SET decision='rejected',decided_at=? WHERE call_id=? AND call_epoch=? AND delegation_id=?",
+                        (now, binding.call_id, binding.call_epoch, proposal.delegation_id))
+                    connection.execute(
+                        "UPDATE live_control_receipts SET operation='admission',receipt_json=?,created_at=? WHERE call_id=? AND idempotency_key=? AND request_digest=?",
+                        (json.dumps(result), now, binding.call_id, idempotency_key, request_digest))
+                for item in actions:
+                    self.actions.transition(binding, item["action_id"], "failed",
+                        receipt=self._action_text(binding, "admission_rejected"))
+                self._action_event(binding, "admission_rejected", {"delegation_id": proposal.delegation_id,
+                    "error_code": exc.code, "worker_invoked": False})
+                self.audit.record(binding, "action.admission_rejected", delegation_id=proposal.delegation_id,
+                                  error_code=exc.code)
+                await self._offer_action_reply(binding, "admission-" + proposal.delegation_id,
+                                               self._action_text(binding, "admission_rejected"))
+                return result
             raise
         except Exception as exc:
             raise LiveVoiceError("live_outcome_unknown", 502) from exc

@@ -31,7 +31,7 @@ class PhoneActions:
             rows = connection.execute(
                 "SELECT * FROM live_actions WHERE call_id = ? "
                 + ("AND delegation_id = ? " if delegation_id else "")
-                + "ORDER BY created_at DESC LIMIT 32",
+                + "ORDER BY created_at DESC, rowid DESC LIMIT 32",
                 (binding.call_id, delegation_id) if delegation_id else (binding.call_id,),
             ).fetchall()
         return [dict(row) for row in reversed(rows)]

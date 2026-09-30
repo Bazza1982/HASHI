@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-from types import SimpleNamespace
+import logging
+from dataclasses import replace
+from types import MethodType, SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
@@ -14,6 +17,182 @@ from orchestrator.frontend_live_voice.delegation_policy import ActionIntent, par
 from orchestrator.frontend_live_voice.protocol import Fragment
 from orchestrator.frontend_live_voice import worker_actions
 from tools.registry import ToolRegistry
+
+
+def actual_admission_api(phone, tmp_path):
+    """Real API -> Worker dispatch -> runtime PAO -> persistent Run and queue."""
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+    from orchestrator.function_worker_host import FunctionWorkerHost
+    from orchestrator.function_worker_supervisor import AgentRuntimeHandle
+    from orchestrator.function_worker_protocol import FunctionWorkerRemoteError
+    from orchestrator.workbench_api import WorkbenchApiServer
+
+    workspace = tmp_path / "agent"
+    workspace.mkdir()
+    sequence = iter(range(1, 20))
+    runtime = SimpleNamespace(name=phone.agent_id, session_store=phone.store,
+        workspace_dir=workspace, global_config=SimpleNamespace(
+            authorized_id=7, instance_id="HASHI", bridge_home=tmp_path, project_root=None),
+        config=SimpleNamespace(workspace_dir=workspace), queue=asyncio.Queue(),
+        error_logger=logging.getLogger("test.phone.error"), message_logger=logging.getLogger("test.phone.messages"),
+        request_activity=SimpleNamespace(start=lambda *args, **kwargs: None),
+        next_request_id=lambda: f"actual-admission-{next(sequence)}")
+    runtime.enqueue_request = MethodType(FlexibleAgentRuntime.enqueue_request, runtime)
+    host = FunctionWorkerHost.__new__(FunctionWorkerHost)
+    host.runtime, host.phase, host.accepting, host.agent_name = runtime, "ACTIVE", True, phone.agent_id
+    host.emit_metadata = AsyncMock()
+    handle = AgentRuntimeHandle.__new__(AgentRuntimeHandle)
+    handle.metadata = {"primary_chat_id": 7}
+    handle._outstanding_request_ids = set()
+
+    async def route(_self, method, params):
+        # Exercise the real RPC handlers and serialization boundary; no process,
+        # model, Telegram connection or production Agent starts in this test.
+        try:
+            return await host.handle_request(method, json.loads(json.dumps(params)))
+        except Exception as exc:
+            raise FunctionWorkerRemoteError(method, {"type": type(exc).__name__, "message": str(exc)}) from exc
+
+    handle._route = MethodType(route, handle)
+    server = WorkbenchApiServer.__new__(WorkbenchApiServer)
+    server.session_store = phone.store
+    server._runtime_map = lambda: {phone.agent_id: handle}
+    server.global_config = runtime.global_config
+    return server, runtime
+
+
+@pytest.mark.asyncio
+async def test_real_worker_admission_is_scoped_durable_and_idempotent(phone, tmp_path):
+    server, runtime = actual_admission_api(phone, tmp_path)
+    phone.store.bind_primary_session(owner_id=phone.owner_id, agent_id=phone.agent_id, session_id=phone.session_id)
+    phone.manager._admit_run = server._admit_live_voice_run
+    phone.judgments = [decision(action("write", "Create fitness.txt containing Exercise 40 minutes, then read it back"))]
+    await speak(phone, "Create fitness.txt, save Exercise 40 minutes and read the saved file back")
+    rows = action_rows(phone)
+    assert len(rows) == 1 and rows[0]["run_id"] is not None
+    queued = runtime.queue.get_nowait()
+    assert queued.run_id == rows[0]["run_id"]
+    assert "read it back" in queued.prompt
+    run = phone.store.get_run(queued.run_id, owner_id=phone.owner_id)
+    assert run["message_context"]["live_voice"]["call_id"] == phone.call_id
+    with phone.store._lock, phone.store._connection() as connection:
+        child = connection.execute("SELECT * FROM live_delegations WHERE call_id=? AND delegation_id=?",
+            (phone.call_id, rows[0]["delegation_id"])).fetchone()
+    proposal = await phone.manager.read_proposal(phone.binding, child["delegation_id"])
+    same = await server._admit_live_voice_run(phone.binding, proposal, "live-delegation-" + child["decision_key"])
+    assert same["run_id"] == queued.run_id
+    assert runtime.queue.empty()
+    assert len(phone.store.recent_session_runs(phone.session_id, owner_id=phone.owner_id)) == 1
+
+
+@pytest.mark.asyncio
+async def test_real_worker_preserves_order_of_independent_goals(phone, tmp_path):
+    server, runtime = actual_admission_api(phone, tmp_path)
+    phone.store.bind_primary_session(owner_id=phone.owner_id, agent_id=phone.agent_id, session_id=phone.session_id)
+    phone.manager._admit_run = server._admit_live_voice_run
+    requests = ["Check the mail delivery status", "Record exercise in fitness.txt and read it back"]
+    phone.judgments = [decision(action("query", requests[0]), action("write", requests[1]))]
+    await speak(phone, "Check mail and separately record exercise")
+    queued = [runtime.queue.get_nowait(), runtime.queue.get_nowait()]
+    assert [item.request_metadata["live_voice"]["delegation_id"] for item in queued] == [
+        row["delegation_id"] for row in action_rows(phone)]
+    for index, item in enumerate(queued):
+        resolved = json.loads(item.prompt.split("\n", 1)[1])["resolved_actions"]
+        assert [task["request"] for task in resolved] == [requests[index]]
+    assert runtime.queue.empty()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", [{"owner_id": "foreign-owner"}, {"agent_id": "foreign-agent"}, {"context_generation": 2}])
+async def test_real_admission_rejects_owner_agent_or_generation_change(phone, tmp_path, change):
+    from orchestrator.frontend_live_voice.protocol import LiveVoiceError
+    server, runtime = actual_admission_api(phone, tmp_path)
+    phone.store.bind_primary_session(owner_id=phone.owner_id, agent_id=phone.agent_id, session_id=phone.session_id)
+    proposal = SimpleNamespace(text="Synthetic only", execution_text="")
+    with pytest.raises(LiveVoiceError, match="live_admission_scope_changed"):
+        await server._admit_live_voice_run(replace(phone.binding, **change), proposal, "foreign-scope")
+    assert runtime.queue.empty()
+    assert phone.store.recent_session_runs(phone.session_id, owner_id=phone.owner_id) == []
+
+
+@pytest.mark.asyncio
+async def test_non_primary_scope_is_rejected_before_phone_context_or_worker_admission(phone, tmp_path):
+    from orchestrator.frontend_live_voice.protocol import LiveVoiceError
+    server, runtime = actual_admission_api(phone, tmp_path)
+    primary = phone.store.ensure_default_session(owner_id=phone.owner_id, agent_id=phone.agent_id)
+    phone.store.bind_primary_session(owner_id=phone.owner_id, agent_id=phone.agent_id, session_id=primary["session_id"])
+    with pytest.raises(LiveVoiceError, match="live_scope_changed"):
+        server._resolve_live_voice_phone_session(phone.agent_id, owner_id=phone.owner_id,
+            session_id=phone.session_id, context_generation=1)
+    proposal = SimpleNamespace(text="Save synthetic fitness data", execution_text="", delegation_id="target-request",
+                               version=1, digest="a" * 64)
+    with pytest.raises(LiveVoiceError, match="live_admission_scope_changed"):
+        await server._admit_live_voice_run(phone.binding, proposal, "wrong-scope")
+    assert runtime.queue.empty()
+    assert phone.store.recent_session_runs(phone.session_id, owner_id=phone.owner_id) == []
+
+
+@pytest.mark.asyncio
+async def test_known_initial_rejection_closes_pending_receipt_without_recovery_retry(phone, tmp_path):
+    server, runtime = actual_admission_api(phone, tmp_path)
+    primary = phone.store.ensure_default_session(owner_id=phone.owner_id, agent_id=phone.agent_id)
+    phone.store.bind_primary_session(owner_id=phone.owner_id, agent_id=phone.agent_id, session_id=primary["session_id"])
+    phone.manager._admit_run = server._admit_live_voice_run
+    phone.judgments = [decision(action("write", "Save synthetic exercise data"))]
+    await speak(phone, "Save synthetic exercise data")
+    assert action_rows(phone)[0]["status"] == "failed"
+    with phone.store._lock, phone.store._connection() as connection:
+        pending = connection.execute("SELECT COUNT(*) FROM live_control_receipts WHERE call_id=? AND operation='admission_pending'",
+                                     (phone.call_id,)).fetchone()[0]
+    assert pending == 0
+    assert event_details(phone, "voice.live.action.admission_rejected")[0]["worker_invoked"] is False
+    phone.manager._recover_action_relays(call_id=phone.call_id)
+    assert runtime.queue.empty()
+    assert phone.store.recent_session_runs(phone.session_id, owner_id=phone.owner_id) == []
+
+
+@pytest.mark.asyncio
+async def test_similar_exception_text_is_unknown_and_preserves_bounded_diagnostics(phone, tmp_path):
+    server, runtime = actual_admission_api(phone, tmp_path)
+    phone.store.bind_primary_session(owner_id=phone.owner_id, agent_id=phone.agent_id, session_id=phone.session_id)
+    async def uncertain(*args, **kwargs):
+        raise RuntimeError("live_admission_scope_changed secret caller words")
+    runtime.enqueue_request = uncertain
+    phone.manager._admit_run = server._admit_live_voice_run
+    phone.judgments = [decision(action("write", "Save synthetic exercise data"))]
+    await speak(phone, "Save synthetic exercise data")
+    assert action_rows(phone)[0]["status"] == "unknown"
+    assert not event_details(phone, "voice.live.action.admission_rejected")
+    evidence = event_details(phone, "voice.live.action.admission_unconfirmed")[0]
+    assert evidence["error_code"] == "live_outcome_unknown"
+    assert evidence["exception_type"] == "RuntimeError"
+    assert "secret caller words" not in json.dumps(evidence)
+    audit = phone.manager.audit.path_for(phone.binding).read_text(encoding="utf-8")
+    assert '"error_code":"live_outcome_unknown"' in audit
+    assert action_rows(phone)[0]["action_id"] in audit
+    assert "secret caller words" not in audit
+    # A later scope failure cannot prove the earlier uncertain attempt had no
+    # effect. Recovery retains its pending receipt instead of declaring failure.
+    primary = phone.store.ensure_default_session(owner_id=phone.owner_id, agent_id=phone.agent_id)
+    phone.store.bind_primary_session(owner_id=phone.owner_id, agent_id=phone.agent_id, session_id=primary["session_id"])
+    with phone.store._lock, phone.store._connection() as connection:
+        pending = connection.execute("SELECT * FROM live_control_receipts WHERE call_id=? AND operation='admission_pending'",
+                                     (phone.call_id,)).fetchone()
+    await phone.manager._resume_pending_admission(phone.binding, pending["idempotency_key"],
+                                                  pending["request_digest"], pending["receipt_json"])
+    assert action_rows(phone)[0]["status"] == "unknown"
+    assert not event_details(phone, "voice.live.action.admission_rejected")
+    with phone.store._lock, phone.store._connection() as connection:
+        assert connection.execute("SELECT operation FROM live_control_receipts WHERE call_id=? AND idempotency_key=?",
+                                  (phone.call_id, pending["idempotency_key"])).fetchone()[0] == "admission_pending"
+
+
+def test_action_creation_preserves_requested_order_when_timestamps_match(phone, monkeypatch):
+    from orchestrator.frontend_live_voice import actions as actions_module
+    monkeypatch.setattr(actions_module, "stable_digest", lambda value: f"{value['index']:028d}")
+    intents = [ActionIntent("query", "First independent goal"), ActionIntent("write", "Second independent goal")]
+    created = phone.manager.actions.create(phone.binding, "ordered", intents)
+    assert [row["request"] for row in created] == [item.request for item in intents]
 
 
 def action(kind, request, relation="new", target=None):

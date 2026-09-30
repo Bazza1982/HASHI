@@ -41,7 +41,7 @@ _ALLOWED_DETAIL_KEYS = frozenset({
     "acknowledged", "action", "attempt", "attempt_id", "attempts", "call_epoch",
     "chunk_count", "chunk_index", "cleanup_state", "client_event_id",
     "client_sequence", "close_sent", "consecutive_failures",
-    "delegation_id", "detail_truncated", "duration_ms", "end_ms", "error_code",
+    "action_id", "delegation_id", "detail_truncated", "duration_ms", "end_ms", "error_code",
     "exception_frames", "exception_message", "exception_type", "expires_at",
     "failed_attempts", "history_omitted_units", "initiator", "input_messages",
     "input_tokens", "item_type", "maximum_at", "observed_at", "online",
@@ -60,6 +60,10 @@ _SECRET_PATTERNS = (
     re.compile(r"\blive_[A-Za-z0-9_-]+\b"),
     re.compile(r"(?i)(api[_-]?key\s*[=:]\s*)[^\s,;]+"),
 )
+_PUBLIC_ERROR_CODES = frozenset({
+    "live_outcome_unknown", "live_admission_scope_changed", "live_scope_changed",
+    "live_admission_rejected", "live_agent_unavailable", "live_admission_unavailable",
+})
 
 
 def _redact(value: str) -> str:
@@ -143,7 +147,8 @@ class LiveVoiceAuditLog:
         if not isinstance(event, str) or not _EVENT.fullmatch(event):
             return False
         admitted = {
-            key: _safe_value(value)
+            key: (value if key == "error_code" and isinstance(value, str) and value in _PUBLIC_ERROR_CODES
+                  else _safe_value(value))
             for key, value in detail.items()
             if key in _ALLOWED_DETAIL_KEYS
         }
