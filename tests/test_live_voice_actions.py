@@ -307,6 +307,67 @@ def test_external_record_modification_and_cancellation_can_use_resolved_targets(
         assert parsed.actions[0].target_action_id is None
 
 @pytest.mark.asyncio
+async def test_invalid_judgment_for_superseded_speech_cannot_consume_file_target(phone):
+    prefix = "This is a test. Using synthetic exercise data only, please create a new text file named phone test September thirty in your permitted working folder. Record exactly"
+    suffix = ": Exercise forty minutes. Read the saved file back. Then tell me what it contains."
+    started, release = asyncio.Event(), asyncio.Event()
+    heard = []
+
+    async def judge(_binding, state):
+        heard.append(state["utterance"])
+        if len(heard) == 1:
+            started.set()
+            await release.wait()
+            return {"route": "act", "complete": False, "reply": "", "actions": []}
+        return decision(action("write", "Create phone test September thirty containing exactly Exercise forty minutes, then read the file back"))
+
+    phone.manager._judge_action = judge
+    first = asyncio.create_task(speak(phone, prefix, end=21400, source="prefix"))
+    await started.wait()
+    await phone.manager.append_fragment_once(phone.binding, Fragment("suffix", "user", suffix, 22200, 27600))
+    release.set()
+    await first
+    routed = event_details(phone, "voice.live.delegation.routed")
+    assert routed[-1]["decision"] == "superseded"
+    discarded = event_details(phone, "voice.live.action.judgment_discarded")[0]
+    assert discarded["reason"] == "new_speech"
+    assert discarded["shape"]["complete"] is False
+    assert not phone.updates
+    await phone.manager.register_delegation_once(phone.binding, "complete-request", 27601)
+    await phone.manager.schedule_proposal(phone.binding, "complete-request", 27601)
+    assert heard == [prefix, prefix + suffix]
+    assert len(phone.admit_calls) == 1
+    assert "phone test September thirty" in phone.admitted_proposals[0].execution_text
+    assert "Exercise forty minutes" in phone.admitted_proposals[0].execution_text
+
+
+@pytest.mark.asyncio
+async def test_invalid_unexecuted_judgment_retains_prefix_for_later_speech(phone):
+    prefix = "Create a new file named phone test September thirty. Record exactly"
+    suffix = ": Exercise forty minutes. Read the saved file back."
+    heard = []
+
+    async def judge(_binding, state):
+        heard.append(state["utterance"])
+        if len(heard) == 1:
+            return {"route": "act", "complete": False, "reply": "", "actions": []}
+        return decision(action("write", "Create phone test September thirty with Exercise forty minutes and read it back"))
+
+    phone.manager._judge_action = judge
+    await speak(phone, prefix, end=21400, source="prefix")
+    assert not phone.admit_calls
+    assert event_details(phone, "voice.live.delegation.routed")[-1]["decision"] == "judgment_failed"
+    assert event_details(phone, "voice.live.action.judgment_rejected")[0]["shape"]["route"] == "act"
+    await phone.manager.register_delegation_once(phone.binding, "duplicate-prefix", 21401)
+    await phone.manager.schedule_proposal(phone.binding, "duplicate-prefix", 21401)
+    assert heard == [prefix]  # No unbounded retry of the same failed judgment.
+    assert event_details(phone, "voice.live.delegation.routed")[-1]["decision"] == "judgment_failed"
+    await speak(phone, suffix, start=22200, end=27600, source="suffix")
+    assert heard == [prefix, prefix + suffix]
+    assert len(phone.admit_calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_tool_effect_before_admission_ack_uses_validated_run_origin(phone, tmp_path):
     runtime = SimpleNamespace(workspace_dir=tmp_path / "home", name=phone.agent_id, session_store=phone.store)
     runtime.workspace_dir.mkdir()
@@ -357,7 +418,8 @@ async def test_effect_reply_uses_frozen_phone_locale_and_stale_judgment_is_rejec
     async def inspect(_runtime, request_id, actions, **options):
         assert request_id == run["request_id"]
         assert actions[0]["action_id"] == row["action_id"]
-        assert options["reply_language"] == "zh-CN"
+        assert options["reply_language"] == "auto"
+        assert options["fallback_language"] == "zh-CN"
         return {"actions":[]}
 
     monkeypatch.setattr(worker_actions, "inspect_phone_action_results", inspect)

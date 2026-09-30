@@ -222,6 +222,8 @@ not repeat a greeting. Never hardcode a family title into shared instructions.
 Instruction acceptance, generated audio, player activity and device listening
 are different evidence. A movable or collapsed Phone window is display state
 and cannot hang up or recreate the connection.
+Continuous silent audio must not suppress the opening. Failed interpretation
+must retain an unexecuted partial request when later speech completes it.
 
 Implementation note (2026-09-30): PAO now reserves one live foreground call per
 owner, allocates Session ordinals atomically, and queues attributable background

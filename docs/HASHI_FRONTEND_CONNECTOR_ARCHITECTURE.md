@@ -549,6 +549,9 @@ of a date. Answer, necessary clarification, query, write, modification and
 cancellation remain distinct. Mixed requests retain their separate intents.
 A correction may change a real record; urging speech need not execute work.
 Uncertain interpretation is visible rather than silently treated as chat.
+Speech arriving during interpretation supersedes the old result before its
+schema is consumed. A failed interpretation that admitted no work does not
+discard the earlier words when the caller completes that same request.
 
 Deduplication belongs to one action and its version, not a global one-task
 limit. Independent actions remain admissible while another runs. Repeated
@@ -661,6 +664,10 @@ and lost acceptance is uncertain rather than permission to resend. Acoustic
 activity and transcripts are observations, not semantic authority. Player
 progress after observed output is evidence of local playback activity, not
 proof of a complete utterance or physical audibility.
+Continuous audio packets may contain silence and cannot consume an opening
+reservation. Only valid assistant speech text observed after the opening was
+sent advances its generation observation; a moving playback clock alone is
+insufficient.
 
 ## 9. Engineering-layer placement
 

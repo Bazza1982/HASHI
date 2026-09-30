@@ -57,7 +57,8 @@ For answer/clarify, actions=[] and reply actually answers or asks the necessary 
 If the recent assistant speech already substantively answered this request, use reply_needed=false
 and reply="" so the application does not interrupt with a duplicate answer. A short acknowledgement
 or promise is not a substantive answer. Missing reference material requires clarification, never guessing.
-Use INPUT.reply_language when explicit, otherwise the caller's language and presentation preferences.
+Use INPUT.reply_language when explicit. With auto, use the current caller utterance's language
+and presentation preferences; INPUT.fallback_language is only for evidence with no usable language.
 Speak about the user's facts and outcomes;
 internal routing, tools, runs and context are implementation, not ordinary conversation.
 For act, reply may acknowledge receipt of the request but cannot claim success. Only verified
@@ -65,6 +66,37 @@ actions with evidence support completion. A promise alone is never a substantive
 If the words are an unfinished fragment, use complete=false, actions=[], route=clarify,
 reply="". Infer no action from unfinished speech. No confidence numbers are requested.
 """
+
+
+def decision_shape(raw: Any) -> dict[str, Any]:
+    """Bounded contract diagnostics without user text, arbitrary keys or model prose."""
+    def shape_type(value):
+        return {dict: "object", list: "array", str: "string", bool: "boolean",
+                int: "number", float: "number", type(None): "null"}.get(type(value), "other")
+
+    def known_value(value, choices):
+        return value if isinstance(value, str) and value in choices else "invalid"
+
+    if not isinstance(raw, Mapping):
+        return {"type": shape_type(raw)}
+    actions, reply = raw.get("actions"), raw.get("reply")
+    complete = raw.get("complete")
+    return {
+        "type": "object", "missing": [key for key in ("route", "complete", "reply", "actions") if key not in raw],
+        "route": known_value(raw.get("route"), {"answer", "clarify", "act"}),
+        "complete_type": shape_type(complete), "complete": complete if isinstance(complete, bool) else None,
+        "reply_type": shape_type(reply), "reply_characters": len(reply) if isinstance(reply, str) else None,
+        "reply_needed_type": shape_type(raw.get("reply_needed", True)),
+        "actions_type": shape_type(actions), "actions_count": len(actions) if isinstance(actions, list) else None,
+        "action_shapes": [{
+            "type": shape_type(item),
+            **({"kind": known_value(item.get("kind"), {"query", "write", "modify", "cancel", "execute"}),
+                "relation": known_value(item.get("relation"), {"new", "reuse", "revise", "cancel"}),
+                "request_type": shape_type(item.get("request")),
+                "request_characters": len(item["request"]) if isinstance(item.get("request"), str) else None,
+                "target_type": shape_type(item.get("target_action_id"))} if isinstance(item, Mapping) else {})
+        } for item in (actions[:4] if isinstance(actions, list) else [])],
+    }
 
 
 def parse_decision(raw: Mapping[str, Any], *, known_action_ids: set[str]) -> DelegationDecision:
@@ -84,7 +116,8 @@ def parse_decision(raw: Mapping[str, Any], *, known_action_ids: set[str]) -> Del
             raise LiveVoiceError("live_semantic_result_invalid", 502)
         kind, relation = value.get("kind"), value.get("relation")
         request, target = value.get("request"), value.get("target_action_id")
-        if kind not in {"query", "write", "modify", "cancel", "execute"} or relation not in {"new", "reuse", "revise", "cancel"}:
+        if (not isinstance(kind, str) or kind not in {"query", "write", "modify", "cancel", "execute"}
+                or not isinstance(relation, str) or relation not in {"new", "reuse", "revise", "cancel"}):
             raise LiveVoiceError("live_semantic_result_invalid", 502)
         if not isinstance(request, str) or not request.strip() or len(request) > 6000:
             raise LiveVoiceError("live_semantic_result_invalid", 502)

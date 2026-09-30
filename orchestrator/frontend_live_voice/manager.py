@@ -20,6 +20,7 @@ from .audit import LiveVoiceAuditLog, exception_evidence
 from .delegation import Proposal, build_proposal
 from .delegation_policy import (
     DelegationRoute,
+    decision_shape,
     parse_decision,
 )
 from .actions import PhoneActions
@@ -466,8 +467,10 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 self._schedule_opening(binding)
             elif kind == "conversation.user.delta" and str(event.get("delta") or "").strip():
                 self.opening.change(binding, "user.started")
-            elif kind == "output.generated":
-                self.opening.change(binding, "output.generated")
+            elif kind == "conversation.assistant.delta":
+                fragment = normalize_transcript(event)
+                if fragment is not None and fragment.text.strip():
+                    self.opening.change(binding, "speech.generated")
             elif kind in {"update.accepted", "provider.error"}:
                 state = self.opening.read(binding)
                 if state and _provider_client_event_id(event) == state.get("opening_id"):
@@ -1232,7 +1235,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 )
                 return False
             prior = connection.execute(
-                "SELECT COALESCE(MAX(cutoff_ms), 0) AS watermark FROM live_delegations WHERE call_id = ? AND call_epoch = ? AND decision IS NOT NULL AND decision NOT IN ('incomplete','superseded')",
+                "SELECT COALESCE(MAX(cutoff_ms), 0) AS watermark FROM live_delegations WHERE call_id = ? AND call_epoch = ? AND decision IS NOT NULL AND decision NOT IN ('incomplete','superseded','judgment_failed')",
                 (binding.call_id, binding.call_epoch),
             ).fetchone()
             after_ms = min(int(prior["watermark"]), offset_ms)
@@ -1392,8 +1395,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             state["omitted_history"] = len(history) > 4
             public = phone.get("public") or {}
             state["reply_language"] = public.get("language")
-            if state["reply_language"] in {None, "auto"}:
-                state["reply_language"] = public.get("interface_language") or "auto"
+            state["fallback_language"] = public.get("interface_language") or "en"
         return state
 
     async def note_user_fragment(self, binding: CallBinding, fragment: Fragment) -> None:
@@ -1413,7 +1415,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             handled = connection.execute(
                 """SELECT COALESCE(MAX(cutoff_ms),0) FROM live_delegations
                 WHERE call_id=? AND call_epoch=?
-                AND decision IS NOT NULL AND decision NOT IN ('incomplete','superseded')""",
+                AND decision IS NOT NULL AND decision NOT IN ('incomplete','superseded','judgment_failed')""",
                 (binding.call_id, binding.call_epoch),
             ).fetchone()[0]
         if int(handled) >= end_ms:
@@ -1437,14 +1439,17 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 # Provider proposals and the silence observer may cover the same
                 # source. Reuse the earlier decision rather than executing twice.
                 duplicate = connection.execute(
-                    """SELECT delegation_id FROM live_delegations WHERE call_id=? AND call_epoch=?
+                    """SELECT delegation_id,decision FROM live_delegations WHERE call_id=? AND call_epoch=?
                     AND delegation_id!=? AND source_event_ids_json=? AND decision IS NOT NULL
                     AND decision NOT IN ('incomplete','superseded') LIMIT 1""",
                     (binding.call_id, binding.call_epoch, proposal.delegation_id,
                      json.dumps(list(proposal.source_event_ids))),
                 ).fetchone()
             if duplicate:
-                await self._finish_delegation_without_run(binding, proposal, decision="reused",
+                # A duplicate failed fragment is neither a new inference request
+                # nor consumed speech. Only additional words can advance it.
+                status = "judgment_failed" if duplicate["decision"] == "judgment_failed" else "reused"
+                await self._finish_delegation_without_run(binding, proposal, decision=status,
                     reason="same_source_already_processed", provider_reply="")
                 return
             if proposal.ambiguous or not proposal.text.strip():
@@ -1453,22 +1458,23 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 return
             self._action_event(binding, "guard", {"active": True, "source_id": proposal.delegation_id})
             reply = ""
+            raw = None
+            interpreted = False
             try:
                 if not callable(self._judge_action):
                     raise LiveVoiceError("live_semantic_service_unavailable", 503)
                 state = self._semantic_context(binding, proposal)
                 raw = await asyncio.wait_for(self._judge_action(binding, state), timeout=8.0)
-                decision = parse_decision(raw, known_action_ids={item["action_id"] for item in state["actions"]})
-                # New words arriving during inference revoke this old judgment.
-                with self.session_store._lock, self.session_store._connection() as connection:
-                    latest = connection.execute(
-                        "SELECT MAX(end_ms) FROM live_fragments WHERE call_id=? AND call_epoch=? AND speaker='user'",
-                        (binding.call_id, binding.call_epoch),
-                    ).fetchone()[0]
-                if latest is not None and int(latest) > proposal.cutoff_ms:
+                # Fresh speech invalidates even a malformed response to the old
+                # fragment. Never consume its prefix through the parse-error path.
+                if self._proposal_has_newer_speech(binding, proposal):
+                    self._action_event(binding, "judgment_discarded", {"source_id": proposal.delegation_id,
+                        "reason": "new_speech", "shape": decision_shape(raw)})
                     await self._finish_delegation_without_run(binding, proposal, decision="superseded",
                         reason="new_speech_during_judgment", provider_reply="")
                     return
+                decision = parse_decision(raw, known_action_ids={item["action_id"] for item in state["actions"]})
+                interpreted = True
                 if not decision.complete:
                     await self._finish_delegation_without_run(binding, proposal, decision="incomplete",
                         reason="semantic_incomplete", provider_reply="")
@@ -1515,6 +1521,17 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 raise
             except Exception as exc:
                 reason = str(getattr(exc, "code", "live_semantic_service_unavailable"))
+                if not interpreted:
+                    superseded = self._proposal_has_newer_speech(binding, proposal)
+                    self._action_event(binding, "judgment_rejected", {"source_id": proposal.delegation_id,
+                        "reason": reason, "shape": decision_shape(raw), "superseded": superseded})
+                    # Nothing was admitted. Keep the entire spoken prefix for a
+                    # later complete statement; do not retry a failed model call.
+                    unfinished = isinstance(raw, Mapping) and raw.get("complete") is False
+                    await self._finish_delegation_without_run(binding, proposal,
+                        decision="superseded" if superseded else "judgment_failed", reason=reason,
+                        provider_reply="" if superseded or unfinished else self._action_text(binding, "judgment_unavailable"))
+                    return
                 for item in self.actions.rows(binding, delegation_id=proposal.delegation_id):
                     self.actions.transition(binding, item["action_id"], "unknown",
                         receipt=self._action_text(binding, "write_unconfirmed"))
@@ -1525,6 +1542,14 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                     delegation_id=proposal.delegation_id, error_code=reason)
             finally:
                 self._action_event(binding, "guard", {"active": False, "source_id": proposal.delegation_id})
+
+    def _proposal_has_newer_speech(self, binding: CallBinding, proposal: Proposal) -> bool:
+        with self.session_store._lock, self.session_store._connection() as connection:
+            latest = connection.execute(
+                "SELECT MAX(end_ms) FROM live_fragments WHERE call_id=? AND call_epoch=? AND speaker='user'",
+                (binding.call_id, binding.call_epoch),
+            ).fetchone()[0]
+        return latest is not None and int(latest) > proposal.cutoff_ms
 
     async def _cancel_existing_action(self, binding: CallBinding, action: Mapping[str, Any]) -> dict[str, Any]:
         result = {}
@@ -3536,7 +3561,6 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
     async def _run_sideband(self, binding: CallBinding, key: str, provider_session_id: str) -> None:
         ready = self._sideband_ready_events.setdefault(binding.call_id, asyncio.Event())
         confirmed_close = False
-        opening_audio_seen = False
         self.audit.record(binding, "sideband.attach_started", source="provider")
         try:
             adapter = self._provider_for(binding, provider_session_id=provider_session_id)
@@ -3566,15 +3590,14 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                                               provider_event_type=str(event_type or "unknown"))
                             continue
                         if event_type == "output.generated":
-                            if not opening_audio_seen:
-                                self._observe_opening_provider(binding, event)
-                                with suppress(Exception):
-                                    opening_state = self.opening.read(binding)
-                                    opening_audio_seen = bool(opening_state.get("output_observed")) or opening_state.get("state") in {"skipped", "interrupted", "rejected"}
-                            # One metadata observation suffices; don't enqueue or
-                            # audit every reflected audio packet as a Session event.
+                            # Continuous media includes silence before any speech.
+                            # A packet cannot consume the opening reservation or
+                            # prove a greeting was generated. Transcript evidence
+                            # after the request is sent is observed separately.
                             continue
-                        if event_type == "conversation.user.delta":
+                        if event_type in {"conversation.user.delta", "conversation.assistant.delta"}:
+                            # Observe ordering when received, before a slow durable
+                            # stage could make pre-request speech look subsequent.
                             self._observe_opening_provider(binding, event)
                         if event_type == "action.proposed":
                             proposal = event.get("delegation")
@@ -3685,7 +3708,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                             if self._is_current_provider_binding(binding):
                                 self._session_closed_events.setdefault(binding.call_id, asyncio.Event()).set()
                             break
-                        if event_type != "conversation.user.delta":
+                        if event_type not in {"conversation.user.delta", "conversation.assistant.delta"}:
                             self._observe_opening_provider(binding, event)
                         # Persist asynchronously in per-call order. A slow Session write
                         # must not stop this reader from seeing session.closed or a user hangup.

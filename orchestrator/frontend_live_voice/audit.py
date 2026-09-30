@@ -51,6 +51,8 @@ _ALLOWED_DETAIL_KEYS = frozenset({
     "source_event_id", "source_message_id", "source_session_id", "speaker",
     "start_ms", "state", "summary_code", "task_name", "text_bytes", "usage",
     "visible", "ws_close_code", "ws_message_type",
+    "opening_id", "request_sent", "request_accepted", "output_observed",
+    "output_evidence", "playback_observed",
 })
 _SECRET_PATTERNS = (
     re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~-]+"),

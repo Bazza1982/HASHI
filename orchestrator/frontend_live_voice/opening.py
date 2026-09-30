@@ -128,18 +128,22 @@ class CallOpening:
                 and not state.get("user_started")
             ):
                 state["request_sent"] = True
-            elif signal == "accepted":
+            elif signal == "accepted" and state.get("request_sent"):
                 state["request_accepted"] = True
                 if state["state"] == "requested":
                     state["state"] = "accepted"
-            elif signal == "output.generated":
-                if state["state"] in {
+            elif signal == "speech.generated":
+                if state.get("request_sent") and state["state"] in {
                     "requested",
                     "accepted",
                     "generated",
                     "uncertain",
                 }:
-                    state.update(output_observed=True, output_attribution="estimated")
+                    state.update(
+                        output_observed=True,
+                        output_evidence="assistant_transcript",
+                        output_attribution="estimated",
+                    )
                     if state["state"] != "uncertain":
                         state["state"] = "generated"
             elif signal == "playback":
@@ -184,5 +188,10 @@ class CallOpening:
             opening_id=state["opening_id"],
             state=state["state"],
             reason=state.get("reason"),
+            request_sent=state.get("request_sent"),
+            request_accepted=state.get("request_accepted"),
+            output_observed=state.get("output_observed"),
+            output_evidence=state.get("output_evidence"),
+            playback_observed=state.get("playback_observed"),
         )
         return state

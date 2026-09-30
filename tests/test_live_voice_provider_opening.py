@@ -116,6 +116,13 @@ class AlternateProvider:
                 "client_event_id": item.get("request"),
             },
             "audio": {"type": "output.generated", "completion": "unknown"},
+            "assistant": {
+                "type": "conversation.assistant.delta",
+                "event_id": item.get("event_id", "assistant-opening-1"),
+                "delta": item.get("text", "Hello, let's continue our conversation."),
+                "start_ms": 200,
+                "end_ms": 600,
+            },
             "closed": {"type": "provider.closed", "reason": "requested"},
         }.get(item.get("signal"))
 
@@ -261,12 +268,28 @@ class TestPhoneProviderOpening:
         assert "爸爸" not in self.adapter.sent[0]["goal"]
         self.adapter.sockets[0].incoming.put_nowait({"signal": "audio"})
         await asyncio.sleep(0.02)
+        assert not self.manager.opening.read(self.binding)["output_observed"]
+        self.adapter.sockets[0].incoming.put_nowait({"signal": "assistant"})
+        for _ in range(50):
+            if self.manager.opening.read(self.binding).get("output_observed"):
+                break
+            await asyncio.sleep(0.01)
+        assert self.manager.opening.read(self.binding)["output_evidence"] == "assistant_transcript"
         await self.observe(
             "client.playback_progress",
             current_time_ms=200,
             opening_id=state["opening_id"],
         )
         assert self.manager.opening.read(self.binding)["playback_observed"]
+        opening_audit = [
+            json.loads(line)["detail"]
+            for line in self.manager.audit.path_for(self.binding).read_text(encoding="utf-8").splitlines()
+            if json.loads(line)["event"] == "opening.state"
+        ]
+        assert opening_audit[-1]["request_sent"] is True
+        assert opening_audit[-1]["request_accepted"] is True
+        assert opening_audit[-1]["output_evidence"] == "assistant_transcript"
+        assert opening_audit[-1]["playback_observed"] is True
         self.adapter.sockets[0].incoming.put_nowait({"signal": "connected"})
         await self.observe(
             "client.media_ready", input_active=True, playback_unlocked=True
@@ -283,6 +306,42 @@ class TestPhoneProviderOpening:
         await self.settle()
         assert self.manager.opening.read(self.binding)["state"] == "skipped"
         assert self.adapter.sent == []
+
+    async def test_continuous_audio_during_grace_does_not_consume_opening_request(self):
+        self.manager._opening_grace_seconds = 0.08
+        await self.start_call()
+        await self.observe(
+            "client.media_ready", input_active=True, playback_unlocked=True
+        )
+        self.adapter.sockets[0].incoming.put_nowait({"signal": "audio"})
+        self.adapter.sockets[0].incoming.put_nowait({"signal": "assistant"})
+        await asyncio.sleep(0.01)
+        state = self.manager.opening.read(self.binding)
+        assert state["state"] == "requested"
+        assert state["request_sent"] is False
+        assert state["output_observed"] is False
+        await self.settle()
+        state = self.manager.opening.read(self.binding)
+        assert state["request_sent"] is True
+        assert state["request_accepted"] is True
+        assert state["state"] == "accepted"
+        assert len([item for item in self.adapter.sent if item["command"] == "greet"]) == 1
+
+    async def test_silent_audio_and_playback_clock_after_ack_are_not_speech(self):
+        await self.start_call()
+        await self.observe(
+            "client.media_ready", input_active=True, playback_unlocked=True
+        )
+        await self.settle()
+        self.adapter.sockets[0].incoming.put_nowait({"signal": "audio"})
+        await asyncio.sleep(0.01)
+        state = self.manager.opening.read(self.binding)
+        await self.observe("client.playback_progress", current_time_ms=30000,
+                           opening_id=state["opening_id"])
+        state = self.manager.opening.read(self.binding)
+        assert state["state"] == "accepted"
+        assert state["output_observed"] is False
+        assert state["playback_observed"] is False
 
     async def test_lost_ack_is_uncertain_no_retry_or_hangup(self):
         self.adapter.acknowledge = False
