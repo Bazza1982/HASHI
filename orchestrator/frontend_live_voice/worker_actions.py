@@ -42,7 +42,6 @@ inside the verification receipt.
 """
 
 
-MAX_PHONE_RESULT_BYTES = 512 * 1024
 MAX_VERIFY_INPUT_CHARS = 24_000
 MAX_VERIFY_RECEIPTS_PER_ACTION = 12
 
@@ -63,17 +62,17 @@ def _canonical_run_result(runtime: Any, request_id: str) -> tuple[str | None, di
             return state, None, "canonical_result_unavailable"
         content = str(message.get("text") or "")
         encoded = content.encode("utf-8")
-        complete = len(encoded) <= MAX_PHONE_RESULT_BYTES
         return state, {
             "source": "pao_canonical_final_message",
             "message_id": message_id,
-            "text": content if complete else None,
+            "text": None,
+            "content_owner": "pao_session_store",
+            "content_included": False,
             "characters": len(content),
             "bytes": len(encoded),
             "sha256": hashlib.sha256(encoded).hexdigest(),
-            "complete": complete,
+            "complete": True,
             "verification": "model_authored_unverified",
-            **({"omission_reason": "result_exceeds_handoff_limit"} if not complete else {}),
         }, None
     except Exception:
         # Preserve the tool-evidence outcome and let PAO's caller retry the
@@ -307,6 +306,9 @@ async def inspect_phone_action_results(runtime: Any, request_id: str, actions: l
         valid = (supplied["receipts_omitted"] == 0 and raw.get("verified") is True
                  and isinstance(refs, list) and bool(refs)
                  and all(isinstance(ref, str) and ref in allowed for ref in refs))
+        if valid and item["kind"] == "query":
+            by_ref = {receipt["evidence_ref"]: receipt for receipt in supplied["receipts"]}
+            valid = all(by_ref[ref]["complete_content"] is True for ref in refs)
         # A model cannot silently reuse one observation to certify different records.
         if valid and any(ref in claimed_refs for ref in refs):
             valid = False
