@@ -2259,7 +2259,9 @@ class _AdapterDelivery(DeliveryPort):
                 kind=kind,
                 summary=text,
                 event_id=event_id,
-                delivery_class=DELIVERY_TECHNICAL,
+                delivery_class=(
+                    DELIVERY_INTERNAL if kind == "model_route" else DELIVERY_TECHNICAL
+                ),
                 origin="her_v2:runtime",
                 phase=phase,
                 provenance="runtime_state",
