@@ -45,13 +45,17 @@ def test_call_audit_bounds_and_redacts_diagnostic_values(tmp_path: Path):
         binding,
         "sideband.exception",
         exception_type="RuntimeError",
-        exception_message="Bearer sk-test-super-secret",
+        exception_message=(
+            "Bearer sk-test-super-secret at "
+            "wss://api.openai.com/v1/live/sessions/live_provider-private-id/attach"
+        ),
         ignored={"nested": "not admitted"},
     )
 
     record = json.loads(audit.path_for(binding).read_text(encoding="utf-8"))
     assert record["detail"]["exception_type"] == "RuntimeError"
     assert "super-secret" not in json.dumps(record)
+    assert "live_provider-private-id" not in json.dumps(record)
     assert "ignored" not in record["detail"]
 
 

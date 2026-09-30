@@ -55,6 +55,7 @@ _ALLOWED_DETAIL_KEYS = frozenset({
 _SECRET_PATTERNS = (
     re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~-]+"),
     re.compile(r"\bsk-[A-Za-z0-9_-]+\b"),
+    re.compile(r"\blive_[A-Za-z0-9_-]+\b"),
     re.compile(r"(?i)(api[_-]?key\s*[=:]\s*)[^\s,;]+"),
 )
 
