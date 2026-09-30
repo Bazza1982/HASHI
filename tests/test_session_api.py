@@ -337,6 +337,19 @@ def test_live_phone_resolver_uses_authoritative_pcm_and_same_session_history(tmp
     assert "SCHEDULER_PROMPT_MUST_NOT_ENTER_PHONE" not in startup
     assert "METER_AND_PROGRESS_NOISE_MUST_NOT_ENTER_PHONE" not in startup
 
+    # Recovery does not consult next-call configuration before PCM is assembled.
+    from unittest.mock import patch
+    runtime.phone_manager.set_language("en")
+    with patch.object(runtime.phone_manager, "_read", side_effect=AssertionError("next-call settings were read")):
+        recovered = server._resolve_live_voice_phone_session(
+            "lily", owner_id=owner_id, session_id=session["session_id"],
+            context_generation=int(session["context_generation"]),
+            frozen_selection=resolved["selection"],
+        )
+    assert recovered["public"]["language"] == resolved["public"]["language"]
+    assert "GLOBAL_SYS_PHONE_SENTINEL" in recovered["instructions"]
+    assert "MEMORY_PLUS_PHONE_SENTINEL" in json.dumps(recovered["input"], ensure_ascii=False)
+
 
 @pytest.mark.asyncio
 async def test_session_workzone_reference_stages_committed_managed_bytes(tmp_path):

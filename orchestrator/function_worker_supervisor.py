@@ -1049,6 +1049,9 @@ class AgentRuntimeHandle:
             or {}
         )
 
+    async def phone_action_operation(self, operation: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return dict(await self._route("runtime.phone_action", {"operation": operation, "payload": dict(payload)}, timeout=12) or {})
+
     async def execute_slash_command(
         self,
         text: str,

@@ -537,31 +537,40 @@ cache. `store:false` remains mandatory, so HASHI's Session record, not a
 provider recording, owns continuity.
 
 The live phone is another transport for the selected Agent, not a second Agent
-or a reduced-permission assistant. GPT-Live supplies speech recognition, voice,
-and turn-taking. The foreground model answers from supplied context first.
-Conversational corrections, requests to continue or explain, urgency, and
-requests to report known facts never become Runs. If freshness might help but
-the user has not clearly requested a backend check, the model reports what is
-already known and asks one short intent question. Only an explicit backend,
-tool, or external action (including an explicitly confirmed fresh check) may
-enter that same Agent's current Session through ordinary PAO ingress. This
-intent check is not new authority: the Agent's existing HASHI permissions and
-normal approval behaviour remain authoritative exactly as they are in text
-chat; the provider receives neither credentials nor direct tool authority.
+or a reduced-permission assistant. The foreground model answers from supplied
+facts and presents the user's subject, with enough substance for the requested
+detail. PCM retains effective Persona, address, language and authority layers;
+shared Phone instructions never hardcode a personal address or relationship.
 
-PAO enforces this three-way route independently of the provider prompt and
-defaults uncertain speech to foreground conversation. One logical call may
-have at most one non-terminal phone-originated background Run; later speech is
-handled as a correction or follow-up instead of accumulating a queue. The
-origin marker is validated against the durable call and proposal before Run
-admission. Messages, status events, and presentation-only cost/progress rows
-from that Run are excluded from the generic foreground inbox because its
-dedicated delegation relay already owns progress and final-result delivery.
+PAO interprets a complete request with recent conversation and real action
+state through a bounded, configured semantic capability. It does not infer
+intent from keyword lists, fabricated confidence values, or the mere presence
+of a date. Answer, necessary clarification, query, write, modification and
+cancellation remain distinct. Mixed requests retain their separate intents.
+A correction may change a real record; urging speech need not execute work.
+Uncertain interpretation is visible rather than silently treated as chat.
 
-While delegated work runs, HASHI returns safe progress and the canonical final
-result to the same GPT-Live delegation so the Agent can report it naturally in
-the call. The frontend keeps one non-collapsible call panel visible from start
-through closure, with live captions, microphone mute, and hang-up controls.
+Deduplication belongs to one action and its version, not a global one-task
+limit. Independent actions remain admissible while another runs. Repeated
+requests refer to existing evidence, and uncertain effects require
+reconciliation before another write. All execution retains the Agent's normal
+PAO permissions and admission boundary. The durable call/proposal origin is
+validated before Run admission; its messages, status, progress and cost rows
+stay out of the generic foreground inbox because the dedicated relay owns
+their delivery.
+
+While delegated work runs, HASHI returns attributable progress and effects.
+A completed model response is not an action-completion receipt. Public action
+state distinguishes accepted, running, verified, failed, unknown and cancelled;
+verified effects carry references to actual execution evidence. The display
+and spoken result consume that same state. Provider acceptance of a result,
+generated speech, player activity and physical listening remain separate facts.
+Ordinary free model audio is not thereby certified before playback.
+
+The frontend retains one globally mounted call owner with captions, mute and
+explicit hang-up. Window movement, collapsing, restoring and navigation are
+display preferences, and do not recreate media or change logical call state.
+The external frontend owns responsive layout and inherits its existing theme.
 Each transcript delta is durably written to the bound HASHI Session as it
 arrives. PCM derives role-preserving utterances from those canonical fragments,
 so concurrent text chat and the next call can use phone speech as ordinary
@@ -633,6 +642,25 @@ catalogue is maintained as Function configuration and is applied before the
 session begins, following the provider's live-conversation contract. Source,
 offline qualification, real-provider canary, running-generation adoption, and
 user microphone acceptance remain distinct delivery states.
+
+Provider translation is an explicit Functions adapter contract: credentials,
+selection validation, context encoding and capacity, media descriptor, wire
+events, control, context/result updates and opening. PAO consumes normalized
+events. The browser implements only qualified media codecs selected by the
+server; it accepts neither arbitrary provider URLs nor provider credentials.
+The logical call freezes its adapter version, provider, model and voice, also
+across connection recovery. Configuration changes apply to the next call.
+Adding a registry entry or passing a synthetic alternate-protocol test does
+not qualify Gemini or a local speech service for production.
+
+An opening is a persisted once-per-logical-call PAO operation. Provider ready,
+continuous microphone input and an unlocked player are prerequisites. Effective
+PCM supplies wording and context; the program owns timing, identity and
+deduplication. User-first input skips the opening, recovery does not repeat it,
+and lost acceptance is uncertain rather than permission to resend. Acoustic
+activity and transcripts are observations, not semantic authority. Player
+progress after observed output is evidence of local playback activity, not
+proof of a complete utterance or physical audibility.
 
 ## 9. Engineering-layer placement
 

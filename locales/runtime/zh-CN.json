@@ -4,6 +4,13 @@
   "native_name": "简体中文",
   "telegram_language_code": "zh",
   "strings": {
+    "phone.action.judgment_unavailable": "刚才没能完成这项请求，目前没有可以确认的结果。需要先核实处理状态，再决定是否重试。",
+    "phone.action.admission_unconfirmed": "已经收到请求，但还不能确认是否开始办理。需要先核实处理状态，再决定是否重试。",
+    "phone.action.write_unconfirmed": "这项修改的结果还没有确认。需要先检查现有记录，避免重复写入。",
+    "phone.action.query_unconfirmed": "这次核对还没有得到可确认的答案。",
+    "phone.action.cancelled": "这项请求已在开始办理前取消。",
+    "phone.action.stop_unconfirmed": "还不能确认是否已经停止处理，之前是否产生过修改也需要检查。",
+    "phone.action.approval": "这项请求正在等待批准，批准后才能继续。具体批准请求已放在对话里。",
     "common.back": "← 返回",
     "common.refresh": "↻ 刷新",
     "common.on": "开启",

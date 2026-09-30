@@ -14,6 +14,7 @@ class Proposal:
     ambiguous: bool
     cutoff_ms: int
     expires_at: str
+    execution_text: str = ""
 
 
 def build_proposal(binding: CallBinding, delegation_id: str, fragments: Iterable[Fragment], *,

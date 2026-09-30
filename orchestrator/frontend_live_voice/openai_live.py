@@ -12,13 +12,14 @@ import json
 import logging
 from urllib.parse import quote
 from orchestrator.phone_catalog import OPENAI_LIVE_VOICES
-from orchestrator.pcm_voice_projection import (
+from .openai_limits import (
     MAX_LIVE_INPUT_MESSAGES,
     MAX_LIVE_INPUT_TOKENS,
     MAX_LIVE_INSTRUCTION_TOKENS,
 )
 from tools.token_tracker import estimate_tokens
 from .protocol import LiveVoiceError, identifier
+from .provider import ProviderCapabilities
 
 CREATE_URL = "https://api.openai.com/v1/live/sessions"
 ATTACH_ROOT = "wss://api.openai.com/v1/live/sessions"
@@ -71,6 +72,7 @@ def _log_provider_rejection(response: Any, body: bytes) -> None:
 
 def _normalise_input_messages(
     input_messages: Sequence[Mapping[str, Any]] | None,
+    *, enforce_message_limit: bool = True,
 ) -> list[dict[str, Any]]:
     normalized_input: list[dict[str, Any]] = []
     for raw in input_messages or ():
@@ -99,7 +101,7 @@ def _normalise_input_messages(
                 "content": [{"type": str(part["type"]), "text": text}],
             }
         )
-    if len(normalized_input) > MAX_LIVE_INPUT_MESSAGES:
+    if enforce_message_limit and len(normalized_input) > MAX_LIVE_INPUT_MESSAGES:
         raise LiveVoiceError("live_input_limit")
     return normalized_input
 
@@ -190,7 +192,7 @@ async def fit_live_session_input(
 
     if model != "gpt-live-1":
         raise LiveVoiceError("live_model_unqualified")
-    normalized = _normalise_input_messages(input_messages)
+    normalized = _normalise_input_messages(input_messages, enforce_message_limit=False)
     if (
         isinstance(required_message_count, bool)
         or not isinstance(required_message_count, int)
@@ -211,6 +213,18 @@ async def fit_live_session_input(
         or not 0 <= optional_prefix_unit_count <= len(unit_counts)
     ):
         raise LiveVoiceError("live_input_plan_invalid", 503)
+
+    message_omitted_units = 0
+    had_conversation = len(unit_counts) > optional_prefix_unit_count
+    while len(normalized) > MAX_LIVE_INPUT_MESSAGES and unit_counts:
+        count = unit_counts.pop(0)
+        del normalized[required_message_count:required_message_count + count]
+        optional_prefix_unit_count = max(0, optional_prefix_unit_count - 1)
+        message_omitted_units += 1
+    if len(normalized) > MAX_LIVE_INPUT_MESSAGES:
+        raise LiveVoiceError("live_input_mandatory_limit", 503)
+    if had_conversation and not unit_counts:
+        raise LiveVoiceError("live_input_newest_unit_limit", 503)
 
     required = normalized[:required_message_count]
     unit_offsets: list[tuple[int, int]] = []
@@ -244,7 +258,7 @@ async def fit_live_session_input(
             "input_tokens_exact": full_count,
             "provider_tokens_limit": MAX_LIVE_INPUT_TOKENS,
             "history_included_units": total_units,
-            "history_omitted_units": 0,
+            "history_omitted_units": message_omitted_units,
             "provider_count_requests": len(counts),
         }
 
@@ -267,7 +281,7 @@ async def fit_live_session_input(
         "input_tokens_exact": counts.get(best, required_count),
         "provider_tokens_limit": MAX_LIVE_INPUT_TOKENS,
         "history_included_units": best,
-        "history_omitted_units": total_units - best,
+        "history_omitted_units": total_units - best + message_omitted_units,
         "provider_count_requests": len(counts),
     }
 
@@ -350,3 +364,126 @@ def safe_sideband_event(raw: str) -> dict[str, Any] | None:
         return None
     # Internal only. The application must normalize/redact before browser projection/logging.
     return value
+
+
+class OpenAILiveProvider:
+    """The only live-qualified Phone provider; no PAO state or policy lives here."""
+
+    provider_id = "openai"
+    capabilities = ProviderCapabilities(
+        version="openai-live-v1", max_input_messages=MAX_LIVE_INPUT_MESSAGES,
+        max_instruction_tokens=MAX_LIVE_INSTRUCTION_TOKENS,
+        max_input_tokens=MAX_LIVE_INPUT_TOKENS, max_session_seconds=1800,
+    )
+
+    def credential(self, secrets: Mapping[str, Any]) -> str:
+        import os
+        return str(secrets.get("openai_api_key") or os.environ.get("OPENAI_API_KEY", "")).strip()
+
+    def validate_selection(self, model: str, voice: str) -> None:
+        if model != "gpt-live-1":
+            raise LiveVoiceError("live_model_unqualified", 503)
+        if voice not in OPENAI_LIVE_VOICES:
+            raise LiveVoiceError("live_voice_unqualified", 503)
+
+    def media_descriptor(self) -> dict[str, Any]:
+        return {"transport": "webrtc", "protocol": self.capabilities.version,
+                "data_channel": "oai-events", "version": 1}
+
+    def encode_history(self, messages: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        result = []
+        for item in messages:
+            role = item.get("role")
+            text = item.get("text")
+            if text is None:  # Read the previous PCM projection during adoption.
+                content = item.get("content")
+                if isinstance(content, list) and len(content) == 1 and isinstance(content[0], Mapping):
+                    text = content[0].get("text")
+            if role not in {"developer", "user", "assistant"} or not isinstance(text, str) or not text:
+                raise LiveVoiceError("live_input_invalid", 503)
+            result.append({"type": "message", "role": role, "content": [
+                {"type": "output_text" if role == "assistant" else "input_text", "text": text}
+            ]})
+        return result
+
+    def validate_session(self, instructions, model, voice, messages) -> None:
+        self.validate_selection(model, voice)
+        session_request("v=0", instructions, model, voice, self.encode_history(messages))
+
+    def http_session(self):
+        return provider_http_session()
+
+    async def fit_input(self, http, **kwargs):
+        kwargs["input_messages"] = self.encode_history(kwargs["input_messages"])
+        return await fit_live_session_input(http, **kwargs)
+
+    async def create(self, http, *, key, **kwargs):
+        kwargs["input_messages"] = self.encode_history(kwargs["input_messages"])
+        return await create_provider_session(http, key=key, request=session_request(**kwargs))
+
+    async def attach(self, http, *, key, provider_session_id):
+        return await attach_provider(http, key=key, provider_session_id=provider_session_id)
+
+    def normalize_event(self, raw: str) -> dict[str, Any] | None:
+        # Reflected audio is reduced to observation metadata. No bytes escape the adapter.
+        if not isinstance(raw, str) or len(raw.encode("utf-8")) > MAX_FRAME_BYTES:
+            raise LiveVoiceError("live_provider_event_limit", 502)
+        try:
+            candidate = json.loads(raw)
+        except (TypeError, ValueError) as exc:
+            raise LiveVoiceError("live_provider_event_invalid", 502) from exc
+        if isinstance(candidate, dict) and candidate.get("type") == "session.output_audio.delta":
+            return {"type": "output.generated", "start_ms": candidate.get("start_ms"),
+                    "end_ms": candidate.get("end_ms"), "completion": "unknown"}
+        event = safe_sideband_event(raw)
+        if event is None:
+            return None
+        mapping = {
+            "session.started": "provider.ready", "session.closed": "provider.closed",
+            "session.input_transcript.delta": "conversation.user.delta",
+            "session.output_transcript.delta": "conversation.assistant.delta",
+            "session.delegation.created": "action.proposed",
+            "session.commentary.appended": "update.accepted",
+            "session.thinking.appended": "update.accepted",
+            "session.instructions.appended": "update.accepted",
+            "session.input_audio.muted": "control.accepted",
+            "session.input_audio.unmuted": "control.accepted", "error": "provider.error",
+        }
+        kind = mapping.get(event.get("type"))
+        if kind is None:
+            return None
+        result = {key: event[key] for key in (
+            "event_id", "client_event_id", "delta", "start_ms", "end_ms", "offset_ms"
+        ) if key in event}
+        result["type"] = kind
+        if kind == "action.proposed":
+            delegation = event.get("delegation")
+            if not isinstance(delegation, Mapping) or delegation.get("target") != "client":
+                return None
+            result["delegation"] = {"target": "client", "id": delegation.get("id")}
+        if kind == "provider.error":
+            error = event.get("error")
+            error = error if isinstance(error, Mapping) else {}
+            result["client_event_id"] = result.get("client_event_id") or error.get("client_event_id") or error.get("event_id")
+            result["error"] = {"code": _safe_provider_field(error.get("code"))}
+        if kind == "provider.closed":
+            session = event.get("session")
+            session = session if isinstance(session, Mapping) else {}
+            result["reason"] = _safe_provider_field(session.get("reason") or event.get("reason"))
+            usage = event.get("usage") or session.get("usage")
+            if isinstance(usage, Mapping):
+                result["usage"] = {str(k): v for k, v in usage.items()
+                                   if isinstance(v, int) and not isinstance(v, bool) and v >= 0}
+        return result
+
+    def update(self, kind, content, delegation_id, event_id):
+        return append_update(kind, content, delegation_id, event_id, estimate_tokens)
+
+    def control(self, action: str, event_id: str) -> dict[str, Any]:
+        if action not in {"mute", "unmute", "close"}:
+            raise LiveVoiceError("live_action_invalid")
+        return {"type": "session.close" if action == "close" else f"session.input_audio.{action}",
+                "event_id": identifier(event_id)}
+
+    def opening(self, goal: str, event_id: str) -> dict[str, Any]:
+        return self.update("instructions", goal, None, event_id)

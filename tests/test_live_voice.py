@@ -37,7 +37,7 @@ class ProtocolTests(unittest.TestCase):
     def test_boolean_generation_invalid(self):
         with self.assertRaises(LiveVoiceError):replace(BINDING,context_generation=True)
     def test_exact_caption(self):
-        f=normalize_transcript({'type':'session.input_transcript.delta','event_id':'event1','delta':'go go ','start_ms':0,'end_ms':10})
+        f=normalize_transcript({'type':'conversation.user.delta','event_id':'event1','delta':'go go ','start_ms':0,'end_ms':10})
         self.assertEqual(f.text,'go go ')
     def test_audio_not_transcript(self):
         self.assertIsNone(normalize_transcript({'type':'session.input_audio.append','audio':'secret'}))
@@ -280,14 +280,14 @@ class ServiceTests(unittest.TestCase):
 
     @run_async
     async def test_delegation_duplicate_has_one_outbox_wakeup(self):
-        e = {'type': 'session.delegation.created', 'event_id': 'event-delegation-1', 'offset_ms': 600, 'delegation': {'id': 'delegation-1', 'target': 'client'}}
+        e = {'type': 'action.proposed', 'event_id': 'event-delegation-1', 'offset_ms': 600, 'delegation': {'id': 'delegation-1', 'target': 'client'}}
         await self.service.on_provider_event(BINDING, e)
         await self.service.on_provider_event(BINDING, e)
         self.assertEqual(self.store.scheduled, ['delegation-1'])
 
     @run_async
     async def test_caption_alone_does_not_schedule_agent_work(self):
-        await self.service.on_provider_event(BINDING, {'type': 'session.input_transcript.delta', 'event_id': 'e1', 'delta': 'do it', 'start_ms': 0, 'end_ms': 50})
+        await self.service.on_provider_event(BINDING, {'type': 'conversation.user.delta', 'event_id': 'e1', 'delta': 'do it', 'start_ms': 0, 'end_ms': 50})
         self.assertEqual(self.store.scheduled, [])
 
 if __name__=='__main__':unittest.main()

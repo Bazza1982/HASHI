@@ -204,13 +204,24 @@ Every other stop is recovery/fault evidence, never `user_hangup`. Keep a
 privacy-bounded per-call lifecycle log independent of Session event sequencing;
 transcript content remains canonical in the Session.
 
-Live speech answers from supplied context first. PAO routes provider proposals
-as direct foreground speech, a short intent confirmation for a possible fresh
-check, or an explicit backend Run. Corrections, explanations, urgency, and
-reports of known facts never create Runs. One call has at most one non-terminal
-phone-originated Run. Validate its durable call/proposal origin and exclude its
-own messages, status, progress, and cost rows from the generic foreground inbox;
-the dedicated delegation relay alone returns its progress and final result.
+Live speech presents the user's facts and requested level of detail. Phone
+action interpretation uses complete conversational meaning, not keyword lists:
+recording, modification, query and cancellation must preserve their actual
+targets. Urgency does not duplicate a task, while independent new work remains
+admissible. Verified completion needs attributable execution evidence; a model's
+final answer alone is insufficient and uncertain writes must not be replayed.
+Validate durable call/proposal origin and exclude its own messages, progress
+and cost rows from the generic foreground inbox.
+
+Phone provider details belong to qualified Functions adapters. Changing the
+configured provider/model/voice affects the next call; recovery retains the
+current selection. New adapters require real capability qualification.
+One persisted opening uses effective Persona, address preferences and language,
+after provider and media readiness; user-first speech wins and recovery does
+not repeat a greeting. Never hardcode a family title into shared instructions.
+Instruction acceptance, generated audio, player activity and device listening
+are different evidence. A movable or collapsed Phone window is display state
+and cannot hang up or recreate the connection.
 
 Implementation note (2026-09-30): PAO now reserves one live foreground call per
 owner, allocates Session ordinals atomically, and queues attributable background

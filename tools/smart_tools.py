@@ -1037,6 +1037,9 @@ class SmartToolRuntime:
             }
             if tool_name in {"file_write", "apply_patch"}:
                 record["target"] = str(arguments.get("path") or "")[:4096]
+            receipt = (details or {}).get("effect_receipt")
+            if isinstance(receipt, Mapping):
+                record["effect_receipt"] = dict(receipt)
             self._append_record(record)
 
         return outcome, spec, record

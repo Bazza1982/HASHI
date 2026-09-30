@@ -1552,6 +1552,11 @@ class FunctionWorkerHost:
             )
         if method == "runtime.cos_query":
             return await runtime.cos_query(str(params.get("question") or ""))
+        if method == "runtime.phone_action":
+            from orchestrator.frontend_live_voice.worker_actions import handle_phone_action_operation
+
+            return await handle_phone_action_operation(runtime, str(params.get("operation") or ""),
+                                                       dict(params.get("payload") or {}))
         if method == "runtime.slash":
             from orchestrator.admin_local_testing import (
                 try_execute_slash_command_text,

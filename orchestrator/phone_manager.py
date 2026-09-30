@@ -224,10 +224,18 @@ class PhoneManager:
         agent_id: str | None = None,
         pcm_payload: Mapping[str, Any] | None = None,
         recent_history: Iterable[Mapping[str, Any]] = (),
+        interface_language: str | None = None,
+        frozen_selection: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Freeze the effective provider request without exposing private PCM."""
 
-        state, _state_revision = self._read()
+        if frozen_selection is None:
+            state, _state_revision = self._read()
+        else:
+            # This server-owned call snapshot is not a writable config fallback.
+            # Re-read current persona/authority below, but retain phone choices.
+            state = self._normalise_state(dict(frozen_selection))
+            interface_language = frozen_selection.get("interface_language", interface_language)
         persona = load_phone_persona(self.workspace_dir)
         effective_pcm = (
             dict(pcm_payload)
@@ -236,6 +244,8 @@ class PhoneManager:
         )
         resolved_agent_id = str(agent_id or self.workspace_dir.name)
         resolved_display_name = str(display_name or resolved_agent_id)
+        from orchestrator.frontend_live_voice.provider import default_registry, select_provider
+        adapter = select_provider(default_registry(), state["provider"])
         instructions = build_live_voice_instructions(
             agent_id=resolved_agent_id,
             display_name=resolved_display_name,
@@ -244,10 +254,13 @@ class PhoneManager:
             style_instruction=self.STYLES[state["style"]]["instruction"],
             custom_style_instruction=state["style_instructions"],
             pcm_payload=effective_pcm,
+            instruction_token_limit=adapter.capabilities.max_instruction_tokens,
         )
         startup_input, context_audit = build_live_voice_input(
             effective_pcm,
             recent_history,
+            message_limit=adapter.capabilities.max_input_messages,
+            input_token_limit=adapter.capabilities.max_input_tokens,
         )
         revision_payload = {
             "schema_version": self.SCHEMA_VERSION,
@@ -263,6 +276,7 @@ class PhoneManager:
             ).hexdigest(),
             "agent_id": resolved_agent_id,
             "display_name": resolved_display_name,
+            "interface_language": interface_language,
         }
         revision = hashlib.sha256(
             json.dumps(revision_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -282,6 +296,7 @@ class PhoneManager:
             "style_label": self.STYLES[state["style"]]["label"],
             "custom_style": bool(state["style_instructions"]),
             "persona_projected": True,
+            "interface_language": interface_language,
         }
         return {
             "provider": state["provider"],
@@ -291,4 +306,8 @@ class PhoneManager:
             "input": startup_input,
             "context_audit": context_audit,
             "public": public,
+            "selection": {
+                **{key: state[key] for key in self.DEFAULT_STATE},
+                "interface_language": interface_language,
+            },
         }

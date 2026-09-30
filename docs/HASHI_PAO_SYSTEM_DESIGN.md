@@ -162,6 +162,22 @@ not overtake an older item still waiting in the other inbox.
 
 ### 2.3 Outer orchestration
 
+The Phone action boundary interprets complete speech in bounded conversational
+context using an explicitly configured semantic capability. Code validates its
+typed result and target references; no keyword classifier or guessed confidence
+grants action authority. Ordinary Agent ingress still owns permission and
+execution. Reuse, revision and cancellation address a specific persisted action;
+independent actions are not blocked by a one-task-per-call policy. A stalled
+interpretation produces a visible unresolved result, never an invented success.
+Action completion requires attributable effect evidence rather than an Engine's
+terminal reply. Unknown commit outcomes stay unknown until reconciled.
+
+PAO also owns the durable opening identifier and its separate request,
+acceptance, output and player observations. Opening content comes from PCM,
+wire commands from the selected Connector adapter. The same logical call
+retains this record across transport replacement, and never repeats an opening
+merely because a provider emitted ready again.
+
 PAO owns orchestration across Agents, Engines, Runs, Sessions, time, or HASHI
 instances, including:
 

@@ -69,6 +69,7 @@ def resolved_phone_session(_agent_id="zelda", **_scope):
 class LiveVoiceManagerStoreTests(unittest.TestCase):
     async def _admit_run(self, binding, proposal, idempotency_key):
         self.admit_calls.append(idempotency_key)
+        self.admitted_proposals.append(proposal)
         accepted = self.store.accept_run(
             session_id=binding.session_id,
             owner_id=binding.owner_id,
@@ -85,8 +86,17 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
             "message_id": accepted.message_id,
         }
 
+    async def _judge_action(self, _binding, state):
+        if self.judgments:
+            return self.judgments.pop(0)
+        return {"route": "act", "complete": True, "reply": "",
+                "actions": [{"kind": "query", "request": state["utterance"],
+                             "relation": "new", "target_action_id": None}]}
+
     def setUp(self):
         self.admit_calls = []
+        self.admitted_proposals = []
+        self.judgments = []
         self.temp_dir = tempfile.mkdtemp()
         self.db_path = Path(self.temp_dir) / "state" / "sessions.sqlite3"
         self.store = SessionStore(self.db_path, instance_id="HASHI")
@@ -108,6 +118,7 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
             global_config=self.global_config,
             secrets={"openai_api_key": "sk-test-fake"},
             admit_run=self._admit_run,
+            judge_action=self._judge_action,
             resolve_phone_session=resolved_phone_session,
             proposal_grace_seconds=0,
             close_timeout_seconds=0.01,
@@ -208,10 +219,12 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
                 "SELECT decision, accepted_run_id FROM live_delegations WHERE call_id = ? AND delegation_id = ?",
                 (self.call_id, "del-1"),
             ).fetchone()
-        self.assertEqual(row["decision"], "admitted")
-        self.assertTrue(row["accepted_run_id"])
+        self.assertEqual(row["decision"], "actions_admitted")
+        self.assertTrue(self.manager.actions.rows(self.binding)[0]["run_id"])
 
-    def test_report_from_existing_context_requires_confirmation_not_a_run(self):
+    def test_existing_context_answer_does_not_queue_work(self):
+        self.judgments = [{"route": "answer", "complete": True,
+                           "reply": "The scheduled check passed.", "actions": []}]
         asyncio.run(self.manager.append_fragment_once(
             self.binding,
             Fragment("report-today", "user", "给我详细报告一下今天的情况", 0, 500),
@@ -229,9 +242,11 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
                 "SELECT decision FROM live_delegations WHERE call_id = ? AND delegation_id = ?",
                 (self.call_id, "del-report-today"),
             ).fetchone()
-        self.assertEqual(row["decision"], "confirmation_requested")
+        self.assertEqual(row["decision"], "handled_locally")
 
     def test_conversational_correction_never_becomes_a_background_run(self):
+        self.judgments = [{"route": "answer", "complete": True,
+                           "reply": "The checks passed; here are their details.", "actions": []}]
         asyncio.run(self.manager.append_fragment_once(
             self.binding,
             Fragment("answer-known", "user", "不用核对，知道什么就说什么，快说", 0, 500),
@@ -251,7 +266,11 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(row["decision"], "handled_locally")
 
-    def test_explicit_yes_promotes_the_pending_freshness_check(self):
+    def test_contextual_affirmation_uses_resolved_request(self):
+        self.judgments = [
+            {"route": "clarify", "complete": True, "reply": "Check current status?", "actions": []},
+            {"route": "act", "complete": True, "reply": "", "actions": [
+                {"kind": "query", "request": "Check current service status", "relation": "new", "target_action_id": None}]}]
         asyncio.run(self.manager.append_fragment_once(
             self.binding,
             Fragment("report-first", "user", "给我报告一下今天的情况", 0, 500),
@@ -281,7 +300,8 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
             session_id=self.session_id,
             owner_id=self.owner_id,
         )
-        self.assertIn("今天的情况", user_message["text"])
+        self.assertEqual("好", user_message["text"])
+        self.assertIn("Check current service status", self.admitted_proposals[0].execution_text)
         with self.store._lock, self.store._connection() as conn:
             decisions = {
                 row["delegation_id"]: row["decision"]
@@ -290,10 +310,10 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
                     (self.call_id,),
                 ).fetchall()
             }
-        self.assertEqual(decisions["del-report-first"], "confirmed")
-        self.assertEqual(decisions["del-report-confirm"], "admitted")
+        self.assertEqual(decisions["del-report-first"], "clarification_requested")
+        self.assertEqual(decisions["del-report-confirm"], "actions_admitted")
 
-    def test_only_one_background_run_can_be_active_for_a_call(self):
+    def test_independent_actions_both_enter_the_normal_queue(self):
         asyncio.run(self.manager.append_fragment_once(
             self.binding, Fragment("first-check", "user", "inspect the current logs", 0, 500)
         ))
@@ -313,13 +333,13 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
             self.binding, "del-second-check", 1100
         ))
 
-        self.assertEqual(len(self.admit_calls), 1)
+        self.assertEqual(len(self.admit_calls), 2)
         with self.store._lock, self.store._connection() as conn:
             row = conn.execute(
                 "SELECT decision FROM live_delegations WHERE call_id = ? AND delegation_id = ?",
                 (self.call_id, "del-second-check"),
             ).fetchone()
-        self.assertEqual(row["decision"], "coalesced")
+        self.assertEqual(row["decision"], "actions_admitted")
 
     def test_automatic_admission_is_idempotent(self):
         frag = Fragment("e1", "user", "deploy to production", 0, 500)
@@ -545,7 +565,7 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         async def scenario():
             self.manager._proposal_grace_seconds = 0.05
             await self.manager.service.on_provider_event(self.binding, {
-                "type": "session.delegation.created",
+                "type": "action.proposed",
                 "event_id": "grace-event-1",
                 "offset_ms": 1000,
                 "delegation": {"id": "grace-delegation", "target": "client"},
@@ -648,8 +668,8 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         async def fake_http(): yield object()
         async def fake_attach(_http, *, key, provider_session_id): return DisconnectedSocket()
         async def scenario():
-            with patch("orchestrator.frontend_live_voice.manager.provider_http_session", fake_http), \
-                 patch("orchestrator.frontend_live_voice.manager.attach_provider", fake_attach):
+            with patch("orchestrator.frontend_live_voice.openai_live.provider_http_session", fake_http), \
+                 patch("orchestrator.frontend_live_voice.openai_live.attach_provider", fake_attach):
                 await self.manager.start()
                 await asyncio.sleep(0)
                 await self.manager.shutdown()
@@ -693,8 +713,8 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
             close_calls.append((key, provider_session_id))
             return "confirmed", {"total_tokens": 3}
         self.manager._close_provider_session = fake_close
-        with patch("orchestrator.frontend_live_voice.manager.provider_http_session", fake_http), \
-             patch("orchestrator.frontend_live_voice.manager.attach_provider", fake_attach):
+        with patch("orchestrator.frontend_live_voice.openai_live.provider_http_session", fake_http), \
+             patch("orchestrator.frontend_live_voice.openai_live.attach_provider", fake_attach):
             asyncio.run(self.manager._run_sideband(self.binding, "sk-test-fake", "prov-1"))
         self.assertEqual(close_calls, [])
         snap = asyncio.run(self.manager._op_snapshot(self.owner_id, self.scope))
@@ -748,10 +768,10 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
             **self.scope, "sdp": "v=0\r\n", "idempotency_key": "resume-attempt-1",
             "phone_revision": PHONE_REVISION,
         }
-        with patch("orchestrator.frontend_live_voice.manager.provider_http_session", fake_http), \
-             patch("orchestrator.frontend_live_voice.manager.attach_provider", fake_attach), \
-             patch("orchestrator.frontend_live_voice.manager.fit_live_session_input", fit), \
-             patch("orchestrator.frontend_live_voice.manager.create_provider_session", create):
+        with patch("orchestrator.frontend_live_voice.openai_live.provider_http_session", fake_http), \
+             patch("orchestrator.frontend_live_voice.openai_live.attach_provider", fake_attach), \
+             patch("orchestrator.frontend_live_voice.openai_live.fit_live_session_input", fit), \
+             patch("orchestrator.frontend_live_voice.openai_live.create_provider_session", create):
             result = asyncio.run(manager._op_resume(self.owner_id, resume_payload))
             replay = asyncio.run(manager._op_resume(self.owner_id, resume_payload))
         self.assertEqual(replay["sdp_answer"], result["sdp_answer"])
@@ -799,8 +819,8 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         async def fake_attach(_http, *, key, provider_session_id):
             return ProviderSocket()
 
-        with patch("orchestrator.frontend_live_voice.manager.provider_http_session", fake_http), \
-             patch("orchestrator.frontend_live_voice.manager.attach_provider", fake_attach):
+        with patch("orchestrator.frontend_live_voice.openai_live.provider_http_session", fake_http), \
+             patch("orchestrator.frontend_live_voice.openai_live.attach_provider", fake_attach):
             asyncio.run(self.manager._run_sideband(self.binding, "sk-test-fake", "prov-1"))
 
         audit_text = self.manager.audit.path_for(self.binding).read_text(encoding="utf-8")
@@ -869,8 +889,8 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         self.manager.append_fragment_once = fail_persistence
 
         async def scenario():
-            with patch("orchestrator.frontend_live_voice.manager.provider_http_session", fake_http), \
-                 patch("orchestrator.frontend_live_voice.manager.attach_provider", fake_attach):
+            with patch("orchestrator.frontend_live_voice.openai_live.provider_http_session", fake_http), \
+                 patch("orchestrator.frontend_live_voice.openai_live.attach_provider", fake_attach):
                 sideband = asyncio.create_task(
                     self.manager._run_sideband(self.binding, "sk-test-fake", "prov-1")
                 )
@@ -960,8 +980,8 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         self.manager.append_fragment_once = flaky_persistence
 
         async def scenario():
-            with patch("orchestrator.frontend_live_voice.manager.provider_http_session", fake_http), \
-                 patch("orchestrator.frontend_live_voice.manager.attach_provider", fake_attach):
+            with patch("orchestrator.frontend_live_voice.openai_live.provider_http_session", fake_http), \
+                 patch("orchestrator.frontend_live_voice.openai_live.attach_provider", fake_attach):
                 sideband = asyncio.create_task(
                     self.manager._run_sideband(self.binding, "sk-test-fake", "prov-1")
                 )
@@ -998,7 +1018,7 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
 
         self.manager.append_fragment_once = fail_append
         event = {
-            "type": "session.input_transcript.delta",
+            "type": "conversation.user.delta",
             "event_id": "provider-fragment-replay-1",
             "delta": "recover this after replacement",
             "start_ms": 300,
@@ -1094,8 +1114,8 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         self.manager._enqueue_provider_event = simulate_replacement_after_durable_stage
 
         async def scenario():
-            with patch("orchestrator.frontend_live_voice.manager.provider_http_session", fake_http), \
-                 patch("orchestrator.frontend_live_voice.manager.attach_provider", fake_attach):
+            with patch("orchestrator.frontend_live_voice.openai_live.provider_http_session", fake_http), \
+                 patch("orchestrator.frontend_live_voice.openai_live.attach_provider", fake_attach):
                 sideband = asyncio.create_task(
                     self.manager._run_sideband(self.binding, "sk-test-fake", "prov-1")
                 )
@@ -1177,8 +1197,8 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
             return ProviderSocket()
 
         async def scenario():
-            with patch("orchestrator.frontend_live_voice.manager.provider_http_session", fake_http), \
-                 patch("orchestrator.frontend_live_voice.manager.attach_provider", fake_attach):
+            with patch("orchestrator.frontend_live_voice.openai_live.provider_http_session", fake_http), \
+                 patch("orchestrator.frontend_live_voice.openai_live.attach_provider", fake_attach):
                 await asyncio.wait_for(
                     self.manager._run_sideband(self.binding, "sk-test-fake", "prov-1"),
                     timeout=3,
@@ -1275,8 +1295,8 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
             return socket
 
         async def scenario():
-            with patch("orchestrator.frontend_live_voice.manager.provider_http_session", fake_http), \
-                 patch("orchestrator.frontend_live_voice.manager.attach_provider", fake_attach):
+            with patch("orchestrator.frontend_live_voice.openai_live.provider_http_session", fake_http), \
+                 patch("orchestrator.frontend_live_voice.openai_live.attach_provider", fake_attach):
                 return await self.manager._close_provider_session(
                     "sk-test-fake", "prov-1", binding=self.binding
                 )
@@ -1317,7 +1337,7 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
 
         async def scenario():
             self.manager._enqueue_provider_event(self.binding, {
-                "type": "session.input_transcript.delta",
+                "type": "conversation.user.delta",
                 "event_id": "provider-fragment-hangup-1",
                 "delta": "hangup continues",
                 "start_ms": 200,
@@ -1389,8 +1409,8 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         self.manager._active_sockets[self.call_id] = StuckSocket()
 
         async def scenario():
-            with patch("orchestrator.frontend_live_voice.manager.provider_http_session", fake_http), \
-                 patch("orchestrator.frontend_live_voice.manager.attach_provider", fake_attach):
+            with patch("orchestrator.frontend_live_voice.openai_live.provider_http_session", fake_http), \
+                 patch("orchestrator.frontend_live_voice.openai_live.attach_provider", fake_attach):
                 return await asyncio.wait_for(
                     self.manager._finish_call(
                         self.binding, reason="user_hangup", initiator="user"
@@ -1511,8 +1531,8 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         async def scenario():
             waiter = asyncio.get_running_loop().create_future()
             manager._update_waiters[(binding.call_id, "update-too-large")] = waiter
-            with patch("orchestrator.frontend_live_voice.manager.provider_http_session", fake_http), \
-                 patch("orchestrator.frontend_live_voice.manager.attach_provider", fake_attach):
+            with patch("orchestrator.frontend_live_voice.openai_live.provider_http_session", fake_http), \
+                 patch("orchestrator.frontend_live_voice.openai_live.attach_provider", fake_attach):
                 await manager._run_sideband(binding, "sk-test-fake", "prov-1")
             return waiter.result()
 
@@ -1522,7 +1542,7 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         self.assertEqual(snap["snapshot"]["provider_close_state"], "confirmed")
         self.assertTrue(snap["snapshot"]["resume_required"])
 
-    def test_automatic_admission_retry_reuses_reserved_pao_idempotency(self):
+    def test_unknown_admission_is_not_blindly_retried(self):
         calls = []
 
         async def flaky(binding, frozen, key):
@@ -1537,15 +1557,15 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         ))
         asyncio.run(self.manager.register_delegation_once(self.binding, "retry-delegation", 600))
         asyncio.run(self.manager.schedule_proposal(self.binding, "retry-delegation", 600))
-        self.assertEqual(len(calls), 2)
-        self.assertEqual(calls[0], calls[1])
+        self.assertEqual(len(calls), 1)
         self.assertTrue(calls[0].startswith("live-delegation-live-auto-"))
         with self.store._lock, self.store._connection() as conn:
             row = conn.execute(
                 "SELECT decision FROM live_delegations WHERE call_id = ? AND delegation_id = ?",
                 (self.call_id, "retry-delegation"),
             ).fetchone()
-        self.assertEqual(row["decision"], "admitted")
+        self.assertEqual(row["decision"], "actions_admitted")
+        self.assertEqual(self.manager.actions.snapshot(self.binding)[0]["status"], "unknown")
 
     def test_background_messages_and_events_are_delivered_in_source_time_order(self):
         manager = self.manager
@@ -1587,7 +1607,7 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         self.assertIn("earlier background event", sent[0][1])
         self.assertIn("later background message", sent[1][1])
 
-    def test_agent_result_is_returned_to_same_live_voice(self):
+    def test_model_completion_without_effect_is_returned_as_unconfirmed(self):
         sent = []
         manager = self.manager
         binding = self.binding
@@ -1648,10 +1668,11 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         asyncio.run(scenario())
         thinking = [item for item in sent if item["type"] == "session.thinking.append"]
         commentary = [item for item in sent if item["type"] == "session.commentary.append"]
-        self.assertTrue(any("Checking service health" in item["content"] for item in thinking))
+        self.assertFalse(any("Checking service health" in item["content"] for item in thinking))
         self.assertFalse(any("private reasoning" in item["content"] for item in sent))
-        self.assertTrue(any("service is healthy" in item["content"] for item in commentary))
-        self.assertTrue(all(item["delegation_id"] == "relay-delegation" for item in commentary))
+        self.assertFalse(any("service is healthy" in item["content"] for item in commentary))
+        self.assertTrue(any("not obtained a verified" in item["content"] for item in commentary))
+        self.assertTrue(all(item["delegation_id"] is None for item in commentary))
 
     def test_terminal_call_creates_one_complete_chat_record(self):
         asyncio.run(self.manager.append_fragment_once(
@@ -1725,9 +1746,9 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         )}
         payload = {**scope, "sdp": "v=0\r\noffer", "idempotency_key": "start-sideband-fault",
                    "phone_revision": PHONE_REVISION}
-        with patch("orchestrator.frontend_live_voice.manager.provider_http_session", fake_http), \
-             patch("orchestrator.frontend_live_voice.manager.fit_live_session_input", fit), \
-             patch("orchestrator.frontend_live_voice.manager.create_provider_session", create):
+        with patch("orchestrator.frontend_live_voice.openai_live.provider_http_session", fake_http), \
+             patch("orchestrator.frontend_live_voice.openai_live.fit_live_session_input", fit), \
+             patch("orchestrator.frontend_live_voice.openai_live.create_provider_session", create):
             with self.assertRaisesRegex(LiveVoiceError, "live_sideband_timeout"):
                 asyncio.run(manager._op_start(self.owner_id, payload))
         with self.store._lock, self.store._connection() as connection:
@@ -1786,8 +1807,8 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         )}
         payload = {**start_scope, "sdp": "v=0\r\noffer", "idempotency_key": "start-contract-1",
                    "phone_revision": PHONE_REVISION}
-        with patch("orchestrator.frontend_live_voice.manager.provider_http_session", fake_http), \
-             patch("orchestrator.frontend_live_voice.manager.create_provider_session", fake_create):
+        with patch("orchestrator.frontend_live_voice.openai_live.provider_http_session", fake_http), \
+             patch("orchestrator.frontend_live_voice.openai_live.create_provider_session", fake_create):
             first = asyncio.run(self.manager._op_start(self.owner_id, payload))
             replay = asyncio.run(self.manager._op_start(self.owner_id, payload))
         self.assertEqual(len(provider_calls), 1)
@@ -1838,7 +1859,7 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
             "idempotency_key": "start-stale-phone",
             "phone_revision": "b" * 64,
         }
-        with patch("orchestrator.frontend_live_voice.manager.provider_http_session", fake_http):
+        with patch("orchestrator.frontend_live_voice.openai_live.provider_http_session", fake_http):
             with self.assertRaises(LiveVoiceError) as caught:
                 asyncio.run(self.manager._op_start(self.owner_id, payload))
         self.assertEqual(caught.exception.code, "live_phone_configuration_changed")

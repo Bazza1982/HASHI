@@ -243,7 +243,13 @@ async def test_third_identical_query_warns_and_writes_one_row_per_call(
         "duration_ms",
         "result_hash",
         "repeat_count",
+        "effect_receipt",
     }
+    receipts = [row["effect_receipt"] for row in rows]
+    assert {receipt["revision"] for receipt in receipts} == {receipts[0]["revision"]}
+    assert len({receipt["evidence_ref"] for receipt in receipts}) == 3
+    assert all(receipt["kind"] == "read" and receipt["target"] == "state.txt" for receipt in receipts)
+    assert all(receipt["observed"] == "same result" and receipt["complete_content"] for receipt in receipts)
     assert rows[0]["task_id"] == "task-123"
     assert rows[0]["stage"] == "execution"
     assert rows[0]["model"] == "test-model"

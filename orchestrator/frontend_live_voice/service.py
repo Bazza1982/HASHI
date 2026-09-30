@@ -17,8 +17,11 @@ class LiveVoiceEventService:
         if fragment is not None:
             await self.durable.stage_fragment_once(binding, fragment)
             await self.durable.append_fragment_once(binding, fragment)
+            observer = getattr(self.durable, "note_user_fragment", None)
+            if fragment.speaker == "user" and callable(observer):
+                await observer(binding, fragment)
             return
-        if event.get("type") != "session.delegation.created":
+        if event.get("type") != "action.proposed":
             return
         delegation = event.get("delegation")
         if not isinstance(delegation, Mapping) or delegation.get("target") != "client":

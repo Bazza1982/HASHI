@@ -77,17 +77,10 @@ def test_defaults_resolve_full_authoritative_pcm_and_history(tmp_path: Path):
     assert "What changed today?" in input_text
     assert "The phone UI was fixed." in input_text
     assert [item["role"] for item in resolved["input"][-2:]] == ["user", "assistant"]
-    assert "HIGHEST PRIORITY" in resolved["instructions"]
-    assert "not a separate assistant" in resolved["instructions"]
-    assert "Answer immediately from supplied context" in resolved["instructions"]
-    assert "ask whether the user wants a backend check" in resolved["instructions"]
-    assert "Never delegate conversational corrections" in resolved["instructions"]
     assert resolved["context_audit"]["provider_exact_count_required"] is True
     assert resolved["context_audit"]["required_message_count"] == 3
     assert resolved["context_audit"]["history_unit_message_counts"] == [1, 2]
-    assert resolved["instructions"].endswith(
-        "You are Moon throughout the call. HASHI is your execution capability, not another Agent. Answer from existing context first; delegate only explicit backend work, and never represent delegated work as completed without a reliable HASHI result."
-    )
+
 
 
 def test_live_input_keeps_hcc_and_newest_complete_exchange_then_drops_oldest():
@@ -186,6 +179,31 @@ def test_effective_identity_is_frozen_into_the_revision(tmp_path: Path):
     assert reassigned["public"]["revision"] != first["public"]["revision"]
     assert "Moon Prime" in renamed["instructions"]
     assert "agent-two" in reassigned["instructions"]
+
+
+def test_recovery_freezes_phone_choices_before_reprojecting_current_authority(tmp_path: Path):
+    workspace = _workspace(tmp_path)
+    manager = PhoneManager(workspace)
+    manager.set_language("zh-CN")
+    manager.set_style_instructions("ORIGINAL_PHONE_STYLE")
+    first = manager.resolve_live_session(display_name="Moon", pcm_payload=_pcm_payload())
+    manager.set_voice("willow")
+    manager.set_language("en")
+    manager.set_style_instructions("NEXT_CALL_PHONE_STYLE")
+
+    recovered = manager.resolve_live_session(
+        display_name="Moon Prime",
+        pcm_payload=_pcm_payload(system="CURRENT_AUTHORITY_MUST_APPLY"),
+        frozen_selection=first["selection"],
+    )
+    assert recovered["voice"] == "marin"
+    assert recovered["public"]["language"] == "zh-CN"
+    assert "ORIGINAL_PHONE_STYLE" in recovered["instructions"]
+    assert "NEXT_CALL_PHONE_STYLE" not in recovered["instructions"]
+    assert "CURRENT_AUTHORITY_MUST_APPLY" in recovered["instructions"]
+    assert "Moon Prime" in recovered["instructions"]
+    assert manager.get_state()["voice"] == "willow"
+    assert "selection" not in recovered["public"]
 
 
 def test_updates_preserve_unknown_future_fields(tmp_path: Path):

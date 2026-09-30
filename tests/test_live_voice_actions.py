@@ -1,0 +1,369 @@
+"""Phone intent/action boundaries with real temporary file effects and durable receipts."""
+from __future__ import annotations
+
+import asyncio
+import json
+from types import SimpleNamespace
+
+import pytest
+import pytest_asyncio
+
+from tests import test_live_voice_integration as integration
+from orchestrator.frontend_live_voice.actions import effect_evidence
+from orchestrator.frontend_live_voice.delegation_policy import ActionIntent, parse_decision
+from orchestrator.frontend_live_voice.protocol import Fragment
+from orchestrator.frontend_live_voice import worker_actions
+from tools.registry import ToolRegistry
+
+
+def action(kind, request, relation="new", target=None):
+    return {"kind": kind, "request": request, "relation": relation, "target_action_id": target}
+
+
+def decision(*items):
+    return {"route": "act", "complete": True, "reply": "", "actions": list(items)}
+
+
+@pytest_asyncio.fixture
+async def phone():
+    harness = integration.LiveVoiceManagerStoreTests()
+    harness.setUp()
+    harness.updates = []
+    harness.manager._action_reply_timeout_seconds = 0.02
+
+    async def send(binding, **payload):
+        harness.updates.append((binding, payload))
+        return True
+
+    harness.manager._send_provider_update = send
+    try:
+        yield harness
+    finally:
+        await harness.manager.shutdown()
+        harness.tearDown()
+
+
+async def speak(phone, text, *, start=0, end=100, source="speech"):
+    await phone.manager.append_fragment_once(phone.binding, Fragment(source, "user", text, start, end))
+    await phone.manager.register_delegation_once(phone.binding, source + "-proposal", end + 1)
+    await phone.manager.schedule_proposal(phone.binding, source + "-proposal", end + 1)
+
+
+def action_rows(phone):
+    return phone.manager.actions.rows(phone.binding)
+
+
+def event_details(phone, kind):
+    with phone.store._lock, phone.store._connection() as connection:
+        rows = connection.execute("SELECT detail_json FROM run_events WHERE session_id=? AND kind=? ORDER BY sequence",
+                                  (phone.session_id, kind)).fetchall()
+    return [json.loads(row[0]) for row in rows]
+
+
+@pytest.mark.asyncio
+async def test_no_provider_delegation_still_records_complete_speech(phone):
+    phone.judgments = [decision(action("write", "Save a 30 minute exercise entry in the established fitness record"))]
+    fragment = Fragment("just-speech", "user", "I exercised for thirty minutes. Record that.", 0, 100)
+    await phone.manager.append_fragment_once(phone.binding, fragment)
+    await phone.manager.note_user_fragment(phone.binding, fragment)
+    await asyncio.sleep(1.1)
+    assert len(phone.admit_calls) == 1
+    assert len(action_rows(phone)) == 1
+    assert "30 minute exercise" in phone.admitted_proposals[0].execution_text
+    assert phone.admitted_proposals[0].text == fragment.text
+
+
+@pytest.mark.asyncio
+async def test_words_arriving_during_judgment_revoke_old_action_without_losing_first_fragment(phone):
+    started, release = asyncio.Event(), asyncio.Event()
+    heard = []
+
+    async def judge(_binding, state):
+        heard.append(state["utterance"])
+        if len(heard) == 1:
+            started.set()
+            await release.wait()
+            return decision(action("write", "Save the incomplete old record"))
+        return decision(action("write", "Save the corrected forty minute exercise entry"))
+
+    phone.manager._judge_action = judge
+    first = Fragment("part-1", "user", "Record the exercise as ", 0, 100)
+    await phone.manager.append_fragment_once(phone.binding, first)
+    await phone.manager.note_user_fragment(phone.binding, first)
+    await asyncio.wait_for(started.wait(), 2)
+    second = Fragment("part-2", "user", "forty minutes, not thirty.", 101, 200)
+    await phone.manager.append_fragment_once(phone.binding, second)
+    await phone.manager.note_user_fragment(phone.binding, second)
+    await asyncio.sleep(1.0)
+    release.set()
+    await asyncio.sleep(0.12)
+    assert heard == [first.text, first.text + second.text]
+    assert len(phone.admit_calls) == 1
+    assert "forty minute" in phone.admitted_proposals[0].execution_text
+    assert action_rows(phone)[0]["request"] != "Save the incomplete old record"
+
+
+@pytest.mark.asyncio
+async def test_independent_actions_have_separate_runs_and_scoped_cancel(phone):
+    phone.judgments = [decision(action("query", "Check mail delivery"), action("write", "Record exercise"))]
+    await speak(phone, "Check mail and record exercise")
+    first, second = action_rows(phone)
+    assert first["run_id"] != second["run_id"]
+    assert len(phone.admit_calls) == 2
+    cancelled = []
+
+    async def cancel(_binding, run_id):
+        cancelled.append(run_id)
+        return {"cancelled_before_start": True, "evidence_ref": "request:removed-before-start"}
+
+    phone.manager._cancel_action_run = cancel
+    phone.judgments = [decision(action("cancel", "Cancel the mail check", "cancel", first["action_id"]))]
+    await speak(phone, "Cancel only the mail check", start=200, end=300, source="cancel")
+    rows = {row["action_id"]: row for row in action_rows(phone)}
+    assert cancelled == [first["run_id"]]
+    assert rows[first["action_id"]]["status"] == "cancelled"
+    assert rows[second["action_id"]]["status"] == "accepted"
+    assert rows[second["action_id"]]["run_id"] == second["run_id"]
+    assert len(phone.admit_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_same_action_hurry_reuses_and_real_correction_updates_original(phone):
+    phone.judgments = [decision(action("write", "Record exercise for 30 minutes"))]
+    await speak(phone, "Record exercise for 30 minutes")
+    original = action_rows(phone)[0]
+    phone.manager.actions.transition(phone.binding, original["action_id"], "verified",
+        evidence_refs=["tool:write:sha256:original"], receipt="Exercise saved for 30 minutes.")
+    phone.judgments = [
+        decision(action("write", "Report whether the exercise is saved", "reuse", original["action_id"])),
+        decision(action("modify", "Change the same exercise entry from 30 to 40 minutes", "revise", original["action_id"])),
+    ]
+    await speak(phone, "Have you done it? Hurry", start=200, end=300, source="hurry")
+    assert len(phone.admit_calls) == 1
+    await speak(phone, "Change that to forty minutes", start=400, end=500, source="correct")
+    assert len(phone.admit_calls) == 2
+    latest = action_rows(phone)[-1]
+    assert latest["target_action_id"] == original["action_id"]
+    assert "original" in phone.admitted_proposals[-1].execution_text
+    assert "30 to 40" in phone.admitted_proposals[-1].execution_text
+
+
+@pytest.mark.asyncio
+async def test_substantive_live_answer_does_not_trigger_second_reply(phone):
+    await phone.manager.append_fragment_once(phone.binding, Fragment("already", "assistant", "The report contains no incidents.", 1, 20))
+    phone.judgments = [{"route": "answer", "complete": True, "reply_needed": False, "reply": "", "actions": []}]
+    await speak(phone, "Tell me that report", start=30, end=50)
+    assert not phone.updates
+    assert not phone.admit_calls
+
+
+@pytest.mark.asyncio
+async def test_crash_between_classification_and_admission_is_visible_unknown_not_replayed(phone):
+    rows = phone.manager.actions.create(phone.binding, "not-admitted-yet", [ActionIntent("write", "Record exercise")])
+    phone.manager._recover_action_relays(settle_orphans=True)
+    await asyncio.sleep(0)
+    persisted = action_rows(phone)[0]
+    assert persisted["action_id"] == rows[0]["action_id"]
+    assert persisted["status"] == "unknown" and persisted["run_id"] is None
+    assert not phone.admit_calls
+
+
+@pytest.mark.asyncio
+async def test_readback_evidence_survives_distinct_home_workzone_and_later_switch(phone, tmp_path, monkeypatch):
+    phone.judgments = [decision(action("write", "Record exercise for 30 minutes in fitness.txt"))]
+    await speak(phone, "Record exercise for 30 minutes in fitness.txt")
+    row = action_rows(phone)[0]
+    run = phone.store.get_run(row["run_id"], owner_id=phone.owner_id)
+    home, workzone, next_zone = (tmp_path / name for name in ("agent-home", "first-workzone", "next-workzone"))
+    for folder in (home, workzone, next_zone):
+        folder.mkdir()
+    runtime = SimpleNamespace(workspace_dir=home, name=phone.agent_id, session_store=phone.store)
+    registry = ToolRegistry(allowed_tools=["file_write", "apply_patch"], access_root=workzone,
+        workspace_dir=workzone, secrets={}, audit_context={
+            "_runtime": runtime, "owner_id": phone.owner_id, "hashi_session_id": phone.session_id,
+            "hashi_run_id": row["run_id"], "request_id": run["request_id"],
+        })
+    result = await registry.execute("file_write", {"path": "fitness.txt", "content": "Exercise: 30 minutes\n"}, "write-exercise")
+    assert not result.is_error
+    assert (workzone / "fitness.txt").read_text() == "Exercise: 30 minutes\n"
+    assert not (home / "tool_action_audit.jsonl").exists()
+    assert event_details(phone, "voice.live.action.tool_effect")
+    registry.workspace_dir = next_zone
+
+    async def verify(_runtime, state, **_kwargs):
+        supplied = state["actions"][0]
+        receipt = supplied["receipts"][0]
+        assert receipt["target"] == str(workzone / "fitness.txt")
+        assert receipt["observed"] == (workzone / "fitness.txt").read_bytes().decode("utf-8")
+        assert receipt["readback"] is True and receipt["revision"].startswith("sha256:")
+        return {"actions": [{"action_id": supplied["action_id"], "verified": True,
+            "evidence_refs": [receipt["evidence_ref"]], "receipt": "Recorded 30 minutes of exercise in fitness.txt."}]}
+
+    monkeypatch.setattr(worker_actions, "invoke_phone_judgment", verify)
+    inspected = await worker_actions.inspect_phone_action_results(runtime, run["request_id"], [row])
+    assert inspected["actions"][0]["status"] == "verified"
+    assert inspected["actions"][0]["association"] == "semantic_check"
+
+    registry.workspace_dir = workzone
+    patched = await registry.execute("apply_patch", {"path": "fitness.txt", "patch":
+        "--- fitness.txt\n+++ fitness.txt\n@@ -1 +1 @@\n-Exercise: 30 minutes\n+Exercise: 40 minutes\n"}, "correct-exercise")
+    assert not patched.is_error
+    assert (workzone / "fitness.txt").read_text() == "Exercise: 40 minutes\n"
+    observations = event_details(phone, "voice.live.action.tool_effect")
+    assert observations[-1]["effect_receipt"]["observed"] == (workzone / "fitness.txt").read_bytes().decode("utf-8")
+    assert observations[-1]["effect_receipt"]["revision"] != observations[0]["effect_receipt"]["revision"]
+
+
+@pytest.mark.asyncio
+async def test_observation_failure_does_not_fail_or_repeat_committed_write(tmp_path, monkeypatch):
+    from tools import effect_receipts
+
+    def broken(**_kwargs):
+        raise OSError("diagnostic storage unavailable")
+
+    monkeypatch.setattr(effect_receipts, "observe_tool_effect", broken)
+    registry = ToolRegistry(allowed_tools=["file_write"], access_root=tmp_path, workspace_dir=tmp_path, secrets={})
+    result = await registry.execute("file_write", {"path": "fitness.txt", "content": "Exercise: 30 minutes"}, "one-write")
+    assert not result.is_error
+    assert (tmp_path / "fitness.txt").read_text() == "Exercise: 30 minutes"
+    assert not (result.details or {}).get("effect_receipt")
+
+
+@pytest.mark.asyncio
+async def test_unrelated_success_and_forged_or_reused_receipts_do_not_certify_actions(tmp_path, monkeypatch):
+    runtime = SimpleNamespace(workspace_dir=tmp_path, name="test")
+    registry = ToolRegistry(allowed_tools=["file_write"], access_root=tmp_path, workspace_dir=tmp_path,
+        secrets={}, audit_context={"request_id": "req-one"})
+    await registry.execute("file_write", {"path": "config.txt", "content": "theme=dark"}, "unrelated")
+    candidates_seen = []
+
+    async def refuse_unrelated(_runtime, state, **_kwargs):
+        candidates_seen.extend(state["actions"])
+        return {"actions": [{"action_id": "exercise", "verified": False, "evidence_refs": [], "receipt": "No exercise saved."}]}
+
+    monkeypatch.setattr(worker_actions, "invoke_phone_judgment", refuse_unrelated)
+    result = await worker_actions.inspect_phone_action_results(runtime, "req-one",
+        [{"action_id": "exercise", "kind": "write", "request": "Record exercise for 30 minutes"}])
+    assert candidates_seen[0]["receipts"][0]["observed"] == "theme=dark"
+    assert result["actions"][0]["status"] == "unknown"
+    assert not effect_evidence("write", {"tool_actions": [
+        {"status": "success", "effect_receipt": {"kind": "write", "evidence_ref": "fake"}}]})
+
+    async def forge(_runtime, _state, **_kwargs):
+        return {"actions": [{"action_id": "exercise", "verified": True, "evidence_refs": ["invented"], "receipt": "Saved."}]}
+    monkeypatch.setattr(worker_actions, "invoke_phone_judgment", forge)
+    assert (await worker_actions.inspect_phone_action_results(runtime, "req-one",
+        [{"action_id": "exercise", "kind": "write", "request": "Record exercise"}]))["actions"][0]["status"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_reply_ack_is_not_audible_and_lost_ack_has_bounded_resume(phone):
+    calls = []
+
+    async def lost_ack(_binding, **payload):
+        assert payload["kind"] == "commentary" and payload["delegation_id"] is None
+        calls.append(payload["content"])
+        return False
+
+    phone.manager._send_provider_update = lost_ack
+    for _ in range(4):
+        await phone.manager._offer_action_reply(phone.binding, "specific-result", "The existing record contains 40 minutes.")
+    assert calls == ["The existing record contains 40 minutes."] * 2
+    assert len(event_details(phone, "voice.live.action.reply_attempted")) == 2
+    assert not event_details(phone, "voice.live.action.reply_offered")
+    assert event_details(phone, "voice.live.action.reply_unconfirmed")[0]["audible_delivery"] == "unverified"
+
+
+@pytest.mark.asyncio
+async def test_no_output_gets_one_substantive_continuation_and_then_stops(phone):
+    await phone.manager._offer_action_reply(phone.binding, "answer-one", "The report has two completed checks and no incidents.")
+    async def wait_until_unconfirmed():
+        while not event_details(phone, "voice.live.action.reply_unconfirmed"):
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(wait_until_unconfirmed(), timeout=2.0)
+    contents = [payload["content"] for _, payload in phone.updates]
+    assert contents == ["The report has two completed checks and no incidents."] * 2
+    assert event_details(phone, "voice.live.action.reply_unconfirmed")
+    assert not event_details(phone, "voice.live.action.reply_observed")
+
+
+@pytest.mark.asyncio
+async def test_transcript_observation_does_not_claim_complete_audible_playback(phone):
+    await phone.manager._offer_action_reply(phone.binding, "answer-two", "Saved 40 minutes of exercise.")
+    await phone.manager.append_fragment_once(phone.binding, Fragment("output", "assistant", "Saved 40 minutes of exercise.", 200, 220))
+    await asyncio.sleep(0.08)
+    assert len(phone.updates) == 1
+    observed = event_details(phone, "voice.live.action.reply_observed")[0]
+    assert observed["generated_output"] == "observed"
+    assert observed["content_delivery"] == observed["audible_delivery"] == "unverified"
+
+
+def test_external_record_modification_and_cancellation_can_use_resolved_targets():
+    for kind in ("modify", "cancel"):
+        parsed = parse_decision(decision(action(kind, "The saved reminder with title Gym at 7 pm")),
+                                known_action_ids=set())
+        assert parsed.actions[0].kind == kind
+        assert parsed.actions[0].target_action_id is None
+
+@pytest.mark.asyncio
+async def test_tool_effect_before_admission_ack_uses_validated_run_origin(phone, tmp_path):
+    runtime = SimpleNamespace(workspace_dir=tmp_path / "home", name=phone.agent_id, session_store=phone.store)
+    runtime.workspace_dir.mkdir()
+    workzone = tmp_path / "workzone"
+    workzone.mkdir()
+
+    async def admit_before_ack(binding, proposal, key):
+        origin = phone.store.resolve_live_voice_origin(owner_id=binding.owner_id,
+            session_id=binding.session_id, agent_id=binding.agent_id,
+            context_generation=binding.context_generation, candidate={
+                "call_id": binding.call_id, "call_epoch": binding.call_epoch,
+                "delegation_id": proposal.delegation_id, "proposal_version": proposal.version,
+                "proposal_digest": proposal.digest})
+        accepted = phone.store.accept_run(session_id=binding.session_id, owner_id=binding.owner_id,
+            agent_id=binding.agent_id, request_id="fast-write-before-ack", text=proposal.text,
+            source="session-api", idempotency_key=key, expected_context_generation=binding.context_generation,
+            message_context={"live_voice": origin})
+        assert action_rows(phone)[0]["run_id"] is None
+        registry = ToolRegistry(allowed_tools=["file_write"], access_root=workzone, workspace_dir=workzone,
+            secrets={}, audit_context={"_runtime": runtime, "owner_id": phone.owner_id,
+                "hashi_session_id": phone.session_id, "hashi_run_id": accepted.run_id,
+                "request_id": accepted.request_id})
+        result = await registry.execute("file_write",
+            {"path": "fitness.txt", "content": "Exercise: 40 minutes\n"}, "fast-write")
+        assert not result.is_error
+        assert event_details(phone, "voice.live.action.tool_effect")[0]["effect_receipt"]["readback"]
+        return {"request_id": accepted.request_id, "run_id": accepted.run_id, "message_id": accepted.message_id}
+
+    phone.manager._admit_run = admit_before_ack
+    phone.judgments = [decision(action("write", "Record 40 minutes of exercise in fitness.txt"))]
+    await speak(phone, "Record 40 minutes of exercise in fitness.txt")
+    assert (workzone / "fitness.txt").read_text() == "Exercise: 40 minutes\n"
+    assert action_rows(phone)[0]["run_id"] is not None
+    assert len(event_details(phone, "voice.live.action.tool_effect")) == 1
+
+
+@pytest.mark.asyncio
+async def test_effect_reply_uses_frozen_phone_locale_and_stale_judgment_is_rejected(phone, tmp_path, monkeypatch):
+    phone.judgments = [decision(action("query", "Check the saved fitness entry"))]
+    await speak(phone, "Check the saved fitness entry")
+    row = action_rows(phone)[0]
+    run = phone.store.get_run(row["run_id"], owner_id=phone.owner_id)
+    runtime = SimpleNamespace(workspace_dir=tmp_path, name=phone.agent_id, session_store=phone.store)
+    with phone.store._lock, phone.store._connection() as connection:
+        connection.execute("UPDATE live_calls SET phone_config_json=?,call_epoch=2 WHERE call_id=?",
+            (json.dumps({"public":{"language":"auto","interface_language":"zh-CN"}}), phone.call_id))
+
+    async def inspect(_runtime, request_id, actions, **options):
+        assert request_id == run["request_id"]
+        assert actions[0]["action_id"] == row["action_id"]
+        assert options["reply_language"] == "zh-CN"
+        return {"actions":[]}
+
+    monkeypatch.setattr(worker_actions, "inspect_phone_action_results", inspect)
+    await worker_actions.handle_phone_action_operation(runtime, "inspect", {
+        "owner_id":phone.owner_id, "scope":phone.scope,
+        "request_id":run["request_id"], "actions":[row]})
+    with pytest.raises(Exception, match="live_scope_changed"):
+        await worker_actions.handle_phone_action_operation(runtime, "judge",
+            {"owner_id":phone.owner_id, "scope":phone.scope, "state":{"utterance":"Record that"}})

@@ -415,6 +415,9 @@ class WorkbenchApiServer:
             secrets=self.secrets,
             admit_run=self._admit_live_voice_run,
             poll_run_activity=self._poll_live_voice_run_activity,
+            judge_action=self._judge_live_voice_action,
+            inspect_action_results=self._inspect_live_voice_action_results,
+            cancel_action_run=self._cancel_live_voice_action,
             resolve_phone_session=self._resolve_live_voice_phone_session,
         )
         register_live_voice_routes(
@@ -978,6 +981,7 @@ class WorkbenchApiServer:
         owner_id: str | None = None,
         session_id: str | None = None,
         context_generation: int | None = None,
+        frozen_selection: Mapping[str, Any] | None = None,
     ) -> dict:
         """Resolve Agent PCM and same-Session history at the trusted API edge."""
 
@@ -1104,7 +1108,7 @@ class WorkbenchApiServer:
 
         pcm_payload = assembler.build_prompt_payload(
             "",
-            "gpt-live-1",
+            str((frozen_selection or manager.get_state())["model"]),
             incremental=False,
             extra_sections=extra_sections,
             inject_memory=False,
@@ -1116,6 +1120,8 @@ class WorkbenchApiServer:
             display_name=str(display_name or target),
             pcm_payload=pcm_payload,
             recent_history=recent_history,
+            interface_language=preferred_locale(runtime or self, actor_id=owner_id),
+            frozen_selection=frozen_selection,
         )
 
     def _is_governed_profile(self) -> bool:
@@ -5407,7 +5413,7 @@ class WorkbenchApiServer:
         try:
             request_id = await runtime.enqueue_request(
                 runtime._primary_chat_id(),
-                proposal.text,
+                proposal.execution_text or proposal.text,
                 "session-api",
                 proposal.text[:160],
                 deliver_to_telegram=True,
@@ -5447,6 +5453,30 @@ class WorkbenchApiServer:
             "run_id": str(run["run_id"]),
             "message_id": str(run["user_message_id"]),
         }
+
+    async def _live_voice_action_operation(self, binding, operation: str, **payload) -> dict[str, Any]:
+        from orchestrator.frontend_live_voice.protocol import LiveVoiceError
+
+        runtime = self._runtime_map().get(binding.agent_id)
+        if runtime is None:
+            raise LiveVoiceError("live_agent_unavailable", 503)
+        params = {"scope": binding.public_scope(), "owner_id": binding.owner_id, **payload}
+        operation_port = getattr(runtime, "phone_action_operation", None)
+        if callable(operation_port):
+            return dict(await operation_port(operation, params))
+        from orchestrator.frontend_live_voice.worker_actions import handle_phone_action_operation
+
+        return await handle_phone_action_operation(runtime, operation, params)
+
+    async def _judge_live_voice_action(self, binding, state) -> dict[str, Any]:
+        return await self._live_voice_action_operation(binding, "judge", state=state)
+
+    async def _inspect_live_voice_action_results(self, binding, request_id, actions) -> dict[str, Any]:
+        return await self._live_voice_action_operation(binding, "inspect", request_id=request_id, actions=actions)
+
+    async def _cancel_live_voice_action(self, binding, run_id) -> dict[str, Any]:
+        run = self.session_store.get_run(run_id, owner_id=binding.owner_id)
+        return await self._live_voice_action_operation(binding, "cancel", request_id=run["request_id"])
 
     async def _poll_live_voice_run_activity(
         self, binding, request_id: str, after_sequence: int, limit: int

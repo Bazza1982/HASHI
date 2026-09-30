@@ -1,65 +1,17 @@
 from __future__ import annotations
-
 import pytest
-
-from orchestrator.frontend_live_voice.delegation_policy import (
-    DelegationRoute,
-    is_affirmative_confirmation,
-    route_delegation,
-)
+from orchestrator.frontend_live_voice.delegation_policy import parse_decision
+from orchestrator.frontend_live_voice.protocol import LiveVoiceError
 from orchestrator.frontend_live_voice.openai_live import fit_live_session_input
 
 
-@pytest.mark.parametrize(
-    ("text", "route"),
-    [
-        ("不用查，知道什么就说什么", DelegationRoute.DIRECT),
-        ("你怎么还在兜圈子，赶紧说", DelegationRoute.DIRECT),
-        ("告诉我你不说的原因", DelegationRoute.DIRECT),
-        ("给我详细报告一下今天的情况", DelegationRoute.CONFIRM),
-        ("给我更新一下今天的情况", DelegationRoute.CONFIRM),
-        ("what is today's status?", DelegationRoute.CONFIRM),
-        ("查一下今天有没有新邮件", DelegationRoute.EXECUTE),
-        ("快说，帮我查一下最新日志", DelegationRoute.EXECUTE),
-        ("inspect the current logs", DelegationRoute.EXECUTE),
-        ("deploy the build to production", DelegationRoute.EXECUTE),
-    ],
-)
-def test_delegation_policy_is_fail_safe_for_live_conversation(text, route):
-    assert route_delegation(text).route is route
-
-
-def test_unknown_live_utterance_stays_in_the_foreground():
-    decision = route_delegation("把刚才那三件事详细讲清楚")
-    assert decision.route is DelegationRoute.DIRECT
-    assert decision.confidence >= 0.9
-
-
-@pytest.mark.parametrize("text", ["好", "好的。", "yes please", "go ahead"])
-def test_short_affirmation_can_confirm_a_pending_backend_check(text):
-    assert is_affirmative_confirmation(text) is True
-
-
-def test_zhaojun_incident_replay_cannot_create_a_delegation_storm():
-    utterances = [
-        "Okay 给我报告一下今天的情况",
-        "不用这么查，知道什么就说什么",
-        "所以从昨天聊天到现在没有任何新的信息进到你的窗口里面吗",
-        "你能不要核对吗，有就是有，没有就是没有",
-        "你怎么还在兜圈子，赶紧说",
-        "不行，你要详细地说",
-        "快说呀",
-        "快说快说快说",
-        "告诉我你不说的原因",
-        "不要等确认，知道什么说什么",
-        "把这些东西详细地报告给我",
-        "不要光说有几笔，我要详细的信息",
-        "快说快说",
-    ]
-
-    routes = [route_delegation(text).route for text in utterances]
-
-    assert routes == [DelegationRoute.CONFIRM] + [DelegationRoute.DIRECT] * 12
+def test_structural_decision_cannot_invent_a_target_or_hide_missing_question():
+    with pytest.raises(LiveVoiceError):
+        parse_decision({"route": "act", "complete": True, "reply": "", "actions": [
+            {"kind": "cancel", "request": "Cancel it", "relation": "cancel", "target_action_id": "foreign"}]},
+            known_action_ids={"owned"})
+    with pytest.raises(LiveVoiceError):
+        parse_decision({"route": "clarify", "complete": True, "reply": "", "actions": []}, known_action_ids=set())
 
 
 @pytest.mark.asyncio

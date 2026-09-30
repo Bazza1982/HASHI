@@ -79,6 +79,7 @@ def _tool_action(row: Mapping[str, Any], *, source: str) -> dict[str, Any]:
             "status": str(row.get("status") or "unknown"),
             "effect": str(row.get("effect") or "unknown"),
             "target": str(row.get("target") or ""),
+            "effect_receipt": dict(row["effect_receipt"]) if isinstance(row.get("effect_receipt"), Mapping) else None,
         }
     arguments = row.get("args_redacted")
     args = dict(arguments) if isinstance(arguments, Mapping) else {}
@@ -93,6 +94,7 @@ def _tool_action(row: Mapping[str, Any], *, source: str) -> dict[str, Any]:
         "status": str(row.get("status") or "unknown"),
         "effect": str(detail_map.get("smart_effect") or "unknown"),
         "target": str(args.get("path") or ""),
+        "effect_receipt": dict(detail_map["effect_receipt"]) if isinstance(detail_map.get("effect_receipt"), Mapping) else None,
     }
 
 

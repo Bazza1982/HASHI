@@ -1095,6 +1095,25 @@ class SessionStore:
                     FOREIGN KEY(call_id) REFERENCES live_calls(call_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS live_actions (
+                    call_id TEXT NOT NULL,
+                    action_id TEXT NOT NULL,
+                    delegation_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    request TEXT NOT NULL,
+                    target_action_id TEXT,
+                    status TEXT NOT NULL,
+                    run_id TEXT,
+                    evidence_json TEXT NOT NULL DEFAULT '[]',
+                    receipt TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(call_id, action_id),
+                    FOREIGN KEY(call_id) REFERENCES live_calls(call_id)
+                );
+                CREATE INDEX IF NOT EXISTS live_actions_delegation
+                    ON live_actions(call_id, delegation_id);
+
                 CREATE TABLE IF NOT EXISTS live_control_receipts (
                     call_id TEXT NOT NULL,
                     idempotency_key TEXT NOT NULL,

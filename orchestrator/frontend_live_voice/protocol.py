@@ -75,7 +75,7 @@ class Fragment:
 
 def normalize_transcript(event: Mapping[str, Any]) -> Fragment | None:
     # Audio reflection is intentionally ignored, with no decoding or logging.
-    types = {"session.input_transcript.delta": "user", "session.output_transcript.delta": "assistant"}
+    types = {"conversation.user.delta": "user", "conversation.assistant.delta": "assistant"}
     speaker = types.get(event.get("type"))
     if speaker is None:
         return None
