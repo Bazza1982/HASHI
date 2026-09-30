@@ -404,6 +404,8 @@ class WorkbenchApiServer:
 
         self.app = web.Application(client_max_size=64 * 1024 * 1024,
                                    middlewares=[runtime_admission])
+        from orchestrator.desktop_api import register_desktop_api
+        register_desktop_api(self)
         self.demo_connector = DemoConnector(self)
         self.demo_connector.register(self.app)
         self.app.router.add_post("/api/auth/login", self.handle_auth_login)

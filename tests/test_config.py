@@ -685,3 +685,13 @@ def test_enterprise_scheduler_lease_env_overrides_config(tmp_path, monkeypatch):
     assert global_cfg.enterprise_scheduler_lease_pool_enabled is True
     assert global_cfg.enterprise_scheduler_lease_pool_min_size == 3
     assert global_cfg.enterprise_scheduler_lease_pool_max_size == 7
+
+
+def test_desktop_opt_in_is_loaded_without_changing_default(tmp_path):
+    config_path, secrets_path = _write_base_files(tmp_path, _minimal_flex_agent())
+    manager = ConfigManager(config_path, secrets_path, bridge_home=tmp_path)
+    assert manager.load()[0].desktop_enabled is False
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["global"]["desktop_enabled"] = True
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    assert manager.load()[0].desktop_enabled is True
