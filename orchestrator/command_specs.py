@@ -167,7 +167,7 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
             "/safevoice [on|off]", ("on", "off"), example="/safevoice on"
         ),
     ),
-    CommandSpec("say", "cmd_say", "Read the last assistant reply as voice", "session"),
+    CommandSpec("say", "cmd_say", "Read recent Agent replies as voice", "session"),
     CommandSpec(
         "loop",
         "cmd_loop",

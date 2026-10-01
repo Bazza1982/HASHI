@@ -171,10 +171,15 @@ Current implementation boundary:
   ownership only after the clipboard accepts it;
 - short sent/received sounds are a local, persisted TUI preference. Windows uses
   the native sound API and WSL/Linux uses an available PulseAudio or ALSA player;
-- `/say` and automatic reply speech are TUI-only presentation. The selected
+- TUI `/say` and automatic reply speech are local Connector presentation. The selected
   instance generates bounded Ogg bytes using the Agent-owned semantic voice
   profile, while the launch computer owns the sole non-overlapping player.
   These controls never enqueue a chat command or create Telegram output;
+- `/say` selects only final Agent replies, never cost tails, command cards, or
+  progress. `/say N` selects the newest N (1-4), and `/say A-B` selects inclusive
+  newest-first positions but plays them oldest first. TUI and Workbench keep
+  speech local; Telegram selects only replies confirmed on its delivery route.
+  Selection stays within the current Agent and Conversation Session;
 - TUI auto-read is persisted per launch client, instance and Agent. The four
   available semantic profiles are discovered from the Agent voice owner and
   profile changes use that existing revision-safe state rather than a second

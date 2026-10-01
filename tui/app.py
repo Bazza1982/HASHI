@@ -33,6 +33,11 @@ from orchestrator.flexible_backend_registry import (
 )
 from orchestrator.runtime_effort_options import get_available_efforts
 from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_LOCALHOST_URL
+from orchestrator.say_command import (
+    is_speakable_final_reply,
+    parse_say_selection,
+    select_recent_replies,
+)
 from tui.api_client import TUI_TERMINAL_RUN_STATES, TuiApiClient, run_failure_text
 from tui.attachments import PendingAttachment, TuiAttachmentError, snapshot_bytes, snapshot_path
 from tui.audio import TuiAudioError, decode_tui_audio, play_ogg_bytes
@@ -74,7 +79,7 @@ TUI_COMMAND_HELP = {
     "agents": ("查看可用 Agent", "List available Agents"),
     "clear": ("清空当前 TUI 显示", "Clear the current TUI view"),
     "quit": ("退出 TUI", "Exit the TUI"),
-    "say": ("在本机朗读最后一条代理回复", "Read the last Agent reply on this computer"),
+    "say": ("在本机朗读最近一至四条代理回复", "Read one to four Agent replies on this computer"),
     "tui": ("设置 TUI 语言及客户端选项", "Set TUI language and client options"),
     "voice": ("设置本机自动朗读与共享声音", "Set local auto-read and the shared voice"),
 }
@@ -112,7 +117,7 @@ TUI_COMMAND_GUIDES = {
         ("on", "off", "toggle", "refresh", "auto"),
         example="/sidepanel on",
     ),
-    "say": CommandGuide("/say", example="/say"),
+    "say": CommandGuide("/say [1..4|1-3]", ("1", "2", "3", "4"), example="/say 1-3"),
     "voice": CommandGuide(
         "/voice [status|on|off|<profile>|advanced]",
         ("status", "on", "off", "advanced"),
@@ -720,10 +725,12 @@ class HASHITuiApp(App):
         self._submission_sequence = 0
         self._latest_submission_ref: tuple[int, str, int] | None = None
         self._pending_attachment: PendingAttachment | None = None
-        self._last_assistant_by_target: dict[str, dict] = {}
+        self._assistant_replies_by_target: dict[str, list[dict]] = {}
+        self._assistant_reply_scope_by_target: dict[str, tuple[str, object]] = {}
         self._auto_spoken_refs: dict[str, None] = {}
         self._auto_speech_pending: set[str] = set()
         self._speech_task: asyncio.Task | None = None
+        self._say_sequence_task: asyncio.Task | None = None
         self._speech_lock = asyncio.Lock()
         preferences = self._load_tui_preferences()
         remembered = preferences.get("last_agent_by_instance", {})
@@ -1592,10 +1599,21 @@ class HASHITuiApp(App):
             target_agent = str(
                 msg.get("agent") or msg.get("agent_id") or self.current_agent or ""
             ).strip().casefold()
-            if target_agent:
-                self._last_assistant_by_target[
-                    f"{self.current_instance_id}:{target_agent}"
-                ] = dict(msg)
+            if target_agent and is_speakable_final_reply(msg):
+                key = f"{self.current_instance_id}:{target_agent}"
+                scope = (str(msg.get("session_id") or ""), msg.get("context_generation"))
+                if scope[0] and self._assistant_reply_scope_by_target.get(key) not in (None, scope):
+                    self._assistant_replies_by_target.pop(key, None)
+                if scope[0]:
+                    self._assistant_reply_scope_by_target[key] = scope
+                recent = self._assistant_replies_by_target.setdefault(key, [])
+                identity = msg.get("message_id") or msg.get("message_ref")
+                if not identity or all(
+                    (entry.get("message_id") or entry.get("message_ref")) != identity
+                    for entry in recent
+                ):
+                    recent.append(dict(msg))
+                    del recent[:-20]
             self._clear_typing_for_transcript_message(msg)
 
     @work()
@@ -1617,6 +1635,7 @@ class HASHITuiApp(App):
             return
         chat = self.query_one("#chat-history", ChatHistory)
         chat.clear()
+        self._assistant_replies_by_target.pop(self._voice_target_key(agent), None)
         for msg in messages:
             self._render_transcript_message(msg)
 
@@ -1655,6 +1674,7 @@ class HASHITuiApp(App):
                         history_reset = client.consume_transcript_reset(agent)
                         if history_reset and agent == self.current_agent:
                             self.query_one("#chat-history", ChatHistory).clear()
+                            self._assistant_replies_by_target.pop(self._voice_target_key(agent), None)
                             for msg in messages:
                                 self._render_transcript_message(msg)
                             continue
@@ -1662,7 +1682,7 @@ class HASHITuiApp(App):
                         for msg in messages:
                             if msg.get("role") == "assistant":
                                 self._render_transcript_message(msg)
-                                if self._voice_auto_enabled(agent):
+                                if self._voice_auto_enabled(agent) and is_speakable_final_reply(msg):
                                     self._queue_tui_speech(msg, announce=False)
                                 received = True
                         if received:
@@ -2588,7 +2608,7 @@ class HASHITuiApp(App):
 `/sidepanel auto on|off|toggle`　设置自动巡览
 `/attach <路径|clipboard|cancel>`　发送文件或剪贴板图片
 `@相对路径`　发送当前 Agent Workzone 中的文件
-`/say`　仅在本机朗读最后一条代理回复一次
+`/say [1..4|1-3]`　仅在本机按先后顺序朗读代理回复
 `/voice [on|off|档案|advanced]`　设置本机自动朗读与共享声音
 `/tui language zh|en`　切换界面语言
 `/tui sound on|off|test`　设置短提示音（不是回复朗读）
@@ -2615,7 +2635,7 @@ class HASHITuiApp(App):
 `/sidepanel auto on|off|toggle`　Configure the automatic tour
 `/attach <path|clipboard|cancel>`　Send a file or clipboard image
 `@relative/path`　Send a file from the current Agent Workzone
-`/say`　Read the last Agent reply once on this computer only
+`/say [1..4|1-3]`　Read recent Agent replies in order on this computer only
 `/voice [on|off|profile|advanced]`　Set local auto-read and the shared voice
 `/tui language zh|en`　Change the interface language
 `/tui sound on|off|test`　Configure short cues (not reply speech)
@@ -2984,14 +3004,18 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
         task = self._speech_task
         if task is not None and not task.done():
             task.cancel()
+        sequence = self._say_sequence_task
+        if sequence is not None and not sequence.done():
+            sequence.cancel()
 
-    def _queue_tui_speech(self, message: dict, *, announce: bool) -> None:
+    def _queue_tui_speech(self, message: dict, *, announce: bool, cancel_existing: bool = True) -> None:
         if not self.current_agent or self.current_agent_display == "ALL":
             return
         text = str(message.get("text") or "").strip()
         if not text:
             return
-        self._cancel_tui_speech()
+        if cancel_existing:
+            self._cancel_tui_speech()
         generation = self._connection_generation
         client = self.api
         instance_id = self.current_instance_id
@@ -3139,17 +3163,46 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
 
     def _handle_say_cmd(self, text: str) -> None:
         chat = self.query_one("#chat-history", ChatHistory)
-        if text.strip().casefold() != "/say":
-            chat.write(Text("请直接使用 /say，不带参数。" if self._ui_language == "zh" else "Use /say without arguments.", style="hashi.error"))
+        try:
+            selection = parse_say_selection(text.strip().split()[1:])
+        except ValueError:
+            chat.write(Text("用法：/say、/say 1 至 /say 4，或 /say 1-3。" if self._ui_language == "zh" else "Use /say, /say 1-4, or /say 1-3.", style="hashi.error"))
             return
         if not self.current_agent or self.current_agent_display == "ALL":
             chat.write(Text("使用 /say 前请先选择一个 Agent。" if self._ui_language == "zh" else "Select one Agent before using /say.", style="hashi.error"))
             return
-        message = self._last_assistant_by_target.get(self._voice_target_key())
-        if not message:
+        messages, available = select_recent_replies(
+            self._assistant_replies_by_target.get(self._voice_target_key(), []),
+            selection,
+        )
+        if not messages:
             chat.write(Text("当前没有可朗读的已显示代理最终回复。" if self._ui_language == "zh" else "No visible final Agent reply is available to read.", style="hashi.error"))
             return
-        self._queue_tui_speech(message, announce=True)
+        if available < selection.end:
+            chat.write(Text(
+                (f"当前只有 {available} 条可朗读的回复。" if self._ui_language == "zh" else f"Only {available} recent replies are available."),
+                style="hashi.muted",
+            ))
+        self._cancel_tui_speech()
+        self._say_sequence_task = asyncio.create_task(
+            self._play_say_sequence(messages, generation=self._connection_generation)
+        )
+
+    async def _play_say_sequence(self, messages: list[dict], *, generation: int) -> None:
+        current_task = asyncio.current_task()
+        try:
+            for message in messages:
+                if generation != self._connection_generation:
+                    return
+                self._queue_tui_speech(message, announce=True, cancel_existing=False)
+                task = self._speech_task
+                if task is not None:
+                    await task
+        except asyncio.CancelledError:
+            return
+        finally:
+            if self._say_sequence_task is current_task:
+                self._say_sequence_task = None
 
     async def _handle_voice_cmd(self, text: str) -> None:
         chat = self.query_one("#chat-history", ChatHistory)

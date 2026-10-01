@@ -1558,6 +1558,28 @@ def test_say_delivery_lookup_targets_telegram_when_command_arrives_via_workbench
     assert tracking_started is True
 
 
+def test_say_recent_delivery_query_is_bounded_to_confirmed_chat_replies(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    for index in range(1, 4):
+        accepted = _complete(
+            store, session_id=session["session_id"], owner_id=owner,
+            request_id=f"say-recent-{index}", key=f"say-recent-key-{index}",
+            text=f"prompt {index}", answer=f"answer {index}", source="text",
+        )
+        store.record_assistant_delivery(
+            accepted.request_id, delivered=index != 2, surface="telegram",
+            channel_key="99", transport="telegram", completion_path="foreground",
+        )
+    assert store.recent_delivered_assistant_texts(
+        session["session_id"], surface="telegram", channel_key="99", limit=4,
+    ) == ["answer 3", "answer 1"]
+    assert store.recent_delivered_assistant_texts(
+        session["session_id"], surface="telegram", channel_key="other", limit=4,
+    ) == []
+
+
 def test_default_session_is_permanent_and_channel_bindings_are_isolated(tmp_path):
     store = _store(tmp_path)
     owner = "user:7"

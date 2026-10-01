@@ -52,6 +52,8 @@ Phone provider and model details live in qualified Function adapters. Settings a
 
 Commands follow the [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md). Typed slash commands retain their Session and are admitted by the owner even during an active Run. /new creates a fresh primary Session without deleting history; PAO owns Agent deletion and cleanup receipts.
 
+`/say` reads the newest final Agent reply; `/say 2` through `/say 4` read that many, and `/say 1-3` reads the newest three oldest first. Speech selection skips presentation-only cost, command, and progress messages. Telegram requires confirmed delivery on its chat route; Workbench and TUI present generated audio locally. Source changes and a `/reboot max` receipt do not prove physical playback.
+
 ## Move, Scheduler, and HCC
 
 /move and /clone share package, registry, workspace, Scheduler, secret, and lifecycle owners. Move removes verified source only after activation. Clone preserves it, excludes Telegram credentials, and disables imported jobs. Accepted is not completed. See [Agent Move](HASHI_AGENT_MOVE_V1.md).

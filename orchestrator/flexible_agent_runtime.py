@@ -8,6 +8,7 @@ import time
 import asyncio
 import inspect
 import logging
+from collections import deque
 from uuid import uuid4
 from contextlib import suppress
 from datetime import datetime
@@ -81,6 +82,7 @@ from orchestrator.source_policy import source_requires_manual_remote_api_permiss
 from remote.local_http import local_http_hosts
 from remote.runtime_identity import read_runtime_claim
 from orchestrator import runtime_session
+from orchestrator.say_command import parse_say_selection
 from orchestrator import runtime_status
 from orchestrator import runtime_timeout
 from orchestrator import runtime_transfer
@@ -5988,26 +5990,40 @@ class FlexibleAgentRuntime:
         )
 
     async def cmd_say(self, update: Update, context: Any):
-        """One-shot TTS: synthesize the last assistant message and send as voice."""
+        """Speak selected delivered final replies on the current Telegram route."""
         if not self._is_authorized_user(update.effective_user.id):
             return
-        text = self._load_last_visible_assistant_text(update)
-        if not text:
+        try:
+            selection = parse_say_selection(getattr(context, "args", None) or [])
+        except ValueError:
+            await self._reply_text(update, ui_language.tr("voice.say_usage"))
+            return
+        newest = self._load_recent_visible_assistant_texts(update, limit=selection.end)
+        texts = list(reversed(newest[selection.start - 1 : selection.end]))
+        if not texts:
             await self._reply_text(update, ui_language.tr("voice.no_recent"))
             return
+        if len(newest) < selection.end:
+            await self._reply_text(
+                update, ui_language.tr("voice.say_partial", count=len(newest))
+            )
         chat_id = update.effective_chat.id
-        request_id = f"say-{int(time.time())}"
-        ok = await self._send_voice_reply(chat_id, text, request_id, force=True)
         session = active_slash_command_audit_session()
-        if ok is True:
-            if session is not None:
-                session.add_side_effect("voice_reply_sent")
-        elif ok is None:
-            if session is not None:
-                session.add_side_effect("voice_reply_delivery_unknown")
-            await self._reply_text(update, ui_language.tr("voice.delivery_unknown"))
-        else:
-            await self._reply_text(update, ui_language.tr("voice.synthesis_failed"))
+        for text in texts:
+            ok = await self._send_voice_reply(
+                chat_id, text, f"say-{uuid4().hex}", force=True
+            )
+            if ok is True:
+                if session is not None:
+                    session.add_side_effect("voice_reply_sent")
+            elif ok is None:
+                if session is not None:
+                    session.add_side_effect("voice_reply_delivery_unknown")
+                await self._reply_text(update, ui_language.tr("voice.delivery_unknown"))
+                return
+            else:
+                await self._reply_text(update, ui_language.tr("voice.synthesis_failed"))
+                return
 
     # ── /loop — recurring task management ──────────────────────────
 
@@ -11744,6 +11760,11 @@ class FlexibleAgentRuntime:
     def _is_visible_assistant_entry(entry: dict, *, core: bool) -> bool:
         """Return whether a transcript row is a real, speakable reply."""
 
+        if entry.get("history_eligible") is False:
+            return False
+        channel = str(entry.get("presentation_channel") or entry.get("channel") or "").casefold()
+        if channel and channel != "final":
+            return False
         if entry.get("role") == "thinking" or entry.get("source") == "think":
             return False
         text = entry.get("text") or entry.get("visible_text") or ""
@@ -11766,6 +11787,7 @@ class FlexibleAgentRuntime:
             return True
         if source in {
             "api",
+            "meter-cost",
             "cron",
             "scheduler",
             "heartbeat",
@@ -11801,7 +11823,17 @@ class FlexibleAgentRuntime:
         self,
         update: Update | None = None,
     ) -> str | None:
-        """Return the newest reply confirmed on the current /say route.
+        """Compatibility accessor for the newest confirmed /say reply."""
+        texts = self._load_recent_visible_assistant_texts(update, limit=1)
+        return texts[0] if texts else None
+
+    def _load_recent_visible_assistant_texts(
+        self,
+        update: Update | None = None,
+        *,
+        limit: int = 4,
+    ) -> list[str]:
+        """Return recent confirmed replies newest first on the /say route.
 
         Before delivery-aware Session receipts exist, a bounded compatibility
         scan accepts only interactive legacy transcript sources.  Once receipt
@@ -11809,16 +11841,19 @@ class FlexibleAgentRuntime:
         instead of speaking an unconfirmed or cross-channel response.
         """
 
+        limit = max(1, min(int(limit), 4))
         session_store_available = getattr(self, "session_store", None) is not None
         if update is not None and session_store_available:
             try:
-                delivered_text, tracking_started = (
-                    runtime_session.telegram_delivery_state_for_update(self, update)
+                delivered_texts, tracking_started = (
+                    runtime_session.telegram_delivery_texts_for_update(
+                        self, update, limit=limit
+                    )
                 )
-                if delivered_text:
-                    return delivered_text
+                if delivered_texts:
+                    return delivered_texts
                 if tracking_started:
-                    return None
+                    return []
             except Exception as exc:
                 logger = getattr(self, "error_logger", None)
                 if logger is not None:
@@ -11827,12 +11862,12 @@ class FlexibleAgentRuntime:
                         type(exc).__name__,
                         exc,
                     )
-                return None
+                return []
 
         try:
             core_path = getattr(self, "core_transcript_log_path", None)
             if core_path is not None and core_path.exists():
-                last_core = None
+                recent_core: deque[str] = deque(maxlen=limit)
                 with core_path.open("r", encoding="utf-8") as handle:
                     for line in handle:
                         line = line.strip()
@@ -11846,22 +11881,18 @@ class FlexibleAgentRuntime:
                             self._is_visible_assistant_entry(entry, core=True)
                             and self._is_legacy_interactive_reply_source(entry)
                         ):
-                            last_core = entry
-                if last_core is not None:
-                    text = (
-                        last_core.get("visible_text")
-                        or last_core.get("text")
-                        or ""
-                    )
-                    if text.strip():
-                        return text
+                            text = entry.get("visible_text") or entry.get("text") or ""
+                            if text.strip():
+                                recent_core.append(text)
+                if recent_core:
+                    return list(reversed(recent_core))
         except Exception:
             pass
 
         try:
             path = getattr(self, "transcript_log_path", None)
             if path is not None and path.exists():
-                last_text = None
+                recent_text: deque[str] = deque(maxlen=limit)
                 with path.open("r", encoding="utf-8") as handle:
                     for line in handle:
                         line = line.strip()
@@ -11875,12 +11906,12 @@ class FlexibleAgentRuntime:
                             self._is_visible_assistant_entry(entry, core=False)
                             and self._is_legacy_interactive_reply_source(entry)
                         ):
-                            last_text = entry.get("text") or ""
-                if last_text and last_text.strip():
-                    return last_text
+                            recent_text.append(entry.get("text") or "")
+                if recent_text:
+                    return list(reversed(recent_text))
         except Exception:
             pass
-        return None
+        return []
 
     async def _send_wrapper_polishing_placeholder(self, item: QueuedRequest):
         return await runtime_wrapper.send_wrapper_polishing_placeholder(self, item)

@@ -4313,11 +4313,27 @@ class SessionStore:
     ) -> str | None:
         """Return the newest visible assistant text confirmed on one route."""
 
-        self.get_session(session_id)
+        texts = self.recent_delivered_assistant_texts(
+            session_id, surface=surface, channel_key=channel_key, limit=1
+        )
+        return texts[0] if texts else None
+
+    def recent_delivered_assistant_texts(
+        self,
+        session_id: str,
+        *,
+        surface: str,
+        channel_key: str,
+        limit: int = 4,
+    ) -> list[str]:
+        """Return up to four confirmed final replies, newest first, on one route."""
+
+        session = self.get_session(session_id)
         normalized_surface = str(surface or "").strip().lower()
         normalized_channel = str(channel_key or "").strip()
         if not normalized_surface or not normalized_channel:
-            return None
+            return []
+        bounded_limit = max(1, min(int(limit), 4))
         route_phase = f"transport:{normalized_surface}:{normalized_channel}"
         with self._lock, self._connection() as connection:
             rows = connection.execute(
@@ -4334,16 +4350,22 @@ class SessionStore:
                   AND r.state = 'completed'
                   AND m.role = 'assistant'
                   AND m.visibility = 'visible'
+                  AND m.context_generation = ?
                 ORDER BY e.sequence DESC
+                LIMIT ?
                 """,
-                (str(session_id), self.instance_id, route_phase),
+                (
+                    str(session_id), self.instance_id, route_phase,
+                    int(session["context_generation"]), bounded_limit,
+                ),
             ).fetchall()
+        texts: list[str] = []
         for row in rows:
             detail = _json_object(row["detail_json"])
             text = str(detail.get("text_override") or row["text"] or "").strip()
             if text:
-                return text
-        return None
+                texts.append(text)
+        return texts
 
     def has_assistant_delivery_outcome(
         self,

@@ -1303,6 +1303,19 @@ def telegram_delivery_state_for_update(
     update: Any,
 ) -> tuple[str | None, bool]:
     """Return confirmed assistant delivery state for the target Telegram chat."""
+    texts, tracking_started = telegram_delivery_texts_for_update(
+        runtime, update, limit=1
+    )
+    return (texts[0] if texts else None), tracking_started
+
+
+def telegram_delivery_texts_for_update(
+    runtime: Any,
+    update: Any,
+    *,
+    limit: int = 4,
+) -> tuple[list[str], bool]:
+    """Return recent delivered final replies on the current Telegram route."""
 
     (
         update_surface,
@@ -1315,7 +1328,7 @@ def telegram_delivery_state_for_update(
         query = getattr(update, "callback_query", None)
         chat_id = getattr(getattr(query, "message", None), "chat_id", None)
     if chat_id is None:
-        return None, False
+        return [], False
     surface = "telegram"
     channel_key = str(chat_id)
     if update_surface != "telegram":
@@ -1329,10 +1342,11 @@ def telegram_delivery_state_for_update(
     )
     store = ensure_store(runtime)
     return (
-        store.latest_delivered_assistant_text(
+        store.recent_delivered_assistant_texts(
             session["session_id"],
             surface=surface,
             channel_key=channel_key,
+            limit=limit,
         ),
         store.has_assistant_delivery_outcome(
             session["session_id"],
@@ -2047,4 +2061,5 @@ __all__ = [
     "session_workzone_state",
     "start_automatic_promotion",
     "telegram_delivery_state_for_update",
+    "telegram_delivery_texts_for_update",
 ]

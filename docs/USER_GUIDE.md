@@ -131,8 +131,12 @@ selected model's capabilities and configured routes.
 
 SafeVoice adds confirmation for transcribed voice commands. Native audio,
 transcription, and spoken replies have separate capability requirements.
-/voice configures speech; /say attempts to read the most recent confirmed
-assistant reply on the current route.
+/voice configures speech. /say reads the newest confirmed final Agent reply on
+the current route. /say 2 through /say 4 read that many recent replies, and
+/say 1-3 reads the newest three, oldest first. Automated cost, command, and
+progress messages are skipped. A range such as /say 2-4 selects the second
+through fourth most recent replies. Speech stays within the current Agent and
+conversation; Telegram only reads replies confirmed delivered to that chat.
 
 /notify chooses normal, quiet, or silent Telegram delivery. Quiet retains
 final results and important error/recovery notices while silencing interim

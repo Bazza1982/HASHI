@@ -2332,6 +2332,8 @@
     "voice.current_provider": "Current voice provider: {provider}",
     "voice.rate_integer": "Voice rate must be an integer.",
     "voice.no_recent": "No recent message is available to read.",
+    "voice.say_usage": "Use /say, /say 1-4, or /say 1-3.",
+    "voice.say_partial": "Only {count} recent replies are available.",
     "voice.synthesis_failed": "Voice synthesis failed. Check /voice status for provider settings.",
     "voice.delivery_unknown": "Telegram did not confirm the voice delivery. It may already have arrived, so HASHI did not retry and risk sending a duplicate.",
     "skill.system_unconfigured": "The Skill system is not configured.",
