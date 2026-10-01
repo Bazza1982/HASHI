@@ -81,6 +81,52 @@ async def test_only_real_presentable_progress_is_spoken_when_call_prefers_it(pho
 
 
 @pytest.mark.asyncio
+async def test_caller_can_stop_interim_updates_mid_run_without_losing_final_result(phone):
+    phone.judgments = [decision(action("query", "Check the current news"))]
+    await speak(phone, "Check the news and keep me posted")
+    await _stop_auto_relays(phone)
+    item = action_rows(phone)[0]
+    _set_run_state(phone, item["run_id"], "running")
+
+    phone.judgments = [{"route": "answer", "complete": True, "reply_needed": False,
+                        "reply": "", "actions": [], "progress_preference": "off"}]
+    await speak(phone, "No more interim updates; tell me the result when done",
+                start=200, end=300, source="quiet")
+    assert phone.manager._progress_enabled(phone.binding) is False
+    assert len(action_rows(phone)) == 1
+
+    phone.updates.clear()
+    polled = asyncio.Event()
+
+    async def poll(_binding, _request_id, after_sequence, _limit):
+        polled.set()
+        return {"ok": True, "ephemeral_epoch": "worker-1", "events": [
+            {"sequence": 1, "delivery_class": "user_commentary",
+             "presentation_channel": "commentary", "presentation_enabled": True,
+             "summary": "The first sources are ready."},
+        ] if after_sequence == 0 else []}
+
+    phone.manager._poll_run_activity = poll
+    run = phone.store.get_run(item["run_id"])
+    relay = asyncio.create_task(phone.manager._relay_run(
+        phone.binding, item["delegation_id"], item["run_id"], run["request_id"]))
+    try:
+        await asyncio.wait_for(polled.wait(), timeout=2)
+        await asyncio.sleep(0.03)
+        assert not any("first sources" in payload["content"] for _, payload in phone.updates)
+    finally:
+        relay.cancel()
+        await asyncio.gather(relay, return_exceptions=True)
+
+    phone.store.finish_request(run["request_id"], success=True,
+                               assistant_text="Checked result: three confirmed stories.")
+    await phone.manager._relay_run(
+        phone.binding, item["delegation_id"], item["run_id"], run["request_id"])
+    assert any("three confirmed stories" in payload["content"]
+               for _, payload in phone.updates)
+
+
+@pytest.mark.asyncio
 async def test_running_stop_is_confirmed_when_run_stops_even_with_partial_reads(phone):
     phone.judgments = [decision(action("query", "Find all current news"))]
     await speak(phone, "Find all current news")
