@@ -231,8 +231,9 @@ The foreground must be able to read that final Message from durable PAO state.
 At call start, PCM includes an addressable index of recent completed results
 from the selected Conversation and the same Agent's scheduled activity as
 mandatory reference context; provider capacity fitting must retain it or fail
-the start explicitly. The index marks excerpts and omissions. A request for
-details reads the full original without a new Run. Large originals carry an
+the start explicitly. The index marks excerpts and omissions. Any question
+about a completed result, including a summary or count, reads the full original
+without a new Run. Large originals carry an
 explicit page boundary and continuation position; the position means offered
 content, not confirmed speech.
 Provider append acceptance proves only that the submitted text was accepted;

@@ -525,6 +525,10 @@ it may not silently masquerade as the whole result. Capacity fitting must not
 silently remove all access to a relevant completed result. If the required
 foreground facts cannot be made available, initiation reports that limitation
 instead of asking the Agent to guess or re-run completed work.
+The index is an address book, not answer material. A question about completed
+work, including a summary or count, resolves to its canonical original before
+the foreground answers. Whether an excerpt happens to look sufficient is not
+a routing decision.
 
 This clarification supersedes the earlier rule that the entire recent
 activity reference simply yields before conversation history. A privacy-safe

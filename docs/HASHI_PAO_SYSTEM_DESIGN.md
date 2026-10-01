@@ -223,6 +223,10 @@ call stores only that ID and a page position in its retry plan. The foreground
 receives a bounded page labelled with its start, end, total length and next
 position; asking to continue reads the next page from the same saved result
 without a new Run. The position records material offered, not words heard.
+When the caller asks about several completed reports, semantic routing selects
+their distinct IDs and PAO stages each original. A summary request does not
+authorize answering from a clipped opening excerpt. A new background Run is
+reserved for work not already represented by a saved result.
 The resulting speech and player observations remain separate evidence. A
 typed user-stop backend notification settles its Run as `stopped`; an ordinary
 backend error settles as `failed`. Phone cancellation reports request sent
@@ -234,6 +238,11 @@ Hong Kong news final Messages existed, while the then-running Phone relay sent
 only short uncertainty receipts. Later source changes that read the canonical final
 Message still require a real completed-Run handoff and spoken-coverage check;
 provider acceptance or a generic speech fragment cannot close this case.
+In the 2026-10-01 isolated Sunny call, the opening included all five morning
+reports, but semantic routing chose a direct answer from excerpts and the
+foreground spoke only two of the early report's three numbered focus items.
+This is a separate red acceptance case for result recall, even though mail and
+school facts were present and no duplicate Run was started.
 
 PAO also owns the durable opening identifier and its separate request,
 acceptance, output and player observations. Opening content comes from PCM,

@@ -410,6 +410,48 @@ async def test_same_agent_can_recall_complete_scheduled_report_without_new_run(p
 
 
 @pytest.mark.asyncio
+async def test_morning_question_receives_four_complete_saved_reports_without_new_work(phone):
+    activity = phone.store.ensure_agent_activity_session(
+        owner_id=phone.owner_id, agent_id=phone.agent_id,
+    )
+    reports = {
+        "news": "Gemini; Micron; Russian energy strike",
+        "gmail": "Gmail 36 messages and two decisions",
+        "outlook": "Outlook 13 messages and three followups",
+        "school": "Two students and 16 modules checked",
+    }
+    message_ids = []
+    for name, conclusion in reports.items():
+        accepted = phone.store.accept_run(
+            session_id=activity["session_id"], owner_id=phone.owner_id,
+            agent_id=phone.agent_id, request_id="morning-" + name,
+            text="Prepare morning " + name, source="scheduler",
+            idempotency_key="morning-" + name,
+        )
+        full_report = (name + " details. " * 55) + "\nConclusion: " + conclusion
+        assert len(full_report) > 360
+        phone.store.finish_request(
+            accepted.request_id, success=True, assistant_text=full_report,
+        )
+        message_ids.append(
+            phone.store.get_run(accepted.run_id, owner_id=phone.owner_id)["final_message_id"]
+        )
+    phone.judgments = [{"route": "recall", "complete": True, "reply_needed": False,
+                        "reply": "", "actions": [], "result_ids": message_ids}]
+
+    await speak(phone, "Tell me the news, Gmail, Outlook and school results")
+
+    assert not phone.admit_calls
+    assert not action_rows(phone)
+    offered = event_details(phone, "voice.live.action.reply_offered")[-1]
+    assert [page["message_id"] for page in offered["result_pages"]] == message_ids
+    staged = "\n".join(payload["content"] for _, payload in phone.updates
+                       if payload["kind"] == "thinking")
+    assert all(conclusion in staged for conclusion in reports.values())
+    assert event_details(phone, "voice.live.delegation.routed")[-1]["decision"] == "recalled"
+
+
+@pytest.mark.asyncio
 async def test_long_saved_original_has_explicit_page_and_scoped_continuation(phone):
     activity = phone.store.ensure_agent_activity_session(
         owner_id=phone.owner_id, agent_id=phone.agent_id,

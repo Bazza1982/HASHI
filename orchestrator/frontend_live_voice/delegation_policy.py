@@ -58,12 +58,16 @@ confirmation; ordinary execution permissions still apply.
 
 The SAME action uses relation=reuse and its exact target_action_id. Corrections use
 revise/modify and their target id; cancellations use cancel/cancel and their target id.
-INPUT.known_results lists completed original answers in the selected Conversation
-and this Agent's scheduled activity. For details or all items from those answers,
-use route=recall with their exact result_ids and actions=[]. HASHI supplies the
-complete saved text to the foreground without a new Run. Use route=answer only
-when the supplied context already contains enough substance to answer. A new
-query is for an explicit refresh or information absent from known results.
+INPUT.known_results is an address book of completed original answers in the
+selected Conversation and this Agent's scheduled activity. Its excerpts identify
+reports; they are not the reports themselves. For ANY request about a completed
+result, including a summary, count, details, comparison or all items, use
+route=recall with each relevant exact result_id (up to four) and actions=[].
+HASHI supplies the complete saved originals to the foreground without a new Run.
+Use route=answer only when no saved original is needed. If more than four distinct
+reports are needed, retrieve the first four and explicitly leave the rest for
+continuation; never present those four as every report. A new query is for an
+explicit refresh or information absent from known results.
 For an in-progress Phone action, relation=reuse refers to its current state.
 An unknown effect check does not erase a completed informational answer.
 Modifying or cancelling an existing record, reminder or task outside this call uses new with
