@@ -1714,6 +1714,53 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         self.assertIn("I am checking it.", records[0]["text"])
         self.assertTrue(records[0]["message_context"]["live_call_record"])
 
+    def test_short_assistant_backchannel_does_not_split_continuing_caller(self):
+        fragments = [
+            Fragment("backchannel-u1", "user", "Wait a moment ", 16000, 16600),
+            Fragment("backchannel-a1", "assistant", "嗯,", 16800, 17000),
+            Fragment("backchannel-u2", "user", "Please finish your thought", 17800, 18200),
+        ]
+        for fragment in fragments:
+            asyncio.run(self.manager.append_fragment_once(self.binding, fragment))
+
+        segments = self.store.live_transcript_segments(
+            self.session_id, owner_id=self.owner_id, context_generation=1,
+        )
+        self.assertEqual(
+            [(item["role"], item["text"]) for item in segments],
+            [("user", "Wait a moment Please finish your thought"),
+             ("assistant", "嗯,")],
+        )
+        history = self.store.recent_history_messages(
+            self.session_id, owner_id=self.owner_id, context_generation=1,
+        )
+        self.assertEqual(
+            [(item["role"], item["text"]) for item in history],
+            [("user", "Wait a moment Please finish your thought"),
+             ("assistant", "嗯,")],
+        )
+        self.manager._persist_call_record(self.binding)
+        record = next(item for item in self.store.messages(self.session_id, owner_id=self.owner_id)
+                      if item.get("source") == "live-phone")
+        self.assertIn("Wait a moment Please finish your thought", record["text"])
+
+    def test_full_unpunctuated_reply_separates_quick_caller_turns(self):
+        for fragment in (
+            Fragment("reply-u1", "user", "早安", 0, 200),
+            Fragment("reply-a1", "assistant", "我会详细讲解", 300, 1300),
+            Fragment("reply-u2", "user", "现在下午了", 1400, 1600),
+        ):
+            asyncio.run(self.manager.append_fragment_once(self.binding, fragment))
+
+        segments = self.store.live_transcript_segments(
+            self.session_id, owner_id=self.owner_id, context_generation=1,
+        )
+        self.assertEqual(
+            [(item["role"], item["text"]) for item in segments],
+            [("user", "早安"), ("assistant", "我会详细讲解"),
+             ("user", "现在下午了")],
+        )
+
     def test_overlapping_speech_keeps_each_utterance_together_in_history_and_record(self):
         fragments = [
             Fragment("overlap-a1", "assistant", "正在介绍", 0, 200),
@@ -1722,7 +1769,7 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
             Fragment("overlap-u2", "user", "详细说", 600, 800),
             Fragment("overlap-a3", "assistant", "内容", 800, 1000),
             Fragment("overlap-u3", "user", "这个模型", 1000, 1200),
-            Fragment("overlap-a4", "assistant", "好的", 1300, 1500),
+            Fragment("overlap-a4", "assistant", "好的。", 1300, 1500),
             Fragment("overlap-u4", "user", "继续", 1600, 1800),
         ]
         for fragment in fragments:
@@ -1734,7 +1781,7 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         self.assertEqual(
             [(item["role"], item["text"]) for item in history],
             [("assistant", "正在介绍新闻内容"), ("user", "等一下详细说这个模型"),
-             ("assistant", "好的"), ("user", "继续")],
+             ("assistant", "好的。"), ("user", "继续")],
         )
         legacy = self.store.append_presentation_message(
             session_id=self.session_id, owner_id=self.owner_id,

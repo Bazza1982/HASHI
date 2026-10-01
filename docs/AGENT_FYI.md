@@ -35,6 +35,7 @@ it does not outrank a saved report.
 Phone captions and terminal call records derive readable speaker utterances
 from durable provider fragments, retaining exact recognized text and source
 identity. Interleaved speech does not split a caller sentence into token rows;
+brief acknowledgments inside that sentence do not create a false turn boundary;
 reprojecting an old call keeps its chat position and refreshes the client view.
 Speech-recognition mistakes can still affect delegated action text.
 Phone stop receipts separate confirmed stop, missing final answer and

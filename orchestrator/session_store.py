@@ -6865,6 +6865,10 @@ class SessionStore:
                 and previous is not None
                 and int(other["end_ms"]) > int(previous["end_ms"])
                 and int(other["end_ms"]) < start_ms
+                and (
+                    int(other["end_ms"]) - int(other["start_ms"]) >= 800
+                    or str(other["text"]).rstrip().endswith((".", "!", "?", "。", "！", "？"))
+                )
             )
             if (
                 previous is not None

@@ -97,7 +97,14 @@ later Session history and the terminal call record. Simultaneous speech does
 not break either speaker's continuous utterance into one line per delta; a
 completed reply still separates successive turns. The projection preserves
 the provider's exact words and their source IDs. The Phone Connector applies
-the same rule to live captions. An existing call record may be reprojected
+the same rule to live captions. A brief interleaved acknowledgment does not
+complete a reply merely because it falls between two parts of the other
+speaker's sentence. This provider supplies deltas and timestamps, not stable
+utterance boundaries: a short reply is complete when it has sentence-ending
+punctuation; a longer reply can also complete a turn without punctuation.
+The 1.2-second same-speaker gap remains a presentation boundary. Ambiguous
+recognition is displayed as received, without claiming a verified turn break.
+An existing call record may be reprojected
 from its durable fragments under the same Message ID and ordinal. PAO raises
 the Session history generation so clients refresh the corrected presentation
 in place, without moving an old call to the end of the conversation. No audio
