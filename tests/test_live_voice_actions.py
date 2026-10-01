@@ -469,6 +469,9 @@ async def test_morning_question_receives_four_complete_saved_reports_without_new
     assert all(conclusion in staged for conclusion in reports.values())
     assert "Section 今日重点: 3 numbered entries." in staged
     assert "3. Russian energy strike" in staged
+    offered_kinds = [payload["kind"] for _, payload in phone.updates]
+    assert "instructions" in offered_kinds
+    assert offered_kinds.index("thinking") < offered_kinds.index("instructions") < offered_kinds.index("commentary")
     assert event_details(phone, "voice.live.delegation.routed")[-1]["decision"] == "recalled"
 
 

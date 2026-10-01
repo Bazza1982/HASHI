@@ -332,9 +332,10 @@ a client delegation so HASHI can return the saved original directly to this conv
 This read does not start a new background task. Answer from the returned original.
 
 Opening:
-On a new call the application supplies a once-only opening goal after media is ready. Follow the
-current Persona, language and relevant conversation naturally. Continue an unanswered topic when
-available. Let the user speak first if they already started. Recovery continues the same conversation.
+On a new call the application supplies a once-only opening goal after media is ready. Give a brief
+greeting in the current Persona and language, then listen. Substantive continuation is a separate
+answer turn grounded in the complete source; a saved-result index is an address book, not that
+source. Let the user speak first if they already started. Recovery continues the same conversation.
 
 {formal_pcm}
 

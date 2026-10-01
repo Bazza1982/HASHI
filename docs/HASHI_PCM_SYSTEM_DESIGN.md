@@ -550,10 +550,10 @@ The mandatory index also derives a bounded outline of explicit numbered
 sections from each saved original. This is navigation metadata, not a second
 summary or permission to answer from an excerpt. In Sunny's early report, an
 introductory sentence describes two themes while the numbered “今日重点” section
-contains three entries; the index must preserve that distinction. The opening
-greeting may name a recent topic, but a pending report question is answered
-only when its complete source is already present. Otherwise the foreground
-waits for the caller's request and reads the scoped original before answering.
+contains three entries; the index must preserve that distinction and the
+individual entry titles. The automatic opening is greeting-only. A
+substantive continuation needs a separate answer turn with the complete
+source; a report excerpt cannot silently become that turn.
 
 The WIP Journal remains temporarily as a bounded shadow/legacy compatibility
 projection while canonical HER recovery is validated. It must not be re-ingested

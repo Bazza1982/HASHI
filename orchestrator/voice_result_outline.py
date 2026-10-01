@@ -44,6 +44,10 @@ def numbered_source_outline(original: str, *, max_chars: int = 2800) -> str:
         if not current:
             current_heading = heading
         title = match.group(2).replace("**", "").strip()
+        # The numbered heading can carry a whole paragraph after an em dash.
+        # Navigation needs the entry title; the full paragraph remains in the
+        # canonical original offered to the foreground on request.
+        title = re.split(r"\s+[—–-]\s+", title, maxsplit=1)[0].strip() or title
         current.append((number, title))
     finish()
     if not groups:

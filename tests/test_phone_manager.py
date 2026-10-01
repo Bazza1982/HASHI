@@ -129,6 +129,7 @@ def test_sunny_morning_baseline_survives_busy_conversation_at_opening(tmp_path):
     assert all(summary in index.text for result_id, summary in expected.items()
                if result_id != "msg-news")
     assert "Section 今日重点: 3 numbered entries." in index.text
+    assert "1. Gemini" in index.text
     assert "3. Russia energy strike" in index.text
     assert "source excerpts" in index.text
     assert len(index.text) <= 9_000
