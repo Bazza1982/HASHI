@@ -435,6 +435,16 @@ connected Agent to local-only mode. The Worker records the failed stage and
 retries menu registration independently until success or a permanent rejection;
 shutdown cancels the retry task.
 
+Scheduler missed-trigger recovery is also connector-neutral. Scheduler admits
+one internal system Message/Run into the owner's primary Conversation, the Agent
+asks the recovery question, and FC projects that exchange to every attached
+frontend using the normal Session feed and frozen delivery route. A user's
+reply from Telegram, TUI, Backend API, or any later Connector follows the same
+ordinary-message admission path. No Connector may consume recovery prose,
+recognize menu tokens, or mutate Scheduler state directly. After the Engine
+interprets a clear reply, the Agent invokes the exact-batch typed Scheduler tool;
+ambiguous replies remain conversation until clarified.
+
 Final replies from standard non-Telegram Runs publish enabled meter and HER
 presentations after the final Message through the same Session Event boundary.
 Telegram mirroring is a destination choice, not a prerequisite for creating
@@ -491,6 +501,212 @@ transport. No frontend packages a private copy of the preview catalogue.
 The user approved the Function, HASHI1 deployment-template, and local-instance
 changes on 2026-09-28. Offline validation and running-Function adoption remain
 separate; approval did not authorize a reboot or replacement.
+
+### 8.5 Agent-owned live phone configuration (2026-09-29)
+
+`/voice` continues to own rendered TTS replies and previews. `/phone` separately
+owns an Agent's full-duplex live provider, model, output voice, conversation
+language, speaking style, and bounded custom speaking-style instruction. The
+configuration is persisted in that Agent's workspace. A frontend may display
+the effective public projection but may not select or override it.
+
+Live Phone is enabled by default at the instance level. An explicit
+`global.live_voice_v1: false` remains an operator opt-out. Provider credentials
+remain in instance secrets or the service environment; no credential means
+the capability is unavailable. `/phone` displays the effective readiness and
+names a missing provider API key, even when the Agent's provider and voice
+choices are valid. Internal revision digests stay in the preflight protocol,
+not the ordinary settings card. A successful PCM projection is separate from
+provider readiness.
+
+PCM owns the live bootstrap projection. The provider's formal `instructions`
+contain the canonical `[sys]`, active instance-global `/sys`, active Agent-local
+`/sys`, HCC usage rules, Persona, and fixed live-call transport rules with their
+authority kept explicit. HCC reference data, `[memory]`, enabled Memory+
+continuity, and the same Conversation Session's real recent user/assistant
+messages enter provider startup `input`. PAO retrieves that Agent's recent
+completed activity results so cron, heartbeat, HChat, and proactive outcomes
+already known to HASHI can be made available without another Run;
+task prompts, progress notices, cost cards, and other presentation-only rows do
+not enter this reference. None of these facts is rewritten into another memory
+store. Credentials and raw PCM files remain excluded.
+
+The OpenAI GPT-Live adapter keeps the provider's 16,384-token instruction limit
+and the 128-message/8,192-token startup-input hard limits. PCM and the adapter
+must fit whole conversation units while preserving effective instructions,
+configured memory/HCC, and access to recent completed results needed for an
+immediate answer. In the 2026-10-01 Sunny call, capacity fitting omitted the
+earlier same-Session Gmail and Hong Kong news final Messages. The separate
+completed-activity reference, if admitted at the PCM stage, was the first
+optional history unit and could not survive the recorded prefix pruning.
+Neither loss is an accepted capacity policy. A shortened reference must
+disclose its boundary and retain access to the complete original result. The
+adapter uses the provider's exact input counter and must record a privacy-safe
+section inclusion/omission manifest; the manifest is not yet implemented.
+Local estimates remain audit telemetry. If required foreground facts cannot be
+made available within the provider limit, startup fails visibly instead of
+presenting a falsely informed assistant. `store:false` remains mandatory, so
+HASHI's Session record, not a provider recording, owns continuity.
+
+The live phone is another transport for the selected Agent, not a second Agent
+or a reduced-permission assistant. The foreground model answers from supplied
+facts and presents the user's subject, with enough substance for the requested
+detail. PCM retains effective Persona, address, language and authority layers;
+shared Phone instructions never hardcode a personal address or relationship.
+Spoken results identify records by short names and requested contents. Detailed
+paths, links and code are supplied when requested, keeping ordinary speech
+suited to listening while preserving the caller's explicit presentation rules.
+
+PAO interprets a complete request with recent conversation and real action
+state through a bounded, configured semantic capability. It does not infer
+intent from keyword lists, fabricated confidence values, or the mere presence
+of a date. Answer, necessary clarification, query, write, modification and
+cancellation remain distinct. Mixed requests retain their separate intents.
+A correction may change a real record; urging speech need not execute work.
+Uncertain interpretation is visible rather than silently treated as chat.
+Speech arriving during interpretation supersedes the old result before its
+schema is consumed. A failed interpretation that admitted no work does not
+discard the earlier words when the caller completes that same request.
+
+Deduplication belongs to one action and its version, not a global one-task
+limit. Independent actions remain admissible while another runs. Repeated
+requests refer to existing evidence, and uncertain effects require
+reconciliation before another write. All execution retains the Agent's normal
+PAO permissions and admission boundary. The durable call/proposal origin is
+validated before Run admission; its messages, status, progress and cost rows
+stay out of the generic foreground inbox because the dedicated relay owns
+their delivery.
+
+One action represents an independently useful outcome. Ordered prerequisites,
+the write itself and its readback stay in that same action and Run; a readback
+must not race the write as an unrelated query. Stored action order retains the
+input order even when a batch shares one timestamp. Phone validates the current
+primary Session before preparing media and again before invoking a Worker.
+A first, definite rejection before invoking a Worker settles as failed; a later
+scope change cannot erase uncertainty from an earlier unacknowledged invocation.
+
+While delegated work runs, HASHI returns attributable progress and effects.
+A completed model response is not an action-completion receipt. Public action
+state distinguishes accepted, running, verified, failed, unknown and cancelled;
+verified effects carry references to actual execution evidence. The display
+and spoken result consume that same state. Provider acceptance of a result,
+generated speech, player activity and physical listening remain separate facts.
+Ordinary free model audio is not thereby certified before playback.
+
+The frontend retains one globally mounted call owner with captions, mute and
+explicit hang-up. Window movement, collapsing, restoring and navigation are
+display preferences, and do not recreate media or change logical call state.
+In the compact floating Phone, the text control reads “收起通话” in Chinese
+and collapses the call in place; it does not navigate to another chat. The
+existing application theme continues to own its appearance.
+The external frontend owns responsive layout and inherits its existing theme.
+Each transcript delta is durably written to the bound HASHI Session as it
+arrives. PCM derives role-preserving utterances from those canonical fragments,
+so concurrent text chat and the next call can use phone speech as ordinary
+recent history. When the call becomes terminal, HASHI additionally projects the
+complete transcript as one presentation-only call record; that card is a view,
+not a second history authority.
+
+The call panel controls one durable logical call, not the lifetime of one
+browser or provider connection. Only its explicit hang-up button may submit a
+user termination. Scope navigation, component disposal, page lifecycle,
+WebRTC/data-channel failure, Provider closure, API replacement, and lease or
+duration expiry must be reported as distinct automatic/fault sources; none may
+be labelled `user_hangup`. FC keeps the call globally reachable across ordinary
+Workbench navigation and reconnects or rolls over replaceable transport epochs
+where possible. If recovery ultimately fails, the call is visibly faulted and
+never rendered as a normal user-ended call. When reloading an older event
+cursor, the canonical call phase takes precedence: the backend does not project
+superseded passive terminal events for a call that is still recoverable.
+
+FC writes a privacy-bounded JSONL diagnostic timeline for every call under the
+instance logs. Server-side lifecycle evidence does not share the PAO Session
+event sequence, so the failure being diagnosed cannot suppress its own record.
+Workbench contributes bounded observations for peer connection, ICE, data
+channel, media track, page visibility, network state, polling, heartbeat,
+scope departure, and termination source. Provider events record their type,
+identifier, timing/size metadata, close reason and bounded exception frames;
+raw audio, transcript text, projected context, SDP, credentials and secrets are
+excluded. The canonical Session transcript continues to own conversational
+content.
+
+PAO background-result routing uses the Provider's supported append channels:
+factual/progress context enters `session.thinking.append`, while a result that
+the foreground voice should say enters `session.commentary.append`. Every
+append remains correlated with its source Run/delegation and acknowledgement.
+An unavailable sideband queues or defers that delivery; it never grants the
+background Run authority over the call lifecycle.
+The Phone reads the canonical PAO final Message directly for complete query
+content; a bounded effect check must not turn a completed report into “no
+results.” It separately tracks accepted interruption, terminal stop, and
+possible effects before stopping. Optional spoken progress comes from real
+presentable request activity and obeys the foreground call's on/off choice.
+Neither acceptance of provider updates nor one observed speech fragment
+proves that a long answer was spoken in full or heard on the user's device.
+
+The sideband stages each normalized transcript or typed delegation in a durable
+SessionStore inbox before placing it in the process-only projection queue. A
+single persistent queue sequence preserves receive order across both event
+types. Function startup replays staged items in order; transcript projection
+and inbox removal commit together. If staging fails, the reader applies
+backpressure and records redacted retry evidence instead of accepting volatile
+content. The independent audit never records transcript text. Explicit user
+hang-up uses its authenticated call-control path and does not wait for the
+projection queue to drain.
+
+Authenticated event polling reads call phase and Session events from one SQLite
+snapshot. Background inbox pagination selects a single globally ordered source-
+time page across messages and status events, preventing a deep queue in one type
+from letting a later item in the other type go first.
+
+Context preflight returns a public `/phone` snapshot and revision. Start must
+present that exact revision, resolves the snapshot again at the trusted Backend
+API boundary, and fails if PCM, identity, or phone configuration changed. The
+provider model and voice are frozen for the resulting call. Persistent call
+records contain only the public snapshot and an instruction digest, never the
+projected persona or full provider prompt.
+
+Authenticated context preflight returns a recoverable foreground-call binding
+as well as capability data. Workbench uses that binding to rediscover an old
+call even if a previous client cleared its per-tab hint, and presents a pending
+user hang-up as retryable until confirmed. A late start response is bound to its
+Provider epoch before cancellation handling, so an uncertain user hang-up can
+retry against the canonical call.
+
+The initial qualified provider is OpenAI `gpt-live-1`. Its supported voice
+catalogue is maintained as Function configuration and is applied before the
+session begins, following the provider's live-conversation contract. Source,
+offline qualification, real-provider canary, running-generation adoption, and
+user microphone acceptance remain distinct delivery states.
+
+Provider translation is an explicit Functions adapter contract: credentials,
+selection validation, context encoding and capacity, media descriptor, wire
+events, control, context/result updates and opening. PAO consumes normalized
+events. The browser implements only qualified media codecs selected by the
+server; it accepts neither arbitrary provider URLs nor provider credentials.
+The logical call freezes its adapter version, provider, model and voice, also
+across connection recovery. Configuration changes apply to the next call.
+Adding a registry entry or passing a synthetic alternate-protocol test does
+not qualify Gemini or a local speech service for production.
+
+An opening is a persisted once-per-logical-call PAO operation. Provider ready,
+continuous microphone input and an unlocked player are prerequisites. Effective
+PCM supplies wording and context; the program owns timing, identity and
+deduplication. User-first input skips the opening, recovery does not repeat it,
+and lost acceptance is uncertain rather than permission to resend. Acoustic
+activity and transcripts are observations, not semantic authority. Player
+progress after observed output is evidence of local playback activity, not
+proof of a complete utterance or physical audibility.
+Continuous audio packets may contain silence and cannot consume an opening
+reservation. Only valid assistant speech text observed after the opening was
+sent advances its generation observation; a moving playback clock alone is
+insufficient.
+After a confirmed opening request, a single persisted continuation may be
+reserved only when current-epoch PCM and local observation both establish a
+continuous silent window. Missing frames, stalled observations, unknown audio,
+any non-silent output or caller speech prevent it. This bounded observation
+stays in memory; audio packets create no per-packet Session or audit writes.
+Lost acceptance never authorizes this continuation or an additional retry.
 
 ## 9. Engineering-layer placement
 

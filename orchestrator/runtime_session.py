@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from orchestrator import ui_language
+from orchestrator import scheduler_recovery, ui_language
 from orchestrator.flexible_backend_registry import is_cli_backend, public_backend_engine
 from orchestrator.session_store import (
     SESSION_KIND_AGENT_ACTIVITY,
@@ -44,6 +44,8 @@ def is_agent_activity_source(source: Any) -> bool:
     """Return whether a request is Agent-owned work outside user chat history."""
 
     normalized = str(source or "").strip().casefold()
+    if normalized == scheduler_recovery.RECOVERY_CONVERSATION_SOURCE:
+        return False
     return normalized in _AGENT_ACTIVITY_SOURCES or normalized.startswith(
         ("scheduler:", "cron:", "heartbeat:", "proactive:", "background:")
     )
@@ -122,6 +124,12 @@ def _surface_and_channel(
     explicit_surface = str(metadata.get("session_surface") or "").strip().lower()
     explicit_channel = str(metadata.get("session_channel_key") or "").strip()
     normalized = str(source or "").strip().lower()
+    if normalized == scheduler_recovery.RECOVERY_CONVERSATION_SOURCE:
+        return (
+            scheduler_recovery.RECOVERY_CONVERSATION_SURFACE,
+            scheduler_recovery.RECOVERY_CONVERSATION_CHANNEL,
+            False,
+        )
     if is_agent_activity_source(normalized):
         return AGENT_ACTIVITY_SURFACE, AGENT_ACTIVITY_CHANNEL, False
     if explicit_surface:
@@ -177,7 +185,11 @@ def resolve_request_session(
             raise SessionConflict("Agent activity Session changed during admission")
         if session.get("session_kind") != SESSION_KIND_AGENT_ACTIVITY:
             raise SessionConflict("Agent activity resolved to a conversation Session")
-    elif surface in _SHARED_PRIMARY_SURFACES:
+    elif (
+        surface in _SHARED_PRIMARY_SURFACES
+        or str(source or "").strip().casefold()
+        == scheduler_recovery.RECOVERY_CONVERSATION_SOURCE
+    ):
         session = store.resolve_primary_session(
             owner_id=resolved_owner,
             agent_id=runtime.name,
@@ -1221,6 +1233,12 @@ def finish_request_from_listener(runtime: Any, request_id: str, payload: Mapping
         assistant_source=public_backend_engine(_active_engine(runtime)) or runtime.name,
         error_text=str(payload.get("error") or "") or None,
         error_context=failure_context,
+        failure_state=(
+            "stopped"
+            if not success and payload.get("interrupted") is True
+            and payload.get("interrupt_reason") == "user_stop"
+            else "failed"
+        ),
     )
     capture_backend_binding(runtime, request_id=request_id)
 

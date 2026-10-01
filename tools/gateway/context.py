@@ -11,13 +11,15 @@ from typing import Any
 
 from tools.registry import ToolRegistry
 from tools.schemas import ALL_TOOL_NAMES
+from tools.workbench_client import (
+    live_workbench_api_base_url as _live_workbench_api_base_url,
+)
 from orchestrator.file_permissions import tighten_fd_permissions
-from orchestrator.service_endpoints import ServiceEndpointError
 
 CONTEXT_SCHEMA_VERSION = 5
 _COMPATIBLE_CONTEXT_SCHEMA_VERSIONS = frozenset({3, 4, CONTEXT_SCHEMA_VERSION})
 
-# LEGACY HER V1 ONLY. The subprocess Tool Gateway is not part of HER v2 or any
+# LEGACY HER V1 ONLY. The subprocess Tool Gateway is not part of HERV3 or any
 # direct API backend. Its circuit breakers remain solely to contain a retired
 # compatibility protocol and must never be imported as active-runtime policy.
 LEGACY_HER_GATEWAY_MAX_CALLS = 100
@@ -54,60 +56,15 @@ def live_workbench_api_base_url(
     registry: ToolRegistry,
     global_config: Any,
 ) -> str:
-    """Return the address actually used by the running Workbench API.
+    """Return the live Backend API address for an isolated Tool Gateway."""
 
-    ``api_host`` is only an input to Workbench host selection.  On WSL the
-    server can replace a configured loopback host with its reachable virtual
-    adapter address, so gateway subprocesses must consume the selected
-    ``bind_host`` rather than reconstructing an address from configuration.
-    """
-
-    audit = registry.audit_context or {}
-    runtime = audit.get("_runtime")
-    kernel = (
-        getattr(runtime, "orchestrator", None)
-        or getattr(runtime, "kernel", None)
-        or audit.get("_kernel")
+    url = _live_workbench_api_base_url(
+        registry.audit_context,
+        global_config,
     )
-    server = getattr(kernel, "workbench_api", None) if kernel is not None else None
-    expected_instance = str(getattr(global_config, "instance_id", "") or "").strip()
-    resolver = getattr(kernel, "resolve_service_endpoint", None)
-    if callable(resolver):
-        endpoint = resolver(
-            "workbench",
-            expected_instance=expected_instance or None,
-        )
-        url = str(endpoint.get("base_url") or "").strip().rstrip("/")
-        if not url:
-            raise ServiceEndpointError("live Workbench endpoint has no base URL")
-        return url
-    endpoint_registry = getattr(kernel, "endpoint_registry", None)
-    if endpoint_registry is not None:
-        return endpoint_registry.resolve(
-            "workbench",
-            expected_instance=expected_instance or None,
-        ).base_url
-    host = str(
-        getattr(server, "bind_host", None)
-        or getattr(global_config, "api_host", None)
-    ).strip()
-    if not host or host in {"0.0.0.0", "::"}:
-        raise ServiceEndpointError("connectable Workbench host is unavailable")
-    server_config = getattr(server, "global_config", None)
-    server_instance = str(getattr(server_config, "instance_id", "") or "").strip()
-    if expected_instance and server_instance and server_instance.casefold() != expected_instance.casefold():
-        raise ServiceEndpointError(
-            "cross-instance Workbench endpoint rejected: "
-            f"expected={expected_instance} received={server_instance}"
-        )
-    raw_port = getattr(server, "bound_port", None) or getattr(
-        server_config, "workbench_port", None
-    ) or getattr(global_config, "workbench_port", None)
-    if raw_port is None:
-        raise ServiceEndpointError("live Workbench port is unavailable")
-    port = int(raw_port)
-    url_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
-    return f"http://{url_host}:{port}"
+    if not url:
+        raise ValueError("live HASHI Backend API endpoint is unavailable")
+    return url
 
 
 @dataclass(frozen=True)

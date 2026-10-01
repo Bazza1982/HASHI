@@ -39,12 +39,26 @@ def _registry(tmp_path, global_config):
     access_root = tmp_path / "access"
     workspace_dir = access_root / "workzone"
     workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    def resolve_service_endpoint(service, *, expected_instance=None):
+        assert service == "workbench"
+        assert expected_instance == global_config.instance_id
+        return {
+            "service": service,
+            "instance_id": global_config.instance_id,
+            "base_url": f"http://127.0.0.1:{global_config.workbench_port}",
+        }
+
     return ToolRegistry(
         allowed_tools=["file_read", "memory_search"],
         access_root=access_root,
         workspace_dir=workspace_dir,
         secrets={},
-        audit_context={"agent_name": "rika", "global_config": global_config},
+        audit_context={
+            "agent_name": "rika",
+            "global_config": global_config,
+            "_kernel": SimpleNamespace(resolve_service_endpoint=resolve_service_endpoint),
+        },
     )
 
 

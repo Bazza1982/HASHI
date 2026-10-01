@@ -23,6 +23,9 @@ MAX_STORED_DUE_TIMES = 100
 HARD_MAX_REPLAY = 100
 DEFAULT_MAX_REPLAY = 1
 RECENT_RESOLVED_CONTEXT_SECONDS = 7 * 24 * 60 * 60
+RECOVERY_CONVERSATION_SOURCE = "scheduler:recovery-conversation"
+RECOVERY_CONVERSATION_SURFACE = "hashi.internal"
+RECOVERY_CONVERSATION_CHANNEL = "scheduler-recovery"
 
 
 def collect_cron_occurrences(
@@ -217,8 +220,6 @@ def render_notice(
     affected = len(items)
     total_missed = sum(int(item.get("missed_count", 1) or 1) for item in items)
     total_missed_label = f"{total_missed}+" if any(item.get("missed_count_capped") for item in items) else str(total_missed)
-    total_replayable = sum(replayable_count(item) for item in items)
-    example_id = str(items[0].get("task_id") or "task-id") if items else "task-id"
     separator = "：" if selected == "zh-CN" else ": "
     lines = [
         "⏰ " + ui_language.tr("scheduler.title", locale=selected),
@@ -280,25 +281,35 @@ def render_notice(
         )
     lines.extend(
         [
-            ui_language.tr("scheduler.choose", locale=selected),
-            "1. "
-            + ui_language.tr(
-                "scheduler.run_all",
-                locale=selected,
-                count=total_replayable,
-            ),
-            "2. "
-            + ui_language.tr(
-                "scheduler.run_partial",
-                locale=selected,
-                example=example_id,
-            ),
-            "3. " + ui_language.tr("scheduler.skip_all", locale=selected),
+            ui_language.tr("scheduler.natural_reply", locale=selected),
             "",
             ui_language.tr("scheduler.safety", locale=selected),
         ]
     )
     return "\n".join(lines).strip()
+
+
+def render_agent_request(
+    batch: dict[str, Any],
+    *,
+    locale: str | None = None,
+) -> str:
+    """Build the internal Run that asks the Agent to discuss one recovery batch."""
+
+    notice = render_notice(batch, locale=locale)
+    return (
+        "[HASHI Scheduler recovery conversation]\n"
+        "A durable missed-trigger recovery batch now needs the user's decision.\n\n"
+        f"{notice}\n\n"
+        "Ask the user what they want to do and answer any questions about what was "
+        "missed. The user's later reply will arrive as ordinary conversation through "
+        "the Frontend Connector. Interpret that reply naturally; do not require menu "
+        "numbers, keywords, or exact phrases.\n"
+        "Do not resolve, skip, or rerun this batch in this turn. Wait for a later "
+        "human/client reply. When that reply is unambiguous, use the typed "
+        "hashi_scheduler_recovery_resolve tool for the exact batch. If it is "
+        "ambiguous, ask a clarifying question instead."
+    )
 
 
 def render_context(batches: list[dict[str, Any]], *, now_ts: float) -> str:
@@ -314,7 +325,7 @@ def render_context(batches: list[dict[str, Any]], *, now_ts: float) -> str:
 
     lines = [
         "HASHI maintains this scheduler-recovery context directly. Do not search logs for these facts.",
-        "Clear execution replies are handled by HASHI before they reach the agent. Use this context to answer questions about what was missed, what was run, and what remains.",
+        "The user's reply is ordinary conversation delivered through the Frontend Connector. Use this context to answer questions about what was missed, what was run, and what remains.",
     ]
     if pending:
         lines.extend(["", "PENDING RECOVERY BATCHES"])
@@ -347,8 +358,8 @@ def render_context(batches: list[dict[str, Any]], *, now_ts: float) -> str:
                 lines.extend(item_lines)
         lines.extend(
             [
-                "Accepted direct choices: 全部补跑 / run all; 全部跳过 / skip all; task_id=N; or 补跑 N 次 when only one task is pending.",
-                "Never execute a pending recovery batch without an explicit user choice.",
+                "Interpret the user's natural-language intent in context; never use a keyword table or menu-token parser.",
+                "If the user clearly chooses an action, call hashi_scheduler_recovery_resolve for each exact batch. If they only ask a question or remain ambiguous, answer or clarify without resolving anything.",
             ]
         )
     if recent:
@@ -366,97 +377,3 @@ def render_context(batches: list[dict[str, Any]], *, now_ts: float) -> str:
                     f"  - task_id={item.get('task_id')} missed={_count_label(item)} executed={result.get('executed', 0)} skipped={result.get('skipped', item.get('missed_count', 1))}"
                 )
     return "\n".join(lines).strip()
-
-
-def parse_reply(text: str, pending_batches: list[dict[str, Any]]) -> dict[str, Any] | None:
-    if not pending_batches:
-        return None
-    raw = " ".join(str(text or "").strip().split())
-    if not raw or "?" in raw or "？" in raw:
-        return None
-    lowered = raw.casefold().strip(" .!。！")
-    if lowered in {
-        "1",
-        "all",
-        "run all",
-        "run them all",
-        "all run",
-        "execute all",
-        "execute them all",
-        "all execute",
-        "replay all",
-        "do all",
-        "do them all",
-        "let's run all",
-        "全部执行",
-        "全部补跑",
-        "全部都执行",
-        "补跑全部",
-        "执行全部",
-        "全都补跑",
-        "都执行",
-        "全跑",
-    }:
-        return {"action": "all"}
-    if re.fullmatch(
-        r"(?:yes[, ]+)?(?:please\s+)?(?:let'?s\s+)?(?:run|execute|replay|do)\s+"
-        r"(?:all|all\s+of\s+them|them\s+all)(?:\s+(?:missed\s+)?(?:runs?|turns?|jobs?))?",
-        lowered,
-        flags=re.IGNORECASE,
-    ) or re.fullmatch(r"(?:请)?(?:把)?(?:全部|全都)(?:错过的)?(?:都)?(?:执行|补跑|跑)(?:一遍)?", lowered):
-        return {"action": "all"}
-    if lowered in {
-        "3",
-        "skip",
-        "skip all",
-        "skip them all",
-        "全部跳过",
-        "都跳过",
-        "不用补跑",
-        "不补跑",
-    }:
-        return {"action": "skip"}
-    if re.fullmatch(
-        r"(?:yes[, ]+)?(?:please\s+)?(?:skip|discard)\s+(?:all|all\s+of\s+them|them\s+all)",
-        lowered,
-        flags=re.IGNORECASE,
-    ) or re.fullmatch(r"(?:请)?(?:把)?(?:全部|全都)(?:都)?(?:跳过|忽略)", lowered):
-        return {"action": "skip"}
-    if lowered == "2":
-        return {"action": "help"}
-
-    task_id_counts: dict[str, int] = {}
-    for batch in pending_batches:
-        for item in batch.get("items") or []:
-            task_id = str(item.get("task_id") or "")
-            if task_id:
-                task_id_counts[task_id] = task_id_counts.get(task_id, 0) + 1
-    known_ids = {
-        task_id
-        for task_id in task_id_counts
-        if task_id
-    }
-    counts: dict[str, int] = {}
-    for task_id in sorted(known_ids, key=len, reverse=True):
-        match = re.search(rf"(?<![\w-]){re.escape(task_id)}\s*=\s*(\d+)", raw, flags=re.IGNORECASE)
-        if match:
-            if task_id_counts.get(task_id, 0) > 1:
-                return {"action": "ambiguous"}
-            counts[task_id] = int(match.group(1))
-    if counts:
-        return {"action": "partial", "counts": counts}
-
-    if len(known_ids) == 1 and task_id_counts.get(next(iter(known_ids)), 0) == 1:
-        task_id = next(iter(known_ids))
-        patterns = (
-            r"^(?:please\s+)?(?:run|execute|replay|do)\s+(?:the\s+)?(?:last|latest)?\s*(\d+)\s*(?:times?)?(?:\s+of\s+them)?$",
-            r"^(?:只)?(?:补跑|执行|跑)\s*(?:最近)?\s*(\d+)\s*次?$",
-            r"^(?:最近)\s*(\d+)\s*次$",
-        )
-        for pattern in patterns:
-            match = re.match(pattern, lowered, flags=re.IGNORECASE)
-            if match:
-                return {"action": "partial", "counts": {task_id: int(match.group(1))}}
-        if lowered == task_id.casefold():
-            return {"action": "partial", "counts": {task_id: 1}}
-    return None

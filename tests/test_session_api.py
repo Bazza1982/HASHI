@@ -211,6 +211,149 @@ def _server(
     return server, runtime
 
 
+def test_live_phone_resolver_uses_authoritative_pcm_and_same_session_history(tmp_path):
+    from orchestrator.bridge_memory import BridgeContextAssembler, BridgeMemoryStore
+    from orchestrator.hcc import set_hcc_enabled
+    from orchestrator.memory_plus_mode import (
+        append_memory_plus_manual_note,
+        set_memory_plus_enabled,
+    )
+    from orchestrator.pcm import render_pcm_document
+    from orchestrator.phone_manager import PhoneManager
+
+    server, runtime = _server(tmp_path)
+    workspace = tmp_path / "phone-agent"
+    workspace.mkdir()
+    (workspace / "agent.md").write_text(
+        render_pcm_document(
+            persona="PERSONA_PHONE_SENTINEL",
+            system="PERMANENT_SYS_PHONE_SENTINEL",
+            memory="LONG_MEMORY_PHONE_SENTINEL",
+            hcc="FULL_HCC_PHONE_SENTINEL",
+        ),
+        encoding="utf-8",
+    )
+    set_hcc_enabled(workspace, True)
+    set_memory_plus_enabled(workspace, True)
+    runtime.workspace_dir = workspace
+    runtime.phone_manager = PhoneManager(workspace)
+    runtime.context_assembler = BridgeContextAssembler(
+        BridgeMemoryStore(workspace),
+        workspace / "agent.md",
+        sys_prompt_manager=SimpleNamespace(
+            get_active_texts=lambda: ["LOCAL_SYS_PHONE_SENTINEL"]
+        ),
+        global_sys_prompt_manager=SimpleNamespace(
+            get_active_entries=lambda: [
+                {"slot": 1, "text": "GLOBAL_SYS_PHONE_SENTINEL"}
+            ]
+        ),
+    )
+
+    owner_id = "owner:phone"
+    session = server.session_store.create_session(
+        owner_id=owner_id,
+        agent_id="lily",
+        title="Phone continuity",
+    )
+    server.session_store.bind_primary_session(
+        owner_id=owner_id, agent_id="lily", session_id=session["session_id"]
+    )
+    accepted = server.session_store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner_id,
+        agent_id="lily",
+        request_id="phone-history-request",
+        text="RECENT_USER_PHONE_SENTINEL",
+        source="session-api",
+        idempotency_key="phone-history-run",
+    )
+    server.session_store.mark_request_running(
+        accepted.request_id,
+        worker_id="test-worker",
+    )
+    server.session_store.finish_request(
+        accepted.request_id,
+        success=True,
+        assistant_text="RECENT_ASSISTANT_PHONE_SENTINEL",
+        assistant_source="test-backend",
+    )
+    activity = server.session_store.ensure_agent_activity_session(
+        owner_id=owner_id,
+        agent_id="lily",
+    )
+    activity_run = server.session_store.accept_run(
+        session_id=activity["session_id"],
+        owner_id=owner_id,
+        agent_id="lily",
+        request_id="phone-activity-request",
+        text="SCHEDULER_PROMPT_MUST_NOT_ENTER_PHONE",
+        source="scheduler",
+        idempotency_key="phone-activity-run",
+    )
+    server.session_store.mark_request_running(
+        activity_run.request_id,
+        worker_id="scheduler-worker",
+    )
+    server.session_store.finish_request(
+        activity_run.request_id,
+        success=True,
+        assistant_text="TODAY_COMPLETED_BACKGROUND_RESULT_SENTINEL",
+        assistant_source="test-backend",
+    )
+    server.session_store.append_presentation_message(
+        session_id=activity["session_id"],
+        owner_id=owner_id,
+        agent_id="lily",
+        role="assistant",
+        text="METER_AND_PROGRESS_NOISE_MUST_NOT_ENTER_PHONE",
+        source="meter-cost",
+        idempotency_key="phone-meter-noise",
+        presentation_channel="meter",
+    )
+    session_workspace = server.session_store.session_workspace(
+        session["session_id"],
+        int(session["context_generation"]),
+    )
+    append_memory_plus_manual_note(
+        session_workspace,
+        "MEMORY_PLUS_PHONE_SENTINEL",
+    )
+
+    resolved = server._resolve_live_voice_phone_session(
+        "lily",
+        owner_id=owner_id,
+        session_id=session["session_id"],
+        context_generation=int(session["context_generation"]),
+    )
+    assert "PERMANENT_SYS_PHONE_SENTINEL" in resolved["instructions"]
+    assert "GLOBAL_SYS_PHONE_SENTINEL" in resolved["instructions"]
+    assert "LOCAL_SYS_PHONE_SENTINEL" in resolved["instructions"]
+    assert "PERSONA_PHONE_SENTINEL" in resolved["instructions"]
+    startup = json.dumps(resolved["input"], ensure_ascii=False)
+    assert "FULL_HCC_PHONE_SENTINEL" in startup
+    assert "LONG_MEMORY_PHONE_SENTINEL" in startup
+    assert "MEMORY_PLUS_PHONE_SENTINEL" in startup
+    assert "RECENT_USER_PHONE_SENTINEL" in startup
+    assert "RECENT_ASSISTANT_PHONE_SENTINEL" in startup
+    assert "TODAY_COMPLETED_BACKGROUND_RESULT_SENTINEL" in startup
+    assert "SCHEDULER_PROMPT_MUST_NOT_ENTER_PHONE" not in startup
+    assert "METER_AND_PROGRESS_NOISE_MUST_NOT_ENTER_PHONE" not in startup
+
+    # Recovery does not consult next-call configuration before PCM is assembled.
+    from unittest.mock import patch
+    runtime.phone_manager.set_language("en")
+    with patch.object(runtime.phone_manager, "_read", side_effect=AssertionError("next-call settings were read")):
+        recovered = server._resolve_live_voice_phone_session(
+            "lily", owner_id=owner_id, session_id=session["session_id"],
+            context_generation=int(session["context_generation"]),
+            frozen_selection=resolved["selection"],
+        )
+    assert recovered["public"]["language"] == resolved["public"]["language"]
+    assert "GLOBAL_SYS_PHONE_SENTINEL" in recovered["instructions"]
+    assert "MEMORY_PLUS_PHONE_SENTINEL" in json.dumps(recovered["input"], ensure_ascii=False)
+
+
 @pytest.mark.asyncio
 async def test_session_workzone_reference_stages_committed_managed_bytes(tmp_path):
     from orchestrator.frontend_delivery import tui_run_delivery_policy

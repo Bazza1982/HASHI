@@ -408,6 +408,26 @@ class WorkbenchApiServer:
         register_desktop_api(self)
         self.demo_connector = DemoConnector(self)
         self.demo_connector.register(self.app)
+        from orchestrator.frontend_live_voice.manager import LiveVoiceManager
+        from orchestrator.frontend_live_voice.routes import register_live_voice_routes
+
+        self.live_voice_manager = LiveVoiceManager(
+            session_store=self.session_store,
+            global_config=self.global_config,
+            secrets=self.secrets,
+            admit_run=self._admit_live_voice_run,
+            poll_run_activity=self._poll_live_voice_run_activity,
+            judge_action=self._judge_live_voice_action,
+            inspect_action_results=self._inspect_live_voice_action_results,
+            cancel_action_run=self._cancel_live_voice_action,
+            resolve_phone_session=self._resolve_live_voice_phone_session,
+        )
+        register_live_voice_routes(
+            self.app,
+            self.live_voice_manager,
+            self._authorize_live_voice,
+            qualified=True,
+        )
         self.app.router.add_post("/api/auth/login", self.handle_auth_login)
         self.app.router.add_post("/api/auth/logout", self.handle_auth_logout)
         self.app.router.add_get("/api/auth/me", self.handle_auth_me)
@@ -838,6 +858,10 @@ class WorkbenchApiServer:
             self.handle_agent_scheduler_runs,
         )
         self.app.router.add_post(
+            "/api/agents/{name}/scheduler/recovery/{batch_id}/resolve",
+            self.handle_agent_scheduler_recovery_resolve,
+        )
+        self.app.router.add_post(
             "/api/agents/{name}/jobs/run", self.handle_agent_run_job
         )
         self.app.router.add_get(
@@ -947,7 +971,191 @@ class WorkbenchApiServer:
         return entries if isinstance(entries, (list, dict)) else []
 
     def _runtime_map(self) -> dict:
-        return {runtime.name: runtime for runtime in self._runtime_list()}
+        return {
+            str(runtime.name).strip().casefold(): runtime
+            for runtime in self._runtime_list()
+        }
+
+    def _require_live_voice_session_scope(
+        self, *, owner_id: str, agent_id: str, session_id: str, context_generation: int
+    ) -> dict:
+        """Use the same primary Session fence as interactive PAO admission."""
+        from orchestrator.frontend_live_voice.protocol import LiveVoiceError
+
+        try:
+            session = self.session_store.get_session(
+                session_id, owner_id=owner_id, agent_id=agent_id, include_deleted=False)
+            primary = self.session_store.resolve_primary_session(owner_id=owner_id, agent_id=agent_id)
+        except (SessionNotFound, SessionConflict) as exc:
+            raise LiveVoiceError("live_scope_changed", 409) from exc
+        if (session["session_id"] != primary["session_id"]
+                or int(session["context_generation"]) != int(context_generation)):
+            raise LiveVoiceError("live_scope_changed", 409)
+        return session
+
+    def _resolve_live_voice_phone_session(
+        self,
+        agent_id: str,
+        *,
+        owner_id: str | None = None,
+        session_id: str | None = None,
+        context_generation: int | None = None,
+        frozen_selection: Mapping[str, Any] | None = None,
+    ) -> dict:
+        """Resolve Agent PCM and same-Session history at the trusted API edge."""
+
+        if owner_id and session_id and context_generation is not None:
+            self._require_live_voice_session_scope(owner_id=owner_id, agent_id=agent_id,
+                session_id=session_id, context_generation=context_generation)
+
+        from orchestrator.bridge_memory import (
+            BridgeContextAssembler,
+            BridgeMemoryStore,
+            SysPromptManager,
+        )
+        from orchestrator.memory_plus_mode import (
+            build_memory_plus_context,
+            is_memory_plus_enabled,
+            memory_plus_config,
+            prepare_memory_plus_store,
+        )
+        from orchestrator.pcm import canonical_agent_md
+        from orchestrator.pcm_voice_projection import (
+            build_phone_result_index,
+        )
+        from orchestrator.phone_manager import PhoneConfigError, PhoneManager
+
+        target = str(agent_id or "").strip().casefold()
+        runtime = self._runtime_map().get(target)
+        manager = getattr(runtime, "phone_manager", None)
+        display_name = None
+        workspace: Path | None = None
+        assembler = getattr(runtime, "context_assembler", None)
+        if manager is not None and callable(getattr(manager, "resolve_live_session", None)):
+            display = getattr(runtime, "get_display_name", None)
+            display_name = display() if callable(display) else getattr(runtime, "display_name", None)
+            workspace = Path(getattr(runtime, "workspace_dir"))
+        else:
+            raw = self._load_raw_agent_config()
+            rows = raw.get("agents", []) if isinstance(raw, dict) else []
+            agent = next(
+                (
+                    row for row in rows
+                    if isinstance(row, dict)
+                    and str(row.get("name") or "").strip().casefold() == target
+                ),
+                None,
+            )
+            if agent is None:
+                raise PhoneConfigError("phone_agent_unavailable", "The selected Agent has no phone configuration owner.")
+            workspace_value = str(agent.get("workspace_dir") or "").strip()
+            if not workspace_value:
+                raise PhoneConfigError("phone_workspace_unavailable", "The selected Agent has no workspace.")
+            workspace = Path(workspace_value).expanduser()
+            if not workspace.is_absolute():
+                workspace = self.config_path.parent / workspace
+            workspace = workspace.resolve()
+            manager = PhoneManager(workspace)
+            display_name = str(agent.get("display_name") or agent.get("name") or target)
+
+        if workspace is None:
+            raise PhoneConfigError("phone_workspace_unavailable", "The selected Agent has no workspace.")
+        if assembler is None:
+            assembler = BridgeContextAssembler(
+                BridgeMemoryStore(workspace),
+                canonical_agent_md(workspace),
+                sys_prompt_manager=SysPromptManager(workspace),
+                global_sys_prompt_manager=SysPromptManager.for_instance(self.global_config),
+            )
+
+        extra_sections: list[tuple[str, str, dict[str, Any]]] = []
+        recent_history: list[dict[str, Any]] = []
+        result_index = None
+        if owner_id and session_id and context_generation is not None:
+            session = self.session_store.get_session(
+                session_id,
+                owner_id=owner_id,
+                agent_id=target,
+            )
+            generation = int(context_generation)
+            if int(session["context_generation"]) != generation:
+                raise PhoneConfigError(
+                    "phone_session_changed",
+                    "The selected Session changed while phone context was prepared.",
+                )
+            if is_memory_plus_enabled(workspace):
+                session_workspace = self.session_store.session_workspace(
+                    session_id,
+                    generation,
+                )
+                memory_plus_cfg = memory_plus_config(workspace)
+                memory_plus_state = prepare_memory_plus_store(
+                    session_workspace,
+                    memory_plus_cfg,
+                )
+                extra_sections.append(
+                    (
+                        "Memory+ Continuity",
+                        build_memory_plus_context(
+                            memory_plus_state,
+                            cfg=memory_plus_cfg,
+                            include_update_contract=False,
+                        ),
+                        {"key": "memory_plus_continuity", "protected": True},
+                    )
+                )
+            recent_history = self.session_store.recent_history_messages(
+                session_id,
+                owner_id=owner_id,
+                context_generation=generation,
+                limit=128,
+            )
+            result_index = build_phone_result_index(
+                self.session_store.recent_phone_result_references(
+                    owner_id=owner_id,
+                    agent_id=target,
+                    session_id=session_id,
+                )
+            )
+            if result_index.text:
+                extra_sections.append(
+                    (
+                        "RECENT COMPLETED BACKGROUND RESULTS",
+                        result_index.text,
+                        {
+                            "key": "recent_background_results",
+                            "protected": True,
+                        },
+                    )
+                )
+
+        pcm_payload = assembler.build_prompt_payload(
+            "",
+            str((frozen_selection or manager.get_state())["model"]),
+            incremental=False,
+            extra_sections=extra_sections,
+            inject_memory=False,
+            recent_exchanges=[],
+            explicit_history_context=False,
+        )
+        resolved = manager.resolve_live_session(
+            agent_id=target,
+            display_name=str(display_name or target),
+            pcm_payload=pcm_payload,
+            recent_history=recent_history,
+            interface_language=preferred_locale(runtime or self, actor_id=owner_id),
+            frozen_selection=frozen_selection,
+        )
+        if result_index is not None:
+            resolved["context_audit"].update({
+                "result_reference_ids": list(result_index.included_message_ids),
+                "result_references_omitted": result_index.omitted_count,
+                "result_references_omitted_ids": list(result_index.omitted_message_ids),
+                "result_reference_omission_reason": (
+                    "opening_index_capacity" if result_index.omitted_count else None
+                ),
+            })
+        return resolved
 
     def _is_governed_profile(self) -> bool:
         return (
@@ -1494,6 +1702,7 @@ class WorkbenchApiServer:
     async def start(self):
         await asyncio.to_thread(self.session_store.cleanup_attachments)
         await asyncio.to_thread(self.session_store.cleanup_audio_assets)
+        await self.live_voice_manager.start()
         self.runner = web.AppRunner(self.app)
         await self.runner.setup()
         bind_host = self._select_bind_host()
@@ -1679,6 +1888,8 @@ class WorkbenchApiServer:
                 *self._audio_transcript_tasks, return_exceptions=True
             )
             self._audio_transcript_tasks.clear()
+        if hasattr(self, "live_voice_manager"):
+            await self.live_voice_manager.shutdown()
         if self.runner:
             await self.runner.cleanup()
         transfer_store = getattr(self, "transfer_store", None)
@@ -5213,6 +5424,134 @@ class WorkbenchApiServer:
             return f"enterprise:{user.id}" if user is not None else None
         return SessionStore.owner_id_for(self.global_config)
 
+    async def _authorize_live_voice(
+        self, request, operation: str, payload: dict
+    ) -> dict[str, Any]:
+        owner_id = self._v1_owner_id(request)
+        if not owner_id:
+            from orchestrator.frontend_live_voice.protocol import LiveVoiceError
+            raise LiveVoiceError("live_not_authenticated", 401)
+        return {"owner_id": owner_id, "admin": self._check_admin_auth(request)}
+
+    async def _admit_live_voice_run(
+        self, binding, proposal, idempotency_key: str
+    ) -> dict[str, str]:
+        """Enter delegated speech through the selected Agent's normal PAO ingress."""
+
+        from orchestrator.frontend_live_voice.protocol import LiveVoiceError
+
+        try:
+            self._require_live_voice_session_scope(owner_id=binding.owner_id, agent_id=binding.agent_id,
+                session_id=binding.session_id, context_generation=binding.context_generation)
+        except LiveVoiceError as exc:
+            # This check is strictly before invoking the Worker. Its code can
+            # close an admission receipt as rejected, unlike an uncertain RPC.
+            raise LiveVoiceError("live_admission_scope_changed", 409) from exc
+        runtime = self._runtime_map().get(binding.agent_id)
+        if runtime is None:
+            raise LiveVoiceError("live_agent_unavailable", 503)
+        try:
+            request_id = await runtime.enqueue_request(
+                runtime._primary_chat_id(),
+                proposal.execution_text or proposal.text,
+                "session-api",
+                proposal.text[:160],
+                deliver_to_telegram=True,
+                idempotency_key=idempotency_key,
+                request_metadata={
+                    "session_id": binding.session_id,
+                    "owner_id": binding.owner_id,
+                    "session_surface": "workbench",
+                    "session_channel_key": "default",
+                    "session_message_text": proposal.text,
+                    "session_message_display_text": proposal.text,
+                    "session_context_generation": binding.context_generation,
+                    "live_voice": {
+                        "call_id": binding.call_id,
+                        "call_epoch": binding.call_epoch,
+                        "delegation_id": proposal.delegation_id,
+                        "proposal_version": proposal.version,
+                        "proposal_digest": proposal.digest,
+                    },
+                },
+            )
+            if not request_id:
+                raise LiveVoiceError("live_admission_rejected", 409)
+            run = self.session_store.get_run_by_request(str(request_id))
+        except LiveVoiceError:
+            raise
+        except Exception as exc:
+            raise LiveVoiceError("live_outcome_unknown", 502) from exc
+        if (
+            run["session_id"] != binding.session_id
+            or run["agent_id"] != binding.agent_id
+            or int(run["context_generation"]) != binding.context_generation
+        ):
+            raise LiveVoiceError("live_scope_changed", 409)
+        return {
+            "request_id": str(request_id),
+            "run_id": str(run["run_id"]),
+            "message_id": str(run["user_message_id"]),
+        }
+
+    async def _live_voice_action_operation(self, binding, operation: str, **payload) -> dict[str, Any]:
+        from orchestrator.frontend_live_voice.protocol import LiveVoiceError
+
+        runtime = self._runtime_map().get(binding.agent_id)
+        if runtime is None:
+            raise LiveVoiceError("live_agent_unavailable", 503)
+        params = {"scope": binding.public_scope(), "owner_id": binding.owner_id, **payload}
+        operation_port = getattr(runtime, "phone_action_operation", None)
+        if callable(operation_port):
+            return dict(await operation_port(operation, params))
+        from orchestrator.frontend_live_voice.worker_actions import handle_phone_action_operation
+
+        return await handle_phone_action_operation(runtime, operation, params)
+
+    async def _judge_live_voice_action(self, binding, state) -> dict[str, Any]:
+        return await self._live_voice_action_operation(binding, "judge", state=state)
+
+    async def _inspect_live_voice_action_results(self, binding, request_id, actions) -> dict[str, Any]:
+        return await self._live_voice_action_operation(binding, "inspect", request_id=request_id, actions=actions)
+
+    async def _cancel_live_voice_action(self, binding, run_id) -> dict[str, Any]:
+        run = self.session_store.get_run(run_id, owner_id=binding.owner_id)
+        return await self._live_voice_action_operation(binding, "cancel", request_id=run["request_id"])
+
+    async def _poll_live_voice_run_activity(
+        self, binding, request_id: str, after_sequence: int, limit: int
+    ) -> dict[str, Any]:
+        """Read the selected Agent's existing safe activity projection for GPT-Live."""
+
+        from orchestrator.frontend_live_voice.protocol import LiveVoiceError
+
+        runtime = self._runtime_map().get(binding.agent_id)
+        poll = getattr(runtime, "poll_request_activity", None) if runtime is not None else None
+        if not callable(poll):
+            return {"ok": False, "error_code": "request_activity_unavailable"}
+        try:
+            run = self.session_store.get_run_by_request(
+                request_id,
+                owner_id=binding.owner_id,
+                agent_id=binding.agent_id,
+            )
+        except Exception as exc:
+            raise LiveVoiceError("live_run_not_found", 404) from exc
+        if (
+            run["session_id"] != binding.session_id
+            or int(run["context_generation"]) != binding.context_generation
+        ):
+            raise LiveVoiceError("live_scope_changed", 409)
+        result = await poll(
+            request_id,
+            after_sequence=max(0, int(after_sequence)),
+            limit=max(1, min(int(limit), 100)),
+        )
+        return dict(result) if isinstance(result, Mapping) else {
+            "ok": False,
+            "error_code": "request_activity_unavailable",
+        }
+
     def _agent_history_cursor_key(self) -> bytes:
         """Bind opaque paging tokens to this Function instance's authority."""
 
@@ -5510,6 +5849,12 @@ class WorkbenchApiServer:
                         },
                     }
                 )
+        if hasattr(self, "live_voice_manager") and self.live_voice_manager.available:
+            capabilities["live_voice"] = {
+                "version": "1.0",
+                "available": True,
+                "protocol_version": "1.0",
+            }
         return web.json_response(capabilities)
 
     async def handle_v2_frontend_capabilities(self, request):
@@ -7908,7 +8253,7 @@ class WorkbenchApiServer:
         if source.casefold() == "tui":
             client_id = str(payload.get("client_id") or "").strip()
             try:
-                normalized_policy = normalize_tui_run_delivery_policy(
+                _normalized_policy = normalize_tui_run_delivery_policy(
                     supplied_delivery_policy,
                     client_id=client_id,
                 )
@@ -9103,6 +9448,66 @@ class WorkbenchApiServer:
     @staticmethod
     def _scheduler_task_id_valid(task_id: str) -> bool:
         return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", task_id or ""))
+
+    async def handle_agent_scheduler_recovery_resolve(self, request):
+        """Resolve one exact recovery batch through the Agent tool gateway."""
+
+        agent_name = str(request.match_info.get("name") or "").strip()
+        batch_id = str(request.match_info.get("batch_id") or "").strip()
+        runtime = self._runtime_map().get(agent_name)
+        if runtime is None:
+            return web.json_response(
+                {"ok": False, "error": "agent not found"}, status=404
+            )
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response(
+                {"ok": False, "error": "invalid JSON body"}, status=400
+            )
+        if not isinstance(payload, dict):
+            return web.json_response(
+                {"ok": False, "error": "request body must be an object"},
+                status=400,
+            )
+        if payload.get("requested_by") != "hashi_tool_gateway":
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "scheduler recovery decisions must come from the Agent tool gateway",
+                },
+                status=403,
+            )
+        scheduler = self._task_scheduler()
+        resolver = getattr(scheduler, "resolve_recovery_batch", None)
+        if not callable(resolver):
+            return web.json_response(
+                {"ok": False, "error": "scheduler recovery is unavailable"},
+                status=503,
+            )
+        try:
+            result = await resolver(
+                agent_name=agent_name,
+                batch_id=batch_id,
+                action=str(payload.get("action") or ""),
+                counts=payload.get("counts"),
+                runtime_map={agent_name: runtime},
+            )
+        except KeyError as exc:
+            return web.json_response(
+                {"ok": False, "error": str(exc)}, status=404
+            )
+        except ValueError as exc:
+            return web.json_response(
+                {"ok": False, "error": str(exc)}, status=400
+            )
+        return web.json_response(
+            {
+                "ok": True,
+                "authority": "HASHI Scheduler",
+                **dict(result or {}),
+            }
+        )
 
     async def handle_agent_scheduler_create(self, request):
         """Create one Agent-owned scheduler task through the typed API."""

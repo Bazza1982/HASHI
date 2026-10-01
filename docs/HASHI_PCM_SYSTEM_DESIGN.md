@@ -6,7 +6,7 @@
 | ------------------------ | --------- |
 | Purpose | Define how HASHI maintains and distributes Persona, Context, and Memory to Engine (Harness) Providers while distinguishing current implementation, target design, and known gaps. |
 | Status | Authoritative PCM module specification under the [HASHI System Architecture](../ARCHITECTURE.md). |
-| Revision | 1 September 2026 — aligned PCM with PAO ownership, fixed HER Engine Sessions, incremental PCM, and canonical HER recovery. |
+| Revision | 29 September 2026 — aligned Live Voice bootstrap with full PCM authority, same-Session history, and HASHI-owned continuity. |
 
 ## 1. Overview
 
@@ -504,6 +504,64 @@ The following decisions were accepted on 26 August 2026. They are normative and 
 | PCM-DEC-006 | Unfinished work is transient Context, not Agent Memory. HERV3's canonical Engine Session control plane owns durable recovery evidence; the former WIP Journal is shadow compatibility evidence only. | Interrupted work is reconstructed from canonical typed Turn, Tool, side-effect, and checkpoint evidence. Later HER Turns receive quoted recovery Context with visible uncertainty where required. Provider requests and raw assembled envelopes are excluded. `/compact` operates on settled Session history. Memory+ is not responsible for crash recovery. |
 | PCM-DEC-007 | Natural-language referents are resolved by the Engine from the current user message and chronologically ordered Conversation history, not by PAO/PCM hard binding. | Preserve ordinary user text verbatim, including bare choices such as `3` and words such as `continue`. Out-of-session results may enter Context only as timestamped, read-only user-assistant history. Do not infer a reply target from prose, rewrite the current request, synthesize option wording, or create Connector reply controls. Explicit typed slash/control operations retain their own contracts. |
 | PCM-DEC-008 | PCM transports context and resource facts but never decides which historical topic or attachment is relevant to the current conversation. | Bind each attachment projection to its originating Message/Turn. Present only the current Message's attachments as current references; keep attachments from completed Turns inside their chronologically ordered historical exchanges, and never promote resources from failed or cancelled Turns. A cumulative Engine Session resource registry is transport/audit state, not a current-request or relevance selector. |
+| PCM-DEC-009 | A provider-hosted live voice session is an ephemeral transport for the same Agent and Conversation Session, not a Persona-only assistant or a second memory owner. | Put `[sys]`, both active `/sys` layers, HCC usage rules and Persona into formal provider instructions. Project complete enabled HCC, `[memory]`, enabled Memory+ and same-Session role-preserving recent messages as provider-neutral history; the qualified adapter encodes that history and applies its declared limits. Persist live transcript fragments to the HASHI Session as they arrive, derive later history and the visible call card from those fragments, keep provider storage disabled, and fail visibly instead of clipping HCC or an utterance. Express the user's subject and concrete outcomes in their effective language and Persona, with complete useful answers. PAO triggers the once-per-call opening only after media readiness; its wording is generated from these effective instructions and existing context, never a shared hardcoded name or relationship. |
+
+For Live Phone capacity pruning, a completed Run's final answer enters recent
+history at its actual completion time. An earlier user request must not anchor
+that later answer before newer speech and cause a fresh report to be evicted.
+Chronological presentation and whole-message capacity limits still apply.
+
+### Live Phone foreground initiation correction (2026-10-01)
+
+The voice model is the foreground for the current call; the selected HASHI
+Agent performs delegated work in the background. This is one Agent identity,
+not two independent assistants. At the opening turn, PCM must project the
+effective instructions, Persona, configured memory and HCC, recent
+conversation, and completed Agent activity including cron/job results. A
+completed result needed for an immediate answer must remain available with
+its subject, status, provenance, and full original content. A shortened
+reference must identify itself as such and retain an addressable original;
+it may not silently masquerade as the whole result. Capacity fitting must not
+silently remove all access to a relevant completed result. If the required
+foreground facts cannot be made available, initiation reports that limitation
+instead of asking the Agent to guess or re-run completed work.
+The index is an address book, not answer material. A question about completed
+work, including a summary or count, resolves to its canonical original before
+the foreground answers. Whether an excerpt happens to look sufficient is not
+a routing decision.
+
+This clarification supersedes the earlier rule that the entire recent
+activity reference simply yields before conversation history. A privacy-safe
+inclusion manifest must show which PCM sections and completed-result references
+were actually supplied to the provider, which were omitted, and why. A Session
+record or visible chat card alone does not prove foreground model access.
+
+PAO selects completed final Messages from the active Conversation and this
+Agent's activity Session under the current owner and instance. PCM puts an
+explicitly excerpted, addressable result index beside HCC and configured
+memory in the mandatory opening context. The provider fitter may discard
+oldest conversation units but may not discard that index; if mandatory
+content does not fit, initiation fails with a capacity reason. The index
+identifies omitted older entries, and the full saved original remains
+available by scoped result ID. A later request for details reads that
+original instead of admitting another Run.
+For activity entries, the index carries the completed final Message but omits
+the scheduled task's input prompt. Only a Conversation user's request may
+identify a result in that way.
+
+The mandatory index also derives a bounded outline of explicit numbered
+sections from each saved original. This is navigation metadata, not a second
+summary or permission to answer from an excerpt. In Sunny's early report, an
+introductory sentence describes two themes while the numbered “今日重点” section
+contains three entries; the index must preserve that distinction and the
+individual entry titles. The automatic opening is greeting-only. A
+substantive continuation needs a separate answer turn with the complete
+source; a report excerpt cannot silently become that turn.
+Prior Phone assistant speech remains in chronological conversation history,
+but PCM labels its transcript provenance when projecting it to a new provider
+session. Such speech is conversational context, not evidence that a saved
+report's claims or counts were verified. The source-derived outline and the
+addressable original retain their separate provenance.
 
 The WIP Journal remains temporarily as a bounded shadow/legacy compatibility
 projection while canonical HER recovery is validated. It must not be re-ingested

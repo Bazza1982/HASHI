@@ -450,6 +450,15 @@ class RuntimeInvocationMixin:
             )
             state.ledger.add_log_ref(start_ref)
             self.ledger_store.save(state.ledger)
+            await self._publish_model_route(
+                state,
+                event_id=f"{attempt_prefix}:model-route:selected",
+                stage=stage,
+                model_provider=selected.engine,
+                model=selected.model,
+                route_status="selected",
+                attempt=attempt,
+            )
             state.progress.record(
                 "stage_started",
                 stage.value,
@@ -517,6 +526,15 @@ class RuntimeInvocationMixin:
                     },
                 )
                 state.ledger.add_log_ref(response_ref)
+                await self._publish_model_route(
+                    state,
+                    event_id=f"{attempt_prefix}:model-route:returned",
+                    stage=stage,
+                    model_provider=response.provider,
+                    model=response.model,
+                    route_status="returned",
+                    attempt=attempt,
+                )
                 reasoning_ref = self.audit_log.record_reasoning(
                     event_id=f"{attempt_prefix}:reasoning",
                     turn_id=state.ledger.turn_id,
@@ -1104,6 +1122,15 @@ class RuntimeInvocationMixin:
             )
             state.ledger.add_log_ref(start_ref)
             self.ledger_store.save(state.ledger)
+            await self._publish_model_route(
+                state,
+                event_id=f"{attempt_prefix}:model-route:selected",
+                stage=Stage.JSON_REPAIR,
+                model_provider=selected.engine,
+                model=selected.model,
+                route_status="selected",
+                attempt=repair_attempt,
+            )
             response: StageResponse | None = None
             try:
                 response = await state.control.run_cancellable(
@@ -1128,6 +1155,15 @@ class RuntimeInvocationMixin:
                     },
                 )
                 state.ledger.add_log_ref(response_ref)
+                await self._publish_model_route(
+                    state,
+                    event_id=f"{attempt_prefix}:model-route:returned",
+                    stage=Stage.JSON_REPAIR,
+                    model_provider=response.provider,
+                    model=response.model,
+                    route_status="returned",
+                    attempt=repair_attempt,
+                )
                 reasoning_ref = self.audit_log.record_reasoning(
                     event_id=f"{attempt_prefix}:reasoning",
                     turn_id=state.ledger.turn_id,

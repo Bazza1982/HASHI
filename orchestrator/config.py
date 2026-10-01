@@ -171,6 +171,7 @@ class GlobalConfig:
     persistent_session_v1: bool = True
     native_audio_chat_v1: bool = False
     desktop_enabled: bool = False
+    live_voice_v1: bool = True
     native_audio_retention_seconds: int | str = 3600
 
 @dataclass
@@ -737,6 +738,7 @@ class ConfigManager:
             native_audio_chat_v1=_truthy(
                 g_raw.get("native_audio_chat_v1", False)
             ),
+            live_voice_v1=_truthy(g_raw.get("live_voice_v1", True)),
             native_audio_retention_seconds=g_raw.get(
                 "native_audio_retention_seconds", 3600
             ),

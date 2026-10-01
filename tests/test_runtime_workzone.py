@@ -303,6 +303,185 @@ async def test_admitted_workzone_snapshot_does_not_change_mid_request(tmp_path):
     )
 
 
+@pytest.mark.asyncio
+async def test_busy_workzone_path_change_is_saved_for_future_admission(tmp_path):
+    runtime = _runtime(tmp_path)
+    busy = {"value": False}
+    restarts = []
+
+    async def handle_new_session():
+        restarts.append(True)
+        return True
+
+    runtime._backend_busy = lambda: busy["value"]
+    runtime.backend.capabilities.supports_sessions = True
+    runtime.backend.handle_new_session = handle_new_session
+    runtime._sync_workzone_to_backend_config = (
+        lambda: runtime_workzone.sync_workzone_to_backend_config(runtime)
+    )
+    replacement = runtime.global_config.project_root / "replacement"
+    replacement.mkdir()
+
+    await runtime_workzone.cmd_workzone(
+        runtime, _update(), SimpleNamespace(args=["repo"])
+    )
+    admitted = runtime_session.agent_workzone_state(runtime)
+    restarts.clear()
+    busy["value"] = True
+
+    await runtime_workzone.cmd_workzone(
+        runtime, _update(), SimpleNamespace(args=["replacement"])
+    )
+
+    saved = runtime_session.agent_workzone_state(runtime)
+    assert saved["revision"] > admitted["revision"]
+    assert saved["slots"][0]["path"] == str(replacement.resolve())
+    assert runtime._workzone_dir == runtime.zone.resolve()
+    assert runtime.backend.tool_registry.workspace_dir == runtime.zone.resolve()
+    assert restarts == []
+    assert "requests admitted after this change" in runtime.replies[-1]["text"]
+
+    await runtime_workzone.cmd_workzone(
+        runtime, _update(), SimpleNamespace(args=[])
+    )
+    assert runtime._workzone_dir == runtime.zone.resolve()
+    assert runtime.backend.tool_registry.workspace_dir == runtime.zone.resolve()
+
+    admitted_item = SimpleNamespace(
+        owner_id="user:1",
+        request_metadata={"workzone_snapshot": admitted},
+    )
+    runtime_session.apply_item_workzone(runtime, admitted_item)
+    assert await runtime_workzone.activate_backend_state(runtime) is False
+    assert runtime._workzone_dir == runtime.zone.resolve()
+    assert restarts == []
+
+    busy["value"] = False
+    future_item = SimpleNamespace(
+        owner_id="user:1",
+        request_metadata={"workzone_snapshot": saved},
+    )
+    runtime_session.apply_item_workzone(runtime, future_item)
+    assert await runtime_workzone.activate_backend_state(runtime) is True
+    assert runtime._workzone_dir == replacement.resolve()
+    assert runtime.backend.tool_registry.workspace_dir == replacement.resolve()
+    assert restarts == [True]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("args", "expected_change"),
+    [
+        (["off"], "disabled"),
+        (["label", "renamed"], "renamed"),
+        (["delete", "CONFIRM"], "deleted"),
+        (["all", "off"], "disabled"),
+    ],
+)
+async def test_busy_workzone_configuration_mutations_are_not_blocked(
+    tmp_path, args, expected_change
+):
+    runtime = _runtime(tmp_path)
+    runtime._sync_workzone_to_backend_config = (
+        lambda: runtime_workzone.sync_workzone_to_backend_config(runtime)
+    )
+    await runtime_workzone.cmd_workzone(
+        runtime, _update(), SimpleNamespace(args=["repo"])
+    )
+    before = runtime_session.agent_workzone_state(runtime)
+    runtime._backend_busy = lambda: True
+
+    await runtime_workzone.cmd_workzone(
+        runtime, _update(), SimpleNamespace(args=args)
+    )
+
+    after = runtime_session.agent_workzone_state(runtime)
+    assert after["revision"] > before["revision"]
+    if expected_change == "deleted":
+        assert after["slots"] == []
+    elif expected_change == "renamed":
+        assert after["slots"][0]["label"] == "renamed"
+    else:
+        assert after["slots"][0]["enabled"] is False
+    assert runtime._workzone_dir == runtime.zone.resolve()
+    assert "blocked while" not in runtime.replies[-1]["text"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("args", [["reset"], ["all", "reload"]])
+async def test_busy_workzone_reload_remains_blocked(tmp_path, args):
+    runtime = _runtime(tmp_path)
+    runtime._sync_workzone_to_backend_config = (
+        lambda: runtime_workzone.sync_workzone_to_backend_config(runtime)
+    )
+    await runtime_workzone.cmd_workzone(
+        runtime, _update(), SimpleNamespace(args=["repo"])
+    )
+    before = runtime_session.agent_workzone_state(runtime)
+    runtime._backend_busy = lambda: True
+
+    await runtime_workzone.cmd_workzone(
+        runtime, _update(), SimpleNamespace(args=args)
+    )
+
+    assert runtime_session.agent_workzone_state(runtime) == before
+    assert "reload is blocked" in runtime.replies[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_busy_callback_reload_remains_blocked(tmp_path):
+    runtime = _runtime(tmp_path)
+    await runtime_workzone.cmd_workzone(
+        runtime, _update(), SimpleNamespace(args=["repo"])
+    )
+    state = runtime_session.agent_workzone_state(runtime)
+    runtime._backend_busy = lambda: True
+    query = _CallbackQuery(f"wz:reset:{state['revision']}:main")
+
+    await runtime_workzone.callback_workzone(
+        runtime, _callback_update(query), SimpleNamespace()
+    )
+
+    assert runtime_session.agent_workzone_state(runtime) == state
+    assert query.answers[-1]["show_alert"] is True
+    assert "reload is blocked" in query.answers[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_busy_callback_path_add_and_delete_are_saved(tmp_path):
+    runtime = _runtime(tmp_path)
+    attached = runtime.global_config.project_root / "shared"
+    attached.mkdir()
+    runtime._backend_busy = lambda: True
+    query = _CallbackQuery("wz:p:0:1")
+
+    await runtime_workzone.callback_workzone(
+        runtime, _callback_update(query), SimpleNamespace()
+    )
+    assert query.message.replies
+    reply_message = SimpleNamespace(
+        text="shared",
+        reply_to_message=SimpleNamespace(message_id=query.message.prompt_message_id),
+    )
+    reply = SimpleNamespace(
+        effective_user=SimpleNamespace(id=1),
+        effective_chat=SimpleNamespace(id=123),
+        effective_message=reply_message,
+        message=reply_message,
+    )
+    assert await runtime_workzone.handle_pending_path_reply(runtime, reply) is True
+    saved = runtime_session.agent_workzone_state(runtime)
+    assert saved["slots"][0]["path"] == str(attached.resolve())
+    assert runtime._workzone_dir is None
+
+    delete_query = _CallbackQuery(f"wz:dc:{saved['revision']}:1")
+    await runtime_workzone.callback_workzone(
+        runtime, _callback_update(delete_query), SimpleNamespace()
+    )
+    assert runtime_session.agent_workzone_state(runtime)["slots"] == []
+    assert not delete_query.answers[-1].get("show_alert", False)
+
+
 def test_workzone_prompt_section_uses_backend_capabilities(tmp_path):
     runtime = _runtime(tmp_path)
     runtime._sync_workzone_to_backend_config = lambda: runtime_workzone.sync_workzone_to_backend_config(runtime)

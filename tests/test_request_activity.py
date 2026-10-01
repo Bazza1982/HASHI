@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from adapters.her_v2_provider import _AdapterDelivery
 from adapters.stream_events import (
     DELIVERY_ANSWER_PREVIEW,
     DELIVERY_FINAL,
     KIND_ANSWER_PREVIEW,
 )
+from orchestrator.her_message_router import HERMessageRouter
 from orchestrator.request_activity import RequestActivityStore
 from orchestrator.session_store import SessionStore
 from orchestrator.workbench_api import WorkbenchApiServer
@@ -76,6 +79,67 @@ def test_request_activity_poll_uses_sequence_cursor() -> None:
 
     assert [event["sequence"] for event in result["events"]] == [2]
     assert result["latest_sequence"] == 2
+
+
+@pytest.mark.asyncio
+async def test_model_route_activity_exposes_only_bounded_typed_identity() -> None:
+    store = RequestActivityStore()
+    store.start("req-model")
+    presented = []
+    router = HERMessageRouter(
+        request_id="req-model",
+        logger=logging.getLogger(__name__),
+        technical_presenter=lambda event: presented.append(event),
+        verbose_enabled=lambda: True,
+        persist_event=lambda event: store.publish_stream("req-model", event),
+    )
+    delivery = _AdapterDelivery(router.route, allow_immediate_response=False)
+    await delivery.deliver_activity(
+        kind="model_route",
+        text="",
+        event_id="req-model:route:1",
+        phase="execution",
+        metadata={
+            "engine": "her-v3",
+            "model_provider": "fake-api",
+            "model": "model-lightweight",
+            "route_status": "selected",
+            "attempt": 1,
+            "prompt": "private instruction",
+        },
+    )
+
+    event = store.poll("req-model")["events"][-1]
+    assert event["kind"] == "model_route"
+    assert event["engine"] == "her-v3"
+    assert event["model_provider"] == "fake-api"
+    assert event["model"] == "model-lightweight"
+    assert event["route_status"] == "selected"
+    assert event["attempt"] == 1
+    assert "prompt" not in event
+    assert "metadata" not in event
+    assert event["presentation_enabled"] is False
+    assert presented == []
+    await delivery.deliver_activity(
+        kind="model_route",
+        text="",
+        event_id="req-model:route:2",
+        phase="execution",
+        metadata={
+            "engine": "her-v3",
+            "model_provider": "actual-api",
+            "model": "actual-model",
+            "route_status": "returned",
+            "attempt": 1,
+        },
+    )
+    returned = store.poll("req-model")["events"][-1]
+    assert returned["route_status"] == "returned"
+    assert (returned["model_provider"], returned["model"]) == (
+        "actual-api",
+        "actual-model",
+    )
+    assert presented == []
 
 
 def test_request_activity_clamps_regressing_timestamps_to_sequence_order() -> None:
