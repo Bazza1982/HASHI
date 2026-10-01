@@ -3812,20 +3812,31 @@ class FlexibleAgentRuntime:
         return f"{label} · {ui_language.tr(f'phone.voice.{presentation}')}"
 
     def _phone_menu_text(self) -> str:
+        from orchestrator.frontend_live_voice.provider import default_registry
+
         state = self.phone_manager.get_state()
         provider = self.phone_manager.PROVIDERS[state["provider"]]
+        adapter = default_registry().get(state["provider"])
+        if not bool(getattr(self.global_config, "live_voice_v1", True)):
+            availability = ui_language.tr("phone.status.disabled")
+        elif adapter is None:
+            availability = ui_language.tr("phone.status.provider_unavailable")
+        elif not adapter.credential(self.secrets):
+            availability = ui_language.tr("phone.status.missing_api_key").format(
+                provider=html.escape(str(provider["label"]))
+            )
+        else:
+            availability = ui_language.tr("phone.status.ready")
         style_label = ui_language.tr(f"phone.style.{state['style']}")
         language_label = ui_language.tr(f"phone.language.{state['language']}")
         custom = state["style_instructions"]
         try:
-            resolved = self.phone_manager.resolve_live_session(
+            self.phone_manager.resolve_live_session(
                 display_name=self.get_display_name()
             )
             persona_label = ui_language.tr("phone.persona.ready")
-            revision = str(resolved["public"]["revision"])[:8]
         except Exception:
             persona_label = ui_language.tr("phone.persona.unavailable")
-            revision = "—"
         custom_label = (
             f"<code>{html.escape(custom)}</code>"
             if custom else ui_language.tr("phone.custom.none")
@@ -3839,11 +3850,11 @@ class FlexibleAgentRuntime:
                 f"{html.escape(self._phone_voice_label(state['voice']))}"
             ),
             facts=(
+                f"<b>{html.escape(ui_language.tr('phone.field.status'))}</b> · {availability}",
                 f"<b>{html.escape(ui_language.tr('phone.field.language'))}</b> · {html.escape(language_label)}",
                 f"<b>{html.escape(ui_language.tr('phone.field.style'))}</b> · {html.escape(style_label)}",
                 f"<b>{html.escape(ui_language.tr('phone.field.persona'))}</b> · {html.escape(persona_label)}",
                 f"<b>{html.escape(ui_language.tr('phone.field.custom'))}</b> · {custom_label}",
-                f"<b>{html.escape(ui_language.tr('phone.field.revision'))}</b> · <code>{revision}</code>",
             ),
             consequence=ui_language.tr("phone.effect"),
             action=ui_language.tr("phone.action"),

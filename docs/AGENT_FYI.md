@@ -34,6 +34,8 @@ Model and provider cards share one contract. Tool support is per model: chat-onl
 
 ## UI, media, and Phone
 
+Live Phone defaults on; a missing provider API key blocks calls and must be named in `/phone`. An explicit instance opt-out remains valid. The Agent's Phone settings and PCM readiness do not prove provider readiness.
+
 Renderers and catalogs own interface text. /language changes shared UI and /tui language only local TUI; neither translates replies, IDs, commands, paths, logs, or transcripts. A TUI instance switch freezes generation, Agent, target, capabilities, logs, and Session at submission. Remote requires authentication, not cached liveness. /telegram off and /whatsapp off disable future owner mirrors while originating-platform replies still deliver normally. /think controls Provider reasoning and /commentary controls visible Engine commentary.
 
 Media are Session assets bound to one draft, instance, Agent, and Run. Remote sends managed bytes. HERV3 receives authorized native content or managed references without widening authority. Safe Voice uses typed confirm/discard, and missing idempotency fails before upload. Late or cancelled media is discarded. /voice previews use a validated Function bundle and instance-local media where possible; Workbench receives a Session audio attachment and Telegram its voice renderer.

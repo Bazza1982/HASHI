@@ -89,6 +89,19 @@ def _minimal_flex_agent():
     }
 
 
+def test_live_phone_defaults_on_but_explicit_instance_opt_out_is_kept(tmp_path):
+    config_path, secrets_path = _write_base_files(tmp_path, _minimal_flex_agent())
+    manager = ConfigManager(config_path, secrets_path, bridge_home=tmp_path)
+    global_config, _, _ = manager.load()
+    assert global_config.live_voice_v1 is True
+
+    document = read_config_json(config_path)
+    document["global"]["live_voice_v1"] = False
+    write_config_json(config_path, document)
+    global_config, _, _ = manager.load()
+    assert global_config.live_voice_v1 is False
+
+
 def test_global_timezone_uses_explicit_iana_name(tmp_path):
     config_path, secrets_path = _write_base_files(
         tmp_path,
