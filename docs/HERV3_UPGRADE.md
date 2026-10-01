@@ -48,6 +48,13 @@ permissions, recovery, audit, user commentary and learning.
 
 `PCM -> main model <-> tools -> delivery`
 
+For an active request, HERV3 emits a bounded internal route event when a
+configured provider/model is selected and another after that adapter returns
+a response. PAO's request-activity projection can pass these facts to the
+foreground Phone without a second model call. The model name comes from the
+selected adapter profile; the returned event does not independently attest
+the remote provider's model identity or prove that the user's task succeeded.
+
 Triage, Strategy, Planning, Replanning, Review and stage-based Finalisation are
 not reachable foreground stages. Legacy code/config names remain temporarily
 where they are stable adapter or persistence contracts; they do not select

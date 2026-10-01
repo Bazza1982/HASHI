@@ -19,8 +19,10 @@ from typing import Any, Callable, Mapping
 from adapters.stream_events import (
     DELIVERY_ANSWER_PREVIEW,
     DELIVERY_FINAL,
+    DELIVERY_INTERNAL,
     legacy_delivery_class,
 )
+from orchestrator.flexible_backend_registry import HER_V3_ENGINE
 
 
 _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
@@ -271,6 +273,32 @@ class RequestActivityStore:
     def publish_stream(self, request_id: str, event: object) -> None:
         try:
             kind = str(getattr(event, "kind", "progress") or "progress")
+            model_route_fields: dict[str, Any] = {}
+            if kind == "model_route":
+                metadata = getattr(event, "metadata", None)
+                if not isinstance(metadata, Mapping):
+                    return
+                route_status = str(metadata.get("route_status") or "")
+                if (
+                    metadata.get("engine") != HER_V3_ENGINE
+                    or route_status not in {"selected", "returned"}
+                ):
+                    return
+                provider = _safe_text(metadata.get("model_provider"), limit=160).strip()
+                model = _safe_text(metadata.get("model"), limit=240).strip()
+                try:
+                    attempt = int(metadata.get("attempt"))
+                except (TypeError, ValueError):
+                    return
+                if not provider or not model or not 1 <= attempt <= 1_000_000:
+                    return
+                model_route_fields = {
+                    "engine": HER_V3_ENGINE,
+                    "model_provider": provider,
+                    "model": model,
+                    "route_status": route_status,
+                    "attempt": attempt,
+                }
             status = {
                 "tool_end": "completed",
                 "error": "failed",
@@ -309,7 +337,11 @@ class RequestActivityStore:
                 )
                 # A Connector projection of the existing delivery owner and
                 # runtime switches. Internal/unknown HER events stay closed.
-                owner = str(getattr(event, "delivery_class", "") or "")
+                owner = (
+                    DELIVERY_INTERNAL
+                    if kind == "model_route"
+                    else str(getattr(event, "delivery_class", "") or "")
+                )
                 if not owner and not str(getattr(event, "origin", "")).startswith("her_v2"):
                     owner = legacy_delivery_class(kind)
                 channel = {
@@ -349,6 +381,8 @@ class RequestActivityStore:
                 projected = record["events"][-1]
                 projected.update(delivery_class=owner, presentation_channel=channel or "internal",
                                  presentation_enabled=enabled)
+                if model_route_fields:
+                    projected.update(model_route_fields)
                 if channel == "answer":
                     projected.update(
                         answer_state=(

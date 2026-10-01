@@ -423,8 +423,8 @@ opt-in required by media and local-vision tools.
 - Scheduler checks every 15 seconds; injects prompt into target agent's async queue when due.
 - Hot reload: `tasks.json` is re-read on each loop — no restart needed for task changes.
 - Cron actions: enqueue a prompt or perform a built-in action (e.g. transcript export to markdown journal).
-- On the first pass after a restart, due cron and heartbeat jobs for the same agent are persisted as one recovery batch. HASHI directly sends a fixed notice showing affected task IDs, total missed occurrences, purpose, due-time range, and replay limit; it does not ask an agent to generate the notice.
-- Pending and recently resolved recovery batches are injected into later user turns for that agent. The bridge directly handles `run all` / `全部补跑`, `task-id=N` / `补跑 N 次`, and `skip all` / `全部跳过`, and persists the result across restarts.
+- On the first pass after a restart, due cron and heartbeat jobs for the same agent are persisted as one recovery batch. Scheduler admits the missed-trigger facts into the owner's primary Conversation, and the Agent asks what to do through the normal Frontend Connector path.
+- Pending and recently resolved recovery facts are available to later user turns for that agent. Replies from Telegram, TUI, Backend API, and other Connectors remain ordinary natural-language Conversation messages. The Agent answers questions or clarifies ambiguity, then uses `hashi_scheduler_recovery_resolve` for one exact batch only after the user's intent is clear; no bridge keyword or menu-token parser consumes the reply.
 - Recovery defaults to one execution per task. Set `"recovery": {"max_replay": N}` on a job to permit bounded repeated catch-up; partial counts select the most recent N occurrences and execute them in chronological order.
 - A single recent job keeps automatic catch-up behavior. A cron missed by more than one hour still waits for user confirmation, and normal heartbeat ticks after startup are not grouped.
 - HERV3 prompt/skill jobs use the same one main-model/tool loop for scheduled,

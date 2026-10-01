@@ -5,14 +5,18 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from aiohttp.test_utils import TestServer
 
+from orchestrator.flexible_backend_manager import FlexibleBackendManager
 from orchestrator.skill_manager import SkillManager
 from orchestrator.workbench_api import WorkbenchApiServer
 
 
 class _FakeRequest:
-    def __init__(self, *, name="momo", query=None, payload=None):
+    def __init__(self, *, name="momo", batch_id=None, query=None, payload=None):
         self.match_info = {"name": name}
+        if batch_id is not None:
+            self.match_info["batch_id"] = batch_id
         self.query = query or {}
         self._payload = payload or {}
 
@@ -27,6 +31,7 @@ class _FakeRuntime:
         self.workspace_dir = workspace_dir
         self.skill_manager = skill_manager
         self.reruns = []
+        self.recovery_resolutions = []
 
     async def _run_job_now(self, job, *, kind=None):
         self.reruns.append((kind, dict(job)))
@@ -63,6 +68,22 @@ def _server(tmp_path: Path) -> tuple[WorkbenchApiServer, _FakeRuntime]:
     workspace.mkdir(parents=True)
     manager = SkillManager(tmp_path, tasks_path)
     runtime = _FakeRuntime(workspace, manager)
+    async def resolve_recovery_batch(**kwargs):
+        runtime.recovery_resolutions.append(dict(kwargs))
+        return {
+            "batch_id": kwargs["batch_id"],
+            "agent": kwargs["agent_name"],
+            "status": "resolved",
+            "state_changed": True,
+            "resolution": {
+                "action": "skip",
+                "executed_total": 0,
+                "failed_total": 0,
+                "skipped_total": 2,
+                "items": {},
+            },
+        }
+
     scheduler = SimpleNamespace(
         state={
             "crons": {"daily-report": 1_723_456_789.0},
@@ -84,7 +105,8 @@ def _server(tmp_path: Path) -> tuple[WorkbenchApiServer, _FakeRuntime]:
                     ],
                 }
             },
-        }
+        },
+        resolve_recovery_batch=resolve_recovery_batch,
     )
     config_path = tmp_path / "agents.json"
     config_path.write_text(
@@ -257,6 +279,118 @@ async def test_scheduler_gateway_rerun_requires_exact_single_job_authorization(t
     assert payload["ok"] is True
     assert [(kind, job["id"]) for kind, job in runtime.reruns] == [
         ("cron", "daily-report")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_scheduler_recovery_resolution_is_typed_and_agent_scoped(tmp_path):
+    server, runtime = _server(tmp_path)
+
+    direct = await server.handle_agent_scheduler_recovery_resolve(
+        _FakeRequest(
+            batch_id="batch-1",
+            payload={"action": "skip"},
+        )
+    )
+    assert direct.status == 403
+    assert runtime.recovery_resolutions == []
+
+    response = await server.handle_agent_scheduler_recovery_resolve(
+        _FakeRequest(
+            batch_id="batch-1",
+            payload={
+                "action": "skip",
+                "requested_by": "hashi_tool_gateway",
+            },
+        )
+    )
+    payload = json.loads(response.text)
+
+    assert response.status == 200
+    assert payload["authority"] == "HASHI Scheduler"
+    assert payload["batch_id"] == "batch-1"
+    assert payload["resolution"]["skipped_total"] == 2
+    assert runtime.recovery_resolutions == [
+        {
+            "agent_name": "momo",
+            "batch_id": "batch-1",
+            "action": "skip",
+            "counts": None,
+            "runtime_map": {"momo": runtime},
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_herv3_registry_resolves_recovery_through_worker_topology(tmp_path):
+    server, runtime = _server(tmp_path)
+
+    async with TestServer(server.app) as live_server:
+        base_url = str(live_server.make_url("")).rstrip("/")
+        resolutions = []
+
+        def resolve_service_endpoint(service, *, expected_instance=None):
+            resolutions.append((service, expected_instance))
+            return {
+                "service": service,
+                "instance_id": "HASHI1",
+                "base_url": base_url,
+            }
+
+        worker_facade = SimpleNamespace(
+            is_function_worker_facade=True,
+            resolve_service_endpoint=resolve_service_endpoint,
+        )
+        manager = FlexibleBackendManager.__new__(FlexibleBackendManager)
+        manager.current_backend = SimpleNamespace(tool_registry=None)
+        manager.secrets = {}
+        manager.global_config = SimpleNamespace(
+            instance_id="HASHI1",
+            authorized_id=None,
+        )
+        manager.config = SimpleNamespace(name="momo", telegram_token_key="")
+        manager.logger = SimpleNamespace(
+            error=lambda *_args, **_kwargs: None,
+            info=lambda *_args, **_kwargs: None,
+        )
+        manager.runtime = SimpleNamespace(
+            name="momo",
+            orchestrator=worker_facade,
+            canonical_audit=None,
+        )
+        adapter_config = SimpleNamespace(
+            name="momo",
+            extra={},
+            workspace_dir=tmp_path,
+            access_scope="project",
+            resolve_access_root=lambda: tmp_path,
+        )
+        manager._attach_tool_registry(
+            {"allowed": ["hashi_scheduler_recovery_resolve"]},
+            adapter_config,
+        )
+        registry = manager.current_backend.tool_registry
+        registry.audit_context["workbench_api_base_url"] = "http://127.0.0.1:9"
+
+        result = await registry.execute(
+            "hashi_scheduler_recovery_resolve",
+            {"batch_id": "batch-1", "action": "skip"},
+            "resolve-herv3-1",
+        )
+
+    assert result.is_error is False, result.output
+    payload = json.loads(result.output)
+    assert payload["batch_id"] == "batch-1"
+    assert payload["resolution"]["skipped_total"] == 2
+    assert resolutions == [("workbench", "HASHI1")]
+    assert runtime.recovery_resolutions == [
+        {
+            "agent_name": "momo",
+            "batch_id": "batch-1",
+            "action": "skip",
+            "counts": None,
+            "runtime_map": {"momo": runtime},
+        }
     ]
 
 

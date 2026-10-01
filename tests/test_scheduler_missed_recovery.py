@@ -75,7 +75,7 @@ def _write_tasks(tmp_path, *, heartbeats: list[dict], crons: list[dict]):
 
 
 @pytest.mark.asyncio
-async def test_startup_groups_one_hundred_missed_crons_and_heartbeats_into_one_direct_notice(
+async def test_startup_groups_missed_jobs_into_one_canonical_agent_conversation(
     tmp_path,
     monkeypatch,
 ):
@@ -106,6 +106,15 @@ async def test_startup_groups_one_hundred_missed_crons_and_heartbeats_into_one_d
         runtimes=[runtime],
         authorized_id=123,
     )
+    context_refreshes = []
+
+    async def broadcast_topology():
+        context_refreshes.append(True)
+
+    scheduler.orchestrator = SimpleNamespace(
+        runtimes=[runtime],
+        function_workers=SimpleNamespace(broadcast_topology=broadcast_topology),
+    )
     old_run = time.time() - 7200
     scheduler.state["heartbeats"].update({job["id"]: old_run for job in heartbeats})
     scheduler.state["crons"].update({job["id"]: old_run for job in crons})
@@ -118,20 +127,32 @@ async def test_startup_groups_one_hundred_missed_crons_and_heartbeats_into_one_d
 
     await _run_one_scheduler_pass(scheduler)
 
-    assert runtime.enqueued == []
-    assert len(runtime.notices) == 1
-    notice = runtime.notices[0]["text"]
+    assert runtime.notices == []
+    assert len(runtime.enqueued) == 1
+    request_id, request = runtime.enqueued[0]
+    assert request_id == "req-1"
+    assert request["source"] == scheduler_module.scheduler_recovery.RECOVERY_CONVERSATION_SOURCE
+    assert request["chat_id"] == 123
+    assert request["idempotency_key"].startswith("scheduler-recovery-question:")
+    assert request["request_metadata"]["session_surface"] == "hashi.internal"
+    assert request["request_metadata"]["session_channel_key"] == "scheduler-recovery"
+    assert request["request_metadata"]["scheduler_recovery"]["batch_id"]
+    assert "Ask the user" in request["prompt"]
+    assert "Do not resolve" in request["prompt"]
+    notice = request["request_metadata"]["session_message_text"]
     assert "100 task(s) missed" in notice
     assert notice.count("\n• ") == 100
-    assert "1. Run all" in notice
-    assert "2. Run some" in notice
-    assert "3. Skip all" in notice
+    assert "reply in your own words" in notice
+    assert "1. Run all" not in notice
+    assert "2. Run some" not in notice
+    assert "3. Skip all" not in notice
     assert len(scheduler.state["missed_crons"]) == 50
     assert len(scheduler.state["missed_heartbeats"]) == 50
     assert len(scheduler.state["recovery_batches"]) == 1
+    assert context_refreshes == [True]
 
     await _run_one_scheduler_pass(scheduler)
-    assert len(runtime.notices) == 1
+    assert len(runtime.enqueued) == 1
 
 
 @pytest.mark.asyncio
@@ -246,7 +267,7 @@ def test_hourly_cron_occurrence_capture_counts_all_seven_missed_turns():
     ]
 
 
-def test_recovery_replay_is_safe_by_default_and_questions_are_not_actions():
+def test_recovery_context_delegates_natural_language_to_agent_and_typed_tool():
     item = {
         "task_id": "hourly-hello",
         "kind": "cron",
@@ -257,17 +278,14 @@ def test_recovery_replay_is_safe_by_default_and_questions_are_not_actions():
     batch = {"batch_id": "batch-1", "status": "pending", "items": [item]}
 
     assert scheduler_module.scheduler_recovery.replayable_count(item) == 1
-    assert scheduler_module.scheduler_recovery.parse_reply("How many were missed?", [batch]) is None
-    for ordinary_reply in ("继续", "可以", "ok", "yes", "一起做完"):
-        assert (
-            scheduler_module.scheduler_recovery.parse_reply(ordinary_reply, [batch])
-            is None
-        )
-    assert scheduler_module.scheduler_recovery.parse_reply("全部补跑", [batch]) == {"action": "all"}
-    assert scheduler_module.scheduler_recovery.parse_reply("补跑 3 次", [batch]) == {
-        "action": "partial",
-        "counts": {"hourly-hello": 3},
-    }
+    context = scheduler_module.scheduler_recovery.render_context(
+        [batch],
+        now_ts=time.time(),
+    )
+    assert "ordinary conversation" in context
+    assert "hashi_scheduler_recovery_resolve" in context
+    assert "exact phrases" not in context
+    assert "Accepted direct choices" not in context
 
 
 def test_recent_legacy_notice_migrates_to_pending_seven_occurrence_batch(tmp_path, monkeypatch):
@@ -323,7 +341,7 @@ def test_recent_legacy_notice_migrates_to_pending_seven_occurrence_batch(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_recovery_reply_replays_latest_occurrences_with_direct_policy_context(
+async def test_typed_recovery_resolution_replays_latest_occurrences(
     tmp_path,
     monkeypatch,
 ):
@@ -347,6 +365,15 @@ async def test_recovery_reply_replays_latest_occurrences_with_direct_policy_cont
         runtimes=[runtime],
         authorized_id=123,
     )
+    context_refreshes = []
+
+    async def broadcast_topology():
+        context_refreshes.append(True)
+
+    scheduler.orchestrator = SimpleNamespace(
+        runtimes=[runtime],
+        function_workers=SimpleNamespace(broadcast_topology=broadcast_topology),
+    )
     occurrences = scheduler_module.scheduler_recovery.collect_cron_occurrences(
         cron["schedule"],
         datetime(2026, 8, 8, 22, 8, 32, tzinfo=SYDNEY).timestamp(),
@@ -361,13 +388,16 @@ async def test_recovery_reply_replays_latest_occurrences_with_direct_policy_cont
     )
     batch["notice_status"] = "sent"
 
-    result = await scheduler.handle_recovery_reply(
+    result = await scheduler.resolve_recovery_batch(
         agent_name="zelda",
-        text="补跑 3 次",
+        batch_id=batch["batch_id"],
+        action="rerun_selected",
+        counts={"hourly-hello": 3},
         runtime_map={"zelda": runtime},
     )
 
-    assert "replayed 3" in result
+    assert result["state_changed"] is True
+    assert result["resolution"]["executed_total"] == 3
     assert len(runtime.enqueued) == 3
     assert [
         payload["prompt"].split("originally due at ", 1)[1].split(".", 1)[0]
@@ -392,6 +422,19 @@ async def test_recovery_reply_replays_latest_occurrences_with_direct_policy_cont
     assert "RECENTLY RESOLVED RECOVERY BATCHES" in context
     assert "executed=3" in context
     assert "missed=7" in context
+    assert context_refreshes == [True]
+
+    repeated = await scheduler.resolve_recovery_batch(
+        agent_name="zelda",
+        batch_id=batch["batch_id"],
+        action="rerun_selected",
+        counts={"hourly-hello": 3},
+        runtime_map={"zelda": runtime},
+    )
+    assert repeated["state_changed"] is False
+    assert repeated["resolution"]["executed_total"] == 3
+    assert len(runtime.enqueued) == 3
+    assert context_refreshes == [True]
 
 
 def test_scheduler_wall_time_policy_covers_aest_aedt_fold_and_gap():

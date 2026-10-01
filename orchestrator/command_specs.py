@@ -138,6 +138,27 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         ),
     ),
     CommandSpec(
+        "phone",
+        "cmd_phone",
+        "Configure live phone calls",
+        "session",
+        guide=CommandGuide(
+            "/phone <action> [value]",
+            (
+                "status",
+                "menu",
+                "provider",
+                "model",
+                "voice",
+                "language",
+                "style",
+                "instructions",
+                "reset",
+            ),
+            example="/phone status",
+        ),
+    ),
+    CommandSpec(
         "safevoice",
         "cmd_safevoice",
         "Toggle voice confirmation safety layer",

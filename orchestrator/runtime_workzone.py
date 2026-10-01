@@ -431,25 +431,51 @@ async def _restart_backend_session(runtime: Any) -> None:
         await backend.handle_new_session()
 
 
+def _active_topology(state: Mapping[str, Any] | None) -> tuple[tuple[str, str, bool], ...]:
+    return tuple(
+        (item["slot_id"], item["path"], bool(item["available"]))
+        for item in active_workzone_slots(state)
+    )
+
+
+async def activate_backend_state(runtime: Any) -> bool:
+    """Adopt the current Run's Workzones at its Engine boundary."""
+
+    desired = _active_topology(getattr(runtime, "_workzone_state", None))
+    current = getattr(runtime, "_backend_workzone_topology", None)
+    if current is None:
+        runtime._backend_workzone_topology = desired
+        return False
+    if current == desired:
+        return False
+    await _restart_backend_session(runtime)
+    runtime._backend_workzone_topology = desired
+    return True
+
+
 async def _activate_state(
     runtime: Any,
     before: Mapping[str, Any],
     after: Mapping[str, Any],
     *,
     force_reload: bool = False,
-) -> None:
-    before_topology = tuple(
-        (item["slot_id"], item["path"], bool(item["available"]))
-        for item in active_workzone_slots(before)
-    )
-    after_topology = tuple(
-        (item["slot_id"], item["path"], bool(item["available"]))
-        for item in active_workzone_slots(after)
-    )
+) -> bool:
+    if runtime._backend_busy():
+        return True
+    before_topology = _active_topology(before)
+    after_topology = _active_topology(after)
     install_runtime_state(runtime, after)
     runtime._sync_workzone_to_backend_config()
     if force_reload or before_topology != after_topology:
         await _restart_backend_session(runtime)
+    runtime._backend_workzone_topology = after_topology
+    return False
+
+
+def _mutation_notice(notice: str, *, deferred: bool) -> str:
+    if not deferred:
+        return notice
+    return ui_language.tr("workzone.saved_for_future", result=notice)
 
 
 def _current_session(runtime: Any, update: Any) -> dict[str, Any]:
@@ -592,7 +618,7 @@ async def _save_path(
     expected_revision: int | None,
     enable: bool | None,
     source: str,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], bool]:
     from orchestrator import runtime_session
 
     slot = normalize_workzone_slot(slot_id)
@@ -616,8 +642,8 @@ async def _save_path(
         source=source,
     )
     after = normalize_workzone_state(updated)
-    await _activate_state(runtime, state, after)
-    return after
+    deferred = await _activate_state(runtime, state, after)
+    return after, deferred
 
 
 async def handle_pending_path_reply(runtime: Any, update: Any) -> bool:
@@ -634,9 +660,6 @@ async def handle_pending_path_reply(runtime: Any, update: Any) -> bool:
         _clear_pending_path(runtime, update)
         await runtime._reply_text(update, ui_language.tr("workzone.path_expired"))
         return True
-    if runtime._backend_busy():
-        await runtime._reply_text(update, ui_language.tr("workzone.busy"))
-        return True
     session = _current_session(runtime, update)
     if (
         str(session["owner_id"]) != str(pending["owner_id"])
@@ -647,7 +670,7 @@ async def handle_pending_path_reply(runtime: Any, update: Any) -> bool:
         return True
     state = agent_state(runtime, owner_id=str(session["owner_id"]))
     try:
-        after = await _save_path(
+        after, deferred = await _save_path(
             runtime,
             owner_id=str(session["owner_id"]),
             state=state,
@@ -674,7 +697,9 @@ async def handle_pending_path_reply(runtime: Any, update: Any) -> bool:
         update,
         after,
         pending["slot"],
-        notice=ui_language.tr("workzone.updated"),
+        notice=_mutation_notice(
+            ui_language.tr("workzone.updated"), deferred=deferred
+        ),
     )
     return True
 
@@ -688,7 +713,7 @@ async def _set_enabled(
     enabled: bool,
     expected_revision: int | None = None,
     source: str = "telegram",
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], bool]:
     from orchestrator import runtime_session
 
     slot = normalize_workzone_slot(slot_id)
@@ -708,8 +733,8 @@ async def _set_enabled(
         source=source,
     )
     after = normalize_workzone_state(updated)
-    await _activate_state(runtime, state, after)
-    return after
+    deferred = await _activate_state(runtime, state, after)
+    return after, deferred
 
 
 async def _delete_slot(
@@ -720,7 +745,7 @@ async def _delete_slot(
     slot_id: str,
     expected_revision: int | None = None,
     source: str = "telegram",
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], bool]:
     from orchestrator import runtime_session
 
     updated = runtime_session.ensure_store(runtime).delete_agent_workzone_slot(
@@ -731,8 +756,8 @@ async def _delete_slot(
         source=source,
     )
     after = normalize_workzone_state(updated)
-    await _activate_state(runtime, state, after)
-    return after
+    deferred = await _activate_state(runtime, state, after)
+    return after, deferred
 
 
 async def _reload_slots(
@@ -776,7 +801,8 @@ async def cmd_workzone(runtime: Any, update: Any, context: Any) -> None:
     session = _current_session(runtime, update)
     resolved_owner = str(session["owner_id"])
     state = agent_state(runtime, owner_id=resolved_owner)
-    install_runtime_state(runtime, state)
+    if not runtime._backend_busy():
+        install_runtime_state(runtime, state)
     if not args:
         await _reply_overview(runtime, update, state)
         return
@@ -792,7 +818,7 @@ async def cmd_workzone(runtime: Any, update: Any, context: Any) -> None:
         if action not in {"off", "reset", "reload"}:
             await runtime._reply_text(update, ui_language.tr("workzone.usage_all"))
             return
-        if runtime._backend_busy():
+        if action in {"reset", "reload"} and runtime._backend_busy():
             await runtime._reply_text(update, ui_language.tr("workzone.busy"))
             return
         try:
@@ -805,12 +831,14 @@ async def cmd_workzone(runtime: Any, update: Any, context: Any) -> None:
                     source="telegram_command",
                 )
                 after = normalize_workzone_state(updated)
-                await _activate_state(runtime, state, after)
+                deferred = await _activate_state(runtime, state, after)
                 await _reply_overview(
                     runtime,
                     update,
                     after,
-                    notice=ui_language.tr("workzone.all_off"),
+                    notice=_mutation_notice(
+                        ui_language.tr("workzone.all_off"), deferred=deferred
+                    ),
                 )
                 return
             configured = [item["slot_id"] for item in state["slots"]]
@@ -847,13 +875,13 @@ async def cmd_workzone(runtime: Any, update: Any, context: Any) -> None:
     if not rest:
         await _reply_slot(runtime, update, state, slot)
         return
-    if runtime._backend_busy():
+    action = rest[0].lower()
+    if action in {"reset", "reload"} and runtime._backend_busy():
         await runtime._reply_text(update, ui_language.tr("workzone.busy"))
         return
-    action = rest[0].lower()
     try:
         if action in {"on", "off"}:
-            after = await _set_enabled(
+            after, deferred = await _set_enabled(
                 runtime,
                 owner_id=resolved_owner,
                 state=state,
@@ -865,6 +893,7 @@ async def cmd_workzone(runtime: Any, update: Any, context: Any) -> None:
                 "workzone.turned_on" if action == "on" else "workzone.turned_off",
                 slot=slot,
             )
+            notice = _mutation_notice(notice, deferred=deferred)
             await _reply_slot(runtime, update, after, slot, notice=notice)
             return
         if action in {"reset", "reload"}:
@@ -901,7 +930,7 @@ async def cmd_workzone(runtime: Any, update: Any, context: Any) -> None:
                     reply_markup=_delete_confirmation_keyboard(state, slot),
                 )
                 return
-            after = await _delete_slot(
+            after, deferred = await _delete_slot(
                 runtime,
                 owner_id=resolved_owner,
                 state=state,
@@ -912,7 +941,10 @@ async def cmd_workzone(runtime: Any, update: Any, context: Any) -> None:
                 runtime,
                 update,
                 after,
-                notice=ui_language.tr("workzone.deleted", slot=slot),
+                notice=_mutation_notice(
+                    ui_language.tr("workzone.deleted", slot=slot),
+                    deferred=deferred,
+                ),
             )
             return
         if action == "label":
@@ -930,13 +962,15 @@ async def cmd_workzone(runtime: Any, update: Any, context: Any) -> None:
                 source="telegram_command",
             )
             after = normalize_workzone_state(updated)
-            await _activate_state(runtime, state, after)
+            deferred = await _activate_state(runtime, state, after)
             await _reply_slot(
                 runtime,
                 update,
                 after,
                 slot,
-                notice=ui_language.tr("workzone.label_updated"),
+                notice=_mutation_notice(
+                    ui_language.tr("workzone.label_updated"), deferred=deferred
+                ),
             )
             return
         if action in {"replace", "set"}:
@@ -947,7 +981,7 @@ async def cmd_workzone(runtime: Any, update: Any, context: Any) -> None:
         else:
             raw_path = " ".join(rest).strip()
             enable = True
-        after = await _save_path(
+        after, deferred = await _save_path(
             runtime,
             owner_id=resolved_owner,
             state=state,
@@ -962,7 +996,9 @@ async def cmd_workzone(runtime: Any, update: Any, context: Any) -> None:
             update,
             after,
             slot,
-            notice=ui_language.tr("workzone.updated"),
+            notice=_mutation_notice(
+                ui_language.tr("workzone.updated"), deferred=deferred
+            ),
         )
     except (ValueError, SessionConflict) as exc:
         await runtime._reply_text(
@@ -1026,9 +1062,6 @@ async def callback_workzone(runtime: Any, update: Any, context: Any) -> None:
         )
         return
     if action == "p" and slot is not None:
-        if runtime._backend_busy():
-            await query.answer(ui_language.tr("workzone.busy"), show_alert=True)
-            return
         await _begin_path_reply(
             runtime,
             query,
@@ -1038,12 +1071,12 @@ async def callback_workzone(runtime: Any, update: Any, context: Any) -> None:
         )
         await query.answer(ui_language.tr("workzone.path_waiting"))
         return
-    if runtime._backend_busy():
+    if action == "reset" and runtime._backend_busy():
         await query.answer(ui_language.tr("workzone.busy"), show_alert=True)
         return
     try:
         if action in {"on", "off"} and slot is not None:
-            after = await _set_enabled(
+            after, deferred = await _set_enabled(
                 runtime,
                 owner_id=resolved_owner,
                 state=state,
@@ -1052,8 +1085,11 @@ async def callback_workzone(runtime: Any, update: Any, context: Any) -> None:
                 expected_revision=expected_revision,
                 source="telegram_callback",
             )
-            await query.answer(ui_language.tr("workzone.updated"))
-            await _edit_slot(runtime, query, after, slot)
+            notice = _mutation_notice(
+                ui_language.tr("workzone.updated"), deferred=deferred
+            )
+            await query.answer(notice)
+            await _edit_slot(runtime, query, after, slot, notice=notice)
             return
         if action == "reset" and slot is not None:
             after = await _reload_slots(
@@ -1067,7 +1103,7 @@ async def callback_workzone(runtime: Any, update: Any, context: Any) -> None:
             await _edit_slot(runtime, query, after, slot)
             return
         if action == "dc" and slot is not None:
-            after = await _delete_slot(
+            after, deferred = await _delete_slot(
                 runtime,
                 owner_id=resolved_owner,
                 state=state,
@@ -1075,8 +1111,11 @@ async def callback_workzone(runtime: Any, update: Any, context: Any) -> None:
                 expected_revision=expected_revision,
                 source="telegram_callback",
             )
-            await query.answer(ui_language.tr("workzone.deleted", slot=slot))
-            await _edit_overview(runtime, query, after)
+            notice = _mutation_notice(
+                ui_language.tr("workzone.deleted", slot=slot), deferred=deferred
+            )
+            await query.answer(notice)
+            await _edit_overview(runtime, query, after, notice=notice)
             return
         if action == "a":
             from orchestrator import runtime_session
@@ -1088,9 +1127,12 @@ async def callback_workzone(runtime: Any, update: Any, context: Any) -> None:
                 source="telegram_callback",
             )
             after = normalize_workzone_state(updated)
-            await _activate_state(runtime, state, after)
-            await query.answer(ui_language.tr("workzone.all_off"))
-            await _edit_overview(runtime, query, after)
+            deferred = await _activate_state(runtime, state, after)
+            notice = _mutation_notice(
+                ui_language.tr("workzone.all_off"), deferred=deferred
+            )
+            await query.answer(notice)
+            await _edit_overview(runtime, query, after, notice=notice)
             return
     except SessionConflict:
         current = agent_state(runtime, owner_id=resolved_owner)

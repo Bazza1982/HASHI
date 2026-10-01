@@ -130,7 +130,7 @@ async def test_scheduler_without_gateway_is_unavailable_and_not_retryable(
     registry = _registry(tmp_path, "hashi_scheduler_list")
 
     async def fake_dispatch(_tool_name, _arguments, **_kwargs):
-        return "Error: HASHI Workbench API is unavailable in this gateway context"
+        return "Error: HASHI Backend API is unavailable in this tool context"
 
     monkeypatch.setattr(registry, "_dispatch", fake_dispatch)
     result = await registry.execute("hashi_scheduler_list", {}, "call-1")
@@ -157,6 +157,17 @@ def test_unreachable_scheduler_rerun_keeps_side_effect_unknown() -> None:
     assert outcome.status == "unavailable"
     assert outcome.effect == "unknown"
     assert outcome.error.code == "scheduler_unreachable"
+
+
+def test_resolved_scheduler_recovery_repeat_reports_no_change() -> None:
+    _spec, outcome = adapt_legacy_result(
+        "hashi_scheduler_recovery_resolve",
+        output='{"ok": true, "state_changed": false}',
+        raw_is_error=False,
+    )
+
+    assert outcome.status == "success"
+    assert outcome.effect == "no_change"
 
 
 def test_legacy_unavailable_detail_maps_to_unavailable() -> None:
@@ -232,7 +243,13 @@ async def test_third_identical_query_warns_and_writes_one_row_per_call(
         "duration_ms",
         "result_hash",
         "repeat_count",
+        "effect_receipt",
     }
+    receipts = [row["effect_receipt"] for row in rows]
+    assert {receipt["revision"] for receipt in receipts} == {receipts[0]["revision"]}
+    assert len({receipt["evidence_ref"] for receipt in receipts}) == 3
+    assert all(receipt["kind"] == "read" and receipt["target"] == "state.txt" for receipt in receipts)
+    assert all(receipt["observed"] == "same result" and receipt["complete_content"] for receipt in receipts)
     assert rows[0]["task_id"] == "task-123"
     assert rows[0]["stage"] == "execution"
     assert rows[0]["model"] == "test-model"

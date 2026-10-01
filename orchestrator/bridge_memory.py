@@ -1561,18 +1561,19 @@ class BridgeContextAssembler:
         sequence: int,
         source_text: str,
     ) -> str:
-        user_excerpt = cls._history_excerpt(exchange.get("user_text")) or "(empty)"
-        assistant_excerpt = (
-            cls._history_excerpt(exchange.get("assistant_text")) or "(empty)"
-        )
+        user_excerpt = cls._history_excerpt(exchange.get("user_text"))
+        assistant_excerpt = cls._history_excerpt(exchange.get("assistant_text"))
         source_hash = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
-        return (
+        lines = [
             f"Exchange sequence={sequence}; user_ts={exchange.get('user_ts') or 'unknown-time'}; "
             f"assistant_ts={exchange.get('assistant_ts') or 'unknown-time'}; "
-            f"source_sha256={source_hash}\n"
-            f"USER_EXCERPT: {user_excerpt}\n"
-            f"ASSISTANT_EXCERPT: {assistant_excerpt}"
-        )
+            f"source_sha256={source_hash}"
+        ]
+        if user_excerpt or exchange.get("user_message_id") is not None:
+            lines.append(f"USER_EXCERPT: {user_excerpt or '(empty)'}")
+        if assistant_excerpt or exchange.get("assistant_message_id") is not None:
+            lines.append(f"ASSISTANT_EXCERPT: {assistant_excerpt or '(empty)'}")
+        return "\n".join(lines)
 
     def _resolve_prompt_token_budget(
         self,
@@ -1815,12 +1816,18 @@ class BridgeContextAssembler:
                 if assistant_provenance
                 else "ASSISTANT"
             )
-            exchange_key = f"recent_exchange:{sequence}"
-            exchange_text = (
-                f"Exchange sequence={sequence}; user_ts={user_ts}; assistant_ts={assistant_ts}\n"
-                f"{user_label}: {exchange.get('user_text', '')}\n"
-                f"{assistant_label}: {exchange.get('assistant_text', '')}"
-            )
+            exchange_identity = str(exchange.get("exchange_id") or sequence)
+            exchange_key = f"recent_exchange:{exchange_identity}"
+            exchange_lines = [
+                f"Exchange sequence={sequence}; user_ts={user_ts}; assistant_ts={assistant_ts}"
+            ]
+            if exchange.get("user_message_id") is not None or exchange.get("user_text"):
+                exchange_lines.append(f"{user_label}: {exchange.get('user_text', '')}")
+            if exchange.get("assistant_message_id") is not None or exchange.get("assistant_text"):
+                exchange_lines.append(
+                    f"{assistant_label}: {exchange.get('assistant_text', '')}"
+                )
+            exchange_text = "\n".join(exchange_lines)
             add_section(
                 exchange_key,
                 "RECENT COMPLETED EXCHANGE",

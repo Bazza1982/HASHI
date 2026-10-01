@@ -8,6 +8,8 @@ import hashlib
 import json
 from typing import TYPE_CHECKING, Any, Mapping
 
+from orchestrator.flexible_backend_registry import HER_V3_ENGINE
+
 from .audit import AuditPersistenceError
 from .interfaces import (
     DeliveryReceipt,
@@ -70,6 +72,40 @@ def _merged_stage_timings_s(state: _TurnState) -> dict[str, float]:
 
 
 class RuntimeSupportMixin:
+    async def _publish_model_route(
+        self,
+        state: _TurnState,
+        *,
+        event_id: str,
+        stage: Stage,
+        model_provider: str,
+        model: str,
+        route_status: str,
+        attempt: int,
+    ) -> bool:
+        """Project selection or the StageResponse route after it returns.
+
+        A returned model name is the adapter's route identity. The underlying
+        Model Provider has not independently attested to that exact model ID.
+        """
+
+        if not str(model_provider or "").strip() or not str(model or "").strip():
+            return False
+        return await self._publish_activity(
+            state,
+            kind="model_route",
+            text="",
+            event_id=event_id,
+            phase=stage.value,
+            metadata={
+                "engine": HER_V3_ENGINE,
+                "model_provider": model_provider,
+                "model": model,
+                "route_status": route_status,
+                "attempt": attempt,
+            },
+        )
+
     async def _publish_activity(
         self,
         state: _TurnState,

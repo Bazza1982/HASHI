@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -437,6 +438,36 @@ def test_listener_completion_projects_public_her_v3_source(tmp_path):
 
     messages = store.messages(session["session_id"], owner_id=owner)
     assert messages[-1]["source"] == "her-v3"
+
+
+def test_listener_marks_confirmed_user_stop_as_stopped_not_failed(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.create_session(owner_id=owner, agent_id="lily")
+    for request_id in ("phone-stop", "backend-error"):
+        store.accept_run(
+            session_id=session["session_id"], owner_id=owner, agent_id="lily",
+            request_id=request_id, text="check", source="workbench",
+            idempotency_key=request_id,
+        )
+        store.mark_request_running(request_id, worker_id="worker")
+    monkeypatch.setattr(runtime_session, "capture_backend_binding", lambda *args, **kwargs: None)
+    runtime = SimpleNamespace(
+        name="lily", config=SimpleNamespace(active_backend="her-v2"),
+        backend_manager=SimpleNamespace(current_backend=None), session_store=store,
+        _request_meta_by_id={},
+    )
+
+    runtime_session.finish_request_from_listener(runtime, "phone-stop", {
+        "success": False, "error": "Interrupted by user_stop",
+        "interrupted": True, "interrupt_reason": "user_stop",
+    })
+    runtime_session.finish_request_from_listener(runtime, "backend-error", {
+        "success": False, "error": "backend failed",
+    })
+
+    assert store.get_run_by_request("phone-stop", owner_id=owner)["state"] == "stopped"
+    assert store.get_run_by_request("backend-error", owner_id=owner)["state"] == "failed"
 
 
 def _complete(
@@ -3000,3 +3031,275 @@ def test_frontend_transport_references_resolve_only_inside_their_endpoint(tmp_pa
             transport_message_id="7788",
             event_id="evt_other",
         )
+
+
+def test_message_and_event_ordinals_are_atomic_across_store_processes(tmp_path):
+    store_a = _store(tmp_path)
+    session = store_a.ensure_default_session(owner_id="user:atomic", agent_id="lily")
+    store_b = SessionStore(store_a.db_path, instance_id="HASHI1")
+
+    def next_message(index):
+        store = store_a if index % 2 else store_b
+        with store._lock, store._connection() as connection:
+            return store._next_ordinal(connection, session["session_id"])
+
+    def next_event(index):
+        store = store_a if index % 2 else store_b
+        with store._lock, store._connection() as connection:
+            return store._append_event(
+                connection, session_id=session["session_id"], run_id=None,
+                kind="test.concurrent", summary=f"parallel {index}",
+            )["sequence"]
+
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        message_ordinals = list(pool.map(next_message, range(120)))
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        event_sequences = list(pool.map(next_event, range(120)))
+
+    assert len(set(message_ordinals)) == 120
+    assert len(set(event_sequences)) == 120
+
+
+def test_background_messages_and_events_from_any_agent_enter_active_phone_inbox(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:phone"
+    foreground = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    background = store.ensure_default_session(owner_id=owner, agent_id="zelda")
+    call_id = "call-foreground"
+    with store._lock, store._connection() as connection:
+        connection.execute(
+            """INSERT INTO live_calls(
+                call_id, owner_id, session_id, agent_id, instance_id, instance_generation,
+                context_generation, call_epoch, provider_session_id, phase, controller_lease,
+                lease_expiry, started_at, max_ends_at
+            ) VALUES (?, ?, ?, 'lily', 'HASHI1', '1', 1, 1, 'provider1', 'active',
+                      'lease1', '2099-01-01T00:00:00Z', '2026-09-30T00:00:00Z', '2099-01-01T00:30:00Z')""",
+            (call_id, owner, foreground["session_id"]),
+        )
+    dormant_call_id = "call-dormant-background"
+    with store._lock, store._connection() as connection:
+        connection.execute(
+            """INSERT INTO live_calls(
+                call_id, owner_id, session_id, agent_id, instance_id, instance_generation,
+                context_generation, call_epoch, provider_session_id, phase, foreground,
+                controller_lease, lease_expiry, started_at, max_ends_at
+            ) VALUES (?, ?, ?, 'zelda', 'HASHI1', '1', 1, 1, 'provider-old', 'recovering', 0,
+                      'lease-old', '2099-01-01T00:00:00Z', '2026-09-29T00:00:00Z', '2099-01-01T00:30:00Z')""",
+            (dormant_call_id, owner, background["session_id"]),
+        )
+    message = store.append_presentation_message(
+        session_id=background["session_id"], owner_id=owner, agent_id="zelda",
+        role="assistant", text="background result", source="workbench.run",
+        idempotency_key="background-result-1", history_eligible=True,
+    )
+    with store._lock, store._connection() as connection:
+        store._append_event(
+            connection, session_id=background["session_id"], run_id=None,
+            kind="run.failed", summary="background run needs attention",
+        )
+    pending_messages = store.pending_live_foreground_messages(call_id)
+    pending_events = store.pending_live_foreground_events(call_id)
+    assert [item["source_message_id"] for item in pending_messages] == [message["message_id"]]
+    assert [item["kind"] for item in pending_events] == ["run.failed"]
+    assert store.pending_live_foreground_messages(dormant_call_id) == []
+    assert store.pending_live_foreground_events(dormant_call_id) == []
+
+
+def test_phone_inbox_excludes_presentation_noise_and_its_own_delegated_run(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:phone-self"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    call_id = "call-phone-self"
+    with store._lock, store._connection() as connection:
+        connection.execute(
+            """INSERT INTO live_calls(
+                call_id, owner_id, session_id, agent_id, instance_id, instance_generation,
+                context_generation, call_epoch, provider_session_id, phase, controller_lease,
+                lease_expiry, started_at, max_ends_at
+            ) VALUES (?, ?, ?, 'lily', 'HASHI1', '1', 1, 1, 'provider1', 'active',
+                      'lease1', '2099-01-01T00:00:00Z', '2026-09-30T00:00:00Z',
+                      '2099-01-01T00:30:00Z')""",
+            (call_id, owner, session["session_id"]),
+        )
+        connection.execute(
+            """INSERT INTO live_delegations(
+                call_id, call_epoch, delegation_id, offset_ms, after_ms, cutoff_ms,
+                proposal_version, proposal_digest, proposal_text, proposal_state,
+                proposal_ready_after, expires_at, decision, created_at
+            ) VALUES (?, 1, 'del-self', 600, 0, 600, 1, 'digest-self',
+                      'inspect logs', 'ready', '2026-09-30T00:00:00Z',
+                      '2099-01-01T00:00:00Z', 'admitting', '2026-09-30T00:00:00Z')""",
+            (call_id,),
+        )
+
+    presentation = store.append_presentation_message(
+        session_id=session["session_id"], owner_id=owner, agent_id="lily",
+        role="assistant", text="meter noise", source="meter-cost",
+        idempotency_key="meter-noise", history_eligible=False,
+    )
+    assert presentation["history_eligible"] is False
+
+    origin = store.resolve_live_voice_origin(
+        owner_id=owner,
+        session_id=session["session_id"],
+        agent_id="lily",
+        context_generation=1,
+        candidate={
+            "call_id": call_id,
+            "call_epoch": 1,
+            "delegation_id": "del-self",
+            "proposal_version": 1,
+            "proposal_digest": "digest-self",
+        },
+    )
+    accepted = store.accept_run(
+        session_id=session["session_id"], owner_id=owner, agent_id="lily",
+        request_id="req-live-self", text="inspect logs", source="session-api",
+        idempotency_key="live-self", message_context={"live_voice": origin},
+    )
+    store.mark_request_running(accepted.request_id, worker_id="worker")
+    store.finish_request(
+        accepted.request_id,
+        success=True,
+        assistant_text="same call final result",
+        assistant_source="test-backend",
+    )
+
+    assert store.pending_live_foreground_messages(call_id) == []
+    assert store.pending_live_foreground_events(call_id) == []
+
+
+def test_recent_agent_activity_results_include_only_completed_assistant_results(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:activity-context"
+    activity = store.ensure_agent_activity_session(owner_id=owner, agent_id="lily")
+    accepted = store.accept_run(
+        session_id=activity["session_id"], owner_id=owner, agent_id="lily",
+        request_id="req-activity-context", text="private scheduler prompt",
+        source="scheduler", idempotency_key="activity-context",
+    )
+    store.mark_request_running(accepted.request_id, worker_id="worker")
+    store.finish_request(
+        accepted.request_id,
+        success=True,
+        assistant_text="completed patrol result",
+        assistant_source="test-backend",
+    )
+    store.append_presentation_message(
+        session_id=activity["session_id"], owner_id=owner, agent_id="lily",
+        role="assistant", text="cost noise", source="meter-cost",
+        idempotency_key="activity-cost-noise", history_eligible=False,
+    )
+
+    results = store.recent_agent_activity_results(
+        owner_id=owner,
+        agent_id="lily",
+        limit=8,
+    )
+
+    assert [item["text"] for item in results] == ["completed patrol result"]
+
+
+def test_phone_result_references_keep_current_conversation_and_cron_scoped(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:phone-results"
+    current = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    activity = store.ensure_agent_activity_session(owner_id=owner, agent_id="lily")
+    foreign = store.ensure_default_session(owner_id="user:other", agent_id="lily")
+    for session, key, answer in (
+        (current, "current-news", "Hong Kong report with 23 complete items"),
+        (activity, "scheduled-mail", "Gmail scan with 36 messages"),
+        (foreign, "foreign-result", "Another owner's private result"),
+    ):
+        accepted = store.accept_run(
+            session_id=session["session_id"], owner_id=session["owner_id"],
+            agent_id="lily", request_id=key, text="request", source="session-api",
+            idempotency_key=key,
+        )
+        store.mark_request_running(accepted.request_id, worker_id="worker")
+        store.finish_request(accepted.request_id, success=True, assistant_text=answer)
+
+    rows = store.recent_phone_result_references(
+        owner_id=owner, agent_id="lily", session_id=current["session_id"],
+    )
+    assert {row["text"] for row in rows} == {
+        "Hong Kong report with 23 complete items", "Gmail scan with 36 messages",
+    }
+    assert all(row["message_id"] and row["run_id"] and row["session_id"] for row in rows)
+    assert all(row["request_text"] == "request" for row in rows)
+    assert all(row["agent_id"] == "lily" for row in rows)
+    by_text = {row["text"]: row for row in rows}
+    news = by_text["Hong Kong report with 23 complete items"]
+    assert store.get_phone_result_text(
+        owner_id=owner, agent_id="lily", current_session_id=current["session_id"],
+        message_id=news["message_id"],
+    ) == news["text"]
+    assert store.get_phone_result_text(
+        owner_id="user:other", agent_id="lily", current_session_id=foreign["session_id"],
+        message_id=news["message_id"],
+    ) is None
+
+
+def test_phone_inbox_uses_one_globally_ordered_page_across_messages_and_events(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:phone-order"
+    foreground = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    background = store.ensure_default_session(owner_id=owner, agent_id="zelda")
+    call_id = "call-foreground-order"
+    with store._lock, store._connection() as connection:
+        connection.execute(
+            """INSERT INTO live_calls(
+                call_id, owner_id, session_id, agent_id, instance_id, instance_generation,
+                context_generation, call_epoch, provider_session_id, phase, controller_lease,
+                lease_expiry, started_at, max_ends_at
+            ) VALUES (?, ?, ?, 'lily', 'HASHI1', '1', 1, 1, 'provider1', 'active',
+                      'lease1', '2099-01-01T00:00:00Z', '2026-09-30T00:00:00Z',
+                      '2099-01-01T00:30:00Z')""",
+            (call_id, owner, foreground["session_id"]),
+        )
+
+    message_ids = []
+    for index in range(1, 31):
+        message = store.append_presentation_message(
+            session_id=background["session_id"], owner_id=owner, agent_id="zelda",
+            role="assistant", text=f"message-{index}", source="workbench.run",
+            idempotency_key=f"ordered-message-{index}", history_eligible=True,
+        )
+        message_ids.append(message["message_id"])
+
+    event_ids = []
+    for index in range(1, 31):
+        with store._lock, store._connection() as connection:
+            event = store._append_event(
+                connection, session_id=background["session_id"], run_id=None,
+                kind="run.failed", summary=f"event-{index}",
+            )
+        event_ids.append(event["event_id"])
+
+    with store._lock, store._connection() as connection:
+        for index, message_id in enumerate(message_ids, start=1):
+            connection.execute(
+                "UPDATE messages SET created_at = ? WHERE message_id = ?",
+                (f"2026-09-30T00:00:{index:02d}Z", message_id),
+            )
+        for index, event_id in enumerate(event_ids, start=50):
+            connection.execute(
+                "UPDATE run_events SET created_at = ? WHERE event_id = ?",
+                (f"2026-09-30T00:00:{index:02d}Z", event_id),
+            )
+
+    first_page = store.pending_live_foreground_items(call_id, limit=25)
+    assert [item["item_type"] for item in first_page] == ["message"] * 25
+    assert [item["text"] for item in first_page] == [f"message-{i}" for i in range(1, 26)]
+    for item in first_page:
+        assert store.mark_live_foreground_message_delivered(call_id, item["inbox_id"])
+
+    second_page = store.pending_live_foreground_items(call_id, limit=25)
+    assert [item["item_type"] for item in second_page[:5]] == ["message"] * 5
+    assert [item["text"] for item in second_page[:5]] == [
+        f"message-{i}" for i in range(26, 31)
+    ]
+    assert [item["item_type"] for item in second_page[5:]] == ["event"] * 20
+    assert [item["summary"] for item in second_page[5:]] == [
+        f"event-{i}" for i in range(1, 21)
+    ]
