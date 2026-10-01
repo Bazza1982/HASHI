@@ -235,6 +235,8 @@ write separate from the stop outcome.
 For a stopped general execution, the receipt names the missing final answer
 and any unverified effect without claiming a record was written. The action
 kind controls this wording; a confirmed stop does not certify prior effects.
+The spoken receipt does not promise another report or suggest a record check
+for a general execution when no record effect was observed.
 
 The 2026-10-01 Sunny incident is a failed acceptance case: completed Gmail and
 Hong Kong news final Messages existed, while the then-running Phone relay sent

@@ -355,6 +355,8 @@ async def test_running_phone_stop_waits_for_terminal_confirmation(phone, monkeyp
         assert phone.manager._action_text(phone.binding, "no_final_result") in receipt
         assert phone.manager._action_text(phone.binding, "execute_unconfirmed") in receipt
         assert phone.manager._action_text(phone.binding, "write_unconfirmed") not in receipt
+        assert "reported separately" not in receipt
+        assert "before trying it again" not in receipt
     assert len(phone.admit_calls) == 1
 
 

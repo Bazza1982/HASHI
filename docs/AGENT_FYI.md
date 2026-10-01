@@ -32,6 +32,8 @@ but it remains an address book: answer a report question from the scoped full
 original, and keep opening speech short when that original is not yet present.
 Prior Phone speech is labelled as an unverified transcript in new-call context;
 it does not outrank a saved report.
+Phone stop receipts separate confirmed stop, missing final answer and
+unverified effects; they do not imply a record was written.
 `/reboot min|same` replaces the selected Agent Worker; `/reboot max` adopts
 shared Functions and all running Workers while Core and Remote stay live.
 Adoption needs matching identity, PID, generation, health, and receipts.
