@@ -80,8 +80,10 @@ someone else's active manual input.
 
 ## Bounds and privacy
 
-One shared in-memory JPEG per worker, <=512 KiB; at most 1600x900 (1280x720 small),
-quality starts at 75, four bounded encoding attempts maximum. GDI captures/scales
+Each live desktop session has its own bounded in-memory JPEG cache, <=512 KiB per
+frame; at most eight API sessions and 1600x900 pixels (1280x720 small). Worker
+sessions without contact expire after 60 seconds and release their cached frames.
+Quality starts at 75, with four bounded encoding attempts maximum. GDI captures/scales
 the selected monitor/region directly; no screenshot temp files. Capture/encoding
 uses the existing request worker thread, not Core/HTTP event loops. Concurrent frame
 requests do not start independent capture jobs. Active max 2 FPS, stable idle .5 FPS;

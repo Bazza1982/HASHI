@@ -1,8 +1,8 @@
 """Manual desktop endpoint inside the existing device worker.
 
-One bounded preview per worker; an OS lock is held for the whole human control
-lease, including gaps between input calls. All legacy agent mutations use the
-same OS lock. Native dependencies are imported only in the Windows worker.
+Each session owns its bounded preview. An OS lock is held for the whole human
+control lease, including gaps between input calls. All legacy agent mutations
+use the same OS lock. Native dependencies are imported only in the Windows worker.
 """
 from __future__ import annotations
 
@@ -14,8 +14,21 @@ import threading
 import time
 from collections import OrderedDict
 
-from orchestrator.desktop_contract import CONTROL_TTL, DesktopError, fields, identifier, validate_input, view_options
+from orchestrator.desktop_contract import CONTROL_TTL, SESSION_TTL, DesktopError, fields, identifier, validate_input, view_options
 from tools.windows_helper.desktop_capture import fit_size, jpeg_bytes
+
+
+class SessionState:
+    def __init__(self, last_contact):
+        self.last_contact = last_contact
+        self.view = None
+        self.view_revision = ""
+        self.display_revision = ""
+        self.frame_cache = None
+        self.frame_history = OrderedDict()
+        self.last_capture = -100.0
+        self.last_changed = -100.0
+        self.frames = 0
 
 
 class DesktopController:
@@ -27,14 +40,8 @@ class DesktopController:
         self.device_lock = None
         self.deadline = 0.0
         self.last_contact = 0.0
-        self.view = None
-        self.view_revision = ""
-        self.display_revision = ""
-        self.frame_cache = None
-        self.frame_history = OrderedDict()
-        self.last_capture = -100.0
-        self.last_changed = self.last_input = self.clock()
-        self.frames = 0
+        self.sessions = {}
+        self.last_input = self.clock()
         self.last_seq = 0
         self.results = OrderedDict()
         self.rate_start, self.rate_count = self.clock(), 0
@@ -42,24 +49,38 @@ class DesktopController:
         if watchdog:
             threading.Thread(target=self._watch, name="desktop-input-watchdog", daemon=True).start()
 
+    def _get_session(self, session_id):
+        sid = identifier(session_id, "session")
+        now = self.clock()
+        if sid not in self.sessions:
+            self.sessions[sid] = SessionState(now)
+        session = self.sessions[sid]
+        session.last_contact = now
+        return session
+
     def _watch(self):
         while not self.stop_event.wait(.5):
             self.expire()
 
     def expire(self):
         with self.guard:
-            if self.owner and self.clock() >= self.deadline:
+            now = self.clock()
+            if self.owner and now >= self.deadline:
                 self._release()
-            elif self.owner and self.clock() - self.last_contact > 3:
+            elif self.owner and now - self.last_contact > 3:
                 try: self.native.reset()
                 except Exception: pass
+            for sid, session in list(self.sessions.items()):
+                if now - session.last_contact >= SESSION_TTL:
+                    if self.owner and self.owner[1] == sid:
+                        self._release()
+                    self.sessions.pop(sid, None)
 
     def close(self):
         self.stop_event.set()
         with self.guard:
             self._release()
-            self.frame_cache = None
-            self.frame_history.clear()
+            self.sessions.clear()
 
     def _release(self):
         try:
@@ -87,25 +108,25 @@ class DesktopController:
     def _set_view(self, value, actor, session_id):
         with self.guard:
             self.expire()
-            if self.owner and self.owner[:2] != (actor, session_id):
-                raise DesktopError("desktop_control_busy", 409)
             view = view_options(value)
             rows, rev = self.native.displays()
             if view["display_id"] not in {r["id"] for r in rows}:
                 raise DesktopError("desktop_display_changed", 409)
-            if view == self.view and rev == self.display_revision:
-                return {"view_revision": self.view_revision}
-            if self.owner: self.native.reset()
-            self.view = view
-            self.display_revision = rev
-            self.view_revision = self._view_id(rev)
-            self.frame_cache = None
-            self.frame_history.clear()
-            self.last_capture = -100.0
-            return {"view_revision": self.view_revision}
+            sess = self._get_session(session_id)
+            if view == sess.view and rev == sess.display_revision:
+                return {"view_revision": sess.view_revision}
+            if self.owner and self.owner[:2] == (actor, session_id):
+                self.native.reset()
+            sess.view = view
+            sess.display_revision = rev
+            sess.view_revision = self._view_id(session_id, view, rev)
+            sess.frame_cache = None
+            sess.frame_history.clear()
+            sess.last_capture = -100.0
+            return {"view_revision": sess.view_revision}
 
-    def _view_id(self, revision):
-        return hashlib.sha256(json.dumps([self.view, revision], sort_keys=True).encode()).hexdigest()[:24]
+    def _view_id(self, session_id, view, revision):
+        return hashlib.sha256(json.dumps([session_id, view, revision], sort_keys=True).encode()).hexdigest()[:24]
 
     def handle(self, operation, args, actor, session_id):
         if not isinstance(actor, str) or not 1 <= len(actor) <= 256:
@@ -120,11 +141,12 @@ class DesktopController:
             return self._set_view(args, actor, session_id)
         if operation == "desktop_frame":
             fields(args, {"after_frame"})
-            return self.frame(str(args.get("after_frame", "")))
+            return self.frame(str(args.get("after_frame", "")), session_id)
         if operation == "desktop_close":
             fields(args, set())
             with self.guard:
                 if self.owner and self.owner[:2] == (actor, session_id): self._release()
+                self.sessions.pop(session_id or "", None)
             return {"closed": True}
         if operation == "desktop_control":
             fields(args, {"mode", "lease_id", "ttl"}, {"mode", "lease_id"})
@@ -137,6 +159,7 @@ class DesktopController:
                 if args["mode"] not in {"acquire", "heartbeat"}:
                     raise DesktopError("desktop_invalid_control")
                 self.native.available()
+                self._get_session(session_id)
                 if self.owner is None:
                     if args["mode"] != "acquire": raise DesktopError("desktop_control_expired", 409)
                     lock = self.lock_factory()
@@ -156,40 +179,42 @@ class DesktopController:
             return self.input(args["event"], actor, session_id, args["lease_id"])
         raise DesktopError("desktop_invalid_operation")
 
-    def frame(self, after):
+    def frame(self, after, session_id):
         if not self.capture_guard.acquire(blocking=False):
             raise DesktopError("desktop_capture_busy", 429)
         try:
             self.native.available()
             with self.guard:
                 now = self.clock()
-                interval = 2.0 if now-max(self.last_changed, self.last_input) > 10 else .5
-                cached = self.frame_cache
-                if cached and now-self.last_capture < interval:
-                    return self._project(cached, after)
+                sess = self._get_session(session_id)
+                interval = 2.0 if now-max(sess.last_changed, self.last_input) > 10 else .5
+                cached = sess.frame_cache
+                if cached and now-sess.last_capture < interval:
+                    return self._project(cached, after, sess)
                 rows, revision = self.native.displays()
-                if self.view is None:
-                    self.view = view_options({"display_id": rows[0]["id"]})
-                if revision != self.display_revision:
-                    if self.owner: self._release()
-                    self.display_revision = revision
-                    if self.view["display_id"] not in {r["id"] for r in rows}:
-                        self.view = view_options({"display_id": rows[0]["id"]})
-                    self.view_revision = self._view_id(revision)
-                    self.frame_cache = None; self.frame_history.clear()
-                view = dict(self.view)
-                view_revision = self.view_revision
+                if sess.view is None:
+                    sess.view = view_options({"display_id": rows[0]["id"]})
+                if revision != sess.display_revision:
+                    if self.owner and self.owner[1] == (session_id or ""):
+                        self._release()
+                    sess.display_revision = revision
+                    if sess.view["display_id"] not in {r["id"] for r in rows}:
+                        sess.view = view_options({"display_id": rows[0]["id"]})
+                    sess.view_revision = self._view_id(session_id, sess.view, revision)
+                    sess.frame_cache = None; sess.frame_history.clear()
+                view = dict(sess.view)
+                view_revision = sess.view_revision
                 display = next(r for r in rows if r["id"] == view["display_id"])
                 c = view["crop"]
                 x, y = round(c["x"]*display["width"]), round(c["y"]*display["height"])
                 rect = {"x": display["x"]+x, "y": display["y"]+y,
                         "width": max(1, min(display["width"]-x, round(c["width"]*display["width"]))),
                         "height": max(1, min(display["height"]-y, round(c["height"]*display["height"])))}
-            # Encoding never holds the input lock. One capture, even with many tabs.
+            # Encoding never holds the input lock. Sessions have independent views.
             image = self.native.capture(rect, fit_size(rect["width"], rect["height"], view["small"]))
             digest = hashlib.blake2b(image.tobytes(), digest_size=16).hexdigest()
             with self.guard:
-                cached = self.frame_cache
+                cached = sess.frame_cache
                 changed = not cached or cached["digest"] != digest or cached["meta"]["view_revision"] != view_revision
             data = jpeg_bytes(image) if changed else cached["data"]
             if changed:
@@ -197,31 +222,33 @@ class DesktopController:
                 with Image.open(io.BytesIO(data)) as encoded: encoded_size = encoded.size
             else: encoded_size = cached["meta"]["width"], cached["meta"]["height"]
             with self.guard:
-                if view_revision != self.view_revision:
+                if self.sessions.get(session_id) is not sess:
+                    raise DesktopError("desktop_session_expired", 410)
+                if view_revision != sess.view_revision:
                     raise DesktopError("desktop_view_changed", 409)
-                self.last_capture = self.clock()
+                sess.last_capture = self.clock()
                 if changed:
-                    self.frames += 1
-                    self.last_changed = self.last_capture
-                frame_id = f"frame-{view_revision}-{self.frames}"
+                    sess.frames += 1
+                    sess.last_changed = sess.last_capture
+                frame_id = f"frame-{view_revision}-{sess.frames}"
                 meta = {"frame_id": frame_id, "view_revision": view_revision,
                         "display_revision": revision, "display_id": view["display_id"],
                         "width": encoded_size[0], "height": encoded_size[1], "rect": rect,
                         "display": display, "displays": rows, "checked_at": time.time(), "cursor": self.native.cursor()}
-                self.frame_history[frame_id] = (self.last_capture, rect, view_revision)
-                self.frame_history.move_to_end(frame_id)
-                while len(self.frame_history) > 8: self.frame_history.popitem(last=False)
-                self.frame_cache = {"meta": meta, "digest": digest, "data": data}
-                return self._project(self.frame_cache, after)
+                sess.frame_history[frame_id] = (sess.last_capture, rect, view_revision)
+                sess.frame_history.move_to_end(frame_id)
+                while len(sess.frame_history) > 8: sess.frame_history.popitem(last=False)
+                sess.frame_cache = {"meta": meta, "digest": digest, "data": data}
+                return self._project(sess.frame_cache, after, sess)
         finally:
             self.capture_guard.release()
 
-    def _project(self, cached, after):
+    def _project(self, cached, after, sess):
         meta = dict(cached["meta"])
-        meta["age_ms"] = round(max(0, self.clock()-self.last_capture)*1000)
+        meta["age_ms"] = round(max(0, self.clock()-sess.last_capture)*1000)
         meta["cursor"] = self.native.cursor()
         meta["control_active"] = self.owner is not None
-        meta["next_poll_ms"] = 2000 if self.clock()-max(self.last_changed, self.last_input) > 10 else 500
+        meta["next_poll_ms"] = 2000 if self.clock()-max(sess.last_changed, self.last_input) > 10 else 500
         return {"meta": meta, "jpeg": None if after == meta["frame_id"] else base64.b64encode(cached["data"]).decode("ascii")}
 
     def input(self, value, actor, session_id, lease_id):
@@ -229,6 +256,7 @@ class DesktopController:
         digest = hashlib.sha256(json.dumps(event, sort_keys=True).encode()).hexdigest()
         with self.guard:
             self._own(actor, session_id, lease_id)
+            sess = self._get_session(session_id)
             seq = event["seq"]
             if seq in self.results:
                 old_digest, receipt = self.results[seq]
@@ -237,12 +265,12 @@ class DesktopController:
             if seq != self.last_seq+1: raise DesktopError("desktop_input_out_of_order", 409)
             release = event["kind"] in {"reset", "up", "key_up"}
             if not release:
-                record = self.frame_history.get(event["frame_id"])
-                if not record or event["view_revision"] != self.view_revision or record[2] != self.view_revision or self.clock()-record[0] > 3:
+                record = sess.frame_history.get(event["frame_id"])
+                if not record or event["view_revision"] != sess.view_revision or record[2] != sess.view_revision or self.clock()-record[0] > 3:
                     raise DesktopError("desktop_stale_frame", 409)
                 # Close the display-change race before mapping input coordinates.
                 _, revision = self.native.displays()
-                if revision != self.display_revision:
+                if revision != sess.display_revision:
                     self._release()
                     raise DesktopError("desktop_display_changed", 409)
                 if self.clock()-self.rate_start >= 1: self.rate_start, self.rate_count = self.clock(), 0

@@ -27,6 +27,7 @@ class DesktopSessionService:
     def __init__(self, broker_getter, *, clock=time.monotonic):
         self.broker_getter, self.clock = broker_getter, clock
         self.sessions = {}
+        self.open_lock = asyncio.Lock()
 
     def broker(self):
         broker = self.broker_getter()
@@ -42,17 +43,18 @@ class DesktopSessionService:
         if op == "targets":
             return {"targets": self.broker().desktop_targets(), "protocol_version": 1}
         if op == "open":
-            if len(self.sessions) >= 8: raise DesktopError("desktop_session_limit", 429)
-            target = b.get("target")
-            targets = self.broker().desktop_targets()
-            if not isinstance(target, dict) or target not in targets:
-                raise DesktopError("desktop_target_changed", 409)
-            sid = "desktop-"+uuid4().hex
-            record = DesktopSession(owner, client, dict(target), self.clock()+SESSION_TTL)
-            info = await self.broker().invoke_desktop(target, actor_id=owner, session_id=sid,
-                                                     operation="desktop_info", args={})
-            self.sessions[sid] = record
-            return {"session_id": sid, "binding": target, **info}
+            async with self.open_lock:
+                if len(self.sessions) >= 8: raise DesktopError("desktop_session_limit", 429)
+                target = b.get("target")
+                targets = self.broker().desktop_targets()
+                if not isinstance(target, dict) or target not in targets:
+                    raise DesktopError("desktop_target_changed", 409)
+                sid = "desktop-"+uuid4().hex
+                info = await self.broker().invoke_desktop(target, actor_id=owner, session_id=sid,
+                                                         operation="desktop_info", args={})
+                record = DesktopSession(owner, client, dict(target), self.clock()+SESSION_TTL)
+                self.sessions[sid] = record
+                return {"session_id": sid, "binding": target, **info}
         sid = identifier(b.get("session_id"), "session")
         record = self.sessions.get(sid)
         if record is None: raise DesktopError("desktop_session_expired", 410)

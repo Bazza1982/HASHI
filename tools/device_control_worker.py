@@ -305,14 +305,14 @@ class _DeviceLock:
 
     def acquire(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.stream = self.path.open("a+b")
-        self.stream.seek(0)
-        if self.stream.read(1) == b"":
-            self.stream.seek(0)
-            self.stream.write(b"0")
-            self.stream.flush()
-        self.stream.seek(0)
         try:
+            self.stream = self.path.open("a+b")
+            self.stream.seek(0)
+            if self.stream.read(1) == b"":
+                self.stream.seek(0)
+                self.stream.write(b"0")
+                self.stream.flush()
+            self.stream.seek(0)
             if os.name == "nt":
                 import msvcrt
 
@@ -322,8 +322,9 @@ class _DeviceLock:
 
                 fcntl.flock(self.stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
-            self.stream.close()
-            self.stream = None
+            if self.stream is not None:
+                self.stream.close()
+                self.stream = None
             raise DeviceWorkerError(
                 "device/session write lock is held by another worker"
             ) from exc
