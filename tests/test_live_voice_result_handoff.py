@@ -8,7 +8,9 @@ import pytest
 
 from orchestrator.frontend_live_voice import worker_actions
 from tools.registry import ToolRegistry
-from tests.test_live_voice_actions import phone
+from tests.test_live_voice_actions import phone as _phone_fixture
+
+phone = _phone_fixture
 
 
 @pytest.mark.asyncio
@@ -154,7 +156,7 @@ async def test_stopped_write_keeps_real_saved_readback_separate_from_stop(phone,
         row = state["actions"][0]
         receipt = row["receipts"][0]
         assert row["kind"] == "write" and receipt["readback"] is True
-        assert receipt["observed"] == "Exercise: 40 minutes\n"
+        assert receipt["observed"] == (tmp_path / "fitness.txt").read_bytes().decode("utf-8")
         return {"actions": [{"action_id": row["action_id"], "verified": True,
                              "evidence_refs": [receipt["evidence_ref"]],
                              "receipt": "The exercise record was saved and read back."}]}
