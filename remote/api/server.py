@@ -155,6 +155,7 @@ _WORKBENCH_GATEWAY_RESPONSE_HEADERS = frozenset(
         "content-type",
         "etag",
         "last-modified",
+        "x-desktop-meta",
     }
 )
 
@@ -2012,6 +2013,10 @@ def _forward_workbench_gateway_request(
             return exc.code, exc.read(), response_headers
         except (URLError, TimeoutError, OSError) as exc:
             last_error = exc
+            # A lost desktop input response is an unknown outcome, not permission
+            # to replay a click/text against a fallback loopback address.
+            if upstream_path.split("?", 1)[0].startswith("/api/v1/desktop/"):
+                break
             continue
     raise ConnectionError(str(last_error or "local Workbench API is unavailable"))
 

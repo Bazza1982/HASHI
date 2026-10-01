@@ -1018,3 +1018,12 @@ External calls are rejected before terminal execution. The native Telegram
 handler returns a localized unsupported notice. The TUI compatibility route
 passes its normalized Connector identity to the handler and retains terminal
 execution; a handler must not mistake that call for a native Telegram update.
+
+### Manual desktop candidate (2026-09-30)
+
+The opt-in, client-neutral manual desktop ingress and Windows worker projection are
+specified in [Manual Desktop v1](HASHI_MANUAL_DESKTOP.md). The candidate reuses PAO
+capability registration and resource leases, accepts an authenticated human actor,
+and never creates a conversational Run. It is not a new frontend product inside
+HASHI. Source/automated checks and physical-device acceptance remain separate;
+feature availability defaults to disabled.

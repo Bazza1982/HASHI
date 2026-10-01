@@ -21,6 +21,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from uuid import uuid4
 
+from orchestrator.desktop_broker import ManualDesktopBroker
 from orchestrator.file_permissions import tighten_fd_permissions
 from orchestrator.service_endpoints import (
     ServiceEndpoint,
@@ -249,7 +250,7 @@ RegistrationProbe = Callable[
 ]
 
 
-class CapabilityBroker:
+class CapabilityBroker(ManualDesktopBroker):
     """Own discovery, authorization, audit, and device write leases in Core."""
 
     def __init__(self, kernel: Any) -> None:
@@ -577,7 +578,7 @@ class CapabilityBroker:
             "expired",
             "function-worker-exited",
             "worker-cancelled",
-        } and registration_record is not None:
+        } and registration_record is not None and getattr(lease, "actor_type", "agent") != "user":
             registration, worker_token = registration_record
             self._schedule_cleanup(
                 registration,
