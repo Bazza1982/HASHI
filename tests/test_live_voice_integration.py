@@ -1670,7 +1670,7 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         commentary = [item for item in sent if item["type"] == "session.commentary.append"]
         self.assertFalse(any("Checking service health" in item["content"] for item in thinking))
         self.assertFalse(any("private reasoning" in item["content"] for item in sent))
-        self.assertTrue(any("service is healthy" in item["content"] for item in commentary))
+        self.assertTrue(any("service is healthy" in item["content"] for item in thinking))
         self.assertTrue(any("not checked item by item" in item["content"] for item in commentary))
         self.assertTrue(all(item["delegation_id"] is None for item in commentary))
 

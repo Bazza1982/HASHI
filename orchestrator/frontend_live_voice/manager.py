@@ -50,6 +50,7 @@ TERMINAL_PHASES = {"ended", "failed", "interrupted"}
 CALL_EVENT_SCHEMA = "hashi.live_voice.event.v1"
 LIVE_UPDATE_TOKEN_LIMIT = 320
 LIVE_UPDATE_BYTE_LIMIT = 512
+MAX_RESULT_PAGE_CHARS = 12_000
 CLIENT_OBSERVATION_EVENTS = frozenset({
     "client.data_channel_state",
     "client.event_poll_failed",
@@ -1439,6 +1440,13 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 ORDER BY e.sequence DESC LIMIT 24""",
                 (binding.call_id,),
             ).fetchall()
+            offered_result_rows = connection.execute(
+                """SELECT detail_json FROM run_events
+                   WHERE session_id=? AND kind='voice.live.action.reply_offered'
+                     AND json_extract(detail_json, '$.scope.call_id')=?
+                   ORDER BY sequence DESC LIMIT 256""",
+                (binding.session_id, binding.call_id),
+            ).fetchall()
         results_available = {row["action_id"]: bool(row["final_message_id"]) for row in result_rows}
         run_states = {row["action_id"]: row["run_state"] for row in result_rows}
         routes_by_run = {}
@@ -1447,6 +1455,12 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             routes_by_run.setdefault(row["run_id"], {
                 key: detail[key] for key in ("engine", "model_provider", "model", "route_status", "attempt")
                 if key in detail})
+        next_offsets = {}
+        for row in offered_result_rows:
+            detail = json.loads(row["detail_json"] or "{}")
+            for page in detail.get("result_pages") or []:
+                if isinstance(page, Mapping) and page.get("message_id") not in next_offsets:
+                    next_offsets[str(page["message_id"])] = int(page.get("next_offset") or 0)
         conversation = []
         for row in reversed(rows):
             detail = json.loads(row["detail_json"] or "{}")
@@ -1456,6 +1470,11 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             else:
                 conversation.append({"speaker": row["speaker"], "text": text})
         action_rows = self.actions.rows(binding)[-12:]
+        known_results = self.session_store.recent_phone_result_references(
+            owner_id=binding.owner_id,
+            agent_id=binding.agent_id,
+            session_id=binding.session_id,
+        )
         state = {
             "utterance": proposal.text,
             "progress_updates": self._progress_enabled(binding),
@@ -1471,6 +1490,15 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                          "full_result_available": results_available.get(item["action_id"], False),
                          "model_route": routes_by_run.get(item["run_id"], {})}
                         for item in action_rows],
+            "known_results": [
+                {"result_id": row["message_id"], "session_id": row["session_id"],
+                 "completed_at": row["created_at"], "source": row["session_kind"],
+                 "request": str(row.get("request_text") or "")[:160],
+                 "characters": len(row["text"]), "excerpt": row["text"][:360],
+                 "excerpt_truncated": len(row["text"]) > 360,
+                 "next_offset": next_offsets.get(row["message_id"], 0)}
+                for row in known_results
+            ],
         }
         # Derive this small judgment input from PCM's existing projection. Keep
         # reference context (including HCC) explicitly represented before recent
@@ -1577,7 +1605,10 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                         return
                     try:
                         decision = parse_decision(raw,
-                            known_action_ids={item["action_id"] for item in state["actions"]})
+                            known_action_ids={item["action_id"] for item in state["actions"]},
+                            known_result_ids={item["result_id"] for item in state["known_results"]},
+                            known_result_next_offsets={item["result_id"]: item["next_offset"]
+                                                       for item in state["known_results"]})
                         break
                     except LiveVoiceError as exc:
                         if (attempt or isinstance(raw, Mapping) and raw.get("complete") is False or
@@ -1594,6 +1625,31 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                         reason="semantic_incomplete", provider_reply="")
                     return
                 self._set_progress_preference(binding, decision.progress_preference)
+                if decision.route is DelegationRoute.RECALL:
+                    for result_id in decision.result_ids:
+                        original = self.session_store.get_phone_result_text(
+                            owner_id=binding.owner_id,
+                            agent_id=binding.agent_id,
+                            current_session_id=binding.session_id,
+                            message_id=result_id,
+                        )
+                        if not original:
+                            raise LiveVoiceError("live_saved_result_unavailable", 409)
+                    reply = (
+                        "The caller asked: " + proposal.text + "\n"
+                        "Complete saved originals from this Agent were supplied as context. "
+                        "Answer from them now. If all items were requested, cover every item "
+                        "in spoken sections; do not invent a smaller total or repeat the work."
+                    )
+                    await self._finish_delegation_without_run(binding, proposal,
+                        decision="recalled", reason="saved_agent_result", provider_reply=reply,
+                        result_sources=[{
+                            "message_id": result_id,
+                            "start": next(item["next_offset"] for item in state["known_results"]
+                                          if item["result_id"] == result_id)
+                                     if decision.result_continuation else 0,
+                        } for result_id in decision.result_ids])
+                    return
                 if decision.route is not DelegationRoute.EXECUTE:
                     reply = decision.reply if decision.reply_needed else ""
                     await self._finish_delegation_without_run(binding, proposal,
@@ -1780,8 +1836,44 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                     delegation_id=None)
 
     async def _offer_action_reply(self, binding: CallBinding, reply_id: str, content: str,
-                                  *, run_id: str | None = None) -> bool:
-        """Persist actual reply content, then request speech independently of native tool IDs."""
+                                  *, run_id: str | None = None,
+                                  result_sources: list[dict[str, Any]] | None = None) -> bool:
+        """Persist a recoverable delivery plan, then stage originals before speech."""
+        sources = list(result_sources or [])
+        originals = []
+        result_pages = []
+        for source in sources:
+            message_id = identifier(source.get("message_id"))
+            original = self.session_store.get_phone_result_text(
+                owner_id=binding.owner_id, agent_id=binding.agent_id,
+                current_session_id=binding.session_id, message_id=message_id,
+            )
+            if not original:
+                raise LiveVoiceError("live_saved_result_unavailable", 409)
+            start = source.get("start", 0)
+            if isinstance(start, bool) or not isinstance(start, int) or start < 0 or start >= len(original):
+                raise LiveVoiceError("live_saved_result_position_invalid", 409)
+            end = min(len(original), start + MAX_RESULT_PAGE_CHARS)
+            if end < len(original):
+                boundary = original.rfind("\n", start + MAX_RESULT_PAGE_CHARS // 2, end)
+                if boundary > start:
+                    end = boundary + 1
+            next_offset = end if end < len(original) else 0
+            result_pages.append({"message_id": message_id, "start": start,
+                                 "end": end, "total_chars": len(original),
+                                 "next_offset": next_offset})
+            originals.append(
+                f"Saved original {message_id}; characters {start + 1}-{end} of {len(original)}; "
+                + (f"continuation begins at offset {end}; this is not the full report"
+                   if next_offset else "complete through the end")
+                + ":\n" + original[start:end]
+            )
+        original_context = "\n\n".join(originals)
+        provider_content = content
+        if any(page["next_offset"] for page in result_pages):
+            provider_content += ("\nThe saved original continues beyond the material in this turn. "
+                                 "Explain the page boundary and continuation to the caller; "
+                                 "do not claim that the full report has been spoken.")
         token = (binding.call_id, reply_id)
         if token in self._reply_inflight:
             return False
@@ -1803,7 +1895,8 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 if not previous:
                     self.session_store._append_event(connection, session_id=binding.session_id, run_id=run_id,
                         kind="voice.live.action.reply_pending", summary="Phone response pending",
-                        detail={"scope": binding.public_scope(), "reply_id": reply_id, "content": content})
+                        detail={"scope": binding.public_scope(), "reply_id": reply_id,
+                                "content": content, "result_sources": sources})
                 attempt = sum(row["kind"] == "voice.live.action.reply_attempted" for row in previous) + 1
                 baseline = int(connection.execute("SELECT next_event_sequence-1 FROM sessions WHERE session_id=?",
                                                   (binding.session_id,)).fetchone()[0])
@@ -1817,16 +1910,23 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                     "reason": "delivery_attempt_limit", "generated_output": "unconfirmed",
                     "audible_delivery": "unverified"})
                 return False
-            relayed = await self._send_provider_update(binding, kind="commentary", content=content, delegation_id=None)
+            if original_context and not await self._send_provider_update(
+                    binding, kind="thinking", content=original_context, delegation_id=None):
+                return False
+            relayed = await self._send_provider_update(binding, kind="commentary",
+                                                       content=provider_content, delegation_id=None)
             if not relayed:
                 return False
             with self.session_store._lock, self.session_store._connection() as connection:
                 self.session_store._append_event(connection, session_id=binding.session_id, run_id=run_id,
                     kind="voice.live.action.reply_offered", summary="Phone response accepted for generation",
                     detail={"scope": binding.public_scope(), "reply_id": reply_id, "attempt": attempt,
-                            "generated_output": "unverified", "audible_delivery": "unverified"})
+                            "generated_output": "unverified", "audible_delivery": "unverified",
+                            "result_source_count": len(sources),
+                            "result_pages": result_pages,
+                            "result_context_sha256": stable_digest({"text": original_context}) if sources else None})
             self._track(asyncio.create_task(
-                self._observe_action_reply(binding, reply_id, content, baseline, attempt, run_id),
+                self._observe_action_reply(binding, reply_id, content, baseline, attempt, run_id, sources),
                 name="hashi-live-reply-" + reply_id), self._relay_tasks, binding=binding)
             monitoring = True
             return True
@@ -1835,7 +1935,8 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 self._reply_inflight.discard(token)
 
     async def _observe_action_reply(self, binding: CallBinding, reply_id: str, content: str,
-                                    after_sequence: int, attempt: int, run_id: str | None) -> None:
+                                    after_sequence: int, attempt: int, run_id: str | None,
+                                    result_sources: list[dict[str, Any]]) -> None:
         token = (binding.call_id, reply_id)
         handed_off = False
         try:
@@ -1849,7 +1950,8 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             user_spoke = any(row["speaker"] == "user" for row in rows)
             if not output_observed and not user_spoke and attempt < 2 and not self._closing:
                 self._reply_inflight.discard(token)
-                handed_off = await self._offer_action_reply(binding, reply_id, content, run_id=run_id)
+                handed_off = await self._offer_action_reply(binding, reply_id, content, run_id=run_id,
+                                                            result_sources=result_sources)
                 return
             self._action_event(binding, "reply_observed" if output_observed else "reply_unconfirmed", {
                 "reply_id": reply_id, "attempts": attempt,
@@ -1881,11 +1983,13 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             if (binding.call_id, detail["reply_id"]) in self._reply_inflight:
                 continue
             self._track(asyncio.create_task(self._offer_action_reply(
-                binding, detail["reply_id"], detail["content"], run_id=row["run_id"]),
+                binding, detail["reply_id"], detail["content"], run_id=row["run_id"],
+                result_sources=detail.get("result_sources")),
                 name="hashi-live-reply-recovery-" + detail["reply_id"]), self._relay_tasks, binding=binding)
 
     async def _finish_delegation_without_run(self, binding: CallBinding, proposal: Proposal, *,
-                                             decision: str, reason: str, provider_reply: str) -> None:
+                                             decision: str, reason: str, provider_reply: str,
+                                             result_sources: list[dict[str, Any]] | None = None) -> None:
         applied = False
         with self.session_store._lock, self.session_store._connection() as connection:
             cursor = connection.execute(
@@ -1902,7 +2006,8 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         if applied and provider_reply:
             # Commentary delivers actual content; instruction insertion alone
             # neither completes a turn nor proves audible playback.
-            await self._offer_action_reply(binding, "decision-" + proposal.delegation_id, provider_reply)
+            await self._offer_action_reply(binding, "decision-" + proposal.delegation_id,
+                                           provider_reply, result_sources=result_sources)
 
     async def read_proposal(self, binding: CallBinding, delegation_id: str) -> Proposal:
         with self.session_store._lock, self.session_store._connection() as connection:
@@ -2545,12 +2650,15 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             # The canonical final Message carries the complete answer. It is not
             # evidence that any write succeeded or that every source was verified.
             content = "\n".join(f"{fact['summary']}: {fact['spoken_receipt']}" for fact in facts)
+            result_sources = []
             if report and (any(item["kind"] == "query" for item in actions)
                            or any(fact["status"] == "unknown" for fact in facts)):
-                content += "\n" + self._action_text(binding, "result_reported") + "\n" + report
+                content += "\n" + self._action_text(binding, "result_reported")
+                result_sources = [{"message_id": str(run["final_message_id"])}]
             if not content:
                 content = self._action_text(binding, "judgment_unavailable")
-            relayed = await self._offer_action_reply(binding, "result-" + delegation_id, content, run_id=run_id)
+            relayed = await self._offer_action_reply(binding, "result-" + delegation_id, content,
+                                                     run_id=run_id, result_sources=result_sources)
             if relayed:
                 with self.session_store._lock, self.session_store._connection() as connection:
                     self.session_store._append_event(connection, session_id=binding.session_id, run_id=run_id,
@@ -2657,6 +2765,13 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             "input_sha256": stable_digest({"input": phone_session["input"]}),
             "input_messages": len(phone_session["input"]),
             "input_tokens_est": int(phone_session["context_audit"].get("tokens_est") or 0),
+            "context_manifest": {
+                "included_context_keys": list(phone_session["context_audit"].get("included_context_keys") or []),
+                "result_reference_ids": list(phone_session["context_audit"].get("result_reference_ids") or []),
+                "result_references_omitted": int(phone_session["context_audit"].get("result_references_omitted") or 0),
+                "result_references_omitted_ids": list(phone_session["context_audit"].get("result_references_omitted_ids") or []),
+                "result_reference_omission_reason": phone_session["context_audit"].get("result_reference_omission_reason"),
+            },
         }
         phone_record_json = json.dumps(phone_record, ensure_ascii=False, separators=(",", ":"))
         sdp = payload.get("sdp")

@@ -440,6 +440,36 @@ def test_listener_completion_projects_public_her_v3_source(tmp_path):
     assert messages[-1]["source"] == "her-v3"
 
 
+def test_listener_marks_confirmed_user_stop_as_stopped_not_failed(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.create_session(owner_id=owner, agent_id="lily")
+    for request_id in ("phone-stop", "backend-error"):
+        store.accept_run(
+            session_id=session["session_id"], owner_id=owner, agent_id="lily",
+            request_id=request_id, text="check", source="workbench",
+            idempotency_key=request_id,
+        )
+        store.mark_request_running(request_id, worker_id="worker")
+    monkeypatch.setattr(runtime_session, "capture_backend_binding", lambda *args, **kwargs: None)
+    runtime = SimpleNamespace(
+        name="lily", config=SimpleNamespace(active_backend="her-v2"),
+        backend_manager=SimpleNamespace(current_backend=None), session_store=store,
+        _request_meta_by_id={},
+    )
+
+    runtime_session.finish_request_from_listener(runtime, "phone-stop", {
+        "success": False, "error": "Interrupted by user_stop",
+        "interrupted": True, "interrupt_reason": "user_stop",
+    })
+    runtime_session.finish_request_from_listener(runtime, "backend-error", {
+        "success": False, "error": "backend failed",
+    })
+
+    assert store.get_run_by_request("phone-stop", owner_id=owner)["state"] == "stopped"
+    assert store.get_run_by_request("backend-error", owner_id=owner)["state"] == "failed"
+
+
 def _complete(
     store: SessionStore,
     *,
@@ -3168,6 +3198,46 @@ def test_recent_agent_activity_results_include_only_completed_assistant_results(
     )
 
     assert [item["text"] for item in results] == ["completed patrol result"]
+
+
+def test_phone_result_references_keep_current_conversation_and_cron_scoped(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:phone-results"
+    current = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    activity = store.ensure_agent_activity_session(owner_id=owner, agent_id="lily")
+    foreign = store.ensure_default_session(owner_id="user:other", agent_id="lily")
+    for session, key, answer in (
+        (current, "current-news", "Hong Kong report with 23 complete items"),
+        (activity, "scheduled-mail", "Gmail scan with 36 messages"),
+        (foreign, "foreign-result", "Another owner's private result"),
+    ):
+        accepted = store.accept_run(
+            session_id=session["session_id"], owner_id=session["owner_id"],
+            agent_id="lily", request_id=key, text="request", source="session-api",
+            idempotency_key=key,
+        )
+        store.mark_request_running(accepted.request_id, worker_id="worker")
+        store.finish_request(accepted.request_id, success=True, assistant_text=answer)
+
+    rows = store.recent_phone_result_references(
+        owner_id=owner, agent_id="lily", session_id=current["session_id"],
+    )
+    assert {row["text"] for row in rows} == {
+        "Hong Kong report with 23 complete items", "Gmail scan with 36 messages",
+    }
+    assert all(row["message_id"] and row["run_id"] and row["session_id"] for row in rows)
+    assert all(row["request_text"] == "request" for row in rows)
+    assert all(row["agent_id"] == "lily" for row in rows)
+    by_text = {row["text"]: row for row in rows}
+    news = by_text["Hong Kong report with 23 complete items"]
+    assert store.get_phone_result_text(
+        owner_id=owner, agent_id="lily", current_session_id=current["session_id"],
+        message_id=news["message_id"],
+    ) == news["text"]
+    assert store.get_phone_result_text(
+        owner_id="user:other", agent_id="lily", current_session_id=foreign["session_id"],
+        message_id=news["message_id"],
+    ) is None
 
 
 def test_phone_inbox_uses_one_globally_ordered_page_across_messages_and_events(tmp_path):

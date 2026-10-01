@@ -10,6 +10,7 @@ from .protocol import LiveVoiceError, identifier
 class DelegationRoute(str, Enum):
     DIRECT = "answer"
     CLARIFY = "clarify"
+    RECALL = "recall"
     EXECUTE = "act"
 
 
@@ -29,12 +30,16 @@ class DelegationDecision:
     complete: bool = True
     reply_needed: bool = True
     progress_preference: str = "unchanged"
+    result_ids: tuple[str, ...] = ()
+    result_continuation: bool = False
 
 
 SEMANTIC_INSTRUCTIONS = """Interpret one spoken request in its conversation.
 Return ONE JSON object, no other text:
-{"route":"answer|clarify|act","complete":true,"reply_needed":true,"reply":"substantive answer or necessary question",
+{"route":"answer|clarify|recall|act","complete":true,"reply_needed":true,"reply":"substantive answer or necessary question",
 "progress_preference":"unchanged|on|off",
+"result_ids":[],
+"result_continuation":false,
 "actions":[{"kind":"query|write|modify|cancel|execute","request":"fully resolved task",
 "relation":"new|reuse|revise|cancel","target_action_id":null}]}
 
@@ -53,14 +58,14 @@ confirmation; ordinary execution permissions still apply.
 
 The SAME action uses relation=reuse and its exact target_action_id. Corrections use
 revise/modify and their target id; cancellations use cancel/cancel and their target id.
-If the caller asks to hear all the findings from an existing Phone query, reuse that
-action. HASHI will supply its stored complete answer; do not guess a smaller count,
-claim that the findings vanished, or launch another query just to repeat them.
-If the caller asks about a particular item or detail in an existing query answer,
-reuse that action too; the foreground voice receives the canonical answer and
-can explain the requested item from it. A new query is for an explicit refresh
-or new information. INPUT.actions separates run_state/answer_available from
-effect_status: an unknown effect check does not erase a completed answer.
+INPUT.known_results lists completed original answers in the selected Conversation
+and this Agent's scheduled activity. For details or all items from those answers,
+use route=recall with their exact result_ids and actions=[]. HASHI supplies the
+complete saved text to the foreground without a new Run. Use route=answer only
+when the supplied context already contains enough substance to answer. A new
+query is for an explicit refresh or information absent from known results.
+For an in-progress Phone action, relation=reuse refers to its current state.
+An unknown effect check does not erase a completed informational answer.
 Modifying or cancelling an existing record, reminder or task outside this call uses new with
 the resolved concrete target in request; only existing Phone actions have target_action_id.
 An action is one independently useful user outcome, not one tool operation. Keep dependent
@@ -73,7 +78,13 @@ outcomes, such as checking mail and recording exercise. Independent work uses ne
 another action runs. Keep independent actions in the user's requested order. Include all requested actions
 (at most four; clarify if more). Never invent target IDs or facts. request contains resolved
 details, not a new goal. Uncertain prior effects need reconciliation before repeated writes.
-For answer/clarify, actions=[] and reply actually answers or asks the necessary question.
+For answer/clarify, actions=[] and result_ids=[]; reply answers or asks the necessary question.
+For recall, result_ids has one to four exact IDs from INPUT.known_results, actions=[],
+reply="", and reply_needed=false. For act, result_ids=[].
+For a saved original split into pages, INPUT.known_results supplies next_offset
+only after a page was offered. If the caller asks to continue that exact result,
+set result_continuation=true with its single result ID; otherwise false restarts
+from the beginning. Never infer that an offered page was heard in full.
 If the recent assistant speech already substantively answered this request, use reply_needed=false
 and reply="" so the application does not interrupt with a duplicate answer. A short acknowledgement
 or promise is not a substantive answer. Missing reference material requires clarification, never guessing.
@@ -111,9 +122,11 @@ def decision_shape(raw: Any) -> dict[str, Any]:
     complete = raw.get("complete")
     return {
         "type": "object", "missing": [key for key in ("route", "complete", "reply", "actions") if key not in raw],
-        "route": known_value(raw.get("route"), {"answer", "clarify", "act"}),
+        "route": known_value(raw.get("route"), {"answer", "clarify", "recall", "act"}),
         "complete_type": shape_type(complete), "complete": complete if isinstance(complete, bool) else None,
         "reply_type": shape_type(reply), "reply_characters": len(reply) if isinstance(reply, str) else None,
+        "result_ids_count": len(raw.get("result_ids")) if isinstance(raw.get("result_ids"), list) else None,
+        "result_continuation_type": shape_type(raw.get("result_continuation", False)),
         "reply_needed_type": shape_type(raw.get("reply_needed", True)),
         "progress_preference": known_value(raw.get("progress_preference", "unchanged"), {"unchanged", "on", "off"}),
         "actions_type": shape_type(actions), "actions_count": len(actions) if isinstance(actions, list) else None,
@@ -128,7 +141,9 @@ def decision_shape(raw: Any) -> dict[str, Any]:
     }
 
 
-def parse_decision(raw: Mapping[str, Any], *, known_action_ids: set[str]) -> DelegationDecision:
+def parse_decision(raw: Mapping[str, Any], *, known_action_ids: set[str],
+                   known_result_ids: set[str] | None = None,
+                   known_result_next_offsets: Mapping[str, int] | None = None) -> DelegationDecision:
     """Check shape and references without inferring intent from words in code."""
     if not isinstance(raw, Mapping) or not isinstance(raw.get("complete"), bool):
         raise LiveVoiceError("live_semantic_result_invalid", 502)
@@ -137,8 +152,21 @@ def parse_decision(raw: Mapping[str, Any], *, known_action_ids: set[str]) -> Del
     except (TypeError, ValueError) as exc:
         raise LiveVoiceError("live_semantic_result_invalid", 502) from exc
     reply, values = raw.get("reply"), raw.get("actions")
+    result_ids = raw.get("result_ids", [])
     if not isinstance(reply, str) or len(reply) > 5000 or not isinstance(values, list) or len(values) > 4:
         raise LiveVoiceError("live_semantic_result_invalid", 502)
+    if (not isinstance(result_ids, list) or len(result_ids) > 4
+            or any(not isinstance(value, str) for value in result_ids)
+            or len(result_ids) != len(set(result_ids))):
+        raise LiveVoiceError("live_semantic_result_invalid", 502)
+    if any(value not in (known_result_ids or set()) for value in result_ids):
+        raise LiveVoiceError("live_semantic_target_invalid", 502)
+    continuation = raw.get("result_continuation", False)
+    if not isinstance(continuation, bool):
+        raise LiveVoiceError("live_semantic_result_invalid", 502)
+    if continuation and (route is not DelegationRoute.RECALL or len(result_ids) != 1
+                         or int((known_result_next_offsets or {}).get(result_ids[0]) or 0) <= 0):
+        raise LiveVoiceError("live_semantic_target_invalid", 502)
     actions = []
     for value in values:
         if not isinstance(value, Mapping):
@@ -161,7 +189,9 @@ def parse_decision(raw: Mapping[str, Any], *, known_action_ids: set[str]) -> Del
             identifier(target)
         actions.append(ActionIntent(kind, request.strip(), relation, target))
     complete = raw["complete"]
-    if (route is DelegationRoute.EXECUTE) != bool(actions) or (not complete and actions):
+    if ((route is DelegationRoute.EXECUTE) != bool(actions)
+            or (route is DelegationRoute.RECALL) != bool(result_ids)
+            or (not complete and (actions or result_ids))):
         raise LiveVoiceError("live_semantic_result_invalid", 502)
     reply_needed = raw.get("reply_needed", True)
     if not isinstance(reply_needed, bool):
@@ -169,7 +199,9 @@ def parse_decision(raw: Mapping[str, Any], *, known_action_ids: set[str]) -> Del
     progress_preference = raw.get("progress_preference", "unchanged")
     if not isinstance(progress_preference, str) or progress_preference not in {"unchanged", "on", "off"}:
         raise LiveVoiceError("live_semantic_result_invalid", 502)
-    if complete and reply_needed and route is not DelegationRoute.EXECUTE and not reply.strip():
+    if complete and reply_needed and route not in {DelegationRoute.EXECUTE, DelegationRoute.RECALL} and not reply.strip():
+        raise LiveVoiceError("live_semantic_result_invalid", 502)
+    if route is DelegationRoute.RECALL and (reply.strip() or reply_needed):
         raise LiveVoiceError("live_semantic_result_invalid", 502)
     return DelegationDecision(route, reply.strip(), tuple(actions), complete, reply_needed,
-                              progress_preference)
+                              progress_preference, tuple(result_ids), continuation)

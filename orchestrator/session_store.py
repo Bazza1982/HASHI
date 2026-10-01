@@ -6961,6 +6961,76 @@ class SessionStore:
             ).fetchall()
         return [dict(row) for row in reversed(rows)]
 
+    def recent_phone_result_references(
+        self,
+        *,
+        owner_id: str,
+        agent_id: str,
+        session_id: str,
+        limit: int = 24,
+        since_hours: int = 24,
+    ) -> list[dict[str, Any]]:
+        """PAO-owned completed answers available to the same Agent's phone.
+
+        Include the selected Conversation and the Agent's scheduled activity.
+        A provider receives an addressable projection, never a second result store.
+        """
+
+        bounded_limit = max(1, min(int(limit), 32))
+        bounded_hours = max(1, min(int(since_hours), 168))
+        since = (
+            datetime.now(timezone.utc) - timedelta(hours=bounded_hours)
+        ).isoformat().replace("+00:00", "Z")
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """SELECT m.message_id, m.text, m.source, m.created_at,
+                          u.text AS request_text,
+                          r.run_id, s.session_id, s.session_kind, s.agent_id
+                   FROM sessions AS s
+                   JOIN runs AS r ON r.session_id = s.session_id
+                   JOIN messages AS u ON u.message_id = r.user_message_id
+                   JOIN messages AS m ON m.message_id = r.final_message_id
+                   WHERE s.instance_id = ? AND s.owner_id = ? AND s.agent_id = ?
+                     AND s.status != 'deleted'
+                     AND (s.session_kind = 'agent_activity' OR s.session_id = ?)
+                     AND r.state = 'completed'
+                     AND m.role = 'assistant' AND m.visibility = 'visible'
+                     AND m.history_eligible = 1 AND m.created_at >= ?
+                     AND TRIM(m.text) != ''
+                   ORDER BY m.created_at DESC, m.ordinal DESC
+                   LIMIT ?""",
+                (self.instance_id, str(owner_id), str(agent_id).lower(),
+                 str(session_id), since, bounded_limit),
+            ).fetchall()
+        return [dict(row) for row in reversed(rows)]
+
+    def get_phone_result_text(
+        self,
+        *,
+        owner_id: str,
+        agent_id: str,
+        current_session_id: str,
+        message_id: str,
+    ) -> str | None:
+        """Read one complete final answer under the call's owner/Agent scope."""
+
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """SELECT m.text FROM messages AS m
+                   JOIN runs AS r ON r.final_message_id = m.message_id
+                   JOIN sessions AS s ON s.session_id = r.session_id
+                   WHERE m.message_id = ? AND s.instance_id = ?
+                     AND s.owner_id = ? AND s.agent_id = ?
+                     AND s.status != 'deleted'
+                     AND (s.session_id = ? OR s.session_kind = 'agent_activity')
+                     AND r.state = 'completed' AND m.role = 'assistant'
+                     AND m.visibility = 'visible' AND m.history_eligible = 1
+                   LIMIT 1""",
+                (str(message_id), self.instance_id, str(owner_id),
+                 str(agent_id).lower(), str(current_session_id)),
+            ).fetchone()
+        return str(row["text"]) if row is not None else None
+
     def recent_visible_messages(
         self,
         session_id: str,

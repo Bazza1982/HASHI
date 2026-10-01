@@ -16,6 +16,7 @@ from orchestrator.frontend_live_voice.actions import effect_evidence
 from orchestrator.frontend_live_voice.delegation_policy import ActionIntent, parse_decision
 from orchestrator.frontend_live_voice.protocol import Fragment
 from orchestrator.frontend_live_voice import worker_actions
+from orchestrator import runtime_session
 from tools.registry import ToolRegistry
 
 
@@ -307,6 +308,47 @@ async def test_independent_actions_have_separate_runs_and_scoped_cancel(phone):
 
 
 @pytest.mark.asyncio
+async def test_running_phone_stop_waits_for_terminal_confirmation(phone, monkeypatch):
+    phone.judgments = [decision(action("query", "Check current news"))]
+    await speak(phone, "Check current news")
+    original = action_rows(phone)[0]
+    run = phone.store.get_run(original["run_id"], owner_id=phone.owner_id)
+    phone.store.mark_request_running(run["request_id"], worker_id="worker")
+
+    async def request_stop(_binding, run_id):
+        assert run_id == original["run_id"]
+        return {"interrupted": True,
+                "evidence_ref": "request:" + run["request_id"] + ":interrupt-sent"}
+
+    phone.manager._cancel_action_run = request_stop
+    phone.judgments = [decision(action("cancel", "Stop that news search", "cancel", original["action_id"]))]
+    await speak(phone, "Stop that search and tell me what happened", start=200, end=300, source="stop")
+    assert action_rows(phone)[0]["status"] == "running"
+    assert event_details(phone, "voice.live.action.stop_requested")
+    assert not event_details(phone, "voice.live.action.stop_confirmed")
+
+    monkeypatch.setattr(runtime_session, "capture_backend_binding", lambda *args, **kwargs: None)
+    runtime = SimpleNamespace(
+        name=phone.agent_id, session_store=phone.store,
+        config=SimpleNamespace(active_backend="her-v3"),
+        backend_manager=SimpleNamespace(current_backend=None),
+    )
+    runtime_session.finish_request_from_listener(runtime, run["request_id"], {
+        "success": False, "error": "Interrupted by user_stop",
+        "interrupted": True, "interrupt_reason": "user_stop",
+    })
+    for _ in range(20):
+        if event_details(phone, "voice.live.action.stop_confirmed"):
+            break
+        await asyncio.sleep(0.1)
+
+    assert phone.store.get_run(original["run_id"], owner_id=phone.owner_id)["state"] == "stopped"
+    assert event_details(phone, "voice.live.action.stop_confirmed")
+    assert action_rows(phone)[0]["status"] == "cancelled"
+    assert len(phone.admit_calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_same_action_hurry_reuses_and_real_correction_updates_original(phone):
     phone.judgments = [decision(action("write", "Record exercise for 30 minutes"))]
     await speak(phone, "Record exercise for 30 minutes")
@@ -333,6 +375,73 @@ async def test_substantive_live_answer_does_not_trigger_second_reply(phone):
     phone.judgments = [{"route": "answer", "complete": True, "reply_needed": False, "reply": "", "actions": []}]
     await speak(phone, "Tell me that report", start=30, end=50)
     assert not phone.updates
+    assert not phone.admit_calls
+
+
+@pytest.mark.asyncio
+async def test_same_agent_can_recall_complete_scheduled_report_without_new_run(phone):
+    activity = phone.store.ensure_agent_activity_session(
+        owner_id=phone.owner_id, agent_id=phone.agent_id,
+    )
+    accepted = phone.store.accept_run(
+        session_id=activity["session_id"], owner_id=phone.owner_id,
+        agent_id=phone.agent_id, request_id="scheduled-report", text="Make the report",
+        source="scheduler", idempotency_key="scheduled-report",
+    )
+    phone.store.mark_request_running(accepted.request_id, worker_id="worker")
+    report = "\n".join(f"News {item:02d}: complete detail" for item in range(1, 24))
+    phone.store.finish_request(accepted.request_id, success=True, assistant_text=report)
+    message_id = phone.store.get_run(accepted.run_id, owner_id=phone.owner_id)["final_message_id"]
+    phone.judgments = [{"route": "recall", "complete": True, "reply_needed": False,
+                        "reply": "", "actions": [], "result_ids": [message_id]}]
+
+    await speak(phone, "Tell me all 23 saved news items")
+
+    assert not phone.admit_calls
+    assert not action_rows(phone)
+    offered = "\n".join(payload["content"] for _, payload in phone.updates)
+    assert all(f"News {item:02d}: complete detail" in offered for item in range(1, 24))
+    assert event_details(phone, "voice.live.delegation.routed")[-1]["decision"] == "recalled"
+    pending = event_details(phone, "voice.live.action.reply_pending")[-1]
+    assert "News 23" not in pending["content"]
+    assert pending["result_sources"] == [{"message_id": message_id, "start": 0}]
+    assert phone.updates[0][1]["kind"] == "thinking"
+    assert phone.updates[-1][1]["kind"] == "commentary"
+
+
+@pytest.mark.asyncio
+async def test_long_saved_original_has_explicit_page_and_scoped_continuation(phone):
+    activity = phone.store.ensure_agent_activity_session(
+        owner_id=phone.owner_id, agent_id=phone.agent_id,
+    )
+    accepted = phone.store.accept_run(
+        session_id=activity["session_id"], owner_id=phone.owner_id,
+        agent_id=phone.agent_id, request_id="long-report", text="Make the report",
+        source="scheduler", idempotency_key="long-report",
+    )
+    report = "\n".join(f"Item {item:03d}: " + "complete detail " * 11 for item in range(1, 151))
+    phone.store.finish_request(accepted.request_id, success=True, assistant_text=report)
+    message_id = phone.store.get_run(accepted.run_id, owner_id=phone.owner_id)["final_message_id"]
+    phone.judgments = [{"route": "recall", "complete": True, "reply_needed": False,
+                        "reply": "", "actions": [], "result_ids": [message_id]}]
+
+    await speak(phone, "Tell me all the saved items")
+    first = event_details(phone, "voice.live.action.reply_offered")[-1]["result_pages"][0]
+    assert first["start"] == 0
+    assert 0 < first["next_offset"] < len(report)
+    staged = "\n".join(payload["content"] for _, payload in phone.updates)
+    assert "Item 001" in staged and "Item 150" not in staged
+    assert "not the full report" in staged
+
+    phone.updates.clear()
+    phone.judgments = [{"route": "recall", "complete": True, "reply_needed": False,
+                        "reply": "", "actions": [], "result_ids": [message_id],
+                        "result_continuation": True}]
+    await speak(phone, "Continue that report", start=200, end=300, source="continue")
+    second = event_details(phone, "voice.live.action.reply_offered")[-1]["result_pages"][0]
+    assert second["start"] == first["next_offset"]
+    assert second["end"] > second["start"]
+    assert "Item 001" not in "\n".join(payload["content"] for _, payload in phone.updates)
     assert not phone.admit_calls
 
 

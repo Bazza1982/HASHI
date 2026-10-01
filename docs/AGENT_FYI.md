@@ -228,13 +228,21 @@ an effect check remains uncertain; the final text is information, not proof
 that a write committed or every source was verified. When asked for all
 findings, reuse that answer rather than starting the same query again.
 The foreground must be able to read that final Message from durable PAO state.
+At call start, PCM includes an addressable index of recent completed results
+from the selected Conversation and the same Agent's scheduled activity as
+mandatory reference context; provider capacity fitting must retain it or fail
+the start explicitly. The index marks excerpts and omissions. A request for
+details reads the full original without a new Run. Large originals carry an
+explicit page boundary and continuation position; the position means offered
+content, not confirmed speech.
 Provider append acceptance proves only that the submitted text was accepted;
 it does not prove the foreground model used the complete result. Any later
 speech fragment does not prove full content coverage or playback.
 Stopping a running Run requires a later terminal confirmation; an unconfirmed
 interrupt is not a confirmed stop. A stopped query's partial reads
 are not a completed answer, while a saved record with readback may still be
-verified after stopping. The Run state and the effect remain separate.
+verified after stopping. A typed user-stop completion records `stopped`, while
+a backend error remains `failed`. The Run state and the effect remain separate.
 The foreground may switch brief spoken
 progress on or off from the caller's request. When enabled, relay only real,
 user-presentable activity at a restrained cadence; always deliver required

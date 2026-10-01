@@ -31,6 +31,14 @@ class PhonePersonaProjection:
     content_sha256: str
 
 
+@dataclass(frozen=True)
+class PhoneResultIndex:
+    text: str
+    included_message_ids: tuple[str, ...]
+    omitted_count: int
+    omitted_message_ids: tuple[str, ...] = ()
+
+
 def load_phone_persona(workspace_dir: str | Path) -> PhonePersonaProjection:
     """Load canonical Persona without imposing a second character budget."""
 
@@ -141,32 +149,84 @@ def _message_tokens(item: Mapping[str, Any], token_count: Callable[[str], int]) 
 def build_recent_background_reference(
     results: Iterable[Mapping[str, Any]],
     *,
-    max_chars: int = 6_000,
-    max_item_chars: int = 1_600,
+    max_chars: int = 9_000,
+    max_item_chars: int = 360,
 ) -> str:
-    """Render bounded completed PAO results as reference data for Live Voice."""
+    """Compatibility view of the addressable completed-result index."""
+
+    return build_phone_result_index(
+        results, max_chars=max_chars, max_item_chars=max_item_chars,
+    ).text
+
+
+def build_phone_result_index(
+    results: Iterable[Mapping[str, Any]],
+    *,
+    max_chars: int = 9_000,
+    max_item_chars: int = 360,
+) -> PhoneResultIndex:
+    """Render source excerpts with IDs for scoped retrieval and an audit manifest."""
 
     rows = [row for row in results if str(row.get("text") or "").strip()]
     selected: list[str] = []
-    remaining = max(0, int(max_chars))
+    included_ids: list[str] = []
+    header = (
+        "Recently completed results from this HASHI Agent. These are source excerpts, "
+        "not complete reports. A result ID addresses the full saved original. "
+        "Use the known result before starting another lookup; request its full original "
+        "when the caller asks for details or all items.\n\n"
+    )
+    remaining = max(0, int(max_chars) - len(header))
     for row in reversed(rows):
         text = str(row.get("text") or "").strip()
-        if len(text) > max_item_chars:
+        excerpted = len(text) > max_item_chars
+        if excerpted:
             text = text[: max_item_chars - 1].rstrip() + "…"
         timestamp = str(row.get("created_at") or "time unavailable").strip()
-        block = f"Completed at {timestamp}:\n{text}"
+        result_id = str(row.get("message_id") or "").strip()
+        source = str(row.get("session_kind") or "agent_activity").strip()
+        request = str(row.get("request_text") or "").strip().replace("\n", " ")[:120]
+        reference = f"Result ID {result_id}; " if result_id else "Unaddressable legacy result; "
+        block = (
+            f"{reference}completed at {timestamp}; source {source}; "
+            + (f"request {request}; " if request else "")
+            + f"original length {len(str(row.get('text') or '').strip())} characters; "
+            + f"{'excerpt' if excerpted else 'complete short text'}:\n{text}"
+        )
         if len(block) > remaining:
             continue
         selected.append(block)
+        included_ids.append(result_id)
         remaining -= len(block) + 2
     selected.reverse()
+    included_ids.reverse()
     if not selected:
-        return ""
-    return (
-        "These are recently completed Agent activity results already known to HASHI. "
-        "Use them directly when relevant; do not rerun them merely to verify that they exist.\n\n"
-        + "\n\n".join(selected)
+        if rows:
+            raise PCMValidationError(
+                "pcm_live_result_index_capacity_exceeded",
+                "No completed result can fit in the Live Phone opening index",
+            )
+        return PhoneResultIndex("", (), 0)
+    omitted = len(rows) - len(selected)
+    suffix = f"\n\n{omitted} older results are outside this opening index." if omitted else ""
+    while selected and len(header + "\n\n".join(selected) + suffix) > max_chars:
+        selected.pop(0)
+        included_ids.pop(0)
+        omitted += 1
+        suffix = f"\n\n{omitted} older results are outside this opening index."
+    if not selected:
+        raise PCMValidationError(
+            "pcm_live_result_index_capacity_exceeded",
+            "No completed result can fit in the Live Phone opening index",
+        )
+    included = tuple(item for item in included_ids if item)
+    included_set = set(included)
+    omitted_ids = tuple(
+        str(row.get("message_id")) for row in rows
+        if row.get("message_id") and str(row.get("message_id")) not in included_set
     )
+    return PhoneResultIndex(header + "\n\n".join(selected) + suffix,
+                            included, omitted, omitted_ids)
 
 
 def build_live_voice_instructions(
@@ -262,6 +322,10 @@ answer are different from a saved record or an observed external result. Use the
 as the basis of completion statements; permission and verification remain application responsibilities.
 Remain available for conversation while an action runs. If delivery fails, give a complete explanation,
 not just an unfinished promise. Receiving appended text does not prove the user heard it.
+The opening result index is made of labelled excerpts of this same Agent's completed work.
+When a caller asks for the full content or details beyond an excerpt, request a client
+delegation so HASHI can return the saved original directly to this conversation. This
+read does not start a new background task. Answer from the returned original.
 
 Opening:
 On a new call the application supplies a once-only opening goal after media is ready. Follow the
@@ -309,7 +373,6 @@ def build_live_voice_input(
     sections = _transport_sections(pcm_payload)
     by_key = {section["key"]: section for section in sections}
     required_developer_items: list[dict[str, Any]] = []
-    optional_reference_items: list[dict[str, Any]] = []
     seen_context: set[str] = set()
     for key in (
         "hcc",
@@ -324,12 +387,7 @@ def build_live_voice_input(
         if body in seen_context:
             continue
         seen_context.add(body)
-        destination = (
-            optional_reference_items
-            if key == "recent_background_results"
-            else required_developer_items
-        )
-        destination.append(
+        required_developer_items.append(
             _message(
                 "developer",
                 f"{section['title']} — REFERENCE CONTEXT ONLY\n\n{body}",
@@ -405,38 +463,26 @@ def build_live_voice_input(
     conversation_items = [
         item for unit_items in selected_ordered_units for item in unit_items
     ]
-    included_optional_items = (
-        optional_reference_items
-        if used_messages + len(optional_reference_items) <= message_limit
-        else []
-    )
-    used_tokens += sum(
-        _message_tokens(item, token_count) for item in included_optional_items
-    )
     items = [
         *required_developer_items,
-        *included_optional_items,
         *conversation_items,
     ]
-    optional_unit_counts = [1] if included_optional_items else []
-    optional_requested = 1 if optional_reference_items else 0
     return items, {
         "messages": len(items),
         "tokens_est": used_tokens,
         "provider_tokens_limit": input_token_limit,
         "provider_exact_count_required": True,
         "required_message_count": len(required_developer_items),
-        "history_unit_message_counts": optional_unit_counts + [
+        "history_unit_message_counts": [
             len(unit_items) for unit_items in selected_ordered_units
         ],
-        "history_requested_units": len(ordered_units) + optional_requested,
-        "history_included_units": len(selected_units) + len(optional_unit_counts),
-        "history_omitted_units": (
-            len(ordered_units) - len(selected_units)
-            + optional_requested - len(optional_unit_counts)
-        ),
-        "optional_reference_units": len(optional_unit_counts),
-        "optional_reference_omitted": bool(
-            optional_reference_items and not included_optional_items
-        ),
+        "history_requested_units": len(ordered_units),
+        "history_included_units": len(selected_units),
+        "history_omitted_units": len(ordered_units) - len(selected_units),
+        "optional_reference_units": 0,
+        "optional_reference_omitted": False,
+        "included_context_keys": [
+            key for key in ("hcc", "permanent_memory", "memory_plus_continuity",
+                            "recent_background_results") if key in by_key
+        ],
     }

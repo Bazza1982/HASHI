@@ -43,11 +43,31 @@ def test_progress_preference_is_typed_without_changing_action_intent():
         parse_decision({**base, "progress_preference": ["off"]}, known_action_ids=set())
 
 
+def test_existing_result_recall_is_scoped_and_never_creates_a_run():
+    request = {"route": "recall", "complete": True, "reply_needed": False,
+               "reply": "", "actions": [], "result_ids": ["msg-news"]}
+    decision = parse_decision(request, known_action_ids=set(),
+                              known_result_ids={"msg-news"})
+    assert decision.result_ids == ("msg-news",)
+    assert decision.actions == ()
+    with pytest.raises(LiveVoiceError, match="live_semantic_target_invalid"):
+        parse_decision({**request, "result_ids": ["msg-foreign"]},
+                       known_action_ids=set(), known_result_ids={"msg-news"})
+    continued = parse_decision({**request, "result_continuation": True},
+                               known_action_ids=set(), known_result_ids={"msg-news"},
+                               known_result_next_offsets={"msg-news": 12000})
+    assert continued.result_continuation is True
+    with pytest.raises(LiveVoiceError, match="live_semantic_target_invalid"):
+        parse_decision({**request, "result_continuation": True},
+                       known_action_ids=set(), known_result_ids={"msg-news"})
+
+
 @pytest.mark.asyncio
-async def test_optional_background_reference_yields_before_mandatory_context(
+async def test_completed_result_index_survives_exact_provider_fitting(
     monkeypatch,
 ):
-    weights = {"MANDATORY": 7_800, "BACKGROUND": 1_000}
+    weights = {"MANDATORY": 5_000, "BACKGROUND": 1_000, "OLD": 2_500,
+               "LATEST": 1_000}
 
     async def fake_count(
         _http,
@@ -79,12 +99,11 @@ async def test_optional_background_reference_yields_before_mandatory_context(
         object(),
         key="test-key",
         model="gpt-live-1",
-        input_messages=[item("MANDATORY"), item("BACKGROUND")],
-        required_message_count=1,
-        history_unit_message_counts=[1],
-        optional_prefix_unit_count=1,
+        input_messages=[item("MANDATORY"), item("BACKGROUND"), item("OLD"), item("LATEST")],
+        required_message_count=2,
+        history_unit_message_counts=[1, 1],
     )
 
-    assert [entry["content"][0]["text"] for entry in fitted] == ["MANDATORY"]
-    assert audit["history_included_units"] == 0
+    assert [entry["content"][0]["text"] for entry in fitted] == ["MANDATORY", "BACKGROUND", "LATEST"]
+    assert audit["history_included_units"] == 1
     assert audit["history_omitted_units"] == 1

@@ -1019,7 +1019,7 @@ class WorkbenchApiServer:
         )
         from orchestrator.pcm import canonical_agent_md
         from orchestrator.pcm_voice_projection import (
-            build_recent_background_reference,
+            build_phone_result_index,
         )
         from orchestrator.phone_manager import PhoneConfigError, PhoneManager
 
@@ -1068,6 +1068,7 @@ class WorkbenchApiServer:
 
         extra_sections: list[tuple[str, str, dict[str, Any]]] = []
         recent_history: list[dict[str, Any]] = []
+        result_index = None
         if owner_id and session_id and context_generation is not None:
             session = self.session_store.get_session(
                 session_id,
@@ -1107,19 +1108,18 @@ class WorkbenchApiServer:
                 context_generation=generation,
                 limit=128,
             )
-            recent_background = build_recent_background_reference(
-                self.session_store.recent_agent_activity_results(
+            result_index = build_phone_result_index(
+                self.session_store.recent_phone_result_references(
                     owner_id=owner_id,
                     agent_id=target,
-                    limit=8,
-                    since_hours=24,
+                    session_id=session_id,
                 )
             )
-            if recent_background:
+            if result_index.text:
                 extra_sections.append(
                     (
                         "RECENT COMPLETED BACKGROUND RESULTS",
-                        recent_background,
+                        result_index.text,
                         {
                             "key": "recent_background_results",
                             "protected": True,
@@ -1136,7 +1136,7 @@ class WorkbenchApiServer:
             recent_exchanges=[],
             explicit_history_context=False,
         )
-        return manager.resolve_live_session(
+        resolved = manager.resolve_live_session(
             agent_id=target,
             display_name=str(display_name or target),
             pcm_payload=pcm_payload,
@@ -1144,6 +1144,16 @@ class WorkbenchApiServer:
             interface_language=preferred_locale(runtime or self, actor_id=owner_id),
             frozen_selection=frozen_selection,
         )
+        if result_index is not None:
+            resolved["context_audit"].update({
+                "result_reference_ids": list(result_index.included_message_ids),
+                "result_references_omitted": result_index.omitted_count,
+                "result_references_omitted_ids": list(result_index.omitted_message_ids),
+                "result_reference_omission_reason": (
+                    "opening_index_capacity" if result_index.omitted_count else None
+                ),
+            })
+        return resolved
 
     def _is_governed_profile(self) -> bool:
         return (

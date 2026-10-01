@@ -8,8 +8,7 @@ import pytest
 
 from orchestrator.frontend_live_voice import worker_actions
 from tools.registry import ToolRegistry
-
-pytest_plugins = ("tests.test_live_voice_actions",)
+from tests.test_live_voice_actions import phone
 
 
 @pytest.mark.asyncio

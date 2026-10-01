@@ -532,6 +532,16 @@ inclusion manifest must show which PCM sections and completed-result references
 were actually supplied to the provider, which were omitted, and why. A Session
 record or visible chat card alone does not prove foreground model access.
 
+PAO selects completed final Messages from the active Conversation and this
+Agent's activity Session under the current owner and instance. PCM puts an
+explicitly excerpted, addressable result index beside HCC and configured
+memory in the mandatory opening context. The provider fitter may discard
+oldest conversation units but may not discard that index; if mandatory
+content does not fit, initiation fails with a capacity reason. The index
+identifies omitted older entries, and the full saved original remains
+available by scoped result ID. A later request for details reads that
+original instead of admitting another Run.
+
 The WIP Journal remains temporarily as a bounded shadow/legacy compatibility
 projection while canonical HER recovery is validated. It must not be re-ingested
 when canonical recovery is available and must not become a competing authority.

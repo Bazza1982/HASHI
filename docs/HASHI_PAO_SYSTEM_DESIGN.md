@@ -218,6 +218,17 @@ heard. If the provider offers no consumption acknowledgement, record that
 limit honestly and verify content coverage at the product boundary. A later
 foreground turn must be able to recover the same result from PAO state.
 
+Phone handoff uses the canonical final Message ID as its durable source. The
+call stores only that ID and a page position in its retry plan. The foreground
+receives a bounded page labelled with its start, end, total length and next
+position; asking to continue reads the next page from the same saved result
+without a new Run. The position records material offered, not words heard.
+The resulting speech and player observations remain separate evidence. A
+typed user-stop backend notification settles its Run as `stopped`; an ordinary
+backend error settles as `failed`. Phone cancellation reports request sent
+until the terminal Run state confirms the stop, and keeps any verified prior
+write separate from the stop outcome.
+
 The 2026-10-01 Sunny incident is a failed acceptance case: completed Gmail and
 Hong Kong news final Messages existed, while the then-running Phone relay sent
 only short uncertainty receipts. Later source changes that read the canonical final

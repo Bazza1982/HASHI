@@ -7,7 +7,7 @@ import pytest
 
 from orchestrator.hcc import HCC_USAGE_PROMPT
 from orchestrator.pcm import render_pcm_document
-from orchestrator.pcm_voice_projection import build_live_voice_input
+from orchestrator.pcm_voice_projection import build_live_voice_input, build_phone_result_index
 from orchestrator.phone_manager import PhoneConfigError, PhoneManager
 
 
@@ -78,8 +78,66 @@ def test_defaults_resolve_full_authoritative_pcm_and_history(tmp_path: Path):
     assert "The phone UI was fixed." in input_text
     assert [item["role"] for item in resolved["input"][-2:]] == ["user", "assistant"]
     assert resolved["context_audit"]["provider_exact_count_required"] is True
-    assert resolved["context_audit"]["required_message_count"] == 3
-    assert resolved["context_audit"]["history_unit_message_counts"] == [1, 2]
+    assert resolved["context_audit"]["required_message_count"] == 4
+    assert resolved["context_audit"]["history_unit_message_counts"] == [2]
+
+
+def test_completed_activity_index_survives_history_capacity_pressure():
+    recent = [
+        {"message_id": f"m-{index}", "history_unit_id": f"r-{index}",
+         "role": "assistant", "text": f"conversation {index}"}
+        for index in range(8)
+    ]
+    items, audit = build_live_voice_input(
+        _pcm_payload(background="TODAY_GMAIL_AND_NEWS_INDEX"), recent,
+        message_limit=6,
+    )
+    text = json.dumps(items, ensure_ascii=False)
+    assert "TODAY_GMAIL_AND_NEWS_INDEX" in text
+    assert "conversation 7" in text
+    assert audit["required_message_count"] == 4
+    assert audit["optional_reference_omitted"] is False
+
+
+def test_sunny_morning_baseline_survives_busy_conversation_at_opening(tmp_path):
+    completed = [
+        {"message_id": f"msg-older-{index}", "created_at": "2026-10-01T00:00:00Z",
+         "session_kind": "agent_activity", "text": f"Older report {index}. " + "detail " * 140}
+        for index in range(11)
+    ]
+    expected = {
+        "msg-outlook": "Outlook: 13 messages",
+        "msg-gmail": "Gmail: 36 messages",
+        "msg-school": "School reconciliation: 16 of 16 modules",
+        "msg-property": "Property monthly statement completed",
+        "msg-news": "Morning news report completed",
+    }
+    completed.extend(
+        {"message_id": result_id, "created_at": "2026-10-01T00:30:00Z",
+         "session_kind": "agent_activity", "text": summary + ". " + "full detail " * 160}
+        for result_id, summary in expected.items()
+    )
+    index = build_phone_result_index(completed)
+    assert set(expected) <= set(index.included_message_ids)
+    assert all(summary in index.text for summary in expected.values())
+    assert "source excerpts" in index.text
+    assert len(index.text) <= 9_000
+    assert index.omitted_count == len(index.omitted_message_ids)
+    assert set(index.included_message_ids).isdisjoint(index.omitted_message_ids)
+    assert len(index.included_message_ids) + index.omitted_count == len(completed)
+
+    history = [
+        {"message_id": f"history-{number}", "history_unit_id": f"turn-{number}",
+         "role": "assistant", "text": f"Recent conversation turn {number}"}
+        for number in range(90)
+    ]
+    resolved = PhoneManager(_workspace(tmp_path)).resolve_live_session(
+        display_name="Moon", pcm_payload=_pcm_payload(background=index.text),
+        recent_history=history,
+    )
+    offered = json.dumps(resolved["input"], ensure_ascii=False)
+    assert all(result_id in offered for result_id in expected)
+    assert resolved["context_audit"]["required_message_count"] == 4
 
 
 

@@ -1233,6 +1233,12 @@ def finish_request_from_listener(runtime: Any, request_id: str, payload: Mapping
         assistant_source=public_backend_engine(_active_engine(runtime)) or runtime.name,
         error_text=str(payload.get("error") or "") or None,
         error_context=failure_context,
+        failure_state=(
+            "stopped"
+            if not success and payload.get("interrupted") is True
+            and payload.get("interrupt_reason") == "user_stop"
+            else "failed"
+        ),
     )
     capture_backend_binding(runtime, request_id=request_id)
 
