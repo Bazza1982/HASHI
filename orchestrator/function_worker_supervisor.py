@@ -1049,6 +1049,9 @@ class AgentRuntimeHandle:
             or {}
         )
 
+    async def phone_action_operation(self, operation: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return dict(await self._route("runtime.phone_action", {"operation": operation, "payload": dict(payload)}, timeout=12) or {})
+
     async def execute_slash_command(
         self,
         text: str,
@@ -2239,8 +2242,6 @@ class FunctionWorkerSupervisor:
             )
         scheduler = getattr(self.kernel, "scheduler", None)
         if scheduler is None:
-            if method == "core.scheduler.handle_recovery_reply":
-                return None
             if method == "core.scheduler.schedule_delayed_message":
                 raise FunctionWorkerError("Scheduler is unavailable")
             return []
@@ -2271,12 +2272,6 @@ class FunctionWorkerSupervisor:
             return await scheduler.cancel_delayed_messages(
                 agent_name,
                 delay_ids=set(str(item) for item in params.get("delay_ids", ())),
-            )
-        if method == "core.scheduler.handle_recovery_reply":
-            return await scheduler.handle_recovery_reply(
-                agent_name=agent_name,
-                text=str(params.get("text") or ""),
-                runtime_map=self.kernel._runtime_map(),
             )
         raise FunctionWorkerProtocolError(f"Unknown scheduler method: {method}")
 

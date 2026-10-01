@@ -9,6 +9,7 @@ from orchestrator import (
     runtime_delivery_order,
     runtime_pipeline,
     runtime_session,
+    runtime_workzone,
     terminal_console,
 )
 from orchestrator.audit_mode import AuditTelemetryCollector, should_audit_source
@@ -352,6 +353,7 @@ async def process_queue(runtime: Any) -> None:
                     error="[REMOTE_BACKEND_BLOCKED]",
                 )
                 continue
+            await runtime_workzone.activate_backend_state(runtime)
             turn_prompt = await runtime_pipeline.build_turn_prompt(
                 runtime,
                 item,

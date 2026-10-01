@@ -1615,7 +1615,7 @@ async def test_adapter_never_sends_provisional_answer_in_single_loop(
     assert response.is_success is True
     assert response.stream_metadata["her_v2"]["final_already_delivered"] is False
     user_events = [
-        event for event in events if event.delivery_class != DELIVERY_TECHNICAL
+        event for event in events if event.delivery_class not in {DELIVERY_TECHNICAL, DELIVERY_INTERNAL}
     ]
     assert [event.delivery_class for event in user_events] == [DELIVERY_FINAL]
     assert user_events[0].summary == response.text
@@ -1643,7 +1643,7 @@ async def test_adapter_does_not_send_early_without_resolution_capability(tmp_pat
     assert response.is_success is True
     assert response.stream_metadata["her_v2"]["final_already_delivered"] is False
     user_events = [
-        event for event in events if event.delivery_class != DELIVERY_TECHNICAL
+        event for event in events if event.delivery_class not in {DELIVERY_TECHNICAL, DELIVERY_INTERNAL}
     ]
     assert [event.delivery_class for event in user_events] == [DELIVERY_FINAL]
     assert all(event.kind != KIND_INITIAL_RESOLUTION for event in user_events)

@@ -1,7 +1,8 @@
 """
-ToolRegistry — permission-checked tool dispatcher for HASHI V2.2.
+ToolRegistry — permission-checked tool dispatcher for HASHI.
 
-HER v2 and other Engine adapters consume it through the HASHI Tool Gateway.
+HERV3 consumes it directly inside its Function Worker. Isolated CLI Engines
+consume the same registry through the HASHI Tool Gateway.
 """
 from __future__ import annotations
 
@@ -42,6 +43,7 @@ TOOL_TIERS: dict[str, list[str]] = {
         "hashi_scheduler_status",
         "hashi_scheduler_run_history",
         "hashi_scheduler_rerun",
+        "hashi_scheduler_recovery_resolve",
         "hashi_scheduler_create",
         "hashi_scheduler_update",
         "hashi_scheduler_delete",
@@ -959,7 +961,18 @@ class ToolRegistry:
         started: float,
     ) -> ToolResult:
         """Apply the optional five-field contract and append one ledger row."""
+        from tools.effect_receipts import observe_tool_effect
 
+        try:
+            receipt = observe_tool_effect(tool_name=tool_name, call_id=result.tool_call_id,
+                arguments=arguments, output=result.output, is_error=result.is_error,
+                workspace_dir=self.workspace_dir, access_roots=self.access_roots)
+        except Exception:
+            # Observation failure must not turn a committed write into a retryable
+            # tool failure. The Phone action will remain unverified instead.
+            receipt = None
+        if receipt is not None:
+            result.details = {**(result.details or {}), "effect_receipt": receipt}
         if not self.smart_tools.enabled:
             return result
         outcome, _spec, _record = self.smart_tools.complete(
@@ -1150,6 +1163,16 @@ class ToolRegistry:
         started: float,
     ) -> None:
         self._remember_hchat_attachment_selection(tool_name, result)
+        if not result.is_error and isinstance((result.details or {}).get("effect_receipt"), dict):
+            try:
+                from tools.effect_receipts import publish_phone_effect
+                publish_phone_effect(context=self._effective_audit_context(),
+                    receipt=result.details["effect_receipt"], tool_call_id=result.tool_call_id,
+                    workspace_dir=self.workspace_dir)
+            except Exception:
+                # Losing a receipt must not turn an already committed effect into
+                # a retryable failure. Its Phone action remains unconfirmed.
+                self.logger.warning("Could not project Phone effect evidence", exc_info=True)
         artifact_id = self._register_file_write_artifact(
             tool_name, arguments, result
         )

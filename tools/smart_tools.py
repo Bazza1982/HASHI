@@ -130,6 +130,7 @@ _SIDE_EFFECT_ACTION_TOOLS = frozenset(
         "browser_type_text",
         "background_job_start",
         "hashi_scheduler_rerun",
+        "hashi_scheduler_recovery_resolve",
         "hashi_scheduler_create",
         "hashi_scheduler_update",
         "hashi_scheduler_delete",
@@ -159,6 +160,7 @@ _TOOL_ADAPTERS = {
     "hashi_scheduler_status": "scheduler",
     "hashi_scheduler_run_history": "scheduler",
     "hashi_scheduler_rerun": "scheduler",
+    "hashi_scheduler_recovery_resolve": "scheduler",
     "hashi_scheduler_create": "scheduler",
     "hashi_scheduler_update": "scheduler",
     "hashi_scheduler_delete": "scheduler",
@@ -675,6 +677,17 @@ def _bash_outcome(
     return SmartToolOutcome(status="success", effect="unknown", data=_result_data(text))
 
 
+def _backend_api_context_unavailable(lowered: str) -> bool:
+    return any(
+        marker in lowered
+        for marker in (
+            "backend api is unavailable",
+            "workbench api is unavailable",
+            "gateway context",
+        )
+    )
+
+
 def _scheduler_outcome(
     spec: SmartToolSpec,
     output: str,
@@ -683,7 +696,7 @@ def _scheduler_outcome(
 ) -> SmartToolOutcome:
     text = str(output or "")
     lowered = text.casefold()
-    if "workbench api is unavailable" in lowered or "gateway context" in lowered:
+    if _backend_api_context_unavailable(lowered):
         return SmartToolOutcome(
             status="unavailable",
             effect="no_change",
@@ -718,11 +731,17 @@ def _scheduler_outcome(
     outcome = _generic_outcome(spec, text, raw_is_error, details)
     if outcome.status == "success" and spec.name in {
         "hashi_scheduler_rerun",
+        "hashi_scheduler_recovery_resolve",
         "hashi_scheduler_create",
         "hashi_scheduler_update",
         "hashi_scheduler_delete",
     }:
-        return replace(outcome, effect="changed")
+        effect = (
+            _effect_from_data(outcome.data, fallback="changed")
+            if spec.name == "hashi_scheduler_recovery_resolve"
+            else "changed"
+        )
+        return replace(outcome, effect=effect)
     return outcome
 
 
@@ -734,7 +753,7 @@ def _superloop_outcome(
 ) -> SmartToolOutcome:
     text = str(output or "")
     lowered = text.casefold()
-    if "workbench api is unavailable" in lowered or "gateway context" in lowered:
+    if _backend_api_context_unavailable(lowered):
         return SmartToolOutcome(
             status="unavailable",
             effect="no_change",
@@ -1018,6 +1037,9 @@ class SmartToolRuntime:
             }
             if tool_name in {"file_write", "apply_patch"}:
                 record["target"] = str(arguments.get("path") or "")[:4096]
+            receipt = (details or {}).get("effect_receipt")
+            if isinstance(receipt, Mapping):
+                record["effect_receipt"] = dict(receipt)
             self._append_record(record)
 
         return outcome, spec, record

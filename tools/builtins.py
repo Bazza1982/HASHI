@@ -1450,7 +1450,7 @@ async def _background_job_api_request(
         return (
             None,
             (
-                "Error: HASHI Workbench API is unavailable: "
+                "Error: HASHI Backend API is unavailable: "
                 f"{type(exc).__name__}: {exc}"
             ),
         )

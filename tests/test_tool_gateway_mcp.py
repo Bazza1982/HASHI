@@ -97,10 +97,13 @@ def test_gateway_context_uses_running_workbench_bind_host(tmp_path):
 def test_gateway_context_rejects_cross_instance_workbench_endpoint(tmp_path):
     global_config = SimpleNamespace(instance_id="HASHI3")
 
-    def reject(_service, *, expected_instance=None):
-        raise ValueError(
-            f"cross-instance Workbench endpoint: expected={expected_instance} received=HASHI1"
-        )
+    def resolve(service, *, expected_instance=None):
+        assert expected_instance == "HASHI3"
+        return {
+            "service": service,
+            "instance_id": "HASHI1",
+            "base_url": "http://127.0.0.1:18800",
+        }
 
     registry = ToolRegistry(
         allowed_tools=["background_job_list"],
@@ -110,7 +113,7 @@ def test_gateway_context_rejects_cross_instance_workbench_endpoint(tmp_path):
         audit_context={
             "agent_name": "momo",
             "_runtime": SimpleNamespace(
-                orchestrator=SimpleNamespace(resolve_service_endpoint=reject)
+                orchestrator=SimpleNamespace(resolve_service_endpoint=resolve)
             ),
         },
     )
@@ -204,6 +207,7 @@ async def test_gateway_exposes_authoritative_hashi_scheduler_tools(tmp_path, mon
             "hashi_scheduler_status",
             "hashi_scheduler_run_history",
             "hashi_scheduler_rerun",
+            "hashi_scheduler_recovery_resolve",
         },
         workbench_api_base_url="http://10.255.255.254:18800",
     )
@@ -222,6 +226,7 @@ async def test_gateway_exposes_authoritative_hashi_scheduler_tools(tmp_path, mon
         "hashi_scheduler_status",
         "hashi_scheduler_run_history",
         "hashi_scheduler_rerun",
+        "hashi_scheduler_recovery_resolve",
     } <= names
     listed = await gateway.call("hashi_scheduler_list", {"kind": "cron"}, "list-1")
     assert listed["isError"] is False
@@ -250,6 +255,26 @@ async def test_gateway_exposes_authoritative_hashi_scheduler_tools(tmp_path, mon
             "job_id": "daily",
             "requested_by": "hashi_tool_gateway",
             "authorization": "explicit_user_authorization",
+        },
+    )
+
+    resolved = await gateway.call(
+        "hashi_scheduler_recovery_resolve",
+        {
+            "batch_id": "recovery-1",
+            "action": "rerun_selected",
+            "counts": {"daily": 2},
+        },
+        "resolve-1",
+    )
+    assert resolved["isError"] is False
+    assert calls[-1] == (
+        "POST",
+        "http://10.255.255.254:18800/api/agents/momo/scheduler/recovery/recovery-1/resolve",
+        {
+            "action": "rerun_selected",
+            "counts": {"daily": 2},
+            "requested_by": "hashi_tool_gateway",
         },
     )
 
@@ -538,7 +563,10 @@ async def test_gateway_background_jobs_report_missing_workbench_context(tmp_path
     result = await gateway.call("background_job_list", {}, "bg-list")
 
     assert result["isError"] is True
-    assert "Workbench API is unavailable in this gateway context" in result["content"][0]["text"]
+    assert (
+        "Backend API is unavailable in this tool context"
+        in result["content"][0]["text"]
+    )
     assert "BackgroundJobManager is not running" not in result["content"][0]["text"]
 
 

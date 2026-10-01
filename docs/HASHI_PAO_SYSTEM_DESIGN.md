@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Status | **Authoritative PAO module specification** |
-| Effective date | 2026-09-01 |
+| Effective date | 2026-09-29 |
 | Parent architecture | [HASHI System Architecture](../ARCHITECTURE.md) |
 | Scope | HASHI outer control plane, Conversation Sessions, Engine binding, capabilities, workflows, Jobs, and cross-agent coordination |
 
@@ -79,7 +79,222 @@ the current Agent Workzone revision into each admitted Run so an in-flight Run
 cannot observe a later menu change. Legacy Session Workzone rows remain inert
 compatibility records and are not silently migrated or merged.
 
+Configuration mutations may commit while Runs are active or queued. Every Run
+already admitted keeps its frozen snapshot, while the next admission after the
+commit reads the new revision. PAO defers runtime, Tool-root, and Engine-session
+activation to a Run boundary. Explicit Workzone `reload`/`reset` remains
+idle-only because it immediately resets the selected Engine Session.
+
+A live phone call is another transport bound to the same Conversation Session.
+Each role-labelled transcript fragment is durable PAO Session evidence as it
+arrives and participates in later text and phone history. A terminal call card
+is a Connector view derived from those fragments; it is not a second message
+authority or a replacement for the role-preserving transcript.
+
+Provider transcript deltas may be only a few hundred milliseconds long. PAO
+retains each original fragment and derives readable utterances per speaker for
+later Session history and the terminal call record. Simultaneous speech does
+not break either speaker's continuous utterance into one line per delta; a
+completed reply still separates successive turns. The projection preserves
+the provider's exact words and their source IDs. The Phone Connector applies
+the same rule to live captions. A brief interleaved acknowledgment does not
+complete a reply merely because it falls between two parts of the other
+speaker's sentence. This provider supplies deltas and timestamps, not stable
+utterance boundaries: a short reply is complete when it has sentence-ending
+punctuation; a longer reply can also complete a turn without punctuation.
+The 1.2-second same-speaker gap remains a presentation boundary. Ambiguous
+recognition is displayed as received, without claiming a verified turn break.
+An existing call record may be reprojected
+from its durable fragments under the same Message ID and ordinal. PAO raises
+the Session history generation so clients refresh the corrected presentation
+in place, without moving an old call to the end of the conversation. No audio
+transcription is silently corrected. The live model hears provider
+audio directly, while PAO action delegation uses the recognized user text, so
+recognition errors remain a separate action-understanding risk.
+
+#### Live Phone foreground arbitration contract (2026-09-30)
+
+While one logical Live Phone call is engaged, PAO binds that authenticated
+owner's instance-wide foreground conversation to the call's Agent and
+Conversation Session. There is at most one such foreground binding per owner
+and instance. The logical call is not the same object as an OpenAI session,
+WebRTC connection, browser component, or Function generation; those are
+replaceable transport epochs beneath it.
+
+Every other Run or event is background relative to that call. This includes a
+spoken request delegated to the Agent, concurrent text/API input, Scheduler
+cron and heartbeat work, HChat, Remote coordination, and Agent-initiated work.
+Background work keeps its normal Session, authority, persistence, and approval
+boundaries. It may append attributable facts or reportable results to the
+foreground model, but it cannot mutate, cancel, close, or compete with the
+foreground conversation. A background result that would normally create a
+separate user-facing reply is instead routed to the active foreground call;
+if delivery is temporarily unavailable, PAO retains it for replay or later
+ordinary delivery rather than ending the call.
+
+Only an authenticated explicit hang-up action bound to the current call may
+normally terminate it as `ended`. Provider expiry or closure, WebRTC/data-
+channel loss, lease loss, navigation, page reload, Function replacement,
+process failure, persistence failure, or a background task is a transport or
+runtime fault. PAO and FC first recover or replace that transport epoch; an
+unrecoverable case terminates as `failed` or `interrupted`, never as a user
+hang-up. Provider duration limits therefore require pre-expiry rollover, not a
+normal logical-call ending.
+
+Each logical call has an append-only diagnostic timeline independent of the
+ordinary Session-event sequence. It correlates PAO Runs, FC/browser states,
+provider lifecycle and close reason, transport epochs, persistence failures,
+recovery attempts, and the actor/reason for every termination request. It does
+not duplicate transcript text, audio, instructions, credentials, or secrets;
+the role-preserving Session transcript remains canonical.
+
+Implementation checkpoint (2026-09-30): PAO now assigns one foreground call per
+owner, routes attributable background messages and status through a durable
+inbox, and retains legacy calls as recoverable unless the stored record proves
+an explicit user hang-up. Authenticated context lookup returns the current
+recoverable binding so the Connector can restore a call after older clients
+cleared their local hint. Function replacement and Provider close preserve the
+logical call; only an explicit user hang-up becomes normal completion.
+
+The event reader suppresses historical terminal phase events while the
+canonical call phase remains nonterminal, so an old cursor cannot close a
+recovering call before receiving its recovery state. PAO merges pending
+background messages and status events by source timestamp and stops the batch
+when delivery or acknowledgement is uncertain.
+
+The sideband durably stages each normalized transcript or typed delegation before
+placing it in the process-only per-call projection queue. One SessionStore inbox
+assigns a persistent order across both event types. Canonical transcript
+projection and inbox removal share one transaction; delegation admission also
+removes its staged row atomically. Startup replays pending inbox rows in that
+order, including rows left between receipt and projection by Function
+replacement. If staging fails, the reader applies backpressure and records
+redacted retry evidence; it does not acknowledge the event into volatile memory.
+The independent diagnostic audit stores lifecycle and error metadata only,
+never transcript text. User hang-up and Provider cleanup bound WebSocket send
+and close operations separately, so a stalled socket cannot block the cleanup
+path or the normal user-requested terminal record.
+
+The event feed reads canonical call phase and Session events from one SQLite
+snapshot, so a concurrent user-ended event cannot be filtered using an older
+phase. PAO selects one globally oldest page across pending background messages
+and status events by their source timestamps; separate per-type page limits may
+not overtake an older item still waiting in the other inbox.
+
 ### 2.3 Outer orchestration
+
+The Phone action boundary interprets complete speech in bounded conversational
+context using an explicitly configured semantic capability. Code validates its
+typed result and target references; no keyword classifier or guessed confidence
+grants action authority. Ordinary Agent ingress still owns permission and
+execution. Reuse, revision and cancellation address a specific persisted action;
+independent actions are not blocked by a one-task-per-call policy. A stalled
+interpretation produces a visible unresolved result, never an invented success.
+Action completion requires attributable effect evidence rather than an Engine's
+terminal reply. Unknown commit outcomes stay unknown until reconciled.
+
+The canonical PAO final Message remains available as the complete informational
+answer to a query even when an independent effect inspection fails. Its text
+does not certify a write or every source. Effect inspection deduplicates tool
+receipts and bounds its verifier input; an over-budget inspection remains
+unknown rather than discarding the final answer. A repeated request for all
+findings reuses that Message and the existing action instead of starting a
+duplicate query. Terminal stopped/interrupted queries never become verified
+from partial reads. A stopped write can still have a verified independent
+save/readback effect; the stop state and the effect outcome remain separate.
+
+Phone reports cancellation in two stages: an accepted interrupt request and
+the later terminal Run state. A queued task removed before start may settle
+immediately; a running task is confirmed stopped only when its Run terminates.
+An unconfirmed stop request remains uncertain and does not suppress later
+progress. Completion before an interrupt is a distinct, factual outcome.
+Progress speech is an Agent-controlled call preference: the foreground model
+may turn it on or off from the caller's complete request. With progress on,
+PAO emits one start notice and only bounded, user-presentable commentary from
+real request activity; with it off, interim notices stop while required
+approvals and final results remain. Activity is observed by cursor without an
+extra model inference. A Phone-specific on choice may present an event already
+typed as user commentary even when a separate Connector's display preference
+is off; it never promotes private reasoning or tool telemetry to speech.
+Backend model route facts may enter foreground context
+as internal state, but a configured route or adapter response is not proof of
+task success or independent vendor model attestation.
+
+#### Live Phone background-result handoff correction (2026-10-01)
+
+The foreground voice and background execution belong to the same selected
+Agent. PAO must retain each delegated Run's terminal state and, when produced,
+its complete final Message as one addressable result correlated to the spoken
+request. A short status receipt, UI card, or provider append acknowledgement
+is not the result. The foreground must have a way to read the original result
+without repeating the background Run; long results need explicit content
+boundaries and continuation position so an answer requested in full cannot
+silently shrink to a few items.
+
+Handoff evidence distinguishes the persisted result, the material offered to
+the provider, provider acceptance, the foreground's observed response content,
+and local playback. Any assistant fragment proves only that some output was
+generated; it does not prove the result was understood, covered in full, or
+heard. If the provider offers no consumption acknowledgement, record that
+limit honestly and verify content coverage at the product boundary. A later
+foreground turn must be able to recover the same result from PAO state.
+
+Phone handoff uses the canonical final Message ID as its durable source. The
+call stores only that ID and a page position in its retry plan. The foreground
+receives a bounded page labelled with its start, end, total length and next
+position; asking to continue reads the next page from the same saved result
+without a new Run. The position records material offered, not words heard.
+When the caller asks about several completed reports, semantic routing selects
+their distinct IDs and PAO stages each original. A summary request does not
+authorize answering from a clipped opening excerpt. A new background Run is
+reserved for work not already represented by a saved result.
+
+Phone action interpretation may refresh effective PCM during a call. If that
+projection is unavailable, PAO does not silently omit it and admit new work.
+The current call may still identify and stop or inspect one of its already
+known actions by its exact PAO action ID; these control operations cannot
+create a Run. Other requests receive a visible uncertainty response until
+effective context is available again. This preserves cancellation while
+keeping incomplete authority from licensing a new task.
+
+The resulting speech and player observations remain separate evidence. A
+typed user-stop backend notification settles its Run as `stopped`; an ordinary
+backend error settles as `failed`. Phone cancellation reports request sent
+until the terminal Run state confirms the stop, and keeps any verified prior
+write separate from the stop outcome.
+For a stopped general execution, the receipt names the missing final answer
+and any unverified effect without claiming a record was written. The action
+kind controls this wording; a confirmed stop does not certify prior effects.
+The spoken receipt does not promise another report or suggest a record check
+for a general execution when no record effect was observed.
+
+The 2026-10-01 Sunny incident is a failed acceptance case: completed Gmail and
+Hong Kong news final Messages existed, while the then-running Phone relay sent
+only short uncertainty receipts. Later source changes that read the canonical final
+Message still require a real completed-Run handoff and spoken-coverage check;
+provider acceptance or a generic speech fragment cannot close this case.
+In the 2026-10-01 isolated Sunny call, the opening included all five morning
+reports, but semantic routing chose a direct answer from excerpts and the
+foreground spoke only two of the early report's three numbered focus items.
+This is a separate red acceptance case for result recall, even though mail and
+school facts were present and no duplicate Run was started.
+After recall was required, all four requested originals were staged, but the
+foreground still confused the report introduction's two main themes with its
+three explicitly numbered focus items. For saved reports with numbered lines,
+PAO now projects their source headings, exact numbered counts and item titles
+as a deterministic outline alongside the original. This is a view of the
+canonical text, not a second result store or proof of spoken coverage.
+On a saved-result recall, PAO appends the original as factual context and
+offers the caller's request for speech. A separate generic “correct your
+earlier answer” instruction was rejected by live acceptance: it made Sunny
+change a correct three-item answer into an incorrect two-item one. The spoken
+transcript decides whether every requested item was covered.
+
+PAO also owns the durable opening identifier and its separate request,
+acceptance, output and player observations. Opening content comes from PCM,
+wire commands from the selected Connector adapter. The same logical call
+retains this record across transport replacement, and never repeats an opening
+merely because a provider emitted ready again.
 
 PAO owns orchestration across Agents, Engines, Runs, Sessions, time, or HASHI
 instances, including:
@@ -107,6 +322,33 @@ an unknown legacy timezone defaults to UTC, never the scheduler host timezone.
 New and edited declarations use the revision-aware Scheduler writer and retain
 unrelated fields. Merely reading a legacy declaration does not publish a
 migration.
+
+#### Scheduler recovery conversation contract (2026-09-30)
+
+When persisted missed triggers require a decision, HASHI Scheduler creates one
+system-authored Run through normal PAO admission in the owner's current primary
+Conversation. The missed-trigger facts are the canonical Message content; the
+Agent asks the user what to do, and the resulting question is delivered by FC.
+Scheduled work remains in the Agent Activity Session; only the human decision
+exchange belongs to the Conversation.
+
+The user's later reply is always ordinary Conversation input, regardless of
+whether it arrives from Telegram, TUI, Backend API, or another registered
+Connector. PAO must not intercept it with transport-specific callbacks or
+interpret it using numbers, keywords, exact phrases, or regular expressions.
+The selected Engine reasons over the ordered Conversation and durable recovery
+facts. A clear decision becomes one typed
+`hashi_scheduler_recovery_resolve` invocation bound to the exact Agent and
+batch; questions and ambiguous replies do not mutate Scheduler state. The
+internal mutation endpoint accepts only the Agent Tool Gateway and remains
+idempotent after a batch is resolved.
+
+PAO tool execution resolves that Backend API endpoint from the Function
+Worker's authoritative same-instance service topology. Isolated CLI Tool
+Gateways receive a serialized snapshot derived from the same live endpoint.
+Live topology takes precedence over compatibility snapshots; configured ports,
+wildcard hosts, stale snapshots, and endpoints published by another instance
+must never be guessed or accepted as substitutes.
 
 ### 2.4 Skills, Tools, permissions, and execution
 

@@ -14,8 +14,8 @@ sys.modules.setdefault("edge_tts", types.ModuleType("edge_tts"))
 from orchestrator import (
     runtime_cross_session,
     runtime_long,
-    runtime_scheduler_recovery,
     runtime_session,
+    scheduler_recovery,
     runtime_transfer,
     runtime_workzone,
 )
@@ -1109,35 +1109,45 @@ def test_fresh_boundary_filters_cross_session_receipts_by_request_start(tmp_path
     assert [entry["request_id"] for entry in entries] == ["new"]
 
 
-@pytest.mark.asyncio
-async def test_fresh_boundary_does_not_intercept_reply_as_old_scheduler_recovery(
-    tmp_path,
-):
-    calls = []
+def test_scheduler_recovery_question_uses_primary_conversation(tmp_path):
+    runtime, conversation, _replies, _resets = _session_command_runtime(tmp_path)
 
-    async def handle_recovery_reply(**kwargs):
-        calls.append(kwargs)
-        return "old recovery handled"
-
-    runtime = SimpleNamespace(
-        name="arale",
-        workspace_dir=tmp_path,
-        config=SimpleNamespace(active_backend="her-v2"),
-        backend_manager=SimpleNamespace(state_store=WorkspaceStateStore(tmp_path)),
-        orchestrator=SimpleNamespace(
-            scheduler=SimpleNamespace(handle_recovery_reply=handle_recovery_reply)
-        ),
-    )
-    start_boundary(runtime)
-
-    handled = await runtime_scheduler_recovery.handle_reply(
+    session, owner, surface, channel = runtime_session.resolve_request_session(
         runtime,
-        text="yes",
+        source=scheduler_recovery.RECOVERY_CONVERSATION_SOURCE,
         chat_id=456,
     )
 
-    assert handled is False
-    assert calls == []
+    assert session["session_id"] == conversation["session_id"]
+    assert session["session_kind"] == "conversation"
+    assert owner == "user:123"
+    assert surface == "hashi.internal"
+    assert channel == "scheduler-recovery"
+
+    reply_routes = (
+        ("text", 456, None),
+        ("session-api", None, None),
+        (
+            "tui",
+            None,
+            {
+                "session_surface": "tui",
+                "session_channel_key": "terminal-1",
+                "session_id": conversation["session_id"],
+            },
+        ),
+    )
+    for reply_source, chat_id, metadata in reply_routes:
+        reply_session, reply_owner, _reply_surface, _reply_channel = (
+            runtime_session.resolve_request_session(
+                runtime,
+                source=reply_source,
+                chat_id=chat_id,
+                metadata=metadata,
+            )
+        )
+        assert reply_session["session_id"] == conversation["session_id"]
+        assert reply_owner == owner
 
 
 def test_fresh_auxiliary_and_habit_fences_resume_independently(tmp_path):

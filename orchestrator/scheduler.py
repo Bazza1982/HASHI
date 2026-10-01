@@ -310,6 +310,24 @@ class TaskScheduler:
             return {rt.name: rt for rt in getattr(self.orchestrator, "runtimes", []) if getattr(rt, "startup_success", False)}
         return dict(self.runtimes)
 
+    async def _refresh_worker_scheduler_context(self) -> None:
+        """Publish changed recovery facts to active Function Workers."""
+
+        workers = getattr(self.orchestrator, "function_workers", None)
+        broadcast = getattr(workers, "broadcast_topology", None)
+        if not callable(broadcast):
+            return
+        try:
+            await broadcast()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            scheduler_logger.warning(
+                "Scheduler recovery context refresh failed: %s",
+                exc,
+                exc_info=True,
+            )
+
     def _load_state(self):
         if self.state_path.exists():
             try:
@@ -1035,10 +1053,10 @@ class TaskScheduler:
         return batch
 
     async def _deliver_recovery_notice(self, runtime, batch: dict[str, Any]) -> bool:
-        sender = getattr(runtime, "send_long_message", None)
+        sender = getattr(runtime, "enqueue_request", None)
         if not callable(sender):
             scheduler_logger.error(
-                "Cannot deliver scheduler recovery batch %s: runtime %s has no direct sender.",
+                "Cannot deliver scheduler recovery batch %s: runtime %s has no request admission path.",
                 batch.get("batch_id"),
                 batch.get("agent"),
             )
@@ -1048,26 +1066,44 @@ class TaskScheduler:
                 runtime,
                 actor_id=self.authorized_id,
             )
-            result = await asyncio.wait_for(
+            notice = scheduler_recovery.render_notice(batch, locale=locale)
+            request_id = await asyncio.wait_for(
                 sender(
                     chat_id=self.authorized_id,
-                    text=scheduler_recovery.render_notice(batch, locale=locale),
-                    request_id=f"scheduler-{batch.get('batch_id')}",
-                    purpose="scheduler-recovery",
+                    prompt=scheduler_recovery.render_agent_request(
+                        batch,
+                        locale=locale,
+                    ),
+                    source=scheduler_recovery.RECOVERY_CONVERSATION_SOURCE,
+                    summary=f"Scheduler Recovery Question [{batch.get('batch_id')}]",
+                    habit_learning_eligible=False,
+                    scheduler_context={
+                        "kind": "recovery_decision",
+                        "task_id": str(batch.get("batch_id") or ""),
+                        "trigger": "recovery",
+                    },
+                    request_metadata={
+                        "session_surface": scheduler_recovery.RECOVERY_CONVERSATION_SURFACE,
+                        "session_channel_key": scheduler_recovery.RECOVERY_CONVERSATION_CHANNEL,
+                        "session_message_text": notice,
+                        "session_message_display_text": notice,
+                        "scheduler_recovery": {
+                            "batch_id": str(batch.get("batch_id") or ""),
+                        },
+                    },
+                    idempotency_key=(
+                        f"scheduler-recovery-question:{batch.get('batch_id')}"
+                    ),
                 ),
                 timeout=SCHEDULER_JOB_TIMEOUT_S,
             )
-            delivered = not (
-                isinstance(result, tuple)
-                and len(result) >= 2
-                and int(result[1] or 0) == 0
-            )
+            delivered = bool(request_id)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             delivered = False
             scheduler_logger.error(
-                "Direct scheduler recovery notice %s failed: %s",
+                "Canonical scheduler recovery question %s failed: %s",
                 batch.get("batch_id"),
                 exc,
                 exc_info=True,
@@ -1076,6 +1112,7 @@ class TaskScheduler:
         if delivered:
             batch["notice_status"] = "sent"
             batch["notified_at"] = time.time()
+            batch["notice_request_id"] = str(request_id)
         else:
             batch["notice_status"] = "retry"
         self._save_state()
@@ -1095,6 +1132,7 @@ class TaskScheduler:
             return None
         batch = self._create_recovery_batch(agent_name=agent_name, items=items)
         await self._deliver_recovery_notice(rt, batch)
+        await self._refresh_worker_scheduler_context()
         return batch
 
     def _agent_recovery_batches(self, agent_name: str) -> list[dict[str, Any]]:
@@ -1117,7 +1155,11 @@ class TaskScheduler:
         now_ts: float,
     ) -> None:
         for batch in (self.state.get("recovery_batches") or {}).values():
-            if not isinstance(batch, dict) or batch.get("notice_status") == "sent":
+            if (
+                not isinstance(batch, dict)
+                or batch.get("status") not in {"pending", "running"}
+                or batch.get("notice_status") == "sent"
+            ):
                 continue
             last_attempt = float(batch.get("notice_attempted_at") or 0)
             if now_ts - last_attempt < 60:
@@ -1158,9 +1200,9 @@ class TaskScheduler:
             task_id = str(item.get("task_id"))
             replayable = scheduler_recovery.replayable_count(item)
             requested = 0
-            if action == "all":
+            if action == "rerun_all":
                 requested = replayable
-            elif action == "partial":
+            elif action == "rerun_selected":
                 requested = max(0, int((counts or {}).get(task_id, 0)))
                 requested = min(requested, replayable)
 
@@ -1228,70 +1270,92 @@ class TaskScheduler:
         self._save_state()
         return resolution
 
-    async def handle_recovery_reply(
+    async def resolve_recovery_batch(
         self,
         *,
         agent_name: str,
-        text: str,
+        batch_id: str,
+        action: str,
+        counts: Mapping[str, int] | None,
         runtime_map: dict[str, Any],
-    ) -> str | None:
-        pending = [
-            batch
-            for batch in self._agent_recovery_batches(agent_name)
-            if batch.get("status") in {"pending", "running"}
-        ]
-        parsed = scheduler_recovery.parse_reply(text, pending)
-        if parsed is None:
-            return None
-        runtime = runtime_map.get(agent_name)
-        locale = (
-            ui_language.preferred_locale(runtime, actor_id=self.authorized_id)
-            if runtime is not None
-            else ui_language.DEFAULT_LOCALE
-        )
-        if parsed.get("action") == "help":
-            return ui_language.tr("scheduler.reply_help", locale=locale)
-        if parsed.get("action") == "ambiguous":
-            return ui_language.tr("scheduler.reply_ambiguous", locale=locale)
+    ) -> dict[str, Any]:
+        """Resolve one exact recovery batch after the Agent interprets user intent."""
+
+        normalized_agent = str(agent_name or "").strip()
+        normalized_batch_id = str(batch_id or "").strip()
+        normalized_action = str(action or "").strip().lower()
+        if normalized_action not in {"rerun_all", "rerun_selected", "skip"}:
+            raise ValueError(
+                "action must be rerun_all, rerun_selected, or skip"
+            )
+        if not normalized_batch_id:
+            raise ValueError("batch_id is required")
 
         async with self._recovery_lock:
-            executed_total = 0
-            failed_total = 0
-            skipped_total = 0
-            for batch in pending:
-                resolution = await self._resolve_recovery_batch(
-                    batch,
-                    action=str(parsed.get("action")),
-                    counts=dict(parsed.get("counts") or {}),
-                    runtime_map=runtime_map,
+            batch = (self.state.get("recovery_batches") or {}).get(
+                normalized_batch_id
+            )
+            if not isinstance(batch, dict) or str(batch.get("agent") or "") != normalized_agent:
+                raise KeyError("recovery batch not found for agent")
+
+            if batch.get("status") not in {"pending", "running"}:
+                return {
+                    "batch_id": normalized_batch_id,
+                    "agent": normalized_agent,
+                    "status": str(batch.get("status") or "resolved"),
+                    "state_changed": False,
+                    "resolution": dict(batch.get("resolution") or {}),
+                }
+
+            items_by_id = {
+                str(item.get("task_id") or ""): item
+                for item in (batch.get("items") or [])
+                if isinstance(item, dict) and str(item.get("task_id") or "")
+            }
+            normalized_counts: dict[str, int] | None = None
+            if normalized_action == "rerun_selected":
+                if not isinstance(counts, Mapping) or not counts:
+                    raise ValueError(
+                        "counts is required when action is rerun_selected"
+                    )
+                normalized_counts = {}
+                for task_id, raw_count in counts.items():
+                    normalized_task_id = str(task_id or "").strip()
+                    item = items_by_id.get(normalized_task_id)
+                    if item is None:
+                        raise ValueError(
+                            f"task {normalized_task_id!r} is not in recovery batch"
+                        )
+                    if isinstance(raw_count, bool) or not isinstance(raw_count, int):
+                        raise ValueError(
+                            f"replay count for {normalized_task_id!r} must be an integer"
+                        )
+                    replayable = scheduler_recovery.replayable_count(item)
+                    if raw_count < 1 or raw_count > replayable:
+                        raise ValueError(
+                            f"replay count for {normalized_task_id!r} must be between 1 and {replayable}"
+                        )
+                    normalized_counts[normalized_task_id] = raw_count
+            elif counts not in (None, {}):
+                raise ValueError(
+                    "counts is only accepted when action is rerun_selected"
                 )
-                executed_total += int(resolution.get("executed_total", 0))
-                failed_total += int(resolution.get("failed_total", 0))
-                skipped_total += int(resolution.get("skipped_total", 0))
-        if parsed.get("action") == "skip":
-            return ui_language.tr(
-                "scheduler.reply_skipped",
-                locale=locale,
-                batches=len(pending),
-                skipped=skipped_total,
+
+            resolution = await self._resolve_recovery_batch(
+                batch,
+                action=normalized_action,
+                counts=normalized_counts,
+                runtime_map=runtime_map,
             )
-        failed_clause = (
-            ui_language.tr(
-                "scheduler.reply_failed_clause",
-                locale=locale,
-                failed=failed_total,
-            )
-            if failed_total
-            else ""
-        )
-        return ui_language.tr(
-            "scheduler.reply_resolved",
-            locale=locale,
-            batches=len(pending),
-            executed=executed_total,
-            skipped=skipped_total,
-            failed_clause=failed_clause,
-        )
+            result = {
+                "batch_id": normalized_batch_id,
+                "agent": normalized_agent,
+                "status": str(batch.get("status") or "resolved"),
+                "state_changed": True,
+                "resolution": resolution,
+            }
+        await self._refresh_worker_scheduler_context()
+        return result
 
     async def _fire_heartbeat_job(
         self,

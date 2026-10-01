@@ -409,6 +409,52 @@ def _runtime(
     )
 
 
+@pytest.mark.asyncio
+async def test_model_route_activity_distinguishes_selection_from_returned_stage_response(tmp_path):
+    release = asyncio.Event()
+
+    async def answer(_request):
+        await release.wait()
+        return StageResponse(
+            data={"message": "Done."},
+            provider="actual-api",
+            model="actual-model",
+        )
+
+    provider = ScriptedProvider({Stage.DIRECT: [answer]})
+    delivery = RecordingDelivery()
+    runtime = _runtime(tmp_path, provider, delivery=delivery)
+    turn = asyncio.create_task(
+        runtime.run_turn("Answer directly", "request-model-route", effort=Effort.ZERO)
+    )
+    await asyncio.wait_for(provider.started[Stage.DIRECT].wait(), timeout=2)
+    try:
+        selected = [
+            row for row in delivery.activity_records
+            if row["kind"] == "model_route"
+        ]
+        assert len(selected) == 1
+        assert selected[0]["metadata"] == {
+            "engine": "her-v3",
+            "model_provider": "fake-api",
+            "model": "model-premium",
+            "route_status": "selected",
+            "attempt": 1,
+        }
+    finally:
+        release.set()
+    result = await turn
+    returned = [
+        row for row in delivery.activity_records
+        if row["kind"] == "model_route"
+        and row["metadata"]["route_status"] == "returned"
+    ]
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert len(returned) == 1
+    assert returned[0]["metadata"]["model_provider"] == "actual-api"
+    assert returned[0]["metadata"]["model"] == "actual-model"
+
+
 def test_stage_timing_merges_overlapping_parallel_invocations():
     state = SimpleNamespace(
         stage_timing_intervals={
