@@ -252,11 +252,11 @@ three explicitly numbered focus items. For saved reports with numbered lines,
 PAO now projects their source headings, exact numbered counts and item titles
 as a deterministic outline alongside the original. This is a view of the
 canonical text, not a second result store or proof of spoken coverage.
-On a saved-result recall, PAO appends the original as factual context, then
-uses the provider's live instruction event to redirect an answer already
-started from an excerpt, and finally offers the caller's request for speech.
-The instruction is a turn correction, not a new lookup or a playback receipt;
-the spoken transcript still decides whether every requested item was covered.
+On a saved-result recall, PAO appends the original as factual context and
+offers the caller's request for speech. A separate generic “correct your
+earlier answer” instruction was rejected by live acceptance: it made Sunny
+change a correct three-item answer into an incorrect two-item one. The spoken
+transcript decides whether every requested item was covered.
 
 PAO also owns the durable opening identifier and its separate request,
 acceptance, output and player observations. Opening content comes from PCM,

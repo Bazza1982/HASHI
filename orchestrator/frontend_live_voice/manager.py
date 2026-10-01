@@ -1922,16 +1922,6 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             if original_context and not await self._send_provider_update(
                     binding, kind="thinking", content=original_context, delegation_id=None):
                 return False
-            if original_context and not await self._send_provider_update(
-                    binding, kind="instructions", delegation_id=None,
-                    content=(
-                        "The caller's requested complete saved original is now in this conversation. "
-                        "Use it for the next answer. If you already began speaking from an earlier excerpt, "
-                        "correct that answer now. Keep introductory themes distinct from explicitly "
-                        "numbered report entries; cover the requested entries from the source. "
-                        "Yield if the caller continues speaking."
-                    )):
-                return False
             relayed = await self._send_provider_update(binding, kind="commentary",
                                                        content=provider_content, delegation_id=None)
             if not relayed:
