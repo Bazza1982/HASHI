@@ -6,6 +6,7 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -747,7 +748,10 @@ def test_codex_nonzero_exit_preserves_last_agent_message(tmp_path, monkeypatch: 
     response = asyncio.run(adapter.generate_response("hello", "req-0004"))
 
     assert response.is_success is False
-    assert "non-zero status" in (response.error or "")
+    assert response.error_code == "CODEX_PROCESS_EXIT_UNCONFIRMED"
+    assert "exit code 1" in (response.error or "")
+    assert response.error_retryable is False
+    assert response.side_effects_possible is True
     assert "Latest progress before stop." in (response.error or "")
     event_log = (tmp_path / "codex_exec_events.jsonl").read_text()
     assert "Latest progress before stop." not in event_log
@@ -758,6 +762,26 @@ def test_codex_nonzero_exit_preserves_last_agent_message(tmp_path, monkeypatch: 
     )
     assert logged_message["redacted"] is True
     assert logged_message["chars"] == len("Latest progress before stop.")
+
+
+@pytest.mark.asyncio
+async def test_force_kill_refuses_current_process_identity(tmp_path, monkeypatch):
+    adapter = _build_adapter(tmp_path)
+    proc = _CompletedProc(pid=os.getpid())
+    proc.returncode = None
+    taskkills = []
+
+    def fake_taskkill(argv, **_kwargs):
+        taskkills.append(argv)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("adapters.base.subprocess.run", fake_taskkill)
+
+    killed = await adapter.force_kill_process_tree(proc, reason="identity-check")
+
+    assert killed is False
+    assert proc.killed is False
+    assert taskkills == []
 
 
 def test_codex_turn_failed_preserves_exact_typed_capacity_error_and_activity(

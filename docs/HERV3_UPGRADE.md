@@ -44,6 +44,21 @@ The model owns reasoning, planning, adaptation and verification inside one conti
 model/tool conversation. HASHI continues to own PCM, Session continuity, tools,
 permissions, recovery, audit, user commentary and learning.
 
+Prior WIP Journal evidence remains bounded, quoted context for a new turn when
+canonical recovery is absent. It no longer sends a proactive recovery card
+before that turn: the current user request is processed first, and recovery
+facts are available to the model without claiming authority to replay effects.
+
+HASHI3 source now bounds ordinary text Tool results before they re-enter the
+model loop (including structured text content); native image blocks remain
+media, not truncated text. File reads and directory listings also have local
+read/enumeration limits. For OpenAI-compatible Provider calls with a declared
+target capacity, a clearly oversized serialized text request is rejected
+before HTTP with the existing typed capacity code. Unknown capacities and
+native-media accounting still depend on Provider rejection; the preflight
+does not promise that every request will fit. A capacity rejection after tool
+activity remains non-replayable without user reconciliation.
+
 ## Foreground path
 
 `PCM -> main model <-> tools -> delivery`

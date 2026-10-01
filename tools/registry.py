@@ -160,6 +160,39 @@ class ToolResult:
     details: dict[str, Any] | None = None
 
 
+MAX_TEXT_TOOL_OUTPUT_CHARS = 20_000
+_IMAGE_OUTPUT_TOOLS = frozenset(
+    {"browser_screenshot", "desktop_screenshot", "windows_screenshot"}
+)
+
+
+def _bound_structured_text(
+    content: list[dict[str, Any]] | None,
+) -> tuple[list[dict[str, Any]] | None, bool]:
+    if content is None:
+        return None, False
+    remaining = MAX_TEXT_TOOL_OUTPUT_CHARS
+    bounded = []
+    truncated = False
+    suffix = "\n[truncated by HASHI; narrow the request or read in parts]"
+    for raw in content:
+        part = dict(raw)
+        holder = part
+        key = "text"
+        if part.get("type") == "resource" and isinstance(part.get("resource"), dict):
+            part["resource"] = dict(part["resource"])
+            holder = part["resource"]
+        value = holder.get(key)
+        if isinstance(value, str) and len(value) > remaining:
+            holder[key] = value[:remaining] + suffix
+            remaining = 0
+            truncated = True
+        elif isinstance(value, str):
+            remaining -= len(value)
+        bounded.append(part)
+    return bounded, truncated
+
+
 @dataclass
 class StructuredToolOutput:
     """Tool output with MCP-native content kept separate from audit text."""
@@ -491,6 +524,18 @@ class ToolRegistry:
         status = self._capability_status_snapshot()
         if status is None:
             return {"available": True, "source": "standalone_legacy_executor"}
+        if self._function_worker_capability_facade() is None:
+            return {
+                "available": False,
+                "code": "capability_unavailable",
+                "reason": "broker_executor_unbound",
+                "next_step": (
+                    "Use the owning Agent Worker route; this isolated tool route "
+                    "cannot invoke the registered device Worker."
+                ),
+                "capability_kind": kind,
+                "action": action,
+            }
         expected_instance = str(
             getattr(
                 self._effective_audit_context().get("global_config"),
@@ -941,6 +986,27 @@ class ToolRegistry:
         else:
             output = dispatched
             content = None
+        content, content_truncated = _bound_structured_text(content)
+        if content_truncated:
+            details = {**(details or {}), "content_text_truncated": True}
+        if (
+            tool_name not in _IMAGE_OUTPUT_TOOLS
+            and not (
+                tool_name == "browser_session"
+                and ("[screenshot] base64:" in output or "data:image/" in output)
+            )
+            and len(output) > MAX_TEXT_TOOL_OUTPUT_CHARS
+        ):
+            original_chars = len(output)
+            output = (
+                output[:MAX_TEXT_TOOL_OUTPUT_CHARS]
+                + "\n[truncated by HASHI; narrow the query or read the source in parts]"
+            )
+            details = {
+                **(details or {}),
+                "output_truncated": True,
+                "output_original_chars": original_chars,
+            }
         is_error = output.startswith("Error:")
         result = ToolResult(
             tool_call_id=effective_call_id,

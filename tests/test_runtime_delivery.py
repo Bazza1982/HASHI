@@ -958,6 +958,25 @@ def test_format_backend_error_for_user_adds_upgrade_action_for_version_gated_mod
     assert "Raw error:" in text
 
 
+def test_backend_error_reports_confirmed_and_unverified_effects_separately():
+    text = runtime_delivery.format_backend_error_for_user(
+        "codex-cli",
+        "process ended without a final event",
+        locale="en",
+        error_context={
+            "side_effects_possible": True,
+            "effect_reconciliation": {
+                "confirmed_write_count": 1,
+                "unverified_action_count": 2,
+            },
+        },
+    )
+
+    assert "1 file write" in text
+    assert "2 other action" in text
+    assert "Do not retry blindly" in text
+
+
 @pytest.mark.asyncio
 async def test_send_long_message_formats_backend_failure_once(tmp_path):
     runtime = _runtime(tmp_path)

@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import signal
+from itertools import islice
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -798,18 +799,40 @@ async def execute_file_read(
         return f"Error: path is not a file: {path}"
 
     offset = max(1, int(args.get("offset", 1)))
-    limit = int(args.get("limit", 500))
+    limit = max(1, min(500, int(args.get("limit", 500))))
+    max_chars = 20_000
 
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-        lines = text.splitlines(keepends=True)
-        selected = lines[offset - 1 : offset - 1 + limit]
+        selected: list[str] = []
+        remaining = max_chars
+        truncated = False
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for _ in range(offset - 1):
+                while True:
+                    chunk = handle.readline(8192)
+                    if not chunk:
+                        return f"[{path}] No lines at offset {offset}"
+                    if chunk.endswith("\n"):
+                        break
+            for _ in range(limit):
+                line = handle.readline(remaining + 1)
+                if not line:
+                    break
+                if len(line) > remaining:
+                    selected.append(line[:remaining])
+                    truncated = True
+                    break
+                selected.append(line)
+                remaining -= len(line)
+                if remaining == 0:
+                    truncated = bool(handle.read(1))
+                    break
+            else:
+                truncated = bool(handle.read(1))
+        header = f"[{path}] lines {offset}-{offset + len(selected) - 1}"
         content = "".join(selected)
-
-        header = f"[{path}]"
-        if offset > 1 or len(lines) > limit:
-            header += f" lines {offset}-{offset + len(selected) - 1} of {len(lines)}"
-
+        if truncated:
+            content += "\n[truncated by HASHI; use a narrower offset or log_query]"
         return f"{header}\n{content}"
     except Exception as e:
         return f"Error reading file: {e}"
@@ -924,12 +947,14 @@ async def execute_file_list(
 
     try:
         entries = []
+        max_entries = 1000
         if recursive:
-            all_paths = sorted(path.rglob(pattern))
+            all_paths = sorted(islice(path.rglob(pattern), max_entries + 1))
         else:
-            all_paths = sorted(path.glob(pattern))
+            all_paths = sorted(islice(path.glob(pattern), max_entries + 1))
+        truncated = len(all_paths) > max_entries
 
-        for p in all_paths:
+        for p in all_paths[:max_entries]:
             rel = p.relative_to(path)
             kind = "dir" if p.is_dir() else "file"
             try:
@@ -942,7 +967,9 @@ async def execute_file_list(
         if not entries:
             return f"No entries found in {path} (pattern: {pattern})"
 
-        header = f"[{path}]  {len(entries)} items"
+        header = f"[{path}]  {len(entries)} items shown"
+        if truncated:
+            header += " [truncated; narrow the pattern or path]"
         return header + "\n" + "\n".join(entries)
     except Exception as e:
         return f"Error listing directory: {e}"
@@ -1379,6 +1406,8 @@ async def execute_process_kill(args: dict) -> str:
 
     signal_num = int(args.get("signal", 15))
     pid = int(pid)
+    if pid in {os.getpid(), os.getppid()}:
+        return f"Error: refusing to terminate HASHI process PID {pid}"
 
     try:
         import psutil

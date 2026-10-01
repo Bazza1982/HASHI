@@ -638,6 +638,13 @@ class BaseBackend(ABC):
                     f"reason={reason!r}"
                 )
             return False
+        if pid in {os.getpid(), os.getppid()}:
+            if logger:
+                logger.error(
+                    "Refusing to terminate the current HASHI process or its parent "
+                    "pid=%s reason=%r", pid, reason
+                )
+            return False
 
         try:
             if os.name == "nt" and pid:

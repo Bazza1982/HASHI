@@ -64,6 +64,63 @@ def test_backend_diagnostic_fields_keep_provider_request_response_and_wire_refs(
     assert fields["side_effects_possible"] is False
 
 
+def test_user_reconciliation_distinguishes_confirmed_write_from_unknown_actions(tmp_path):
+    for call_id, tool_name, receipt in (
+        ("call-write", "file_write", {"kind": "write", "readback": True}),
+        ("call-shell", "shell", None),
+    ):
+        record_tool_action(
+            workspace_dir=tmp_path,
+            tool_name=tool_name,
+            tool_call_id=call_id,
+            arguments={},
+            output="ok",
+            is_error=False,
+            duration_ms=1,
+            audit_context={"request_id": "req-effects"},
+            details={"effect_receipt": receipt} if receipt else None,
+        )
+
+    summary = request_diagnostics.build_user_effect_reconciliation(
+        workspace_dir=tmp_path,
+        request_id="req-effects",
+        tool_call_count=2,
+        side_effects_possible=True,
+    )
+
+    assert summary["confirmed_write_count"] == 1
+    assert summary["unverified_action_count"] == 1
+    assert summary["observed_tool_count"] == 2
+
+
+def test_user_reconciliation_retains_unknown_when_cli_exits_without_tool_log(tmp_path):
+    summary = request_diagnostics.build_user_effect_reconciliation(
+        workspace_dir=tmp_path,
+        request_id="req-cli",
+        tool_call_count=0,
+        side_effects_possible=True,
+    )
+    assert summary["confirmed_write_count"] == 0
+    assert summary["unverified_action_count"] >= 1
+
+
+def test_retry_evidence_never_claims_safe_when_reconciliation_found_an_effect():
+    result = runtime_debug_reporting.safe_retry_evidence(
+        {
+            "success": False,
+            "error_retryable": True,
+            "side_effects_possible": False,
+            "tool_call_count": 0,
+            "effect_reconciliation": {
+                "confirmed_write_count": 1,
+                "observed_tool_count": 1,
+                "unverified_action_count": 0,
+            },
+        }
+    )
+    assert result["status"] == "absent"
+
+
 def test_terminal_projection_records_final_state_and_only_evidence_based_retry(tmp_path: Path):
     runtime = _runtime(tmp_path)
 
@@ -90,6 +147,24 @@ def test_terminal_projection_records_final_state_and_only_evidence_based_retry(t
     assert payload["provider"]["request_id"] == "provider-request-1"
     assert payload["provider"]["response_id"] == "provider-response-1"
     assert payload["safe_retry_evidence"]["status"] == "present"
+
+    reconciled_path = runtime_debug_reporting.persist_terminal_diagnostic(
+        runtime,
+        "req-reconciled",
+        {
+            "success": False,
+            "error_retryable": True,
+            "side_effects_possible": False,
+            "tool_call_count": 0,
+            "effect_reconciliation": {
+                "confirmed_write_count": 0,
+                "unverified_action_count": 1,
+            },
+        },
+    )
+    reconciled = json.loads(reconciled_path.read_text(encoding="utf-8"))
+    assert reconciled["effects"]["reconciliation"]["unverified_action_count"] == 1
+    assert reconciled["safe_retry_evidence"]["status"] == "absent"
 
     blocked = tmp_path / "not-a-directory"
     blocked.write_text("occupied", encoding="utf-8")

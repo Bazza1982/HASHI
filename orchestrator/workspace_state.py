@@ -35,6 +35,11 @@ class WorkspaceStateStore:
             except (OSError, ValueError):
                 return {}
 
+    def read_strict(self) -> dict:
+        """Read control state without treating a damaged file as empty."""
+        with self._lock:
+            return self._read_for_update()[0]
+
     def _publish(self, payload: dict, revision: str | None) -> dict:
         snapshot = dict(payload)
         self.path.parent.mkdir(parents=True, exist_ok=True)

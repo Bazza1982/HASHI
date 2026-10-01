@@ -593,8 +593,14 @@ class TaskScheduler:
                     try:
                         enqueue_options: dict[str, Any] = {}
                         request_metadata = record.get("request_metadata")
-                        if isinstance(request_metadata, dict) and request_metadata:
-                            enqueue_options["request_metadata"] = dict(request_metadata)
+                        enqueue_options["request_metadata"] = {
+                            **(dict(request_metadata) if isinstance(request_metadata, dict) else {}),
+                            "_hashi_autonomous_wakeup": "delayed",
+                        }
+                        from orchestrator import runtime_autonomy
+
+                        if runtime_autonomy.status(runtime)["paused"]:
+                            continue
                         if not bool(record.get("deliver_to_telegram", True)):
                             enqueue_options["deliver_to_telegram"] = False
                         request_id = await runtime.enqueue_request(
@@ -1053,6 +1059,10 @@ class TaskScheduler:
         return batch
 
     async def _deliver_recovery_notice(self, runtime, batch: dict[str, Any]) -> bool:
+        from orchestrator import runtime_autonomy
+
+        if runtime_autonomy.status(runtime)["paused"]:
+            return False
         sender = getattr(runtime, "enqueue_request", None)
         if not callable(sender):
             scheduler_logger.error(
@@ -1372,6 +1382,10 @@ class TaskScheduler:
         prompt = hb.get("prompt", "")
         action = hb.get("action", "enqueue_prompt")
         rt = runtime_map[agent_name]
+        from orchestrator import runtime_autonomy
+
+        if runtime_autonomy.status(rt)["paused"]:
+            return False
         scheduler_logger.info(f"Triggering heartbeat {task_id} for {agent_name}")
         recovery_header = ""
         if scheduled_for is not None:
@@ -1451,6 +1465,10 @@ class TaskScheduler:
         """Run one due cron while preserving loop and action semantics."""
         task_id = cron["id"]
         agent_name = cron["agent"]
+        from orchestrator import runtime_autonomy
+
+        if runtime_autonomy.status(runtime_map[agent_name])["paused"]:
+            return False
         action = cron.get("action", "enqueue_prompt")
 
         loop_meta = cron.get("loop_meta")
@@ -1667,6 +1685,10 @@ class TaskScheduler:
                         continue
 
                     rt = runtime_map[agent_name]
+                    from orchestrator import runtime_autonomy
+
+                    if runtime_autonomy.status(rt)["paused"]:
+                        continue
                     if _runtime_busy(rt):
                         scheduler_logger.info(f"Skipping nudge {task_id} for {agent_name}: runtime busy.")
                         self.state["nudges"][task_id] = now

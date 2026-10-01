@@ -15,6 +15,7 @@ bridge_logger = logging.getLogger("BridgeU.Bridge")
 
 TELEGRAM_LONG_POLL_SECONDS = 30
 TELEGRAM_READ_TIMEOUT_SECONDS = 40
+TELEGRAM_POLL_WATCHDOG_SECONDS = TELEGRAM_READ_TIMEOUT_SECONDS + 5
 TELEGRAM_RETRY_SECONDS = 2.0
 
 
@@ -68,7 +69,6 @@ class CoreTelegramIngress:
             except Exception:
                 pass
             raise
-        await self._set_connected(True)
         self.task = asyncio.create_task(
             self._run(),
             name=f"core-telegram-ingress:{self.agent_name}",
@@ -96,7 +96,9 @@ class CoreTelegramIngress:
                 )
                 self._poll_task = poll
                 try:
-                    updates = await poll
+                    updates = await asyncio.wait_for(
+                        poll, timeout=TELEGRAM_POLL_WATCHDOG_SECONDS
+                    )
                 except asyncio.CancelledError:
                     if self._stopping and poll.cancelled():
                         break

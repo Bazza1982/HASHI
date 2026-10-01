@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
 from orchestrator import runtime_control, runtime_remote, runtime_workspace
+from orchestrator.runtime_autonomy import admission_snapshot, status
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.scheduler import TaskScheduler
 
@@ -177,3 +179,32 @@ async def test_stop_preserves_and_reports_delayed_messages(tmp_path):
 
     assert scheduler.count_delayed_messages("zelda") == 1
     assert "Preserved 1 delayed message(s)" in replies[0]
+
+
+@pytest.mark.asyncio
+async def test_due_delay_stays_parked_after_stop_until_new_user_request(tmp_path):
+    scheduler = _scheduler(tmp_path)
+    await _schedule(scheduler)
+    runtime = SimpleNamespace(
+        name="zelda",
+        workspace_dir=tmp_path,
+        enqueue_request=AsyncMock(return_value="req-delayed"),
+    )
+    from orchestrator.runtime_autonomy import pause
+
+    pause(runtime)
+    await scheduler.dispatch_due_delayed_messages(
+        {"zelda": runtime}, now_ts=time.time() + 3600
+    )
+    runtime.enqueue_request.assert_not_awaited()
+    assert scheduler.count_delayed_messages("zelda") == 1
+    assert status(runtime)["paused"] is True
+
+    assert admission_snapshot(runtime, "api", {})[0] is True
+    await scheduler.dispatch_due_delayed_messages(
+        {"zelda": runtime}, now_ts=time.time() + 3600
+    )
+    assert runtime.enqueue_request.await_count == 1
+    assert runtime.enqueue_request.await_args.kwargs["request_metadata"][
+        "_hashi_autonomous_wakeup"
+    ] == "delayed"

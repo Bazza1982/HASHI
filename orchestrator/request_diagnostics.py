@@ -187,6 +187,7 @@ def build_request_diagnostics(
 
     terminal = terminal_projection.get("terminal")
     provider = terminal_projection.get("provider")
+    effects = terminal_projection.get("effects")
     retry = terminal_projection.get("safe_retry_evidence")
     return {
         "format": FORMAT,
@@ -197,6 +198,7 @@ def build_request_diagnostics(
             else {"state": "unknown", "completed": None}
         ),
         "provider": dict(provider) if isinstance(provider, Mapping) else {},
+        "effects": dict(effects) if isinstance(effects, Mapping) else {},
         "safe_retry_evidence": (
             dict(retry)
             if isinstance(retry, Mapping)
@@ -215,9 +217,76 @@ def build_request_diagnostics(
     }
 
 
+def build_user_effect_reconciliation(
+    *,
+    workspace_dir: Path,
+    request_id: str,
+    tool_call_count: int,
+    side_effects_possible: bool,
+    additional_workspaces: Iterable[Path] = (),
+    background_jobs: Iterable[Any] = (),
+) -> dict[str, Any]:
+    """Summarize observed effects without inferring success from a tool exit.
+
+    A write is confirmed only when a readback receipt exists. Other actions
+    remain unverified, including a CLI failure with no logged tool call.
+    """
+
+    locations = dict.fromkeys(
+        [Path(workspace_dir), *(Path(path) for path in additional_workspaces)]
+    )
+    by_call: dict[str, dict[str, Any]] = {}
+    evidence_limited = False
+    jobs_by_id: dict[str, dict[str, Any]] = {}
+    for location in locations:
+        report = build_request_diagnostics(
+            workspace_dir=location,
+            request_id=request_id,
+            background_jobs=background_jobs,
+        )
+        evidence = report["evidence"]
+        evidence_limited = evidence_limited or bool(
+            evidence["tool_log_suffix_truncated"]
+            or evidence["smart_log_suffix_truncated"]
+        )
+        for index, action in enumerate(report["tool_actions"]):
+            call_id = str(action.get("tool_call_id") or "")
+            key = call_id or f"{location}:{action.get('source')}:{index}"
+            previous = by_call.get(key)
+            if previous is None or (
+                not isinstance(previous.get("effect_receipt"), Mapping)
+                and isinstance(action.get("effect_receipt"), Mapping)
+            ):
+                by_call[key] = action
+        for job in report["background_jobs"]:
+            jobs_by_id[str(job.get("job_id") or "")] = job
+    confirmed_writes = sum(
+        1
+        for action in by_call.values()
+        if action.get("tool_name") in _FILE_WRITE_TOOLS
+        and isinstance(action.get("effect_receipt"), Mapping)
+        and action["effect_receipt"].get("kind") == "write"
+        and action["effect_receipt"].get("readback") is True
+    )
+    observed = max(max(0, int(tool_call_count)), len(by_call))
+    unverified = max(0, observed - confirmed_writes)
+    if side_effects_possible and not confirmed_writes and not unverified:
+        unverified = 1
+    return {
+        "confirmed_write_count": confirmed_writes,
+        "observed_tool_count": observed,
+        "unverified_action_count": unverified,
+        "completed_background_job_count": sum(
+            1 for job in jobs_by_id.values() if job.get("state") == "succeeded"
+        ),
+        "evidence_limited": evidence_limited,
+    }
+
+
 __all__ = [
     "FORMAT",
     "build_request_diagnostics",
+    "build_user_effect_reconciliation",
     "projection_path",
     "safe_request_id",
 ]

@@ -262,6 +262,36 @@ async def test_standalone_registry_keeps_explicit_legacy_executor_for_diagnostic
 
 
 @pytest.mark.asyncio
+async def test_gateway_does_not_advertise_broker_browser_without_broker_executor(
+    tmp_path, monkeypatch
+):
+    from tools import browser
+
+    registry = _registry(tmp_path, "browser_get_text", None)
+    monkeypatch.setattr(
+        registry,
+        "_capability_status_snapshot",
+        lambda: {
+            "instance_id": "HASHI1",
+            "capabilities": [_browser_registration()],
+        },
+    )
+    local_calls = []
+
+    async def local_browser(_arguments):
+        local_calls.append(True)
+        return "local browser result"
+
+    monkeypatch.setattr(browser, "execute_browser_get_text", local_browser)
+
+    assert _definition_names(registry) == set()
+    result = await registry.execute("browser_get_text", {"url": "https://example.test"})
+    assert result.is_error is True
+    assert result.details["reason"] == "broker_executor_unbound"
+    assert local_calls == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("tool_name", "arguments"),
     [
