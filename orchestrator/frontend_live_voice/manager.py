@@ -1395,6 +1395,12 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 locale = public.get("interface_language") or "en"
         return tr("phone.action." + key, locale=locale)
 
+    def _unconfirmed_effect_text(self, binding: CallBinding, kind: str) -> str:
+        key = ("write_unconfirmed" if kind in {"write", "modify"}
+               else "execute_unconfirmed" if kind in {"execute", "cancel"}
+               else "query_unconfirmed")
+        return self._action_text(binding, key)
+
     def _progress_enabled(self, binding: CallBinding) -> bool:
         """Read the latest call-scoped spoken-progress choice from durable events."""
         with self.session_store._lock, self.session_store._connection() as connection:
@@ -1721,7 +1727,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                     return
                 for item in self.actions.rows(binding, delegation_id=proposal.delegation_id):
                     self.actions.transition(binding, item["action_id"], "unknown",
-                        receipt=self._action_text(binding, "write_unconfirmed"))
+                        receipt=self._unconfirmed_effect_text(binding, item["kind"]))
                 reply = self._action_text(binding, "judgment_unavailable")
                 await self._finish_delegation_without_run(binding, proposal, decision="needs_attention",
                     reason=reason, provider_reply=reply)
@@ -2620,7 +2626,9 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                         receipt += " " + (self._action_text(binding, "partial_reads").format(count=read_count)
                                           if read_count else self._action_text(binding, "no_final_result"))
                     if item["kind"] in {"write", "modify", "execute"}:
-                        receipt += " " + self._action_text(binding, "write_unconfirmed")
+                        if item["kind"] == "execute" and not report:
+                            receipt += " " + self._action_text(binding, "no_final_result")
+                        receipt += " " + self._unconfirmed_effect_text(binding, item["kind"])
                 elif state in {"stopped", "interrupted"}:
                     status = "unknown"
                     receipt = self._action_text(binding, "stopped_unattributed" if state == "stopped"
@@ -2631,20 +2639,19 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                         receipt += " " + (self._action_text(binding, "partial_reads").format(count=read_count)
                                           if read_count else self._action_text(binding, "no_final_result"))
                     if item["kind"] in {"write", "modify", "execute"}:
-                        receipt += " " + self._action_text(binding, "write_unconfirmed")
+                        receipt += " " + self._unconfirmed_effect_text(binding, item["kind"])
                 elif state == "failed":
                     status = "failed" if item["kind"] == "query" else "unknown"
                     receipt = self._action_text(binding, "run_failed")
                     if item["kind"] == "query" and not report:
                         receipt += " " + self._action_text(binding, "no_final_result")
                     if item["kind"] in {"write", "modify", "execute"}:
-                        receipt += " " + self._action_text(binding, "write_unconfirmed")
+                        receipt += " " + self._unconfirmed_effect_text(binding, item["kind"])
                 else:
                     status = "unknown"
                     receipt = (self._action_text(binding, "query_result_unverified")
                                if report and item["kind"] == "query" else
-                               self._action_text(binding, "write_unconfirmed" if item["kind"] in
-                                   {"write", "modify", "execute"} else "query_unconfirmed"))
+                               self._unconfirmed_effect_text(binding, item["kind"]))
                     if stop_requested and state == "completed":
                         receipt = self._action_text(binding, "stop_too_late") + " " + receipt
                 facts.append(self.actions.transition(binding, item["action_id"],

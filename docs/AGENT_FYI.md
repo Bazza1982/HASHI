@@ -246,6 +246,8 @@ interrupt is not a confirmed stop. A stopped query's partial reads
 are not a completed answer, while a saved record with readback may still be
 verified after stopping. A typed user-stop completion records `stopped`, while
 a backend error remains `failed`. The Run state and the effect remain separate.
+General execution tasks with unknown effects use a general execution receipt;
+only write or modify tasks use the record/write uncertainty wording.
 The foreground may switch brief spoken
 progress on or off from the caller's request. When enabled, relay only real,
 user-presentable activity at a restrained cadence; always deliver required

@@ -309,9 +309,13 @@ async def test_independent_actions_have_separate_runs_and_scoped_cancel(phone):
 
 
 @pytest.mark.asyncio
-async def test_running_phone_stop_waits_for_terminal_confirmation(phone, monkeypatch):
-    phone.judgments = [decision(action("query", "Check current news"))]
-    await speak(phone, "Check current news")
+@pytest.mark.parametrize("kind, task_text", [
+    ("query", "Check current news"),
+    ("execute", "Wait for ninety seconds"),
+])
+async def test_running_phone_stop_waits_for_terminal_confirmation(phone, monkeypatch, kind, task_text):
+    phone.judgments = [decision(action(kind, task_text))]
+    await speak(phone, task_text)
     original = action_rows(phone)[0]
     run = phone.store.get_run(original["run_id"], owner_id=phone.owner_id)
     phone.store.mark_request_running(run["request_id"], worker_id="worker")
@@ -322,8 +326,8 @@ async def test_running_phone_stop_waits_for_terminal_confirmation(phone, monkeyp
                 "evidence_ref": "request:" + run["request_id"] + ":interrupt-sent"}
 
     phone.manager._cancel_action_run = request_stop
-    phone.judgments = [decision(action("cancel", "Stop that news search", "cancel", original["action_id"]))]
-    await speak(phone, "Stop that search and tell me what happened", start=200, end=300, source="stop")
+    phone.judgments = [decision(action("cancel", "Stop that task", "cancel", original["action_id"]))]
+    await speak(phone, "Stop that task and tell me what happened", start=200, end=300, source="stop")
     assert action_rows(phone)[0]["status"] == "running"
     assert event_details(phone, "voice.live.action.stop_requested")
     assert not event_details(phone, "voice.live.action.stop_confirmed")
@@ -346,6 +350,11 @@ async def test_running_phone_stop_waits_for_terminal_confirmation(phone, monkeyp
     assert phone.store.get_run(original["run_id"], owner_id=phone.owner_id)["state"] == "stopped"
     assert event_details(phone, "voice.live.action.stop_confirmed")
     assert action_rows(phone)[0]["status"] == "cancelled"
+    if kind == "execute":
+        receipt = action_rows(phone)[0]["receipt"]
+        assert phone.manager._action_text(phone.binding, "no_final_result") in receipt
+        assert phone.manager._action_text(phone.binding, "execute_unconfirmed") in receipt
+        assert phone.manager._action_text(phone.binding, "write_unconfirmed") not in receipt
     assert len(phone.admit_calls) == 1
 
 

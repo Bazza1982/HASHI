@@ -8,6 +8,7 @@
     "phone.action.admission_unconfirmed": "已经收到请求，但还不能确认是否开始办理。需要先核实处理状态，再决定是否重试。",
     "phone.action.admission_rejected": "当前会话已经变化，这件事尚未开始办理。请重新打开当前会话后再交办。",
     "phone.action.write_unconfirmed": "这项修改的结果还没有确认。需要先检查现有记录，避免重复写入。",
+    "phone.action.execute_unconfirmed": "这项操作产生的实际效果尚未核实。请先核对，再决定是否重试。",
     "phone.action.query_unconfirmed": "这次核对还没有得到可确认的答案。",
     "phone.action.cancelled": "这项请求已在开始办理前取消。",
     "phone.action.stop_unconfirmed": "还不能确认是否已经停止处理，之前是否产生过修改也需要检查。",

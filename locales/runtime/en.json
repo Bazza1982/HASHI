@@ -8,6 +8,7 @@
     "phone.action.admission_unconfirmed": "I received the request, but cannot yet confirm that it started. Its status needs checking before it is repeated.",
     "phone.action.admission_rejected": "This request has not started because the selected conversation changed. Reopen the current conversation before requesting it again.",
     "phone.action.write_unconfirmed": "The requested change is still unconfirmed. The existing record needs checking before it is repeated.",
+    "phone.action.execute_unconfirmed": "The action's effects have not been verified. Check what happened before trying it again.",
     "phone.action.query_unconfirmed": "I have not obtained a verified answer to that check yet.",
     "phone.action.cancelled": "The request was cancelled before it started.",
     "phone.action.stop_unconfirmed": "The cancellation outcome is not confirmed. Any changes already made still need checking.",

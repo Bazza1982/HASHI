@@ -232,6 +232,9 @@ typed user-stop backend notification settles its Run as `stopped`; an ordinary
 backend error settles as `failed`. Phone cancellation reports request sent
 until the terminal Run state confirms the stop, and keeps any verified prior
 write separate from the stop outcome.
+For a stopped general execution, the receipt names the missing final answer
+and any unverified effect without claiming a record was written. The action
+kind controls this wording; a confirmed stop does not certify prior effects.
 
 The 2026-10-01 Sunny incident is a failed acceptance case: completed Gmail and
 Hong Kong news final Messages existed, while the then-running Phone relay sent
