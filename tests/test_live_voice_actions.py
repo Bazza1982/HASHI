@@ -751,6 +751,49 @@ async def test_invalid_unexecuted_judgment_retains_prefix_for_later_speech(phone
 
 
 @pytest.mark.asyncio
+async def test_phone_intent_never_admits_work_without_effective_pcm_context(phone):
+    def unavailable(*_args, **_kwargs):
+        raise RuntimeError("PCM projection unavailable")
+
+    phone.manager._phone_session = unavailable
+    phone.judgments = [decision(action("write", "Record exercise for 40 minutes"))]
+
+    await speak(phone, "Record exercise for 40 minutes")
+
+    assert not phone.admit_calls
+    assert not action_rows(phone)
+    assert event_details(phone, "voice.live.delegation.routed")[-1]["decision"] == "judgment_failed"
+    assert event_details(phone, "voice.live.action.judgment_rejected")[-1]["reason"] == "live_semantic_context_unavailable"
+    assert any(update[1]["kind"] == "commentary" for update in phone.updates)
+
+
+@pytest.mark.asyncio
+async def test_phone_stop_remains_available_when_current_pcm_refresh_fails(phone):
+    phone.judgments = [decision(action("query", "Check the current news"))]
+    await speak(phone, "Check the current news")
+    original = action_rows(phone)[0]
+
+    def unavailable(*_args, **_kwargs):
+        raise RuntimeError("PCM projection unavailable")
+
+    stopped = []
+
+    async def cancel(_binding, run_id):
+        stopped.append(run_id)
+        return {"cancelled_before_start": True, "evidence_ref": "request:removed-before-start"}
+
+    phone.manager._phone_session = unavailable
+    phone.manager._cancel_action_run = cancel
+    phone.judgments = [decision(action("cancel", "Stop that news check", "cancel", original["action_id"]))]
+
+    await speak(phone, "Stop that news check", start=200, end=300, source="stop")
+
+    assert stopped == [original["run_id"]]
+    assert action_rows(phone)[0]["status"] == "cancelled"
+    assert len(phone.admit_calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_tool_effect_before_admission_ack_uses_validated_run_origin(phone, tmp_path):
     runtime = SimpleNamespace(workspace_dir=tmp_path / "home", name=phone.agent_id, session_store=phone.store)
     runtime.workspace_dir.mkdir()

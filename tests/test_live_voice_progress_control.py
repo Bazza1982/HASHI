@@ -6,9 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from tests.test_live_voice_actions import action, action_rows, decision, event_details, speak
-
-pytest_plugins = ("tests.test_live_voice_actions",)
+from tests.test_live_voice_actions import action, action_rows, decision, event_details, phone as phone, speak
 
 
 async def _stop_auto_relays(phone):

@@ -34,6 +34,8 @@ Prior Phone speech is labelled as an unverified transcript in new-call context;
 it does not outrank a saved report.
 Phone stop receipts separate confirmed stop, missing final answer and
 unverified effects; they do not imply a record was written.
+If effective PCM refresh fails mid-call, Phone can still stop or inspect an
+existing action, but it must not create new work from the incomplete context.
 `/reboot min|same` replaces the selected Agent Worker; `/reboot max` adopts
 shared Functions and all running Workers while Core and Remote stay live.
 Adoption needs matching identity, PID, generation, health, and receipts.

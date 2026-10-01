@@ -1510,7 +1510,8 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         # Derive this small judgment input from PCM's existing projection. Keep
         # reference context (including HCC) explicitly represented before recent
         # history; never silently substitute a guessed referent for omitted text.
-        with suppress(Exception):
+        state["pcm_context_available"] = False
+        try:
             phone = self._phone_session(binding.agent_id, owner_id=binding.owner_id,
                 session_id=binding.session_id, context_generation=binding.context_generation)
             contexts, history = [], []
@@ -1533,6 +1534,13 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             public = phone.get("public") or {}
             state["reply_language"] = public.get("language")
             state["fallback_language"] = public.get("interface_language") or "en"
+            state["pcm_context_available"] = True
+        except Exception:
+            # A current PCM refresh can fail during a live call. Retain the
+            # PAO-owned action IDs so the caller can still stop existing work,
+            # but never let the incomplete snapshot authorize new work.
+            state["known_context"] = []
+            state["omitted_history"] = True
         return state
 
     async def note_user_fragment(self, binding: CallBinding, fragment: Fragment) -> None:
@@ -1616,6 +1624,13 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                             known_result_ids={item["result_id"] for item in state["known_results"]},
                             known_result_next_offsets={item["result_id"]: item["next_offset"]
                                                        for item in state["known_results"]})
+                        if not state["pcm_context_available"] and not (
+                            decision.route is DelegationRoute.EXECUTE
+                            and decision.actions
+                            and all(item.relation in {"cancel", "reuse"}
+                                    for item in decision.actions)
+                        ):
+                            raise LiveVoiceError("live_semantic_context_unavailable", 503)
                         break
                     except LiveVoiceError as exc:
                         if (attempt or isinstance(raw, Mapping) and raw.get("complete") is False or

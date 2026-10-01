@@ -227,6 +227,15 @@ When the caller asks about several completed reports, semantic routing selects
 their distinct IDs and PAO stages each original. A summary request does not
 authorize answering from a clipped opening excerpt. A new background Run is
 reserved for work not already represented by a saved result.
+
+Phone action interpretation may refresh effective PCM during a call. If that
+projection is unavailable, PAO does not silently omit it and admit new work.
+The current call may still identify and stop or inspect one of its already
+known actions by its exact PAO action ID; these control operations cannot
+create a Run. Other requests receive a visible uncertainty response until
+effective context is available again. This preserves cancellation while
+keeping incomplete authority from licensing a new task.
+
 The resulting speech and player observations remain separate evidence. A
 typed user-stop backend notification settles its Run as `stopped`; an ordinary
 backend error settles as `failed`. Phone cancellation reports request sent
