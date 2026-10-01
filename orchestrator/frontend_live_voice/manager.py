@@ -26,7 +26,7 @@ from .delegation_policy import (
 )
 from .actions import PhoneActions
 from .provider import VoiceProvider, default_registry, select_provider
-from .result_outline import numbered_source_outline
+from orchestrator.voice_result_outline import numbered_source_outline
 from .opening import CallOpening, OpeningAudioObservation, new_opening, opening_goal
 from .ports import AdmissionPort, DurableVoicePort, LiveApplicationPort
 from .protocol import CallBinding, Fragment, LiveVoiceError, identifier, normalize_transcript, positive_int, stable_digest

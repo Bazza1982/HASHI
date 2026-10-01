@@ -55,10 +55,12 @@ def opening_goal(phone: Mapping[str, Any], *, continuation: bool = False) -> str
         + "Earlier conversation is context, not an opening already delivered in this call. Use the effective "
         "Persona, address preferences and instruction authority already supplied. "
         + chosen
-        + "Briefly continue a clear recent topic, or begin answering a pending user question from "
-        "the supplied facts. Otherwise offer a short natural greeting without inventing an address. "
-        "Speak one or two substantive sentences, then pause and listen. Use only existing context "
-        "and verified results; this opening requests no lookup or action. Present the user's subject, "
+        + "Begin with one short natural greeting. You may name a clear recent topic. "
+        "Continue a pending user question only when its complete answer is already in startup context. "
+        "A saved-result index is an address book, even when it includes source-derived structure; "
+        "its excerpt is not the report to summarize aloud. If the full answer is absent, invite the "
+        "caller to continue that topic, then listen. Use only verified context; this opening "
+        "requests no lookup or action. Present the user's subject, "
         "not internal execution. If the caller speaks first or interrupts, yield and respond to their words."
     )
 

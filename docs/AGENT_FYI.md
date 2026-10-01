@@ -27,6 +27,9 @@ record authority but never create it. Core owns no product policy, imports no
 product module, and each registry/state writer has one owner.
 
 Source, committed artifacts, clients, Workers, and delivery are separate facts.
+Phone startup's saved-result index carries source-derived numbered structure,
+but it remains an address book: answer a report question from the scoped full
+original, and keep opening speech short when that original is not yet present.
 `/reboot min|same` replaces the selected Agent Worker; `/reboot max` adopts
 shared Functions and all running Workers while Core and Remote stay live.
 Adoption needs matching identity, PID, generation, health, and receipts.

@@ -114,12 +114,22 @@ def test_sunny_morning_baseline_survives_busy_conversation_at_opening(tmp_path):
     }
     completed.extend(
         {"message_id": result_id, "created_at": "2026-10-01T00:30:00Z",
-         "session_kind": "agent_activity", "text": summary + ". " + "full detail " * 160}
+         "session_kind": "agent_activity", "text": (
+             "Today's two main themes are AI and storage.\n"
+             "🔴 **今日重点**\n"
+             "**1. Gemini** — model announcement.\n"
+             "**2. Micron** — storage cycle.\n"
+             "**3. Russia energy strike** — international update.\n"
+             + "full detail " * 160
+             if result_id == "msg-news" else summary + ". " + "full detail " * 160)}
         for result_id, summary in expected.items()
     )
     index = build_phone_result_index(completed)
     assert set(expected) <= set(index.included_message_ids)
-    assert all(summary in index.text for summary in expected.values())
+    assert all(summary in index.text for result_id, summary in expected.items()
+               if result_id != "msg-news")
+    assert "Section 今日重点: 3 numbered entries." in index.text
+    assert "3. Russia energy strike" in index.text
     assert "source excerpts" in index.text
     assert len(index.text) <= 9_000
     assert index.omitted_count == len(index.omitted_message_ids)

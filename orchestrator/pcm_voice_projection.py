@@ -13,6 +13,7 @@ from typing import Any
 
 from orchestrator.hcc import HCC_USAGE_PROMPT, is_hcc_enabled
 from orchestrator.pcm import PCMValidationError, canonical_agent_md, load_pcm_document
+from orchestrator.voice_result_outline import numbered_source_outline
 from tools.token_tracker import estimate_tokens
 
 
@@ -178,7 +179,9 @@ def build_phone_result_index(
     )
     remaining = max(0, int(max_chars) - len(header))
     for row in reversed(rows):
-        text = str(row.get("text") or "").strip()
+        original = str(row.get("text") or "").strip()
+        structure = numbered_source_outline(original, max_chars=400)
+        text = original
         excerpted = len(text) > max_item_chars
         if excerpted:
             text = text[: max_item_chars - 1].rstrip() + "…"
@@ -190,7 +193,8 @@ def build_phone_result_index(
         block = (
             f"{reference}completed at {timestamp}; source {source}; "
             + (f"request {request}; " if request else "")
-            + f"original length {len(str(row.get('text') or '').strip())} characters; "
+            + f"original length {len(original)} characters; "
+            + (f"explicit numbered structure from original:\n{structure}\n" if structure else "")
             + f"{'excerpt' if excerpted else 'complete short text'}:\n{text}"
         )
         if len(block) > remaining:

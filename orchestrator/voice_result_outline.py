@@ -55,14 +55,24 @@ def numbered_source_outline(original: str, *, max_chars: int = 2800) -> str:
     ]
     for group_heading, items in groups:
         label = group_heading or "Unlabelled numbered sequence"
-        group_lines = [f"Section {label}: {len(items)} numbered entries."]
-        for number, title in items[:30]:
-            group_lines.append(f"{number}. {title[:170]}")
-        if len(items) > 30:
-            group_lines.append(f"{len(items) - 30} further numbered entries remain in the original.")
-        candidate = "\n".join((*lines, *group_lines))
-        if len(candidate) > max_chars:
-            lines.append("Further numbered groups remain in the saved original.")
+        group_line = f"Section {label}: {len(items)} numbered entries."
+        if len("\n".join((*lines, group_line))) > max_chars:
             break
-        lines.extend(group_lines)
+        lines.append(group_line)
+        shown = 0
+        for number, title in items[:30]:
+            item_line = f"{number}. {title[:170]}"
+            # Preserve space for an explicit continuation count when this is a
+            # compact opening index rather than the full report handoff.
+            reserve = 55 if shown + 1 < len(items) else 0
+            if len("\n".join((*lines, item_line))) + reserve > max_chars:
+                break
+            lines.append(item_line)
+            shown += 1
+        if shown < len(items):
+            remainder = f"{len(items) - shown} further numbered entries remain in the original."
+            if len("\n".join((*lines, remainder))) <= max_chars:
+                lines.append(remainder)
+        if shown < len(items):
+            break
     return "\n".join(lines)

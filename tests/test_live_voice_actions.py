@@ -15,7 +15,7 @@ from tests import test_live_voice_integration as integration
 from orchestrator.frontend_live_voice.actions import effect_evidence
 from orchestrator.frontend_live_voice.delegation_policy import ActionIntent, parse_decision
 from orchestrator.frontend_live_voice.protocol import Fragment
-from orchestrator.frontend_live_voice.result_outline import numbered_source_outline
+from orchestrator.voice_result_outline import numbered_source_outline
 from orchestrator.frontend_live_voice import worker_actions
 from orchestrator import runtime_session
 from tools.registry import ToolRegistry
@@ -486,6 +486,17 @@ def test_numbered_source_outline_distinguishes_intro_themes_from_report_items():
     assert "Section 今日重点: 3 numbered entries." in outline
     assert "3. Russian energy strike" in outline
     assert "International: " not in outline
+
+
+def test_compact_source_outline_keeps_true_total_when_titles_do_not_fit():
+    original = "# News\n" + "\n".join(
+        f"{number}. Story {number} with source details and follow-up context"
+        for number in range(1, 24)
+    )
+    outline = numbered_source_outline(original, max_chars=400)
+    assert "Section News: 23 numbered entries." in outline
+    assert "further numbered entries remain in the original" in outline
+    assert len(outline) <= 400
 
 
 @pytest.mark.asyncio
