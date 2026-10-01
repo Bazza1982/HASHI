@@ -615,6 +615,22 @@ wire references, observed writes/effects, final state, and whether safe retry
 evidence is present, absent, or unknown. It never retries work, changes HERV3
 control flow, or makes diagnostic persistence a completion condition.
 
+On HASHI3, `/stop` also persists an Agent-wide autonomous-wakeup fence in the
+existing workspace state. Scheduler, nudge, delayed-message, startup, and
+background-completion admissions are blocked until a later explicit user
+request resumes new admissions. Completed background outcomes remain in job
+records and are not automatically replayed. The stop generation invalidates in-flight admissions
+that raced with `/stop`; another Session's already-running user request remains
+untouched. Delayed records are preserved, not silently consumed. A failed
+fence-state read fails closed for new admissions.
+
+Terminal failures with possible tool effects now attach a bounded reconciliation
+to the existing Session failure and terminal diagnostic projection. A file
+write is called confirmed only when its Tool receipt includes a readback;
+other tool actions and untyped CLI exits remain uncertain. User error text
+separates those categories and warns against blind replay. Audit-log truncation
+is disclosed; absence of an audit row never proves absence of an effect.
+
 ### HASHI1 automatic debug-reporting trial (2026-09-13)
 
 - **Approval:** the user authorized this PAO/Functions change and live trial on

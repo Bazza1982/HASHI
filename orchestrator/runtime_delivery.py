@@ -564,7 +564,28 @@ def format_backend_error_for_user(
             )
         )
 
-    if bool(context.get("side_effects_possible")):
+    reconciliation = context.get("effect_reconciliation")
+    if isinstance(reconciliation, Mapping):
+        confirmed = max(0, int(reconciliation.get("confirmed_write_count") or 0))
+        unverified = max(0, int(reconciliation.get("unverified_action_count") or 0))
+        completed_jobs = max(0, int(reconciliation.get("completed_background_job_count") or 0))
+        if confirmed:
+            lines.append(
+                ui_language.tr("error.confirmed_writes", locale=selected, count=confirmed)
+            )
+        if completed_jobs:
+            lines.append(
+                ui_language.tr("error.completed_background_jobs", locale=selected, count=completed_jobs)
+            )
+        if unverified:
+            lines.append(
+                ui_language.tr("error.unverified_actions", locale=selected, count=unverified)
+            )
+        if reconciliation.get("evidence_limited") is True:
+            lines.append(ui_language.tr("error.audit_incomplete", locale=selected))
+        if confirmed or completed_jobs or unverified:
+            lines.append(ui_language.tr("error.no_blind_retry", locale=selected))
+    elif bool(context.get("side_effects_possible")):
         lines.append(
             ui_language.tr("error.warning_partial_execution", locale=selected)
         )

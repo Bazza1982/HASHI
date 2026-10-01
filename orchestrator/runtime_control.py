@@ -396,6 +396,25 @@ async def cmd_stop(runtime: Any, update: Any, context: Any) -> None:
     if not runtime._is_authorized_user(update.effective_user.id):
         return
 
+    from orchestrator import runtime_autonomy
+
+    fence_saved = True
+    async with runtime_autonomy.lock_for(runtime):
+        try:
+            runtime_autonomy.pause(runtime)
+        except Exception as exc:
+            fence_saved = False
+            runtime.logger.warning(
+                "Could not persist /stop autonomous wakeup fence for %s (%s)",
+                runtime.name,
+                type(exc).__name__,
+            )
+    fence_note = ui_language.tr(
+        "control.stop.autonomy_paused"
+        if fence_saved
+        else "control.stop.autonomy_not_persisted"
+    )
+
     active = getattr(runtime.config, "active_backend", None) or getattr(runtime.config, "engine", "")
     runtime.logger.warning(
         f"Manual stop requested for agent {runtime.name} "
@@ -421,7 +440,8 @@ async def cmd_stop(runtime: Any, update: Any, context: Any) -> None:
                 )
                 if delayed_preserved
                 else ""
-            ),
+            )
+            + fence_note,
         )
         return
     busy = bool(active_meta) or bool(
@@ -481,7 +501,8 @@ async def cmd_stop(runtime: Any, update: Any, context: Any) -> None:
             if delayed_preserved
             else ""
         )
-        + f"{continuation_note}",
+        + continuation_note
+        + fence_note,
     )
 
 

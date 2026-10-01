@@ -22,6 +22,43 @@ def _store(tmp_path) -> SessionStore:
     return SessionStore(tmp_path / "state" / "sessions.sqlite3", instance_id="HASHI1")
 
 
+def test_terminal_failure_exposes_bounded_effect_reconciliation(tmp_path):
+    store = _store(tmp_path)
+    session = store.ensure_default_session(owner_id="user:7", agent_id="lily")
+    accepted = store.accept_run(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        agent_id="lily",
+        request_id="req-effects",
+        text="write something",
+        source="test",
+        idempotency_key="req-effects",
+    )
+    store.mark_request_running(accepted.request_id, worker_id="test-worker")
+    store.finish_request(
+        accepted.request_id,
+        success=False,
+        error_text="backend failed",
+        error_context={
+            "effect_reconciliation": {
+                "confirmed_write_count": 1,
+                "unverified_action_count": 2,
+                "observed_tool_count": 3,
+                "completed_background_job_count": 0,
+                "evidence_limited": False,
+                "untrusted": "ignore",
+            }
+        },
+    )
+
+    failure = store.request_failure_detail(
+        accepted.request_id, owner_id="user:7", agent_id="lily"
+    )
+    assert failure["effect_reconciliation"]["confirmed_write_count"] == 1
+    assert failure["effect_reconciliation"]["unverified_action_count"] == 2
+    assert "untrusted" not in failure["effect_reconciliation"]
+
+
 def test_schema_12_sessions_migrate_to_conversations_and_hide_activity(tmp_path):
     store = _store(tmp_path)
     conversation = store.ensure_default_session(owner_id="user:7", agent_id="lily")

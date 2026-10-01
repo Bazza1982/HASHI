@@ -988,6 +988,15 @@ class FlexibleAgentRuntime:
         idempotency_key: str | None = None,
         reply_to_message_id: Any | None = None,
     ):
+        from orchestrator import runtime_autonomy
+
+        async with runtime_autonomy.lock_for(self):
+            autonomy_allowed, autonomy_generation = runtime_autonomy.admission_snapshot(
+                self, source, request_metadata
+            )
+        if not autonomy_allowed:
+            self.logger.warning("Autonomous wakeup declined after /stop: source=%s", source)
+            return None
         # Mirror targets are server-owned. Legacy client delivery flags cannot
         # override the owner's persistent connector preference.
         from orchestrator import runtime_session
@@ -1417,23 +1426,34 @@ class FlexibleAgentRuntime:
             request_content=normalized_request_content,
             attachment_manifest=manifest,
         )
-        usage_recorder = getattr(
-            getattr(self, "skill_manager", None), "record_skill_usage", None
-        )
-        if item.skill_id and callable(usage_recorder):
-            item.skill_usage_event_id = usage_recorder(
-                item.skill_id,
-                agent=self.name,
-                request_id=item.request_id,
-                source=item.source,
+        async with runtime_autonomy.lock_for(self):
+            if not runtime_autonomy.admission_is_current(self, autonomy_generation):
+                if accepted is not None:
+                    await asyncio.to_thread(
+                        self.session_store.finish_request,
+                        item.request_id,
+                        success=False,
+                        error_text="request superseded by user stop",
+                        failure_state="superseded",
+                    )
+                return None
+            usage_recorder = getattr(
+                getattr(self, "skill_manager", None), "record_skill_usage", None
             )
-        runtime_delivery_order.register_turn(self, item)
-        self.request_activity.start(
-            item.request_id,
-            source=item.source,
-            created_at=datetime.fromisoformat(item.created_at).timestamp(),
-        )
-        await self.queue.put(item)
+            if item.skill_id and callable(usage_recorder):
+                item.skill_usage_event_id = usage_recorder(
+                    item.skill_id,
+                    agent=self.name,
+                    request_id=item.request_id,
+                    source=item.source,
+                )
+            runtime_delivery_order.register_turn(self, item)
+            self.request_activity.start(
+                item.request_id,
+                source=item.source,
+                created_at=datetime.fromisoformat(item.created_at).timestamp(),
+            )
+            await self.queue.put(item)
         self.message_logger.info(f"Queued {item.request_id} from {source} (summary={summary!r})")
         return item.request_id
 
@@ -2679,6 +2699,10 @@ class FlexibleAgentRuntime:
         return idle_for >= min_idle_seconds
 
     async def process_parked_topic_followups(self, now_dt: datetime | None = None):
+        from orchestrator import runtime_autonomy
+
+        if runtime_autonomy.status(self)["paused"]:
+            return
         now_dt = now_dt or datetime.now()
         if not self.telegram_connected or not self.is_idle_for_proactive_message():
             return
@@ -2949,6 +2973,10 @@ class FlexibleAgentRuntime:
         *,
         scheduler_context: Mapping[str, str] | None = None,
     ) -> tuple[bool, str | None]:
+        from orchestrator import runtime_autonomy
+
+        if runtime_autonomy.status(self)["paused"]:
+            return False, "Agent autonomous wakeups are paused by /stop"
         if str(skill_id or "").casefold() == "dream":
             # Legacy scheduled Dream jobs must never reach the retired generic
             # memory/AGENT.md writer. Route them through native HER Dream.
@@ -2991,7 +3019,7 @@ class FlexibleAgentRuntime:
             if scheduler_context
             else {}
         )
-        await self.enqueue_request(
+        request_id = await self.enqueue_request(
             chat_id=self._primary_chat_id(),
             prompt=prompt,
             source="scheduler-skill",
@@ -3000,6 +3028,8 @@ class FlexibleAgentRuntime:
             skill_id=skill.id,
             **scheduler_kwargs,
         )
+        if request_id is None:
+            return False, "Scheduled prompt was not admitted"
         return True, f"Scheduled prompt skill queued: {skill.id}"
 
     async def invoke_scheduler_automation(
@@ -3008,6 +3038,10 @@ class FlexibleAgentRuntime:
         args: str,
         task_id: str,
     ) -> tuple[bool, str | None]:
+        from orchestrator import runtime_autonomy
+
+        if runtime_autonomy.status(self)["paused"]:
+            return False, "Agent autonomous wakeups are paused by /stop"
         from orchestrator.automation_runner import run_automation
 
         if not self.skill_manager:

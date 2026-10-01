@@ -3973,6 +3973,22 @@ class SessionStore:
                 value = error_context.get(key)
                 if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= 86400:
                     public_error_context[key] = value
+            reconciliation = error_context.get("effect_reconciliation")
+            if isinstance(reconciliation, Mapping):
+                safe_summary: dict[str, Any] = {}
+                for key in (
+                    "confirmed_write_count",
+                    "observed_tool_count",
+                    "unverified_action_count",
+                    "completed_background_job_count",
+                ):
+                    value = reconciliation.get(key)
+                    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 100_000:
+                        safe_summary[key] = value
+                if isinstance(reconciliation.get("evidence_limited"), bool):
+                    safe_summary["evidence_limited"] = reconciliation["evidence_limited"]
+                if safe_summary:
+                    public_error_context["effect_reconciliation"] = safe_summary
         clean = str(assistant_text or "").strip()
         supplied_content = list(assistant_content or ())
         if contains_persistent_inline_media(supplied_content):

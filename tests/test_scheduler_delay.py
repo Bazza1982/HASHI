@@ -86,6 +86,7 @@ async def test_delay_persists_and_dispatches_through_normal_text_queue_when_due(
             "prompt": "send me a message to say hi",
             "source": "text",
             "summary": "send me a message to say hi",
+            "request_metadata": {"_hashi_autonomous_wakeup": "delayed"},
         }
     ]
     assert runtime.transcript == [("user", "send me a message to say hi", "text")]
@@ -146,7 +147,10 @@ async def test_delayed_message_preserves_session_route_across_restart(tmp_path):
     runtime = _FakeRuntime()
     await recreated.dispatch_due_delayed_messages({"zelda": runtime}, now_ts=2_100)
 
-    assert runtime.enqueued[0]["request_metadata"] == metadata
+    assert runtime.enqueued[0]["request_metadata"] == {
+        **metadata,
+        "_hashi_autonomous_wakeup": "delayed",
+    }
     assert runtime.enqueued[0]["deliver_to_telegram"] is False
 
 
