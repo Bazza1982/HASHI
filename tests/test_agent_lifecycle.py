@@ -192,6 +192,7 @@ async def test_start_agent_registers_one_isolated_handle_and_publishes_topology(
 
     handle.enqueue_startup_bootstrap = bootstrap
     manager = AgentLifecycleManager(kernel)
+    manager.manually_stopped_agents.add("alpha")
 
     ok, message = await manager.start_agent("alpha")
 
@@ -202,6 +203,7 @@ async def test_start_agent_registers_one_isolated_handle_and_publishes_topology(
     assert kernel.function_workers.broadcasts == 1
     assert kernel.function_workers.telegram_ingress == {"alpha"}
     assert kernel._startup_tasks == {}
+    assert manager.manually_stopped_agents == set()
 
 
 @pytest.mark.asyncio
@@ -248,6 +250,7 @@ async def test_stop_agent_drains_worker_and_preserves_runtimes_list_identity():
     assert kernel.function_workers.published == 1
     assert kernel.function_workers.broadcasts == 1
     assert "alpha" not in kernel.function_workers.telegram_ingress
+    assert manager.manually_stopped_agents == {"alpha"}
 
 
 @pytest.mark.asyncio
@@ -272,6 +275,19 @@ async def test_quiesce_failure_leaves_old_worker_registered_and_route_open():
     assert old._cutover is False
     assert old._offline_error is None
     assert kernel.function_workers.telegram_ingress == {"alpha"}
+    assert manager.manually_stopped_agents == set()
+
+
+@pytest.mark.asyncio
+async def test_automatic_cutover_does_not_look_like_a_manual_stop():
+    kernel = _Kernel(names=("alpha",))
+    kernel.runtimes.append(_handle(kernel, "alpha", 101))
+    manager = AgentLifecycleManager(kernel)
+
+    ok, _ = await manager.stop_agent("alpha", reason="agent-move-cutover")
+
+    assert ok is True
+    assert manager.manually_stopped_agents == set()
 
 
 @pytest.mark.asyncio

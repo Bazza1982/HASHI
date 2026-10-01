@@ -14,6 +14,8 @@ Read identity, ports, Workzones, endpoints, and model choices from authoritative
 
 Portable installs carry no credentials. An active Agent needs a PAO-started Worker. Private bridge-home experiment content is not published. Tool wildcard grants permission, not capability. Workzones expose exact enabled roots; each admitted Run freezes its Workzone revision. Later admissions see later revisions, and explicit reload stays idle-only. Naming a path grants nothing. Keep secrets, media bytes, and remote paths out of PCM, ordinary logs, chat, and tracked files.
 
+An explicit Agent stop is projected as `stopped` after success; an unexpected Worker outage remains `offline`, and configuration deactivation remains `inactive`. The shared Functions handoff retains the stop marker until that Agent starts again. Frontends derive visibility from this status; they do not rewrite `is_active` to hide a stopped Agent.
+
 JSON writers validate private candidates under locks, revisions, and atomic replacement. Display fallback is read-only. On conflict, read fresh state and request a fresh action; never blindly retry or restore stale bytes. See [configuration persistence](HASHI_CONFIGURATION_PERSISTENCE.md).
 
 ## Sessions, trust, and delivery

@@ -55,6 +55,15 @@ available for recovery but is written back inactive through the revisioned
 configuration owner; the caller receives a lifecycle failure rather than a
 false ready result. Configured, active, and running remain distinct states.
 
+A successful user-directed Agent stop records a PAO lifecycle marker in the
+shared Functions handoff. The Backend API projects that configured-but-stopped
+Agent as `status=stopped`, distinct from an unexpected offline Worker and from
+`is_active=false`. Starting the Agent clears the marker. Shared Functions
+replacement and recovery carry the marker with the running-Agent topology;
+normal instance startup still follows configured active Agents. External
+frontends may use the status to hide stopped Agents without changing durable
+configuration or treating a failed stop as successful.
+
 The stable process kernel belongs to the Core engineering layer. The Agent and
 runtime policies operated through that kernel belong functionally to PAO.
 The current working-mode contract is defined in

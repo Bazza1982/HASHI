@@ -1684,6 +1684,12 @@ class WorkbenchApiServer:
         if not metadata["is_active"]:
             metadata["online"] = False
             metadata["status"] = "inactive"
+        elif runtime is None and agent_row["name"] in getattr(
+            getattr(self.orchestrator, "agent_lifecycle", None),
+            "manually_stopped_agents",
+            (),
+        ):
+            metadata["status"] = "stopped"
         return metadata
 
     def _is_whatsapp_available(self) -> bool:

@@ -21,6 +21,29 @@ from orchestrator.startup_manager import StartupManager
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.mark.asyncio
+async def test_shared_function_activation_restores_manual_stop_marker():
+    from orchestrator.runtime_app_host import RuntimeAppHost
+
+    async def run():
+        await asyncio.Event().wait()
+
+    app = SimpleNamespace(
+        agent_lifecycle=SimpleNamespace(manually_stopped_agents=set()),
+        startup_status={"services_ready": True, "phase": "ready"},
+        runtimes=[],
+        run=run,
+    )
+    host = RuntimeAppHost(None, {})
+    host.app = app
+    try:
+        await host.activate({"agents": [], "manually_stopped_agents": ["alpha"]})
+        assert app.agent_lifecycle.manually_stopped_agents == {"alpha"}
+    finally:
+        host.task.cancel()
+        await asyncio.gather(host.task, return_exceptions=True)
+
+
 def generation(tmp_path, home, marker, runtime):
     source = tmp_path / marker
     (source / "orchestrator").mkdir(parents=True)
@@ -88,6 +111,7 @@ def test_recovery_retains_mixed_agent_versions_selected_set_and_latest_offsets(
         function_workers=SimpleNamespace(
             _telegram_ingress={"alpha": SimpleNamespace(offset=7)}
         ),
+        agent_lifecycle=SimpleNamespace(manually_stopped_agents={"gamma"}),
     )
     handoff = runtime_handoff.snapshot(app)
     restored = runtime_handoff.agent_artifacts(app, handoff)
@@ -100,6 +124,7 @@ def test_recovery_retains_mixed_agent_versions_selected_set_and_latest_offsets(
     app.runtimes.clear()  # the shared process has disappeared
     recovered = runtime_handoff.load(app)
     assert recovered["agents"] == ["alpha"]
+    assert recovered["manually_stopped_agents"] == ["gamma"]
     assert recovered["telegram_offsets"] == {"alpha": 42}
     assert (
         runtime_handoff.agent_artifacts(app, recovered)["alpha"][0].manifest
