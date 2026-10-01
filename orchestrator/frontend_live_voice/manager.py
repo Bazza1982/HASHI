@@ -247,7 +247,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         self._provider_native_delegations: dict[tuple[str, int], set[str]] = {}
         self.instance_id = str(getattr(global_config, "instance_id", "HASHI") or "HASHI").upper()
         self.instance_generation = str(getattr(global_config, "instance_generation", "1") or "1")
-        self._feature_enabled = bool(getattr(global_config, "live_voice_v1", False))
+        self._feature_enabled = bool(getattr(global_config, "live_voice_v1", True))
         self._availability_override: bool | None = None
         self._admit_run = admit_run
         self._poll_run_activity = poll_run_activity

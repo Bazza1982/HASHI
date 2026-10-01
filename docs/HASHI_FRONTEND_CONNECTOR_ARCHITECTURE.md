@@ -510,6 +510,15 @@ language, speaking style, and bounded custom speaking-style instruction. The
 configuration is persisted in that Agent's workspace. A frontend may display
 the effective public projection but may not select or override it.
 
+Live Phone is enabled by default at the instance level. An explicit
+`global.live_voice_v1: false` remains an operator opt-out. Provider credentials
+remain in instance secrets or the service environment; no credential means
+the capability is unavailable. `/phone` displays the effective readiness and
+names a missing provider API key, even when the Agent's provider and voice
+choices are valid. Internal revision digests stay in the preflight protocol,
+not the ordinary settings card. A successful PCM projection is separate from
+provider readiness.
+
 PCM owns the live bootstrap projection. The provider's formal `instructions`
 contain the canonical `[sys]`, active instance-global `/sys`, active Agent-local
 `/sys`, HCC usage rules, Persona, and fixed live-call transport rules with their

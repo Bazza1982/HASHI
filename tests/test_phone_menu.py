@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from orchestrator import ui_language
+from orchestrator.config import GlobalConfig
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.pcm import render_pcm_document
 from orchestrator.phone_manager import PhoneManager
@@ -25,9 +26,41 @@ def _runtime(tmp_path):
     runtime.name = "moon"
     runtime.config = SimpleNamespace(extra={"display_name": "Moon"})
     runtime.phone_manager = PhoneManager(workspace)
+    runtime.global_config = SimpleNamespace(live_voice_v1=True)
+    runtime.secrets = {}
     runtime._is_authorized_user = lambda _user_id: True
     runtime._reply_text = AsyncMock()
     return runtime
+
+
+def test_phone_menu_reports_missing_key_without_internal_revision(tmp_path, monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    runtime = _runtime(tmp_path)
+    with ui_language.language_scope(SimpleNamespace(), locale="zh-CN"):
+        text = runtime._phone_menu_text()
+    assert "缺少 OpenAI API Key" in text
+    assert "通话配置" not in text
+
+
+def test_live_phone_is_enabled_by_default():
+    assert GlobalConfig(authorized_id=1).live_voice_v1 is True
+
+
+def test_phone_menu_reports_ready_when_provider_key_exists(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime.secrets = {"openai_api_key": "test-key"}
+    with ui_language.language_scope(SimpleNamespace(), locale="zh-CN"):
+        text = runtime._phone_menu_text()
+    assert "可以拨打" in text
+    assert "缺少 OpenAI API Key" not in text
+
+
+def test_phone_menu_reports_explicit_instance_opt_out(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime.global_config.live_voice_v1 = False
+    with ui_language.language_scope(SimpleNamespace(), locale="zh-CN"):
+        text = runtime._phone_menu_text()
+    assert "本实例已关闭实时电话" in text
 
 
 def test_phone_menu_uses_localized_labels_in_chinese(tmp_path):
