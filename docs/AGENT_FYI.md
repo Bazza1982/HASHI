@@ -32,6 +32,10 @@ but it remains an address book: answer a report question from the scoped full
 original, and keep opening speech short when that original is not yet present.
 Prior Phone speech is labelled as an unverified transcript in new-call context;
 it does not outrank a saved report.
+Phone captions and terminal call records derive readable speaker utterances
+from durable provider fragments, retaining exact recognized text and source
+identity. Interleaved speech does not split a caller sentence into token rows;
+speech-recognition mistakes can still affect delegated action text.
 Phone stop receipts separate confirmed stop, missing final answer and
 unverified effects; they do not imply a record was written.
 If effective PCM refresh fails mid-call, Phone can still stop or inspect an

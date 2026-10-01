@@ -18,7 +18,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from orchestrator.frontend_live_voice.manager import LiveVoiceManager
 from orchestrator.frontend_live_voice.protocol import CallBinding, Fragment, LiveVoiceError
 from orchestrator.frontend_live_voice.routes import register_live_voice_routes
-from orchestrator.session_store import SessionStore
+from orchestrator.session_store import SessionConflict, SessionStore
 
 
 PHONE_REVISION = "a" * 64
@@ -1713,6 +1713,64 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         self.assertIn("Please check it.", records[0]["text"])
         self.assertIn("I am checking it.", records[0]["text"])
         self.assertTrue(records[0]["message_context"]["live_call_record"])
+
+    def test_overlapping_speech_keeps_each_utterance_together_in_history_and_record(self):
+        fragments = [
+            Fragment("overlap-a1", "assistant", "正在介绍", 0, 200),
+            Fragment("overlap-u1", "user", "等一下", 300, 500),
+            Fragment("overlap-a2", "assistant", "新闻", 400, 600),
+            Fragment("overlap-u2", "user", "详细说", 600, 800),
+            Fragment("overlap-a3", "assistant", "内容", 800, 1000),
+            Fragment("overlap-u3", "user", "这个模型", 1000, 1200),
+            Fragment("overlap-a4", "assistant", "好的", 1300, 1500),
+            Fragment("overlap-u4", "user", "继续", 1600, 1800),
+        ]
+        for fragment in fragments:
+            asyncio.run(self.manager.append_fragment_once(self.binding, fragment))
+
+        history = self.store.recent_history_messages(
+            self.session_id, owner_id=self.owner_id, context_generation=1,
+        )
+        self.assertEqual(
+            [(item["role"], item["text"]) for item in history],
+            [("assistant", "正在介绍新闻内容"), ("user", "等一下详细说这个模型"),
+             ("assistant", "好的"), ("user", "继续")],
+        )
+        legacy = self.store.append_presentation_message(
+            session_id=self.session_id, owner_id=self.owner_id,
+            agent_id=self.binding.agent_id, role="assistant",
+            text="☎ Live call transcript\n\n[?? 1 ? 0:00] 🎙️ 等一下\n\n[?? 1 ? 0:00] 🔊 新闻",
+            source="live-phone",
+            idempotency_key=f"live-call-record:{self.call_id}:1",
+            presentation_channel="final",
+            message_context={"live_call_record": {
+                "schema": "hashi.live_voice.transcript.v1",
+                "call_id": self.call_id, "call_epoch": 1, "segment_count": 8,
+            }},
+        )
+        self.manager._persist_call_record(self.binding)
+        records = [
+            item for item in self.store.messages(self.session_id, owner_id=self.owner_id)
+            if item.get("source") == "live-phone"
+        ]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["message_id"], legacy["message_id"])
+        self.assertIn("[0:00] 🎙️ 等一下详细说这个模型", records[0]["text"])
+        self.assertNotIn("??", records[0]["text"])
+        self.assertEqual(records[0]["message_context"]["live_call_record"]["segment_count"], 4)
+        self.assertEqual(records[0]["message_context"]["live_call_record"]["schema"],
+                         "hashi.live_voice.transcript.v2")
+        with self.assertRaises(SessionConflict):
+            self.store.update_live_call_record(
+                session_id=self.session_id, owner_id=self.owner_id,
+                agent_id=self.binding.agent_id, call_id="another-call",
+                call_epoch=1, text="wrong call", segment_count=1,
+            )
+        self.manager._persist_call_record(self.binding)
+        self.assertEqual(len([
+            item for item in self.store.messages(self.session_id, owner_id=self.owner_id)
+            if item.get("source") == "live-phone"
+        ]), 1)
 
     def test_initial_sideband_failure_keeps_logical_call_recoverable(self):
         manager = self.manager

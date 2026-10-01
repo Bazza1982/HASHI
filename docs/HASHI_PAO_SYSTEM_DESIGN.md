@@ -91,6 +91,18 @@ arrives and participates in later text and phone history. A terminal call card
 is a Connector view derived from those fragments; it is not a second message
 authority or a replacement for the role-preserving transcript.
 
+Provider transcript deltas may be only a few hundred milliseconds long. PAO
+retains each original fragment and derives readable utterances per speaker for
+later Session history and the terminal call record. Simultaneous speech does
+not break either speaker's continuous utterance into one line per delta; a
+completed reply still separates successive turns. The projection preserves
+the provider's exact words and their source IDs. The Phone Connector applies
+the same rule to live captions. An existing call record may be reprojected
+from its durable fragments under the same Message ID with a visible revision;
+no audio transcription is silently corrected. The live model hears provider
+audio directly, while PAO action delegation uses the recognized user text, so
+recognition errors remain a separate action-understanding risk.
+
 #### Live Phone foreground arbitration contract (2026-09-30)
 
 While one logical Live Phone call is engaged, PAO binds that authenticated

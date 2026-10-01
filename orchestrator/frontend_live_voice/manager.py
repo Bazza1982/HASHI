@@ -31,7 +31,7 @@ from .opening import CallOpening, OpeningAudioObservation, new_opening, opening_
 from .ports import AdmissionPort, DurableVoicePort, LiveApplicationPort
 from .protocol import CallBinding, Fragment, LiveVoiceError, identifier, normalize_transcript, positive_int, stable_digest
 from .service import LiveVoiceEventService
-from orchestrator.session_store import SessionConflict, TERMINAL_RUN_STATES
+from orchestrator.session_store import IdempotencyConflict, SessionConflict, TERMINAL_RUN_STATES
 from tools.token_tracker import estimate_tokens
 
 logger = logging.getLogger(__name__)
@@ -49,6 +49,24 @@ PROVIDER_SESSION_MAX_DURATION_SECONDS = 1800
 PROVIDER_SESSION_ROLLOVER_MARGIN_SECONDS = 90
 TERMINAL_PHASES = {"ended", "failed", "interrupted"}
 CALL_EVENT_SCHEMA = "hashi.live_voice.event.v1"
+
+
+def render_live_call_record(segments: list[Mapping[str, Any]]) -> str:
+    """Render the derived turns without exposing provider chunk boundaries."""
+
+    def timestamp(milliseconds: int) -> str:
+        seconds = max(0, int(milliseconds) // 1000)
+        return f"{seconds // 60}:{seconds % 60:02d}"
+
+    lines = ["☎ Live call transcript"]
+    if not segments:
+        lines.extend(("", "(No speech was transcribed.)"))
+    for segment in segments:
+        marker = "🎙️" if segment["role"] == "user" else "🔊"
+        lines.extend(("", f"[{timestamp(segment['start_ms'])}] {marker} {segment['text']}"))
+    return "\n".join(lines)
+
+
 LIVE_UPDATE_TOKEN_LIMIT = 320
 LIVE_UPDATE_BYTE_LIMIT = 512
 MAX_RESULT_PAGE_CHARS = 12_000
@@ -3738,39 +3756,40 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 call_epoch=None,
             )
 
-            def timestamp(milliseconds: int) -> str:
-                seconds = max(0, int(milliseconds) // 1000)
-                return f"{seconds // 60}:{seconds % 60:02d}"
-
-            lines = ["☎ Live call transcript"]
-            if segments:
-                for segment in segments:
-                    marker = "🎙️" if segment["role"] == "user" else "🔊"
-                    lines.extend(("", f"[?? {segment['call_epoch']} ? {timestamp(segment['start_ms'])}] {marker} {segment['text']}"))
-            else:
-                lines.extend(("", "(No speech was transcribed.)"))
-            self.session_store.append_presentation_message(
-                session_id=binding.session_id,
-                owner_id=binding.owner_id,
-                agent_id=binding.agent_id,
-                role="assistant",
-                text="\n".join(lines),
-                source="live-phone",
-                idempotency_key=f"live-call-record:{binding.call_id}:{binding.call_epoch}",
-                content_format="plain-text",
-                presentation_channel="final",
-                history_eligible=False,
-                message_context={
-                    "live_call_record": {
-                        "schema": "hashi.live_voice.transcript.v1",
-                        "call_id": binding.call_id,
-                        "call_epoch": binding.call_epoch,
-                        "started_at": str(call["started_at"] or ""),
-                        "ended_at": str(call["ended_at"] or ""),
-                        "segment_count": len(segments),
-                    }
-                },
-            )
+            record_text = render_live_call_record(segments)
+            try:
+                self.session_store.append_presentation_message(
+                    session_id=binding.session_id,
+                    owner_id=binding.owner_id,
+                    agent_id=binding.agent_id,
+                    role="assistant",
+                    text=record_text,
+                    source="live-phone",
+                    idempotency_key=f"live-call-record:{binding.call_id}:{binding.call_epoch}",
+                    content_format="plain-text",
+                    presentation_channel="final",
+                    history_eligible=False,
+                    message_context={
+                        "live_call_record": {
+                            "schema": "hashi.live_voice.transcript.v2",
+                            "call_id": binding.call_id,
+                            "call_epoch": binding.call_epoch,
+                            "started_at": str(call["started_at"] or ""),
+                            "ended_at": str(call["ended_at"] or ""),
+                            "segment_count": len(segments),
+                        }
+                    },
+                )
+            except IdempotencyConflict:
+                self.session_store.update_live_call_record(
+                    session_id=binding.session_id,
+                    owner_id=binding.owner_id,
+                    agent_id=binding.agent_id,
+                    call_id=binding.call_id,
+                    call_epoch=binding.call_epoch,
+                    text=record_text,
+                    segment_count=len(segments),
+                )
             self.audit.record(
                 binding,
                 "call.transcript_projected",
