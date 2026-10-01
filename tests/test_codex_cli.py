@@ -501,6 +501,121 @@ def test_codex_accepts_completed_turn_even_if_process_needs_forced_exit(tmp_path
     assert killed_reasons == ["turn-completed-grace-expired:req-0001"]
 
 
+@pytest.mark.asyncio
+async def test_codex_usage_reports_only_current_turn_after_resume(
+    tmp_path, monkeypatch,
+):
+    def completed_proc(total_input, total_cached, total_output, total_reasoning):
+        proc = _HangingProc([
+            json.dumps({"type": "thread.started", "thread_id": "thread-1"}),
+            json.dumps({
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": "done"},
+            }),
+            json.dumps({"type": "turn.completed", "usage": {
+                "input_tokens": total_input,
+                "cached_input_tokens": total_cached,
+                "output_tokens": total_output,
+                "reasoning_output_tokens": total_reasoning,
+            }}),
+        ])
+        proc.finish(0)
+        return proc
+
+    pending = [
+        completed_proc(1000, 400, 100, 20),
+        completed_proc(1600, 900, 160, 35),
+        completed_proc(1800, 1000, 180, 40),
+    ]
+
+    async def create_subprocess(*_args, **_kwargs):
+        return pending.pop(0)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+    adapter = _build_adapter(tmp_path, model="gpt-6-sol")
+    adapter.set_session_mode(True)
+    first = await adapter.generate_response("first", "req-first")
+    second = await adapter.generate_response("second", "req-second")
+    resumed = _build_adapter(tmp_path, model="gpt-6-sol")
+    resumed.set_session_mode(True)
+    resumed._session_id = "thread-1"
+    third = await resumed.generate_response("third", "req-third")
+
+    assert first.usage.input_tokens == 1000
+    assert (second.usage.input_tokens, second.usage.prompt_cache_hit_tokens,
+            second.usage.output_tokens, second.usage.thinking_tokens) == (
+        600, 500, 60, 15,
+    )
+    assert (third.usage.input_tokens, third.usage.prompt_cache_hit_tokens,
+            third.usage.output_tokens, third.usage.thinking_tokens) == (
+        200, 100, 20, 5,
+    )
+
+
+@pytest.mark.asyncio
+async def test_codex_existing_thread_uses_logged_baseline(tmp_path, monkeypatch):
+    (tmp_path / "codex_exec_events.jsonl").write_text(
+        "\n".join(json.dumps(event) for event in [
+            {"type": "thread.started", "thread_id": "old-thread"},
+            {"type": "turn.completed", "usage": {
+                "input_tokens": 1000, "cached_input_tokens": 800,
+                "output_tokens": 100, "reasoning_output_tokens": 40,
+            }},
+        ]) + "\n", encoding="utf-8",
+    )
+    proc = _HangingProc([
+        json.dumps({"type": "thread.started", "thread_id": "old-thread"}),
+        json.dumps({"type": "item.completed", "item": {
+            "type": "agent_message", "text": "done",
+        }}),
+        json.dumps({"type": "turn.completed", "usage": {
+            "input_tokens": 1350, "cached_input_tokens": 1100,
+            "output_tokens": 140, "reasoning_output_tokens": 55,
+        }}),
+    ])
+    proc.finish(0)
+
+    async def create_subprocess(*_args, **_kwargs):
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+    adapter = _build_adapter(tmp_path)
+    adapter.set_session_mode(True)
+    adapter._session_id = "old-thread"
+    response = await adapter.generate_response("continue", "req-old-thread")
+
+    assert (response.usage.input_tokens, response.usage.prompt_cache_hit_tokens,
+            response.usage.prompt_cache_miss_tokens, response.usage.output_tokens,
+            response.usage.thinking_tokens) == (350, 300, 50, 40, 15)
+
+
+@pytest.mark.asyncio
+async def test_codex_unobserved_resume_does_not_charge_old_thread(tmp_path, monkeypatch):
+    proc = _HangingProc([
+        json.dumps({"type": "thread.started", "thread_id": "unseen-thread"}),
+        json.dumps({"type": "item.completed", "item": {
+            "type": "agent_message", "text": "done",
+        }}),
+        json.dumps({"type": "turn.completed", "usage": {
+            "input_tokens": 100_000, "cached_input_tokens": 90_000,
+            "output_tokens": 1000, "reasoning_output_tokens": 500,
+        }}),
+    ])
+    proc.finish(0)
+
+    async def create_subprocess(*_args, **_kwargs):
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+    adapter = _build_adapter(tmp_path)
+    adapter.set_session_mode(True)
+    adapter._session_id = "unseen-thread"
+    response = await adapter.generate_response("continue", "req-unseen")
+
+    assert response.is_success is True
+    assert response.usage is None
+
+
 def test_codex_completed_turn_does_not_wait_for_inherited_pipe_eof(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,

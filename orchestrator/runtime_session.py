@@ -1221,7 +1221,7 @@ def finish_request_from_listener(runtime: Any, request_id: str, payload: Mapping
         session_dir = getattr(runtime, "session_dir", None)
         if session_dir is not None:
             failure_context["diagnostic_log"] = str(Path(session_dir) / "errors.log")
-    store.finish_request(
+    completed_run = store.finish_request(
         request_id,
         success=success,
         assistant_text=str(payload.get("text") or "") or None,
@@ -1240,6 +1240,21 @@ def finish_request_from_listener(runtime: Any, request_id: str, payload: Mapping
             else "failed"
         ),
     )
+    if completed_run is not None and completed_run.get("state") == "completed":
+        try:
+            from orchestrator.agent_activity_visibility import project_completed_result
+
+            project_completed_result(
+                store,
+                run=completed_run,
+                owner_id=owner_id(runtime),
+                agent_id=runtime.name,
+            )
+        except Exception as exc:  # presentation cannot change execution outcome
+            logger.warning(
+                "Agent activity Workbench projection failed for %s (%s)",
+                request_id, type(exc).__name__,
+            )
     capture_backend_binding(runtime, request_id=request_id)
 
 
