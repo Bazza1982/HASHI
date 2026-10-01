@@ -491,6 +491,18 @@ class ToolRegistry:
         status = self._capability_status_snapshot()
         if status is None:
             return {"available": True, "source": "standalone_legacy_executor"}
+        if self._function_worker_capability_facade() is None:
+            return {
+                "available": False,
+                "code": "capability_unavailable",
+                "reason": "broker_executor_unbound",
+                "next_step": (
+                    "Use the owning Agent Worker route; this isolated tool route "
+                    "cannot invoke the registered device Worker."
+                ),
+                "capability_kind": kind,
+                "action": action,
+            }
         expected_instance = str(
             getattr(
                 self._effective_audit_context().get("global_config"),

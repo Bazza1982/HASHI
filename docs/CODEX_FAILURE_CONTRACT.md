@@ -49,9 +49,15 @@ Current stable classifications include:
 | `PROVIDER_BAD_REQUEST` | Other invalid request | No |
 | `PROVIDER_EMPTY_RESPONSE` | Successful exit without deliverable content | Yes |
 | `PROVIDER_UNKNOWN` | No stable classification was possible | No |
+| `CODEX_PROCESS_EXIT_UNCONFIRMED` | Codex exited without a terminal JSONL turn event; exit code is reported and effects are unknown | No |
 
 `error_retryable=true` never proves that replay is safe.  Runtime retry logic
 must also require `side_effects_possible=false` and no observed tool activity.
+An untyped nonzero Codex process exit is conservatively marked as possibly
+having unobserved effects, even when no Tool event reached HASHI. It is not
+automatically replayed. HASHI's own process-tree kill and `process_kill` Tool
+reject the current Function process and its parent by PID; this guard does not
+prove the cause of an external Codex shell command that killed its own process.
 Collaboration tool calls are treated as potentially state-changing.  A Codex
 diagnostic reporting dropped provider events also fails closed because the
 missing interval could contain an unobserved command or file mutation.

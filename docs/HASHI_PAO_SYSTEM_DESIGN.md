@@ -373,6 +373,12 @@ declaration still replaces the absent-value default, and a backend row with
 `tools.enabled=false` still disables HASHI tools. The wildcard grants registry
 permission only; Engine support, Workzone roots, device availability,
 stage-specific policy, and per-invocation authority remain independent gates.
+An isolated Tool route may not advertise a registered Browser/Computer Worker
+from the capability Broker unless it can invoke that same Broker route. Without
+the matching executor it fails closed with `broker_executor_unbound`; a
+standalone diagnostic Tool Registry with no Broker snapshot may still use its
+explicit local executor. Catalogue visibility and actual dispatch must name
+the same execution source.
 
 ## 3. Non-responsibilities
 

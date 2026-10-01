@@ -751,6 +751,7 @@ class CodexCLIAdapter(BaseBackend):
         tool_item_ids: set[str] | None = None,
         side_effect_item_ids: set[str] | None = None,
         provider_activity_observed: bool = False,
+        unobserved_effects_possible: bool = False,
     ) -> BackendResponse:
         tool_ids = set(tool_item_ids or ())
         side_effect_ids = set(side_effect_item_ids or ())
@@ -766,7 +767,7 @@ class CodexCLIAdapter(BaseBackend):
             http_status=failure.http_status,
             provider_request_id=failure.provider_request_id,
             retry_after_s=failure.retry_after_s,
-            side_effects_possible=bool(side_effect_ids),
+            side_effects_possible=bool(side_effect_ids or unobserved_effects_possible),
             stream_metadata={
                 "provider_failure_description": failure.description,
                 "provider_activity_observed": bool(
@@ -1381,12 +1382,28 @@ class CodexCLIAdapter(BaseBackend):
 
             if returncode != 0 and terminal_event_type != "turn.completed":
                 err_msg = stderr_buffer.decode(errors="replace").strip()
-                if not err_msg:
-                    err_msg = "Codex CLI exited with a non-zero status."
                 failure = parse_codex_failure(
                     last_error_event,
                     fallback_message=err_msg,
                 )
+                if failure.code == "PROVIDER_UNKNOWN":
+                    diagnostic = (
+                        f" Diagnostic stderr: {err_msg[:500]}" if err_msg else ""
+                    )
+                    failure = CodexFailure(
+                        message=(
+                            "Codex CLI exited before reporting a completed or failed "
+                            f"turn (exit code {returncode}). The outcome of any "
+                            "unreported actions is unknown; inspect request "
+                            f"diagnostics before retrying.{diagnostic}"
+                        ),
+                        code="CODEX_PROCESS_EXIT_UNCONFIRMED",
+                        retryable=False,
+                        description=(
+                            "The Codex subprocess exited without a terminal JSONL "
+                            "turn event; side effects cannot be ruled out."
+                        ),
+                    )
                 self.logger.error(
                     "Codex request %s exited non-zero without turn.failed "
                     "code=%s retryable=%s returncode=%s tools=%s side_effects=%s",
@@ -1405,6 +1422,7 @@ class CodexCLIAdapter(BaseBackend):
                         tool_item_ids=tool_item_ids,
                         side_effect_item_ids=side_effect_item_ids,
                         provider_activity_observed=provider_activity_observed,
+                        unobserved_effects_possible=True,
                     )
                 )
             if returncode != 0 and terminal_event_type == "turn.completed":

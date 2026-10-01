@@ -1379,6 +1379,8 @@ async def execute_process_kill(args: dict) -> str:
 
     signal_num = int(args.get("signal", 15))
     pid = int(pid)
+    if pid in {os.getpid(), os.getppid()}:
+        return f"Error: refusing to terminate HASHI process PID {pid}"
 
     try:
         import psutil
