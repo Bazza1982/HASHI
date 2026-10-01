@@ -545,6 +545,9 @@ content does not fit, initiation fails with a capacity reason. The index
 identifies omitted older entries, and the full saved original remains
 available by scoped result ID. A later request for details reads that
 original instead of admitting another Run.
+For activity entries, the index carries the completed final Message but omits
+the scheduled task's input prompt. Only a Conversation user's request may
+identify a result in that way.
 
 The mandatory index also derives a bounded outline of explicit numbered
 sections from each saved original. This is navigation metadata, not a second
