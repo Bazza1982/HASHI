@@ -42,6 +42,13 @@ HASHI includes and maintains:
 The built-in TUI remains part of HASHI and is not planned for extraction into a
 separate product. It is the reference terminal client for local operation.
 
+Telegram ingress reports connected only after a successful `getUpdates` call,
+not merely after Bot initialization or webhook removal. A bounded poll watchdog
+turns a stalled receive into a retry and a disconnected state. Normal Agent
+startup preserves Telegram's pending updates; the accepted-update offset
+advances only after the Worker accepts each update. Source changes on HASHI3
+are not evidence that an already running shared Function has adopted them.
+
 ## 3. External-client boundary
 
 Any compatible desktop, web, mobile, IDE, or operations client may use HASHI

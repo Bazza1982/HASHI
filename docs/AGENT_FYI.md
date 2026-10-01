@@ -26,6 +26,8 @@ PAO freezes destinations and automatic mirrors before PCM. Queue acceptance is n
 
 Autonomous cron, heartbeat, nudge, recovery, /bg, and background completion use an Agent-owned hidden activity Session, not a Conversation or Provider thread. Store execution and delivery separately, then project typed same-owner receipts. /bg sees only its bounded admission snapshot. Scheduled work gets no implicit Conversation history. /delay and interactive /loop remain Conversation continuations.
 
+On HASHI3, Telegram intake reports healthy only after a successful bounded poll and does not discard pending updates on ordinary Agent startup. HERV3 may quote bounded unfinished WIP evidence in the current turn, but no longer sends a recovery card before handling that turn. These are source changes until the owning Functions are separately adopted and checked live.
+
 ## Engine, tools, and recovery
 
 HERV3 is the public her-v3 Engine; internal her-v2 names remain storage or adapter compatibility. Its main model/tool loop may use optional JEV, off by default. /backend chooses the Engine, /provider the Model Provider, /model the model, and /effort its reasoning. Fixed/Flex and Memory+ remain independent. /meter derives roles from recorded physical calls and includes all cost; do not invent phases or zero cost where evidence is absent.

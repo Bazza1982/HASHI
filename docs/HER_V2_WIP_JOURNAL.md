@@ -26,9 +26,9 @@ and apply only within that boundary.
 1. At the start of a HERV2 turn, HASHI resolves the Journal owned by the
    current HASHI Session context generation. A bounded legacy Agent-level
    Journal is migrated into the first current Session that encounters it.
-2. If prior records exist, HASHI sends a mandatory visible warning independent
-   of `/verbose` and supplies only a deterministic bounded recovery summary to
-   the new turn. The raw Journal is never copied into a provider request.
+2. If prior records exist, HASHI supplies a deterministic bounded recovery
+   summary to the new turn without sending a proactive card ahead of the
+   current request. The raw Journal is never copied into a provider request.
 3. HASHI durably appends a bounded request boundary for the new turn. While the
    turn is active, selected HERV2 events are projected into small recovery
    facts only after their canonical audit records are durable.
@@ -151,8 +151,8 @@ behaviour independently inspectable.
 - An empty Journal after a successful turn or successful WIP recovery Compact
   is expected.
 - A non-empty Journal after an interrupted turn or failed recovery commit is
-  expected and must produce a warning on each later HERV2 request that sees
-  it.
+  expected and is quoted into each later HERV3 request that sees it. It does
+  not interrupt that request with a separate warning card.
 - Receiving a recovery summary proves only that bounded context was supplied;
   it does not prove that old work was resumed or completed.
 - A torn final JSONL line is ignored without hiding earlier durable records.

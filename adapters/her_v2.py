@@ -226,7 +226,6 @@ class HERv2Adapter(BaseBackend):
         self._wip_journal: WIPJournal | None = None
         self._wip_active_journals: dict[str, WIPJournal] = {}
         self._wip_journal_cache: dict[str, WIPJournal] = {}
-        self._wip_warned_requests: set[str] = set()
         self._learning: HERv2Learning | None = None
         self._active_runtimes: dict[str, HERv2Runtime] = {}
         self._pending_delivery_receipts: dict[str, dict[str, Any]] = {}
@@ -333,44 +332,6 @@ class HERv2Adapter(BaseBackend):
         ):
             journal.adopt_from(self._wip_journal)
         return journal
-
-    def _surface_wip_recovery_warning(
-        self,
-        *,
-        request_id: str,
-        summary: Mapping[str, Any],
-        request_meta: Mapping[str, Any],
-    ) -> None:
-        generation_id = str(summary.get("generation_id") or "")
-        warning_key = f"{request_id}:{generation_id}"
-        if not generation_id or warning_key in self._wip_warned_requests:
-            return
-        runtime = self._runtime_context()
-        if runtime is None:
-            return
-        try:
-            from orchestrator import runtime_pipeline
-
-            runtime_pipeline.surface_wip_recovery_warning(
-                runtime,
-                SimpleNamespace(
-                    request_id=request_id,
-                    chat_id=request_meta.get("chat_id"),
-                    deliver_to_telegram=bool(
-                        request_meta.get("deliver_to_telegram")
-                    ),
-                ),
-                record_count=int(summary.get("record_count") or 0),
-                size_bytes=int(summary.get("size_bytes") or 0),
-                first_request_id=str(summary.get("first_request_id") or ""),
-            )
-            self._wip_warned_requests.add(warning_key)
-        except Exception as exc:
-            self.logger.warning(
-                "HERV3 WIP recovery warning failed safely request=%s error=%s",
-                request_id,
-                type(exc).__name__,
-            )
 
     def _record_wip_lifecycle(
         self,
@@ -1747,15 +1708,6 @@ class HERv2Adapter(BaseBackend):
             if wip_journal is not None
             else {"record_count": 0, "size_bytes": 0}
         )
-        if (
-            int(prior_wip_summary.get("record_count") or 0) > 0
-            and canonical_recovery_context is None
-        ):
-            self._surface_wip_recovery_warning(
-                request_id=request_id,
-                summary=prior_wip_summary,
-                request_meta=request_meta,
-            )
         prior_wip = (
             wip_journal.begin_turn(
                 request_id=request_id,

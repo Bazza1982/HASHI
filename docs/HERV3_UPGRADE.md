@@ -44,6 +44,11 @@ The model owns reasoning, planning, adaptation and verification inside one conti
 model/tool conversation. HASHI continues to own PCM, Session continuity, tools,
 permissions, recovery, audit, user commentary and learning.
 
+Prior WIP Journal evidence remains bounded, quoted context for a new turn when
+canonical recovery is absent. It no longer sends a proactive recovery card
+before that turn: the current user request is processed first, and recovery
+facts are available to the model without claiming authority to replay effects.
+
 ## Foreground path
 
 `PCM -> main model <-> tools -> delivery`

@@ -100,7 +100,7 @@ class _FunctionWorkers:
         drop_pending_updates,
     ):
         assert token == f"token-{name}"
-        assert drop_pending_updates is True
+        assert drop_pending_updates is False
         self.telegram_ingress.add(name)
         return True
 

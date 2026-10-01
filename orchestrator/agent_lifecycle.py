@@ -98,7 +98,7 @@ class AgentLifecycleManager:
                         await self.kernel.function_workers.start_telegram_ingress(
                             agent_name,
                             token,
-                            drop_pending_updates=True,
+                            drop_pending_updates=False,
                         )
                     except Exception as exc:
                         bridge_logger.warning(

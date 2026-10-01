@@ -587,7 +587,9 @@ async def test_fixed_route_freeze_failure_closes_turn_before_provider_work(
 
 
 @pytest.mark.asyncio
-async def test_adapter_injects_prior_wip_and_clears_after_completed_ledger(tmp_path):
+async def test_adapter_injects_prior_wip_without_interrupting_new_turn(
+    tmp_path, monkeypatch
+):
     config = _agent_config(tmp_path)
     provider = _DirectProvider()
     setattr(config, "_her_v2_stage_provider", provider)
@@ -604,6 +606,13 @@ async def test_adapter_injects_prior_wip_and_clears_after_completed_ledger(tmp_p
     )
     adapter = HERv2Adapter(config, _global_config(tmp_path))
     assert await adapter.initialize() is True
+    warnings = []
+    monkeypatch.setattr(
+        adapter,
+        "_surface_wip_recovery_warning",
+        lambda **kwargs: warnings.append(kwargs),
+        raising=False,
+    )
 
     response = await adapter.generate_response(
         "What is the current status?", "req-next"
@@ -613,6 +622,7 @@ async def test_adapter_injects_prior_wip_and_clears_after_completed_ledger(tmp_p
     injected_goals = [request.goal for _profile, request in provider.requests]
     assert any(CONTEXT_HEADER in goal for goal in injected_goals)
     assert any("partial observable result" in goal for goal in injected_goals)
+    assert warnings == []
     assert journal.records() == []
     audit_rows = [
         json.loads(line)

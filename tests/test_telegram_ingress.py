@@ -73,12 +73,12 @@ async def test_core_ingress_advances_offset_only_after_worker_accepts(monkeypatc
         bot_factory=lambda _token: bot,
     )
 
-    await ingress.start(drop_pending_updates=True)
+    await ingress.start(drop_pending_updates=False)
     await asyncio.wait_for(accepted.wait(), timeout=1.0)
 
     assert attempts == 2
     assert ingress.offset == 8
-    assert bot.calls[:2] == ["initialize", ("delete_webhook", True)]
+    assert bot.calls[:2] == ["initialize", ("delete_webhook", False)]
     assert ("get_updates", None) in bot.calls
     assert statuses[:3] == [True, False, True]
 
@@ -108,12 +108,57 @@ async def test_core_ingress_shutdown_can_skip_worker_status_callback():
         bot_factory=lambda _token: bot,
     )
 
-    await ingress.start(drop_pending_updates=True)
+    await ingress.start(drop_pending_updates=False)
+    for _ in range(100):
+        if statuses:
+            break
+        await asyncio.sleep(0.001)
     await ingress.stop(notify_status=False)
 
     assert statuses == [True]
     assert ingress.connected is False
     assert ingress.is_running is False
+
+
+@pytest.mark.asyncio
+async def test_ingress_is_not_healthy_until_poll_succeeds_and_stalled_poll_expires(
+    monkeypatch,
+):
+    bot = _Bot("token")
+    entered = asyncio.Event()
+    expired = asyncio.Event()
+    statuses = []
+
+    async def stalled_poll(**_kwargs):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            expired.set()
+            raise
+
+    bot.get_updates = stalled_poll
+    monkeypatch.setattr(
+        "orchestrator.telegram_ingress.TELEGRAM_POLL_WATCHDOG_SECONDS",
+        0.01,
+        raising=False,
+    )
+    monkeypatch.setattr("orchestrator.telegram_ingress.TELEGRAM_RETRY_SECONDS", 0.1)
+    ingress = CoreTelegramIngress(
+        agent_name="alpha",
+        token="token",
+        handle_lookup=lambda _: object(),
+        status_callback=lambda connected: statuses.append(connected),
+        bot_factory=lambda _: bot,
+    )
+
+    await ingress.start(drop_pending_updates=False)
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    assert ingress.connected is False
+    assert statuses == []
+    await asyncio.wait_for(expired.wait(), timeout=1)
+    await ingress.stop()
+    assert statuses == []
 
 
 @pytest.mark.asyncio
