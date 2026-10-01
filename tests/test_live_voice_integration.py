@@ -1748,6 +1748,13 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
                 "call_id": self.call_id, "call_epoch": 1, "segment_count": 8,
             }},
         )
+        history_before = self.store.get_session(self.session_id, owner_id=self.owner_id)["history_generation"]
+        later = self.store.append_presentation_message(
+            session_id=self.session_id, owner_id=self.owner_id,
+            agent_id=self.binding.agent_id, role="assistant",
+            text="A later chat message", source="test",
+            idempotency_key="later-chat-message",
+        )
         self.manager._persist_call_record(self.binding)
         records = [
             item for item in self.store.messages(self.session_id, owner_id=self.owner_id)
@@ -1755,6 +1762,27 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         ]
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["message_id"], legacy["message_id"])
+        self.assertEqual(records[0]["ordinal"], legacy["ordinal"])
+        self.assertLess(records[0]["ordinal"], later["ordinal"])
+        self.assertEqual(
+            self.store.get_session(self.session_id, owner_id=self.owner_id)["history_generation"],
+            history_before + 1,
+        )
+        from orchestrator.chat_transcript_projection import build_chat_projection
+        refreshed = build_chat_projection(
+            self.store,
+            session=self.store.get_session(self.session_id, owner_id=self.owner_id),
+            owner_id=self.owner_id,
+            offset=0,
+            known_history_generation=history_before,
+            after_message_ordinal=later["ordinal"],
+        )
+        self.assertTrue(refreshed["history_reset"])
+        visible_ids = [item.get("message_ref") for item in refreshed["messages"]]
+        self.assertLess(
+            visible_ids.index(f"message:{legacy['message_id']}"),
+            visible_ids.index(f"message:{later['message_id']}"),
+        )
         self.assertIn("[0:00] 🎙️ 等一下详细说这个模型", records[0]["text"])
         self.assertNotIn("??", records[0]["text"])
         self.assertEqual(records[0]["message_context"]["live_call_record"]["segment_count"], 4)
@@ -1767,6 +1795,10 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
                 call_epoch=1, text="wrong call", segment_count=1,
             )
         self.manager._persist_call_record(self.binding)
+        self.assertEqual(
+            self.store.get_session(self.session_id, owner_id=self.owner_id)["history_generation"],
+            history_before + 1,
+        )
         self.assertEqual(len([
             item for item in self.store.messages(self.session_id, owner_id=self.owner_id)
             if item.get("source") == "live-phone"

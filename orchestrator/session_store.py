@@ -3813,11 +3813,10 @@ class SessionStore:
                 and str(existing["message_context_json"]) == context_json
             ):
                 return self._message_dict(existing)
-            ordinal = self._next_ordinal(connection, str(session_id))
             connection.execute(
-                """UPDATE messages SET ordinal=?, message_context_json=?, content_json=?,
+                """UPDATE messages SET message_context_json=?, content_json=?,
                    text=?, content_hash=? WHERE message_id=?""",
-                (ordinal, context_json, content_json, clean, content_hash, message_id),
+                (context_json, content_json, clean, content_hash, message_id),
             )
             self._append_event(
                 connection, session_id=str(session_id), run_id=None,
@@ -3825,7 +3824,8 @@ class SessionStore:
                 summary="Live call transcript updated", detail={"message_id": message_id},
             )
             connection.execute(
-                "UPDATE sessions SET updated_at=?, revision=revision+1 WHERE session_id=?",
+                """UPDATE sessions SET updated_at=?, revision=revision+1,
+                   history_generation=history_generation+1 WHERE session_id=?""",
                 (_utc_now(), str(session_id)),
             )
             updated = connection.execute(

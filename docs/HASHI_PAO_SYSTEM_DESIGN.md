@@ -98,8 +98,10 @@ not break either speaker's continuous utterance into one line per delta; a
 completed reply still separates successive turns. The projection preserves
 the provider's exact words and their source IDs. The Phone Connector applies
 the same rule to live captions. An existing call record may be reprojected
-from its durable fragments under the same Message ID with a visible revision;
-no audio transcription is silently corrected. The live model hears provider
+from its durable fragments under the same Message ID and ordinal. PAO raises
+the Session history generation so clients refresh the corrected presentation
+in place, without moving an old call to the end of the conversation. No audio
+transcription is silently corrected. The live model hears provider
 audio directly, while PAO action delegation uses the recognized user text, so
 recognition errors remain a separate action-understanding risk.
 
