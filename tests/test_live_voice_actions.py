@@ -15,6 +15,7 @@ from tests import test_live_voice_integration as integration
 from orchestrator.frontend_live_voice.actions import effect_evidence
 from orchestrator.frontend_live_voice.delegation_policy import ActionIntent, parse_decision
 from orchestrator.frontend_live_voice.protocol import Fragment
+from orchestrator.frontend_live_voice.result_outline import numbered_source_outline
 from orchestrator.frontend_live_voice import worker_actions
 from orchestrator import runtime_session
 from tools.registry import ToolRegistry
@@ -429,6 +430,15 @@ async def test_morning_question_receives_four_complete_saved_reports_without_new
             idempotency_key="morning-" + name,
         )
         full_report = (name + " details. " * 55) + "\nConclusion: " + conclusion
+        if name == "news":
+            full_report = (
+                "Today's two main themes are AI and storage.\n"
+                "🔴 **今日重点**\n"
+                "**1. Gemini 4 Argon** — programming model news.\n"
+                "**2. Micron Q4** — storage cycle news.\n"
+                "**3. Russian energy strike** — international news.\n"
+                + full_report
+            )
         assert len(full_report) > 360
         phone.store.finish_request(
             accepted.request_id, success=True, assistant_text=full_report,
@@ -448,7 +458,25 @@ async def test_morning_question_receives_four_complete_saved_reports_without_new
     staged = "\n".join(payload["content"] for _, payload in phone.updates
                        if payload["kind"] == "thinking")
     assert all(conclusion in staged for conclusion in reports.values())
+    assert "Section 今日重点: 3 numbered entries." in staged
+    assert "3. Russian energy strike" in staged
     assert event_details(phone, "voice.live.delegation.routed")[-1]["decision"] == "recalled"
+
+
+def test_numbered_source_outline_distinguishes_intro_themes_from_report_items():
+    original = (
+        "Two main themes today: AI and storage.\n"
+        "🔴 **今日重点**\n"
+        "**1. Gemini** — first news item.\n"
+        "**2. Micron** — second news item.\n"
+        "**3. Russian energy strike** — third news item.\n"
+        "🌏 **International**\n"
+        "Other unnumbered news follows.\n"
+    )
+    outline = numbered_source_outline(original)
+    assert "Section 今日重点: 3 numbered entries." in outline
+    assert "3. Russian energy strike" in outline
+    assert "International: " not in outline
 
 
 @pytest.mark.asyncio

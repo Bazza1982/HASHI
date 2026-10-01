@@ -26,6 +26,7 @@ from .delegation_policy import (
 )
 from .actions import PhoneActions
 from .provider import VoiceProvider, default_registry, select_provider
+from .result_outline import numbered_source_outline
 from .opening import CallOpening, OpeningAudioObservation, new_opening, opening_goal
 from .ports import AdmissionPort, DurableVoicePort, LiveApplicationPort
 from .protocol import CallBinding, Fragment, LiveVoiceError, identifier, normalize_transcript, positive_int, stable_digest
@@ -1859,6 +1860,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 if boundary > start:
                     end = boundary + 1
             next_offset = end if end < len(original) else 0
+            outline = numbered_source_outline(original) if start == 0 else ""
             result_pages.append({"message_id": message_id, "start": start,
                                  "end": end, "total_chars": len(original),
                                  "next_offset": next_offset})
@@ -1866,7 +1868,8 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 f"Saved original {message_id}; characters {start + 1}-{end} of {len(original)}; "
                 + (f"continuation begins at offset {end}; this is not the full report"
                    if next_offset else "complete through the end")
-                + ":\n" + original[start:end]
+                + ":\n" + (outline + "\n\n" if outline else "")
+                + original[start:end]
             )
         original_context = "\n\n".join(originals)
         provider_content = content

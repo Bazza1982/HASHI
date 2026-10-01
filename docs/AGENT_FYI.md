@@ -236,6 +236,8 @@ about a completed result, including a summary or count, reads the full original
 without a new Run. Large originals carry an
 explicit page boundary and continuation position; the position means offered
 content, not confirmed speech.
+Explicitly numbered sections also carry a source-derived outline so a prose
+introduction's theme count cannot silently replace the numbered item count.
 Provider append acceptance proves only that the submitted text was accepted;
 it does not prove the foreground model used the complete result. Any later
 speech fragment does not prove full content coverage or playback.

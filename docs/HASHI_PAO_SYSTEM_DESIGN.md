@@ -243,6 +243,12 @@ reports, but semantic routing chose a direct answer from excerpts and the
 foreground spoke only two of the early report's three numbered focus items.
 This is a separate red acceptance case for result recall, even though mail and
 school facts were present and no duplicate Run was started.
+After recall was required, all four requested originals were staged, but the
+foreground still confused the report introduction's two main themes with its
+three explicitly numbered focus items. For saved reports with numbered lines,
+PAO now projects their source headings, exact numbered counts and item titles
+as a deterministic outline alongside the original. This is a view of the
+canonical text, not a second result store or proof of spoken coverage.
 
 PAO also owns the durable opening identifier and its separate request,
 acceptance, output and player observations. Opening content comes from PCM,
