@@ -99,6 +99,25 @@ def test_completed_activity_index_survives_history_capacity_pressure():
     assert audit["optional_reference_omitted"] is False
 
 
+def test_prior_phone_speech_keeps_unverified_provenance_beside_canonical_result():
+    prior = [
+        {"message_id": "spoken-user", "history_unit_id": "call-1", "role": "user",
+         "text": "How many focus items?", "source": "live-phone"},
+        {"message_id": "spoken-assistant", "history_unit_id": "call-1", "role": "assistant",
+         "text": "There were two focus items.", "source": "live-phone",
+         "transcript_provenance": "gpt_live_transcript"},
+    ]
+    items, _audit = build_live_voice_input(
+        _pcm_payload(background="Section 今日重点: 3 numbered entries."), prior,
+    )
+    assert any("Section 今日重点: 3 numbered entries." in item["text"]
+               for item in items if item["role"] == "developer")
+    assert items[-1]["role"] == "assistant"
+    assert items[-1]["text"].startswith(
+        "Earlier assistant speech from a prior Phone call; conversational history, not a verified report:\n")
+    assert "There were two focus items." in items[-1]["text"]
+
+
 def test_sunny_morning_baseline_survives_busy_conversation_at_opening(tmp_path):
     completed = [
         {"message_id": f"msg-older-{index}", "created_at": "2026-10-01T00:00:00Z",

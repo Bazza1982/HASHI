@@ -554,6 +554,11 @@ contains three entries; the index must preserve that distinction and the
 individual entry titles. The automatic opening is greeting-only. A
 substantive continuation needs a separate answer turn with the complete
 source; a report excerpt cannot silently become that turn.
+Prior Phone assistant speech remains in chronological conversation history,
+but PCM labels its transcript provenance when projecting it to a new provider
+session. Such speech is conversational context, not evidence that a saved
+report's claims or counts were verified. The source-derived outline and the
+addressable original retain their separate provenance.
 
 The WIP Journal remains temporarily as a bounded shadow/legacy compatibility
 projection while canonical HER recovery is validated. It must not be re-ingested

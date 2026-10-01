@@ -408,6 +408,10 @@ def build_live_voice_input(
         text = str(raw.get("text") or "")
         if role not in {"user", "assistant"} or not text.strip():
             continue
+        if (role == "assistant" and raw.get("source") == "live-phone"
+                and raw.get("transcript_provenance") == "gpt_live_transcript"):
+            text = ("Earlier assistant speech from a prior Phone call; "
+                    "conversational history, not a verified report:\n" + text)
         identity = str(
             raw.get("message_id")
             or raw.get("history_id")
