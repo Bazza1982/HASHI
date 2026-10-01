@@ -188,7 +188,11 @@ def build_phone_result_index(
         timestamp = str(row.get("created_at") or "time unavailable").strip()
         result_id = str(row.get("message_id") or "").strip()
         source = str(row.get("session_kind") or "agent_activity").strip()
-        request = str(row.get("request_text") or "").strip().replace("\n", " ")[:120]
+        request = (
+            str(row.get("request_text") or "").strip().replace("\n", " ")[:120]
+            if source == "conversation"
+            else ""
+        )
         reference = f"Result ID {result_id}; " if result_id else "Unaddressable legacy result; "
         block = (
             f"{reference}completed at {timestamp}; source {source}; "
