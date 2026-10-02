@@ -43,6 +43,12 @@ HERV3 is public her-v3; internal her-v2 names are compatibility only. Optional J
 
 HASHI2 `feature-privacy` implements a HERV3-only Level 2 local PII-masking trial. A replaceable, isolated local detector masks supported text PII before each qualified DeepSeek request; direct API and other outer backends are disabled at Level 2. `/privacy 2` requires explicit acceptance of residual misses, especially in non-English text; detector failures and unsupported media block transport. Synthetic DeepSeek evidence showed masked name/email absent at the HTTP boundary while a calculation succeeded. Source implementation, running Worker adoption, and live verification are separate facts. See the [Level 2 decision](HASHI_HERV3_PRIVACY_PILOT_2026-10-02.md).
 
+Level 2 deployment uses `requirements-privacy.txt` in a separate interpreter.
+Source installs run `scripts/provision_privacy_runtime.py`; npm and enterprise
+builds prepare it automatically; the 957 MB Portable Windows image supplies a
+separate on-target installer. Readiness checks use synthetic PII, and setup
+does not activate `/privacy 2` or prove running Worker adoption.
+
 Model/provider cards share one contract; chat-only models disclose that they have no tools. /style rephrases completed answers without changing facts and meters separately. Fallback is opt-in: warn before switching and block uncertain effect replay. Reject malformed Tool batches before effects; never replay committed effects. /stop, /retry, /resend and /steer differ; recovery grants no revoked authority. Show typed progress, not private reasoning.
 
 ## UI, media, and Phone

@@ -844,6 +844,7 @@ def test_builder_enforces_capacity_and_prunes_cli_adaptors():
         "runtime-entry.json",
         "tui.py",
         "pyproject.toml",
+        "requirements-privacy.txt",
         "LICENSE",
     }
     assert builder.RUNTIME_POLICY_FILES == (load_runtime_policy(ROOT).standard_lock,)

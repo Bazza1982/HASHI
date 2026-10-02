@@ -77,6 +77,15 @@ A live canary proves its exact request only, not every future outbound path.
 
 ## Approval, implementation, and adoption
 
+- **Deployment preparation (2026-10-03):** `requirements-privacy.txt` now
+  declares the separate detector profile, including a hash-pinned English
+  model wheel. A source provisioner performs a real synthetic readiness check.
+  The npm post-install flow and enterprise image prepare the sidecar outside
+  Core. The size-limited Portable Windows image includes an on-target installer
+  instead of bundling the large model. Its installation still needs network
+  access and Windows acceptance testing. These changes do not enable an
+  Agent's Level 2 setting or adopt a running Worker.
+
 - **Approval:** The user approved this limited, replaceable-model Level 2
   definition and implementation on HASHI2 on 2026-10-02.
 - **Implementation:** The `feature-privacy` source was fast-forward merged into

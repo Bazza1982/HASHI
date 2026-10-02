@@ -13,6 +13,7 @@ compatibility shim.
 | Development and tests | `python -m pip install -r requirements-dev.txt` | Standard profile and test tools |
 | Minimal source-checkout environment | `python -m pip install -e .` | Base Python dependencies; optional APIs, Remote, and TUI need their extras |
 | Every declared integration | `python -m pip install -e ".[all]"` | All optional profiles; potentially very large |
+| HERV3 Privacy Level 2 | `python scripts/provision_privacy_runtime.py` | Separate Presidio/spaCy detector and English model; never Core |
 
 ## Feature extras
 
@@ -48,6 +49,34 @@ python -m pip install -e ".[media,remote]"
 System executables and model files remain separate from Python packages. For
 example, FFmpeg, browser binaries, local TTS models, and vector model weights
 must still be installed or supplied when their selected feature requires them.
+
+## Isolated Privacy Level 2 detector
+
+`requirements-privacy.txt` pins Presidio 2.2.364 and spaCy 3.8.16; its
+English `en_core_web_sm` 3.8.0 wheel has a SHA-256 fragment. Transitive Python
+packages are resolved during installation, so this profile is not a fully
+hash-locked offline bundle. Run it with the approved Python 3.12.13 interpreter
+from a source checkout:
+
+```bash
+python scripts/provision_privacy_runtime.py
+python scripts/provision_privacy_runtime.py --check
+```
+
+The commands create `.venv-privacy` beside the source, not inside the Core
+environment. The readiness check executes the actual local detector on
+synthetic name and email values and verifies package versions. An alternate
+runtime location can be selected with `--runtime-dir`; launchers must then set
+`HASHI_PRIVACY_FILTER_PYTHON` to that runtime's Python. The npm installer does
+both automatically in a versioned user directory. The enterprise image
+prepares the same separate environment during its build. The size-limited
+Portable Windows image provides an on-target installer instead of bundling the
+model; it needs network access after the local copy is installed.
+
+This installation provides **eligibility**, not automatic activation. Level 2
+is HERV3/qualified DeepSeek only, requires explicit risk acceptance, and may
+miss PII, especially in non-English text. If the detector is absent or fails,
+the outbound request is blocked rather than sent unfiltered.
 
 ## Isolated transcription runtime
 
