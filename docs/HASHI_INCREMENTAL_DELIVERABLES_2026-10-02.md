@@ -90,5 +90,19 @@ published 82 seconds apart. Their Telegram endpoint tasks remained pending
 with zero attempts even after final delivery, because the isolated CLI tool
 gateway did not have the Worker runtime needed by the tool's immediate wakeup.
 This is the observed break that prompted the Worker-owned sweep above. The
-Telegram correction needs separate source validation and live adoption before
-claiming the mirror is working; Workbench visibility alone cannot prove it.
+Telegram correction was validated and adopted separately. The focused
+detached-gateway test was red before the Worker sweep existed, then green for
+both running and completed Runs. The attachment, runtime lifecycle, delivery,
+and Session suites passed **117 tests** on Windows; one WSL-only path case was
+excluded. The protected-Core check and compilation passed.
+
+The second HASHI3 hot reboot succeeded with all nine Workers online while the
+Core PID remained stable. The previously queued A and B Telegram tasks each
+completed in one attempt with delivered receipts and proof. A fresh live C
+publication was persisted at 04:51:30 UTC; Telegram recorded a delivered
+receipt with proof at 04:51:32 UTC; its Run completed at 04:52:06 UTC. Workbench
+showed C as a document attachment while the Run was still executing and
+showed one copy after completion. The final Message contained no attachment.
+The Backend API endpoint task still showed pending because Workbench displayed
+the Message through transcript polling rather than acknowledging the FC feed;
+the visible UI observation and the pending task are distinct facts.
