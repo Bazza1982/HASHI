@@ -2119,7 +2119,22 @@ class ContextCompactionCoordinator:
                     "Compact cannot call its Provider before a durable HER Session is bound",
                     retryable=False,
                 )
-        backend = manager.create_ephemeral_backend(route.provider, target_model=route.model)
+        if int(getattr(manager, "privacy_level", 1)) == 2:
+            create_qualified = getattr(manager, "create_herv3_provider_backend", None)
+            if (
+                getattr(manager.config, "active_backend", None) != HER_V2_ENGINE
+                or not callable(create_qualified)
+            ):
+                raise CompactionFailure(
+                    "COMPACTION_PRIVACY_GATE_UNAVAILABLE",
+                    "Compact has no qualified HERV3 Level 2 Provider gate",
+                    retryable=False,
+                )
+            backend = create_qualified(route.provider, target_model=route.model)
+        else:
+            backend = manager.create_ephemeral_backend(
+                route.provider, target_model=route.model
+            )
         if hasattr(backend, "tool_registry"):
             backend.tool_registry = None
         extra = dict(getattr(backend.config, "extra", None) or {})

@@ -1,16 +1,19 @@
 """Privacy-level policy primitives.
 
-Levels 0, 1, and 2 are represented by the current policy foundation. Level 0
-turns the privacy framework off, while Level 1 remains the default explicit
-provider-trust mode. Higher levels remain product-roadmap concepts and are
-intentionally not accepted here until their guarantees can be enforced.
+Levels 0, 1, and 2 are executable. Level 0 turns the privacy framework off;
+Level 1 remains the default provider-trust mode. Level 2 is a HERV3-only
+local PII-masking trial with an explicitly limited detector. Higher levels
+remain roadmap concepts and are intentionally not accepted here.
 """
 
 from __future__ import annotations
 
 from enum import IntEnum
 
-from orchestrator.flexible_backend_registry import get_supported_privacy_levels
+from orchestrator.flexible_backend_registry import (
+    get_supported_herv3_provider_privacy_levels,
+    get_supported_privacy_levels,
+)
 
 
 class PrivacyLevel(IntEnum):
@@ -26,6 +29,7 @@ class PrivacyPolicyError(ValueError):
 EXECUTABLE_PRIVACY_LEVELS = (
     PrivacyLevel.OFF,
     PrivacyLevel.PROVIDER_TRUST,
+    PrivacyLevel.BASIC_REDACTION,
 )
 
 
@@ -47,6 +51,20 @@ def require_backend_compatibility(
     if int(parsed) not in supported:
         raise PrivacyPolicyError(
             f"Backend {engine!r} does not support privacy level {int(parsed)}; "
+            f"supported levels: {', '.join(str(item) for item in supported)}."
+        )
+    return parsed
+
+
+def require_herv3_provider_compatibility(
+    engine: str,
+    level: int | str | PrivacyLevel,
+) -> PrivacyLevel:
+    parsed = parse_privacy_level(level)
+    supported = get_supported_herv3_provider_privacy_levels(engine)
+    if int(parsed) not in supported:
+        raise PrivacyPolicyError(
+            f"HERV3 Provider {engine!r} does not support privacy level {int(parsed)}; "
             f"supported levels: {', '.join(str(item) for item in supported)}."
         )
     return parsed

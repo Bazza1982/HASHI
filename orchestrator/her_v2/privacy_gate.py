@@ -37,6 +37,43 @@ class PrivacyGateError(RuntimeError):
 Detector = Callable[[list[str]], Awaitable[list[list[dict[str, Any]]]]]
 
 
+def configured_filter_python(explicit: str | None = None) -> Path:
+    """Resolve the separately installed local model runtime or fail closed."""
+
+    executable = explicit or os.getenv("HASHI_PRIVACY_FILTER_PYTHON", "")
+    if not executable:
+        root = Path(__file__).resolve().parents[2]
+        relative = (
+            Path(".venv-privacy/Scripts/python.exe")
+            if os.name == "nt"
+            else Path(".venv-privacy/bin/python")
+        )
+        executable = str(root / relative)
+    python_path = Path(executable) if executable else None
+    if (
+        python_path is None
+        or not python_path.is_absolute()
+        or not python_path.is_file()
+        or not os.access(python_path, os.X_OK)
+    ):
+        raise PrivacyGateError("local privacy model is not configured")
+    return python_path
+
+
+def configured_filter_script() -> Path:
+    """Select a trusted local detector implementing the span JSON contract."""
+
+    script = os.getenv("HASHI_PRIVACY_FILTER_SCRIPT", "")
+    path = (
+        Path(script)
+        if script
+        else Path(__file__).resolve().parents[2] / "tools" / "privacy_filter_sidecar.py"
+    )
+    if not path.is_absolute() or not path.is_file():
+        raise PrivacyGateError("local privacy model script is not configured")
+    return path
+
+
 class OutboundPrivacyGate:
     def __init__(
         self,
@@ -51,18 +88,8 @@ class OutboundPrivacyGate:
         self._counts: Counter[str] = Counter()
 
     async def _detect_with_sidecar(self, texts: list[str]) -> list[list[dict[str, Any]]]:
-        executable = self._python_executable or os.getenv(
-            "HASHI_PRIVACY_FILTER_PYTHON", ""
-        )
-        python_path = Path(executable) if executable else None
-        if (
-            python_path is None
-            or not python_path.is_absolute()
-            or not python_path.is_file()
-            or not os.access(python_path, os.X_OK)
-        ):
-            raise PrivacyGateError("local privacy model is not configured")
-        sidecar = Path(__file__).resolve().parents[2] / "tools" / "privacy_filter_sidecar.py"
+        python_path = configured_filter_python(self._python_executable)
+        sidecar = configured_filter_script()
         request = json.dumps({"texts": texts}, ensure_ascii=False).encode("utf-8")
         if len(request) > MAX_SIDECAR_BYTES:
             raise PrivacyGateError("privacy payload exceeds the pilot limit")

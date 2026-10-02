@@ -66,6 +66,7 @@ from orchestrator.her_v2.retry import (
 from orchestrator.her_v2.runtime import HERv2Runtime
 from orchestrator.her_v2.v3_config import normalise_v3_config
 from orchestrator import final_style_policy
+from orchestrator.privacy_levels import require_herv3_provider_compatibility
 from orchestrator.her_v2.wip_journal import WIPJournal
 from orchestrator.multimodal_contract import (
     media_failure_code,
@@ -921,6 +922,13 @@ class HERv2Adapter(BaseBackend):
                 raw = normalise_v3_config(raw)
                 self._extra["her_v2"] = raw
             self._v2_config = HERv2Config.from_mapping(raw)
+            if int(getattr(self, "privacy_level", 1)) == 2:
+                for profile in self._v2_config.all_provider_profiles():
+                    require_herv3_provider_compatibility(profile.engine, 2)
+                if self._v2_config.agent_companion.enabled:
+                    raise HERv2ConfigurationError(
+                        "HERV3 Agent Companion is unavailable at privacy level 2"
+                    )
             requested_effort = (
                 str(self._extra.get("effort") or raw.get("effort") or "medium")
                 .strip()

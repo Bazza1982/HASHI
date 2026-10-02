@@ -8,6 +8,7 @@ from orchestrator.privacy_levels import (
     PrivacyPolicyError,
     parse_privacy_level,
     require_backend_compatibility,
+    require_herv3_provider_compatibility,
     require_level_available,
     require_transition_confirmation,
 )
@@ -23,17 +24,30 @@ from orchestrator.privacy_levels import (
         "ollama-api",
     ),
 )
-def test_api_backends_declare_level_two_support(engine: str) -> None:
-    assert get_supported_privacy_levels(engine) == (0, 1, 2)
-    assert (
+def test_api_backends_cannot_run_as_outer_level_two_backends(engine: str) -> None:
+    assert get_supported_privacy_levels(engine) == (0, 1)
+    with pytest.raises(PrivacyPolicyError, match="does not support"):
         require_backend_compatibility(engine, 2)
+
+
+def test_only_herv3_is_an_outer_level_two_backend() -> None:
+    assert get_supported_privacy_levels("her-v2") == (0, 1, 2)
+    assert require_backend_compatibility("her-v2", 2) is PrivacyLevel.BASIC_REDACTION
+
+
+def test_only_qualified_deepseek_provider_runs_inside_herv3_level_two() -> None:
+    assert (
+        require_herv3_provider_compatibility("deepseek-api", 2)
         is PrivacyLevel.BASIC_REDACTION
     )
+    for engine in ("hashi-api", "openrouter-api", "codex-cli", "unknown-backend"):
+        with pytest.raises(PrivacyPolicyError, match="does not support"):
+            require_herv3_provider_compatibility(engine, 2)
 
 
 @pytest.mark.parametrize(
     "engine",
-    ("gemini-cli", "claude-cli", "codex-cli", "her", "grok-cli"),
+    ("gemini-cli", "claude-cli", "codex-cli", "grok-cli"),
 )
 def test_cli_harnesses_are_level_one_only(engine: str) -> None:
     assert get_supported_privacy_levels(engine) == (0, 1)
@@ -53,11 +67,10 @@ def test_higher_levels_are_not_accepted_before_they_are_enforceable() -> None:
         parse_privacy_level(3)
 
 
-def test_only_levels_zero_and_one_are_currently_activatable() -> None:
+def test_level_two_is_activatable_after_scoped_enforcement() -> None:
     assert require_level_available(0) is PrivacyLevel.OFF
     assert require_level_available(1) is PrivacyLevel.PROVIDER_TRUST
-    with pytest.raises(PrivacyPolicyError, match="not available"):
-        require_level_available(2)
+    assert require_level_available(2) is PrivacyLevel.BASIC_REDACTION
 
 
 def test_privacy_downgrade_requires_explicit_confirmation() -> None:

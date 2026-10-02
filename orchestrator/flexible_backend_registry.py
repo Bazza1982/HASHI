@@ -115,7 +115,7 @@ BACKEND_REGISTRY: dict[str, dict] = {
     },
     "her-v2": {
         "label": "HERV3",
-        "privacy_levels": [0, 1],
+        "privacy_levels": [0, 1, 2],
         # Provider, model and reasoning choices are instance-derived. Keeping
         # placeholders here would leak the retired HER v2 route matrix.
         "models": [],
@@ -139,7 +139,10 @@ BACKEND_REGISTRY: dict[str, dict] = {
     },
     "deepseek-api": {
         "label": "deepseek",
-        "privacy_levels": [0, 1, 2],
+        "privacy_levels": [0, 1],
+        # Qualified only as a HERV3 model provider. Direct Engine use remains
+        # blocked at Level 2, including direct ephemeral API calls.
+        "herv3_level2_qualified": True,
         "models": [
             "deepseek-flash",
             "deepseek-v4-pro",
@@ -157,7 +160,7 @@ BACKEND_REGISTRY: dict[str, dict] = {
     },
     "openai-compatible-api": {
         "label": "OpenAI-compatible",
-        "privacy_levels": [0, 1, 2],
+        "privacy_levels": [0, 1],
         # Models and endpoint are instance configuration, not global product
         # catalogue. This keeps official Qwen and other regional services
         # selectable inside HER without exposing another top-level Engine.
@@ -173,7 +176,7 @@ BACKEND_REGISTRY: dict[str, dict] = {
     },
     "ollama-api": {
         "label": "ollama",
-        "privacy_levels": [0, 1, 2],
+        "privacy_levels": [0, 1],
         "models": [
             "gemma4:26b",
             "gemma4:31b",
@@ -187,7 +190,7 @@ BACKEND_REGISTRY: dict[str, dict] = {
     "xai-api": {
         "label": "xai",
         "gateway_enabled": True,
-        "privacy_levels": [0, 1, 2],
+        "privacy_levels": [0, 1],
         "models": [
             "grok-4.5",
             "grok-4.3",
@@ -221,7 +224,7 @@ BACKEND_REGISTRY: dict[str, dict] = {
     },
     "openrouter-api": {
         "label": "openrouter",
-        "privacy_levels": [0, 1, 2],
+        "privacy_levels": [0, 1],
         "models": [
             "deepseek/deepseek-v3.2-exp",
             "deepseek/deepseek-v4-flash",
@@ -239,7 +242,7 @@ BACKEND_REGISTRY: dict[str, dict] = {
     },
     "hashi-api": {
         "label": "hashi",
-        "privacy_levels": [0, 1, 2],
+        "privacy_levels": [0, 1],
         "models": [
             "gpt-5.6-luna",
             "gpt-5.6-sol",
@@ -395,6 +398,15 @@ def get_supported_privacy_levels(engine: str | None) -> tuple[int, ...]:
         return (0, 1)
     levels = get_backend_entry(engine).get("privacy_levels") or [0, 1]
     return tuple(sorted({int(level) for level in levels}))
+
+
+def get_supported_herv3_provider_privacy_levels(engine: str | None) -> tuple[int, ...]:
+    """Derive HERV3 Provider eligibility from qualified Function metadata."""
+
+    levels = set(get_supported_privacy_levels(engine))
+    if engine and get_backend_entry(engine).get("herv3_level2_qualified") is True:
+        levels.add(2)
+    return tuple(sorted(levels))
 
 
 def get_backend_label(engine: str) -> str:

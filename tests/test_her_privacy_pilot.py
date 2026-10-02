@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -13,6 +15,7 @@ import pytest
 from adapters.deepseek_api import DeepSeekAdapter
 from adapters.openrouter_api import _APIResult
 from orchestrator.her_v2.privacy_gate import OutboundPrivacyGate, PrivacyGateError
+from orchestrator.multimodal_contract import canonical_request_content
 from tools.registry import ToolResult
 
 
@@ -177,6 +180,64 @@ async def test_streaming_deepseek_call_receives_only_masked_payload(tmp_path):
     assert "jordan@example.com" not in outbound
     assert "[PERSON_1]" in outbound
     assert "[EMAIL_ADDRESS_1]" in outbound
+
+
+@pytest.mark.asyncio
+async def test_level_two_media_is_blocked_before_provider_request(tmp_path):
+    image = tmp_path / "private.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\nprivate")
+    content = canonical_request_content([{
+        "type": "media", "item_index": 1, "attachment_id": "private-image",
+        "modality": "image", "kind": "photo", "mime_type": "image/png",
+        "filename": image.name, "caption": "", "local_ref": str(image),
+        "size_bytes": image.stat().st_size,
+        "sha256": hashlib.sha256(image.read_bytes()).hexdigest(),
+        "transport": {"message_id": 1},
+    }])
+    adapter = _deepseek(tmp_path)
+    adapter.privacy_level = 2
+    adapter._herv3_privacy_scope = True
+    adapter._privacy_gate = OutboundPrivacyGate(detector=_synthetic_detector)
+    adapter._call_api_once = AsyncMock(
+        return_value=_APIResult("unexpected", None, "stop", 1, 1)
+    )
+
+    response = await adapter.generate_response(
+        "Inspect private image", "req-private-image", request_content=content
+    )
+
+    assert response.is_success is False
+    adapter._call_api_once.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_local_detector_script_can_be_replaced_and_failure_blocks(
+    tmp_path, monkeypatch
+):
+    script = tmp_path / "replacement_detector.py"
+    script.write_text(
+        "import json, sys\n"
+        "texts = json.load(sys.stdin)['texts']\n"
+        "matches = [[{'start': text.index('Ari Example'), "
+        "'end': text.index('Ari Example') + 11, 'label': 'PERSON', "
+        "'score': 0.9}] if 'Ari Example' in text else [] for text in texts]\n"
+        "json.dump({'ok': True, 'matches': matches}, sys.stdout)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HASHI_PRIVACY_FILTER_SCRIPT", str(script))
+    payload = {"model": "deepseek-flash", "messages": [{"content": "Ari Example owes $50"}]}
+
+    protected = await OutboundPrivacyGate(python_executable=sys.executable).sanitize(
+        payload, request_id="replacement-model"
+    )
+    assert "Ari Example" not in json.dumps(protected)
+    assert "[PERSON_1] owes $50" in json.dumps(protected)
+
+    monkeypatch.setenv("HASHI_PRIVACY_FILTER_SCRIPT", str(tmp_path / "missing.py"))
+    with pytest.raises(PrivacyGateError):
+        await OutboundPrivacyGate(python_executable=sys.executable).sanitize(
+            payload, request_id="missing-model"
+        )
 
 
 @pytest.mark.platform

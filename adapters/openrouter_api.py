@@ -3286,7 +3286,20 @@ class OpenRouterAdapter(BaseBackend):
 
         try:
             self._touch_activity()
+            if int(getattr(self, "privacy_level", 1)) == 2 and request_content:
+                private_input = normalize_request_content(request_content)
+                if private_input is not None and any(
+                    part.get("type") != "text"
+                    for part in private_input.get("parts", ())
+                ):
+                    raise PrivacyGateError(
+                        "privacy level 2 currently supports text input only"
+                    )
             audio_output = self._native_audio_output_profile(request_content)
+            if int(getattr(self, "privacy_level", 1)) == 2 and audio_output is not None:
+                raise PrivacyGateError(
+                    "privacy level 2 currently supports text output only"
+                )
             use_streaming = use_streaming or audio_output is not None
             (
                 provider_request_content,
