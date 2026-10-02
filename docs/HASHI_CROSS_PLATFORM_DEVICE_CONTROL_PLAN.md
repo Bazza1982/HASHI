@@ -27,6 +27,19 @@ rejects CDP routing and requires its registered extension, including when the
 bridge disconnects. Source and offline tests are separate from running
 generation adoption and live Chrome/Edge acceptance.
 
+### HASHI4 live check and catalogue clarification — 2026-10-03
+
+After the HASHI4 Agent adopted the repair, an isolated CLI browser tool read
+the real logged-in Workbench tab through `/browser 4`. The connected Worker had
+started before the new browser identity fields existed, so its choice appeared
+as an unnamed `Browser` capability. The shared Tool Registry now removes CDP
+and standalone launch options from connected-bridge tool schemas, describes
+the selected extension and existing login state directly, and reports a
+task-bound browser switch as a clear denial. This source clarification needs
+a new Agent Function generation. The older Browser Worker still needs safe
+replacement before browser-name discovery can be live-accepted; two connected
+browser choices and HERV3 remain offline-tested rather than live-accepted.
+
 ## Implementation update — 2026-09-05
 
 The architecture below is now implemented in HASHI3. Core capability
