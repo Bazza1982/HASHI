@@ -1,28 +1,25 @@
 # HASHI Agent FYI
 
-2026-10-03 Lily correction: six legacy Windows LilyMemoryWiki tasks and eleven
-old HASHI jobs were removed. Four Agent cron jobs now cover 01:00 import,
-03:00 offline embedding, 04:05 Wiki reasoning/publish and 05:00 report, Sydney
-time. Standalone Wiki no longer calls model API/CLI: classification needs a
-SHA256-bound answer from Lily's current foreground turn. Missing answers block.
-The Agent supervises import and embedding. A real 50-record discovery batch
-passed; full scheduled workflow, delivery and HERV3 live execution remain open.
-Old independent Windows automation is superseded, not authority to reactivate it.
-See the standalone centre's current operations and migration decision.
+2026-10-03 Lily correction supersedes Windows automation: six Windows tasks and
+eleven old HASHI jobs were removed. Four Agent crons run import 01:00, offline
+embedding 03:00, Wiki 04:05 and report 05:00 Sydney time. Wiki requires a
+SHA256-bound foreground answer, otherwise blocks; it calls no model API/CLI.
+The Agent supervises tools. A 50-record batch passed; scheduled workflow,
+delivery and live HERV3 remain open. Do not reactivate old automation; see the
+standalone centre's operations/migration decision.
 
-Browser route 4 relays CLI tools through their Function Worker and Capability
-Broker. Connected browsers use existing login state, separate Chrome/Edge
-endpoints and task-bound selection; an unspecified browser may use any connected
-one. HASHI4's CLI read a real Workbench tab on 2026-10-03. Its older Browser
-Worker still needs replacement for browser names; dual-browser and HERV3 live
-acceptance remain open. See [device control](HASHI_CROSS_PLATFORM_DEVICE_CONTROL_PLAN.md#hashi4-browser-route-repair--2026-10-02).
+Browser route 4 relays CLI tools through Worker/Capability Broker, reusing login
+state and task-bound Chrome/Edge endpoints. Unspecified browsers may use any
+connected one. HASHI4 read a real tab on 2026-10-03; its old Browser Worker needs
+replacement for names. Dual-browser/HERV3 live checks remain open. See
+[device control](HASHI_CROSS_PLATFORM_DEVICE_CONTROL_PLAN.md#hashi4-browser-route-repair--2026-10-02).
 
 2026-10-02 MCP/media repair: Codex inventory disables plugins consistently with
 execution, and trusted Telegram media and /long preserve ingress identity.
 See docs/HASHI_MCP_MEDIA_ROLLOUT_2026-10-02.md for source/adoption scope.
 HASHI2 is outside this rollout.
 
-Orientation only; not a task queue or proof of authority/adoption. /fyi reloads it. Current typed requests govern; see AGENTS.md, ARCHITECTURE.md, runtime boundaries, UI guide and testing policy.
+Orientation only; /fyi reloads it. Typed requests govern authority; see AGENTS.md, architecture, runtime boundaries and testing policy.
 
 ## Authority and ownership
 
@@ -56,7 +53,7 @@ HASHI3 Telegram intake reports healthy only after a successful bounded poll; ord
 
 ## Engine, tools, and recovery
 
-HERV3 is public her-v3; internal her-v2 names are compatibility only. Optional JEV is off by default. /backend chooses Engine, /provider Model Provider, /model model, /effort reasoning; Fixed/Flex and Memory+ are independent. /meter uses physical calls and all cost; never invent phases or zero cost. Codex CLI counters are cumulative: use a persisted baseline for current-turn usage and estimate if unknown. USD estimates are not subscription bills.
+Public HERV3 is her-v3; her-v2 names are compatibility only. JEV defaults off. /backend selects Engine, /provider Model Provider, /model model, /effort reasoning; Fixed/Flex and Memory+ are independent. /meter uses all physical calls/cost. Codex cumulative counters need a persisted turn baseline; estimate if unknown. USD estimates are not subscription bills.
 
 Level 2: HERV3/DeepSeek only. Local PII detection can miss values;
 `/privacy 2` needs risk acceptance and blocks on detector failure.
@@ -65,7 +62,11 @@ Model/provider cards share one contract; chat-only models disclose that they hav
 
 ## UI, media, and Phone
 
-Experimental `local-cascade` connects local speech to the selected Agent's Phone judgment/actions. It needs opt-in and offline models and is outside the default qualified registry. HASHI1 uses a loopback-only Worker without shared token; adaptive ambient-noise calibration passed a two-turn synthetic WebRTC call on 2026-10-03. Speech inference disables reasoning. Reconnect replays a bounded gap; real microphone/speaker acceptance remains open. See [Gate 2](HASHI_PHONE_LOCAL_CASCADE_GATE2.md).
+Experimental `local-cascade` connects local speech to Agent Phone actions, with
+opt-in/offline models outside the default registry. HASHI1's loopback Worker
+needs no token; adaptive noise calibration passed two synthetic WebRTC turns
+on 2026-10-03. Speech disables reasoning; reconnect replay is bounded. Physical
+audio acceptance remains open. See [Gate 2](HASHI_PHONE_LOCAL_CASCADE_GATE2.md).
 
 Live Phone defaults on; a missing provider API key blocks calls and must be named in `/phone`. An explicit instance opt-out remains valid. The Agent's Phone settings and PCM readiness do not prove provider readiness.
 
@@ -81,7 +82,7 @@ Qualified Function adapters own Phone settings. Changes apply next call; recover
 
 Commands follow the [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md), retain Session and remain owner-admitted during active Runs. /new creates a fresh Session without deleting history; PAO owns Agent deletion/cleanup receipts.
 
-`/say` reads the newest final Agent reply; `/say 2`–`/say 4` read that many, and `/say 1-3` reads the newest three oldest first. Skip cost, command and progress messages. Telegram requires confirmed chat delivery; Workbench/TUI play audio locally. Source or reboot receipts do not prove physical playback.
+`/say` reads the latest final reply, `/say 2`–`/say 4` that many, `/say 1-3` the latest three oldest first. Skip cost/command/progress. Telegram needs confirmed chat delivery; Workbench/TUI play locally. Reboot receipts never prove playback.
 
 ## Move, Scheduler, and HCC
 
@@ -97,7 +98,6 @@ Manual Desktop is opt-in: Standard 2 FPS, Smooth 20 FPS, Ultra Smooth targets 30
 
 HASHI3 caps Tool text at Provider capacity. `/stop` blocks autonomous wakeups until an explicit request; completed background results stay in job records. Distinguish verified writes from uncertain effects; adopt offline changes before claiming live behavior.
 
-2026-10-03 cancellation repair: Workbench supplies exact Session/Run identity;
-PAO's Worker cancels that queued/active Run, including capacity recovery. Never
-fall back to Agent stop or mark stopped before settlement. The old 404 path is
-red/green offline; runtime/frontend acceptance remains separate. See [PAO](HASHI_PAO_SYSTEM_DESIGN.md).
+Cancellation binds exact Session/Run, including capacity recovery; PAO settles
+queued/active Runs. Never fall back to Agent stop or report stopped early.
+Offline red/green passed; live acceptance is separate. See [PAO](HASHI_PAO_SYSTEM_DESIGN.md).
