@@ -418,6 +418,7 @@ class WorkbenchApiServer:
             admit_run=self._admit_live_voice_run,
             poll_run_activity=self._poll_live_voice_run_activity,
             judge_action=self._judge_live_voice_action,
+            render_speech=self._render_live_voice_speech,
             inspect_action_results=self._inspect_live_voice_action_results,
             cancel_action_run=self._cancel_live_voice_action,
             resolve_phone_session=self._resolve_live_voice_phone_session,
@@ -5516,6 +5517,9 @@ class WorkbenchApiServer:
 
     async def _judge_live_voice_action(self, binding, state) -> dict[str, Any]:
         return await self._live_voice_action_operation(binding, "judge", state=state)
+
+    async def _render_live_voice_speech(self, binding, state) -> dict[str, Any]:
+        return await self._live_voice_action_operation(binding, "speak", state=state)
 
     async def _inspect_live_voice_action_results(self, binding, request_id, actions) -> dict[str, Any]:
         return await self._live_voice_action_operation(binding, "inspect", request_id=request_id, actions=actions)

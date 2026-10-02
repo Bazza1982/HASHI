@@ -68,6 +68,9 @@ class AlternateProvider:
     def credential(self, secrets):
         return secrets.get("fixture_credential", "")
 
+    def is_available(self, secrets):
+        return bool(self.credential(secrets))
+
     def validate_selection(self, model, voice):
         if model != "fixture-speech" or voice != "fixture-voice":
             raise LiveVoiceError("fixture_selection_invalid")
@@ -305,6 +308,19 @@ class TestPhoneProviderOpening:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
 
+    async def test_selected_provider_must_be_enabled_even_when_another_is_ready(self):
+        self.manager.secrets = {"openai_api_key": "fixture-only"}
+        self.manager.providers["openai"] = OpenAILiveProvider()
+        assert self.manager.available
+        assert not self.adapter.is_available(self.manager.secrets)
+        with pytest.raises(LiveVoiceError) as error:
+            await self.manager._op_start("owner", {
+                **self.context["binding"], "phone_revision": "a" * 64,
+                "sdp": "v=0\r\n", "idempotency_key": "disabled-provider",
+            })
+        assert error.value.code == "live_not_enabled"
+        assert not self.adapter.created
+
     async def test_confirmed_continuous_silence_gets_only_one_opening_continuation(self):
         await self.start_call()
         await self.feed_silence()
@@ -475,6 +491,16 @@ class TestPhoneProviderOpening:
         await self.observe(
             "client.media_ready", input_active=True, playback_unlocked=True
         )
+        await self.settle()
+        assert self.manager.opening.read(self.binding)["state"] == "skipped"
+        assert self.adapter.sent == []
+
+    async def test_worker_barge_in_before_transcription_skips_pending_opening(self):
+        await self.start_call()
+        self.manager._observe_opening_provider(self.binding, {
+            "type": "output.interrupted", "reason": "user_speech_interrupted",
+        })
+        await self.observe("client.media_ready", input_active=True, playback_unlocked=True)
         await self.settle()
         assert self.manager.opening.read(self.binding)["state"] == "skipped"
         assert self.adapter.sent == []

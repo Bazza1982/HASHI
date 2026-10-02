@@ -34,6 +34,7 @@ class VoiceProvider(Protocol):
     provider_id: str
     capabilities: ProviderCapabilities
 
+    def is_available(self, secrets: Mapping[str, Any]) -> bool: ...
     def credential(self, secrets: Mapping[str, Any]) -> str: ...
     def validate_selection(self, model: str, voice: str) -> None: ...
     def media_descriptor(self) -> dict[str, Any]: ...
@@ -72,11 +73,17 @@ class VoiceProvider(Protocol):
     def opening(self, goal: str, event_id: str) -> dict[str, Any]: ...
 
 
-def default_registry() -> dict[str, VoiceProvider]:
+def default_registry(include_experimental: bool = False) -> dict[str, VoiceProvider]:
     from .openai_live import OpenAILiveProvider
 
-    adapter = OpenAILiveProvider()
-    return {adapter.provider_id: adapter}
+    openai_adapter = OpenAILiveProvider()
+    registry = {openai_adapter.provider_id: openai_adapter}
+    if include_experimental:
+        from .cascade_provider import CascadeProvider
+
+        cascade_adapter = CascadeProvider()
+        registry[cascade_adapter.provider_id] = cascade_adapter
+    return registry
 
 
 def select_provider(

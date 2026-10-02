@@ -3852,7 +3852,7 @@ class FlexibleAgentRuntime:
 
         state = self.phone_manager.get_state()
         provider = self.phone_manager.PROVIDERS[state["provider"]]
-        adapter = default_registry().get(state["provider"])
+        adapter = default_registry(include_experimental=True).get(state["provider"])
         if not bool(getattr(self.global_config, "live_voice_v1", True)):
             availability = ui_language.tr("phone.status.disabled")
         elif adapter is None:
