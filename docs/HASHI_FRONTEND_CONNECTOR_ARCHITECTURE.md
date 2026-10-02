@@ -399,6 +399,11 @@ their feed consumer accepts the Event. A destination without an active-Run
 media consumer is marked failed for this publication without hiding the
 states of other endpoints: current HChat, Remote and Exchange senders claim
 terminal events only, and WhatsApp does not advertise media egress.
+An external Workbench feed consumer must request the same connection-scoped
+client ID that chat admission froze in the Run route; transcript visibility
+alone does not acknowledge that endpoint. The consumer should drain the
+latest Run's feed after its transcript final or failure so short Runs and
+reloads do not leave visible publications queued.
 
 The tool reports persistence separately from each endpoint's queued,
 accepted, delivered, failed or unknown state. An accepted receipt is not

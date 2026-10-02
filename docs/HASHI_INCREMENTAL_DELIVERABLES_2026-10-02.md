@@ -106,3 +106,17 @@ showed one copy after completion. The final Message contained no attachment.
 The Backend API endpoint task still showed pending because Workbench displayed
 the Message through transcript polling rather than acknowledging the FC feed;
 the visible UI observation and the pending task are distinct facts.
+
+The later Workbench status-alignment fix found a precise endpoint mismatch:
+chat admission froze `hashi-workbench-v2:hashi3`, but the feed proxy requested
+`hashi-workbench-v2`. Workbench now sends the connection-scoped client ID used
+by chat admission and drains the latest Run's feed after a transcript final,
+including a failed Run with previously published files. This was implemented
+in the separate Workbench repository, commits `65e0d14` and `2cb23c9`, and
+deployed as a production UI build and server reload. A and B, then C, were
+accepted through the frozen Backend API endpoint; each task is completed with
+one accepted receipt and one attempt. Re-reading both feeds accepted zero new
+events. Their Telegram tasks remain completed with delivered proof. The
+Backend API receipt proves feed acceptance; Workbench rendering was observed
+separately and the receipt does not prove the user read the files. HASHI3
+needed no additional reboot for this Workbench-only correction.
