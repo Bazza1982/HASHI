@@ -79,9 +79,15 @@ A live canary proves its exact request only, not every future outbound path.
 
 - **Approval:** The user approved this limited, replaceable-model Level 2
   definition and implementation on HASHI2 on 2026-10-02.
-- **Implementation:** Source changes and focused offline validation are on
-  `feature-privacy`. Record the final test and merge outcome before claiming
-  the running checkout has adopted them.
-- **Live verification:** Not yet performed on the running HASHI2 Worker. A
-  merged source checkout, configured detector runtime, persisted Agent level,
-  adopted Worker, and observed external-provider request are separate checks.
+- **Implementation:** The `feature-privacy` source was fast-forward merged into
+  HASHI2's `feat/phone-local-cascade` checkout. Focused privacy checks passed
+  (41 passed, 1 opt-in live canary skipped); HERV3 adapter, compaction, and
+  DeepSeek regression checks passed (229 total). Backend state/catalogue checks
+  passed (84). The isolated `.venv-privacy` runtime was installed in HASHI2,
+  and its local readiness probe passed without an environment override.
+  Existing native-audio and cognitive-control failures reproduce on the
+  untouched baseline and are outside this change.
+- **Live verification:** The running HASHI2 Worker has not adopted the merged
+  source, and no Agent's Level 2 setting has been persisted. The earlier
+  synthetic DeepSeek canary proves the direct provider request only. Worker
+  adoption, active Agent level, and a full frontend Session remain unverified.
