@@ -1,5 +1,33 @@
 # HASHI Agent FYI
 
+2026-10-03 Lily user correction supersedes the independent nightly automation
+noted below. All six legacy Windows `LilyMemoryWiki-*` tasks were removed. Four
+HASHI Lily Agent cron jobs are now enabled for 01:00 import, 03:00 offline embed,
+04:05 Wiki reasoning/publish and 05:00 read-only report, Sydney time. Eleven old
+HASHI Lily jobs were removed. The active standalone Wiki path no longer reads
+an API key or calls a model API/CLI. Classification and topic discovery now
+require a SHA256-bound answer from Lily's current foreground Agent turn; the
+script stops when an answer is missing. Memory import and offline BGE embedding
+are foreground tools under Lily's supervision. Old release snapshots and the
+paragraph below are history, not authorization to reactivate Windows background work.
+The provider-neutral exchange passed offline and synthetic foreground checks;
+one real 50-record discovery batch completed in the current Agent turn. Full
+scheduled production workflow, user delivery, and live HERV3 execution were not
+asserted. See the
+standalone centre's current `docs/OPERATIONS.md` and migration decision.
+
+Historical status, superseded 2026-10-03: Lily memory and Wiki previously ran
+from six independent Windows scheduled
+tasks. The first normal overnight cycle imported and embedded 65 records and
+published a validated Wiki update. The old HASHI Scheduler writers stay
+disabled to prevent two writers. The Windows triggers use Sydney local time;
+check the 2026-10-04 daylight-saving transition receipts before claiming that
+night's run. A separate read-only Lily Scheduler task now prepares a user-facing
+daily report from the Windows receipts and Wiki changes; it never reruns the
+pipeline. Its Connector delivery remains a distinct fact from centre success,
+and notification still depends on HASHI availability. See the independent
+centre's operations and migration decision.
+
 2026-10-02 HASHI4 Browser route 4 source repair: fixed CLI Tool Gateways relay
 through their owning Function Worker and the existing Capability Broker. HERV3
 and CLI browser tools share discovery, permission checks, and task-bound browser
