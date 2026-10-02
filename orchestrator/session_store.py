@@ -5209,6 +5209,34 @@ class SessionStore:
             "attachments": attachments,
         }
 
+    def pending_incremental_telegram_deliveries(
+        self, *, agent_id: str, limit: int = 20
+    ) -> list[dict[str, str]]:
+        """Find this Agent's durable publication tasks needing FC dispatch.
+
+        Expired claims are included so the normal claim path can mark their
+        uncertain external outcome unknown without sending them again.
+        """
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("incremental delivery limit must be between 1 and 100")
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """SELECT t.session_id, s.owner_id, r.request_id, p.event_id
+                   FROM run_deliverable_publications AS p
+                   JOIN runs AS r ON r.run_id=p.run_id
+                   JOIN sessions AS s ON s.session_id=r.session_id
+                   JOIN connector_delivery_tasks AS t ON t.event_id=p.event_id
+                   WHERE s.instance_id=? AND s.agent_id=? AND r.agent_id=?
+                     AND t.session_id=s.session_id AND t.run_id=r.run_id
+                     AND t.connector_id='telegram'
+                     AND (t.state IN ('pending','retry') OR
+                          (t.state='claimed' AND t.lease_expires_at<=?))
+                   ORDER BY t.created_at, t.task_id LIMIT ?""",
+                (self.instance_id, str(agent_id).lower(), str(agent_id).lower(), now, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def run_deliverable_publication(
         self,
         *,

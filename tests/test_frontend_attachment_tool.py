@@ -603,6 +603,118 @@ async def test_incremental_telegram_mirror_dispatches_while_workbench_stays_queu
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("finish_before_dispatch", [False, True])
+async def test_detached_gateway_incremental_telegram_is_delivered_by_worker(
+    tmp_path, monkeypatch, finish_before_dispatch
+):
+    from orchestrator import telegram_delivery_failover
+    from orchestrator.frontend_delivery import freeze_run_delivery_route
+    from orchestrator.frontend_incremental_delivery import (
+        dispatch_pending_telegram_deliverables,
+    )
+
+    async def not_blocked(*_args, **_kwargs):
+        return False
+
+    monkeypatch.setattr(telegram_delivery_failover, "handle_blocked_send", not_blocked)
+    route = freeze_run_delivery_route(
+        message_source_id="session_api",
+        session_surface="workbench",
+        session_channel_key="default",
+        chat_id=7,
+        telegram_requested=True,
+    )
+    store, owner, session, accepted = _running_session(tmp_path, delivery_route=route)
+    part = tmp_path / "detached.txt"
+    part.write_text("available before final", encoding="utf-8")
+    registry = _registry(
+        tmp_path, store, owner, session,
+        allowed_tools=["frontend_publish_deliverable"], runtime=None,
+    )
+    published = await registry.execute(
+        "frontend_publish_deliverable",
+        {"publication_id": "detached-a", "attachments": [{"path": str(part)}]},
+        tool_call_id="detached-call",
+    )
+    assert published.is_error is False, published.output
+    publication = json.loads(published.output)
+    assert next(
+        item for item in publication["deliveries"]
+        if item["connector_id"] == "telegram"
+    )["state"] == "queued"
+    if finish_before_dispatch:
+        store.finish_request(accepted.request_id, success=True, assistant_text="All done")
+    else:
+        assert store.get_run_by_request(accepted.request_id, owner_id=owner)["state"] == "running"
+
+    runtime = _ToolRuntime(tmp_path, store)
+    runtime.name = "another-agent"
+    assert await dispatch_pending_telegram_deliverables(runtime) == 0
+    runtime.name = "agent1"
+    assert await dispatch_pending_telegram_deliverables(runtime) == 1
+    assert len(runtime.app.bot.media) == 1
+    assert runtime.app.bot.media[0]["payload"] == b"available before final"
+    assert await dispatch_pending_telegram_deliverables(runtime) == 0
+    assert len(runtime.app.bot.media) == 1
+    persisted = store.run_deliverable_publication(
+        request_id=accepted.request_id, session_id=session["session_id"],
+        owner_id=owner, agent_id="agent1", publication_id="detached-a",
+    )
+    telegram = next(
+        item for item in persisted["deliveries"] if item["connector_id"] == "telegram"
+    )
+    assert telegram["state"] == "delivered"
+    assert telegram["proof"]
+
+
+@pytest.mark.asyncio
+async def test_worker_marks_expired_incremental_claim_unknown_without_resending(tmp_path):
+    from orchestrator.frontend_delivery import freeze_run_delivery_route
+    from orchestrator.frontend_incremental_delivery import (
+        dispatch_pending_telegram_deliverables,
+    )
+
+    route = freeze_run_delivery_route(
+        message_source_id="telegram", session_surface="telegram",
+        session_channel_key="7", chat_id=7, telegram_requested=False,
+    )
+    store, owner, session, _accepted = _running_session(tmp_path, delivery_route=route)
+    part = tmp_path / "uncertain-worker.txt"
+    part.write_text("one result", encoding="utf-8")
+    registry = _registry(
+        tmp_path, store, owner, session,
+        allowed_tools=["frontend_publish_deliverable"], runtime=None,
+    )
+    published = await registry.execute(
+        "frontend_publish_deliverable",
+        {"publication_id": "worker-uncertain", "attachments": [{"path": str(part)}]},
+        tool_call_id="worker-call",
+    )
+    assert published.is_error is False, published.output
+    result = json.loads(published.output)
+    endpoint_id = result["deliveries"][0]["endpoint_id"]
+    claim = store.claim_delivery_outbox(
+        session_id=session["session_id"], owner_id=owner,
+        worker_id="worker-that-crashed", event_id=result["event_id"],
+        connector_id="telegram", endpoint_id=endpoint_id, limit=1,
+    )
+    assert len(claim) == 1
+    with store._connection() as connection:
+        connection.execute(
+            "UPDATE connector_delivery_tasks SET lease_expires_at=? WHERE task_id=?",
+            ("2000-01-01T00:00:00+00:00", claim[0]["outbox_id"]),
+        )
+    runtime = _ToolRuntime(tmp_path, store)
+    assert await dispatch_pending_telegram_deliverables(runtime) == 0
+    assert runtime.app.bot.media == []
+    publication = store.run_deliverable_publication(
+        request_id="request-frontend-output", session_id=session["session_id"],
+        owner_id=owner, agent_id="agent1", publication_id="worker-uncertain",
+    )
+    assert publication["deliveries"][0]["state"] == "unknown"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("terminal", ["failed", "stopped"])
 async def test_incremental_publication_rejects_stale_executor_and_retains_after_terminal(
     tmp_path, terminal

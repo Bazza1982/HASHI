@@ -2381,49 +2381,19 @@ async def execute_frontend_send_attachments(
 async def _dispatch_incremental_deliverable_telegram(
     store, runtime, context: Mapping[str, Any], publication: Mapping[str, Any]
 ) -> None:
-    """Wake the existing FC Telegram sender for this one committed Event."""
-    if runtime is None or getattr(getattr(runtime, "app", None), "bot", None) is None:
-        return
-    from orchestrator.frontend_connector_registry import endpoint_id_for
-    from orchestrator.frontend_delivery import route_destination
-    from orchestrator.runtime_delivery import dispatch_claimed_telegram_event
+    """Try immediate dispatch when the tool shares a live Worker."""
+    from orchestrator.frontend_incremental_delivery import (
+        dispatch_incremental_telegram_event,
+    )
 
-    run = store.get_run_by_request(
-        str(publication["request_id"]), owner_id=str(context["owner_id"])
-    )
-    destination = route_destination(run.get("delivery_route"), "telegram")
-    if destination is None:
-        return
-    channel_key = str(destination["channel_key"])
-    endpoint_id = endpoint_id_for(
-        "telegram", ingress_transport="telegram", channel_key=channel_key
-    )
-    claims = store.claim_delivery_outbox(
+    await dispatch_incremental_telegram_event(
+        store,
+        runtime,
         session_id=str(publication["session_id"]),
         owner_id=str(context["owner_id"]),
-        worker_id=f"fc-telegram-deliverable-{str(publication['event_id'])[:48]}",
+        request_id=str(publication["request_id"]),
         event_id=str(publication["event_id"]),
-        connector_id="telegram",
-        endpoint_id=endpoint_id,
-        limit=1,
-        lease_seconds=3600,
     )
-    if not claims:
-        return
-    try:
-        await dispatch_claimed_telegram_event(
-            runtime,
-            chat_id=int(channel_key),
-            store=store,
-            claim=claims[0],
-            frontend_owner_id=str(context["owner_id"]),
-            request_id=str(publication["request_id"]),
-            purpose="incremental-deliverable",
-        )
-    except Exception:
-        # The FC claim records unknown/failed evidence; never issue a second
-        # transport send from this tool after an uncertain outcome.
-        return
 
 
 async def execute_frontend_publish_deliverable(

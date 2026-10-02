@@ -42,7 +42,11 @@ For frontend consumption, an incremental Message gets its own stable
 reference, so previous draft/final replacement behavior is preserved. The
 Backend API feed and transcript expose the nonterminal output. The existing
 Telegram FC media sender is awakened for its task during the tool call when
-the live runtime is available. Backend API, Session API, TUI and external
+the live runtime is available. An isolated CLI gateway omits that runtime,
+so the Agent's FC Worker also sweeps its own pending publication tasks and
+dispatches through the same claimed endpoint renderer. The sweep continues
+after a Worker replacement and marks expired claims unknown rather than
+resending. Backend API, Session API, TUI and external
 pull endpoints stay queued until their feed consumer accepts the Event.
 HChat, Remote and Exchange currently claim only terminal events, so their
 incremental media tasks fail explicitly; WhatsApp has no media egress and
@@ -78,9 +82,13 @@ deselected**. Two deselected audio-routing assertions also fail unchanged on
 the HASHI3 base commit; the third is the WSL-only drive-path assertion. The
 protected-Core check, Python compilation and whitespace check passed.
 
-This record is source validation only until the changed Functions are adopted
-on HASHI3 and the versioned live acceptance checks establish A-before-B
-visibility, downloadability, continued generating state, reconnect behavior,
-and per-endpoint receipts in the actual frontend. A source merge alone is not
-live adoption. No live reboot or external Workbench deployment is authorized
-by this decision.
+Barry separately authorized a HASHI3 hot reboot and live test. The first
+adoption kept Core running and activated the changed Workers. In the live Run,
+A appeared in Workbench with its file while the Run was still generating;
+B appeared later, and final output contained neither file again. A and B were
+published 82 seconds apart. Their Telegram endpoint tasks remained pending
+with zero attempts even after final delivery, because the isolated CLI tool
+gateway did not have the Worker runtime needed by the tool's immediate wakeup.
+This is the observed break that prompted the Worker-owned sweep above. The
+Telegram correction needs separate source validation and live adoption before
+claiming the mirror is working; Workbench visibility alone cannot prove it.

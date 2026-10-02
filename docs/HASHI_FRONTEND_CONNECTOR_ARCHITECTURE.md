@@ -389,8 +389,11 @@ Run-bound Message and `assistant.output.available` Event, and enqueues one FC
 task per endpoint from the Run's frozen route. The publication does not settle
 the Run. The Backend API feed can accept the event while the Run is active;
 the transcript exposes the new Message under its own stable `message_ref` so
-multiple deliverables do not collapse into one answer. Telegram can claim and
-send its endpoint task immediately through the existing FC media renderer.
+multiple deliverables do not collapse into one answer. The Agent's FC Worker
+claims pending Telegram publication tasks through the existing media renderer
+while the Run continues, including tasks left by an isolated tool gateway or
+a prior Worker generation. The frozen endpoint and existing claim/receipt
+rules prevent blind resend after an uncertain outcome.
 Backend API, Session API, TUI and external pull endpoints remain queued until
 their feed consumer accepts the Event. A destination without an active-Run
 media consumer is marked failed for this publication without hiding the
