@@ -14,6 +14,15 @@ events such as Okta, captcha, platform policy changes, or final selection.
 The template closes only when the selected rows, unique papers/PDFs, Zotero
 records, notes, search index, and final reconciliation are all accounted for.
 
+## Stage and Selection Boundaries
+
+The Journal Watch SOP controls stage order. Discovery, raw capture,
+deterministic cleanup, and Crossref enrichment do not depend on HASHI chat
+inference; validate the API/Gateway immediately before AI triage. A failure
+blocks only the dependent stage and preserves completed upstream artifacts.
+Retrieval requires the user's explicit `selected_for_ex_portario = Y` marks.
+There is no automatic top-N or top-50 selection.
+
 ## Required Roles
 
 - `orchestrator`: Sakura or the active controller. Owns state, taskboard,
@@ -23,8 +32,9 @@ records, notes, search index, and final reconciliation are all accounted for.
   acquisition, download, Zotero, note, and search-index service steps.
 - `reviewer`: Momo or the approved reviewer agent. Reviews every gate and
   evidence bundle. The reviewer advises; it never owns continuation decisions.
-- `human`: the configured human approver. Handles MFA, captcha, manual access decisions, policy
-  exceptions, final selection, and any approved role reassignment.
+- `human`: handles MFA, captcha, manual access decisions, policy exceptions,
+  final `Y` selection, and any approved role reassignment. Configure the wait
+  route before the stage that needs it; it is not a prerequisite for discovery.
 
 Do not substitute a different librarian or reviewer unless the human explicitly
 approves reassignment and the taskboard records the change.
@@ -33,8 +43,8 @@ approves reassignment and the taskboard records the change.
 
 The loop must record the exact SOP versions or file fingerprints used at start:
 
-- `00_main_library/journal_watch/SOP__Journal_Watch__Library_Human_Navigation_Workflow__v1.md`
-- `00_main_library/ex-portario/SOP__Ex_portario__Library_Fulltext_Download_Workflow__v1.md`
+- `00_main_library/journal_watch/SOP__Journal_Watch__UON_Library_Human_Navigation_Workflow__v1.md`
+- `00_main_library/ex-portario/SOP__Ex_portario__UON_Library_Fulltext_Download_Workflow__v1.md`
 - `00_main_library/ex-portario/PLATFORM_ROUTE_STATUS__Ex_portario__v1.json`
 - `00_main_library/SOP__Okta_Authentication_Service__v1.md`
 
@@ -44,7 +54,8 @@ The loop must record the exact SOP versions or file fingerprints used at start:
 - Journal scope and allowed discovery mode.
 - Output roots for reviewer bundles, manifests, downloaded PDFs, Zotero notes,
   Docling markdown, sectioned markdown, and search DB.
-- Human selection policy, e.g. top-N or explicit selected rows.
+- Human selection: the user explicitly marks each retrieval row
+  `selected_for_ex_portario = Y`; no automatic top-N fallback.
 - Approved platform policy, including paused hosts.
 - Approved librarian and reviewer agent identities.
 - Exit condition, including row coverage and unique-paper coverage.
