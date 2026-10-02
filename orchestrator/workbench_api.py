@@ -404,6 +404,8 @@ class WorkbenchApiServer:
 
         self.app = web.Application(client_max_size=64 * 1024 * 1024,
                                    middlewares=[runtime_admission])
+        from orchestrator.desktop_api import register_desktop_api
+        register_desktop_api(self)
         self.demo_connector = DemoConnector(self)
         self.demo_connector.register(self.app)
         from orchestrator.frontend_live_voice.manager import LiveVoiceManager
@@ -1684,6 +1686,12 @@ class WorkbenchApiServer:
         if not metadata["is_active"]:
             metadata["online"] = False
             metadata["status"] = "inactive"
+        elif runtime is None and agent_row["name"] in getattr(
+            getattr(self.orchestrator, "agent_lifecycle", None),
+            "manually_stopped_agents",
+            (),
+        ):
+            metadata["status"] = "stopped"
         return metadata
 
     def _is_whatsapp_available(self) -> bool:

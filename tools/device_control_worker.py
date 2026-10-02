@@ -20,7 +20,7 @@ import socket
 import tempfile
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -30,6 +30,7 @@ from typing import Any, Callable, Iterator, Mapping
 from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
 
+from orchestrator.desktop_contract import ACTIONS as DESKTOP_ACTIONS, DesktopError
 from orchestrator.file_permissions import tighten_fd_permissions
 from tools.device_paths import resolve_device_path_arguments
 
@@ -42,7 +43,7 @@ REGISTRATION_TTL_SECONDS = 90.0
 HEARTBEAT_INTERVAL_SECONDS = 25.0
 REPLAY_TTL_SECONDS = 300.0
 CAPABILITY_KINDS = frozenset({"browser_control", "computer_control"})
-COMPUTER_ACTIONS = frozenset(
+COMPUTER_ACTIONS = DESKTOP_ACTIONS | frozenset(
     {
         "click",
         "drag",
@@ -304,14 +305,14 @@ class _DeviceLock:
 
     def acquire(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.stream = self.path.open("a+b")
-        self.stream.seek(0)
-        if self.stream.read(1) == b"":
-            self.stream.seek(0)
-            self.stream.write(b"0")
-            self.stream.flush()
-        self.stream.seek(0)
         try:
+            self.stream = self.path.open("a+b")
+            self.stream.seek(0)
+            if self.stream.read(1) == b"":
+                self.stream.seek(0)
+                self.stream.write(b"0")
+                self.stream.flush()
+            self.stream.seek(0)
             if os.name == "nt":
                 import msvcrt
 
@@ -321,8 +322,9 @@ class _DeviceLock:
 
                 fcntl.flock(self.stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
-            self.stream.close()
-            self.stream = None
+            if self.stream is not None:
+                self.stream.close()
+                self.stream = None
             raise DeviceWorkerError(
                 "device/session write lock is held by another worker"
             ) from exc
@@ -372,6 +374,16 @@ class DeviceWorkerState:
     shutdown_callback: Callable[[], None] | None = None
     replay_lock: threading.Lock = field(default_factory=threading.Lock)
     replayed_requests: dict[str, float] = field(default_factory=dict)
+    desktop_controller: Any = None
+    desktop_init_lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def manual_desktop(self):
+        with self.desktop_init_lock:
+            if self.desktop_controller is None:
+                from tools.desktop_session import DesktopController
+                from tools.windows_helper.desktop_capture import NativeDesktop
+                self.desktop_controller = DesktopController(NativeDesktop(), lambda: _DeviceLock(self.lock_path))
+            return self.desktop_controller
 
     @property
     def supported_actions(self) -> frozenset[str]:
@@ -580,6 +592,11 @@ class DeviceWorkerState:
     def cleanup(self, *, reason: str) -> dict[str, Any]:
         if self.capability_kind != "computer_control" or os.name != "nt":
             return {"ok": True, "reason": str(reason), "input_reset": False}
+        if self.desktop_controller is not None:
+            if reason == "worker-stopped":
+                self.desktop_controller.close()
+            elif self.desktop_controller.protects_input():
+                return {"ok": True, "reason": reason, "input_reset": False}
         from tools.windows_helper import win32
 
         result = win32.reset_input_state()
@@ -656,8 +673,12 @@ def _optional_device_lock(
     ):
         yield
         return
-    with _DeviceLock(state.lock_path):
-        yield
+    desktop = state.desktop_controller
+    with desktop.guard if desktop is not None else nullcontext():
+        if desktop is not None and desktop.protects_input():
+            raise DeviceWorkerError("device/session write lock is held by manual desktop control")
+        with _DeviceLock(state.lock_path):
+            yield
 
 
 class DeviceWorkerServer(ThreadingHTTPServer):
@@ -772,6 +793,18 @@ class DeviceWorkerRequestHandler(BaseHTTPRequestHandler):
             state.mark_request(request_id)
             state.validate_identity(payload.get("identity"))
             action = str(payload.get("action") or "").strip().casefold()
+            if action in DESKTOP_ACTIONS:
+                # Manual actors use a separate typed ingress, not fabricated Agent
+                # IDs. Only the existing Broker knows the authenticated worker key.
+                if state.capability_kind != "computer_control" or payload.get("worker_generation") != _generation_id(state.capability_kind):
+                    raise DesktopError("desktop_target_changed", 409)
+                actor = payload.get("actor") or {}
+                if actor.get("type") != "user" or set(actor) != {"type", "id"}:
+                    raise DesktopError("desktop_actor_invalid", 403)
+                result = state.manual_desktop().handle(action, payload.get("args"), actor["id"], payload.get("desktop_session_id"))
+                self._write(HTTPStatus.OK, {"ok": True, "identity": state.identity,
+                    "worker_generation": _generation_id(state.capability_kind), "request_id": request_id, "result": result})
+                return
             state.validate_lease(action, payload)
             args = payload.get("args")
             if not isinstance(args, Mapping):
@@ -799,6 +832,14 @@ class DeviceWorkerRequestHandler(BaseHTTPRequestHandler):
                 },
             )
         except Exception as exc:
+            if action in DESKTOP_ACTIONS:
+                # Typed errors are RPC envelopes; HTTP ingress maps the status.
+                # Never leak frame/text/OS exception detail or globally reset input.
+                self._write(HTTPStatus.OK, {"ok": False, "identity": state.identity,
+                    "worker_generation": _generation_id(state.capability_kind),
+                    "error_code": getattr(exc, "code", "desktop_worker_failed"),
+                    "status": getattr(exc, "status", 503)})
+                return
             if state.capability_kind == "computer_control":
                 try:
                     state.cleanup(reason="action-failed")

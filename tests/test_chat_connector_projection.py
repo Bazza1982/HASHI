@@ -14,6 +14,7 @@ from orchestrator.chat_transcript_projection import (
 )
 from orchestrator.her_message_router import HERMessageRouter
 from orchestrator.request_activity import RequestActivityStore
+from orchestrator import runtime_session
 from orchestrator.session_store import IdempotencyConflict, SessionStore
 from orchestrator.workbench_api import WorkbenchApiServer
 
@@ -775,6 +776,58 @@ def test_projection_message_cursor_streams_presentation_only_messages(tmp_path: 
     ]
     assert polled["messages"][0]["history_eligible"] is False
     assert polled["message_cursor"] > snapshot["message_cursor"]
+
+
+def test_completed_agent_activity_result_reaches_workbench_without_reentering_phone(
+    tmp_path: Path,
+):
+    store = SessionStore(tmp_path / "activity-projection.sqlite", instance_id="HASHI1")
+    owner = "user:7"
+    primary = store.resolve_primary_session(owner_id=owner, agent_id="a", establish=True)
+    activity = store.ensure_agent_activity_session(owner_id=owner, agent_id="a")
+    runtime = SimpleNamespace(
+        name="a",
+        session_store=store,
+        global_config=SimpleNamespace(authorized_id=7, instance_id="HASHI1"),
+        config=SimpleNamespace(active_backend="codex-cli"),
+    )
+    call_id = "call-during-cron"
+    with store._lock, store._connection() as connection:
+        connection.execute(
+            """INSERT INTO live_calls(
+                call_id, owner_id, session_id, agent_id, instance_id, instance_generation,
+                context_generation, call_epoch, provider_session_id, phase, controller_lease,
+                lease_expiry, started_at, max_ends_at
+            ) VALUES (?, ?, ?, 'a', 'HASHI1', '1', 1, 1, 'provider1', 'active',
+                      'lease1', '2099-01-01T00:00:00Z', '2026-10-02T00:00:00Z',
+                      '2099-01-01T00:30:00Z')""",
+            (call_id, owner, primary["session_id"]),
+        )
+    snapshot = build_chat_projection(store, session=primary, owner_id=owner)
+    accepted = store.accept_run(
+        session_id=activity["session_id"], owner_id=owner, agent_id="a",
+        request_id="cron-report-1", text="private scheduled instructions",
+        source="scheduler", idempotency_key="cron-report-1",
+    )
+    store.mark_request_running(accepted.request_id, worker_id="worker")
+    terminal = {"success": True, "text": "Daily report is complete."}
+    runtime_session.finish_request_from_listener(runtime, accepted.request_id, terminal)
+    runtime_session.finish_request_from_listener(runtime, accepted.request_id, terminal)
+
+    polled = build_chat_projection(
+        store, session=store.get_session(primary["session_id"]), owner_id=owner,
+        offset=snapshot["offset"], after_message_ordinal=snapshot["message_cursor"],
+    )
+    results = [message for message in polled["messages"]
+               if message.get("source") == "agent_activity.result"]
+    assert [message["text"] for message in results] == ["Daily report is complete."]
+    assert results[0]["history_eligible"] is False
+    assert "private scheduled instructions" not in str(polled)
+    assert [message["source_message_id"] for message in
+            store.pending_live_foreground_messages(call_id)] == [
+        accepted.message_id,
+        store.get_run_by_request(accepted.request_id, owner_id=owner)["final_message_id"]
+    ]
 
 
 def test_agent_history_projection_keeps_old_command_text_but_not_live_controls(

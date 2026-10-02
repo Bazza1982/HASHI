@@ -26,6 +26,7 @@ class QueuedRequest:
     # older provider-isolation policy and is not a user Session identifier.
     session_id: str | None = None
     run_id: str | None = None
+    fencing_token: int | None = None
     message_id: str | None = None
     context_generation: int = 1
     owner_id: str | None = None

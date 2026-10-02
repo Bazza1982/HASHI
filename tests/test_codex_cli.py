@@ -6,6 +6,7 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -327,6 +328,28 @@ async def test_codex_mcp_inventory_starts_in_an_isolated_session(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("standalone_names", [[], ["github", "local-files"]])
+async def test_codex_mcp_inventory_excludes_disabled_plugin_servers(
+    tmp_path, monkeypatch, standalone_names
+):
+    adapter = _build_adapter(tmp_path)
+
+    async def create_subprocess(*argv, **kwargs):
+        names = list(standalone_names)
+        if not any(
+            argv[index:index + 2] == ("--disable", "plugins")
+            for index in range(len(argv) - 1)
+        ):
+            names.append("code-review")
+        return _CompletedProc(
+            stdout=json.dumps([{"name": name} for name in names]).encode()
+        )
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+    assert await adapter._discover_mcp_servers() == tuple(sorted(standalone_names))
+
+
+@pytest.mark.asyncio
 async def test_codex_mcp_inventory_retries_one_timeout_without_stale_fallback(
     tmp_path, monkeypatch
 ):
@@ -501,6 +524,121 @@ def test_codex_accepts_completed_turn_even_if_process_needs_forced_exit(tmp_path
     assert killed_reasons == ["turn-completed-grace-expired:req-0001"]
 
 
+@pytest.mark.asyncio
+async def test_codex_usage_reports_only_current_turn_after_resume(
+    tmp_path, monkeypatch,
+):
+    def completed_proc(total_input, total_cached, total_output, total_reasoning):
+        proc = _HangingProc([
+            json.dumps({"type": "thread.started", "thread_id": "thread-1"}),
+            json.dumps({
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": "done"},
+            }),
+            json.dumps({"type": "turn.completed", "usage": {
+                "input_tokens": total_input,
+                "cached_input_tokens": total_cached,
+                "output_tokens": total_output,
+                "reasoning_output_tokens": total_reasoning,
+            }}),
+        ])
+        proc.finish(0)
+        return proc
+
+    pending = [
+        completed_proc(1000, 400, 100, 20),
+        completed_proc(1600, 900, 160, 35),
+        completed_proc(1800, 1000, 180, 40),
+    ]
+
+    async def create_subprocess(*_args, **_kwargs):
+        return pending.pop(0)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+    adapter = _build_adapter(tmp_path, model="gpt-6-sol")
+    adapter.set_session_mode(True)
+    first = await adapter.generate_response("first", "req-first")
+    second = await adapter.generate_response("second", "req-second")
+    resumed = _build_adapter(tmp_path, model="gpt-6-sol")
+    resumed.set_session_mode(True)
+    resumed._session_id = "thread-1"
+    third = await resumed.generate_response("third", "req-third")
+
+    assert first.usage.input_tokens == 1000
+    assert (second.usage.input_tokens, second.usage.prompt_cache_hit_tokens,
+            second.usage.output_tokens, second.usage.thinking_tokens) == (
+        600, 500, 60, 15,
+    )
+    assert (third.usage.input_tokens, third.usage.prompt_cache_hit_tokens,
+            third.usage.output_tokens, third.usage.thinking_tokens) == (
+        200, 100, 20, 5,
+    )
+
+
+@pytest.mark.asyncio
+async def test_codex_existing_thread_uses_logged_baseline(tmp_path, monkeypatch):
+    (tmp_path / "codex_exec_events.jsonl").write_text(
+        "\n".join(json.dumps(event) for event in [
+            {"type": "thread.started", "thread_id": "old-thread"},
+            {"type": "turn.completed", "usage": {
+                "input_tokens": 1000, "cached_input_tokens": 800,
+                "output_tokens": 100, "reasoning_output_tokens": 40,
+            }},
+        ]) + "\n", encoding="utf-8",
+    )
+    proc = _HangingProc([
+        json.dumps({"type": "thread.started", "thread_id": "old-thread"}),
+        json.dumps({"type": "item.completed", "item": {
+            "type": "agent_message", "text": "done",
+        }}),
+        json.dumps({"type": "turn.completed", "usage": {
+            "input_tokens": 1350, "cached_input_tokens": 1100,
+            "output_tokens": 140, "reasoning_output_tokens": 55,
+        }}),
+    ])
+    proc.finish(0)
+
+    async def create_subprocess(*_args, **_kwargs):
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+    adapter = _build_adapter(tmp_path)
+    adapter.set_session_mode(True)
+    adapter._session_id = "old-thread"
+    response = await adapter.generate_response("continue", "req-old-thread")
+
+    assert (response.usage.input_tokens, response.usage.prompt_cache_hit_tokens,
+            response.usage.prompt_cache_miss_tokens, response.usage.output_tokens,
+            response.usage.thinking_tokens) == (350, 300, 50, 40, 15)
+
+
+@pytest.mark.asyncio
+async def test_codex_unobserved_resume_does_not_charge_old_thread(tmp_path, monkeypatch):
+    proc = _HangingProc([
+        json.dumps({"type": "thread.started", "thread_id": "unseen-thread"}),
+        json.dumps({"type": "item.completed", "item": {
+            "type": "agent_message", "text": "done",
+        }}),
+        json.dumps({"type": "turn.completed", "usage": {
+            "input_tokens": 100_000, "cached_input_tokens": 90_000,
+            "output_tokens": 1000, "reasoning_output_tokens": 500,
+        }}),
+    ])
+    proc.finish(0)
+
+    async def create_subprocess(*_args, **_kwargs):
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+    adapter = _build_adapter(tmp_path)
+    adapter.set_session_mode(True)
+    adapter._session_id = "unseen-thread"
+    response = await adapter.generate_response("continue", "req-unseen")
+
+    assert response.is_success is True
+    assert response.usage is None
+
+
 def test_codex_completed_turn_does_not_wait_for_inherited_pipe_eof(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -632,7 +770,10 @@ def test_codex_nonzero_exit_preserves_last_agent_message(tmp_path, monkeypatch: 
     response = asyncio.run(adapter.generate_response("hello", "req-0004"))
 
     assert response.is_success is False
-    assert "non-zero status" in (response.error or "")
+    assert response.error_code == "CODEX_PROCESS_EXIT_UNCONFIRMED"
+    assert "exit code 1" in (response.error or "")
+    assert response.error_retryable is False
+    assert response.side_effects_possible is True
     assert "Latest progress before stop." in (response.error or "")
     event_log = (tmp_path / "codex_exec_events.jsonl").read_text()
     assert "Latest progress before stop." not in event_log
@@ -643,6 +784,26 @@ def test_codex_nonzero_exit_preserves_last_agent_message(tmp_path, monkeypatch: 
     )
     assert logged_message["redacted"] is True
     assert logged_message["chars"] == len("Latest progress before stop.")
+
+
+@pytest.mark.asyncio
+async def test_force_kill_refuses_current_process_identity(tmp_path, monkeypatch):
+    adapter = _build_adapter(tmp_path)
+    proc = _CompletedProc(pid=os.getpid())
+    proc.returncode = None
+    taskkills = []
+
+    def fake_taskkill(argv, **_kwargs):
+        taskkills.append(argv)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("adapters.base.subprocess.run", fake_taskkill)
+
+    killed = await adapter.force_kill_process_tree(proc, reason="identity-check")
+
+    assert killed is False
+    assert proc.killed is False
+    assert taskkills == []
 
 
 def test_codex_turn_failed_preserves_exact_typed_capacity_error_and_activity(

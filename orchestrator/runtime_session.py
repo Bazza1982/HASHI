@@ -1193,7 +1193,7 @@ def mark_running(runtime: Any, item: Any) -> None:
             metadata[MESSAGE_CONTEXT_METADATA_KEY] = message_context
         metadata.pop(PRIVATE_AUTHORIZATION_RESULTS_METADATA_KEY, None)
         item.request_metadata = metadata
-        ensure_store(runtime).mark_request_running(
+        item.fencing_token = ensure_store(runtime).mark_request_running(
             item.request_id,
             worker_id=f"{getattr(runtime.global_config, 'instance_id', 'HASHI')}:{runtime.name}",
             message_context=(
@@ -1214,6 +1214,7 @@ def finish_request_from_listener(runtime: Any, request_id: str, payload: Mapping
             for key in (
                 "error_code", "error_retryable", "http_status",
                 "provider_request_id", "retry_after_s", "side_effects_possible",
+                "effect_reconciliation",
             )
             if key in payload
         }
@@ -1221,7 +1222,7 @@ def finish_request_from_listener(runtime: Any, request_id: str, payload: Mapping
         session_dir = getattr(runtime, "session_dir", None)
         if session_dir is not None:
             failure_context["diagnostic_log"] = str(Path(session_dir) / "errors.log")
-    store.finish_request(
+    completed_run = store.finish_request(
         request_id,
         success=success,
         assistant_text=str(payload.get("text") or "") or None,
@@ -1240,6 +1241,21 @@ def finish_request_from_listener(runtime: Any, request_id: str, payload: Mapping
             else "failed"
         ),
     )
+    if completed_run is not None and completed_run.get("state") == "completed":
+        try:
+            from orchestrator.agent_activity_visibility import project_completed_result
+
+            project_completed_result(
+                store,
+                run=completed_run,
+                owner_id=owner_id(runtime),
+                agent_id=runtime.name,
+            )
+        except Exception as exc:  # presentation cannot change execution outcome
+            logger.warning(
+                "Agent activity Workbench projection failed for %s (%s)",
+                request_id, type(exc).__name__,
+            )
     capture_backend_binding(runtime, request_id=request_id)
 
 
@@ -1303,6 +1319,19 @@ def telegram_delivery_state_for_update(
     update: Any,
 ) -> tuple[str | None, bool]:
     """Return confirmed assistant delivery state for the target Telegram chat."""
+    texts, tracking_started = telegram_delivery_texts_for_update(
+        runtime, update, limit=1
+    )
+    return (texts[0] if texts else None), tracking_started
+
+
+def telegram_delivery_texts_for_update(
+    runtime: Any,
+    update: Any,
+    *,
+    limit: int = 4,
+) -> tuple[list[str], bool]:
+    """Return recent delivered final replies on the current Telegram route."""
 
     (
         update_surface,
@@ -1315,7 +1344,7 @@ def telegram_delivery_state_for_update(
         query = getattr(update, "callback_query", None)
         chat_id = getattr(getattr(query, "message", None), "chat_id", None)
     if chat_id is None:
-        return None, False
+        return [], False
     surface = "telegram"
     channel_key = str(chat_id)
     if update_surface != "telegram":
@@ -1329,10 +1358,11 @@ def telegram_delivery_state_for_update(
     )
     store = ensure_store(runtime)
     return (
-        store.latest_delivered_assistant_text(
+        store.recent_delivered_assistant_texts(
             session["session_id"],
             surface=surface,
             channel_key=channel_key,
+            limit=limit,
         ),
         store.has_assistant_delivery_outcome(
             session["session_id"],
@@ -2047,4 +2077,5 @@ __all__ = [
     "session_workzone_state",
     "start_automatic_promotion",
     "telegram_delivery_state_for_update",
+    "telegram_delivery_texts_for_update",
 ]

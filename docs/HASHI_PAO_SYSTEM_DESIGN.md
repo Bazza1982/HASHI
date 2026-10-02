@@ -9,6 +9,10 @@
 
 ## 1. Definition
 
+Codex MCP isolation inventories standalone servers with plugins disabled, matching
+both CLI execution and the app-server bridge. Plugin-provided transports must
+not become enabled-only top-level MCP overrides after their plugin is disabled.
+
 Provider-Agnostic Orchestration (PAO) is HASHI's outer control plane. It turns
 an authenticated user or system request into a governed HASHI Run, selects an
 Engine (Harness) Provider, supplies that Engine with authoritative PCM and
@@ -54,6 +58,15 @@ Worker start contract accepts it. If startup fails, the created Agent remains
 available for recovery but is written back inactive through the revisioned
 configuration owner; the caller receives a lifecycle failure rather than a
 false ready result. Configured, active, and running remain distinct states.
+
+A successful user-directed Agent stop records a PAO lifecycle marker in the
+shared Functions handoff. The Backend API projects that configured-but-stopped
+Agent as `status=stopped`, distinct from an unexpected offline Worker and from
+`is_active=false`. Starting the Agent clears the marker. Shared Functions
+replacement and recovery carry the marker with the running-Agent topology;
+normal instance startup still follows configured active Agents. External
+frontends may use the status to hide stopped Agents without changing durable
+configuration or treating a failed stop as successful.
 
 The stable process kernel belongs to the Core engineering layer. The Agent and
 runtime policies operated through that kernel belong functionally to PAO.
@@ -373,6 +386,12 @@ declaration still replaces the absent-value default, and a backend row with
 `tools.enabled=false` still disables HASHI tools. The wildcard grants registry
 permission only; Engine support, Workzone roots, device availability,
 stage-specific policy, and per-invocation authority remain independent gates.
+An isolated Tool route may not advertise a registered Browser/Computer Worker
+from the capability Broker unless it can invoke that same Broker route. Without
+the matching executor it fails closed with `broker_executor_unbound`; a
+standalone diagnostic Tool Registry with no Broker snapshot may still use its
+explicit local executor. Catalogue visibility and actual dispatch must name
+the same execution source.
 
 ## 3. Non-responsibilities
 
@@ -608,6 +627,22 @@ ledger and BackgroundJob receipts. It reports Provider request/response IDs,
 wire references, observed writes/effects, final state, and whether safe retry
 evidence is present, absent, or unknown. It never retries work, changes HERV3
 control flow, or makes diagnostic persistence a completion condition.
+
+On HASHI3, `/stop` also persists an Agent-wide autonomous-wakeup fence in the
+existing workspace state. Scheduler, nudge, delayed-message, startup, and
+background-completion admissions are blocked until a later explicit user
+request resumes new admissions. Completed background outcomes remain in job
+records and are not automatically replayed. The stop generation invalidates in-flight admissions
+that raced with `/stop`; another Session's already-running user request remains
+untouched. Delayed records are preserved, not silently consumed. A failed
+fence-state read fails closed for new admissions.
+
+Terminal failures with possible tool effects now attach a bounded reconciliation
+to the existing Session failure and terminal diagnostic projection. A file
+write is called confirmed only when its Tool receipt includes a readback;
+other tool actions and untyped CLI exits remain uncertain. User error text
+separates those categories and warns against blind replay. Audit-log truncation
+is disclosed; absence of an audit row never proves absence of an effect.
 
 ### HASHI1 automatic debug-reporting trial (2026-09-13)
 

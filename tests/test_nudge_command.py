@@ -241,7 +241,7 @@ async def test_scheduler_tick_releases_enterprise_lease_after_work(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_scheduler_skips_stale_missed_cron_and_notifies(tmp_path):
+async def test_scheduler_asks_before_replaying_stale_missed_cron(tmp_path):
     tasks_path = tmp_path / "tasks.json"
     tasks_path.write_text(
         json.dumps(
@@ -277,10 +277,13 @@ async def test_scheduler_skips_stale_missed_cron_and_notifies(tmp_path):
     finally:
         monkeypatch.undo()
 
-    assert runtime.enqueued == []
-    assert len(runtime.notices) == 1
-    assert "1 task(s) missed 1 trigger(s)" in runtime.notices[0]["text"]
-    assert "run stale task" in runtime.notices[0]["text"]
+    assert len(runtime.enqueued) == 1
+    _request_id, question = runtime.enqueued[0]
+    assert question["source"] == "scheduler:recovery-conversation"
+    assert question["scheduler_context"]["kind"] == "recovery_decision"
+    assert "run stale task" in question["prompt"]
+    assert "Do not resolve, skip, or rerun this batch in this turn" in question["prompt"]
+    assert runtime.notices == []
     assert scheduler.state["missed_crons"]["daily-old"]["agent"] == "zelda"
 
 

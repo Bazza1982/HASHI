@@ -25,6 +25,7 @@ class AgentLifecycleManager:
 
     def __init__(self, kernel):
         self.kernel = kernel
+        self.manually_stopped_agents: set[str] = set()
 
     async def start_agent(
         self,
@@ -88,6 +89,7 @@ class AgentLifecycleManager:
                         await handle.client.shutdown(force=True)
                         return False, f"Agent '{agent_name}' started concurrently."
                     self.kernel.runtimes.append(handle)
+                    self.manually_stopped_agents.discard(agent_name)
                     self.kernel.function_workers.publish_generation_state()
 
                 if handle.telegram_connected:
@@ -98,7 +100,7 @@ class AgentLifecycleManager:
                         await self.kernel.function_workers.start_telegram_ingress(
                             agent_name,
                             token,
-                            drop_pending_updates=True,
+                            drop_pending_updates=False,
                         )
                     except Exception as exc:
                         bridge_logger.warning(
@@ -208,6 +210,16 @@ class AgentLifecycleManager:
             await runtime.close_route(f"Agent {agent_name!r} was stopped")
             await self.kernel.function_workers.broadcast_topology()
             await client.shutdown(force=True)
+            if reason in {"manual-stop", "worker-command"}:
+                self.manually_stopped_agents.add(agent_name)
+            from orchestrator import runtime_handoff
+
+            try:
+                runtime_handoff.persist(self.kernel)
+            except Exception:
+                bridge_logger.exception(
+                    "Could not checkpoint manually stopped agent %s", agent_name
+                )
             main_logger.info("Agent '%s' stopped.", agent_name)
             bridge_logger.info(
                 "Agent '%s' Function Worker stopped (reason=%s)",

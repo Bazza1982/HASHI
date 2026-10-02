@@ -34,6 +34,7 @@ import socket
 import subprocess
 import time
 import uuid
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
 from urllib import request as urllib_request
@@ -155,6 +156,7 @@ _WORKBENCH_GATEWAY_RESPONSE_HEADERS = frozenset(
         "content-type",
         "etag",
         "last-modified",
+        "x-desktop-meta",
     }
 )
 
@@ -1954,6 +1956,33 @@ def _validate_workbench_gateway_path(api_path: str) -> str:
     return f"/api/{value}"
 
 
+@lru_cache(maxsize=8)
+def _desktop_workbench_host(instance_id: str, port: int) -> str:
+    """Pick the local API before sending a desktop request that cannot be replayed."""
+
+    for host in local_http_hosts():
+        health_url = local_http_url(port, "/api/health", host=host)
+        try:
+            request = urllib_request.Request(health_url, method="GET")
+            with urllib_request.urlopen(request, timeout=1.0) as response:
+                if response.status != 200:
+                    continue
+                raw = response.read(8193)
+            if len(raw) > 8192:
+                continue
+            health = json.loads(raw)
+        except (URLError, TimeoutError, OSError, ValueError):
+            continue
+        if (
+            isinstance(health, dict)
+            and health.get("ok") is True
+            and health.get("instance_id") == instance_id
+            and health.get("workbench_port") == port
+        ):
+            return host
+    raise ConnectionError("local Workbench API is unavailable")
+
+
 def _forward_workbench_gateway_request(
     *,
     method: str,
@@ -1982,8 +2011,14 @@ def _forward_workbench_gateway_request(
         # token is injected only on the loopback Workbench hop.
         headers["X-Workbench-Token"] = admin_token
 
+    desktop_request = upstream_path.split("?", 1)[0].startswith("/api/v1/desktop/")
+    hosts = (
+        (_desktop_workbench_host(str(_instance_info.get("instance_id") or ""), _workbench_port),)
+        if desktop_request
+        else local_http_hosts()
+    )
     last_error: Exception | None = None
-    for host in local_http_hosts():
+    for host in hosts:
         url = local_http_url(_workbench_port, upstream_path, host=host)
         request_data = body_bytes if normalized_method != "GET" else None
         upstream = urllib_request.Request(
@@ -2012,6 +2047,13 @@ def _forward_workbench_gateway_request(
             return exc.code, exc.read(), response_headers
         except (URLError, TimeoutError, OSError) as exc:
             last_error = exc
+            # A lost desktop input response is an unknown outcome, not permission
+            # to replay a click/text against a fallback loopback address.
+            if desktop_request:
+                # A later request may discover a replacement listener. Never
+                # replay this request when its outcome is uncertain.
+                _desktop_workbench_host.cache_clear()
+                break
             continue
     raise ConnectionError(str(last_error or "local Workbench API is unavailable"))
 
@@ -2307,6 +2349,7 @@ def create_app(
     _protocol_manager = protocol_manager
     _exchange_transport = exchange_transport
     _workbench_port = workbench_port
+    _desktop_workbench_host.cache_clear()
     _hashi_root = hashi_root
     _control_hashi_root = control_hashi_root or hashi_root
     _attachment_store = AttachmentStore(

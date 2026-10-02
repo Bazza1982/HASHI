@@ -84,6 +84,22 @@ async def test_agents_can_include_inactive_for_authenticated_workbench_gateway(t
     assert agents[0]["status"] == "inactive"
 
 
+def test_manual_stop_is_projected_separately_from_unexpected_offline(tmp_path):
+    orchestrator = SimpleNamespace(
+        agent_lifecycle=SimpleNamespace(manually_stopped_agents={"lily"})
+    )
+    server = _server(tmp_path, active=True, orchestrator=orchestrator)
+    row = _config(True)["agents"][0]
+
+    stopped = server._metadata_for_agent(row, None)
+    assert stopped["status"] == "stopped"
+    assert stopped["is_active"] is True
+    assert stopped["online"] is False
+
+    orchestrator.agent_lifecycle.manually_stopped_agents.clear()
+    assert server._metadata_for_agent(row, None)["status"] == "offline"
+
+
 @pytest.mark.asyncio
 async def test_agent_metadata_update_normalizes_config_encoding_and_updates_values(tmp_path):
     server = _server(tmp_path, active=False)
@@ -378,8 +394,9 @@ async def test_add_agent_api_persists_her_orchestration_effort(tmp_path):
     row = next(item for item in stored["agents"] if item["name"] == "strategist")
     assert row["allowed_backends"][0]["engine"] == "her-v2"
     assert row["allowed_backends"][0]["effort"] == "low"
-    assert set(row["allowed_backends"][0]["her_v2"]["profiles"]) == {
-        "lightweight", "triage", "premium", "reviewer", "orchestrator"
+    assert row["allowed_backends"][0]["her_v2"]["main"] == {
+        "provider": "hashi-api",
+        "model": "gpt-5.6-sol",
     }
 
 

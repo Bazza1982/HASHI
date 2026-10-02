@@ -34,8 +34,9 @@ def _update():
 
 
 @pytest.mark.asyncio
-async def test_restart_defaults_to_own_instance_remote(monkeypatch):
+async def test_restart_defaults_to_own_instance_remote(monkeypatch, tmp_path):
     runtime = _Runtime()
+    runtime.global_config.bridge_home = tmp_path / "hashi3-runtime"
     observed = {}
     provider = {
         "kind": "local_remote",
@@ -77,7 +78,7 @@ async def test_restart_defaults_to_own_instance_remote(monkeypatch):
     assert observed["chat_id"] == 777
     assert observed["provider"] is provider
     assert observed["provider_instance_id"] == "HASHI3"
-    assert observed["provider_hashi_root"] == Path("C:/hashi3-runtime")
+    assert observed["provider_hashi_root"] == runtime.global_config.bridge_home
     assert observed["kwargs"]["request_source"] == "telegram"
     assert runtime.messages == [
         "🔄 Restarting HASHI3. You'll be notified when it's back online."

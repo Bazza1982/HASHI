@@ -196,6 +196,8 @@ def _canonical_projection_row(
             else "message"
         )
     message_ref = f"run:{run_id}:{role}" if run_id else f"message:{message_id}"
+    if role == "assistant" and kind == "deliverable":
+        message_ref = f"message:{message_id}"
     if command_ui is not None:
         message_ref = "command-ui:" + command_ui["menu_id"]
     row = {

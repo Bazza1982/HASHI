@@ -1062,6 +1062,7 @@ def begin_queue_item(runtime, item) -> QueueItemStart:
         "deliver_to_telegram": bool(item.deliver_to_telegram),
         "hashi_session_id": getattr(item, "session_id", None),
         "hashi_run_id": getattr(item, "run_id", None),
+        "hashi_fencing_token": getattr(item, "fencing_token", None),
         "hashi_message_id": getattr(item, "message_id", None),
         "context_generation": int(getattr(item, "context_generation", 1) or 1),
         "owner_id": getattr(item, "owner_id", None),
@@ -4003,6 +4004,47 @@ async def handle_backend_error(
                 default=str,
             ),
         )
+    effect_reconciliation: dict[str, Any] | None = None
+    from orchestrator.request_diagnostics import build_user_effect_reconciliation
+
+    try:
+        backend = getattr(getattr(runtime, "backend_manager", None), "current_backend", None)
+        registry = getattr(backend, "tool_registry", None)
+        tool_workspace = getattr(registry, "workspace_dir", None)
+        manager = getattr(runtime, "background_job_manager", None) or getattr(
+            getattr(runtime, "orchestrator", None), "background_job_manager", None
+        )
+        jobs = await asyncio.to_thread(manager.list, limit=50) if manager is not None else ()
+        effect_reconciliation = await asyncio.to_thread(
+            build_user_effect_reconciliation,
+            workspace_dir=runtime.workspace_dir,
+            request_id=item.request_id,
+            tool_call_count=int(failure_fields.get("tool_call_count") or 0),
+            side_effects_possible=bool(failure_fields.get("side_effects_possible")),
+            additional_workspaces=((tool_workspace,) if tool_workspace else ()),
+            background_jobs=jobs,
+        )
+        if not (
+            effect_reconciliation["observed_tool_count"]
+            or effect_reconciliation["unverified_action_count"]
+            or effect_reconciliation["completed_background_job_count"]
+            or effect_reconciliation["evidence_limited"]
+        ):
+            effect_reconciliation = None
+    except Exception as exc:
+        runtime.logger.warning(
+            "Effect reconciliation unavailable for %s (%s)",
+            item.request_id,
+            type(exc).__name__,
+        )
+        if failure_fields.get("side_effects_possible") or failure_fields.get("tool_call_count"):
+            effect_reconciliation = {
+                "confirmed_write_count": 0,
+                "observed_tool_count": int(failure_fields.get("tool_call_count") or 0),
+                "unverified_action_count": max(1, int(failure_fields.get("tool_call_count") or 0)),
+                "completed_background_job_count": 0,
+                "evidence_limited": True,
+            }
     if runtime._should_buffer_during_transfer(item.request_id):
         runtime._record_suppressed_transfer_result(item, success=False, error=err_msg)
     await runtime._notify_request_listeners(
@@ -4015,6 +4057,7 @@ async def handle_backend_error(
             "source": item.source,
             "summary": item.summary,
             **failure_fields,
+            **({"effect_reconciliation": effect_reconciliation} if effect_reconciliation else {}),
             **diagnostic_fields,
             **request_context_warning_fields(runtime, item.request_id),
         },
@@ -4060,7 +4103,10 @@ async def handle_backend_error(
         text=err_msg,
         request_id=item.request_id,
         purpose="error",
-        error_context=failure_fields,
+        error_context={
+            **failure_fields,
+            **({"effect_reconciliation": effect_reconciliation} if effect_reconciliation else {}),
+        },
         frontend_outbox=True,
     )
     total_elapsed_s = (

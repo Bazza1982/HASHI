@@ -445,6 +445,7 @@ _CONNECTORS: tuple[dict[str, Any], ...] = (
         "class": "messaging",
         "ingress": ["message", "command", "callback", "media", "voice"],
         "egress": ["text", "media", "voice", "command_result"],
+        "running_media_delivery": "push",
         "canonical_feed": "persistent_session_events",
         "customizations": (
             *_TELEGRAM_PRESENTATION_CUSTOMIZATIONS,
@@ -456,6 +457,7 @@ _CONNECTORS: tuple[dict[str, Any], ...] = (
         "class": "local_ui",
         "ingress": ["message", "command", "media", "voice"],
         "egress": ["text", "media", "voice", "status", "approval"],
+        "running_media_delivery": "pull",
         "canonical_feed": "persistent_session_events",
         "customizations": _TUI_COMMAND_CUSTOMIZATIONS,
     },
@@ -464,6 +466,7 @@ _CONNECTORS: tuple[dict[str, Any], ...] = (
         "class": "api",
         "ingress": ["message", "command", "media"],
         "egress": ["text", "media", "status", "approval"],
+        "running_media_delivery": "pull",
         "canonical_feed": "persistent_session_events",
         "customizations": _TERMINAL_LOCAL_COMMAND_CUSTOMIZATIONS,
     },
@@ -472,6 +475,7 @@ _CONNECTORS: tuple[dict[str, Any], ...] = (
         "class": "api",
         "ingress": ["message", "command", "media", "voice"],
         "egress": ["text", "media", "voice", "status", "approval"],
+        "running_media_delivery": "pull",
         "canonical_feed": "persistent_session_events",
         "customizations": _TERMINAL_LOCAL_COMMAND_CUSTOMIZATIONS,
     },
@@ -515,6 +519,7 @@ _CONNECTORS: tuple[dict[str, Any], ...] = (
         "class": "external_client",
         "ingress": ["message", "command", "media"],
         "egress": ["text", "media", "status", "approval"],
+        "running_media_delivery": "pull",
         "canonical_feed": "persistent_session_events",
         "customizations": _TERMINAL_LOCAL_COMMAND_CUSTOMIZATIONS,
     },
@@ -944,6 +949,15 @@ def get_connector_capabilities(
         "health": runtime["health"] if endpoint_registered else "unobserved",
         "generation": runtime["generation"],
     }
+
+
+def supports_running_media_delivery(connector_id: str) -> bool:
+    """Whether this Connector has a sender or feed consumer during a Run."""
+    descriptor = _descriptor(str(connector_id or "").strip().casefold())
+    return (
+        "media" in descriptor.get("egress", ())
+        and descriptor.get("running_media_delivery") in {"push", "pull"}
+    )
 
 
 def connector_registry_snapshot() -> dict[str, Any]:

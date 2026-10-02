@@ -363,7 +363,7 @@ class SessionStore:
     per-Session working files are derived state used by Memory+ and Compact.
     """
 
-    SCHEMA_VERSION = 21
+    SCHEMA_VERSION = 22
 
     def __init__(
         self,
@@ -935,6 +935,7 @@ class SessionStore:
                     attachment_id TEXT NOT NULL,
                     output_index INTEGER NOT NULL,
                     idempotency_key TEXT NOT NULL,
+                    publication_id TEXT,
                     group_index INTEGER NOT NULL,
                     request_digest TEXT NOT NULL,
                     caption TEXT NOT NULL DEFAULT '',
@@ -945,6 +946,21 @@ class SessionStore:
                     UNIQUE(run_id, idempotency_key, group_index),
                     FOREIGN KEY(run_id) REFERENCES runs(run_id),
                     FOREIGN KEY(attachment_id) REFERENCES session_attachments(attachment_id)
+                );
+                CREATE TABLE IF NOT EXISTS run_deliverable_publications (
+                    run_id TEXT NOT NULL,
+                    publication_id TEXT NOT NULL,
+                    publication_digest TEXT NOT NULL,
+                    attachment_digest TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    group_id TEXT NOT NULL,
+                    message_id TEXT NOT NULL UNIQUE,
+                    event_id TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(run_id, publication_id),
+                    FOREIGN KEY(run_id) REFERENCES runs(run_id),
+                    FOREIGN KEY(message_id) REFERENCES messages(message_id),
+                    FOREIGN KEY(event_id) REFERENCES run_events(event_id)
                 );
 
                 CREATE TABLE IF NOT EXISTS voice_transcripts (
@@ -1509,6 +1525,20 @@ class SessionStore:
                     connection.execute(
                         f"ALTER TABLE session_attachments ADD COLUMN {column} {declaration}"
                     )
+            output_columns = {
+                str(row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(run_output_attachments)"
+                ).fetchall()
+            }
+            if "publication_id" not in output_columns:
+                connection.execute(
+                    "ALTER TABLE run_output_attachments ADD COLUMN publication_id TEXT"
+                )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS run_output_publications "
+                "ON run_output_attachments(run_id, publication_id)"
+            )
             run_columns = {
                 str(row["name"])
                 for row in connection.execute("PRAGMA table_info(runs)").fetchall()
@@ -3973,6 +4003,22 @@ class SessionStore:
                 value = error_context.get(key)
                 if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= 86400:
                     public_error_context[key] = value
+            reconciliation = error_context.get("effect_reconciliation")
+            if isinstance(reconciliation, Mapping):
+                safe_summary: dict[str, Any] = {}
+                for key in (
+                    "confirmed_write_count",
+                    "observed_tool_count",
+                    "unverified_action_count",
+                    "completed_background_job_count",
+                ):
+                    value = reconciliation.get(key)
+                    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 100_000:
+                        safe_summary[key] = value
+                if isinstance(reconciliation.get("evidence_limited"), bool):
+                    safe_summary["evidence_limited"] = reconciliation["evidence_limited"]
+                if safe_summary:
+                    public_error_context["effect_reconciliation"] = safe_summary
         clean = str(assistant_text or "").strip()
         supplied_content = list(assistant_content or ())
         if contains_persistent_inline_media(supplied_content):
@@ -4003,23 +4049,8 @@ class SessionStore:
             normalized_content.append(part)
         if not normalized_content and clean:
             normalized_content = [{"type": "text", "text": clean}]
-        published_attachments = self.run_output_attachment_content(request_id)
-        for item_index, raw_part in enumerate(
-            published_attachments, start=len(normalized_content) + 1
-        ):
-            part = dict(raw_part)
-            part["item_index"] = item_index
-            normalized_content.append(part)
-        deliverable_audio = any(
-            part.get("type") == "audio" and str(part.get("asset_id") or "").strip()
-            for part in normalized_content
-        )
-        deliverable_attachment = any(
-            str(part.get("type") or "").strip().casefold() in {"attachment", "media"}
-            and str(part.get("attachment_id") or "").strip()
-            for part in normalized_content
-        )
         terminal_content_already_published = False
+        incremental_only_complete = False
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             run = connection.execute(
@@ -4035,14 +4066,46 @@ class SessionStore:
             ):
                 raise StaleFencingToken("executor fencing token is stale")
             session_id = str(run["session_id"])
+            unpublished_rows = connection.execute(
+                """SELECT o.*, r.session_id, r.request_id, s.owner_id, r.agent_id
+                   FROM run_output_attachments AS o
+                   JOIN runs AS r ON r.run_id=o.run_id
+                   JOIN sessions AS s ON s.session_id=r.session_id
+                   WHERE o.run_id=? AND o.publication_id IS NULL
+                   ORDER BY o.output_index ASC""",
+                (str(run["run_id"]),),
+            ).fetchall()
+            for item_index, raw_part in enumerate(
+                self._canonical_run_output_attachments(unpublished_rows),
+                start=len(normalized_content) + 1,
+            ):
+                part = dict(raw_part)
+                part["item_index"] = item_index
+                normalized_content.append(part)
+            deliverable_audio = any(
+                part.get("type") == "audio" and str(part.get("asset_id") or "").strip()
+                for part in normalized_content
+            )
+            deliverable_attachment = any(
+                str(part.get("type") or "").strip().casefold()
+                in {"attachment", "media"}
+                and str(part.get("attachment_id") or "").strip()
+                for part in normalized_content
+            )
             final_message_id = None
             if success:
                 if not clean and not deliverable_audio and not deliverable_attachment:
-                    success = False
-                    error_text = (
-                        error_text or "backend returned no visible final response"
-                    )
-                else:
+                    incremental_only_complete = connection.execute(
+                        """SELECT 1 FROM run_deliverable_publications
+                           WHERE run_id=? LIMIT 1""",
+                        (str(run["run_id"]),),
+                    ).fetchone() is not None
+                    if not incremental_only_complete:
+                        success = False
+                        error_text = (
+                            error_text or "backend returned no visible final response"
+                        )
+                if success and not incremental_only_complete:
                     content = normalized_content
                     content_json = _json(content)
                     content_hash = hashlib.sha256(
@@ -4156,7 +4219,7 @@ class SessionStore:
                 # A first-ready native output Event already owns delivery of
                 # a reused Message.  The terminal Event remains in the feed,
                 # but must not enqueue the same text/audio a second time.
-                outbox=not terminal_content_already_published,
+                outbox=not (terminal_content_already_published or incremental_only_complete),
             )
             if success and final_message_id:
                 self._queue_foreground_message(
@@ -4313,11 +4376,27 @@ class SessionStore:
     ) -> str | None:
         """Return the newest visible assistant text confirmed on one route."""
 
-        self.get_session(session_id)
+        texts = self.recent_delivered_assistant_texts(
+            session_id, surface=surface, channel_key=channel_key, limit=1
+        )
+        return texts[0] if texts else None
+
+    def recent_delivered_assistant_texts(
+        self,
+        session_id: str,
+        *,
+        surface: str,
+        channel_key: str,
+        limit: int = 4,
+    ) -> list[str]:
+        """Return up to four confirmed final replies, newest first, on one route."""
+
+        session = self.get_session(session_id)
         normalized_surface = str(surface or "").strip().lower()
         normalized_channel = str(channel_key or "").strip()
         if not normalized_surface or not normalized_channel:
-            return None
+            return []
+        bounded_limit = max(1, min(int(limit), 4))
         route_phase = f"transport:{normalized_surface}:{normalized_channel}"
         with self._lock, self._connection() as connection:
             rows = connection.execute(
@@ -4334,16 +4413,22 @@ class SessionStore:
                   AND r.state = 'completed'
                   AND m.role = 'assistant'
                   AND m.visibility = 'visible'
+                  AND m.context_generation = ?
                 ORDER BY e.sequence DESC
+                LIMIT ?
                 """,
-                (str(session_id), self.instance_id, route_phase),
+                (
+                    str(session_id), self.instance_id, route_phase,
+                    int(session["context_generation"]), bounded_limit,
+                ),
             ).fetchall()
+        texts: list[str] = []
         for row in rows:
             detail = _json_object(row["detail_json"])
             text = str(detail.get("text_override") or row["text"] or "").strip()
             if text:
-                return text
-        return None
+                texts.append(text)
+        return texts
 
     def has_assistant_delivery_outcome(
         self,
@@ -5039,6 +5124,7 @@ class SessionStore:
         owner_id: str | None = None,
         agent_id: str | None = None,
         idempotency_key: str | None = None,
+        unpublished_only: bool = False,
     ) -> list[dict[str, Any]]:
         clauses = ["r.request_id=?", "s.instance_id=?"]
         params: list[Any] = [str(request_id), self.instance_id]
@@ -5054,6 +5140,8 @@ class SessionStore:
         if idempotency_key is not None:
             clauses.append("o.idempotency_key=?")
             params.append(str(idempotency_key))
+        if unpublished_only:
+            clauses.append("o.publication_id IS NULL")
         with self._lock, self._connection() as connection:
             rows = connection.execute(
                 f"""
@@ -5143,18 +5231,141 @@ class SessionStore:
             "attachments": attachments,
         }
 
+    def pending_incremental_telegram_deliveries(
+        self, *, agent_id: str, limit: int = 20
+    ) -> list[dict[str, str]]:
+        """Find this Agent's durable publication tasks needing FC dispatch.
+
+        Expired claims are included so the normal claim path can mark their
+        uncertain external outcome unknown without sending them again.
+        """
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("incremental delivery limit must be between 1 and 100")
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """SELECT t.session_id, s.owner_id, r.request_id, p.event_id
+                   FROM run_deliverable_publications AS p
+                   JOIN runs AS r ON r.run_id=p.run_id
+                   JOIN sessions AS s ON s.session_id=r.session_id
+                   JOIN connector_delivery_tasks AS t ON t.event_id=p.event_id
+                   WHERE s.instance_id=? AND s.agent_id=? AND r.agent_id=?
+                     AND t.session_id=s.session_id AND t.run_id=r.run_id
+                     AND t.connector_id='telegram'
+                     AND (t.state IN ('pending','retry') OR
+                          (t.state='claimed' AND t.lease_expires_at<=?))
+                   ORDER BY t.created_at, t.task_id LIMIT ?""",
+                (self.instance_id, str(agent_id).lower(), str(agent_id).lower(), now, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def run_deliverable_publication(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        owner_id: str,
+        agent_id: str,
+        publication_id: str,
+        publication_digest: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Read one durable Run result and each frozen endpoint's current state."""
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """SELECT p.* FROM run_deliverable_publications AS p
+                   JOIN runs AS r ON r.run_id=p.run_id
+                   JOIN sessions AS s ON s.session_id=r.session_id
+                   WHERE r.request_id=? AND r.session_id=? AND s.instance_id=?
+                     AND s.owner_id=? AND r.agent_id=? AND p.publication_id=?""",
+                (
+                    str(request_id), str(session_id), self.instance_id,
+                    str(owner_id), str(agent_id).lower(), str(publication_id),
+                ),
+            ).fetchone()
+            if row is None:
+                return None
+            if (
+                publication_digest is not None
+                and str(row["publication_digest"]) != str(publication_digest)
+            ):
+                raise IdempotencyConflict(
+                    "deliverable publication ID is bound to different content"
+                )
+            tasks = connection.execute(
+                """SELECT t.connector_id, t.endpoint_id, t.state AS task_state,
+                          t.attempt_count, t.last_error_code, c.status,
+                          c.proof_json
+                   FROM connector_delivery_tasks AS t
+                   LEFT JOIN connector_delivery_receipts AS c
+                     ON c.event_id=t.event_id AND c.endpoint_id=t.endpoint_id
+                   WHERE t.event_id=? ORDER BY t.role, t.endpoint_id""",
+                (str(row["event_id"]),),
+            ).fetchall()
+        group = self.run_output_attachment_group(
+            request_id=request_id,
+            session_id=session_id,
+            owner_id=owner_id,
+            agent_id=agent_id,
+            idempotency_key=str(row["idempotency_key"]),
+        )
+        if group is None or str(group["group_id"]) != str(row["group_id"]):
+            raise SessionConflict("deliverable publication attachment group is missing")
+        deliveries = []
+        for task in tasks:
+            receipt_status = str(task["status"] or "")
+            task_state = str(task["task_state"])
+            if receipt_status in {"accepted", "delivered", "failed", "unknown"}:
+                state = receipt_status
+            elif task_state in {"pending", "retry", "claimed"}:
+                state = "queued"
+            elif task_state == "failed":
+                state = "failed"
+            else:
+                state = "unknown"
+            deliveries.append(
+                {
+                    "connector_id": str(task["connector_id"]),
+                    "endpoint_id": str(task["endpoint_id"]),
+                    "state": state,
+                    "task_state": task_state,
+                    "attempt_count": int(task["attempt_count"]),
+                    "last_error_code": task["last_error_code"],
+                    "proof": (
+                        _json_object(task["proof_json"])
+                        if task["proof_json"] else None
+                    ),
+                }
+            )
+        return {
+            "publication_id": str(row["publication_id"]),
+            "publication_digest": str(row["publication_digest"]),
+            "request_id": str(request_id),
+            "run_id": str(row["run_id"]),
+            "session_id": str(session_id),
+            "group_id": group["group_id"],
+            "media_group": group["media_group"],
+            "attachments": group["attachments"],
+            "attachment_count": len(group["attachments"]),
+            "message_id": str(row["message_id"]),
+            "event_id": str(row["event_id"]),
+            "persisted": True,
+            "deliveries": deliveries,
+        }
+
     def run_output_attachment_content(
         self,
         request_id: str,
         *,
         owner_id: str | None = None,
         agent_id: str | None = None,
+        unpublished_only: bool = False,
     ) -> list[dict[str, Any]]:
         return self._canonical_run_output_attachments(
             self._run_output_attachment_rows(
                 request_id=request_id,
                 owner_id=owner_id,
                 agent_id=agent_id,
+                unpublished_only=unpublished_only,
             )
         )
 
@@ -5169,6 +5380,11 @@ class SessionStore:
         request_digest: str,
         attachments: Iterable[Mapping[str, Any]],
         attachment_policy: str = "standard",
+        publication_id: str | None = None,
+        publication_digest: str | None = None,
+        publication_text: str = "",
+        expected_run_id: str | None = None,
+        fencing_token: int | None = None,
     ) -> dict[str, Any]:
         key = str(idempotency_key or "").strip()
         if not key or len(key) > 512:
@@ -5176,6 +5392,25 @@ class SessionStore:
         digest = str(request_digest or "").strip().casefold()
         if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
             raise ValueError("frontend attachment request digest is invalid")
+        publishing = publication_id is not None
+        stable_publication_id = str(publication_id or "").strip()
+        publication_hash = str(publication_digest or "").strip().casefold()
+        publication_text = str(publication_text or "").strip()
+        if publishing:
+            if (
+                not 1 <= len(stable_publication_id) <= 128
+                or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:-"
+                       for c in stable_publication_id)
+            ):
+                raise ValueError("deliverable publication ID is invalid")
+            if len(publication_hash) != 64 or any(
+                c not in "0123456789abcdef" for c in publication_hash
+            ):
+                raise ValueError("deliverable publication digest is invalid")
+            if len(publication_text) > 4096:
+                raise ValueError("deliverable text exceeds 4096 characters")
+            if not expected_run_id or type(fencing_token) is not int or fencing_token <= 0:
+                raise SessionConflict("deliverable publication requires the current Run executor")
         bindings = []
         seen: set[str] = set()
         for raw in attachments:
@@ -5223,6 +5458,22 @@ class SessionStore:
             ).fetchone()
             if run is None:
                 raise SessionNotFound(str(request_id))
+            if publishing and str(run["run_id"]) != str(expected_run_id):
+                raise SessionConflict("deliverable publication Run identity mismatch")
+            prior_publication = (
+                connection.execute(
+                    """SELECT * FROM run_deliverable_publications
+                       WHERE run_id=? AND publication_id=?""",
+                    (str(run["run_id"]), stable_publication_id),
+                ).fetchone()
+                if publishing else None
+            )
+            if prior_publication is not None and str(
+                prior_publication["publication_digest"]
+            ) != publication_hash:
+                raise IdempotencyConflict(
+                    "deliverable publication ID is bound to different content"
+                )
             existing = connection.execute(
                 """
                 SELECT * FROM run_output_attachments
@@ -5237,11 +5488,17 @@ class SessionStore:
                         "frontend attachment idempotency key is bound to different files"
                     )
                 replayed = True
+                if publishing and prior_publication is None:
+                    raise SessionConflict("deliverable publication record is missing")
             else:
+                if prior_publication is not None:
+                    raise SessionConflict("deliverable publication attachment group is missing")
                 if str(run["state"]) != "running":
                     raise SessionConflict(
                         "frontend attachments require the current running Session Run"
                     )
+                if publishing and int(run["fencing_token"]) != fencing_token:
+                    raise StaleFencingToken("deliverable publisher fencing token is stale")
                 totals = connection.execute(
                     """
                     SELECT COUNT(*) AS attachment_count,
@@ -5299,20 +5556,145 @@ class SessionStore:
                         """
                         INSERT INTO run_output_attachments(
                             run_id, attachment_id, output_index, idempotency_key,
-                            group_index, request_digest, caption, detail, created_at
-                        ) VALUES(?,?,?,?,?,?,?,?,?)
+                            publication_id, group_index, request_digest, caption,
+                            detail, created_at
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?)
                         """,
                         (
                             str(run["run_id"]),
                             binding["attachment_id"],
                             last_index + group_index,
                             key,
+                            stable_publication_id if publishing else None,
                             group_index,
                             digest,
                             binding["caption"],
                             binding["detail"],
                             now,
                         ),
+                    )
+                if publishing:
+                    group_material = "\0".join(
+                        (self.instance_id, str(session_id), str(request_id), key)
+                    )
+                    group_id = "grp_" + hashlib.sha256(
+                        group_material.encode("utf-8")
+                    ).hexdigest()[:32]
+                    content = (
+                        [{"type": "text", "text": publication_text}]
+                        if publication_text else []
+                    )
+                    for index, binding in enumerate(bindings, start=len(content) + 1):
+                        part = self.attachment_canonical_part(
+                            session_id=str(session_id),
+                            owner_id=str(owner_id),
+                            attachment_id=binding["attachment_id"],
+                            item_index=index,
+                            caption=binding["caption"],
+                            detail=binding["detail"],
+                        )
+                        part["group_id"] = group_id
+                        content.append(part)
+                    content_json = _json(content)
+                    message_id = _new_id("msg")
+                    connection.execute(
+                        """INSERT INTO messages(
+                               message_id, session_id, run_id, ordinal,
+                               context_generation, role, author_id, source,
+                               message_context_json, content_json, text,
+                               content_hash, created_at
+                           ) VALUES(?, ?, ?, ?, ?, 'assistant', ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            message_id, str(session_id), str(run["run_id"]),
+                            self._next_ordinal(connection, str(session_id)),
+                            int(run["context_generation"]), str(run["agent_id"]),
+                            "frontend_publish_deliverable",
+                            _json({
+                                "kind": "deliverable",
+                                "publication_id": stable_publication_id,
+                                "group_id": group_id,
+                            }),
+                            content_json, publication_text,
+                            hashlib.sha256(content_json.encode("utf-8")).hexdigest(),
+                            now,
+                        ),
+                    )
+                    event = self._append_event(
+                        connection,
+                        session_id=str(session_id),
+                        run_id=str(run["run_id"]),
+                        kind="assistant.output.available",
+                        status="available",
+                        phase="incremental",
+                        summary=publication_text,
+                        detail={
+                            "message_id": message_id,
+                            "request_id": str(request_id),
+                            "publication_id": stable_publication_id,
+                            "group_id": group_id,
+                            "disposition": "incremental",
+                            "content": content,
+                        },
+                        outbox=True,
+                    )
+                    from orchestrator.frontend_connector_registry import (
+                        get_connector_capabilities,
+                        supports_running_media_delivery,
+                    )
+
+                    endpoint_tasks = connection.execute(
+                        """SELECT task_id, connector_id, endpoint_id
+                           FROM connector_delivery_tasks WHERE event_id=?""",
+                        (str(event["event_id"]),),
+                    ).fetchall()
+                    for task in endpoint_tasks:
+                        capabilities = get_connector_capabilities(
+                            str(task["connector_id"]),
+                            endpoint_id=str(task["endpoint_id"]),
+                        )
+                        media_egress = "media" in capabilities["egress"]
+                        if not media_egress or not supports_running_media_delivery(
+                            str(task["connector_id"])
+                        ):
+                            error_code = (
+                                "incremental_media_unsupported"
+                                if not media_egress
+                                else "incremental_media_consumer_unavailable"
+                            )
+                            connection.execute(
+                                """UPDATE connector_delivery_tasks
+                                   SET state='failed',
+                                       last_error_code=?,
+                                       completed_at=? WHERE task_id=?""",
+                                (error_code, now, str(task["task_id"])),
+                            )
+                    self._refresh_delivery_outbox_aggregate(
+                        connection, event_id=str(event["event_id"])
+                    )
+                    connection.execute(
+                        """INSERT INTO frontend_message_events(
+                               message_id, event_id, session_id) VALUES(?, ?, ?)""",
+                        (message_id, str(event["event_id"]), str(session_id)),
+                    )
+                    connection.execute(
+                        """INSERT INTO run_deliverable_publications(
+                               run_id, publication_id, publication_digest,
+                               attachment_digest, idempotency_key, group_id,
+                               message_id, event_id, created_at
+                           ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            str(run["run_id"]), stable_publication_id,
+                            publication_hash, digest, key, group_id,
+                            message_id, str(event["event_id"]), now,
+                        ),
+                    )
+                    self._queue_foreground_message(
+                        connection, session_id=str(session_id), message_id=message_id
+                    )
+                    connection.execute(
+                        "UPDATE sessions SET updated_at=?, revision=revision+1 "
+                        "WHERE session_id=?",
+                        (now, str(session_id)),
                     )
 
         group = self.run_output_attachment_group(

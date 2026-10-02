@@ -44,6 +44,7 @@ from orchestrator.canonical_audit import (
 )
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.session_store import SessionStore
+from tools.tool_audit import record_tool_action
 
 
 class _Logger:
@@ -3751,6 +3752,7 @@ async def test_handle_backend_error_exposes_typed_failure_metadata_to_listeners(
     assert payload["retry_after_s"] == 2.5
     assert payload["tool_call_count"] == 3
     assert payload["side_effects_possible"] is True
+    assert payload["effect_reconciliation"]["unverified_action_count"] == 3
     assert runtime.sent_message["text"] == response.error
     assert runtime.sent_message["error_context"] == {
         "error_code": "PROVIDER_CAPACITY_UNAVAILABLE",
@@ -3760,6 +3762,13 @@ async def test_handle_backend_error_exposes_typed_failure_metadata_to_listeners(
         "retry_after_s": 2.5,
         "tool_call_count": 3,
         "side_effects_possible": True,
+        "effect_reconciliation": {
+            "confirmed_write_count": 0,
+            "observed_tool_count": 3,
+            "unverified_action_count": 3,
+            "completed_background_job_count": 0,
+            "evidence_limited": False,
+        },
     }
     diagnostic_log = next(
         message
@@ -3768,6 +3777,41 @@ async def test_handle_backend_error_exposes_typed_failure_metadata_to_listeners(
     )
     assert '{\\"error\\":{\\"code\\":\\"capacity\\"}}' in diagnostic_log
     assert "hashi-transport:test:response" in diagnostic_log
+
+
+@pytest.mark.asyncio
+async def test_backend_error_reconciles_audited_action_even_if_adapter_count_is_zero():
+    runtime = _runtime()
+    item = _item()
+    record_tool_action(
+        workspace_dir=runtime.workspace_dir,
+        tool_name="shell",
+        tool_call_id="call-audited",
+        arguments={},
+        output="ok",
+        is_error=False,
+        duration_ms=1,
+        audit_context={"request_id": item.request_id},
+    )
+
+    await runtime_pipeline.handle_backend_error(
+        runtime,
+        item,
+        SimpleNamespace(
+            error="provider ended",
+            error_retryable=True,
+            side_effects_possible=False,
+            tool_call_count=0,
+        ),
+        queued_at=datetime.now(),
+        queue_wait_s=0,
+        backend_elapsed_s=0,
+    )
+
+    assert runtime.listener_payloads[0]["effect_reconciliation"]["observed_tool_count"] == 1
+    assert runtime.sent_message["error_context"]["effect_reconciliation"][
+        "unverified_action_count"
+    ] == 1
 
 
 @pytest.mark.asyncio

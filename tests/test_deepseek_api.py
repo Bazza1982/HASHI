@@ -716,6 +716,36 @@ def test_stable_provider_capacity_code_is_typed_but_generic_400_is_not():
     ).error_code == "PROVIDER_BAD_REQUEST"
 
 
+@pytest.mark.asyncio
+async def test_declared_capacity_rejects_oversized_serialized_payload_before_http(tmp_path):
+    adapter = _adapter(tmp_path)
+    adapter.tool_registry = None
+    adapter.config._hashi_runtime = SimpleNamespace(
+        global_config=SimpleNamespace(
+            her_providers={
+                "providers": {
+                    "deepseek": {
+                        "engine": "deepseek-api",
+                        "model_capabilities": {
+                            "deepseek-v4-pro": {
+                                "context_window_tokens": 1000,
+                                "response_headroom_tokens": 100,
+                            }
+                        },
+                    }
+                }
+            }
+        ),
+        backend_manager=None,
+    )
+    adapter._call_api_once = AsyncMock(return_value=_APIResult("done", None, "stop"))
+
+    response = await adapter.generate_response("long " * 2500, "req-capacity-local")
+
+    assert response.error_code == "CONTEXT_CAPACITY_REJECTED"
+    assert adapter._call_api_once.await_count == 0
+
+
 @pytest.mark.parametrize(
     ("configured", "thinking", "effort"),
     [

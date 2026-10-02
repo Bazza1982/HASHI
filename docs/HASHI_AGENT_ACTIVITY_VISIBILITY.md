@@ -70,6 +70,23 @@ ledger; each Run owns one execution; the Connector owns presentation; the
 Conversation supplies only an explicit bounded context snapshot and the place
 where the user sees or follows up on the result.
 
+### Completed result in Workbench (2026-10-02)
+
+On HASHI1, a successful autonomous activity retains its canonical final Message
+in the Agent-owned activity Session. Completion also projects only that final
+answer into the owner's current primary Conversation as a presentation-only
+Message. Workbench therefore receives it through the normal Conversation
+snapshot and cursor stream. The projection uses the canonical final Message ID
+for idempotency; a repeated completion callback cannot create a second visible
+answer. The activity prompt and internal history remain private.
+
+The projected Message is not eligible for Engine history or the live Phone
+foreground inbox. Phone continues to consume the canonical activity Message
+through its existing background queue, so a cron result cannot interrupt a call
+or appear twice in the call context. Presentation failure does not change the
+activity Run's execution result. This source change has offline test coverage;
+running Workers have not adopted it yet.
+
 This HASHI1 decision is implemented in the Functions layer. Offline source and
 test success remain separate from adoption by the running Worker; replacement
 requires separately authorized Agent-scoped `/reboot`.

@@ -323,6 +323,38 @@ async def test_say_plays_last_visible_reply_locally_without_chat_or_telegram_sen
 
 
 @pytest.mark.asyncio
+async def test_say_range_skips_meter_and_plays_three_replies_in_order(tmp_path, monkeypatch):
+    played = []
+
+    async def play(content):
+        played.append(content)
+
+    monkeypatch.setattr("tui.app.play_ogg_bytes", play)
+    app = _QuietTui(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    client = _Client([_agent("akane")])
+    app.api = client
+    async with app.run_test() as pilot:
+        app.gateway_ok = True
+        app._load_initial_transcript = lambda *_args, **_kwargs: None
+        app._select_agent(client.agents[0], client=client)
+        for index, text in enumerate(("first", "second", "third"), start=1):
+            app._render_transcript_message(
+                {"role": "assistant", "text": text, "kind": "final", "message_id": f"msg-{index}"}
+            )
+        app._render_transcript_message(
+            {"role": "assistant", "text": "cost tail", "channel": "meter",
+             "history_eligible": False, "message_id": "meter-1"}
+        )
+        field = app.query_one(ChatInput)
+        field.value = "/say 1-3"
+        await pilot.press("enter")
+        await pilot.pause(0.5)
+        assert [call[1] for call in client.speech_calls] == ["first", "second", "third"]
+        assert played == [b"OggS-tui-test"] * 3
+        assert client.sent == []
+
+
+@pytest.mark.asyncio
 async def test_voice_auto_read_is_target_scoped_persistent_and_deduplicated(
     tmp_path, monkeypatch
 ):

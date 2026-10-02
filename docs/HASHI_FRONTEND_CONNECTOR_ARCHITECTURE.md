@@ -18,6 +18,10 @@ the authoritative rollout evidence and remaining gates are tracked in
 
 ## 1. Definition
 
+Trusted Telegram media handlers and `/long` submission carry explicit Telegram
+ingress metadata into admission. Media kinds such as photo, document, sticker,
+and multimodal describe content; they do not identify a frontend connector.
+
 Frontend Connectors expose HASHI to users and compatible clients without
 creating a second source of Agent, Session, Message, Run, Event, PCM, or Engine
 state. A Connector translates between one user-facing transport and the typed
@@ -41,6 +45,13 @@ HASHI includes and maintains:
 
 The built-in TUI remains part of HASHI and is not planned for extraction into a
 separate product. It is the reference terminal client for local operation.
+
+Telegram ingress reports connected only after a successful `getUpdates` call,
+not merely after Bot initialization or webhook removal. A bounded poll watchdog
+turns a stalled receive into a retry and a disconnected state. Normal Agent
+startup preserves Telegram's pending updates; the accepted-update offset
+advances only after the Worker accepts each update. Source changes on HASHI3
+are not evidence that an already running shared Function has adopted them.
 
 ## 3. External-client boundary
 
@@ -171,10 +182,15 @@ Current implementation boundary:
   ownership only after the clipboard accepts it;
 - short sent/received sounds are a local, persisted TUI preference. Windows uses
   the native sound API and WSL/Linux uses an available PulseAudio or ALSA player;
-- `/say` and automatic reply speech are TUI-only presentation. The selected
+- TUI `/say` and automatic reply speech are local Connector presentation. The selected
   instance generates bounded Ogg bytes using the Agent-owned semantic voice
   profile, while the launch computer owns the sole non-overlapping player.
   These controls never enqueue a chat command or create Telegram output;
+- `/say` selects only final Agent replies, never cost tails, command cards, or
+  progress. `/say N` selects the newest N (1-4), and `/say A-B` selects inclusive
+  newest-first positions but plays them oldest first. TUI and Workbench keep
+  speech local; Telegram selects only replies confirmed on its delivery route.
+  Selection stays within the current Agent and Conversation Session;
 - TUI auto-read is persisted per launch client, instance and Agent. The four
   available semantic profiles are discovered from the Agent voice owner and
   profile changes use that existing revision-safe state rather than a second
@@ -338,10 +354,11 @@ a Run and may be cleaned up later by retention policy.
 
 ### 6.3 Standard assistant attachment output
 
-An Agent responding to a conforming external frontend publishes generated or
+An Agent responding to a conforming external frontend binds generated or
 selected files through the frontend-neutral `frontend_send_attachments` tool.
 One call contains an ordered `attachments` array and binds every item to the
-current running Session Run. The terminal assistant Message then contains the
+current running Session Run. This call does not send the files while the Run is
+active. The terminal assistant Message then contains the
 normal text plus those canonical attachment references, so all compatible
 frontends consume the same projection instead of a product-specific callback.
 
@@ -360,6 +377,50 @@ against authorized access roots. Media groups retain declared order, content
 digests and Session retention policy. Explicit `telegram_send_file` remains a
 Telegram-targeted compatibility action; it is not the generic multi-connector
 attachment contract.
+
+### 6.4 Incremental assistant deliverables
+
+`frontend_publish_deliverable` publishes one complete, ordered file group as a
+separate canonical assistant Message while its Run remains running. Its required
+`publication_id` identifies the logical result independently of the tool call;
+repeating the same ID and content returns the same Message, Event and group,
+whereas changing either the files or accompanying text under that ID conflicts.
+The tool checks the current Run ID and executor fencing token before accepting
+a new publication. The original final-binding tool retains its previous
+behavior and shares the Run-wide count and byte limits.
+
+After managed bytes are committed, PAO atomically binds the group, creates the
+Run-bound Message and `assistant.output.available` Event, and enqueues one FC
+task per endpoint from the Run's frozen route. The publication does not settle
+the Run. The Backend API feed can accept the event while the Run is active;
+the transcript exposes the new Message under its own stable `message_ref` so
+multiple deliverables do not collapse into one answer. The Agent's FC Worker
+claims pending Telegram publication tasks through the existing media renderer
+while the Run continues, including tasks left by an isolated tool gateway or
+a prior Worker generation. The frozen endpoint and existing claim/receipt
+rules prevent blind resend after an uncertain outcome.
+Backend API, Session API, TUI and external pull endpoints remain queued until
+their feed consumer accepts the Event. A destination without an active-Run
+media consumer is marked failed for this publication without hiding the
+states of other endpoints: current HChat, Remote and Exchange senders claim
+terminal events only, and WhatsApp does not advertise media egress.
+An external Workbench feed consumer must request the same connection-scoped
+client ID that chat admission froze in the Run route; transcript visibility
+alone does not acknowledge that endpoint. The consumer should drain the
+latest Run's feed after its transcript final or failure so short Runs and
+reloads do not leave visible publications queued.
+
+The tool reports persistence separately from each endpoint's queued,
+accepted, delivered, failed or unknown state. An accepted receipt is not
+proof that the user saw the file; delivered requires the connector's transport
+proof. Unknown outcomes use the existing evidence-based recovery path and are
+not blindly resent. The terminal Message includes only attachments still
+bound for final delivery. If prior deliverables are the only visible output,
+the Run may complete successfully without a duplicate final Message. A later
+failure or cancellation does not remove earlier committed deliverables.
+
+The HASHI3 implementation decision and validation scope are recorded in
+[Incremental deliverables, 2026-10-02](HASHI_INCREMENTAL_DELIVERABLES_2026-10-02.md).
 
 ## 7. Retired Workbench boundary
 
@@ -1006,3 +1067,12 @@ External calls are rejected before terminal execution. The native Telegram
 handler returns a localized unsupported notice. The TUI compatibility route
 passes its normalized Connector identity to the handler and retains terminal
 execution; a handler must not mistake that call for a native Telegram update.
+
+### Manual desktop candidate (2026-09-30)
+
+The opt-in, client-neutral manual desktop ingress and Windows worker projection are
+specified in [Manual Desktop v1](HASHI_MANUAL_DESKTOP.md). The candidate reuses PAO
+capability registration and resource leases, accepts an authenticated human actor,
+and never creates a conversational Run. It is not a new frontend product inside
+HASHI. Source/automated checks and physical-device acceptance remain separate;
+feature availability defaults to disabled.

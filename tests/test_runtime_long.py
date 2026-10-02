@@ -44,6 +44,11 @@ def _runtime():
         replies.append({"text": text, **kwargs})
 
     async def enqueue_request(chat_id, prompt, source, summary, **kwargs):
+        from orchestrator.frontend_delivery import telegram_delivery_for_admission
+
+        assert telegram_delivery_for_admission(
+            source=source, request_metadata=kwargs.get("request_metadata")
+        ) is True
         enqueued.append(
             {
                 "chat_id": chat_id,

@@ -146,6 +146,9 @@ class RuntimeAppHost:
         handoff = handoff or self.bootstrap.get("handoff", {})
         if self.bootstrap.get("recovery"):
             handoff = runtime_handoff.load(self.app)
+        self.app.agent_lifecycle.manually_stopped_agents = set(
+            handoff.get("manually_stopped_agents", ())
+        )
         if self.bootstrap.get("recovery") or self.bootstrap.get("restore"):
             self.app._startup_agent_artifacts = runtime_handoff.agent_artifacts(
                 self.app, handoff

@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from urllib.error import URLError
+
+import pytest
 
 from fastapi.testclient import TestClient
 
@@ -231,3 +234,93 @@ def test_forwarder_keeps_gateway_auth_out_of_loopback_and_injects_local_admin(mo
     started = remote_server._request_workbench_agent_lifecycle("windows-fixture", action="start")
     assert started["ok"] is True
     assert captured["timeout"] >= 35
+
+
+def test_desktop_gateway_selects_live_local_api_before_post(monkeypatch):
+    class Response:
+        status = 200
+        headers = {"Content-Type": "application/json"}
+
+        def __init__(self, body):
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, *_args):
+            return self.body
+
+    calls = []
+
+    def urlopen(request, timeout):
+        calls.append((request.get_method(), request.full_url))
+        if request.full_url.startswith("http://10.255.255.254:"):
+            raise URLError("connection refused")
+        if request.get_method() == "GET":
+            return Response(b'{"ok":true,"instance_id":"HASHI1","workbench_port":18800}')
+        return Response(b'{"ok":true,"targets":[{"instance_id":"HASHI1"}]}')
+
+    monkeypatch.setattr(remote_server, "local_http_hosts", lambda: ("10.255.255.254", "127.0.0.1"))
+    monkeypatch.setattr(remote_server, "_instance_info", {"instance_id": "HASHI1"})
+    monkeypatch.setattr(remote_server, "_workbench_port", 18800)
+    monkeypatch.setattr(remote_server, "_workbench_admin_token", lambda: "existing-token")
+    monkeypatch.setattr(remote_server.urllib_request, "urlopen", urlopen)
+
+    status, body, _headers = remote_server._forward_workbench_gateway_request(
+        method="POST",
+        api_path="v1/desktop/operation",
+        query="",
+        body_bytes=b'{"operation":"targets","client_id":"client-a"}',
+        request_headers={"content-type": "application/json"},
+    )
+
+    assert status == 200
+    assert json.loads(body)["targets"] == [{"instance_id": "HASHI1"}]
+    assert [url for method, url in calls if method == "POST"] == [
+        "http://127.0.0.1:18800/api/v1/desktop/operation"
+    ]
+
+
+def test_desktop_input_unknown_outcome_is_never_retried(monkeypatch):
+    class Response:
+        status = 200
+        headers = {"Content-Type": "application/json"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, *_args):
+            return b'{"ok":true,"instance_id":"HASHI1","workbench_port":18800}'
+
+    posted = []
+
+    def urlopen(request, timeout):
+        if request.get_method() == "GET":
+            if request.full_url.startswith("http://10.255.255.254:"):
+                raise URLError("connection refused")
+            return Response()
+        posted.append(request.full_url)
+        raise TimeoutError("response lost after input")
+
+    monkeypatch.setattr(remote_server, "local_http_hosts", lambda: ("10.255.255.254", "127.0.0.1"))
+    monkeypatch.setattr(remote_server, "_instance_info", {"instance_id": "HASHI1"})
+    monkeypatch.setattr(remote_server, "_workbench_port", 18800)
+    monkeypatch.setattr(remote_server, "_workbench_admin_token", lambda: "existing-token")
+    monkeypatch.setattr(remote_server.urllib_request, "urlopen", urlopen)
+
+    with pytest.raises(ConnectionError, match="response lost"):
+        remote_server._forward_workbench_gateway_request(
+            method="POST",
+            api_path="v1/desktop/operation",
+            query="",
+            body_bytes=b'{"operation":"input","client_id":"client-a"}',
+            request_headers={"content-type": "application/json"},
+        )
+
+    assert posted == ["http://127.0.0.1:18800/api/v1/desktop/operation"]

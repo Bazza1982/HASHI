@@ -223,8 +223,9 @@ async def test_execute_local_say_audits_voice_side_effect(
         def _is_authorized_user(self, user_id):
             return user_id == self.global_config.authorized_id
 
-        def _load_last_visible_assistant_text(self, update):
-            return "last delivered reply"
+        def _load_recent_visible_assistant_texts(self, update, *, limit):
+            assert limit == 1
+            return ["last delivered reply"]
 
         async def _send_voice_reply(self, *args, **kwargs):
             return voice_outcome

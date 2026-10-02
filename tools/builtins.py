@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import signal
+from itertools import islice
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -798,18 +799,40 @@ async def execute_file_read(
         return f"Error: path is not a file: {path}"
 
     offset = max(1, int(args.get("offset", 1)))
-    limit = int(args.get("limit", 500))
+    limit = max(1, min(500, int(args.get("limit", 500))))
+    max_chars = 20_000
 
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-        lines = text.splitlines(keepends=True)
-        selected = lines[offset - 1 : offset - 1 + limit]
+        selected: list[str] = []
+        remaining = max_chars
+        truncated = False
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for _ in range(offset - 1):
+                while True:
+                    chunk = handle.readline(8192)
+                    if not chunk:
+                        return f"[{path}] No lines at offset {offset}"
+                    if chunk.endswith("\n"):
+                        break
+            for _ in range(limit):
+                line = handle.readline(remaining + 1)
+                if not line:
+                    break
+                if len(line) > remaining:
+                    selected.append(line[:remaining])
+                    truncated = True
+                    break
+                selected.append(line)
+                remaining -= len(line)
+                if remaining == 0:
+                    truncated = bool(handle.read(1))
+                    break
+            else:
+                truncated = bool(handle.read(1))
+        header = f"[{path}] lines {offset}-{offset + len(selected) - 1}"
         content = "".join(selected)
-
-        header = f"[{path}]"
-        if offset > 1 or len(lines) > limit:
-            header += f" lines {offset}-{offset + len(selected) - 1} of {len(lines)}"
-
+        if truncated:
+            content += "\n[truncated by HASHI; use a narrower offset or log_query]"
         return f"{header}\n{content}"
     except Exception as e:
         return f"Error reading file: {e}"
@@ -924,12 +947,14 @@ async def execute_file_list(
 
     try:
         entries = []
+        max_entries = 1000
         if recursive:
-            all_paths = sorted(path.rglob(pattern))
+            all_paths = sorted(islice(path.rglob(pattern), max_entries + 1))
         else:
-            all_paths = sorted(path.glob(pattern))
+            all_paths = sorted(islice(path.glob(pattern), max_entries + 1))
+        truncated = len(all_paths) > max_entries
 
-        for p in all_paths:
+        for p in all_paths[:max_entries]:
             rel = p.relative_to(path)
             kind = "dir" if p.is_dir() else "file"
             try:
@@ -942,7 +967,9 @@ async def execute_file_list(
         if not entries:
             return f"No entries found in {path} (pattern: {pattern})"
 
-        header = f"[{path}]  {len(entries)} items"
+        header = f"[{path}]  {len(entries)} items shown"
+        if truncated:
+            header += " [truncated; narrow the pattern or path]"
         return header + "\n" + "\n".join(entries)
     except Exception as e:
         return f"Error listing directory: {e}"
@@ -1379,6 +1406,8 @@ async def execute_process_kill(args: dict) -> str:
 
     signal_num = int(args.get("signal", 15))
     pid = int(pid)
+    if pid in {os.getpid(), os.getppid()}:
+        return f"Error: refusing to terminate HASHI process PID {pid}"
 
     try:
         import psutil
@@ -1970,8 +1999,9 @@ async def execute_frontend_send_attachments(
     workspace_dir: Path,
     audit_context: dict | None,
     tool_call_id: str = "",
+    publish_incremental: bool = False,
 ) -> str:
-    """Bind authorized, ordered local files to the current assistant Message.
+    """Bind authorized files to final output or publish one Run result now.
 
     Every source path is resolved against the invocation's authorized roots
     before it is read; connector display identity never widens that authority.
@@ -2021,8 +2051,19 @@ async def execute_frontend_send_attachments(
     session_id = str(context.get("hashi_session_id") or "").strip()
     owner_id = str(context.get("owner_id") or "").strip()
     agent_id = str(context.get("agent_name") or "").strip().casefold()
+    publication_id = str(args.get("publication_id") or "").strip() if publish_incremental else ""
+    publication_text = str(args.get("text") or "").strip() if publish_incremental else ""
+    if publish_incremental and (
+        not 1 <= len(publication_id) <= 128
+        or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:-"
+               for c in publication_id)
+        or len(publication_text) > 4096
+    ):
+        return "Error: deliverable publication ID or text is invalid"
     if not all((session_id, owner_id, agent_id, surface)):
         return "Error: frontend attachments require an active HASHI Session context"
+    if publish_incremental and not request_id:
+        return "Error: incremental deliverables require a current frontend Run"
     bind_only = False
 
     runtime = context.get("_runtime")
@@ -2157,9 +2198,58 @@ async def execute_frontend_send_attachments(
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest()
-        idempotency_key = "frontend-attachments:" + str(
-            tool_call_id or request_digest
-        ).strip()
+        publication_digest = (
+            hashlib.sha256(
+                json.dumps(
+                    {"attachments": request_digest, "text": publication_text},
+                    ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            if publish_incremental else None
+        )
+        idempotency_key = (
+            "frontend-deliverable:" + publication_id
+            if publish_incremental else
+            "frontend-attachments:" + str(tool_call_id or request_digest).strip()
+        )
+        if publish_incremental:
+            existing_publication = store.run_deliverable_publication(
+                request_id=request_id,
+                session_id=session_id,
+                owner_id=owner_id,
+                agent_id=agent_id,
+                publication_id=publication_id,
+                publication_digest=publication_digest,
+            )
+            if existing_publication is not None:
+                await _dispatch_incremental_deliverable_telegram(
+                    store, runtime, context, existing_publication
+                )
+                refreshed = store.run_deliverable_publication(
+                    request_id=request_id, session_id=session_id,
+                    owner_id=owner_id, agent_id=agent_id,
+                    publication_id=publication_id,
+                    publication_digest=publication_digest,
+                )
+                return json.dumps(
+                    {"ok": True, **refreshed, "replayed": True},
+                    ensure_ascii=False, sort_keys=True,
+                )
+            expected_run_id = str(context.get("hashi_run_id") or "").strip()
+            fencing_token = context.get("hashi_fencing_token")
+            if not expected_run_id or type(fencing_token) is not int:
+                raise SessionConflict(
+                    "incremental deliverable requires current Run execution identity"
+                )
+            current_run = store.get_run_by_request(request_id, owner_id=owner_id)
+            if (
+                str(current_run["run_id"]) != expected_run_id
+                or str(current_run["session_id"]) != session_id
+                or str(current_run["agent_id"]) != agent_id
+                or current_run["state"] != "running"
+                or int(current_run["fencing_token"]) != fencing_token
+            ):
+                raise SessionConflict("incremental deliverable Run executor is stale")
         existing = store.run_output_attachment_group(
             request_id=request_id,
             session_id=session_id,
@@ -2167,7 +2257,7 @@ async def execute_frontend_send_attachments(
             agent_id=agent_id,
             idempotency_key=idempotency_key,
         )
-        if existing is not None:
+        if existing is not None and not publish_incremental:
             if str(existing["request_digest"]) != request_digest:
                 raise IdempotencyConflict(
                     "frontend attachment idempotency key is bound to different files"
@@ -2242,7 +2332,34 @@ async def execute_frontend_send_attachments(
             request_digest=request_digest,
             attachments=bindings,
             attachment_policy=attachment_policy,
+            publication_id=publication_id if publish_incremental else None,
+            publication_digest=publication_digest,
+            publication_text=publication_text,
+            expected_run_id=(expected_run_id if publish_incremental else None),
+            fencing_token=(fencing_token if publish_incremental else None),
         )
+        if publish_incremental:
+            publication = store.run_deliverable_publication(
+                request_id=request_id, session_id=session_id,
+                owner_id=owner_id, agent_id=agent_id,
+                publication_id=publication_id,
+                publication_digest=publication_digest,
+            )
+            if publication is None:
+                raise SessionConflict("incremental deliverable publication was not persisted")
+            await _dispatch_incremental_deliverable_telegram(
+                store, runtime, context, publication
+            )
+            refreshed = store.run_deliverable_publication(
+                request_id=request_id, session_id=session_id,
+                owner_id=owner_id, agent_id=agent_id,
+                publication_id=publication_id,
+                publication_digest=publication_digest,
+            )
+            return json.dumps(
+                {"ok": True, **refreshed, "replayed": bool(bound["replayed"])},
+                ensure_ascii=False, sort_keys=True,
+            )
         return json.dumps(
             {
                 "ok": True,
@@ -2259,6 +2376,42 @@ async def execute_frontend_send_attachments(
         )
     except (IdempotencyConflict, OSError, SessionConflict, SessionNotFound, ValueError) as exc:
         return f"Error: {exc}"
+
+
+async def _dispatch_incremental_deliverable_telegram(
+    store, runtime, context: Mapping[str, Any], publication: Mapping[str, Any]
+) -> None:
+    """Try immediate dispatch when the tool shares a live Worker."""
+    from orchestrator.frontend_incremental_delivery import (
+        dispatch_incremental_telegram_event,
+    )
+
+    await dispatch_incremental_telegram_event(
+        store,
+        runtime,
+        session_id=str(publication["session_id"]),
+        owner_id=str(context["owner_id"]),
+        request_id=str(publication["request_id"]),
+        event_id=str(publication["event_id"]),
+    )
+
+
+async def execute_frontend_publish_deliverable(
+    args: dict,
+    *,
+    access_root: Path | Sequence[Path],
+    workspace_dir: Path,
+    audit_context: dict | None,
+    tool_call_id: str = "",
+) -> str:
+    return await execute_frontend_send_attachments(
+        args,
+        access_root=access_root,
+        workspace_dir=workspace_dir,
+        audit_context=audit_context,
+        tool_call_id=tool_call_id,
+        publish_incremental=True,
+    )
 
 
 async def execute_http_request(args: dict) -> str:

@@ -22,6 +22,9 @@ def snapshot(app) -> dict:
         }
     return {
         "agents": list(agents),
+        "manually_stopped_agents": sorted(
+            getattr(getattr(app, "agent_lifecycle", None), "manually_stopped_agents", ())
+        ),
         "agent_generations": agents,
         "generations": generations,
         "telegram_offsets": {

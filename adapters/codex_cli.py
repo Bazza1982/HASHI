@@ -4,6 +4,7 @@ import json
 import time
 import asyncio
 import logging
+import sqlite3
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -16,6 +17,11 @@ from adapters.codex_event_log import (
     DEFAULT_MAX_BYTES,
     DEFAULT_MAX_EVENT_BYTES,
     CodexEventLogWriter,
+)
+from adapters.codex_usage import (
+    CodexUsageCheckpoints,
+    cumulative_usage,
+    last_logged_usage,
 )
 from adapters.stream_io import iter_stream_lines
 from adapters.stream_events import (
@@ -104,6 +110,9 @@ class CodexCLIAdapter(BaseBackend):
         self.cmd_base = self.global_config.codex_cmd
         self.access_root = str(self.config.resolve_access_root())
         self.events_log_path = self.config.workspace_dir / "codex_exec_events.jsonl"
+        self._usage_checkpoints = CodexUsageCheckpoints(
+            self.config.workspace_dir / "backend_state" / "codex_cli" / "usage.sqlite3"
+        )
         extra = dict(self.config.extra or {})
 
         def configured_int(key: str, default: int, *, minimum: int) -> int:
@@ -151,6 +160,7 @@ class CodexCLIAdapter(BaseBackend):
         self._session_mode: bool = bool((self.config.extra or {}).get("session_mode", False))
         # Real token usage captured from turn.completed events
         self._last_usage: TokenUsage | None = None
+        self._last_cumulative_usage: TokenUsage | None = None
         self.tool_registry = None
         self._hashi_mcp_enabled = False
         self._hashi_mcp_descriptor = None
@@ -199,13 +209,13 @@ class CodexCLIAdapter(BaseBackend):
             return False
 
     async def _discover_mcp_servers(self) -> tuple[str, ...]:
-        """List configured MCP servers so the API bridge can disable all of them."""
+        """Inventory standalone MCP servers with execution's plugin state."""
         # force_kill_process_tree() terminates subprocess trees. The inventory
         # process must never inherit HASHI's own process group.
         extra_kwargs: dict[str, object] = process_group_kwargs()
         for attempt in range(1, self.MCP_INVENTORY_MAX_ATTEMPTS + 1):
             invocation = resolve_argv_invocation(
-                (self.cmd_base, "mcp", "list", "--json")
+                (self.cmd_base, "--disable", "plugins", "mcp", "list", "--json")
             )
             proc = await asyncio.create_subprocess_exec(
                 *invocation.argv,
@@ -561,38 +571,10 @@ class CodexCLIAdapter(BaseBackend):
         if etype == "turn.completed":
             usage = event.get("usage")
             if isinstance(usage, dict):
-                input_tokens = int(usage.get("input_tokens", 0) or 0)
-                cache_key = next(
-                    (
-                        key
-                        for key in (
-                            "cached_input_tokens",
-                            "prompt_cache_hit_tokens",
-                        )
-                        if key in usage
-                    ),
-                    None,
-                )
-                cache_hit = (
-                    max(0, int(usage.get(cache_key) or 0))
-                    if cache_key is not None
-                    else None
-                )
-                self._last_usage = TokenUsage(
-                    input_tokens=input_tokens,
-                    output_tokens=usage.get("output_tokens", 0) or 0,
-                    thinking_tokens=(
-                        usage.get("reasoning_output_tokens")
-                        or usage.get("reasoning_tokens")
-                        or 0
-                    ),
-                    prompt_cache_hit_tokens=cache_hit,
-                    prompt_cache_miss_tokens=(
-                        max(0, input_tokens - cache_hit)
-                        if cache_hit is not None and "input_tokens" in usage
-                        else None
-                    ),
-                )
+                try:
+                    self._last_cumulative_usage = cumulative_usage(usage)
+                except (TypeError, ValueError) as exc:
+                    self.logger.warning("Invalid Codex cumulative usage: %s", exc)
             return None
 
         if pending_agent_message:
@@ -751,6 +733,7 @@ class CodexCLIAdapter(BaseBackend):
         tool_item_ids: set[str] | None = None,
         side_effect_item_ids: set[str] | None = None,
         provider_activity_observed: bool = False,
+        unobserved_effects_possible: bool = False,
     ) -> BackendResponse:
         tool_ids = set(tool_item_ids or ())
         side_effect_ids = set(side_effect_item_ids or ())
@@ -766,7 +749,7 @@ class CodexCLIAdapter(BaseBackend):
             http_status=failure.http_status,
             provider_request_id=failure.provider_request_id,
             retry_after_s=failure.retry_after_s,
-            side_effects_possible=bool(side_effect_ids),
+            side_effects_possible=bool(side_effect_ids or unobserved_effects_possible),
             stream_metadata={
                 "provider_failure_description": failure.description,
                 "provider_activity_observed": bool(
@@ -802,6 +785,7 @@ class CodexCLIAdapter(BaseBackend):
     ) -> BackendResponse:
         # Reset per-request usage tracking
         self._last_usage = None
+        self._last_cumulative_usage = None
 
         try:
             normalized_request_content = normalize_request_content(request_content)
@@ -983,6 +967,24 @@ class CodexCLIAdapter(BaseBackend):
             image_paths=native_image_paths,
         )
         session_mode = "resume" if self._session_id else "new"
+        resumed_thread_id = self._session_id if self._session_mode else None
+        logged_usage_baseline = None
+        if resumed_thread_id:
+            try:
+                if not self._usage_checkpoints.has_snapshot(resumed_thread_id):
+                    # The existing bounded event log can seed a thread that
+                    # predates this checkpoint store.  Read it before writing
+                    # the current turn's events to avoid self-subtraction.
+                    logged_usage_baseline = last_logged_usage(
+                        self.events_log_path,
+                        resumed_thread_id,
+                        backup_count=self.events_log_backup_count,
+                    )
+            except (OSError, sqlite3.Error) as exc:
+                self.logger.warning(
+                    "Codex usage baseline unavailable for %s: %s: %s",
+                    request_id, type(exc).__name__, exc,
+                )
         effective_workdir = self.effective_workdir
         proc = None
         stdout_task: asyncio.Task | None = None
@@ -1343,6 +1345,31 @@ class CodexCLIAdapter(BaseBackend):
             elif not self._session_mode:
                 self._session_id = None
 
+            if terminal_event_type == "turn.completed" and self._last_cumulative_usage:
+                usage_thread_id = captured_thread_id or resumed_thread_id
+                if usage_thread_id:
+                    try:
+                        self._last_usage = self._usage_checkpoints.record_turn(
+                            usage_thread_id,
+                            self._last_cumulative_usage,
+                            new_thread=usage_thread_id != resumed_thread_id,
+                            logged_baseline=(
+                                logged_usage_baseline
+                                if usage_thread_id == resumed_thread_id else None
+                            ),
+                        )
+                    except (OSError, sqlite3.Error, ValueError) as exc:
+                        self.logger.error(
+                            "Codex turn usage could not be normalized for %s: %s: %s",
+                            request_id, type(exc).__name__, exc,
+                        )
+                if self._last_usage is None:
+                    self.logger.warning(
+                        "Codex turn usage for %s has no safe cumulative baseline; "
+                        "using estimated usage instead of charging prior turns",
+                        request_id,
+                    )
+
             if terminal_failure is not None:
                 if (
                     terminal_failure.code == "CONTEXT_CAPACITY_REJECTED"
@@ -1381,12 +1408,28 @@ class CodexCLIAdapter(BaseBackend):
 
             if returncode != 0 and terminal_event_type != "turn.completed":
                 err_msg = stderr_buffer.decode(errors="replace").strip()
-                if not err_msg:
-                    err_msg = "Codex CLI exited with a non-zero status."
                 failure = parse_codex_failure(
                     last_error_event,
                     fallback_message=err_msg,
                 )
+                if failure.code == "PROVIDER_UNKNOWN":
+                    diagnostic = (
+                        f" Diagnostic stderr: {err_msg[:500]}" if err_msg else ""
+                    )
+                    failure = CodexFailure(
+                        message=(
+                            "Codex CLI exited before reporting a completed or failed "
+                            f"turn (exit code {returncode}). The outcome of any "
+                            "unreported actions is unknown; inspect request "
+                            f"diagnostics before retrying.{diagnostic}"
+                        ),
+                        code="CODEX_PROCESS_EXIT_UNCONFIRMED",
+                        retryable=False,
+                        description=(
+                            "The Codex subprocess exited without a terminal JSONL "
+                            "turn event; side effects cannot be ruled out."
+                        ),
+                    )
                 self.logger.error(
                     "Codex request %s exited non-zero without turn.failed "
                     "code=%s retryable=%s returncode=%s tools=%s side_effects=%s",
@@ -1405,6 +1448,7 @@ class CodexCLIAdapter(BaseBackend):
                         tool_item_ids=tool_item_ids,
                         side_effect_item_ids=side_effect_item_ids,
                         provider_activity_observed=provider_activity_observed,
+                        unobserved_effects_possible=True,
                     )
                 )
             if returncode != 0 and terminal_event_type == "turn.completed":

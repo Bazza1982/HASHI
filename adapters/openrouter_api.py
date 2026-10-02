@@ -66,6 +66,12 @@ class ProviderProtocolForensicError(RuntimeError):
     """A mandatory private Provider-protocol record could not be persisted."""
 
 
+class ProviderContextCapacityPreflightError(RuntimeError):
+    """The declared model capacity cannot hold the next text request."""
+
+    hashi_error_code = "CONTEXT_CAPACITY_REJECTED"
+
+
 class _ProviderStreamInactivityTimeout(httpx.ReadTimeout):
     """Typed HER v2 timeout for one unfinished SSE provider call."""
 
@@ -1260,6 +1266,9 @@ def _backend_failure_response(
             if explicit_code == "PROVIDER_STREAM_IDLE_TIMEOUT"
             else "The provider stream produced no meaningful output."
         )
+    elif explicit_code == "CONTEXT_CAPACITY_REJECTED":
+        code = explicit_code
+        description = "The prepared request exceeds the declared model context capacity."
     elif isinstance(error, MultimodalContractError):
         code = error.code
         description = str(error)
@@ -1510,6 +1519,39 @@ class OpenRouterAdapter(BaseBackend):
     TRANSIENT_PROVIDER_CALL_RETRIES = INVALID_TOOL_CALL_REPAIR_LIMIT
     TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S = 1.0
     TRANSIENT_PROVIDER_CALL_RETRY_MAX_DELAY_S = 5.0
+
+    def _preflight_payload_capacity(self, payload: Mapping[str, Any]) -> None:
+        """Reject a clearly oversized text payload before an HTTP call.
+
+        Native media have provider-specific token accounting, so leave those
+        requests to the provider's typed rejection rather than guessing from
+        base64 wire bytes.
+        """
+
+        from orchestrator.context_compaction import estimate_tokens, resolve_capacity_profile
+
+        runtime = getattr(self.config, "_hashi_runtime", None)
+        if runtime is None:
+            return
+        model = str(payload.get("model") or self.config.model)
+        capacity = resolve_capacity_profile(runtime, self.config.engine, model)
+        if capacity is None:
+            return
+        serialized = json.dumps(
+            {key: payload.get(key) for key in ("messages", "tools") if key in payload},
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        )
+        if "data:" in serialized or "base64," in serialized:
+            return
+        estimated = estimate_tokens(serialized)
+        if estimated > capacity.usable_input_tokens:
+            raise ProviderContextCapacityPreflightError(
+                f"Prepared request estimate {estimated} tokens exceeds "
+                f"declared usable input capacity {capacity.usable_input_tokens} "
+                f"for {capacity.provider}/{capacity.model}."
+            )
 
     def _define_capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(
@@ -3309,6 +3351,7 @@ class OpenRouterAdapter(BaseBackend):
                             audio_output is None or audio_output.get("tools")
                         ),
                     )
+                    self._preflight_payload_capacity(payload)
                     provider_call_emitted_text = False
                     effective_parameters = _effective_protocol_parameters(payload)
 

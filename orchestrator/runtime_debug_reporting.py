@@ -205,6 +205,22 @@ def safe_retry_evidence(payload: dict[str, Any]) -> dict[str, Any]:
         return {"status": "not_applicable", "reasons": ["request_completed"]}
     if bool(payload.get("interrupted")):
         return {"status": "unknown", "reasons": ["request_interrupted"]}
+    reconciliation = payload.get("effect_reconciliation")
+    if isinstance(reconciliation, dict):
+        if any(
+            isinstance(reconciliation.get(key), int)
+            and not isinstance(reconciliation.get(key), bool)
+            and reconciliation[key] > 0
+            for key in (
+                "confirmed_write_count",
+                "observed_tool_count",
+                "unverified_action_count",
+                "completed_background_job_count",
+            )
+        ):
+            return {"status": "absent", "reasons": ["reconciled_action_evidence"]}
+        if reconciliation.get("evidence_limited") is True:
+            return {"status": "unknown", "reasons": ["effect_audit_incomplete"]}
     side_effects = payload.get("side_effects_possible")
     tool_count = int(payload.get("tool_call_count") or 0)
     retryable = payload.get("error_retryable")
@@ -282,6 +298,11 @@ def persist_terminal_diagnostic(
             "effects": {
                 "side_effects_possible": payload.get("side_effects_possible"),
                 "tool_call_count": int(payload.get("tool_call_count") or 0),
+                "reconciliation": (
+                    dict(payload["effect_reconciliation"])
+                    if isinstance(payload.get("effect_reconciliation"), dict)
+                    else None
+                ),
             },
             "safe_retry_evidence": safe_retry_evidence(payload),
         }

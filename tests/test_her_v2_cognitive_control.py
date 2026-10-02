@@ -269,7 +269,7 @@ def test_incident_style_single_read_cycle_is_detected_after_three_repetitions():
     ],
 )
 @pytest.mark.asyncio
-async def test_stage_provider_mandatorily_installs_cognitive_control(
+async def test_legacy_stage_provider_keeps_cycle_control_without_forcing_task_deltas(
     stage, legacy_options
 ):
     class Backend:
@@ -288,7 +288,7 @@ async def test_stage_provider_mandatorily_installs_cognitive_control(
             assert definitions
             for definition in definitions:
                 parameters = definition["function"]["parameters"]
-                assert HASHI_TASK_DELTA_ARGUMENT in parameters["required"]
+                assert HASHI_TASK_DELTA_ARGUMENT not in parameters.get("required", [])
             assert "HASHI tool-boundary cognitive control" in self.sys_prompt
             assert "HASHI persistent TaskState" in self.sys_prompt
             return BackendResponse(text="stage complete", duration_ms=1)
@@ -385,7 +385,7 @@ def test_unchanged_polling_cycle_remains_available():
 
 
 @pytest.mark.asyncio
-async def test_inline_task_delta_is_advertised_stripped_and_evidence_bound():
+async def test_legacy_inline_task_delta_is_accepted_stripped_and_evidence_bound():
     task_state = HERTaskState(goal="Resolve the evidence question")
     base = _Registry(("probe_a", "probe_b"))
     registry = _CognitiveControlToolRegistry(
@@ -394,8 +394,8 @@ async def test_inline_task_delta_is_advertised_stripped_and_evidence_bound():
     )
 
     parameters = registry.get_tool_definitions()[0]["function"]["parameters"]
-    assert HASHI_TASK_DELTA_ARGUMENT in parameters["required"]
-    assert HASHI_TASK_DELTA_ARGUMENT in parameters["properties"]
+    assert HASHI_TASK_DELTA_ARGUMENT not in parameters.get("required", [])
+    assert HASHI_TASK_DELTA_ARGUMENT not in parameters["properties"]
 
     first = await registry.execute(
         "probe_a",
@@ -853,7 +853,7 @@ async def test_stage_provider_installs_control_and_exports_typed_state():
             tool_parameters = self.tool_registry.get_tool_definitions()[0]["function"][
                 "parameters"
             ]
-            assert HASHI_TASK_DELTA_ARGUMENT in tool_parameters["required"]
+            assert HASHI_TASK_DELTA_ARGUMENT not in tool_parameters.get("required", [])
             for cycle in range(3):
                 for index, name in enumerate(_TOOLS):
                     await self.tool_registry.execute(

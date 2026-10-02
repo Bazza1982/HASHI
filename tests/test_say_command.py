@@ -17,6 +17,34 @@ from orchestrator import runtime_session
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.voice_manager import VoiceManager
 from orchestrator.voice_synthesizer import VoiceAsset
+from orchestrator.say_command import (
+    SaySelection,
+    is_speakable_final_reply,
+    parse_say_selection,
+    select_recent_replies,
+)
+
+
+def test_say_range_selects_final_replies_and_skips_meter():
+    assert parse_say_selection([]) == SaySelection(1, 1)
+    assert parse_say_selection(["3"]) == SaySelection(1, 3)
+    assert parse_say_selection(["2-4"]) == SaySelection(2, 4)
+    for arguments in (["0"], ["5"], ["4-2"], ["1", "3"], ["anything"]):
+        with pytest.raises(ValueError):
+            parse_say_selection(arguments)
+    messages = [
+        {"role": "assistant", "text": "first", "kind": "final", "message_id": "1"},
+        {"role": "assistant", "text": "cost", "channel": "meter", "history_eligible": False},
+        {"role": "assistant", "text": "mislabelled cost", "kind": "final", "channel": "meter"},
+        {"role": "assistant", "text": "second", "kind": "final", "message_id": "2"},
+        {"role": "assistant", "text": "progress", "channel": "commentary"},
+        {"role": "assistant", "text": "third", "kind": "final", "message_id": "3"},
+    ]
+    assert not is_speakable_final_reply(messages[1])
+    assert not is_speakable_final_reply(messages[2])
+    selected, available = select_recent_replies(messages, SaySelection(1, 3))
+    assert [message["text"] for message in selected] == ["first", "second", "third"]
+    assert available == 3
 
 
 def test_say_is_allowed_for_default_allowlist_commands():
@@ -71,7 +99,7 @@ async def test_cmd_say_forces_voice_even_when_voice_replies_are_off():
 
     runtime = SimpleNamespace(
         _is_authorized_user=lambda user_id: True,
-        _load_last_visible_assistant_text=lambda update: "last assistant reply",
+        _load_recent_visible_assistant_texts=lambda update, limit: ["last assistant reply"],
         _send_voice_reply=send_voice,
         _reply_text=lambda update, text: replies.append(text),
     )
@@ -86,6 +114,53 @@ async def test_cmd_say_forces_voice_even_when_voice_replies_are_off():
     assert calls
     assert calls[0]["text"] == "last assistant reply"
     assert calls[0]["force"] is True
+
+
+@pytest.mark.asyncio
+async def test_cmd_say_reads_three_delivered_replies_oldest_first():
+    calls = []
+
+    async def send_voice(chat_id, text, request_id, force=False):
+        calls.append(text)
+        return True
+
+    runtime = SimpleNamespace(
+        _is_authorized_user=lambda user_id: True,
+        _load_recent_visible_assistant_texts=lambda update, limit: ["third", "second", "first"],
+        _send_voice_reply=send_voice,
+    )
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123), effective_chat=SimpleNamespace(id=456)
+    )
+    await FlexibleAgentRuntime.cmd_say(runtime, update, SimpleNamespace(args=["1-3"]))
+    assert calls == ["first", "second", "third"]
+
+
+@pytest.mark.asyncio
+async def test_cmd_say_partial_range_reports_available_count():
+    spoken = []
+    notices = []
+
+    async def send_voice(chat_id, text, request_id, force=False):
+        spoken.append(text)
+        return True
+
+    async def reply_text(update, text):
+        notices.append(text)
+
+    runtime = SimpleNamespace(
+        _is_authorized_user=lambda user_id: True,
+        _load_recent_visible_assistant_texts=lambda update, limit: ["third", "second", "first"],
+        _send_voice_reply=send_voice,
+        _reply_text=reply_text,
+    )
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123), effective_chat=SimpleNamespace(id=456)
+    )
+    await FlexibleAgentRuntime.cmd_say(runtime, update, SimpleNamespace(args=["2-4"]))
+    assert spoken == ["first", "second"]
+    assert len(notices) == 1
+    assert "3" in notices[0]
 
 
 def test_say_legacy_fallback_excludes_newer_noninteractive_sources(tmp_path):
@@ -148,8 +223,8 @@ def test_say_prefers_current_route_confirmed_delivery(tmp_path, monkeypatch):
     update = SimpleNamespace()
     monkeypatch.setattr(
         runtime_session,
-        "telegram_delivery_state_for_update",
-        lambda runtime, current_update: ("confirmed reply", True),
+        "telegram_delivery_texts_for_update",
+        lambda runtime, current_update, limit: (["confirmed reply"], True),
     )
 
     assert runtime._load_last_visible_assistant_text(update) == "confirmed reply"
@@ -177,8 +252,8 @@ def test_say_does_not_fall_back_after_route_delivery_tracking_starts(
     runtime.error_logger = SimpleNamespace(warning=lambda *args: None)
     monkeypatch.setattr(
         runtime_session,
-        "telegram_delivery_state_for_update",
-        lambda runtime, update: (None, True),
+        "telegram_delivery_texts_for_update",
+        lambda runtime, update, limit: ([], True),
     )
 
     assert runtime._load_last_visible_assistant_text(SimpleNamespace()) is None
