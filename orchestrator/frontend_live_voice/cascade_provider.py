@@ -1,7 +1,7 @@
 """Cascade Voice Provider for HASHI Phone.
 
 Binds WebRTC and sideband events to an optional local voice-worker process.
-Supports faster-whisper STT + text reasoning + Kokoro TTS.
+Supports faster-whisper STT, tool-free Phone reasoning, and Piper TTS.
 Preserves existing LiveVoiceManager, FC, and background task semantics.
 """
 from __future__ import annotations
@@ -265,6 +265,7 @@ class CascadeProvider:
             "session.commentary.appended": "update.accepted",
             "session.thinking.appended": "update.accepted",
             "session.instructions.appended": "update.accepted",
+            "session.speech.accepted": "update.accepted",
             "session.input_audio.muted": "control.accepted",
             "session.input_audio.unmuted": "control.accepted",
             "session.output_gate.closed": "output.interrupted",
@@ -297,6 +298,10 @@ class CascadeProvider:
         if kind == "output.interrupted":
             result["generation"] = int(event.get("generation") or 1)
             result["reason"] = str(event.get("reason") or "barge_in")
+        if kind == "provider.ready":
+            generation = event.get("output_generation")
+            if type(generation) is int and generation >= 0:
+                result["generation"] = generation
         if kind == "action.proposed":
             delegation = event.get("delegation")
             if not isinstance(delegation, Mapping) or delegation.get("target") != "client":
@@ -313,6 +318,12 @@ class CascadeProvider:
     def update(
         self, kind: str, content: str, delegation_id: str | None, event_id: str
     ) -> dict[str, Any]:
+        if kind == "commentary":
+            # PAO has already decided the foreground words. Background inbox
+            # entries use thinking and must never trigger speech.
+            value = append_update(kind, content, delegation_id, event_id, estimate_tokens)
+            value["type"] = "session.speech.enqueue"
+            return value
         return append_update(kind, content, delegation_id, event_id, estimate_tokens)
 
     def control(self, action: str, event_id: str) -> dict[str, Any]:
@@ -324,4 +335,6 @@ class CascadeProvider:
         }
 
     def opening(self, goal: str, event_id: str) -> dict[str, Any]:
-        return self.update("instructions", goal, None, event_id)
+        # Manager supplies a model-generated greeting that respects PCM. The
+        # Worker accepts only this typed speech request, never raw instructions.
+        return self.update("commentary", goal, None, event_id)

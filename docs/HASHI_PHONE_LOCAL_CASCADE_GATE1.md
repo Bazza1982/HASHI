@@ -17,3 +17,5 @@ Internal `instructions`, `commentary`, and `thinking` updates are retained as co
 ## What remains for later gates
 
 This Worker does not yet contain real speech recognition, reasoning, or speech synthesis. It must not be presented as a usable local voice assistant. The next gate must connect those engines, prove an actual spoken turn and a safe proactive opening, consume background results as context, and verify cancellation against generated audio. Production qualification also needs durable recovery semantics and a real Workbench microphone and speaker acceptance test. Source tests and an in-process aiortc call do not prove live device adoption.
+
+The subsequent experimental source checkpoint is recorded in [Gate 2](HASHI_PHONE_LOCAL_CASCADE_GATE2.md).

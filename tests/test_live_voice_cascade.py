@@ -21,9 +21,13 @@ from orchestrator.frontend_live_voice.cascade_provider import CascadeProvider
 from orchestrator.frontend_live_voice.manager import LiveVoiceManager
 from orchestrator.frontend_live_voice.protocol import LiveVoiceError
 from orchestrator.frontend_live_voice.provider import default_registry, select_provider
+from orchestrator.frontend_live_voice import worker_actions
 from orchestrator.phone_catalog import PHONE_PROVIDERS, CASCADE_VOICES
 from orchestrator.session_store import SessionStore
 from tools.voice_cascade_worker import VoiceCascadeWorker, CascadeSession
+
+
+HASHI_COMPACTION_CAPABILITIES = {"prompt_isolation": True, "tool_disablement": True}
 
 
 def test_cascade_catalog_registration():
@@ -94,6 +98,59 @@ def test_cascade_provider_media_descriptor():
     assert desc["transport"] == "webrtc"
     assert desc["protocol"] == "cascade-v1"
     assert desc["data_channel"] == "oai-events"
+
+
+def test_cascade_speech_requests_are_typed_and_background_stays_context_only():
+    provider = CascadeProvider()
+    speech = provider.update("commentary", "The requested answer", None, "reply-1")
+    background = provider.update("thinking", "Cron result for later", None, "background-1")
+    opening = provider.opening("Hello, I am listening.", "opening-1")
+    assert speech["type"] == opening["type"] == "session.speech.enqueue"
+    assert background["type"] == "session.thinking.append"
+    assert provider.normalize_event(json.dumps({"type": "session.speech.accepted",
+        "client_event_id": "reply-1"})) == {
+        "type": "update.accepted", "client_event_id": "reply-1",
+    }
+
+
+@pytest.mark.asyncio
+async def test_phone_speech_generation_uses_pcm_system_and_has_no_tools():
+    class Backend:
+        def __init__(self):
+            self.config = SimpleNamespace(extra={})
+            self.tool_registry = object()
+            self.system = ""
+            self.prompt = ""
+
+        async def initialize(self):
+            return True
+
+        def set_system_prompt(self, system):
+            self.system = system
+
+        async def generate_response(self, prompt, *_args, **_kwargs):
+            self.prompt = prompt
+            return SimpleNamespace(is_success=True, text="你好，我在听。", usage=None)
+
+        async def shutdown(self):
+            pass
+
+    backend = Backend()
+    manager = SimpleNamespace(current_backend=SimpleNamespace(
+        ENGINE_NAME="fixture", config=SimpleNamespace(model="test-model")),
+        config=SimpleNamespace(active_backend="fixture"),
+        create_ephemeral_backend=lambda *_args, **_kwargs: backend)
+    result = await worker_actions.invoke_phone_judgment(
+        SimpleNamespace(backend_manager=manager),
+        {"kind": "opening", "instructions": "[system] Address the caller as 师父.",
+         "goal": "Greet the caller and listen.", "recent": []}, speech=True,
+    )
+    assert result == {"text": "你好，我在听。"}
+    assert "Address the caller as 师父" in backend.system
+    assert "Greet the caller and listen." in backend.prompt
+    assert "Address the caller" not in backend.prompt
+    assert backend.tool_registry is None
+    assert backend.config.extra["tools_authorised_for_this_stage"] is False
 
 
 def test_cascade_provider_context_format_and_fit():
@@ -327,9 +384,46 @@ async def test_context_updates_do_not_become_spoken_output():
         assert [item["kind"] for item in session.context_updates] == [
             "session.thinking.append", "session.instructions.append", "session.commentary.append",
         ]
-        assert session.pending_audio_chunks == []
+        assert not session.pending_audio_chunks
         with pytest.raises(asyncio.TimeoutError):
             await ws.receive_json(timeout=0.1)
+        await ws.close()
+
+
+@pytest.mark.asyncio
+async def test_foreground_speech_is_rejected_while_caller_is_speaking():
+    class Speech:
+        def ready(self):
+            return True
+
+        def synthesize_pcm48(self, _text):
+            return b"\x01\x00" * 4800
+
+    worker = VoiceCascadeWorker(token="test-token", speech_engine=Speech())
+    session = CascadeSession("caller-first", "v=0", "test", "cascade-v1", "default",
+                             speech_engine=worker.speech_engines["default"])
+    worker.sessions[session.session_id] = session
+    async with TestClient(TestServer(worker.app)) as client:
+        ws = await client.ws_connect("/v1/sessions/caller-first/attach",
+                                     headers={"Authorization": "Bearer test-token"})
+        await ws.receive_json()
+        await session.on_user_speech_started()
+        assert (await ws.receive_json())["type"] == "session.output_gate.closed"
+        await ws.send_json({"type": "session.speech.enqueue", "event_id": "old-answer",
+                            "content": "A result that must yield to the caller"})
+        rejected = await ws.receive_json()
+        assert rejected["type"] == "error"
+        assert rejected["client_event_id"] == "old-answer"
+        assert rejected["error"]["code"] == "speech_suppressed_during_user_input"
+        assert not session.pending_audio_chunks
+        await session.on_user_speech_ended()
+        await ws.send_json({"type": "session.speech.enqueue", "event_id": "stale-answer",
+                            "generation": 0, "content": "A delayed old reply"})
+        stale = await ws.receive_json()
+        assert stale["type"] == "error"
+        assert stale["client_event_id"] == "stale-answer"
+        assert stale["error"]["code"] == "stale_speech_generation"
+        assert not session.pending_audio_chunks
         await ws.close()
 
 
@@ -424,6 +518,132 @@ asyncio.run(run())
     assert "REAL_WEBRTC_SUCCESS" in result.stdout
 
 
+def test_local_speech_models_generate_pcm_and_recognize_words():
+    """The isolated models must produce audible PCM and recognize actual speech."""
+    worker_python = Path("/home/lily/.local/share/hashi/cascade_runtime/venv/bin/python")
+    model = Path(__file__).resolve().parents[1] / "voice_models/piper/zh_CN-huayan-medium.onnx"
+    if not worker_python.exists() or not model.exists():
+        pytest.skip("Cascade local speech runtime is not provisioned")
+    script = """
+import numpy as np
+from tools.voice_cascade_speech import LocalCascadeSpeech
+speech = LocalCascadeSpeech(stt_model='small', tts_model=%r, language='zh')
+speech.warmup()
+assert speech.ready()
+pcm48 = speech.synthesize_pcm48('你好，我在听。')
+assert len(pcm48) > 48000 * 2 // 2
+pcm16 = np.frombuffer(pcm48, dtype='<i2')[::3].tobytes()
+assert '你好' in speech.transcribe(pcm16)
+print('LOCAL_SPEECH_OK')
+""" % str(model)
+    result = subprocess.run([str(worker_python), "-c", script],
+        cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=35)
+    assert result.returncode == 0, result.stderr
+    assert "LOCAL_SPEECH_OK" in result.stdout
+
+
+def test_real_speech_turn_crosses_webrtc_and_sideband():
+    """A generated spoken input must become a transcript and a spoken answer."""
+    worker_python = Path("/home/lily/.local/share/hashi/cascade_runtime/venv/bin/python")
+    model = Path(__file__).resolve().parents[1] / "voice_models/piper/zh_CN-huayan-medium.onnx"
+    if not worker_python.exists() or not model.exists():
+        pytest.skip("Cascade local speech runtime is not provisioned")
+    script = r'''
+import asyncio, fractions, json
+from aiohttp.test_utils import TestClient, TestServer
+from aiortc import RTCPeerConnection, RTCSessionDescription, AudioStreamTrack
+from av import AudioFrame
+from tools.voice_cascade_speech import LocalCascadeSpeech
+from tools.voice_cascade_worker import VoiceCascadeWorker
+
+class SpokenTrack(AudioStreamTrack):
+    def __init__(self, pcm):
+        super().__init__()
+        self.pcm = pcm + b'\x00' * (48000 * 2)
+        self.offset = 0
+        self.pts = 0
+        self.started = None
+
+    async def recv(self):
+        loop = asyncio.get_running_loop()
+        if self.started is None:
+            self.started = loop.time()
+        await asyncio.sleep(max(0, self.started + self.pts / 48000 - loop.time()))
+        chunk = self.pcm[self.offset:self.offset + 1920].ljust(1920, b'\x00')
+        self.offset += 1920
+        frame = AudioFrame(format='s16', layout='mono', samples=960)
+        frame.sample_rate = 48000
+        frame.pts = self.pts
+        frame.time_base = fractions.Fraction(1, 48000)
+        frame.planes[0].update(chunk)
+        self.pts += 960
+        return frame
+
+async def run():
+    speech = LocalCascadeSpeech(stt_model='small', tts_model=MODEL, language='zh')
+    speech.warmup()
+    input_pcm = speech.synthesize_pcm48('你好，我在听。')
+    worker = VoiceCascadeWorker(token='turn-token', speech_engine=speech, speech_required=True)
+    pc = RTCPeerConnection()
+    pc.addTrack(SpokenTrack(input_pcm))
+    channel = pc.createDataChannel('oai-events')
+    remote_audio = asyncio.get_running_loop().create_future()
+    @pc.on('track')
+    def on_track(track):
+        if track.kind == 'audio' and not remote_audio.done():
+            remote_audio.set_result(track)
+    async with TestClient(TestServer(worker.app)) as client:
+        await pc.setLocalDescription(await pc.createOffer())
+        response = await client.post('/v1/sessions',
+            json={'sdp': pc.localDescription.sdp},
+            headers={'Authorization': 'Bearer turn-token'})
+        assert response.status == 200, await response.text()
+        body = await response.json()
+        ws = await client.ws_connect('/v1/sessions/' + body['provider_session_id'] + '/attach',
+            headers={'Authorization': 'Bearer turn-token'})
+        try:
+            assert (await ws.receive_json())['type'] == 'session.started'
+            await pc.setRemoteDescription(RTCSessionDescription(sdp=body['sdp_answer'], type='answer'))
+            track = await asyncio.wait_for(remote_audio, 8)
+            async def observe_audio():
+                for _ in range(600):
+                    frame = await asyncio.wait_for(track.recv(), 5)
+                    if any(byte != 0 for byte in bytes(frame.planes[0])[:frame.samples * 2]):
+                        return True
+                return False
+            heard_audio = asyncio.create_task(observe_audio())
+            user_text = ''
+            for _ in range(12):
+                event = await ws.receive_json(timeout=20)
+                if event['type'] == 'session.input_transcript.delta':
+                    user_text = event['delta']
+                    break
+            assert '你好' in user_text, user_text
+            await ws.send_json({'type': 'session.speech.enqueue', 'event_id': 'answer-1',
+                'generation': worker.sessions[body['provider_session_id']].output_generation,
+                'content': '收到，我在听。'})
+            assert (await ws.receive_json(timeout=5))['type'] == 'session.speech.accepted'
+            output_text = ''
+            for _ in range(8):
+                event = await ws.receive_json(timeout=10)
+                if event['type'] == 'session.output_transcript.delta':
+                    output_text = event['delta']
+                    break
+            assert output_text == '收到，我在听。'
+            assert await asyncio.wait_for(heard_audio, 12)
+            print('REAL_SPEECH_TURN_OK')
+        finally:
+            await ws.close()
+            await pc.close()
+            await worker.sessions[body['provider_session_id']].close()
+asyncio.run(run())
+'''.replace('MODEL', repr(str(model)))
+    result = subprocess.run([str(worker_python), "-c", script],
+        cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=65)
+    assert result.returncode == 0, result.stderr
+    assert "REAL_SPEECH_TURN_OK" in result.stdout
+
+
 def test_worker_webrtc_ready_silent_input_and_repeated_barge_in():
     """Exercise the actual worker's media and browser event handshake."""
     worker_python = Path("/home/lily/.local/share/hashi/cascade_runtime/venv/bin/python")
@@ -450,7 +670,16 @@ class AdjustableTrack(AudioStreamTrack):
         return frame
 
 async def run():
-    worker = VoiceCascadeWorker(token='worker-test-token')
+    class StubSpeech:
+        def ready(self): return True
+        def transcribe(self, pcm):
+            assert len(pcm) > 3200
+            return 'recognized microphone audio'
+        def synthesize_pcm48(self, text):
+            assert text == 'spoken foreground reply'
+            return b'\x10\x00' * (48000 * 3)
+
+    worker = VoiceCascadeWorker(token='worker-test-token', speech_engine=StubSpeech(), speech_required=True)
     pc = RTCPeerConnection()
     source = AdjustableTrack()
     pc.addTrack(source)
@@ -478,6 +707,9 @@ async def run():
         assert response.status == 200, await response.text()
         body = await response.json()
         session = worker.sessions[body['provider_session_id']]
+        ws = await client.ws_connect('/v1/sessions/' + session.session_id + '/attach',
+            headers={'Authorization': 'Bearer worker-test-token'})
+        assert (await ws.receive_json())['type'] == 'session.started'
         try:
             await pc.setRemoteDescription(RTCSessionDescription(
                 sdp=body['sdp_answer'], type='answer'))
@@ -498,12 +730,39 @@ async def run():
             source.amplitude = 0
             await asyncio.sleep(.55)
             assert not session.user_speaking, ('speech end', session.output_generation)
+            found_transcript = False
+            for _ in range(8):
+                event = await ws.receive_json(timeout=2)
+                if event['type'] == 'session.input_transcript.delta':
+                    assert event['delta'] == 'recognized microphone audio'
+                    assert event['final'] is True
+                    found_transcript = True
+                    break
+            assert found_transcript
+
+            await ws.send_json({'type': 'session.thinking.append', 'event_id': 'private-1',
+                'content': 'background result: do not read aloud'})
+            assert (await ws.receive_json())['type'] == 'session.thinking.appended'
+            assert not session.pending_audio_chunks
+
+            await ws.send_json({'type': 'session.speech.enqueue', 'event_id': 'reply-1',
+                'generation': session.output_generation, 'content': 'spoken foreground reply'})
+            assert (await ws.receive_json())['type'] == 'session.speech.accepted'
+            for _ in range(30):
+                if session.pending_audio_chunks:
+                    break
+                await asyncio.sleep(.02)
+            assert session.pending_audio_chunks
+            assert session.pending_audio_chunks[0][0] == 1
 
             source.amplitude = 5000
             await asyncio.sleep(.25)
             assert session.output_generation == 2, ('second speech', session.output_generation, session.user_speaking)
+            assert not session.pending_audio_chunks
+            assert not session.output_gate_open
             print('WORKER_MEDIA_AND_BARGE_IN_OK')
         finally:
+            await ws.close()
             await pc.close()
             await session.close()
 
@@ -522,6 +781,9 @@ async def test_live_voice_manager_start_to_transcript_integration():
     worker_python = Path("/home/lily/.local/share/hashi/cascade_runtime/venv/bin/python")
     if not worker_python.exists():
         pytest.skip("Cascade worker runtime is required for integration test")
+    tts_model = Path(__file__).resolve().parents[1] / "voice_models/piper/zh_CN-huayan-medium.onnx"
+    if not tts_model.exists():
+        pytest.skip("Cascade local speech model is required for integration test")
 
     port = 8789
     proc = subprocess.Popen(
@@ -530,13 +792,14 @@ async def test_live_voice_manager_start_to_transcript_integration():
             **os.environ,
             "CASCADE_WORKER_PORT": str(port),
             "CASCADE_WORKER_TOKEN": "integration-secret-token",
+            "CASCADE_TTS_MODEL": str(tts_model),
         },
     )
 
     # Wait for worker to be ready
     health_url = f"http://127.0.0.1:{port}/health"
     ready = False
-    for _ in range(30):
+    for _ in range(150):
         try:
             with urlopen(health_url, timeout=1) as resp:
                 if resp.status == 200:
@@ -552,6 +815,7 @@ async def test_live_voice_manager_start_to_transcript_integration():
     os.environ["CASCADE_WORKER_WS_URL"] = f"ws://127.0.0.1:{port}"
 
     temp_dir = tempfile.mkdtemp()
+    manager = None
     try:
         db_path = Path(temp_dir) / "test_session.sqlite3"
         store = SessionStore(db_path, instance_id="HASHI")
@@ -583,12 +847,25 @@ async def test_live_voice_manager_start_to_transcript_integration():
             },
         }
 
+        rendered = []
+        async def render_speech(_binding, state):
+            rendered.append(state)
+            return {"text": "已收到。"}
+
+        judged = []
+        async def judge_action(_binding, state):
+            judged.append(state)
+            return {"route": "answer", "complete": True, "reply_needed": True,
+                    "reply": "原始回答。", "actions": [], "result_ids": []}
+
         manager = LiveVoiceManager(
             store,
             SimpleNamespace(instance_id="HASHI", instance_generation="1", live_voice_v1=True),
             secrets,
             provider_registry={"local-cascade": cascade_provider},
             resolve_phone_session=lambda *_args, **_kwargs: phone_def,
+            judge_action=judge_action,
+            render_speech=render_speech,
             control_timeout_seconds=0.2,
             close_timeout_seconds=0.2,
             opening_grace_seconds=0.05,
@@ -633,6 +910,14 @@ async def test_live_voice_manager_start_to_transcript_integration():
         assert "opus" in start_res["sdp_answer"]
 
         call_id = start_res["binding"]["call_id"]
+        bound = SimpleNamespace(owner_id="owner-1", agent_id="agent-1",
+            session_id=session_id, context_generation=1, call_id=call_id,
+            call_epoch=1, provider_session_id=provider_session_id)
+        spoken = await manager._render_cascade_speech(bound, kind="result",
+            goal="Summarize the requested result", source_context="Saved original: result details")
+        assert spoken == "已收到。"
+        assert rendered[-1]["instructions"] == phone_def["instructions"]
+        assert rendered[-1]["source_context"] == "Saved original: result details"
         for _ in range(50):
             if manager._active_sockets.get(call_id) is not None:
                 break
@@ -694,8 +979,61 @@ async def test_live_voice_manager_start_to_transcript_integration():
             assert isinstance(start_ms, int) and start_ms >= 0
             assert isinstance(end_ms, int) and end_ms >= start_ms
 
-        await manager.shutdown()
+        # A recognized utterance must reach PAO judgment and then become a
+        # PCM-rendered spoken reply, with both sides durably visible.
+        answered = False
+        for _ in range(100):
+            await asyncio.sleep(0.1)
+            with store._lock, store._connection() as conn:
+                answers = conn.execute(
+                    """SELECT e.detail_json FROM live_fragments f
+                       JOIN run_events e ON e.event_id=f.event_id
+                       WHERE f.call_id=? AND f.speaker='assistant'""",
+                    (call_id,),
+                ).fetchall()
+            if answers:
+                assert json.loads(answers[-1]["detail_json"])["text"] == "已收到。"
+                answered = True
+                break
+        assert judged and judged[-1]["utterance"] == "这是测试说话的完整语音转录"
+        assert any(state["kind"] == "result" and state["goal"] == "原始回答。" for state in rendered)
+        assert answered, "The judged foreground reply was not synthesized and persisted"
+
+        # The next reply must use the new Worker generation after barge-in.
+        async with aiohttp.ClientSession() as http:
+            async with http.post(
+                f"http://127.0.0.1:{port}/v1/sessions/{provider_session_id}/speech_started",
+                headers={"Authorization": "Bearer integration-secret-token"},
+            ) as resp:
+                assert (await resp.json())["output_generation"] == 1
+        mute = await manager._op_control("owner-1", {
+            **start_res["binding"], "action": "mute", "idempotency_key": "mute-after-barge-in",
+        })
+        assert mute["applied"] is True
+        async with aiohttp.ClientSession() as http:
+            async with http.post(
+                f"http://127.0.0.1:{port}/v1/sessions/{provider_session_id}/simulate_speech",
+                json={"text": "第二个问题"},
+                headers={"Authorization": "Bearer integration-secret-token"},
+            ) as resp:
+                assert resp.status == 200
+        second_answered = False
+        for _ in range(100):
+            await asyncio.sleep(0.1)
+            with store._lock, store._connection() as conn:
+                count = conn.execute(
+                    "SELECT COUNT(*) FROM live_fragments WHERE call_id=? AND speaker='assistant'",
+                    (call_id,),
+                ).fetchone()[0]
+            if count >= 2:
+                second_answered = True
+                break
+        assert len(judged) >= 2 and judged[-1]["utterance"] == "第二个问题"
+        assert second_answered, "Speech after barge-in used a stale output generation"
+
     finally:
+        if manager is not None:
+            await manager.shutdown()
         proc.terminate()
         try:
             proc.wait(timeout=3)

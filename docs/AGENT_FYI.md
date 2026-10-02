@@ -34,7 +34,7 @@ Model and provider cards share one contract. Tool support is per model: chat-onl
 
 ## UI, media, and Phone
 
-HASHI2's optional `local-cascade` Phone provider is an experimental Gate 1 media and cancellation skeleton. It stays out of the default qualified provider registry and requires an explicit Worker token. It has real WebRTC media and client interruption gates, but no local STT, reasoning, or TTS yet. Sideband reconnect replays only a bounded in-memory gap; live Workbench device acceptance is pending. See [local cascade Gate 1](HASHI_PHONE_LOCAL_CASCADE_GATE1.md).
+HASHI2's optional `local-cascade` Phone provider has an experimental Gate 2 source checkpoint: local recognition and synthesis connect to the existing selected Agent's Phone judgment and action route. It stays out of the default qualified provider registry and requires an explicit Worker token and offline models. Sideband reconnect replays only a bounded in-memory gap; live Workbench device acceptance is pending. See [local cascade Gate 2](HASHI_PHONE_LOCAL_CASCADE_GATE2.md).
 
 Live Phone defaults on; a missing provider API key blocks calls and must be named in `/phone`. An explicit instance opt-out remains valid. The Agent's Phone settings and PCM readiness do not prove provider readiness.
 

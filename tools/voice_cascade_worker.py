@@ -1,7 +1,7 @@
 """Standalone local Voice Cascade Worker for HASHI Phone.
 
-Provides WebRTC audio streaming via aiortc, session authentication,
-generation-based barge-in gate closing, and sideband WebSocket events.
+Provides WebRTC audio streaming via aiortc, offline recognition and synthesis,
+session authentication, generation-based barge-in, and sideband events.
 """
 from __future__ import annotations
 
@@ -17,6 +17,10 @@ from typing import Any
 from uuid import uuid4
 
 from aiohttp import WSMsgType, web
+if __package__:
+    from .voice_cascade_speech import LocalCascadeSpeech, MAX_OUTPUT_PCM_BYTES
+else:
+    from voice_cascade_speech import LocalCascadeSpeech, MAX_OUTPUT_PCM_BYTES
 
 _LOGGER = logging.getLogger("voice_cascade_worker")
 
@@ -38,6 +42,8 @@ MAX_CONTEXT_UPDATES = 128
 SPEECH_RMS_THRESHOLD = 650
 SPEECH_START_FRAMES = 2
 SPEECH_END_FRAMES = 15
+MAX_UTTERANCE_PCM_BYTES = 16000 * 2 * 30
+OUTPUT_FRAME_BYTES = 960 * 2
 
 
 class CascadeAudioStreamTrack(MediaStreamTrack if AIORTC_AVAILABLE else object):
@@ -75,7 +81,7 @@ class CascadeAudioStreamTrack(MediaStreamTrack if AIORTC_AVAILABLE else object):
         if self.session.output_gate_open and self.session.pending_audio_chunks:
             # Drain chunks matching the current generation
             while self.session.pending_audio_chunks:
-                gen, data = self.session.pending_audio_chunks.pop(0)
+                gen, data = self.session.pending_audio_chunks.popleft()
                 if gen == self.session.output_generation:
                     chunk_data = data
                     self.delivered_chunks.append(gen)
@@ -99,6 +105,7 @@ class CascadeSession:
         model: str,
         voice: str,
         input_messages: list[dict[str, Any]] | None = None,
+        speech_engine: LocalCascadeSpeech | None = None,
     ):
         self.session_id = session_id
         self.sdp_offer = sdp_offer
@@ -106,6 +113,7 @@ class CascadeSession:
         self.model = model
         self.voice = voice
         self.input_messages = list(input_messages or [])
+        self.speech_engine = speech_engine
         self.context_updates: list[dict[str, str]] = []
         self.created_at = time.time()
         self.call_epoch = 1
@@ -113,7 +121,7 @@ class CascadeSession:
         self.output_generation = 0
         self.output_gate_open = True
         self.user_speaking = False
-        self.deferred_speech: deque[str] = deque()
+        self.deferred_speech: deque[tuple[int, str]] = deque()
         self.sequence = 0
         self.muted = False
         self.closed = False
@@ -126,7 +134,14 @@ class CascadeSession:
         self.output_track: CascadeAudioStreamTrack | None = None
         self.incoming_track_task: asyncio.Task[Any] | None = None
         # Pending chunks stored as tuples: (generation, pcm_bytes)
-        self.pending_audio_chunks: list[tuple[int, bytes]] = []
+        self.pending_audio_chunks: deque[tuple[int, bytes]] = deque()
+        self._speech_tasks: set[asyncio.Task[Any]] = set()
+        self._transcription_lock = asyncio.Lock()
+        self._speech_output_lock = asyncio.Lock()
+
+    def _track_speech_task(self, task: asyncio.Task[Any]) -> None:
+        self._speech_tasks.add(task)
+        task.add_done_callback(self._speech_tasks.discard)
 
     def next_seq(self) -> int:
         self.sequence += 1
@@ -200,6 +215,7 @@ class CascadeSession:
 
         # 1. Purge all pending audio chunks of previous generations
         self.pending_audio_chunks.clear()
+        self.deferred_speech.clear()
 
         # 2. Emit output.gate.closed on browser DataChannel
         await self.emit_datachannel({
@@ -221,20 +237,70 @@ class CascadeSession:
             return
         self.user_speaking = False
         while self.deferred_speech and not self.user_speaking and not self.closed:
-            await self.speak_text(self.deferred_speech.popleft())
+            generation, text = self.deferred_speech.popleft()
+            if self.speech_engine is None:
+                await self.speak_text(text, expected_generation=generation)
+            else:
+                self._track_speech_task(asyncio.create_task(self.speak_text(text, expected_generation=generation)))
 
-    async def speak_text(self, text: str) -> None:
+    async def speak_text(self, text: str, *, expected_generation: int | None = None) -> None:
         """Enqueue assistant speech text and audio chunks under the current generation."""
-        if self.closed:
+        if self.closed or not isinstance(text, str) or not text.strip():
+            return
+        if len(text) > 1200:
+            await self.emit_sideband("error", {"error": {"code": "cascade_speech_text_limit"}})
+            return
+        generation = self.output_generation if expected_generation is None else expected_generation
+        if generation != self.output_generation:
             return
         if self.user_speaking:
-            self.deferred_speech.append(text)
+            self.deferred_speech.append((generation, text))
+            return
+        async with self._speech_output_lock:
+            if generation == self.output_generation:
+                await self._speak_unlocked(text)
+
+    async def _speak_unlocked(self, text: str) -> None:
+        if self.closed or self.user_speaking:
             return
         current_gen = self.output_generation
+        if self.speech_engine is not None:
+            try:
+                pcm = await asyncio.to_thread(self.speech_engine.synthesize_pcm48, text)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _LOGGER.exception("Local speech synthesis failed")
+                await self.emit_sideband("error", {"error": {"code": "cascade_synthesis_failed"}})
+                return
+            if (not pcm or len(pcm) > MAX_OUTPUT_PCM_BYTES
+                    or len(self.pending_audio_chunks) * OUTPUT_FRAME_BYTES + len(pcm) > MAX_OUTPUT_PCM_BYTES):
+                await self.emit_sideband("error", {"error": {"code": "cascade_synthesis_limit"}})
+                return
+            if self.closed or current_gen != self.output_generation:
+                return
+            if self.user_speaking:
+                self.deferred_speech.append((current_gen, text))
+                return
+            self.turn_id += 1
+            duration_ms = len(pcm) // 96
+            now_ms = max(0, int((time.time() - self.created_at) * 1000))
+            for start in range(0, len(pcm), OUTPUT_FRAME_BYTES):
+                frame = pcm[start:start + OUTPUT_FRAME_BYTES]
+                self.pending_audio_chunks.append((current_gen, frame.ljust(OUTPUT_FRAME_BYTES, b"\x00")))
+            self.output_gate_open = True
+            await self.emit_datachannel({"type": "output.gate.opened", "generation": current_gen})
+            await self.emit_sideband("session.output_transcript.delta", {
+                "event_id": f"evt_out_{uuid4().hex[:12]}", "delta": text,
+                "turn_id": self.turn_id, "generation": current_gen,
+                "start_ms": now_ms, "end_ms": now_ms + duration_ms,
+            })
+            return
         self.turn_id += 1
         await self.emit_datachannel({"type": "output.gate.opened", "generation": current_gen})
         if self.user_speaking or current_gen != self.output_generation:
-            self.deferred_speech.appendleft(text)
+            if current_gen == self.output_generation:
+                self.deferred_speech.appendleft((current_gen, text))
             return
         self.output_gate_open = True
 
@@ -256,9 +322,29 @@ class CascadeSession:
             return
 
         # Queue test audio chunks (20ms frames of test audio tagged with generation)
-        test_frame_bytes = b"\x01\x00" * 960  # Non-zero audio pattern
+        test_frame_bytes = b"\x01\x00" * 960  # Gate 1 media scaffold only
         for _ in range(3):
             self.pending_audio_chunks.append((current_gen, test_frame_bytes))
+
+    async def transcribe_utterance(self, pcm: bytes, *, start_ms: int, end_ms: int) -> None:
+        """Emit only final recognized speech; PAO remains the sole turn/action owner."""
+        if self.speech_engine is None or not pcm or len(pcm) > MAX_UTTERANCE_PCM_BYTES:
+            return
+        async with self._transcription_lock:
+            try:
+                text = await asyncio.to_thread(self.speech_engine.transcribe, pcm)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _LOGGER.exception("Local speech recognition failed")
+                await self.emit_sideband("error", {"error": {"code": "cascade_transcription_failed"}})
+                return
+            if self.closed or not isinstance(text, str) or not text.strip():
+                return
+            await self.emit_sideband("session.input_transcript.delta", {
+                "event_id": f"evt_in_{uuid4().hex[:12]}", "delta": text.strip(),
+                "start_ms": max(0, start_ms), "end_ms": max(start_ms, end_ms), "final": True,
+            })
 
     async def simulate_user_input(self, text: str) -> None:
         """Simulate user voice transcription (STT final) with complete timestamps."""
@@ -283,29 +369,57 @@ class CascadeSession:
             resampler = AudioResampler(format="s16", layout="mono", rate=16000)
             active_frames = 0
             quiet_frames = 0
+            pre_roll: deque[bytes] = deque(maxlen=10)
+            utterance = bytearray()
+            utterance_overflow = False
+            utterance_start_ms = 0
             try:
                 while not self.closed:
                     frame = await track.recv()
                     if self.muted:
                         active_frames = 0
                         quiet_frames = 0
+                        pre_roll.clear()
+                        utterance.clear()
                         continue
                     for mono in resampler.resample(frame):
                         pcm = bytes(mono.planes[0])[: mono.samples * 2]
                         samples = memoryview(pcm).cast("h") if pcm else ()
                         rms = math.isqrt(sum(sample * sample for sample in samples) // len(samples)) if samples else 0
+                        pre_roll.append(pcm)
+                        started = False
                         if rms >= SPEECH_RMS_THRESHOLD:
                             active_frames += 1
                             quiet_frames = 0
                             if active_frames >= SPEECH_START_FRAMES and not self.user_speaking:
                                 await self.on_user_speech_started()
+                                utterance = bytearray(b"".join(pre_roll))
+                                utterance_overflow = False
+                                utterance_start_ms = max(0, int((time.time() - self.created_at) * 1000)
+                                                         - len(utterance) // 32)
+                                started = True
                         else:
                             active_frames = 0
                             if self.user_speaking:
                                 quiet_frames += 1
-                                if quiet_frames >= SPEECH_END_FRAMES:
-                                    quiet_frames = 0
-                                    await self.on_user_speech_ended()
+                        if self.user_speaking and not started:
+                            if len(utterance) + len(pcm) <= MAX_UTTERANCE_PCM_BYTES:
+                                utterance.extend(pcm)
+                            else:
+                                utterance_overflow = True
+                        if self.user_speaking and quiet_frames >= SPEECH_END_FRAMES:
+                            quiet_frames = 0
+                            await self.on_user_speech_ended()
+                            if utterance_overflow:
+                                await self.emit_sideband("error", {"error": {"code": "cascade_utterance_limit"}})
+                            elif self.speech_engine is not None:
+                                end_ms = max(utterance_start_ms, int((time.time() - self.created_at) * 1000))
+                                task = asyncio.create_task(self.transcribe_utterance(
+                                    bytes(utterance), start_ms=utterance_start_ms, end_ms=end_ms,
+                                ))
+                                self._track_speech_task(task)
+                            utterance.clear()
+                            pre_roll.clear()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -320,6 +434,8 @@ class CascadeSession:
         await self.emit_sideband("session.closed", {"reason": "session_terminated"})
         if self.incoming_track_task and not self.incoming_track_task.done():
             self.incoming_track_task.cancel()
+        for task in tuple(self._speech_tasks):
+            task.cancel()
         if self.ws and not self.ws.closed:
             try:
                 await self.ws.close()
@@ -338,12 +454,19 @@ class VoiceCascadeWorker:
         token: str,
         host: str = "127.0.0.1",
         port: int = 8775,
+        speech_engine: LocalCascadeSpeech | None = None,
+        speech_required: bool = False,
+        speech_engines: dict[str, LocalCascadeSpeech] | None = None,
     ):
         if not isinstance(token, str) or not token.strip():
             raise ValueError("CASCADE_WORKER_TOKEN must be configured")
         self.token = token.strip()
         self.host = host
         self.port = port
+        self.speech_engines = dict(speech_engines or {})
+        if speech_engine is not None:
+            self.speech_engines.setdefault("default", speech_engine)
+        self.speech_required = speech_required
         self.sessions: dict[str, CascadeSession] = {}
         self.app = web.Application()
         self._setup_routes()
@@ -368,6 +491,8 @@ class VoiceCascadeWorker:
             "service": "voice-cascade-worker",
             "version": "1.1.0",
             "aiortc_available": AIORTC_AVAILABLE,
+            "speech_ready": any(engine.ready() for engine in self.speech_engines.values()),
+            "available_voices": sorted(voice for voice, engine in self.speech_engines.items() if engine.ready()),
             "active_sessions": len(self.sessions),
         })
 
@@ -393,6 +518,10 @@ class VoiceCascadeWorker:
                 },
                 status=503,
             )
+        voice = body.get("voice", "default")
+        speech_engine = self.speech_engines.get(voice) if isinstance(voice, str) else None
+        if self.speech_required and (speech_engine is None or not speech_engine.ready()):
+            return web.json_response({"error": "speech_engine_unavailable"}, status=503)
 
         input_messages = body.get("input_messages", [])
         if not isinstance(input_messages, list) or len(input_messages) > 128:
@@ -404,8 +533,9 @@ class VoiceCascadeWorker:
             sdp_offer=sdp_offer,
             instructions=body.get("instructions", ""),
             model=body.get("model", "cascade-v1"),
-            voice=body.get("voice", "default"),
+            voice=voice,
             input_messages=input_messages,
+            speech_engine=speech_engine,
         )
 
         try:
@@ -535,6 +665,40 @@ class VoiceCascadeWorker:
                                     "client_event_id": event_id,
                                 },
                             )
+                        elif kind == "session.speech.enqueue":
+                            content = data.get("content")
+                            if not isinstance(content, str) or not content.strip() or len(content) > 1200:
+                                await session.emit_sideband("error", {
+                                    "client_event_id": event_id,
+                                    "error": {"code": "invalid_speech_request"},
+                                })
+                                continue
+                            generation = data.get("generation")
+                            if (generation is not None or self.speech_required) and (
+                                type(generation) is not int or generation != session.output_generation
+                            ):
+                                await session.emit_sideband("error", {
+                                    "client_event_id": event_id,
+                                    "error": {"code": "stale_speech_generation"},
+                                })
+                                continue
+                            if session.user_speaking:
+                                await session.emit_sideband("error", {
+                                    "client_event_id": event_id,
+                                    "error": {"code": "speech_suppressed_during_user_input"},
+                                })
+                                continue
+                            if session.speech_engine is None:
+                                await session.emit_sideband("error", {
+                                    "client_event_id": event_id,
+                                    "error": {"code": "speech_engine_unavailable"},
+                                })
+                                continue
+                            await session.emit_sideband("session.speech.accepted", {"client_event_id": event_id})
+                            generation = session.output_generation
+                            session._track_speech_task(asyncio.create_task(
+                                session.speak_text(content, expected_generation=generation)
+                            ))
                     except Exception as exc:
                         _LOGGER.warning("Error processing websocket message: %s", exc)
                 elif msg.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
@@ -615,6 +779,21 @@ if __name__ == "__main__":
     host = os.environ.get("CASCADE_WORKER_HOST", "127.0.0.1")
     port = int(os.environ.get("CASCADE_WORKER_PORT", "8775"))
     token = os.environ.get("CASCADE_WORKER_TOKEN", "")
-    worker = VoiceCascadeWorker(token=token, host=host, port=port)
+    speech_engines = {}
+    for name, model in os.environ.items():
+        if name == "CASCADE_TTS_MODEL" or name.startswith("CASCADE_TTS_MODEL_"):
+            voice = "default" if name == "CASCADE_TTS_MODEL" else name[len("CASCADE_TTS_MODEL_"):].lower()
+            if model.strip():
+                speech_engines[voice] = LocalCascadeSpeech(
+                    stt_model=os.environ.get("CASCADE_STT_MODEL", "small"),
+                    tts_model=model.strip(),
+                    language=os.environ.get("CASCADE_STT_LANGUAGE") or None,
+                )
+    if not speech_engines:
+        raise RuntimeError("CASCADE_TTS_MODEL must name an installed local voice model")
+    for engine in speech_engines.values():
+        engine.warmup()
+    worker = VoiceCascadeWorker(token=token, host=host, port=port,
+                                speech_engines=speech_engines, speech_required=True)
     print(f"Starting Voice Cascade Worker on http://{host}:{port}...", flush=True)
     web.run_app(worker.app, host=host, port=port)

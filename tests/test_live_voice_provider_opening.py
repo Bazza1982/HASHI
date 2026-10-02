@@ -479,6 +479,16 @@ class TestPhoneProviderOpening:
         assert self.manager.opening.read(self.binding)["state"] == "skipped"
         assert self.adapter.sent == []
 
+    async def test_worker_barge_in_before_transcription_skips_pending_opening(self):
+        await self.start_call()
+        self.manager._observe_opening_provider(self.binding, {
+            "type": "output.interrupted", "reason": "user_speech_interrupted",
+        })
+        await self.observe("client.media_ready", input_active=True, playback_unlocked=True)
+        await self.settle()
+        assert self.manager.opening.read(self.binding)["state"] == "skipped"
+        assert self.adapter.sent == []
+
     async def test_continuous_audio_during_grace_does_not_consume_opening_request(self):
         self.manager._opening_grace_seconds = 0.08
         await self.start_call()
