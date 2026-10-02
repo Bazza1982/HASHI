@@ -52,16 +52,21 @@ def test_cascade_provider_capabilities_qualification():
     assert caps.output_completion == "unavailable"
 
 
-def test_cascade_provider_default_off_credential_rule():
+def test_cascade_provider_default_off_credential_rule(monkeypatch):
     """Verify local-cascade is strictly default-off unless explicitly configured."""
+    for name in ("CASCADE_ENABLED", "CASCADE_WORKER_URL", "CASCADE_WORKER_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
     provider = CascadeProvider()
     # 1. Default empty secrets -> empty credential (disabled)
     assert provider.credential({}) == ""
     assert provider.credential({"openai_api_key": "sk-123"}) == ""
 
-    # 2. Explicit cascade_enabled -> active credential
-    assert provider.credential({"cascade_enabled": True}) == "local-cascade-token"
+    # 2. Enabling without a configured secret must not use a public default.
+    assert provider.credential({"cascade_enabled": True}) == ""
     assert provider.credential({"cascade_enabled": True, "cascade_worker_token": "secret-tok"}) == "secret-tok"
+    assert provider.credential({"cascade_enabled": "false", "cascade_worker_token": "secret-tok"}) == ""
+    monkeypatch.setenv("CASCADE_ENABLED", "false")
+    assert provider.credential({"cascade_worker_token": "secret-tok"}) == ""
 
 
 def test_cascade_provider_selection_validation():
@@ -217,6 +222,8 @@ async def test_worker_explicit_error_without_synthetic_fallback():
 @pytest.mark.asyncio
 async def test_worker_auth_protection_on_all_endpoints():
     """Verify all mutating endpoints require authentication and return 401 when token is missing/wrong."""
+    with pytest.raises(ValueError, match="CASCADE_WORKER_TOKEN"):
+        VoiceCascadeWorker(token="")
     worker = VoiceCascadeWorker(token="secret-auth-token")
     async with TestClient(TestServer(worker.app)) as client:
         # Create session unauthenticated
@@ -230,6 +237,8 @@ async def test_worker_auth_protection_on_all_endpoints():
 
         # Interrupt unauthenticated
         resp = await client.post("/v1/sessions/any-session/interrupt")
+        assert resp.status == 401
+        resp = await client.post("/v1/sessions/any-session/interrupt?token=secret-auth-token")
         assert resp.status == 401
 
         # Speech started unauthenticated
@@ -272,6 +281,7 @@ async def test_sideband_reconnect_preserves_session():
         # Session MUST remain alive in worker!
         assert session.session_id in worker.sessions
         assert not session.closed
+        await session.simulate_user_input("断线期间保留的转写")
 
         # 3. Second connection (reconnect)
         ws2 = await client.ws_connect(
@@ -280,6 +290,9 @@ async def test_sideband_reconnect_preserves_session():
         )
         msg2 = await ws2.receive_json()
         assert msg2["type"] == "session.started"
+        replay = await ws2.receive_json()
+        assert replay["type"] == "session.input_transcript.delta"
+        assert replay["delta"] == "断线期间保留的转写"
 
         # 4. Worker emits transcript event; ws2 receives it
         await session.simulate_user_input("重连后发送的语音识别结果")
@@ -291,6 +304,33 @@ async def test_sideband_reconnect_preserves_session():
         assert event["end_ms"] >= event["start_ms"]
 
         await ws2.close()
+
+
+@pytest.mark.asyncio
+async def test_context_updates_do_not_become_spoken_output():
+    worker = VoiceCascadeWorker(token="test-token")
+    session = CascadeSession("private-context", "v=0", "test", "cascade-v1", "default")
+    worker.sessions[session.session_id] = session
+    async with TestClient(TestServer(worker.app)) as client:
+        ws = await client.ws_connect(
+            "/v1/sessions/private-context/attach",
+            headers={"Authorization": "Bearer test-token"},
+        )
+        await ws.receive_json()
+        for kind in ("thinking", "instructions", "commentary"):
+            await ws.send_json({
+                "type": f"session.{kind}.append", "event_id": f"private-{kind}",
+                "content": "Private call context; do not speak it verbatim.",
+            })
+            ack = await ws.receive_json()
+            assert ack["type"] == f"session.{kind}.appended"
+        assert [item["kind"] for item in session.context_updates] == [
+            "session.thinking.append", "session.instructions.append", "session.commentary.append",
+        ]
+        assert session.pending_audio_chunks == []
+        with pytest.raises(asyncio.TimeoutError):
+            await ws.receive_json(timeout=0.1)
+        await ws.close()
 
 
 @pytest.mark.asyncio
@@ -318,6 +358,14 @@ async def test_barge_in_closes_audio_gate_and_purges_queue():
 
     # 3. All pending audio chunks must be purged immediately
     assert len(session.pending_audio_chunks) == 0
+    await session.speak_text("等用户说完再回应")
+    assert session.output_gate_open is False
+    assert len(session.deferred_speech) == 1
+    await session.on_user_speech_ended()
+    assert session.output_gate_open is True
+    assert len(session.deferred_speech) == 0
+    await session.on_user_speech_started()
+    assert session.output_generation == 2
 
 
 def test_real_webrtc_bidirectional_media_in_worker_runtime():
@@ -374,6 +422,98 @@ asyncio.run(run())
     )
     assert result.returncode == 0
     assert "REAL_WEBRTC_SUCCESS" in result.stdout
+
+
+def test_worker_webrtc_ready_silent_input_and_repeated_barge_in():
+    """Exercise the actual worker's media and browser event handshake."""
+    worker_python = Path("/home/lily/.local/share/hashi/cascade_runtime/venv/bin/python")
+    if not worker_python.exists():
+        pytest.skip("Cascade worker runtime environment is not provisioned on this machine")
+
+    script = r'''
+import asyncio, json, math, struct
+from aiohttp.test_utils import TestClient, TestServer
+from aiortc import RTCPeerConnection, RTCSessionDescription, AudioStreamTrack
+from tools.voice_cascade_worker import VoiceCascadeWorker
+
+class AdjustableTrack(AudioStreamTrack):
+    def __init__(self):
+        super().__init__()
+        self.amplitude = 0
+
+    async def recv(self):
+        frame = await super().recv()
+        if self.amplitude:
+            samples = [int(self.amplitude * math.sin(2 * math.pi * 500 * (frame.pts + i) / 48000))
+                       for i in range(frame.samples)]
+            frame.planes[0].update(struct.pack('<' + 'h' * frame.samples, *samples))
+        return frame
+
+async def run():
+    worker = VoiceCascadeWorker(token='worker-test-token')
+    pc = RTCPeerConnection()
+    source = AdjustableTrack()
+    pc.addTrack(source)
+    channel = pc.createDataChannel('oai-events')
+    loop = asyncio.get_running_loop()
+    ready = loop.create_future()
+    remote_audio = loop.create_future()
+
+    @channel.on('message')
+    def on_message(message):
+        event = json.loads(message)
+        if event.get('type') == 'session.started' and not ready.done():
+            ready.set_result(event)
+
+    @pc.on('track')
+    def on_track(track):
+        if track.kind == 'audio' and not remote_audio.done():
+            remote_audio.set_result(track)
+
+    async with TestClient(TestServer(worker.app)) as client:
+        await pc.setLocalDescription(await pc.createOffer())
+        response = await client.post('/v1/sessions',
+            json={'sdp': pc.localDescription.sdp},
+            headers={'Authorization': 'Bearer worker-test-token'})
+        assert response.status == 200, await response.text()
+        body = await response.json()
+        session = worker.sessions[body['provider_session_id']]
+        try:
+            await pc.setRemoteDescription(RTCSessionDescription(
+                sdp=body['sdp_answer'], type='answer'))
+            started = await asyncio.wait_for(ready, 8)
+            assert started['session']['id'] == session.session_id
+            track = await asyncio.wait_for(remote_audio, 8)
+            assert (await asyncio.wait_for(track.recv(), 8)).samples == 960
+
+            await asyncio.sleep(.35)
+            assert session.output_generation == 0
+            assert not session.user_speaking
+
+            source.amplitude = 5000
+            await asyncio.sleep(.25)
+            assert session.output_generation == 1, ('first speech', session.output_generation, session.user_speaking)
+            assert session.user_speaking, ('first speech state', session.output_generation)
+
+            source.amplitude = 0
+            await asyncio.sleep(.55)
+            assert not session.user_speaking, ('speech end', session.output_generation)
+
+            source.amplitude = 5000
+            await asyncio.sleep(.25)
+            assert session.output_generation == 2, ('second speech', session.output_generation, session.user_speaking)
+            print('WORKER_MEDIA_AND_BARGE_IN_OK')
+        finally:
+            await pc.close()
+            await session.close()
+
+asyncio.run(run())
+'''
+    result = subprocess.run(
+        [str(worker_python), "-c", script], capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "WORKER_MEDIA_AND_BARGE_IN_OK" in result.stdout
 
 
 @pytest.mark.asyncio

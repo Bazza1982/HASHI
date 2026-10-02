@@ -7,7 +7,6 @@ Preserves existing LiveVoiceManager, FC, and background task semantics.
 from __future__ import annotations
 
 import json
-import logging
 import os
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
@@ -25,9 +24,7 @@ from .openai_live import append_update, provider_http_session
 from .protocol import LiveVoiceError, identifier
 from .provider import ProviderCapabilities
 
-_LOGGER = logging.getLogger(__name__)
 DEFAULT_CASCADE_WORKER_URL = "http://127.0.0.1:8775"
-DEFAULT_CASCADE_WORKER_WS_URL = "ws://127.0.0.1:8775"
 MAX_FRAME_BYTES = 262144
 
 
@@ -96,16 +93,15 @@ class CascadeProvider:
 
     def credential(self, secrets: Mapping[str, Any]) -> str:
         """Return non-empty credential only when local cascade is explicitly configured."""
-        enabled = (
-            secrets.get("cascade_enabled")
-            or os.environ.get("CASCADE_ENABLED")
-            or secrets.get("cascade_worker_url")
-            or os.environ.get("CASCADE_WORKER_URL")
-        )
+        env_enabled = os.environ.get("CASCADE_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
+        configured_enabled = secrets.get("cascade_enabled")
+        if isinstance(configured_enabled, str):
+            configured_enabled = configured_enabled.strip().lower() in {"1", "true", "yes", "on"}
+        enabled = bool(configured_enabled or env_enabled or os.environ.get("CASCADE_WORKER_URL"))
         if not enabled:
             return ""
         token = secrets.get("cascade_worker_token") or os.environ.get("CASCADE_WORKER_TOKEN")
-        return str(token or "local-cascade-token").strip()
+        return str(token or "").strip()
 
     def validate_selection(self, model: str, voice: str) -> None:
         if model != "cascade-v1":
@@ -238,9 +234,11 @@ class CascadeProvider:
     async def attach(self, http: Any, *, key: str, provider_session_id: str) -> Any:
         if not key:
             raise LiveVoiceError("live_credential_unavailable", 503)
-        worker_ws_url = os.environ.get("CASCADE_WORKER_WS_URL", DEFAULT_CASCADE_WORKER_WS_URL)
-        target = f"{worker_ws_url.rstrip('/')}/v1/sessions/{quote(identifier(provider_session_id), safe='')}/attach?token={quote(key)}"
-        _LOGGER.info("CascadeProvider.attach connecting to %s", target)
+        worker_url = os.environ.get("CASCADE_WORKER_URL", DEFAULT_CASCADE_WORKER_URL)
+        worker_ws_url = os.environ.get("CASCADE_WORKER_WS_URL") or (
+            worker_url.replace("https://", "wss://", 1).replace("http://", "ws://", 1)
+        )
+        target = f"{worker_ws_url.rstrip('/')}/v1/sessions/{quote(identifier(provider_session_id), safe='')}/attach"
         return await http.ws_connect(
             target,
             headers={"Authorization": f"Bearer {key}"},

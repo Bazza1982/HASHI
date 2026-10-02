@@ -34,6 +34,8 @@ Model and provider cards share one contract. Tool support is per model: chat-onl
 
 ## UI, media, and Phone
 
+HASHI2's optional `local-cascade` Phone provider is an experimental Gate 1 media and cancellation skeleton. It stays out of the default qualified provider registry and requires an explicit Worker token. It has real WebRTC media and client interruption gates, but no local STT, reasoning, or TTS yet. Sideband reconnect replays only a bounded in-memory gap; live Workbench device acceptance is pending. See [local cascade Gate 1](HASHI_PHONE_LOCAL_CASCADE_GATE1.md).
+
 Live Phone defaults on; a missing provider API key blocks calls and must be named in `/phone`. An explicit instance opt-out remains valid. The Agent's Phone settings and PCM readiness do not prove provider readiness.
 
 Renderers and catalogs own interface text. /language changes shared UI and /tui language only local TUI; neither translates replies, IDs, commands, paths, logs, or transcripts. A TUI instance switch freezes generation, Agent, target, capabilities, logs, and Session at submission. Remote requires authentication, not cached liveness. /telegram off and /whatsapp off disable future owner mirrors while originating-platform replies still deliver normally. /think controls Provider reasoning and /commentary controls visible Engine commentary.

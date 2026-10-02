@@ -9,8 +9,10 @@ import asyncio
 import fractions
 import json
 import logging
+import math
 import os
 import time
+from collections import deque
 from typing import Any
 from uuid import uuid4
 
@@ -22,13 +24,20 @@ _LOGGER = logging.getLogger("voice_cascade_worker")
 try:
     import aiortc
     from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
-    from av import AudioFrame
+    from av import AudioFrame, AudioResampler
     AIORTC_AVAILABLE = True
 except ImportError:
     aiortc = None
     MediaStreamTrack = object  # type: ignore
     AudioFrame = None  # type: ignore
+    AudioResampler = None  # type: ignore
     AIORTC_AVAILABLE = False
+
+MAX_SIDEBAND_BACKLOG = 512
+MAX_CONTEXT_UPDATES = 128
+SPEECH_RMS_THRESHOLD = 650
+SPEECH_START_FRAMES = 2
+SPEECH_END_FRAMES = 15
 
 
 class CascadeAudioStreamTrack(MediaStreamTrack if AIORTC_AVAILABLE else object):
@@ -43,6 +52,7 @@ class CascadeAudioStreamTrack(MediaStreamTrack if AIORTC_AVAILABLE else object):
         self._sample_rate = 48000
         self._samples_per_frame = 960  # 20ms at 48kHz
         self._timestamp = 0
+        self._start_time: float | None = None
         self.delivered_chunks: list[int] = []  # Record delivered generation IDs
 
     async def recv(self) -> Any:
@@ -51,7 +61,12 @@ class CascadeAudioStreamTrack(MediaStreamTrack if AIORTC_AVAILABLE else object):
         if self.session.closed:
             raise aiortc.mediastreams.MediaStreamError("session_closed")
 
-        # Advance timeline by 20ms
+        # Pace frames at their media timestamp, then inspect the gate. This
+        # prevents a queued reply from being drained faster than playback.
+        loop = asyncio.get_running_loop()
+        if self._start_time is None:
+            self._start_time = loop.time()
+        await asyncio.sleep(max(0.0, self._start_time + self._timestamp / self._sample_rate - loop.time()))
         pts = self._timestamp
         self._timestamp += self._samples_per_frame
 
@@ -83,22 +98,29 @@ class CascadeSession:
         instructions: str,
         model: str,
         voice: str,
+        input_messages: list[dict[str, Any]] | None = None,
     ):
         self.session_id = session_id
         self.sdp_offer = sdp_offer
         self.instructions = instructions
         self.model = model
         self.voice = voice
+        self.input_messages = list(input_messages or [])
+        self.context_updates: list[dict[str, str]] = []
         self.created_at = time.time()
         self.call_epoch = 1
         self.turn_id = 0
         self.output_generation = 0
         self.output_gate_open = True
         self.user_speaking = False
+        self.deferred_speech: deque[str] = deque()
         self.sequence = 0
         self.muted = False
         self.closed = False
         self.ws: web.WebSocketResponse | None = None
+        self._sideband_lock = asyncio.Lock()
+        self._sideband_backlog: deque[dict[str, Any]] = deque()
+        self.sideband_overflow = False
         self.peer_connection: Any = None
         self.data_channel: Any = None
         self.output_track: CascadeAudioStreamTrack | None = None
@@ -111,21 +133,49 @@ class CascadeSession:
         return self.sequence
 
     async def emit_sideband(self, event_type: str, data: dict[str, Any] | None = None) -> None:
-        if self.ws is None or self.ws.closed:
-            _LOGGER.warning("emit_sideband skipped: ws is None or closed for event %s", event_type)
-            return
         payload = {
             "type": event_type,
             "event_id": f"evt-{uuid4().hex[:12]}",
-            "seq": self.next_seq(),
             "session_id": self.session_id,
             "output_generation": self.output_generation,
             **(data or {}),
         }
-        try:
-            await self.ws.send_json(payload)
-        except Exception as exc:
-            _LOGGER.warning("Failed to emit sideband event %s: %s", event_type, exc)
+        async with self._sideband_lock:
+            if self.ws is not None and not self.ws.closed:
+                try:
+                    payload["seq"] = self.next_seq()
+                    await self.ws.send_json(payload)
+                    return
+                except Exception as exc:
+                    _LOGGER.warning("Failed to emit sideband event %s: %s", event_type, exc)
+                    payload.pop("seq", None)
+            if len(self._sideband_backlog) >= MAX_SIDEBAND_BACKLOG:
+                self.sideband_overflow = True
+                self.output_gate_open = False
+                return
+            self._sideband_backlog.append(payload)
+
+    async def attach_sideband(self, ws: web.WebSocketResponse) -> None:
+        async with self._sideband_lock:
+            self.ws = ws
+            started = {
+                "type": "session.started",
+                "event_id": f"evt-{uuid4().hex[:12]}",
+                "seq": self.next_seq(),
+                "session_id": self.session_id,
+                "output_generation": self.output_generation,
+                "session": {"id": self.session_id, "model": self.model, "voice": self.voice},
+            }
+            await ws.send_json(started)
+            while self._sideband_backlog:
+                event = self._sideband_backlog[0]
+                event["seq"] = self.next_seq()
+                try:
+                    await ws.send_json(event)
+                except Exception:
+                    event.pop("seq", None)
+                    break
+                self._sideband_backlog.popleft()
 
     async def emit_datachannel(self, message: dict[str, Any]) -> None:
         if self.data_channel and hasattr(self.data_channel, "send"):
@@ -140,6 +190,9 @@ class CascadeSession:
         Increments generation, closes the output gate, purges all pending audio chunks,
         and dispatches gate-close events across sideband and WebRTC DataChannel.
         """
+        if self.closed or self.user_speaking:
+            return self.output_generation
+        self.user_speaking = True
         self.output_generation += 1
         self.output_gate_open = False
         gen = self.output_generation
@@ -163,12 +216,26 @@ class CascadeSession:
         })
         return gen
 
+    async def on_user_speech_ended(self) -> None:
+        if not self.user_speaking:
+            return
+        self.user_speaking = False
+        while self.deferred_speech and not self.user_speaking and not self.closed:
+            await self.speak_text(self.deferred_speech.popleft())
+
     async def speak_text(self, text: str) -> None:
         """Enqueue assistant speech text and audio chunks under the current generation."""
         if self.closed:
             return
+        if self.user_speaking:
+            self.deferred_speech.append(text)
+            return
         current_gen = self.output_generation
         self.turn_id += 1
+        await self.emit_datachannel({"type": "output.gate.opened", "generation": current_gen})
+        if self.user_speaking or current_gen != self.output_generation:
+            self.deferred_speech.appendleft(text)
+            return
         self.output_gate_open = True
 
         now_ms = int((time.time() - self.created_at) * 1000)
@@ -185,6 +252,8 @@ class CascadeSession:
             "start_ms": start_ms,
             "end_ms": end_ms,
         })
+        if self.user_speaking or current_gen != self.output_generation:
+            return
 
         # Queue test audio chunks (20ms frames of test audio tagged with generation)
         test_frame_bytes = b"\x01\x00" * 960  # Non-zero audio pattern
@@ -209,17 +278,38 @@ class CascadeSession:
         })
 
     def handle_incoming_track(self, track: Any) -> None:
-        """Listen to incoming user audio track for user speech activity."""
+        """Use sustained audio energy to detect speech starts and ends."""
         async def _read_track() -> None:
+            resampler = AudioResampler(format="s16", layout="mono", rate=16000)
+            active_frames = 0
+            quiet_frames = 0
             try:
                 while not self.closed:
                     frame = await track.recv()
-                    # Any received audio frame indicates user speech activity
-                    if not self.user_speaking:
-                        self.user_speaking = True
-                        await self.on_user_speech_started()
-            except Exception:
-                pass
+                    if self.muted:
+                        active_frames = 0
+                        quiet_frames = 0
+                        continue
+                    for mono in resampler.resample(frame):
+                        pcm = bytes(mono.planes[0])[: mono.samples * 2]
+                        samples = memoryview(pcm).cast("h") if pcm else ()
+                        rms = math.isqrt(sum(sample * sample for sample in samples) // len(samples)) if samples else 0
+                        if rms >= SPEECH_RMS_THRESHOLD:
+                            active_frames += 1
+                            quiet_frames = 0
+                            if active_frames >= SPEECH_START_FRAMES and not self.user_speaking:
+                                await self.on_user_speech_started()
+                        else:
+                            active_frames = 0
+                            if self.user_speaking:
+                                quiet_frames += 1
+                                if quiet_frames >= SPEECH_END_FRAMES:
+                                    quiet_frames = 0
+                                    await self.on_user_speech_ended()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _LOGGER.warning("Incoming audio track ended: %s", type(exc).__name__)
 
         self.incoming_track_task = asyncio.create_task(_read_track())
 
@@ -245,11 +335,13 @@ class CascadeSession:
 class VoiceCascadeWorker:
     def __init__(
         self,
-        token: str = "local-cascade-token",
+        token: str,
         host: str = "127.0.0.1",
         port: int = 8775,
     ):
-        self.token = token
+        if not isinstance(token, str) or not token.strip():
+            raise ValueError("CASCADE_WORKER_TOKEN must be configured")
+        self.token = token.strip()
         self.host = host
         self.port = port
         self.sessions: dict[str, CascadeSession] = {}
@@ -267,16 +359,8 @@ class VoiceCascadeWorker:
         self.app.router.add_delete("/v1/sessions/{session_id}", self.handle_delete_session)
 
     def _verify_auth(self, request: web.Request) -> bool:
-        if not self.token:
-            return True
         auth = request.headers.get("Authorization", "")
-        if auth.startswith("Bearer ") and auth[7:].strip() == self.token:
-            return True
-        if request.headers.get("X-Cascade-Token") == self.token:
-            return True
-        if request.query.get("token") == self.token:
-            return True
-        return False
+        return auth.startswith("Bearer ") and auth[7:].strip() == self.token
 
     async def handle_health(self, request: web.Request) -> web.Response:
         return web.json_response({
@@ -310,6 +394,10 @@ class VoiceCascadeWorker:
                 status=503,
             )
 
+        input_messages = body.get("input_messages", [])
+        if not isinstance(input_messages, list) or len(input_messages) > 128:
+            return web.json_response({"error": "invalid_input_messages"}, status=400)
+
         session_id = f"cascade-{uuid4().hex}"
         session = CascadeSession(
             session_id=session_id,
@@ -317,6 +405,7 @@ class VoiceCascadeWorker:
             instructions=body.get("instructions", ""),
             model=body.get("model", "cascade-v1"),
             voice=body.get("voice", "default"),
+            input_messages=input_messages,
         )
 
         try:
@@ -332,6 +421,19 @@ class VoiceCascadeWorker:
             def on_datachannel(channel: Any) -> None:
                 session.data_channel = channel
 
+                @channel.on("open")
+                def on_open() -> None:
+                    asyncio.create_task(session.emit_datachannel({
+                        "type": "session.started",
+                        "session": {"id": session.session_id, "model": session.model, "voice": session.voice},
+                    }))
+
+                # aiortc may deliver the server-side channel after it has
+                # already entered the open state, so the callback alone is
+                # insufficient for the browser's start handshake.
+                if channel.readyState == "open":
+                    on_open()
+
             @pc.on("track")
             def on_track(track: Any) -> None:
                 if track.kind == "audio":
@@ -344,6 +446,8 @@ class VoiceCascadeWorker:
             answer_sdp = pc.localDescription.sdp
         except Exception as exc:
             _LOGGER.error("SDP negotiation failed: %s", exc)
+            if session.peer_connection is not None:
+                await session.peer_connection.close()
             return web.json_response(
                 {"error": "sdp_negotiation_failed", "detail": str(exc)},
                 status=400,
@@ -364,6 +468,8 @@ class VoiceCascadeWorker:
         session = self.sessions.get(session_id)
         if not session:
             return web.Response(status=404, text="session_not_found")
+        if session.closed or session.sideband_overflow:
+            return web.Response(status=410, text="session_replay_unavailable")
 
         ws = web.WebSocketResponse(heartbeat=20.0)
         await ws.prepare(request)
@@ -374,17 +480,7 @@ class VoiceCascadeWorker:
                 await session.ws.close(code=1000, message=b"replaced_by_new_attach")
             except Exception:
                 pass
-        session.ws = ws
-
-        # Emit session.started or session.resumed
-        await session.emit_sideband("session.started", {
-            "session": {
-                "id": session.session_id,
-                "model": session.model,
-                "voice": session.voice,
-                "output_generation": session.output_generation,
-            },
-        })
+        await session.attach_sideband(ws)
 
         try:
             async for msg in ws:
@@ -400,6 +496,7 @@ class VoiceCascadeWorker:
                             break
                         elif kind == "session.input_audio.mute":
                             session.muted = True
+                            await session.on_user_speech_ended()
                             await session.emit_sideband(
                                 "session.input_audio.muted", {"client_event_id": event_id}
                             )
@@ -414,16 +511,30 @@ class VoiceCascadeWorker:
                             "session.thinking.append",
                         }:
                             content = data.get("content", "")
+                            if not isinstance(content, str) or not content:
+                                await session.emit_sideband("error", {
+                                    "client_event_id": event_id,
+                                    "error": {"code": "invalid_context_update"},
+                                })
+                                continue
+                            if len(session.context_updates) >= MAX_CONTEXT_UPDATES:
+                                await session.emit_sideband("error", {
+                                    "client_event_id": event_id,
+                                    "error": {"code": "context_update_limit"},
+                                })
+                                continue
+                            # All three update types are context for the
+                            # future local reasoning engine. Speaking their
+                            # raw content would expose instructions and
+                            # background task data to the caller.
+                            session.context_updates.append({"kind": kind, "content": content})
                             evt_type = kind.replace(".append", ".appended")
                             await session.emit_sideband(
                                 evt_type,
                                 {
                                     "client_event_id": event_id,
-                                    "content": content,
                                 },
                             )
-                            if content:
-                                await session.speak_text(content)
                     except Exception as exc:
                         _LOGGER.warning("Error processing websocket message: %s", exc)
                 elif msg.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
@@ -494,7 +605,7 @@ class VoiceCascadeWorker:
         return web.json_response({"ok": True})
 
 
-def create_worker_app(token: str = "local-cascade-token") -> web.Application:
+def create_worker_app(token: str) -> web.Application:
     worker = VoiceCascadeWorker(token=token)
     return worker.app
 
@@ -503,7 +614,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     host = os.environ.get("CASCADE_WORKER_HOST", "127.0.0.1")
     port = int(os.environ.get("CASCADE_WORKER_PORT", "8775"))
-    token = os.environ.get("CASCADE_WORKER_TOKEN", "local-cascade-token")
+    token = os.environ.get("CASCADE_WORKER_TOKEN", "")
     worker = VoiceCascadeWorker(token=token, host=host, port=port)
     print(f"Starting Voice Cascade Worker on http://{host}:{port}...", flush=True)
     web.run_app(worker.app, host=host, port=port)
