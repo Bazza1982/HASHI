@@ -25,7 +25,12 @@ from orchestrator.frontend_live_voice.provider import default_registry, select_p
 from orchestrator.frontend_live_voice import worker_actions
 from orchestrator.phone_catalog import PHONE_PROVIDERS, CASCADE_VOICES
 from orchestrator.session_store import SessionStore
-from tools.voice_cascade_worker import VoiceCascadeWorker, CascadeSession
+from tools.voice_cascade_worker import (
+    AdaptiveNoiseFloor,
+    CascadeSession,
+    SPEECH_CALIBRATION_FRAMES,
+    VoiceCascadeWorker,
+)
 
 
 HASHI_COMPACTION_CAPABILITIES = {"prompt_isolation": True, "tool_disablement": True}
@@ -49,6 +54,30 @@ def test_cascade_catalog_registration():
     assert "cascade-v1" in cat["models"]
     assert "default" in cat["models"]["cascade-v1"]["voices"]
     assert "zh_female_1" in cat["models"]["cascade-v1"]["voices"]
+
+
+def test_adaptive_noise_floor_calibrates_and_tracks_quiet_environment():
+    gate = AdaptiveNoiseFloor()
+    for _ in range(SPEECH_CALIBRATION_FRAMES):
+        assert not gate.is_active(700, caller_speaking=False)
+    assert gate.calibrated
+    assert gate.noise_floor == 700
+    assert gate.threshold == 875
+    for _ in range(30):
+        assert not gate.is_active(760, caller_speaking=False)
+    assert gate.noise_floor > 740
+    assert gate.threshold > 925
+    assert gate.is_active(2000, caller_speaking=False)
+    floor = gate.noise_floor
+    assert gate.is_active(2000, caller_speaking=True)
+    assert gate.noise_floor == floor
+
+    # Aptenra's calibrated high-ambient profile still admits nearby speech.
+    noisy = AdaptiveNoiseFloor()
+    for _ in range(SPEECH_CALIBRATION_FRAMES):
+        assert not noisy.is_active(1770, caller_speaking=False)
+    assert not noisy.is_active(1770, caller_speaking=False)
+    assert noisy.is_active(2300, caller_speaking=False)
 
 
 def test_cascade_provider_capabilities_qualification():
@@ -570,7 +599,7 @@ from tools.voice_cascade_worker import VoiceCascadeWorker
 class SpokenTrack(AudioStreamTrack):
     def __init__(self, pcm):
         super().__init__()
-        self.pcm = pcm + b'\x00' * (48000 * 2)
+        self.pcm = b'\x00' * (48000 * 2 * 3 // 5) + pcm + b'\x00' * (48000 * 2)
         self.offset = 0
         self.pts = 0
         self.started = None
@@ -725,17 +754,25 @@ async def run():
             track = await asyncio.wait_for(remote_audio, 8)
             assert (await asyncio.wait_for(track.recv(), 8)).samples == 960
 
-            await asyncio.sleep(.35)
+            source.amplitude = 1200
+            await asyncio.sleep(.75)
             assert session.output_generation == 0
             assert not session.user_speaking
+
+            # A short sound above the noise floor must not interrupt playback.
+            source.amplitude = 2000
+            await asyncio.sleep(.08)
+            source.amplitude = 1200
+            await asyncio.sleep(.12)
+            assert session.output_generation == 0
 
             source.amplitude = 5000
             await asyncio.sleep(.25)
             assert session.output_generation == 1, ('first speech', session.output_generation, session.user_speaking)
             assert session.user_speaking, ('first speech state', session.output_generation)
 
-            source.amplitude = 0
-            await asyncio.sleep(.55)
+            source.amplitude = 1200
+            await asyncio.sleep(.75)
             assert not session.user_speaking, ('speech end', session.output_generation)
             found_transcript = False
             for _ in range(8):

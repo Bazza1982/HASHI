@@ -39,11 +39,46 @@ except ImportError:
 
 MAX_SIDEBAND_BACKLOG = 512
 MAX_CONTEXT_UPDATES = 128
-SPEECH_RMS_THRESHOLD = 650
-SPEECH_START_FRAMES = 2
-SPEECH_END_FRAMES = 15
+SPEECH_RMS_THRESHOLD = 850
+SPEECH_NOISE_MULTIPLIER = 1.25
+SPEECH_CALIBRATION_FRAMES = 23  # 460 ms at 20 ms per frame
+SPEECH_START_FRAMES = 6  # 120 ms of sustained energy
+SPEECH_END_FRAMES = 30  # 600 ms of quiet
+SPEECH_PRE_ROLL_FRAMES = 12  # 240 ms before speech onset
+SPEECH_INPUT_FRAME_BYTES = 16000 * 2 // 50  # 20 ms, 16 kHz, s16 mono
 MAX_UTTERANCE_PCM_BYTES = 16000 * 2 * 30
 OUTPUT_FRAME_BYTES = 960 * 2
+
+
+class AdaptiveNoiseFloor:
+    """Aptenra-style calibration and idle noise tracking for PCM energy gates.
+
+    The median of the first calibration window rejects a transient at startup.
+    Later quiet frames update the baseline slowly; active speech never teaches
+    the baseline to treat the caller's voice as ambient noise.
+    """
+
+    def __init__(self) -> None:
+        self.noise_floor = max(30.0, SPEECH_RMS_THRESHOLD / SPEECH_NOISE_MULTIPLIER / 2)
+        self._calibration: list[int] = []
+        self.calibrated = False
+
+    @property
+    def threshold(self) -> float:
+        return max(SPEECH_RMS_THRESHOLD, self.noise_floor * SPEECH_NOISE_MULTIPLIER)
+
+    def is_active(self, rms: int, *, caller_speaking: bool) -> bool:
+        if not self.calibrated:
+            self._calibration.append(rms)
+            if len(self._calibration) >= SPEECH_CALIBRATION_FRAMES:
+                ordered = sorted(self._calibration)
+                self.noise_floor = max(30.0, float(ordered[len(ordered) // 2]))
+                self.calibrated = True
+            return False
+        active = rms >= self.threshold
+        if not active and not caller_speaking:
+            self.noise_floor = self.noise_floor * 0.96 + rms * 0.04
+        return active
 
 
 class CascadeAudioStreamTrack(MediaStreamTrack if AIORTC_AVAILABLE else object):
@@ -367,9 +402,11 @@ class CascadeSession:
         """Use sustained audio energy to detect speech starts and ends."""
         async def _read_track() -> None:
             resampler = AudioResampler(format="s16", layout="mono", rate=16000)
+            noise_gate = AdaptiveNoiseFloor()
             active_frames = 0
             quiet_frames = 0
-            pre_roll: deque[bytes] = deque(maxlen=10)
+            pcm_buffer = bytearray()
+            pre_roll: deque[bytes] = deque(maxlen=SPEECH_PRE_ROLL_FRAMES)
             utterance = bytearray()
             utterance_overflow = False
             utterance_start_ms = 0
@@ -379,47 +416,57 @@ class CascadeSession:
                     if self.muted:
                         active_frames = 0
                         quiet_frames = 0
+                        pcm_buffer.clear()
                         pre_roll.clear()
                         utterance.clear()
                         continue
                     for mono in resampler.resample(frame):
-                        pcm = bytes(mono.planes[0])[: mono.samples * 2]
-                        samples = memoryview(pcm).cast("h") if pcm else ()
-                        rms = math.isqrt(sum(sample * sample for sample in samples) // len(samples)) if samples else 0
-                        pre_roll.append(pcm)
-                        started = False
-                        if rms >= SPEECH_RMS_THRESHOLD:
-                            active_frames += 1
-                            quiet_frames = 0
-                            if active_frames >= SPEECH_START_FRAMES and not self.user_speaking:
-                                await self.on_user_speech_started()
-                                utterance = bytearray(b"".join(pre_roll))
-                                utterance_overflow = False
-                                utterance_start_ms = max(0, int((time.time() - self.created_at) * 1000)
-                                                         - len(utterance) // 32)
-                                started = True
-                        else:
-                            active_frames = 0
-                            if self.user_speaking:
-                                quiet_frames += 1
-                        if self.user_speaking and not started:
-                            if len(utterance) + len(pcm) <= MAX_UTTERANCE_PCM_BYTES:
-                                utterance.extend(pcm)
+                        pcm_buffer.extend(bytes(mono.planes[0])[: mono.samples * 2])
+                        while len(pcm_buffer) >= SPEECH_INPUT_FRAME_BYTES:
+                            pcm = bytes(pcm_buffer[:SPEECH_INPUT_FRAME_BYTES])
+                            del pcm_buffer[:SPEECH_INPUT_FRAME_BYTES]
+                            samples = memoryview(pcm).cast("h")
+                            rms = math.isqrt(sum(sample * sample for sample in samples) // len(samples))
+                            pre_roll.append(pcm)
+                            was_calibrated = noise_gate.calibrated
+                            active = noise_gate.is_active(rms, caller_speaking=self.user_speaking)
+                            if not was_calibrated and noise_gate.calibrated:
+                                _LOGGER.info("Audio noise baseline calibrated: floor=%d threshold=%d",
+                                             round(noise_gate.noise_floor), round(noise_gate.threshold))
+                            started = False
+                            if active:
+                                active_frames += 1
+                                quiet_frames = 0
+                                if active_frames >= SPEECH_START_FRAMES and not self.user_speaking:
+                                    await self.on_user_speech_started()
+                                    utterance = bytearray(b"".join(pre_roll))
+                                    utterance_overflow = False
+                                    utterance_start_ms = max(0, int((time.time() - self.created_at) * 1000)
+                                                             - len(utterance) // 32)
+                                    started = True
                             else:
-                                utterance_overflow = True
-                        if self.user_speaking and quiet_frames >= SPEECH_END_FRAMES:
-                            quiet_frames = 0
-                            await self.on_user_speech_ended()
-                            if utterance_overflow:
-                                await self.emit_sideband("error", {"error": {"code": "cascade_utterance_limit"}})
-                            elif self.speech_engine is not None:
-                                end_ms = max(utterance_start_ms, int((time.time() - self.created_at) * 1000))
-                                task = asyncio.create_task(self.transcribe_utterance(
-                                    bytes(utterance), start_ms=utterance_start_ms, end_ms=end_ms,
-                                ))
-                                self._track_speech_task(task)
-                            utterance.clear()
-                            pre_roll.clear()
+                                active_frames = 0
+                                if self.user_speaking:
+                                    quiet_frames += 1
+                            if self.user_speaking and not started:
+                                if len(utterance) + len(pcm) <= MAX_UTTERANCE_PCM_BYTES:
+                                    utterance.extend(pcm)
+                                else:
+                                    utterance_overflow = True
+                            if self.user_speaking and quiet_frames >= SPEECH_END_FRAMES:
+                                quiet_frames = 0
+                                active_frames = 0
+                                await self.on_user_speech_ended()
+                                if utterance_overflow:
+                                    await self.emit_sideband("error", {"error": {"code": "cascade_utterance_limit"}})
+                                elif self.speech_engine is not None:
+                                    end_ms = max(utterance_start_ms, int((time.time() - self.created_at) * 1000))
+                                    task = asyncio.create_task(self.transcribe_utterance(
+                                        bytes(utterance), start_ms=utterance_start_ms, end_ms=end_ms,
+                                    ))
+                                    self._track_speech_task(task)
+                                utterance.clear()
+                                pre_roll.clear()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

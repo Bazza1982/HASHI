@@ -65,6 +65,30 @@ and both produced returned audio frames. The call ended cleanly, with no Worker
 session left active. Real Workbench microphone and speaker acceptance remains
 for the user to perform.
 
+## HASHI1 adaptive voice activity update (2026-10-03)
+
+The local Worker now follows Aptenra's `PcmVoiceActivitySegmenter` noise-floor
+method: calibrate on the median of the first 460 ms, use the larger of a fixed
+minimum and 1.25 times the ambient baseline, and update that baseline slowly
+only on idle quiet frames. The Worker uses 20 ms PCM frames, a 120 ms sustained
+onset, 600 ms trailing quiet, and 240 ms pre-roll. Its minimum energy is 850
+PCM RMS instead of the former 650. Workbench's one-time opening activity hint
+uses the same median and idle-baseline method; it does not own the actual
+barge-in decision.
+
+The pre-fix real Sunny call had 19 speech-start triggers during 16 saved user
+fragments. For those 16 fragments, the interval from Worker utterance end to
+HASHI receiving the transcript was 2.24 seconds median, 2.06 to 5.44 seconds
+range. The Phone inference lane already sends reasoning off; DeepSeek maps it
+to disabled thinking. Local synthesis remains Piper pending the separately
+requested Edge evaluation.
+
+After the Worker restarted on HASHI1, a two-turn synthetic spoken call through
+the live Phone API and WebRTC completed: both spoken inputs were transcribed,
+both Agent replies were saved, and both replies returned audio frames. The
+running Worker has no leftover sessions. Workbench's production UI bundle was
+rebuilt, but a new real microphone/speaker acceptance still belongs to the user.
+
 ## Verification and remaining qualification
 
 The focused tests cover real Piper audio, recognition of those spoken words,
