@@ -12364,7 +12364,12 @@ class FlexibleAgentRuntime:
             self._background_tasks.discard(task)
             try:
                 loop = asyncio.get_event_loop()
-                loop.create_task(self._on_background_complete(task, item))
+                completion = loop.create_task(self._on_background_complete(task, item))
+                completion_tasks = getattr(self, "_background_completion_tasks_by_request", None)
+                if not isinstance(completion_tasks, dict):
+                    completion_tasks = {}
+                    self._background_completion_tasks_by_request = completion_tasks
+                completion_tasks[item.request_id] = completion
             except RuntimeError:
                 pass  # loop closed during shutdown
 
@@ -12394,12 +12399,25 @@ class FlexibleAgentRuntime:
         receipt_disposition = "background_transport_not_attempted"
         receipt_chunk_count = 0
         receipt_error_type = ""
+        completion_started = getattr(self, "_background_completion_started_request_ids", None)
+        if not isinstance(completion_started, set):
+            completion_started = set()
+            self._background_completion_started_request_ids = completion_started
+        completion_started.add(item.request_id)
         try:
+            from orchestrator.runtime_cancel import requested_ids
+
+            if item.request_id in requested_ids(self) and not task.cancelled():
+                raise asyncio.CancelledError
             await runtime_delivery_order.wait_for_turn(self, item.request_id)
             await runtime_background_status.wait_for_delivery(item)
+            if item.request_id in requested_ids(self) and not task.cancelled():
+                raise asyncio.CancelledError
             if task.cancelled():
+                user_cancelled = item.request_id in requested_ids(self)
                 receipt_error = "background_task_cancelled"
-                self._mark_error(f"Background task cancelled: {item.summary}")
+                if not user_cancelled:
+                    self._mark_error(f"Background task cancelled: {item.summary}")
                 self.logger.warning(f"Background task {item.request_id} was cancelled.")
                 is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
                 self._notify_right_brain_interrupted(
@@ -12418,6 +12436,8 @@ class FlexibleAgentRuntime:
                         "error": "background_task_cancelled",
                         "source": item.source,
                         "summary": item.summary,
+                        **({"interrupted": True, "interrupt_reason": "user_stop"}
+                           if user_cancelled else {}),
                         **runtime_pipeline.request_context_warning_fields(
                             self, item.request_id
                         ),
@@ -12489,6 +12509,8 @@ class FlexibleAgentRuntime:
             if recovered is not None:
                 response, _recovered_prompt = recovered
                 runtime_pipeline.observe_terminal_response(self, item, response)
+            if item.request_id in requested_ids(self):
+                raise asyncio.CancelledError
             receipt_response = response
 
             if response.is_success and response.text:
@@ -12828,6 +12850,29 @@ class FlexibleAgentRuntime:
                 )
                 receipt_delivered = chunk_count > 0
 
+        except asyncio.CancelledError:
+            from orchestrator.runtime_cancel import requested_ids
+            from orchestrator.session_store import TERMINAL_RUN_STATES
+
+            if item.request_id not in requested_ids(self):
+                raise
+            run_id = getattr(item, "run_id", None)
+            store = getattr(self, "session_store", None)
+            terminal = bool(run_id and store is not None
+                            and store.get_run(run_id)["state"] in TERMINAL_RUN_STATES)
+            if not terminal:
+                receipt_response = None
+                receipt_error = "background_task_cancelled"
+                await self._notify_request_listeners(item.request_id, {
+                    "request_id": item.request_id,
+                    "success": False,
+                    "text": None,
+                    "error": receipt_error,
+                    "source": item.source,
+                    "summary": item.summary,
+                    "interrupted": True,
+                    "interrupt_reason": "user_stop",
+                })
         except Exception as e:
             terminal_console.observe_exception(self.name, item.request_id, e)
             terminal_console.finish_request(
@@ -12845,6 +12890,16 @@ class FlexibleAgentRuntime:
                 f"Unhandled error in _on_background_complete for {item.request_id}: {e}"
             )
         finally:
+            from orchestrator.runtime_cancel import requested_ids
+
+            completion_started.discard(item.request_id)
+            requested_ids(self).discard(item.request_id)
+            tasks_by_request = getattr(self, "_generation_tasks_by_request", None)
+            if isinstance(tasks_by_request, dict) and tasks_by_request.get(item.request_id) is task:
+                tasks_by_request.pop(item.request_id, None)
+            completion_tasks = getattr(self, "_background_completion_tasks_by_request", None)
+            if isinstance(completion_tasks, dict) and completion_tasks.get(item.request_id) is asyncio.current_task():
+                completion_tasks.pop(item.request_id, None)
             if receipt_response is not None:
                 await runtime_pipeline.record_her_v2_transport_receipt(
                     self,

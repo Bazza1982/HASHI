@@ -86,6 +86,16 @@ PAO is the sole owner of:
 An Engine may own its internal Engine Session but must not become a second
 owner of the enclosing Conversation Session.
 
+Cancelling one reply is a PAO Run control operation in shared Functions. The
+caller supplies its exact owner, Agent, Session, Run, and request identity; the
+Agent Worker removes only that ready item or interrupts only its matching live
+provider task. A queued Run cancelled between admission and queue insertion is
+durably fenced before the later item can start. An accepted interrupt is pending
+until the Worker settles the Run as stopped; a Run that finishes first retains
+its actual terminal state. Frontend Connectors must show that state and never
+translate a failed or slow Run cancellation into an Agent lifecycle stop or a
+session-wide `/stop`. Prior side effects remain separate from the stop result.
+
 Workzone configuration is Agent control state, not Conversation Session state.
 `/new`, `/use`, `/fresh`, and `/archive` therefore cannot replace it. PAO freezes
 the current Agent Workzone revision into each admitted Run so an in-flight Run

@@ -12,7 +12,7 @@ import pytest
 
 from adapters.base import BackendResponse
 from adapters.her_v2 import _ExecutionStageCompactionProvider
-from orchestrator import runtime_pipeline, runtime_session, ui_language
+from orchestrator import runtime_cancel, runtime_pipeline, runtime_session, ui_language
 from orchestrator.admin_local_testing import execute_local_command
 from orchestrator.bridge_memory import BridgeContextAssembler, BridgeMemoryStore
 from orchestrator.commands.compact import _outcome_text
@@ -2508,7 +2508,8 @@ def test_typed_capacity_recovery_requires_no_tools_side_effects_or_delivery():
 
 
 @pytest.mark.asyncio
-async def test_typed_capacity_rejection_compacts_and_retries_exactly_once(tmp_path):
+@pytest.mark.parametrize("cancel_retry", [False, True])
+async def test_typed_capacity_rejection_compacts_and_retries_exactly_once(tmp_path, cancel_retry):
     runtime = _Runtime(tmp_path)
     _write_turns(runtime, 12, chars=1400)
     runtime.context_assembler = BridgeContextAssembler(runtime.memory_store, None)
@@ -2541,9 +2542,13 @@ async def test_typed_capacity_rejection_compacts_and_retries_exactly_once(tmp_pa
         "req-capacity": estimate_tokens(initial)
     }
     retry_calls = []
+    retry_started = asyncio.Event()
 
     async def generate(prompt, request_id, **kwargs):
         retry_calls.append((prompt, request_id, kwargs))
+        retry_started.set()
+        if cancel_retry:
+            await asyncio.Event().wait()
         return BackendResponse(
             text="recovered",
             duration_ms=1,
@@ -2567,24 +2572,33 @@ async def test_typed_capacity_rejection_compacts_and_retries_exactly_once(tmp_pa
         side_effects_possible=False,
     )
 
-    recovered = await recover_typed_context_capacity_rejection(
-        runtime,
-        item,
-        rejected,
-    )
+    recovery = asyncio.create_task(recover_typed_context_capacity_rejection(
+        runtime, item, rejected,
+    ))
+    try:
+        if cancel_retry:
+            await retry_started.wait()
+            provider_task = runtime._generation_tasks_by_request["req-capacity"]
+            runtime_cancel.requested_ids(runtime).add("req-capacity")
+            provider_task.cancel()
+        recovered = await recovery
+    finally:
+        if not recovery.done():
+            recovery.cancel()
+            await asyncio.gather(recovery, return_exceptions=True)
 
     assert recovered is not None
     response, retry_prompt = recovered
-    assert response.is_success is True
+    assert response.is_success is not cancel_retry
+    if cancel_retry:
+        assert response.error == "Cancelled by user"
+        assert runtime._generation_tasks_by_request == {}
     assert len(retry_calls) == 1
     assert retry_calls[0][1] == "req-capacity"
     assert retry_calls[0][2]["is_retry"] is True
     assert estimate_tokens(retry_prompt) < estimate_tokens(initial)
     assert coordinator.store.read_state()["generation"] == 1
-    assert (
-        await recover_typed_context_capacity_rejection(runtime, item, rejected)
-        is None
-    )
+    assert (await recover_typed_context_capacity_rejection(runtime, item, rejected)) is None
 
 
 def test_her_stage_error_preserves_hashi_capacity_code_without_stage_deadline_fields():
