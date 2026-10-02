@@ -1,5 +1,20 @@
 # HASHI Agent FYI
 
+2026-10-02 HASHI4 Browser route 4 source repair: fixed CLI Tool Gateways relay
+through their owning Function Worker and the existing Capability Broker. HERV3
+and CLI browser tools share discovery, permission checks, and task-bound browser
+selection. Multiple connected browsers are listed; when the user does not name
+one, try any connected browser and keep it for the task. Chrome/Edge use separate
+bridge endpoints. Offline validation is not running-generation or live acceptance.
+See [device control decision](HASHI_CROSS_PLATFORM_DEVICE_CONTROL_PLAN.md#hashi4-browser-route-repair--2026-10-02).
+
+2026-10-03 HASHI4 `/browser 4` live check: the CLI Agent read the real
+Workbench tab through the connected extension. Connected-browser schemas now
+omit CDP/standalone options and say to use the existing login state; a browser
+switch within one task returns a clear denial. The running Browser Worker was
+started before browser identity support and still needs safe replacement to
+show Chrome/Edge names. Dual-browser and HERV3 live acceptance remain open.
+
 2026-10-02 MCP/media repair: Codex inventory disables plugins consistently with
 execution, and trusted Telegram media and /long preserve ingress identity.
 See docs/HASHI_MCP_MEDIA_ROLLOUT_2026-10-02.md for source/adoption scope.
@@ -81,3 +96,12 @@ Isolated Tool routes must not advertise inaccessible Browser/Computer Workers. U
 Manual Desktop is opt-in: Standard peaks at 2 FPS, Smooth at 20 FPS, and Ultra Smooth targets 30 FPS within bounded size and bandwidth. Remote probes the local API before input and never retries uncertain writes. PAO leases the Worker. See the [desktop guide](HASHI_MANUAL_DESKTOP.md); source, Worker and frontend adoption need separate proof.
 
 HASHI3 caps Tool text at Provider capacity. `/stop` blocks autonomous wakeups until an explicit request; completed background results stay in job records. Distinguish verified writes from uncertain effects; adopt offline changes before claiming live behavior.
+
+2026-10-03 HASHI4 reply cancellation source repair: Workbench now supplies the
+exact Session and Run identity for its stop button and never falls back to
+`/stop` or Agent lifecycle stop. PAO's Function Worker handles the exact queued
+or active Run, including capacity-recovery retry; the Backend API does not mark
+a running Run stopped before the Worker settles it. The former 404-to-Agent-stop
+path was reproduced red and is green offline. Focused tests and the Core gate
+are separate from runtime adoption and live frontend acceptance; neither has
+been asserted for this change. See `docs/HASHI_PAO_SYSTEM_DESIGN.md`.

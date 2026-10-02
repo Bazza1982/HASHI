@@ -118,6 +118,37 @@ def test_catalogue_tracks_browser_registration_expiry_and_recovery(tmp_path):
     assert _definition_names(registry) == {"browser_get_text"}
 
 
+def test_connected_browser_catalogue_describes_bridge_without_standalone_options(tmp_path):
+    chrome = {
+        **_browser_registration(actions=("active_tab", "screenshot", "get_text")),
+        "browser_id": "chrome",
+        "browser_name": "Google Chrome",
+    }
+    facade = _CapabilityFacade(capabilities=[chrome])
+    registry = ToolRegistry(
+        ["browser_active_tab", "browser_screenshot", "browser_get_text"],
+        access_root=tmp_path,
+        workspace_dir=tmp_path,
+        secrets={},
+        audit_context={
+            "_runtime": SimpleNamespace(orchestrator=facade),
+            "global_config": SimpleNamespace(instance_id="HASHI1"),
+        },
+    )
+
+    definitions = {
+        item["function"]["name"]: item["function"]
+        for item in registry.get_tool_definitions()
+    }
+    assert "Google Chrome [chrome]" in definitions["browser_active_tab"]["description"]
+    for function in definitions.values():
+        assert "cdp_url" not in function["parameters"]["properties"]
+        assert "headed" not in function["parameters"]["properties"]
+        assert "CDP" not in function["description"]
+    assert "visible Chrome" not in definitions["browser_active_tab"]["description"]
+    assert "logged-in browser" not in definitions["browser_get_text"]["description"]
+
+
 @pytest.mark.asyncio
 async def test_unregistered_browser_is_rejected_before_dispatch_with_typed_reason(tmp_path):
     facade = _CapabilityFacade()
@@ -157,6 +188,45 @@ async def test_capability_disappearing_after_catalogue_preflight_stays_typed(tmp
     assert result.is_error is True
     assert result.details["code"] == "capability_unavailable"
     assert result.details["reason"] == "disappeared_before_execution"
+    assert "unexpected failure" not in result.output
+
+
+@pytest.mark.asyncio
+async def test_requested_browser_missing_keeps_actionable_reason(tmp_path):
+    facade = _CapabilityFacade(
+        CapabilityUnavailableError(
+            "browser_control", action="get_text",
+            reason="requested_browser_not_connected",
+        ),
+        capabilities=[_browser_registration()],
+    )
+    registry = _registry(tmp_path, "browser_get_text", facade)
+    result = await registry.execute(
+        "browser_get_text", {"browser_target": "edge"}, tool_call_id="missing-edge"
+    )
+    assert result.is_error is True
+    assert result.details["reason"] == "requested_browser_not_connected"
+    assert "connected browser target" in result.output
+
+
+@pytest.mark.asyncio
+async def test_switching_a_task_bound_browser_reports_clear_error(tmp_path):
+    facade = _CapabilityFacade(
+        RuntimeError(
+            "core.capability.invoke: CapabilityBrokerError: browser target is fixed "
+            "for this task; start a new task to switch"
+        ),
+        capabilities=[_browser_registration()],
+    )
+    registry = _registry(tmp_path, "browser_get_text", facade)
+
+    result = await registry.execute(
+        "browser_get_text", {"browser_target": "edge"}, tool_call_id="locked-target"
+    )
+
+    assert result.is_error is True
+    assert result.details["code"] == "browser_target_locked"
+    assert "start a new task" in result.output
     assert "unexpected failure" not in result.output
 
 

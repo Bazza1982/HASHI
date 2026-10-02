@@ -1557,6 +1557,17 @@ class FunctionWorkerHost:
 
             return await handle_phone_action_operation(runtime, str(params.get("operation") or ""),
                                                        dict(params.get("payload") or {}))
+        if method == "runtime.cancel_session_run":
+            from orchestrator.runtime_cancel import cancel_session_run
+
+            return await cancel_session_run(
+                runtime,
+                owner_id=str(params.get("owner_id") or ""),
+                session_id=str(params.get("session_id") or ""),
+                run_id=str(params.get("run_id") or ""),
+                request_id=str(params.get("request_id") or ""),
+                reason=str(params.get("reason") or "cancelled_by_user"),
+            )
         if method == "runtime.slash":
             from orchestrator.admin_local_testing import (
                 try_execute_slash_command_text,

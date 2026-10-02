@@ -1502,6 +1502,12 @@ async def run_backend_generation(
     on_stream_event,
     audit_active: bool,
 ) -> BackendGeneration:
+    from orchestrator.runtime_cancel import requested_ids
+
+    if item.request_id in requested_ids(runtime):
+        runtime.is_generating = False
+        return BackendGeneration(_cancelled_generation_response(), False, time.monotonic(), 0)
+
     extra = runtime.config.extra or {}
     background_mode_requested = (
         extra.get("background_mode", False)
@@ -1533,6 +1539,10 @@ async def run_backend_generation(
     # atomic and prevents a detached task from overwriting a later chat's
     # restored binding when it completes.
     background_mode = background_mode_requested and not provider_isolation.active
+    tasks = getattr(runtime, "_generation_tasks_by_request", None)
+    if not isinstance(tasks, dict):
+        tasks = {}
+        runtime._generation_tasks_by_request = tasks
     try:
         if background_mode:
             generation_task = asyncio.create_task(
@@ -1542,6 +1552,8 @@ async def run_backend_generation(
                     **generation_kwargs,
                 )
             )
+            tasks[item.request_id] = generation_task
+            detached = False
             try:
                 response = await asyncio.wait_for(
                     asyncio.shield(generation_task),
@@ -1552,12 +1564,17 @@ async def run_backend_generation(
                 response = None
                 detached = True
             except asyncio.CancelledError:
-                generation_task.cancel()
-                try:
-                    await generation_task
-                except asyncio.CancelledError:
-                    pass
-                raise
+                if (item.request_id in requested_ids(runtime)
+                        and not asyncio.current_task().cancelling()):
+                    response = _cancelled_generation_response()
+                    detached = False
+                else:
+                    generation_task.cancel()
+                    try:
+                        await generation_task
+                    except asyncio.CancelledError:
+                        pass
+                    raise
             finally:
                 runtime.is_generating = False
                 if generation_task.done():
@@ -1576,6 +1593,8 @@ async def run_backend_generation(
                         )
 
                     generation_task.add_done_callback(_flush_detached_stream)
+                if not detached and tasks.get(item.request_id) is generation_task:
+                    tasks.pop(item.request_id, None)
             return BackendGeneration(
                 response=response,
                 detached=detached,
@@ -1585,10 +1604,11 @@ async def run_backend_generation(
             )
 
         try:
-            response = await runtime.backend_manager.generate_response(
-                final_prompt,
-                item.request_id,
-                **generation_kwargs,
+            response = await _await_targeted_generation(
+                runtime, item.request_id,
+                runtime.backend_manager.generate_response(
+                    final_prompt, item.request_id, **generation_kwargs,
+                ),
             )
         finally:
             runtime.is_generating = False
@@ -1607,6 +1627,37 @@ async def run_backend_generation(
             item,
             provider_isolation,
         )
+
+
+def _cancelled_generation_response():
+    from adapters.base import BackendResponse
+
+    return BackendResponse(text="", duration_ms=0, error="Cancelled by user", is_success=False)
+
+
+async def _await_targeted_generation(runtime, request_id: str, operation):
+    """Map a provider operation to its exact Run until it has settled."""
+    from orchestrator.runtime_cancel import requested_ids
+
+    if request_id in requested_ids(runtime):
+        operation.close()
+        return _cancelled_generation_response()
+    tasks = getattr(runtime, "_generation_tasks_by_request", None)
+    if not isinstance(tasks, dict):
+        tasks = {}
+        runtime._generation_tasks_by_request = tasks
+    task = asyncio.create_task(operation)
+    tasks[request_id] = task
+    try:
+        return await task
+    except asyncio.CancelledError:
+        if request_id in requested_ids(runtime) and not asyncio.current_task().cancelling():
+            return _cancelled_generation_response()
+        task.cancel()
+        raise
+    finally:
+        if tasks.get(request_id) is task:
+            tasks.pop(request_id, None)
 
 
 def log_backend_finished(
@@ -3762,6 +3813,10 @@ async def recover_typed_context_capacity_rejection(
 
     if not _typed_capacity_recovery_is_safe(response):
         return None
+    from orchestrator.runtime_cancel import requested_ids
+
+    if item.request_id in requested_ids(runtime):
+        return None
     states = getattr(runtime, "_context_compaction_prompt_states", None)
     state = states.get(item.request_id) if isinstance(states, dict) else None
     if not isinstance(state, dict) or state.get("capacity_recovery_attempted"):
@@ -3893,12 +3948,12 @@ async def recover_typed_context_capacity_rejection(
     )
     runtime.is_generating = True
     try:
-        retry_response = await runtime.backend_manager.generate_response(
-            retry_prompt,
-            item.request_id,
-            is_retry=True,
-            silent=item.silent,
-            on_stream_event=on_stream_event,
+        retry_response = await _await_targeted_generation(
+            runtime, item.request_id,
+            runtime.backend_manager.generate_response(
+                retry_prompt, item.request_id, is_retry=True,
+                silent=item.silent, on_stream_event=on_stream_event,
+            ),
         )
     finally:
         runtime.is_generating = False

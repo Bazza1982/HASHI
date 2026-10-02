@@ -20,6 +20,9 @@ def test_native_windows_browser_bridge_installer_is_wsl_independent() -> None:
     assert '"com.hashi.browser_bridge.$HostSuffix"' in script
     assert "$ValidateOnly" in script
     assert "Google\\Chrome\\NativeMessagingHosts" in script
+    assert "Microsoft\\Edge\\NativeMessagingHosts" in script
+    assert 'ValidateSet("Chrome", "Edge")' in script
+    assert '$BridgeEndpoint += "-edge"' in script
     assert "chrome-extension://$ExtensionId/" in script
     assert "wsl.exe" not in script.lower()
 
@@ -44,6 +47,7 @@ def test_device_workers_install_as_windowless_dynamic_endpoint_tasks() -> None:
     assert '"--log-dir", $LogDir' in script
     assert '"--port"' not in script
     assert "Stop-ScheduledTask" in script
+    assert '"--browser-id", $BrowserId' in script
 
 
 def test_browser_uninstaller_is_instance_scoped() -> None:
@@ -56,3 +60,4 @@ def test_browser_uninstaller_is_instance_scoped() -> None:
     assert '"com.hashi.browser_bridge.$HostSuffix"' in script
     assert "StartsWith($ResolvedBase" in script
     assert "Remove-Item -LiteralPath $ResolvedInstallRoot" in script
+    assert "Microsoft\\Edge\\NativeMessagingHosts" in script

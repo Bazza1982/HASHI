@@ -43,6 +43,24 @@ It derives an instance-scoped namespace, extension identity, named pipe,
 authentication file, native-host registration, and installation directory.
 Loading one instance's unpacked extension does not authorize another instance.
 
+For Edge on the same HASHI instance, install a second isolated bridge:
+
+```powershell
+.\tools\install_browser_option_d_windows.ps1 -Browser Edge
+```
+
+Load the printed extension directory from `edge://extensions`. Edge gets its
+own extension identity, native-host registration, pipe, and authentication
+file. Keep the existing Chrome installation for Chrome. Install a separate
+Browser Worker for Edge using the printed Edge endpoint and auth-file paths,
+plus `-BrowserId edge -BrowserName "Microsoft Edge"` with
+`scripts/install_device_control_workers.ps1 -BrowserOnly`. This creates a
+separate `Browser-edge` scheduled task. Browser registrations expose their
+IDs/names to every HASHI backend. `/browser 4` may use either connected browser
+when the user has not chosen one; a task remains on its first selected browser.
+Uninstall only Edge's bridge with
+`tools/uninstall_browser_option_d_windows.ps1 -Browser Edge`.
+
 Install the persistent Browser Worker separately. When HASHI itself is hosted
 in WSL, pass the instance's UNC path as `BridgeHome` and a Windows-local checkout
 of the same qualified release as `CodeRoot`; Windows Scheduled Tasks cannot use

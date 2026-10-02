@@ -394,6 +394,15 @@ def test_native_host_parser_accepts_chromium_invocation_arguments() -> None:
     assert args.parent_window == "123"
 
 
+def test_native_host_parser_accepts_instance_extension_origin() -> None:
+    origin = "chrome-extension://abcdefghijklmnopabcdefghijklmnop/"
+    args = build_parser().parse_args(
+        ["--expected-origin", origin, origin, "--parent-window=0"]
+    )
+    assert args.expected_origin == origin
+    assert args.origin == origin
+
+
 @pytest.mark.platform
 @pytest.mark.skipif(os.name != "nt", reason="Native Windows host process requires Windows")
 def test_native_windows_host_process_serves_authenticated_pipe(tmp_path: Path) -> None:

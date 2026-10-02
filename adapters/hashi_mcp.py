@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 import os
 import sys
 import tempfile
@@ -25,6 +26,25 @@ def prepare_hashi_mcp(adapter: Any, *, backend: str) -> dict[str, Any] | None:
     state_dir = Path(adapter.config.workspace_dir) / "backend_state"
     state_dir.mkdir(parents=True, exist_ok=True)
     context_path = state_dir / f"{backend}-hashi-mcp-context.json"
+    audit_context = dict(registry.audit_context or {})
+    audit_context.pop("browser_gateway_proxy", None)
+    runtime = audit_context.get("_runtime")
+    facade = getattr(runtime, "orchestrator", None)
+    if (
+        any(name.startswith("browser_") for name in registry.allowed_tool_names())
+        and bool(getattr(facade, "is_function_worker_facade", False))
+        and callable(getattr(facade, "invoke_capability", None))
+    ):
+        from tools.browser_gateway_proxy import BrowserGatewayProxy
+
+        proxy = getattr(adapter, "_browser_gateway_proxy", None)
+        if proxy is None:
+            proxy = BrowserGatewayProxy(registry, asyncio.get_running_loop())
+            adapter._browser_gateway_proxy = proxy
+        audit_context["browser_gateway_proxy"] = proxy.issue(audit_context)
+    else:
+        audit_context.pop("browser_gateway_proxy", None)
+    registry.audit_context = audit_context
     workbench_url = live_workbench_api_base_url(registry, adapter.global_config)
     write_gateway_context(
         registry,

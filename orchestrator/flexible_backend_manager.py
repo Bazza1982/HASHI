@@ -1788,6 +1788,10 @@ class FlexibleBackendManager:
             await backend.shutdown()
         except Exception:
             self.logger.exception("Failed to shut down discarded backend")
+        proxy = getattr(backend, "_browser_gateway_proxy", None)
+        if proxy is not None:
+            await asyncio.to_thread(proxy.close)
+            backend._browser_gateway_proxy = None
 
     def _resolve_tools_config(self, backend_cfg_raw: dict) -> dict | None:
         """Merge global default_tools with per-backend tools config.
@@ -2048,7 +2052,7 @@ class FlexibleBackendManager:
 
     async def shutdown(self):
         if self.current_backend:
-            await self.current_backend.shutdown()
+            await self._dispose_backend(self.current_backend)
             self.current_backend = None
 
     async def generate_response(

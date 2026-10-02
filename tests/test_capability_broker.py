@@ -225,6 +225,59 @@ async def test_browser_observation_receives_control_lease(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_browser_target_is_optional_but_fixed_for_each_task(tmp_path):
+    broker, bootstrap_token = _started_broker(tmp_path)
+    for browser_id, capability_id, port in (
+        ("chrome", "cap-chrome", 49321),
+        ("edge", "cap-edge", 49322),
+    ):
+        payload = _payload(
+            browser_id * 16,
+            kind="browser_control",
+            capability_id=capability_id,
+            port=port,
+            actions=("get_text",),
+        )
+        payload["browser_id"] = browser_id
+        payload["browser_name"] = "Google Chrome" if browser_id == "chrome" else "Microsoft Edge"
+        broker.register(payload, bootstrap_token=bootstrap_token)
+    visited = []
+
+    async def transport(record, _token, payload, _timeout):
+        visited.append((record.browser_id, payload["args"]))
+        return {"ok": True, "identity": _health(record)["identity"], "result": record.browser_id}
+
+    broker.set_transport_for_testing(transport)
+    first = await broker.invoke(
+        "browser_control", "get_text", {}, agent_id="agent1", task_id="task-auto"
+    )
+    assert first in {"chrome", "edge"}
+    assert await broker.invoke(
+        "browser_control", "get_text", {}, agent_id="agent1", task_id="task-auto"
+    ) == first
+    assert await broker.invoke(
+        "browser_control", "get_text", {"_browser_target": "edge"},
+        agent_id="agent1", task_id="task-explicit"
+    ) == "edge"
+    assert await broker.invoke(
+        "browser_control", "get_text", {"_browser_target": "Chrome"},
+        agent_id="agent1", task_id="task-chrome"
+    ) == "chrome"
+    assert "_browser_target" not in visited[-1][1]
+    with pytest.raises(CapabilityBrokerError, match="fixed for this task"):
+        await broker.invoke(
+            "browser_control", "get_text", {"_browser_target": "chrome"},
+            agent_id="agent1", task_id="task-explicit"
+        )
+    bound_id = broker._browser_task_bindings[("agent1", "task-auto")][0]
+    broker._records.pop(bound_id)
+    with pytest.raises(CapabilityBrokerError, match="bound_browser_disconnected"):
+        await broker.invoke(
+            "browser_control", "get_text", {}, agent_id="agent1", task_id="task-auto"
+        )
+
+
+@pytest.mark.asyncio
 async def test_failed_mutation_schedules_best_effort_input_cleanup(tmp_path):
     broker, bootstrap_token = _started_broker(tmp_path)
     token = "j" * 64

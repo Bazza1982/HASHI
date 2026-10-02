@@ -786,6 +786,10 @@ class WorkbenchApiServer:
             "/api/agents/{name}/requests/{request_id}/activity",
             self.handle_request_activity,
         )
+        self.app.router.add_post(
+            "/api/agents/{name}/requests/{request_id}/cancel",
+            self.handle_request_cancel,
+        )
         self.app.router.add_get(
             "/api/project-chat/{name}/{project}", self.handle_project_chat_log
         )
@@ -5267,6 +5271,49 @@ class WorkbenchApiServer:
         )
         return web.json_response(payload)
 
+    async def _cancel_selected_run(self, run, *, owner_id: str, reason: str):
+        runtime = self._runtime_map().get(run["agent_id"])
+        cancel = getattr(runtime, "cancel_session_run", None) if runtime is not None else None
+        if not callable(cancel):
+            return web.json_response(
+                {"ok": False, "error_code": "run_cancel_unavailable",
+                 "error": "The selected Agent Worker is unavailable."}, status=503,
+            )
+        result = await cancel(
+            owner_id=owner_id, session_id=run["session_id"],
+            run_id=run["run_id"], request_id=run["request_id"], reason=reason,
+        )
+        status = 200 if result.get("ok") and result.get("terminal") else (
+            202 if result.get("ok") else 409
+        )
+        return web.json_response(result, status=status)
+
+    async def handle_request_cancel(self, request):
+        """Resolve the request through PAO and ask its Worker to stop that Run."""
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        try:
+            name = str(request.match_info.get("name") or "")
+            request_id = str(request.match_info.get("request_id") or "")
+            payload = await request.json() if getattr(request, "can_read_body", True) else {}
+            if not isinstance(payload, dict):
+                raise ValueError("cancel payload must be an object")
+            if not payload.get("session_id") or not payload.get("run_id"):
+                raise ValueError("session_id and run_id are required for cancellation")
+            run = self.session_store.get_run_by_request(
+                request_id, owner_id=owner, agent_id=name,
+            )
+            if (payload["session_id"] != run["session_id"]
+                    or payload["run_id"] != run["run_id"]):
+                raise SessionNotFound("request not found in selected Session Run")
+            return await self._cancel_selected_run(
+                run, owner_id=owner,
+                reason=str(payload.get("reason") or "cancelled_by_user")[:160],
+            )
+        except Exception as exc:
+            return self._v1_error(exc)
+
     async def handle_request_activity(self, request):
         """Return an owner-scoped live stream with a durable Run fallback."""
 
@@ -5359,6 +5406,10 @@ class WorkbenchApiServer:
         if result.get("ok"):
             result = _public_request_activity(runtime, result)
             result.update(identity)
+            if str(run.get("state") or "") in TERMINAL_RUN_STATES:
+                result["state"] = str(run["state"])
+                result["terminal"] = True
+                result["success"] = run["state"] == "completed"
             if failure is not None:
                 result["failure"] = failure
             return web.json_response(result)
@@ -6941,12 +6992,17 @@ class WorkbenchApiServer:
             )
             if run["session_id"] != request.match_info["session_id"]:
                 raise SessionNotFound("run not found in Session")
-            stopped = self.session_store.cancel_run(
-                run["run_id"],
-                owner_id=owner,
-                reason=str(payload.get("reason") or "cancelled_by_user"),
+            response = await self._cancel_selected_run(
+                run, owner_id=owner,
+                reason=str(payload.get("reason") or "cancelled_by_user")[:160],
             )
-            return web.json_response({"ok": True, "run": stopped})
+            if response.status not in {200, 202}:
+                return response
+            result = json.loads(response.text)
+            return web.json_response(
+                {"ok": True, "run": self.session_store.get_run(run["run_id"], owner_id=owner),
+                 "cancellation": result}, status=response.status,
+            )
         except Exception as exc:
             return self._v1_error(exc)
 

@@ -2949,6 +2949,76 @@ async def test_background_final_waits_for_transition_status_delivery(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("before_completion_starts", [False, True])
+async def test_background_completion_cancel_stops_exact_run_before_final_delivery(
+    tmp_path, monkeypatch, before_completion_starts,
+):
+    from orchestrator import runtime_cancel
+
+    runtime, sent, _voices = _make_background_runtime(tmp_path)
+    item = _queued_request()
+    item.run_id = "run-001"
+    item.session_id = "ses-001"
+    state = {"state": "running"}
+
+    class Store:
+        def get_run(self, run_id, *, owner_id=None):
+            assert run_id == "run-001"
+            return {"run_id": run_id, "request_id": item.request_id,
+                    "session_id": item.session_id, "agent_id": runtime.name,
+                    "state": state["state"]}
+
+    store = Store()
+    runtime.session_store = store
+    monkeypatch.setattr(runtime_cancel.runtime_session, "ensure_store", lambda _runtime: store)
+    runtime._background_request_ids = {item.request_id}
+    stopped = []
+
+    async def notify(request_id, payload):
+        stopped.append((request_id, payload))
+        state["state"] = "stopped"
+
+    runtime._notify_request_listeners = notify
+    status_entered = asyncio.Event()
+    status_release = asyncio.Event()
+
+    async def deliver_status():
+        status_entered.set()
+        await status_release.wait()
+
+    item._background_status_delivery_task = asyncio.create_task(deliver_status())
+    generation = asyncio.create_task(
+        _completed_task(BackendResponse(text="should not be delivered", duration_ms=1.0))
+    )
+    await generation
+    completion = asyncio.create_task(FlexibleAgentRuntime._on_background_complete(
+        runtime, generation, item,
+    ))
+    runtime._background_completion_tasks_by_request = {item.request_id: completion}
+    try:
+        if not before_completion_starts:
+            await status_entered.wait()
+            await asyncio.sleep(0)
+        result = await runtime_cancel.cancel_session_run(
+            runtime, owner_id="owner", session_id=item.session_id,
+            run_id=item.run_id, request_id=item.request_id,
+        )
+        await completion
+        assert result["status"] == "cancellation_requested"
+        assert state["state"] == "stopped"
+        assert len(stopped) == 1
+        assert stopped[0][1]["interrupt_reason"] == "user_stop"
+        assert sent == []
+        assert runtime._background_completion_tasks_by_request == {}
+    finally:
+        status_release.set()
+        await asyncio.gather(item._background_status_delivery_task, return_exceptions=True)
+        if not completion.done():
+            completion.cancel()
+            await asyncio.gather(completion, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_background_transfer_suppression_buffers_wrapper_output(tmp_path):
     runtime, sent, voices = _make_background_runtime(tmp_path)
     runtime._should_buffer_during_transfer = lambda request_id: True

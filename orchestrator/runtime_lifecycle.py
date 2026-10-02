@@ -332,6 +332,8 @@ async def shutdown(runtime: Any) -> None:
 
 
 async def process_queue(runtime: Any) -> None:
+    from orchestrator import runtime_cancel
+
     runtime.logger.info("Flex queue processor started.")
     while True:
         item = None
@@ -339,10 +341,16 @@ async def process_queue(runtime: Any) -> None:
         feedback_cleaned = False
         try:
             item = await runtime.queue.get()
-            if not item.prompt or not item.prompt.strip():
-                runtime.logger.debug(f"Skipping empty prompt in queue (source={item.source}, id={item.request_id})")
-                continue
-            queue_start = runtime_pipeline.begin_queue_item(runtime, item)
+            async with runtime_cancel.transition_lock(runtime):
+                if (item.request_id in runtime_cancel.requested_ids(runtime)
+                        or runtime_cancel.queued_run_is_terminal(runtime, item)):
+                    runtime_cancel.requested_ids(runtime).discard(item.request_id)
+                    await runtime_cancel.finish_queued_request(runtime, item)
+                    continue
+                if not item.prompt or not item.prompt.strip():
+                    runtime.logger.debug(f"Skipping empty prompt in queue (source={item.source}, id={item.request_id})")
+                    continue
+                queue_start = runtime_pipeline.begin_queue_item(runtime, item)
             await _publish_worker_metadata(
                 runtime,
                 transition="request start",
@@ -479,6 +487,8 @@ async def process_queue(runtime: Any) -> None:
             )
             if recovered is not None:
                 response, final_prompt = recovered
+            if item.request_id in runtime_cancel.requested_ids(runtime):
+                response = runtime_pipeline._cancelled_generation_response()
 
             backend_elapsed = max(
                 0.0, time.monotonic() - backend_started_monotonic
@@ -662,6 +672,10 @@ async def process_queue(runtime: Any) -> None:
             if item is not None:
                 background_ids = getattr(runtime, "_background_request_ids", set())
                 if item.request_id not in background_ids:
+                    from orchestrator.runtime_control import consume_user_interrupt
+
+                    consume_user_interrupt(runtime, item.request_id)
+                    runtime_cancel.requested_ids(runtime).discard(item.request_id)
                     registry = getattr(runtime, "_request_meta_by_id", None)
                     if isinstance(registry, dict):
                         registry.pop(item.request_id, None)

@@ -1052,6 +1052,15 @@ class AgentRuntimeHandle:
     async def phone_action_operation(self, operation: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         return dict(await self._route("runtime.phone_action", {"operation": operation, "payload": dict(payload)}, timeout=12) or {})
 
+    async def cancel_session_run(
+        self, *, owner_id: str, session_id: str, run_id: str,
+        request_id: str, reason: str,
+    ) -> dict[str, Any]:
+        return dict(await self._route("runtime.cancel_session_run", {
+            "owner_id": owner_id, "session_id": session_id, "run_id": run_id,
+            "request_id": request_id, "reason": reason,
+        }, timeout=12) or {})
+
     async def execute_slash_command(
         self,
         text: str,

@@ -103,6 +103,13 @@ class _Runtime:
     def get_display_name(self):
         return "Lily"
 
+    async def cancel_session_run(self, *, owner_id, session_id, run_id, request_id, reason):
+        run = self.server.session_store.get_run(run_id, owner_id=owner_id)
+        assert (run["session_id"], run["request_id"]) == (session_id, request_id)
+        stopped = self.server.session_store.cancel_run(run_id, owner_id=owner_id, reason=reason)
+        return {"ok": True, "session_id": session_id, "run_id": run_id,
+                "request_id": request_id, "status": stopped["state"], "terminal": True}
+
     def _primary_chat_id(self):
         return 123
 
@@ -2037,6 +2044,71 @@ async def test_frontend_feed_projects_final_message_and_accepts_exact_endpoint(t
     assert reset["durable_events"] == []
     assert reset["ephemeral_reset"] is True
     assert len(reset["ephemeral_events"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_session_cancel_reaches_selected_worker_before_marking_run_stopped(tmp_path):
+    server, runtime = _server(tmp_path)
+    session = server.session_store.resolve_primary_session(owner_id=server._v1_owner_id(_Request()), agent_id="lily")
+    accepted = server.session_store.accept_run(
+        session_id=session["session_id"], owner_id=session["owner_id"], agent_id="lily",
+        request_id="req-cancel-target", text="work", source="workbench",
+        idempotency_key="cancel-target",
+    )
+    server.session_store.mark_request_running(accepted.request_id, worker_id="worker")
+    calls = []
+
+    async def cancel_session_run(**scope):
+        calls.append(scope)
+        return {"ok": True, "status": "cancellation_requested", "terminal": False,
+                "request_id": accepted.request_id}
+
+    runtime.cancel_session_run = cancel_session_run
+    response = await server.handle_v1_session_run_cancel(_Request(
+        {"reason": "cancelled_by_user"},
+        match_info={"session_id": session["session_id"], "run_id": accepted.run_id},
+    ))
+    assert response.status == 202
+    assert calls == [{"owner_id": session["owner_id"], "session_id": session["session_id"],
+                      "run_id": accepted.run_id, "request_id": accepted.request_id,
+                      "reason": "cancelled_by_user"}]
+    assert server.session_store.get_run(accepted.run_id)["state"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_request_cancel_fences_session_and_run_before_worker_call(tmp_path):
+    server, runtime = _server(tmp_path)
+    session = server.session_store.resolve_primary_session(
+        owner_id=server._v1_owner_id(_Request()), agent_id="lily",
+    )
+    accepted = server.session_store.accept_run(
+        session_id=session["session_id"], owner_id=session["owner_id"], agent_id="lily",
+        request_id="req-scoped", text="work", source="workbench",
+        idempotency_key="scoped-cancel",
+    )
+    calls = []
+
+    async def cancel_session_run(**scope):
+        calls.append(scope)
+        return {"ok": True, "request_id": accepted.request_id,
+                "status": "cancellation_requested", "terminal": False}
+
+    runtime.cancel_session_run = cancel_session_run
+    target = {"name": "lily", "request_id": accepted.request_id}
+    missing_scope = await server.handle_request_cancel(_Request({}, match_info=target))
+    assert missing_scope.status == 400
+    assert calls == []
+    wrong = await server.handle_request_cancel(_Request(
+        {"session_id": session["session_id"], "run_id": "run-wrong"}, match_info=target,
+    ))
+    assert wrong.status == 404
+    assert calls == []
+    accepted_response = await server.handle_request_cancel(_Request(
+        {"session_id": session["session_id"], "run_id": accepted.run_id}, match_info=target,
+    ))
+    assert accepted_response.status == 202
+    assert len(calls) == 1
+    assert calls[0]["request_id"] == accepted.request_id
 
 
 @pytest.mark.asyncio

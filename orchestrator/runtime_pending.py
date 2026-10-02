@@ -192,6 +192,28 @@ async def _finish_removed_runs(runtime: Any, items: list[Any]) -> None:
         await runtime_delivery_order.complete_turn(runtime, request_id)
 
 
+async def take_ready_exact(
+    runtime: Any, request_id: str, *, session_id: str,
+) -> Any | None:
+    """Take only the fully qualified request ID from this Session's ready queue."""
+    async with pending_lock(runtime):
+        drained = _drain_ready_queue(runtime)
+        removed = None
+        kept = []
+        for item in drained:
+            if (removed is None and _request_id(item) == request_id
+                    and _in_runtime_session(runtime, item, session_id)):
+                removed = item
+            else:
+                kept.append(item)
+        _restore_ready_queue(runtime, kept)
+        return removed
+
+
+async def complete_removed_turn(runtime: Any, request_id: str) -> None:
+    await runtime_delivery_order.complete_turn(runtime, request_id)
+
+
 async def clear_ready(runtime: Any, *, session_id: str | None = None) -> int:
     async with pending_lock(runtime):
         drained = _drain_ready_queue(runtime)

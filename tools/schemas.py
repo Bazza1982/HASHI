@@ -2287,6 +2287,14 @@ from tools.obsidian_mcp.schemas import OBSIDIAN_TOOL_SCHEMAS
 TOOL_SCHEMAS.extend(OBSIDIAN_TOOL_SCHEMAS)
 
 _BROWSER_EXTRA_FIELDS = {
+    "browser_target": {
+        "type": "string",
+        "description": (
+            "Optional connected browser ID (for example chrome or edge), name, or "
+            "capability_id. Omit to try any connected browser. HASHI keeps the "
+            "selected browser fixed for this task."
+        ),
+    },
     "session_id": {
         "type": "string",
         "description": "Optional browser session identifier. Omit to use the agent's default session.",
@@ -2319,6 +2327,7 @@ for _tool_name in [
     "browser_get_text",
     "browser_get_html",
     "browser_click",
+    "browser_react",
     "browser_fill",
     "browser_type_text",
     "browser_evaluate",

@@ -63,6 +63,9 @@ BROWSER_ROUTES: dict[str, BrowserRoute] = {
         instruction=(
             "Use the HASHI browser extension bridge for the real logged-in Windows browser "
             "when authentication, cookies, or the user's live browser state are required. "
+            "Use the connected browser choices shown by HASHI tools. If the user named "
+            "Chrome or Edge, pass its browser_target. Otherwise try any connected "
+            "browser; keep that browser for the whole task. "
             "Read and inspect freely when authorized by the task, but ask for explicit "
             "confirmation before destructive actions, submissions, purchases, account changes, "
             "or bulk edits."
@@ -95,6 +98,7 @@ def get_browser_status_text(
     active_backend: str | None = None,
     brave_configured: bool | None = None,
     extension_bridge_configured: bool | None = None,
+    connected_browsers: list[dict] | None = None,
 ) -> str:
     backend = (active_backend or "unknown").strip() or "unknown"
     native_status = ui_language.tr(
@@ -127,6 +131,14 @@ def get_browser_status_text(
     headless_icon = "🟢"
     headless_status = ui_language.tr("browser.available")
 
+    browser_choices = ""
+    if connected_browsers:
+        labels = [
+            f"{escape(str(row.get('browser_name') or 'Browser'))} "
+            f"<code>{escape(str(row.get('browser_id') or row.get('capability_id') or ''))}</code>"
+            for row in connected_browsers
+        ]
+        browser_choices = "\n" + "\n".join(labels) + "\n"
     return (
         f"{card_title('🌐', 'Browser routes')}\n\n"
         f"<b>{ui_language.tr('common.current')}</b> · "
@@ -141,7 +153,7 @@ def get_browser_status_text(
         f"{brave_icon} <b>3 · {ui_language.tr('browser.route.search')}</b> · {brave_status}\n"
         f"   {ui_language.tr('browser.route.search_desc')}\n"
         f"{extension_icon} <b>4 · {ui_language.tr('browser.route.logged_in')}</b> · {extension_status}\n"
-        f"   {ui_language.tr('browser.route.logged_in_desc')}\n\n"
+        f"   {ui_language.tr('browser.route.logged_in_desc')}{browser_choices}\n\n"
         f"<b>{ui_language.tr('common.use')}</b>\n"
         "<code>/browser &lt;1-4&gt; &lt;task&gt;</code>\n"
         "<code>/browser examples</code>"

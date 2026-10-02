@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import platform
+import re
 import socket
 import tempfile
 import threading
@@ -283,8 +284,12 @@ def _capability_id(
     device_id: str,
     user_session_id: str,
     capability_kind: str,
+    browser_id: str = "",
 ) -> str:
-    seed = "|".join((instance_id, device_id, user_session_id, capability_kind))
+    parts = [instance_id, device_id, user_session_id, capability_kind]
+    if capability_kind == "browser_control" and browser_id:
+        parts.append(browser_id)
+    seed = "|".join(parts)
     return "cap-" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:32]
 
 
@@ -366,6 +371,8 @@ class DeviceWorkerState:
     advertise_host: str
     wsl_distro: str | None
     logger: logging.Logger
+    browser_id: str = ""
+    browser_name: str = ""
     auto_bind: bool = False
     executor: Callable[[str, dict[str, Any]], Any] | None = None
     bound_port: int = 0
@@ -396,6 +403,7 @@ class DeviceWorkerState:
             self.device_id,
             self.user_session_id,
             self.capability_kind,
+            self.browser_id,
         )
 
     @property
@@ -425,11 +433,16 @@ class DeviceWorkerState:
 
     @property
     def status_path(self) -> Path:
+        suffix = (
+            f"_{self.browser_id}"
+            if self.capability_kind == "browser_control" and self.browser_id
+            else ""
+        )
         return (
             self.bridge_home
             / "state"
             / "device_control"
-            / f"{self.capability_kind}.json"
+            / f"{self.capability_kind}{suffix}.json"
         )
 
     def mark_request(self, request_id: str) -> None:
@@ -523,6 +536,14 @@ class DeviceWorkerState:
 
                 bridge = healthcheck(timeout_s=1.0)
                 healthy = bool(bridge.get("connected"))
+                if healthy and not self.browser_name:
+                    meta = (bridge.get("response") or {}).get("extension_meta") or {}
+                    user_agent = str(meta.get("user_agent") or "")
+                    self.browser_name = (
+                        "Microsoft Edge" if "Edg/" in user_agent else
+                        "Google Chrome" if "Chrome/" in user_agent else
+                        "Chromium browser"
+                    )
                 detail = {
                     "bridge_connected": healthy,
                     "bridge_endpoint": bridge.get("endpoint"),
@@ -587,6 +608,12 @@ class DeviceWorkerState:
             from tools.windows_helper.backends import execute_action
 
             return await execute_action(action, args)
+        if str(args.get("cdp_url") or "").strip():
+            raise DeviceWorkerError(
+                "Browser Worker only controls its registered extension; cdp_url is not allowed"
+            )
+        args["bridge_backend"] = "extension"
+        args["_bound_browser_worker"] = True
         return await _execute_browser_action(action, args)
 
     def cleanup(self, *, reason: str) -> dict[str, Any]:
@@ -923,6 +950,8 @@ def _registration_payload(state: DeviceWorkerState) -> dict[str, Any]:
         "schema_version": CAPABILITY_REGISTRATION_SCHEMA_VERSION,
         "capability_id": state.capability_id,
         "capability_kind": state.capability_kind,
+        "browser_id": state.browser_id if state.capability_kind == "browser_control" else "",
+        "browser_name": state.browser_name if state.capability_kind == "browser_control" else "",
         "instance_id": state.instance_id,
         "device_id": state.device_id,
         "user_session_id": state.user_session_id,
@@ -948,6 +977,8 @@ def _registration_payload(state: DeviceWorkerState) -> dict[str, Any]:
 
 
 def _register(state: DeviceWorkerState, bootstrap: Mapping[str, Any]) -> None:
+    if state.capability_kind == "browser_control":
+        state.health()
     response = _http_json(
         str(bootstrap["registration_url"]),
         method="POST",
@@ -1091,6 +1122,9 @@ def build_state(args: argparse.Namespace) -> DeviceWorkerState:
         raise DeviceWorkerError("worker port must be between 0 and 65535")
     device_id = str(args.device_id or _default_device_id()).strip()
     user_session_id = str(args.user_session_id or _default_session_id()).strip()
+    browser_id = str(args.browser_id or "").strip().casefold()
+    if browser_id and not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,39}", browser_id):
+        raise DeviceWorkerError("browser-id must be a short ASCII identifier")
     if not device_id or not user_session_id:
         raise DeviceWorkerError("worker device and user-session identities are required")
     return DeviceWorkerState(
@@ -1103,7 +1137,9 @@ def build_state(args: argparse.Namespace) -> DeviceWorkerState:
         bind_host=bind_host,
         advertise_host=advertise_host,
         wsl_distro=str(args.wsl_distro or "").strip() or None,
-        logger=_logger(log_dir / f"{capability_kind}.jsonl"),
+        logger=_logger(log_dir / f"{capability_kind}{'_' + browser_id if browser_id else ''}.jsonl"),
+        browser_id=browser_id,
+        browser_name=str(args.browser_name or "").strip(),
         auto_bind=str(args.host).strip().casefold() == "auto",
     )
 
@@ -1121,6 +1157,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--wsl-distro")
     parser.add_argument("--browser-endpoint")
     parser.add_argument("--browser-auth-file")
+    parser.add_argument("--browser-id", default="")
+    parser.add_argument("--browser-name", default="")
     parser.add_argument(
         "--log-dir",
         default=str(
