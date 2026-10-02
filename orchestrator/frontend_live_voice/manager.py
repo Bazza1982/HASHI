@@ -242,7 +242,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         self.session_store = session_store
         self.global_config = global_config
         self.secrets = dict(secrets or {})
-        self.providers = dict(default_registry() if provider_registry is None else provider_registry)
+        self.providers = dict(default_registry(include_experimental=True) if provider_registry is None else provider_registry)
         self._connection_providers: dict[str, VoiceProvider] = {}
         self._provider_native_delegations: dict[tuple[str, int], set[str]] = {}
         self.instance_id = str(getattr(global_config, "instance_id", "HASHI") or "HASHI").upper()
