@@ -2,9 +2,9 @@
 
 **Decision date:** 2026-10-02
 
-**Scope:** HASHI2 source implementation developed on `feature-privacy`.
-`feature/privacy-level2-merge` is the privacy-only candidate for `main`.
-Running adoption and live verification are separate facts, recorded below.
+**Scope:** HASHI2 source implementation developed on `feature-privacy` and
+promoted to `main` through privacy-only PR #75 on 2026-10-03. Running adoption
+and live verification are separate facts, recorded below.
 
 **Owner:** HERV3 Function for the outbound model boundary; PAO Function for
 Level 2 eligibility, persistence, and `/privacy` controls.
@@ -78,14 +78,17 @@ A live canary proves its exact request only, not every future outbound path.
 
 ## Approval, implementation, and adoption
 
+- **Main merge (2026-10-03):** PR #75 merged the privacy-only source candidate
+  into `main` after its GitHub checks passed. This did not update HASHI2's
+  active checkout, adopt a running Worker, or activate Level 2 for an Agent.
+
 - **Merge preparation (2026-10-03):** The candidate was rebuilt from the
   then-current `origin/main` with only the Level 2 commits and documentation;
   the separate Phone commits were excluded. Focused privacy, configuration,
   deployment, and UI checks passed (156 passed, 1 opt-in live canary skipped).
   Provider and package checks passed (189), as did the curated shared-runtime
   gate (736). The existing isolated detector passed its synthetic readiness
-  check. This is source validation, not a merge into `main` or running Worker
-  adoption.
+  check. Those checks covered source behavior, not running Worker adoption.
 
 - **Deployment preparation (2026-10-03):** `requirements-privacy.txt` now
   declares the separate detector profile, including a hash-pinned English
