@@ -394,8 +394,9 @@ async def test_add_agent_api_persists_her_orchestration_effort(tmp_path):
     row = next(item for item in stored["agents"] if item["name"] == "strategist")
     assert row["allowed_backends"][0]["engine"] == "her-v2"
     assert row["allowed_backends"][0]["effort"] == "low"
-    assert set(row["allowed_backends"][0]["her_v2"]["profiles"]) == {
-        "lightweight", "triage", "premium", "reviewer", "orchestrator"
+    assert row["allowed_backends"][0]["her_v2"]["main"] == {
+        "provider": "hashi-api",
+        "model": "gpt-5.6-sol",
     }
 
 

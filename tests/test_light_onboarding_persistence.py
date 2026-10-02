@@ -5,6 +5,7 @@ import json
 import pytest
 
 from orchestrator.config_json import read_config_json
+from orchestrator.flexible_backend_registry import get_default_model
 from tui import light_onboarding
 from tui.onboarding import write_config
 
@@ -149,7 +150,7 @@ def test_legacy_onboarding_uses_current_shared_model_defaults(tmp_path):
     backends = {row["engine"]: row for row in agent["allowed_backends"]}
     assert backends["codex-cli"] == {
         "engine": "codex-cli",
-        "model": "gpt-5.6-sol",
+        "model": get_default_model("codex-cli"),
         "effort": "medium",
     }
     assert backends["openrouter-api"]["model"] == "deepseek/deepseek-v4-pro"

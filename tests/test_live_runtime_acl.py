@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import os
 from pathlib import Path
 import subprocess
@@ -53,6 +54,10 @@ def _policy(tmp_path: Path) -> LiveRuntimePolicy:
         core_pid=None,
         policy_path=policy_path,
     )
+
+
+def _windows_token_is_elevated() -> bool:
+    return os.name == "nt" and bool(ctypes.windll.shell32.IsUserAnAdmin())
 
 
 def test_native_target_plan_is_exact_and_never_protects_repo_or_workzone(tmp_path):
@@ -110,6 +115,8 @@ def test_native_target_plan_accepts_exact_managed_python_prefix(
 @pytest.mark.platform
 @pytest.mark.skipif(os.name != "nt", reason="Windows DACL contract")
 def test_windows_acl_rejects_real_writes_and_restores_disposable_target(tmp_path):
+    if _windows_token_is_elevated():
+        pytest.skip("Write denial requires a non-admin runtime token")
     root = tmp_path / "live-runtime"
     root.mkdir()
     child = root / "package.py"
@@ -153,11 +160,16 @@ def test_windows_acl_installs_replacement_before_removing_inheritance(
 
     assert len(calls) == 1
     assert calls[0].index("/grant:r") < calls[0].index("/inheritance:r")
+    assert "*S-1-5-21-1000:(OI)(CI)(RX)" in calls[0]
+    assert "*S-1-5-18:(OI)(CI)(F)" in calls[0]
+    assert "*S-1-5-32-544:(OI)(CI)(F)" in calls[0]
 
 
 @pytest.mark.platform
 @pytest.mark.skipif(os.name != "nt", reason="Windows deployment script contract")
 def test_windows_deployment_script_plans_applies_verifies_and_restores(tmp_path):
+    if _windows_token_is_elevated():
+        pytest.skip("Write denial requires a non-admin runtime token")
     code_root = tmp_path / "source"
     runtime_root = code_root / ".venv"
     bridge_home = tmp_path / "instance"

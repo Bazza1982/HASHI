@@ -37,14 +37,18 @@ async def test_connector_commit_health_and_recovery_follow_real_ingress(tmp_path
             return True
     reports = []
     class Bot:
-        def __init__(self, name): self.name, self.attempts = name, 0
+        def __init__(self, name): self.name, self.attempts, self.polls = name, 0, 0
         async def initialize(self):
             self.attempts += 1
             if self.name == "alpha" and (persistent or self.attempts == 1):
                 raise OSError("connection unavailable")
         async def delete_webhook(self, **kwargs): pass
         async def shutdown(self): pass
-        async def get_updates(self, **kwargs): await asyncio.Event().wait()
+        async def get_updates(self, **kwargs):
+            self.polls += 1
+            if self.polls == 1:
+                return []
+            await asyncio.Event().wait()
 
     app = SimpleNamespace(paths=SimpleNamespace(bridge_home=tmp_path, instance_id="TEST"),
         runtimes=[], shared_generation_id="test", api_gateway=None, whatsapp=None,
@@ -74,13 +78,24 @@ async def test_connector_commit_health_and_recovery_follow_real_ingress(tmp_path
     host = RuntimeAppHost(None, {})
     host.app = app
     host.task = asyncio.create_task(asyncio.Event().wait())
+    async def wait_connected(name):
+        for _ in range(200):
+            if snapshot(name)["connected"]:
+                return
+            await asyncio.sleep(0.01)
+        pytest.fail(f"{name} did not report a successful poll")
     try:
         result = await host.commit()
-        assert result["degraded"] and len(reports) == 1
-        assert reports[0]["beta"]["connected"] and reports[0]["beta"]["running"]
+        assert result["degraded"] and reports
+        assert reports[0]["beta"]["running"]
         assert not reports[0]["alpha"]["connected"]
         payload = json.loads((await server.handle_health(_FakeRequest())).text)
         assert payload["degraded"] and not payload["ready"]
+        affected = next(i for i in payload["issues"] if i["code"] == "agent_telegram_unavailable")
+        assert "alpha" in affected["details"]["agents"]
+        await wait_connected("beta")
+        assert ingress["beta"].bot.polls >= 1
+        payload = json.loads((await server.handle_health(_FakeRequest())).text)
         affected = next(i for i in payload["issues"] if i["code"] == "agent_telegram_unavailable")
         assert affected["details"]["agents"] == ["alpha"]
         if persistent:
@@ -89,6 +104,7 @@ async def test_connector_commit_health_and_recovery_follow_real_ingress(tmp_path
             assert app.startup_status["degraded"]
         else:
             await asyncio.wait_for(host.connector_task, timeout=2)
+            await wait_connected("alpha")
             payload = json.loads((await server.handle_health(_FakeRequest())).text)
             assert payload["ready"] and not payload["degraded"] and not payload["issues"]
             assert all(item["connected"] and item["running"] for item in reports[-1].values())

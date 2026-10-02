@@ -1,7 +1,7 @@
 # Manual Desktop v1 — Functions / Windows Worker
 
-Status: implementation candidate on `feature-virtual-desktop`; Windows and external-client live acceptance pending.
-Baseline: `3004fb1799928506880b7ae3139edf8b96937625`.
+Status: reviewed source integration; running adoption and Windows/external-client live acceptance pending.
+Prior feature baseline: `3004fb1799928506880b7ae3139edf8b96937625`.
 
 Functional owner: Frontend Connectors for the public desktop ingress/projection;
 PAO remains the single authority for capability registration and write leases.
@@ -10,7 +10,7 @@ Computer Worker. No `CORE_SOURCE_PATHS` file is edited. No model/Agent Run is cr
 
 ## Enable locally
 
-1. Pull this branch in a separate checkout and preserve unrelated local changes.
+1. Use the reviewed shared-code checkout and preserve unrelated local changes.
 2. In the selected instance's ignored `agents.json`, set `global.desktop_enabled`
    to `true` using the established revision-safe configuration workflow. Default is
    false. `HASHI_DESKTOP_ENABLED=1` is an optional process-local alternative.

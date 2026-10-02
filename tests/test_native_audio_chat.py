@@ -189,43 +189,20 @@ def test_disabling_safe_voice_discards_waiting_native_path_and_releases_waiter()
     assert inflight_release.is_set() is False
 
 
-def test_voice_route_overlay_does_not_change_text_quick_or_work_routes():
-    profiles = {
-        name: {
-            "engine": "text-api",
-            "model": f"text-{name}",
-        }
-        for name in ("lightweight", "triage", "premium", "reviewer", "orchestrator")
-    }
+def test_voice_origin_snapshot_keeps_the_selected_text_model():
     config = HERv2Config.from_mapping(
         {
-            "profiles": profiles,
-            "routing_mode": "hybrid",
-            "voice_routes": {
-                "direct_target": {
-                    "provider": "audio-api",
-                    "model": "audio-direct",
-                },
-                "immediate_target": {
-                    "provider": "audio-api",
-                    "model": "audio-immediate",
-                },
-                "fallback_text_target": {
-                    "provider": "text-api",
-                    "model": "text-fallback",
-                },
-                "triage_input_policy": "auto",
-                "tools_enabled": False,
-            },
+            "main": {"provider": "text-api", "model": "text-main"},
         }
     )
 
-    assert config.profile_for(Stage.DIRECT).model == "text-lightweight"
-    assert config.profile_for(Stage.TRIAGE).model == "text-triage"
-    assert config.profile_for(Stage.EXECUTION).model == "text-premium"
+    assert config.profile_for(Stage.DIRECT).model == "text-main"
+    assert config.profile_for(Stage.EXECUTION).model == "text-main"
 
     voice = config.activate_voice_origin(
         {
+            "provider": "text-api",
+            "model": "audio-model",
             "voice": "alloy",
             "format": "wav",
             "retention_seconds": 3600,
@@ -235,33 +212,23 @@ def test_voice_route_overlay_does_not_change_text_quick_or_work_routes():
     direct = voice.profile_for(Stage.DIRECT)
     immediate = voice.profile_for(Stage.IMMEDIATE_RESPONSE)
 
-    assert (direct.engine, direct.model) == ("audio-api", "audio-direct")
-    assert (immediate.engine, immediate.model) == (
-        "audio-api",
-        "audio-immediate",
-    )
-    assert direct.options["_voice_fallback_model"] == "text-fallback"
+    assert (direct.engine, direct.model) == ("text-api", "audio-model")
+    assert (immediate.engine, immediate.model) == ("text-api", "audio-model")
+    assert direct.options["_voice_fallback_model"] == "text-main"
     assert direct.options["audio_model_tools"] is False
     assert direct.options["native_audio_voice"] == "alloy"
-    triage = voice.profile_for(Stage.TRIAGE)
-    assert (triage.engine, triage.model) == ("text-api", "text-triage")
-    assert triage.options["_voice_triage_input_policy"] == "auto"
-    assert voice.profile_for(Stage.EXECUTION).model == "text-premium"
+    assert voice.profile_for(Stage.EXECUTION).model == "text-main"
+    assert config.profile_for(Stage.DIRECT).model == "text-main"
 
 
 def test_her_capability_probe_applies_exact_voice_overlay():
-    profiles = {
-        name: {"engine": "text-api", "model": f"text-{name}"}
-        for name in (
-            "lightweight",
-            "triage",
-            "premium",
-            "reviewer",
-            "orchestrator",
-        )
-    }
     resolved = HERv2Config.from_mapping(
-        {"profiles": profiles, "routing_mode": "hybrid"}
+        {
+            "main": {
+                "provider": "openrouter-api",
+                "model": "configured-audio-model",
+            }
+        }
     )
     audio_row = {
         "engine": "openrouter-api",
