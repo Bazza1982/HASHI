@@ -2124,6 +2124,7 @@ class FlexibleBackendManager:
         for key in (
             "hashi_session_id",
             "hashi_run_id",
+            "hashi_fencing_token",
             "owner_id",
             "session_surface",
             "session_channel_key",
@@ -2133,6 +2134,7 @@ class FlexibleBackendManager:
         for key in (
             "hashi_session_id",
             "hashi_run_id",
+            "hashi_fencing_token",
             "owner_id",
             "session_surface",
             "session_channel_key",

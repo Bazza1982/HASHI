@@ -67,7 +67,7 @@ class _ToolRuntime:
         )
 
 
-def _running_session(tmp_path):
+def _running_session(tmp_path, *, delivery_route=None):
     store = SessionStore(
         tmp_path / "state" / "sessions.sqlite3",
         instance_id="HASHI3",
@@ -82,6 +82,7 @@ def _running_session(tmp_path):
         text="send the generated files",
         source="session-api",
         idempotency_key="frontend-output-run",
+        delivery_route=delivery_route,
     )
     assert store.mark_request_running(
         accepted.request_id, worker_id="HASHI3:agent1"
@@ -99,9 +100,12 @@ def _registry(
     request_source="session-api",
     access_root=None,
     workspace_dir=None,
+    allowed_tools=None,
+    runtime=None,
 ):
+    run = store.get_run_by_request("request-frontend-output", owner_id=owner)
     return ToolRegistry(
-        allowed_tools=["frontend_send_attachments"],
+        allowed_tools=allowed_tools or ["frontend_send_attachments"],
         access_root=access_root or tmp_path,
         workspace_dir=workspace_dir or tmp_path,
         secrets={},
@@ -110,6 +114,8 @@ def _registry(
             "request_id": "request-frontend-output",
             "request_source": request_source,
             "hashi_session_id": session["session_id"],
+            "hashi_run_id": run["run_id"],
+            "hashi_fencing_token": run["fencing_token"],
             "owner_id": owner,
             "session_surface": surface,
             "session_store_descriptor": {
@@ -117,6 +123,7 @@ def _registry(
                 "instance_id": store.instance_id,
                 "attachment_root": str(store.attachment_files_root),
             },
+            "_runtime": runtime,
         },
     )
 
@@ -262,10 +269,13 @@ def test_frontend_attachment_tool_is_standard_multi_attachment_contract():
     function = TOOL_SCHEMA_MAP["frontend_send_attachments"]["function"]
     parameters = function["parameters"]
 
-    assert "current frontend Session reply" in function["description"]
+    assert "current Session's final assistant reply" in function["description"]
     assert parameters["required"] == ["attachments"]
     assert parameters["properties"]["attachments"]["maxItems"] == 16
     assert "frontend_send_attachments" in TOOL_TIERS["communication"]
+    incremental = TOOL_SCHEMA_MAP["frontend_publish_deliverable"]["function"]
+    assert incremental["parameters"]["required"] == ["publication_id", "attachments"]
+    assert "frontend_publish_deliverable" in TOOL_TIERS["communication"]
 
 
 def test_telegram_file_cli_requires_explicit_runtime_identity_not_folder_name(
@@ -406,6 +416,395 @@ async def test_agent_publishes_ordered_multi_attachment_as_one_assistant_message
             limit=1,
         )
     ) == 1
+
+
+@pytest.mark.asyncio
+async def test_incremental_deliverables_are_visible_before_final_and_not_repeated(tmp_path):
+    from orchestrator.chat_transcript_projection import build_chat_projection
+    from orchestrator.frontend_projection import poll_frontend_feed
+
+    store, owner, session, accepted = _running_session(tmp_path)
+    first = tmp_path / "part-a.txt"
+    second = tmp_path / "part-b.txt"
+    first.write_text("ready A", encoding="utf-8")
+    second.write_text("ready B", encoding="utf-8")
+    registry = _registry(
+        tmp_path, store, owner, session,
+        allowed_tools=["frontend_send_attachments", "frontend_publish_deliverable"],
+    )
+    first_args = {
+        "publication_id": "deliverable-a",
+        "attachments": [{"path": str(first), "caption": "Part A"}],
+    }
+    published_a = await registry.execute(
+        "frontend_publish_deliverable", first_args, tool_call_id="call-a-1"
+    )
+    assert published_a.is_error is False, published_a.output
+    first_result = json.loads(published_a.output)
+    assert first_result["persisted"] is True
+    assert first_result["replayed"] is False
+    assert first_result["message_id"] and first_result["event_id"]
+    assert store.get_run_by_request(accepted.request_id, owner_id=owner)["state"] == "running"
+    assert store.get_message(
+        first_result["message_id"], session_id=session["session_id"], owner_id=owner
+    )["content"][0]["filename"] == "part-a.txt"
+    claims = store.claim_delivery_outbox(
+        session_id=session["session_id"], owner_id=owner,
+        worker_id="incremental-test", event_id=first_result["event_id"],
+    )
+    assert len(claims) == 1
+
+    replay = await registry.execute(
+        "frontend_publish_deliverable", first_args, tool_call_id="call-a-2"
+    )
+    assert json.loads(replay.output)["replayed"] is True
+    assert json.loads(replay.output)["message_id"] == first_result["message_id"]
+    changed = await registry.execute(
+        "frontend_publish_deliverable",
+        {**first_args, "text": "different"},
+        tool_call_id="call-a-3",
+    )
+    assert changed.is_error is True
+
+    published_b = await registry.execute(
+        "frontend_publish_deliverable",
+        {"publication_id": "deliverable-b", "attachments": [{"path": str(second)}]},
+        tool_call_id="call-b",
+    )
+    assert published_b.is_error is False, published_b.output
+    second_result = json.loads(published_b.output)
+    assert second_result["message_id"] != first_result["message_id"]
+    assert second_result["event_id"] != first_result["event_id"]
+    projection = build_chat_projection(
+        store, session=session, owner_id=owner, limit=20
+    )
+    deliverables = [
+        row for row in projection["messages"]
+        if row.get("message_id") in {first_result["message_id"], second_result["message_id"]}
+    ]
+    assert len(deliverables) == 2
+    assert len({row["message_ref"] for row in deliverables}) == 2
+    delta = build_chat_projection(
+        store, session=session, owner_id=owner, offset=0,
+        after_message_ordinal=deliverables[0]["source_sequence"], limit=20,
+    )
+    assert [
+        row["message_id"] for row in delta["messages"]
+        if row.get("message_id") == second_result["message_id"]
+    ] == [second_result["message_id"]]
+    feed = poll_frontend_feed(
+        store, session["session_id"], owner_id=owner,
+        run_id=accepted.run_id,
+    )
+    early_event = next(
+        row for row in feed["durable_events"]
+        if row["event_id"] == first_result["event_id"]
+    )
+    assert early_event["semantic_kind"] != "final"
+    assert any(
+        block["type"] == "media_ref"
+        for block in early_event["content_blocks"]
+    )
+
+    store.finish_request(
+        accepted.request_id, success=True, assistant_text="Both parts are ready."
+    )
+    final = store.get_message(
+        store.get_run_by_request(accepted.request_id, owner_id=owner)["final_message_id"],
+        session_id=session["session_id"], owner_id=owner,
+    )
+    assert final["text"] == "Both parts are ready."
+    assert not any(part.get("attachment_id") for part in final["content"])
+    assert len([
+        event for event in store.events(session["session_id"], owner_id=owner)
+        if event["kind"] == "assistant.output.available"
+        and event["detail"].get("disposition") == "incremental"
+    ]) == 2
+
+
+@pytest.mark.asyncio
+async def test_only_incremental_output_can_complete_without_duplicate_final(tmp_path):
+    store, owner, session, accepted = _running_session(tmp_path)
+    part = tmp_path / "only.txt"
+    part.write_text("complete", encoding="utf-8")
+    registry = _registry(
+        tmp_path, store, owner, session,
+        allowed_tools=["frontend_publish_deliverable"],
+    )
+    result = await registry.execute(
+        "frontend_publish_deliverable",
+        {"publication_id": "only-output", "attachments": [{"path": str(part)}]},
+        tool_call_id="only-call",
+    )
+    assert result.is_error is False, result.output
+    publication = json.loads(result.output)
+    finished = store.finish_request(accepted.request_id, success=True)
+    assert finished["state"] == "completed"
+    assert finished["final_message_id"] is None
+    assert len([
+        row for row in store.messages(session["session_id"], owner_id=owner)
+        if row["role"] == "assistant"
+    ]) == 1
+    assert store.get_message(
+        publication["message_id"], session_id=session["session_id"], owner_id=owner
+    )
+
+
+@pytest.mark.asyncio
+async def test_incremental_telegram_mirror_dispatches_while_workbench_stays_queued(
+    tmp_path, monkeypatch
+):
+    from orchestrator import telegram_delivery_failover
+    from orchestrator.frontend_delivery import freeze_run_delivery_route
+
+    async def not_blocked(*_args, **_kwargs):
+        return False
+
+    monkeypatch.setattr(telegram_delivery_failover, "handle_blocked_send", not_blocked)
+    route = freeze_run_delivery_route(
+        message_source_id="session_api",
+        session_surface="workbench",
+        session_channel_key="default",
+        chat_id=7,
+        telegram_requested=True,
+    )
+    store, owner, session, accepted = _running_session(
+        tmp_path, delivery_route=route
+    )
+    runtime = _ToolRuntime(tmp_path, store)
+    part = tmp_path / "report.txt"
+    part.write_text("incremental report", encoding="utf-8")
+    registry = _registry(
+        tmp_path, store, owner, session, runtime=runtime,
+        allowed_tools=["frontend_publish_deliverable"],
+    )
+    arguments = {
+        "publication_id": "report-1",
+        "attachments": [{"path": str(part)}],
+    }
+    published = await registry.execute(
+        "frontend_publish_deliverable", arguments, tool_call_id="first-call"
+    )
+    assert published.is_error is False, published.output
+    result = json.loads(published.output)
+    by_connector = {item["connector_id"]: item for item in result["deliveries"]}
+    assert by_connector["backend_api"]["state"] == "queued"
+    assert by_connector["telegram"]["state"] == "delivered"
+    assert by_connector["telegram"]["proof"]
+    assert len(runtime.app.bot.media) == 1
+    assert runtime.app.bot.media[0]["payload"] == b"incremental report"
+    assert store.get_run_by_request(accepted.request_id, owner_id=owner)["state"] == "running"
+    replay = await registry.execute(
+        "frontend_publish_deliverable", arguments, tool_call_id="second-call"
+    )
+    assert replay.is_error is False
+    assert json.loads(replay.output)["replayed"] is True
+    assert len(runtime.app.bot.media) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", ["failed", "stopped"])
+async def test_incremental_publication_rejects_stale_executor_and_retains_after_terminal(
+    tmp_path, terminal
+):
+    store, owner, session, accepted = _running_session(tmp_path)
+    part = tmp_path / "evidence.txt"
+    part.write_text("durable evidence", encoding="utf-8")
+    registry = _registry(
+        tmp_path, store, owner, session,
+        allowed_tools=["frontend_publish_deliverable"],
+    )
+    registry.audit_context["hashi_fencing_token"] = 0
+    stale = await registry.execute(
+        "frontend_publish_deliverable",
+        {"publication_id": "evidence", "attachments": [{"path": str(part)}]},
+        tool_call_id="stale-call",
+    )
+    assert stale.is_error is True
+    assert not store.run_output_attachment_content(accepted.request_id)
+    registry.audit_context["hashi_fencing_token"] = 1
+    good = await registry.execute(
+        "frontend_publish_deliverable",
+        {"publication_id": "evidence", "attachments": [{"path": str(part)}]},
+        tool_call_id="good-call",
+    )
+    assert good.is_error is False, good.output
+    result = json.loads(good.output)
+    if terminal == "stopped":
+        store.cancel_run(accepted.run_id, owner_id=owner)
+    else:
+        store.finish_request(
+            accepted.request_id, success=False, error_text="later work failed"
+        )
+    assert store.get_message(
+        result["message_id"], session_id=session["session_id"], owner_id=owner
+    )["content"][0]["attachment_id"] == result["attachments"][0]["attachment_id"]
+    assert store.run_deliverable_publication(
+        request_id=accepted.request_id, session_id=session["session_id"],
+        owner_id=owner, agent_id="agent1", publication_id="evidence",
+    )["event_id"] == result["event_id"]
+
+
+@pytest.mark.asyncio
+async def test_incremental_publish_transaction_rolls_back_and_retry_recovers(
+    tmp_path, monkeypatch
+):
+    store, owner, session, accepted = _running_session(tmp_path)
+    part = tmp_path / "checkpoint.txt"
+    part.write_text("checkpoint", encoding="utf-8")
+    registry = _registry(
+        tmp_path, store, owner, session,
+        allowed_tools=["frontend_publish_deliverable"],
+    )
+    args = {
+        "publication_id": "checkpoint-1",
+        "attachments": [{"path": str(part)}],
+    }
+    append_event = SessionStore._append_event
+
+    def fail_before_commit(self, connection, **kwargs):
+        if kwargs.get("kind") == "assistant.output.available":
+            raise RuntimeError("injected transaction failure")
+        return append_event(self, connection, **kwargs)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(SessionStore, "_append_event", fail_before_commit)
+        failed = await registry.execute(
+            "frontend_publish_deliverable", args, tool_call_id="attempt-1"
+        )
+    assert failed.is_error is True
+    assert store.run_deliverable_publication(
+        request_id=accepted.request_id, session_id=session["session_id"],
+        owner_id=owner, agent_id="agent1", publication_id="checkpoint-1",
+    ) is None
+    assert not store.run_output_attachment_content(accepted.request_id)
+    assert not [
+        row for row in store.messages(session["session_id"], owner_id=owner)
+        if row["role"] == "assistant"
+    ]
+    retried = await registry.execute(
+        "frontend_publish_deliverable", args, tool_call_id="attempt-2"
+    )
+    assert retried.is_error is False, retried.output
+    assert json.loads(retried.output)["replayed"] is False
+
+
+@pytest.mark.asyncio
+async def test_incremental_unknown_telegram_outcome_is_not_blindly_resent(
+    tmp_path, monkeypatch
+):
+    from orchestrator import telegram_delivery_failover
+    from orchestrator.frontend_delivery import freeze_run_delivery_route
+
+    async def not_blocked(*_args, **_kwargs):
+        return False
+
+    monkeypatch.setattr(telegram_delivery_failover, "handle_blocked_send", not_blocked)
+    route = freeze_run_delivery_route(
+        message_source_id="telegram", session_surface="telegram",
+        session_channel_key="7", chat_id=7, telegram_requested=False,
+    )
+    store, owner, session, _accepted = _running_session(
+        tmp_path, delivery_route=route
+    )
+    runtime = _ToolRuntime(tmp_path, store)
+    attempts = []
+
+    async def uncertain_document(**kwargs):
+        attempts.append(kwargs["chat_id"])
+        raise RuntimeError("transport outcome unavailable")
+
+    runtime.app.bot.send_document = uncertain_document
+    part = tmp_path / "uncertain.txt"
+    part.write_text("one logical result", encoding="utf-8")
+    registry = _registry(
+        tmp_path, store, owner, session, runtime=runtime,
+        allowed_tools=["frontend_publish_deliverable"],
+    )
+    args = {
+        "publication_id": "uncertain-1",
+        "attachments": [{"path": str(part)}],
+    }
+    first = await registry.execute(
+        "frontend_publish_deliverable", args, tool_call_id="first-attempt"
+    )
+    assert first.is_error is False, first.output
+    first_result = json.loads(first.output)
+    assert first_result["persisted"] is True
+    assert first_result["deliveries"][0]["state"] == "unknown"
+    replay = await registry.execute(
+        "frontend_publish_deliverable", args, tool_call_id="replay-attempt"
+    )
+    assert replay.is_error is False
+    assert json.loads(replay.output)["deliveries"][0]["state"] == "unknown"
+    assert attempts == [7]
+
+
+@pytest.mark.asyncio
+async def test_incremental_and_final_bindings_share_run_attachment_cap(
+    tmp_path, monkeypatch
+):
+    from orchestrator import session_store as session_store_module
+
+    store, owner, session, _accepted = _running_session(tmp_path)
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+    first.write_text("first", encoding="utf-8")
+    second.write_text("second", encoding="utf-8")
+    monkeypatch.setattr(session_store_module, "MAX_SESSION_ATTACHMENTS_PER_MESSAGE", 1)
+    registry = _registry(
+        tmp_path, store, owner, session,
+        allowed_tools=["frontend_publish_deliverable", "frontend_send_attachments"],
+    )
+    early = await registry.execute(
+        "frontend_publish_deliverable",
+        {"publication_id": "first", "attachments": [{"path": str(first)}]},
+        tool_call_id="early",
+    )
+    assert early.is_error is False, early.output
+    late = await registry.execute(
+        "frontend_send_attachments",
+        {"attachments": [{"path": str(second)}]},
+        tool_call_id="late",
+    )
+    assert late.is_error is True
+    assert len(store.run_output_attachment_content("request-frontend-output")) == 1
+
+
+@pytest.mark.asyncio
+async def test_incremental_media_marks_unsupported_mirror_failed_without_hiding_primary(
+    tmp_path
+):
+    from orchestrator.frontend_delivery import freeze_run_delivery_route
+
+    route = freeze_run_delivery_route(
+        message_source_id="session_api", session_surface="workbench",
+        session_channel_key="default", chat_id=7,
+        telegram_requested=False, whatsapp_requested=True,
+        whatsapp_channel_key="user@whatsapp",
+    )
+    store, owner, session, _accepted = _running_session(
+        tmp_path, delivery_route=route
+    )
+    part = tmp_path / "report.txt"
+    part.write_text("result", encoding="utf-8")
+    registry = _registry(
+        tmp_path, store, owner, session,
+        allowed_tools=["frontend_publish_deliverable"],
+    )
+    published = await registry.execute(
+        "frontend_publish_deliverable",
+        {"publication_id": "report", "attachments": [{"path": str(part)}]},
+        tool_call_id="report-call",
+    )
+    assert published.is_error is False, published.output
+    by_connector = {
+        row["connector_id"]: row
+        for row in json.loads(published.output)["deliveries"]
+    }
+    assert by_connector["backend_api"]["state"] == "queued"
+    assert by_connector["whatsapp"]["state"] == "failed"
+    assert by_connector["whatsapp"]["last_error_code"] == "incremental_media_unsupported"
 
 
 @pytest.mark.asyncio

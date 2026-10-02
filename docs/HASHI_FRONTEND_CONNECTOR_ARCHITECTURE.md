@@ -349,10 +349,11 @@ a Run and may be cleaned up later by retention policy.
 
 ### 6.3 Standard assistant attachment output
 
-An Agent responding to a conforming external frontend publishes generated or
+An Agent responding to a conforming external frontend binds generated or
 selected files through the frontend-neutral `frontend_send_attachments` tool.
 One call contains an ordered `attachments` array and binds every item to the
-current running Session Run. The terminal assistant Message then contains the
+current running Session Run. This call does not send the files while the Run is
+active. The terminal assistant Message then contains the
 normal text plus those canonical attachment references, so all compatible
 frontends consume the same projection instead of a product-specific callback.
 
@@ -371,6 +372,40 @@ against authorized access roots. Media groups retain declared order, content
 digests and Session retention policy. Explicit `telegram_send_file` remains a
 Telegram-targeted compatibility action; it is not the generic multi-connector
 attachment contract.
+
+### 6.4 Incremental assistant deliverables
+
+`frontend_publish_deliverable` publishes one complete, ordered file group as a
+separate canonical assistant Message while its Run remains running. Its required
+`publication_id` identifies the logical result independently of the tool call;
+repeating the same ID and content returns the same Message, Event and group,
+whereas changing either the files or accompanying text under that ID conflicts.
+The tool checks the current Run ID and executor fencing token before accepting
+a new publication. The original final-binding tool retains its previous
+behavior and shares the Run-wide count and byte limits.
+
+After managed bytes are committed, PAO atomically binds the group, creates the
+Run-bound Message and `assistant.output.available` Event, and enqueues one FC
+task per endpoint from the Run's frozen route. The publication does not settle
+the Run. The Backend API feed can accept the event while the Run is active;
+the transcript exposes the new Message under its own stable `message_ref` so
+multiple deliverables do not collapse into one answer. Telegram can claim and
+send its endpoint task immediately through the existing FC media renderer.
+Other media-capable endpoints remain queued until their existing connector
+consumes them. An endpoint that does not advertise media egress is marked
+failed for this publication without hiding the states of other endpoints.
+
+The tool reports persistence separately from each endpoint's queued,
+accepted, delivered, failed or unknown state. An accepted receipt is not
+proof that the user saw the file; delivered requires the connector's transport
+proof. Unknown outcomes use the existing evidence-based recovery path and are
+not blindly resent. The terminal Message includes only attachments still
+bound for final delivery. If prior deliverables are the only visible output,
+the Run may complete successfully without a duplicate final Message. A later
+failure or cancellation does not remove earlier committed deliverables.
+
+The HASHI3 implementation decision and validation scope are recorded in
+[Incremental deliverables, 2026-10-02](HASHI_INCREMENTAL_DELIVERABLES_2026-10-02.md).
 
 ## 7. Retired Workbench boundary
 

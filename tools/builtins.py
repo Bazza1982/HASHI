@@ -1999,8 +1999,9 @@ async def execute_frontend_send_attachments(
     workspace_dir: Path,
     audit_context: dict | None,
     tool_call_id: str = "",
+    publish_incremental: bool = False,
 ) -> str:
-    """Bind authorized, ordered local files to the current assistant Message.
+    """Bind authorized files to final output or publish one Run result now.
 
     Every source path is resolved against the invocation's authorized roots
     before it is read; connector display identity never widens that authority.
@@ -2050,8 +2051,19 @@ async def execute_frontend_send_attachments(
     session_id = str(context.get("hashi_session_id") or "").strip()
     owner_id = str(context.get("owner_id") or "").strip()
     agent_id = str(context.get("agent_name") or "").strip().casefold()
+    publication_id = str(args.get("publication_id") or "").strip() if publish_incremental else ""
+    publication_text = str(args.get("text") or "").strip() if publish_incremental else ""
+    if publish_incremental and (
+        not 1 <= len(publication_id) <= 128
+        or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:-"
+               for c in publication_id)
+        or len(publication_text) > 4096
+    ):
+        return "Error: deliverable publication ID or text is invalid"
     if not all((session_id, owner_id, agent_id, surface)):
         return "Error: frontend attachments require an active HASHI Session context"
+    if publish_incremental and not request_id:
+        return "Error: incremental deliverables require a current frontend Run"
     bind_only = False
 
     runtime = context.get("_runtime")
@@ -2186,9 +2198,58 @@ async def execute_frontend_send_attachments(
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest()
-        idempotency_key = "frontend-attachments:" + str(
-            tool_call_id or request_digest
-        ).strip()
+        publication_digest = (
+            hashlib.sha256(
+                json.dumps(
+                    {"attachments": request_digest, "text": publication_text},
+                    ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            if publish_incremental else None
+        )
+        idempotency_key = (
+            "frontend-deliverable:" + publication_id
+            if publish_incremental else
+            "frontend-attachments:" + str(tool_call_id or request_digest).strip()
+        )
+        if publish_incremental:
+            existing_publication = store.run_deliverable_publication(
+                request_id=request_id,
+                session_id=session_id,
+                owner_id=owner_id,
+                agent_id=agent_id,
+                publication_id=publication_id,
+                publication_digest=publication_digest,
+            )
+            if existing_publication is not None:
+                await _dispatch_incremental_deliverable_telegram(
+                    store, runtime, context, existing_publication
+                )
+                refreshed = store.run_deliverable_publication(
+                    request_id=request_id, session_id=session_id,
+                    owner_id=owner_id, agent_id=agent_id,
+                    publication_id=publication_id,
+                    publication_digest=publication_digest,
+                )
+                return json.dumps(
+                    {"ok": True, **refreshed, "replayed": True},
+                    ensure_ascii=False, sort_keys=True,
+                )
+            expected_run_id = str(context.get("hashi_run_id") or "").strip()
+            fencing_token = context.get("hashi_fencing_token")
+            if not expected_run_id or type(fencing_token) is not int:
+                raise SessionConflict(
+                    "incremental deliverable requires current Run execution identity"
+                )
+            current_run = store.get_run_by_request(request_id, owner_id=owner_id)
+            if (
+                str(current_run["run_id"]) != expected_run_id
+                or str(current_run["session_id"]) != session_id
+                or str(current_run["agent_id"]) != agent_id
+                or current_run["state"] != "running"
+                or int(current_run["fencing_token"]) != fencing_token
+            ):
+                raise SessionConflict("incremental deliverable Run executor is stale")
         existing = store.run_output_attachment_group(
             request_id=request_id,
             session_id=session_id,
@@ -2196,7 +2257,7 @@ async def execute_frontend_send_attachments(
             agent_id=agent_id,
             idempotency_key=idempotency_key,
         )
-        if existing is not None:
+        if existing is not None and not publish_incremental:
             if str(existing["request_digest"]) != request_digest:
                 raise IdempotencyConflict(
                     "frontend attachment idempotency key is bound to different files"
@@ -2271,7 +2332,34 @@ async def execute_frontend_send_attachments(
             request_digest=request_digest,
             attachments=bindings,
             attachment_policy=attachment_policy,
+            publication_id=publication_id if publish_incremental else None,
+            publication_digest=publication_digest,
+            publication_text=publication_text,
+            expected_run_id=(expected_run_id if publish_incremental else None),
+            fencing_token=(fencing_token if publish_incremental else None),
         )
+        if publish_incremental:
+            publication = store.run_deliverable_publication(
+                request_id=request_id, session_id=session_id,
+                owner_id=owner_id, agent_id=agent_id,
+                publication_id=publication_id,
+                publication_digest=publication_digest,
+            )
+            if publication is None:
+                raise SessionConflict("incremental deliverable publication was not persisted")
+            await _dispatch_incremental_deliverable_telegram(
+                store, runtime, context, publication
+            )
+            refreshed = store.run_deliverable_publication(
+                request_id=request_id, session_id=session_id,
+                owner_id=owner_id, agent_id=agent_id,
+                publication_id=publication_id,
+                publication_digest=publication_digest,
+            )
+            return json.dumps(
+                {"ok": True, **refreshed, "replayed": bool(bound["replayed"])},
+                ensure_ascii=False, sort_keys=True,
+            )
         return json.dumps(
             {
                 "ok": True,
@@ -2288,6 +2376,72 @@ async def execute_frontend_send_attachments(
         )
     except (IdempotencyConflict, OSError, SessionConflict, SessionNotFound, ValueError) as exc:
         return f"Error: {exc}"
+
+
+async def _dispatch_incremental_deliverable_telegram(
+    store, runtime, context: Mapping[str, Any], publication: Mapping[str, Any]
+) -> None:
+    """Wake the existing FC Telegram sender for this one committed Event."""
+    if runtime is None or getattr(getattr(runtime, "app", None), "bot", None) is None:
+        return
+    from orchestrator.frontend_connector_registry import endpoint_id_for
+    from orchestrator.frontend_delivery import route_destination
+    from orchestrator.runtime_delivery import dispatch_claimed_telegram_event
+
+    run = store.get_run_by_request(
+        str(publication["request_id"]), owner_id=str(context["owner_id"])
+    )
+    destination = route_destination(run.get("delivery_route"), "telegram")
+    if destination is None:
+        return
+    channel_key = str(destination["channel_key"])
+    endpoint_id = endpoint_id_for(
+        "telegram", ingress_transport="telegram", channel_key=channel_key
+    )
+    claims = store.claim_delivery_outbox(
+        session_id=str(publication["session_id"]),
+        owner_id=str(context["owner_id"]),
+        worker_id=f"fc-telegram-deliverable-{str(publication['event_id'])[:48]}",
+        event_id=str(publication["event_id"]),
+        connector_id="telegram",
+        endpoint_id=endpoint_id,
+        limit=1,
+        lease_seconds=3600,
+    )
+    if not claims:
+        return
+    try:
+        await dispatch_claimed_telegram_event(
+            runtime,
+            chat_id=int(channel_key),
+            store=store,
+            claim=claims[0],
+            frontend_owner_id=str(context["owner_id"]),
+            request_id=str(publication["request_id"]),
+            purpose="incremental-deliverable",
+        )
+    except Exception:
+        # The FC claim records unknown/failed evidence; never issue a second
+        # transport send from this tool after an uncertain outcome.
+        return
+
+
+async def execute_frontend_publish_deliverable(
+    args: dict,
+    *,
+    access_root: Path | Sequence[Path],
+    workspace_dir: Path,
+    audit_context: dict | None,
+    tool_call_id: str = "",
+) -> str:
+    return await execute_frontend_send_attachments(
+        args,
+        access_root=access_root,
+        workspace_dir=workspace_dir,
+        audit_context=audit_context,
+        tool_call_id=tool_call_id,
+        publish_incremental=True,
+    )
 
 
 async def execute_http_request(args: dict) -> str:

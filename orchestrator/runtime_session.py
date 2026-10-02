@@ -1193,7 +1193,7 @@ def mark_running(runtime: Any, item: Any) -> None:
             metadata[MESSAGE_CONTEXT_METADATA_KEY] = message_context
         metadata.pop(PRIVATE_AUTHORIZATION_RESULTS_METADATA_KEY, None)
         item.request_metadata = metadata
-        ensure_store(runtime).mark_request_running(
+        item.fencing_token = ensure_store(runtime).mark_request_running(
             item.request_id,
             worker_id=f"{getattr(runtime.global_config, 'instance_id', 'HASHI')}:{runtime.name}",
             message_context=(

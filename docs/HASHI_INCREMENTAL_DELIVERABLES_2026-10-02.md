@@ -1,0 +1,83 @@
+# HASHI3 incremental deliverables — decision and implementation record
+
+Date: 2026-10-02. Scope: HASHI3 branch
+`feat/frontend-incremental-deliverables-hashi3-20261002`.
+
+## Approval and owner
+
+Barry authorized an isolated branch/worktree from HASHI3, development, and a
+merge back into HASHI3 for testing. This is not Core migration or permission
+to reboot any instance. PAO owns the Run, Message, attachment binding and
+publication transaction. Frontend Connector owns endpoint dispatch, receipts
+and transcript projection. These changes are in replaceable Functions.
+
+## Annotation of the initial diagnosis
+
+The confirmed first break is the ordinary `frontend_send_attachments` path:
+it commits and binds managed files, but creates no visible assistant Message
+or endpoint delivery task until `finish_request`. Its former “Publish” wording
+described the eventual final reply, not delivery during the active Run. The
+HASHI3 source has the same behavior as the fixed version cited in the initial
+diagnosis. Native audio's first-ready path remains a separate exception.
+
+The minimal design is a separate `frontend_publish_deliverable` tool. The
+existing final-binding tool keeps its behavior and now says so in its schema.
+One publication groups complete files, optionally adds short text, and has a
+caller-supplied stable `publication_id`. Tool-call identity is deliberately not
+the publication identity. The digest covers ordered file metadata and text;
+same ID with changed content conflicts. The Run-wide attachment count and
+byte limits remain shared with final-bound files.
+
+Managed file stage/upload/commit precedes a single PAO transaction that
+validates owner, instance, Agent, Session, current Run ID, running state and
+executor fence; binds the ordered group; inserts a distinct assistant Message;
+adds an `assistant.output.available` Event; associates Message and Event; and
+creates endpoint tasks from the Run's frozen route. The Run stays running.
+The transaction decides the race with finish/cancel: a publication committed
+first survives; a later new publication is rejected. Staged bytes that never
+reach this transaction do not become visible output.
+
+For frontend consumption, an incremental Message gets its own stable
+`message_ref`. The terminal assistant Message retains the existing Run-based
+reference, so previous draft/final replacement behavior is preserved. The
+Backend API feed and transcript expose the nonterminal output. The existing
+Telegram FC media sender is awakened for its task during the tool call when
+the live runtime is available; another media-capable connector without a live
+sender leaves its task queued for its normal consumer. A connector that does
+not advertise media egress gets a failed endpoint task. The tool reports persistence and each
+endpoint's current state separately. A delivered state requires its connector
+proof, and unknown is not resent without the established evidence check.
+
+At finish, only unpublished Run attachments are included in the terminal
+Message. A Run with only previously published deliverables may finish
+successfully without a duplicate final Message. Failure or cancellation keeps
+the committed Message and managed files. This implementation does not alter
+the separate external Workbench repository; its live rendering still needs
+acceptance testing against the adopted HASHI3 Function generation.
+
+## Validation and adoption boundary
+
+Focused red evidence: before implementation, the new tool was absent from the
+registry and both incremental tests failed. Focused green tests cover two
+distinct publications during one running Run, stable replay and changed-content
+conflict, final exclusion, a deliverable-only successful finish, Telegram
+mirror proof with the Backend API endpoint still queued, stale executor
+rejection, failure retention, transaction rollback/retry, and an unknown
+Telegram outcome without blind resend. Legacy final-binding tests remain in
+the same suite. A media-incapable WhatsApp mirror fails independently while
+the Backend API task remains queued. Windows cannot execute the WSL-only drive-path assertion as a
+meaningful local acceptance test; that assertion is excluded from Windows
+verification and its original implementation was not changed.
+
+The final Windows source gate ran the focused attachment, Session, FC,
+transcript, native-audio and HChat suites: **265 passed, 1 skipped, 3
+deselected**. Two deselected audio-routing assertions also fail unchanged on
+the HASHI3 base commit; the third is the WSL-only drive-path assertion. The
+protected-Core check, Python compilation and whitespace check passed.
+
+This record is source validation only until the changed Functions are adopted
+on HASHI3 and the versioned live acceptance checks establish A-before-B
+visibility, downloadability, continued generating state, reconnect behavior,
+and per-endpoint receipts in the actual frontend. A source merge alone is not
+live adoption. No live reboot or external Workbench deployment is authorized
+by this decision.
