@@ -42,9 +42,11 @@ For frontend consumption, an incremental Message gets its own stable
 reference, so previous draft/final replacement behavior is preserved. The
 Backend API feed and transcript expose the nonterminal output. The existing
 Telegram FC media sender is awakened for its task during the tool call when
-the live runtime is available; another media-capable connector without a live
-sender leaves its task queued for its normal consumer. A connector that does
-not advertise media egress gets a failed endpoint task. The tool reports persistence and each
+the live runtime is available. Backend API, Session API, TUI and external
+pull endpoints stay queued until their feed consumer accepts the Event.
+HChat, Remote and Exchange currently claim only terminal events, so their
+incremental media tasks fail explicitly; WhatsApp has no media egress and
+also fails explicitly. The tool reports persistence and each
 endpoint's current state separately. A delivered state requires its connector
 proof, and unknown is not resent without the established evidence check.
 
@@ -65,12 +67,13 @@ mirror proof with the Backend API endpoint still queued, stale executor
 rejection, failure retention, transaction rollback/retry, and an unknown
 Telegram outcome without blind resend. Legacy final-binding tests remain in
 the same suite. A media-incapable WhatsApp mirror fails independently while
-the Backend API task remains queued. Windows cannot execute the WSL-only drive-path assertion as a
+the Backend API task remains queued. Terminal-only HChat, Remote and Exchange
+routes likewise fail explicitly. Windows cannot execute the WSL-only drive-path assertion as a
 meaningful local acceptance test; that assertion is excluded from Windows
 verification and its original implementation was not changed.
 
 The final Windows source gate ran the focused attachment, Session, FC,
-transcript, native-audio and HChat suites: **265 passed, 1 skipped, 3
+transcript, native-audio and HChat suites: **268 passed, 1 skipped, 3
 deselected**. Two deselected audio-routing assertions also fail unchanged on
 the HASHI3 base commit; the third is the WSL-only drive-path assertion. The
 protected-Core check, Python compilation and whitespace check passed.

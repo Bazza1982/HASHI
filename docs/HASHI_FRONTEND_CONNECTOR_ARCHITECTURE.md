@@ -391,9 +391,11 @@ the Run. The Backend API feed can accept the event while the Run is active;
 the transcript exposes the new Message under its own stable `message_ref` so
 multiple deliverables do not collapse into one answer. Telegram can claim and
 send its endpoint task immediately through the existing FC media renderer.
-Other media-capable endpoints remain queued until their existing connector
-consumes them. An endpoint that does not advertise media egress is marked
-failed for this publication without hiding the states of other endpoints.
+Backend API, Session API, TUI and external pull endpoints remain queued until
+their feed consumer accepts the Event. A destination without an active-Run
+media consumer is marked failed for this publication without hiding the
+states of other endpoints: current HChat, Remote and Exchange senders claim
+terminal events only, and WhatsApp does not advertise media egress.
 
 The tool reports persistence separately from each endpoint's queued,
 accepted, delivered, failed or unknown state. An accepted receipt is not

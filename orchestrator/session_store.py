@@ -5589,6 +5589,7 @@ class SessionStore:
                     )
                     from orchestrator.frontend_connector_registry import (
                         get_connector_capabilities,
+                        supports_running_media_delivery,
                     )
 
                     endpoint_tasks = connection.execute(
@@ -5601,13 +5602,21 @@ class SessionStore:
                             str(task["connector_id"]),
                             endpoint_id=str(task["endpoint_id"]),
                         )
-                        if "media" not in capabilities["egress"]:
+                        media_egress = "media" in capabilities["egress"]
+                        if not media_egress or not supports_running_media_delivery(
+                            str(task["connector_id"])
+                        ):
+                            error_code = (
+                                "incremental_media_unsupported"
+                                if not media_egress
+                                else "incremental_media_consumer_unavailable"
+                            )
                             connection.execute(
                                 """UPDATE connector_delivery_tasks
                                    SET state='failed',
-                                       last_error_code='incremental_media_unsupported',
+                                       last_error_code=?,
                                        completed_at=? WHERE task_id=?""",
-                                (now, str(task["task_id"])),
+                                (error_code, now, str(task["task_id"])),
                             )
                     self._refresh_delivery_outbox_aggregate(
                         connection, event_id=str(event["event_id"])

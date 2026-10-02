@@ -808,6 +808,38 @@ async def test_incremental_media_marks_unsupported_mirror_failed_without_hiding_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("surface", ["hchat", "remote", "exchange"])
+async def test_incremental_media_reports_terminal_only_route_as_unsupported(
+    tmp_path, surface
+):
+    from orchestrator.frontend_delivery import freeze_run_delivery_route
+
+    route = freeze_run_delivery_route(
+        message_source_id="hchat", session_surface=surface,
+        session_channel_key="peer", chat_id=7, telegram_requested=False,
+    )
+    store, owner, session, _accepted = _running_session(
+        tmp_path, delivery_route=route
+    )
+    part = tmp_path / "report.txt"
+    part.write_text("result", encoding="utf-8")
+    registry = _registry(
+        tmp_path, store, owner, session,
+        allowed_tools=["frontend_publish_deliverable"],
+    )
+    published = await registry.execute(
+        "frontend_publish_deliverable",
+        {"publication_id": "report", "attachments": [{"path": str(part)}]},
+        tool_call_id="report-call",
+    )
+    assert published.is_error is False, published.output
+    [destination] = json.loads(published.output)["deliveries"]
+    assert destination["connector_id"] == surface
+    assert destination["state"] == "failed"
+    assert destination["last_error_code"] == "incremental_media_consumer_unavailable"
+
+
+@pytest.mark.asyncio
 async def test_bound_output_audio_is_promoted_to_durable_message_retention(tmp_path):
     store, owner, session, _accepted = _running_session(tmp_path)
     audio = tmp_path / "briefing.ogg"
