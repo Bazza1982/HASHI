@@ -20,6 +20,7 @@ from uuid import uuid4
 import httpx
 
 from adapters.base import BaseBackend, BackendCapabilities, BackendResponse
+from orchestrator.her_v2.privacy_gate import OutboundPrivacyGate, PrivacyGateError
 from adapters.stream_events import (
     DELIVERY_USER_COMMENTARY,
     KIND_COMMENTARY,
@@ -1583,6 +1584,24 @@ class OpenRouterAdapter(BaseBackend):
         self._provider_invocation_context: dict[str, Any] = {}
         self._active_provider_wire_context: dict[str, Any] = {}
         self._her_v2_stream_inactivity_timeout_s: float | None = None
+        self._privacy_gate: OutboundPrivacyGate | None = None
+        self._herv3_privacy_scope = False
+
+    async def _protect_outbound_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        request_id: str,
+        gate: OutboundPrivacyGate,
+    ) -> dict[str, Any]:
+        """Inspect the complete model payload before audit or HTTP transport."""
+
+        level = int(getattr(self, "privacy_level", 1))
+        if level != 2:
+            return payload
+        if not self._herv3_privacy_scope:
+            raise PrivacyGateError("privacy level 2 requires HERV3")
+        return await gate.sanitize(payload, request_id=request_id)
 
     def set_her_v2_stream_inactivity_timeout(
         self, timeout_s: float | None
@@ -3267,6 +3286,9 @@ class OpenRouterAdapter(BaseBackend):
     ) -> BackendResponse:
         started = time.perf_counter()
         self._ensure_client()
+        # Keep placeholder identities scoped to this invocation, including
+        # retries and tool loops, even when the adapter handles other requests.
+        privacy_gate = getattr(self, "_privacy_gate", None) or OutboundPrivacyGate()
 
         audio_output = None
         use_streaming = on_stream_event is not None
@@ -3352,6 +3374,9 @@ class OpenRouterAdapter(BaseBackend):
                         ),
                     )
                     self._preflight_payload_capacity(payload)
+                    payload = await self._protect_outbound_payload(
+                        payload, request_id=str(request_id or ""), gate=privacy_gate
+                    )
                     provider_call_emitted_text = False
                     effective_parameters = _effective_protocol_parameters(payload)
 

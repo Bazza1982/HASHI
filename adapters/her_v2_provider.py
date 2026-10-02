@@ -3470,6 +3470,8 @@ class HashiStageProvider(StageProvider):
             backend.tool_registry = selected_registry
         fallback_registry = selected_registry
         backend.privacy_level = self.backend_manager.privacy_level
+        if hasattr(backend, "_herv3_privacy_scope"):
+            backend._herv3_privacy_scope = True
         media_routing: tuple[dict[str, Any], ...] = ()
         provider_request_content = request.request_content
         media_preflight_error: StageInvocationError | None = None
@@ -4489,6 +4491,8 @@ class HashiStageProvider(StageProvider):
                         fallback_backend.privacy_level = (
                             self.backend_manager.privacy_level
                         )
+                        if hasattr(fallback_backend, "_herv3_privacy_scope"):
+                            fallback_backend._herv3_privacy_scope = True
                         if hasattr(fallback_backend, "tool_registry"):
                             fallback_backend.tool_registry = None
                         if profile.reasoning is not None and hasattr(
@@ -5173,6 +5177,8 @@ class HashiStageProvider(StageProvider):
             if controls_tools:
                 backend.tool_registry = None
             backend.privacy_level = self.backend_manager.privacy_level
+            if hasattr(backend, "_herv3_privacy_scope"):
+                backend._herv3_privacy_scope = True
 
             async def _discard_stream(event: StreamEvent) -> None:
                 activity.record(
