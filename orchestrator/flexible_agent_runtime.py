@@ -7654,6 +7654,7 @@ class FlexibleAgentRuntime:
                     item.request_id,
                     owner_id=getattr(item, "owner_id", None),
                     agent_id=self.name,
+                    unpublished_only=True,
                 )
                 for attachment in output_attachments:
                     local_ref = str((attachment or {}).get("local_ref") or "").strip()

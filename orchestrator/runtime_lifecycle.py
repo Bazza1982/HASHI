@@ -5,6 +5,7 @@ import time
 from typing import Any
 
 from orchestrator import (
+    frontend_incremental_delivery,
     runtime_background_status,
     runtime_delivery_order,
     runtime_pipeline,
@@ -153,6 +154,7 @@ async def initialize(runtime: Any) -> bool:
                 f"fixed mode active — session persistence enabled on {runtime.config.active_backend}"
             )
         runtime_session.start_automatic_promotion(runtime)
+        frontend_incremental_delivery.start_incremental_telegram_delivery(runtime)
     return result
 
 
@@ -171,6 +173,18 @@ async def shutdown(runtime: Any) -> None:
         runtime._session_promotion_task = None
     else:
         clean_promotion = True
+    incremental_task = getattr(runtime, "_incremental_telegram_delivery_task", None)
+    if isinstance(incremental_task, asyncio.Task):
+        clean_incremental = await _settle_shutdown_task(
+            runtime,
+            incremental_task,
+            label="incremental-telegram-delivery",
+            timeout_s=RUNTIME_TASK_SHUTDOWN_TIMEOUT_SECONDS,
+            cancel_first=True,
+        )
+        runtime._incremental_telegram_delivery_task = None
+    else:
+        clean_incremental = True
     try:
         from orchestrator.context_compaction import cancel_runtime_compaction
 
@@ -181,11 +195,12 @@ async def shutdown(runtime: Any) -> None:
             type(exc).__name__,
             exc,
         )
-    clean = clean_promotion and await _cancel_tasks(
+    clean_retry = await _cancel_tasks(
         runtime,
         runtime._scheduled_retry_tasks,
         label="retry-tasks",
     )
+    clean = clean_promotion and clean_incremental and clean_retry
     clean = (
         await _cancel_tasks(
             runtime,

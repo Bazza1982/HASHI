@@ -566,10 +566,11 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "frontend_send_attachments",
             "description": (
-                "Publish one or more ordered local files on the current frontend Session reply. "
+                "Bind one or more ordered local files to the current Session's final assistant reply. "
                 "This is the standard frontend-neutral attachment output contract for images, "
                 "audio, video, and documents. Use one call for all files that belong to one "
-                "reply; the current Session and frozen delivery route determine where it appears."
+                "final reply; this call does not send files while the Run is still active. "
+                "Use frontend_publish_deliverable for a complete result that should arrive now."
             ),
             "parameters": {
                 "type": "object",
@@ -605,6 +606,65 @@ TOOL_SCHEMAS = [
                     },
                 },
                 "required": ["attachments"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "frontend_publish_deliverable",
+            "description": (
+                "Persist one complete set of ordered files now as a separate durable "
+                "assistant result while the current Run continues. Use a stable publication_id "
+                "for retries of the same result; a different result needs a different ID. "
+                "The frozen Session route determines destinations. FC delivery begins where "
+                "a consumer is available; the result reports persistence and each destination's "
+                "current state, which may still be queued."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "publication_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128,
+                        "description": "Stable logical result ID, reused unchanged on retry.",
+                    },
+                    "text": {
+                        "type": "string",
+                        "maxLength": 4096,
+                        "description": "Optional short text to accompany this result.",
+                    },
+                    "attachments": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 16,
+                        "description": "Ordered, completed local files in this result.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": {
+                                    "type": "string",
+                                    "description": "Absolute or workspace-relative local file path.",
+                                },
+                                "caption": {
+                                    "type": "string",
+                                    "maxLength": 4096,
+                                    "description": "Optional user-visible caption.",
+                                },
+                                "media_type": {
+                                    "type": "string",
+                                    "maxLength": 255,
+                                    "description": "Optional MIME type override.",
+                                },
+                            },
+                            "required": ["path"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["publication_id", "attachments"],
                 "additionalProperties": False,
             },
         },

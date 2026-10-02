@@ -1062,6 +1062,7 @@ def begin_queue_item(runtime, item) -> QueueItemStart:
         "deliver_to_telegram": bool(item.deliver_to_telegram),
         "hashi_session_id": getattr(item, "session_id", None),
         "hashi_run_id": getattr(item, "run_id", None),
+        "hashi_fencing_token": getattr(item, "fencing_token", None),
         "hashi_message_id": getattr(item, "message_id", None),
         "context_generation": int(getattr(item, "context_generation", 1) or 1),
         "owner_id": getattr(item, "owner_id", None),
