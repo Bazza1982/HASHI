@@ -56,6 +56,15 @@ the token requirement described in the historical Gate 1 checkpoint. The
 running HASHI1 Function and Worker must adopt the source together before live
 calls can use it; source tests alone do not prove that adoption.
 
+HASHI1's Function generation had adopted the change by 05:04 on 2026-10-03,
+but the older Worker still rejected session creation with HTTP 401. Restarting
+only the local Worker at 05:08 removed that mismatch. A synthetic two-turn call
+through HASHI1's real Phone API and WebRTC transport then passed with Sunny:
+both generated utterances were transcribed, both Agent replies were persisted,
+and both produced returned audio frames. The call ended cleanly, with no Worker
+session left active. Real Workbench microphone and speaker acceptance remains
+for the user to perform.
+
 ## Verification and remaining qualification
 
 The focused tests cover real Piper audio, recognition of those spoken words,
