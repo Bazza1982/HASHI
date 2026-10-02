@@ -58,6 +58,28 @@ and user environment as HASHI. For API providers, check the configured
 endpoint, credential reference, and model permission. Credentials entered
 into ordinary chat do not configure a connection.
 
+## Privacy Level 2 cannot activate or blocks a request
+
+Open `/privacy` to check the effective level. Level 2 requires HERV3 with its
+qualified official DeepSeek Model Provider, an available local detector, and
+explicit acceptance of the displayed risk. Other Engines and Model Providers
+are unavailable at this level; an incompatible selection is refused.
+
+For a source installation, run
+`python scripts/provision_privacy_runtime.py --check` from the source root
+using its approved Python. If it fails, follow
+the [installation steps](INSTALL.md) to prepare the separate detector. For npm,
+check the post-install result; for Portable Windows, run its on-target Level 2
+installer after copying HASHI to the local PC. Installation does not turn
+Level 2 on automatically. A new source version does not prove a running Agent
+has adopted it.
+
+A detector failure, unsupported media, or uninspectable input blocks outbound
+transport rather than sending it unfiltered. If an example slips through the
+detector, that is a known limitation of Level 2, especially for non-English
+text. Use fabricated examples when reporting misses. If that residual risk is
+unacceptable, do not process sensitive content with an online model.
+
 ## Telegram does not respond
 
 Check the configured agent's telegram_token_key and corresponding private

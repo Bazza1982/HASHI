@@ -73,6 +73,33 @@ does not maintain a second model/effort catalogue.
 See [working modes](https://github.com/Bazza1982/HASHI/blob/main/docs/FIXED_FLEX_WORKING_MODES.md)
 and the [HERV3 upgrade](https://github.com/Bazza1982/HASHI/blob/main/docs/HERV3_UPGRADE.md).
 
+## Privacy levels and Level 2 trial
+
+`/privacy` shows the current level. Level 0 turns the privacy filter off;
+Level 1 is the default and trusts the selected provider without a local PII
+filter. Level 2 runs a replaceable local PII detector before a qualified
+online-model request. Levels 3–5 are planned and cannot be selected yet.
+
+This Level 2 trial works only with HERV3 and its qualified official DeepSeek
+Model Provider. Other Engines and Model Providers, Agent Companion, and
+unsupported media are unavailable while Level 2 is active. Select HERV3 and
+DeepSeek first, then open `/privacy 2` and accept the displayed residual risk.
+Activation checks that the local detector is ready and saves the setting for
+the Agent. Lowering the level requires separate confirmation.
+
+The detector masks PII it finds in text sent to DeepSeek, including text from
+tools, with typed placeholders. Masking is neither encryption nor a guarantee
+of anonymity. The current Presidio/spaCy detector uses an English model; it
+can miss sensitive values, especially in non-English text. Future local
+detectors can replace it, but this level cannot promise 100% detection. Choose
+Level 2 only if you accept that risk. For stronger protection, wait for a
+future level or avoid processing sensitive information with online AI.
+Detector failure and unsupported input block the request rather than sending
+it without filtering.
+
+See [Level 2 setup](INSTALL.md), [configuration](CONFIGURATION.md#privacy-configuration),
+and the [trial decision](HASHI_HERV3_PRIVACY_PILOT_2026-10-02.md).
+
 ## Memory and instructions
 
 /memory controls memory injection. Memory+ is an independent optional

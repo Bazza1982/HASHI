@@ -137,6 +137,12 @@ Credentials and authoritative HASHI state are stored locally by default.
 That does not make remote inference or messaging offline: review each
 provider's data handling and your agent's tool permissions.
 
+The opt-in [Level 2 privacy trial](docs/USER_GUIDE.md#privacy-levels-and-level-2-trial)
+uses a replaceable local detector to mask PII it finds before qualified HERV3
+DeepSeek requests. It cannot detect every sensitive value, especially in
+non-English text. Level 2 is limited to that Engine and Model Provider and
+requires explicit risk acceptance; installing the detector does not enable it.
+
 The authenticated Backend API and the optional OpenAI-compatible API Gateway
 are different services. The Gateway does **not** enforce caller authentication;
 keep it private. Its model/tool compatibility is described in the

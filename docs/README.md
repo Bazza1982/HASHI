@@ -101,7 +101,8 @@ line.
 - [STEER_COMMAND.md](STEER_COMMAND.md) — Telegram `/steer` mid-task course correction (busy wrapper vs idle plain text, error suppression)
 - [FOCUS_RECALL_COMMANDS.md](FOCUS_RECALL_COMMANDS.md) — Telegram `/focus` scope correction and `/recall [count]` queued-request withdrawal
 - [DELAY_COMMAND.md](DELAY_COMMAND.md) — persistent `/delay` messages, timing semantics, queue interaction, cancellation, and lifecycle safety
-- [HASHI_PRIVACY_LEVEL_2_PLAN.md](HASHI_PRIVACY_LEVEL_2_PLAN.md) — Level 2 basic-redaction security contract, API-only backend boundary, local model probe, and implementation sequence
+- [HASHI_HERV3_PRIVACY_PILOT_2026-10-02.md](HASHI_HERV3_PRIVACY_PILOT_2026-10-02.md) — current HERV3-only Level 2 trial decision, residual risk, implementation evidence, and adoption boundary
+- [HASHI_PRIVACY_LEVEL_2_PLAN.md](HASHI_PRIVACY_LEVEL_2_PLAN.md) — superseded historical plan; its API-only proposal is not the current Level 2 contract
 - [initial.md](initial.md) — Onboarding prompt template (onboarding-only)
 - [tools.md](tools.md) — Tools & operations reference
 - [WORKBENCH_NOTES.md](WORKBENCH_NOTES.md) — Workbench retirement and retained Backend API compatibility names
