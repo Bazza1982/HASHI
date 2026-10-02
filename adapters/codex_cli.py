@@ -199,13 +199,13 @@ class CodexCLIAdapter(BaseBackend):
             return False
 
     async def _discover_mcp_servers(self) -> tuple[str, ...]:
-        """List configured MCP servers so the API bridge can disable all of them."""
+        """Inventory standalone MCP servers with execution's plugin state."""
         # force_kill_process_tree() terminates subprocess trees. The inventory
         # process must never inherit HASHI's own process group.
         extra_kwargs: dict[str, object] = process_group_kwargs()
         for attempt in range(1, self.MCP_INVENTORY_MAX_ATTEMPTS + 1):
             invocation = resolve_argv_invocation(
-                (self.cmd_base, "mcp", "list", "--json")
+                (self.cmd_base, "--disable", "plugins", "mcp", "list", "--json")
             )
             proc = await asyncio.create_subprocess_exec(
                 *invocation.argv,

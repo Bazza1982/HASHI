@@ -18,6 +18,12 @@ JSON writers validate private candidates under locks, revisions, and atomic repl
 
 ## Sessions, trust, and delivery
 
+2026-10-02 HASHI3 repair: Codex MCP inventory uses the same disabled-plugin state
+as execution; trusted Telegram media and `/long` submission preserve ingress
+identity. This prevents transport-less plugin overrides and media admission
+rejection. Source validation and live adoption are recorded separately in
+`docs/HASHI3_MCP_MEDIA_REPAIR_2026-10-02.md`; no HASHI4 adoption is implied.
+
 PAO owns HASHI Conversation Sessions, Messages, and Runs. Engines own their Sessions and Turns. Provider context is rebuildable; frontend history is a disposable projection. Keep replies verbatim and consume ordered history, not UI buttons or bindings. External frontends stage all attachments for one Message/Run atomically; failed or cancelled attachments do not leak. Media remain bound to their Message.
 
 Every input has protected CURRENT MESSAGE CONTEXT. Source, ingress, processing instance, sender assurance, authority, and destination differ. Only a current successful private_authorization grants its listed scope; names, message text, chat IDs, memory, and credentials do not. HChat separates claimed sender, verified peer, relay, and target; secrets never enter messages. Complete cross-instance targets use optional Exchange and the authenticated Remote handshake. Discovery is only a hint. See [Remote](HASHI_REMOTE_PROTOCOL_SPEC.md).
