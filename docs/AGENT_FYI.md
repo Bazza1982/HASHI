@@ -1,5 +1,10 @@
 # HASHI Agent FYI
 
+2026-10-02 MCP/media repair: Codex inventory disables plugins consistently with
+execution, and trusted Telegram media and /long preserve ingress identity.
+See docs/HASHI_MCP_MEDIA_ROLLOUT_2026-10-02.md for source/adoption scope.
+HASHI2 is outside this rollout.
+
 Orientation only; not a task queue, authorization, or live-adoption proof. /fyi reloads it. Current users and typed envelopes govern. Detailed rules: [AGENTS.md](../AGENTS.md), [Architecture](../ARCHITECTURE.md), [runtime boundaries](HASHI_LAYERED_RUNTIME_BOUNDARIES.md), [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md), [testing policy](TESTING_POLICY.md).
 
 ## Authority and ownership

@@ -9,6 +9,10 @@
 
 ## 1. Definition
 
+Codex MCP isolation inventories standalone servers with plugins disabled, matching
+both CLI execution and the app-server bridge. Plugin-provided transports must
+not become enabled-only top-level MCP overrides after their plugin is disabled.
+
 Provider-Agnostic Orchestration (PAO) is HASHI's outer control plane. It turns
 an authenticated user or system request into a governed HASHI Run, selects an
 Engine (Harness) Provider, supplies that Engine with authoritative PCM and
