@@ -350,5 +350,7 @@ def test_voice_presentations_use_only_official_metadata(tmp_path: Path):
     assert manager.voice_presentation("marin") is None
     assert manager.voice_presentation("quartz") == "feminine"
     assert manager.voice_presentation("ripple") == "masculine"
-    assert set(manager.VOICE_PRESENTATIONS) == set(manager.VOICE_LABELS) - {"marin"}
+    assert manager.voice_presentation("default") is None
+    openai_voices = set(manager.PROVIDERS["openai"]["models"]["gpt-live-1"]["voices"])
+    assert set(manager.VOICE_PRESENTATIONS) == openai_voices - {"marin"}
     assert set(manager.VOICE_PRESENTATIONS.values()) == {"feminine", "masculine"}

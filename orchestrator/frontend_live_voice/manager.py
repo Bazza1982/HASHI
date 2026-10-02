@@ -230,6 +230,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         admit_run: Callable[[CallBinding, Proposal, str], Awaitable[Mapping[str, Any]]] | None = None,
         poll_run_activity: Callable[[CallBinding, str, int, int], Awaitable[Mapping[str, Any]]] | None = None,
         judge_action: Callable[[CallBinding, Mapping[str, Any]], Awaitable[Mapping[str, Any]]] | None = None,
+        render_speech: Callable[[CallBinding, Mapping[str, Any]], Awaitable[Mapping[str, Any]]] | None = None,
         inspect_action_results: Callable[..., Awaitable[Mapping[str, Any]]] | None = None,
         cancel_action_run: Callable[..., Awaitable[Mapping[str, Any]]] | None = None,
         resolve_phone_session: Callable[..., Mapping[str, Any]] | None = None,
@@ -242,7 +243,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         self.session_store = session_store
         self.global_config = global_config
         self.secrets = dict(secrets or {})
-        self.providers = dict(default_registry() if provider_registry is None else provider_registry)
+        self.providers = dict(default_registry(include_experimental=True) if provider_registry is None else provider_registry)
         self._connection_providers: dict[str, VoiceProvider] = {}
         self._provider_native_delegations: dict[tuple[str, int], set[str]] = {}
         self.instance_id = str(getattr(global_config, "instance_id", "HASHI") or "HASHI").upper()
@@ -252,6 +253,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         self._admit_run = admit_run
         self._poll_run_activity = poll_run_activity
         self._judge_action = judge_action
+        self._render_speech = render_speech
         self._inspect_action_results = inspect_action_results
         self._cancel_action_run = cancel_action_run
         self.actions = PhoneActions(session_store)
@@ -286,6 +288,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         self._foreground_call_tasks: dict[str, asyncio.Task[Any]] = {}
         self._recovery_tasks: set[asyncio.Task[Any]] = set()
         self._active_sockets: dict[str, Any] = {}
+        self._cascade_generations: dict[tuple[str, int, str], int] = {}
         self._sideband_ready_events: dict[str, asyncio.Event] = {}
         self._sideband_failures: dict[str, str] = {}
         self._session_closed_events: dict[str, asyncio.Event] = {}
@@ -456,6 +459,38 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             name=f"hashi-live-opening-{binding.call_id}",
         ), self._opening_tasks, binding=binding)
 
+    async def _render_cascade_speech(self, binding: CallBinding, *, kind: str,
+                                     goal: str, source_context: str = "") -> str:
+        """Ask the selected Agent's tool-free Phone model for audible words."""
+        if not callable(self._render_speech):
+            raise LiveVoiceError("live_speech_model_unavailable", 503)
+        with self.session_store._lock, self.session_store._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM live_calls WHERE call_id=? AND owner_id=? AND session_id=? AND agent_id=?",
+                (binding.call_id, binding.owner_id, binding.session_id, binding.agent_id),
+            ).fetchone()
+        if (row is None or int(row["call_epoch"]) != binding.call_epoch
+                or str(row["provider_session_id"] or "") != binding.provider_session_id):
+            raise LiveVoiceError("live_scope_changed", 409)
+        frozen_public = self._stored_phone_public(row)
+        if not frozen_public:
+            raise LiveVoiceError("live_phone_configuration_invalid", 503)
+        stored_selection = json.loads(row["phone_config_json"] or "{}").get("selection")
+        if not stored_selection:
+            stored_selection = {key: frozen_public[key] for key in
+                ("provider", "model", "voice", "language", "style", "interface_language")
+                if key in frozen_public}
+        phone = self._phone_session(binding.agent_id, owner_id=binding.owner_id,
+            session_id=binding.session_id, context_generation=binding.context_generation,
+            frozen_public=frozen_public, frozen_selection=stored_selection)
+        state = {"kind": kind, "goal": goal, "source_context": source_context,
+                 "instructions": phone["instructions"], "recent": list(phone.get("input") or [])[-4:]}
+        result = await self._render_speech(binding, state)
+        speech = result.get("text") if isinstance(result, Mapping) else None
+        if not isinstance(speech, str) or not speech.strip() or len(speech) > (1200 if kind == "opening" else 4000):
+            raise LiveVoiceError("live_speech_result_invalid", 502)
+        return speech.strip()
+
     async def _request_opening(self, binding: CallBinding, opening_id: str) -> None:
         audio_key = (binding.call_id, binding.call_epoch, binding.provider_session_id)
         observation = OpeningAudioObservation(maximum_arrival_gap=min(1.0, self._opening_output_timeout_seconds / 2))
@@ -477,7 +512,15 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                     return
                 event_id = opening_id if attempt == 1 else opening_id + "-continuation"
                 adapter = self._provider_for(binding)
-                payload = adapter.opening(opening_goal(self._stored_phone_public(row) or {}, continuation=attempt == 2), event_id)
+                goal = opening_goal(self._stored_phone_public(row) or {}, continuation=attempt == 2)
+                generation = None
+                if adapter.provider_id == "local-cascade":
+                    generation = self._cascade_generations.get(
+                        (binding.call_id, binding.call_epoch, binding.provider_session_id), 0)
+                    goal = await self._render_cascade_speech(binding, kind="opening", goal=goal)
+                payload = adapter.opening(goal, event_id)
+                if generation is not None:
+                    payload["generation"] = generation
                 ws = self._active_sockets.get(binding.call_id)
                 if ws is None or getattr(ws, "closed", True):
                     self.opening.change(binding, "uncertain", reason="sideband_unavailable")
@@ -533,6 +576,10 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 self.opening.change(binding, "provider.ready")
                 self._schedule_opening(binding)
             elif kind == "conversation.user.delta" and str(event.get("delta") or "").strip():
+                self.opening.change(binding, "user.started")
+            elif kind == "output.interrupted" and event.get("reason") == "user_speech_interrupted":
+                # The local Worker detects live speech before STT has a final
+                # transcript. A pending greeting must yield immediately.
                 self.opening.change(binding, "user.started")
             elif kind == "conversation.assistant.delta":
                 fragment = normalize_transcript(event)
@@ -810,6 +857,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
 
     async def shutdown(self) -> None:
         self._closing = True
+        self._cascade_generations.clear()
         if self._sweeper_task is not None:
             self._sweeper_task.cancel()
             await asyncio.gather(self._sweeper_task, return_exceptions=True)
@@ -1952,11 +2000,25 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                     "reason": "delivery_attempt_limit", "generated_output": "unconfirmed",
                     "audible_delivery": "unverified"})
                 return False
+            cascade_generation = None
+            if self._provider_for(binding).provider_id == "local-cascade":
+                cascade_generation = self._cascade_generations.get(
+                    (binding.call_id, binding.call_epoch, binding.provider_session_id), 0)
             if original_context and not await self._send_provider_update(
                     binding, kind="thinking", content=original_context, delegation_id=None):
                 return False
+            spoken_content = provider_content
+            if self._provider_for(binding).provider_id == "local-cascade":
+                try:
+                    spoken_content = await self._render_cascade_speech(binding, kind="result",
+                        goal=provider_content, source_context=original_context)
+                except Exception as exc:
+                    self.audit.record(binding, "speech.render_failed",
+                        error_code=str(getattr(exc, "code", "live_speech_model_unavailable")))
+                    return False
             relayed = await self._send_provider_update(binding, kind="commentary",
-                                                       content=provider_content, delegation_id=None)
+                                                       content=spoken_content, delegation_id=None,
+                                                       expected_generation=cascade_generation)
             if not relayed:
                 return False
             with self.session_store._lock, self.session_store._connection() as connection:
@@ -2259,6 +2321,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         kind: str,
         content: str,
         delegation_id: str | None,
+        expected_generation: int | None = None,
     ) -> bool:
         """Append bounded context/results through the selected provider sideband."""
 
@@ -2272,7 +2335,14 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 reason="sideband_disconnected",
             )
             return False
-        chunks = _live_text_chunks(content)
+        adapter = self._provider_for(binding)
+        cascade_speech = kind == "commentary" and adapter.provider_id == "local-cascade"
+        generation = (expected_generation if expected_generation is not None else
+                      self._cascade_generations.get(
+                          (binding.call_id, binding.call_epoch, binding.provider_session_id), 0))
+        chunks = (_live_text_chunks(content, token_limit=250, byte_limit=1000)
+                  if cascade_speech
+                  else _live_text_chunks(content))
         if not chunks:
             return False
         for index, chunk in enumerate(chunks, start=1):
@@ -2281,7 +2351,9 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             # task observed on this exact connection may cross that namespace.
             native_ids = self._provider_native_delegations.get((binding.call_id, binding.call_epoch), set())
             provider_delegation_id = delegation_id if delegation_id in native_ids else None
-            payload = self._provider_for(binding).update(kind, chunk, provider_delegation_id, event_id)
+            payload = adapter.update(kind, chunk, provider_delegation_id, event_id)
+            if cascade_speech:
+                payload["generation"] = generation
             waiter: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
             identity = (binding.call_id, event_id)
             self._update_waiters[identity] = waiter
@@ -3913,6 +3985,8 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                                     provider_close_state=provider_close_state, usage=public_usage)
             became_terminal = True
         if became_terminal:
+            self._cascade_generations.pop(
+                (binding.call_id, binding.call_epoch, binding.provider_session_id), None)
             queue = self._provider_event_queues.get(binding.call_id)
             if queue is not None and queue._unfinished_tasks:
                 task = asyncio.create_task(
@@ -4189,6 +4263,15 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                         if event is None:
                             continue
                         event_type = event.get("type")
+                        if adapter.provider_id == "local-cascade" and event_type in {
+                            "provider.ready", "output.interrupted"
+                        }:
+                            generation = event.get("generation")
+                            if type(generation) is int and generation >= 0:
+                                generation_key = (binding.call_id, binding.call_epoch,
+                                                  binding.provider_session_id)
+                                self._cascade_generations[generation_key] = max(
+                                    generation, self._cascade_generations.get(generation_key, 0))
                         if event_type == "output.generated":
                             # Samples never reach PAO. While an opening is pending,
                             # retain only bounded in-memory activity/timing evidence.

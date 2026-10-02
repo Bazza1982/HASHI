@@ -45,6 +45,8 @@ Model/provider cards share one contract; chat-only models disclose that they hav
 
 ## UI, media, and Phone
 
+The optional `local-cascade` Phone provider has an experimental Gate 2 source checkpoint: local recognition and synthesis connect to the existing selected Agent's Phone judgment and action route. It stays out of the default qualified provider registry and requires an explicit Worker token and offline models. Sideband reconnect replays only a bounded in-memory gap; live Workbench device acceptance is pending. See [local cascade Gate 2](HASHI_PHONE_LOCAL_CASCADE_GATE2.md).
+
 Live Phone defaults on; a missing provider API key blocks calls and must be named in `/phone`. An explicit instance opt-out remains valid. The Agent's Phone settings and PCM readiness do not prove provider readiness.
 
 Renderers/catalogs own UI text. /language changes shared UI, /tui language only local TUI; neither translates replies or identifiers. TUI instance switches freeze the selected generation, Agent, capabilities and Session. Remote requires authentication. /telegram off and /whatsapp off disable future mirrors, not originating-platform replies. /think and /commentary control reasoning and visible commentary separately.
