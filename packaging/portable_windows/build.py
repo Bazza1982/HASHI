@@ -142,6 +142,7 @@ ROOT_SOURCE_FILES = (
     RUNTIME_ENTRY_FILE,
     "tui.py",
     "pyproject.toml",
+    "requirements-privacy.txt",
     "LICENSE",
 )
 RUNTIME_POLICY_FILES = (_RUNTIME_POLICY.standard_lock,)
@@ -938,6 +939,7 @@ def copy_launchers(image_root: Path) -> None:
         "Rollback_HASHI_On_This_PC.bat",
         "Uninstall_HASHI_From_This_PC.bat",
         "Stop_HASHI.bat",
+        "Enable_Privacy_Level2_On_This_PC.bat",
         "Diagnose_HASHI.bat",
         "PORTABLE_README.txt",
     ):
@@ -1108,6 +1110,8 @@ def validate_image(image_root: Path) -> None:
         "app/hashi/__main__.py",
         "app/hashi/main.py",
         "app/hashi/pyproject.toml",
+        "app/hashi/requirements-privacy.txt",
+        "app/hashi/scripts/provision_privacy_runtime.py",
         f"app/hashi/{_RUNTIME_POLICY.standard_lock}",
         "app/hashi/tui.py",
         "app/hashi/tui/assets/sounds/soft_chat_send.wav",
@@ -1120,6 +1124,7 @@ def validate_image(image_root: Path) -> None:
         "Update_HASHI_On_This_PC.bat",
         "Rollback_HASHI_On_This_PC.bat",
         "Uninstall_HASHI_From_This_PC.bat",
+        "Enable_Privacy_Level2_On_This_PC.bat",
         "launcher/Install-To-PC.ps1",
         "launcher/Bootstrap-Elevated.ps1",
         "launcher/Elevated-Entry.ps1",
@@ -1128,6 +1133,7 @@ def validate_image(image_root: Path) -> None:
         "launcher/Common.ps1",
         "launcher/Start-TUI.ps1",
         "launcher/Stop-HASHI.ps1",
+        "launcher/Enable-Privacy-Level2.ps1",
     )
     missing = [
         relative for relative in required if not (image_root / relative).is_file()
@@ -1254,6 +1260,8 @@ def build(args: argparse.Namespace) -> Path:
                 "ffmpeg": True,
                 "playwright_without_browser": True,
                 "administrator_local_execution": True,
+                "privacy_level_2_bundled": False,
+                "privacy_level_2_on_target_provisioning": True,
                 "complete_local_copy": True,
                 "usb_execution": False,
                 "fixed_loopback_dynamic_port": True,

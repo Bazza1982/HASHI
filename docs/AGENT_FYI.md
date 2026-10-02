@@ -41,6 +41,9 @@ HASHI3 Telegram intake reports healthy only after a successful bounded poll; ord
 
 HERV3 is public her-v3; internal her-v2 names are compatibility only. Optional JEV is off by default. /backend chooses Engine, /provider Model Provider, /model model, /effort reasoning; Fixed/Flex and Memory+ are independent. /meter uses physical calls and all cost; never invent phases or zero cost. Codex CLI counters are cumulative: use a persisted baseline for current-turn usage and estimate if unknown. USD estimates are not subscription bills.
 
+Level 2: HERV3/DeepSeek only. Local PII detection can miss values;
+`/privacy 2` needs risk acceptance and blocks on detector failure.
+
 Model/provider cards share one contract; chat-only models disclose that they have no tools. /style rephrases completed answers without changing facts and meters separately. Fallback is opt-in: warn before switching and block uncertain effect replay. Reject malformed Tool batches before effects; never replay committed effects. /stop, /retry, /resend and /steer differ; recovery grants no revoked authority. Show typed progress, not private reasoning.
 
 ## UI, media, and Phone

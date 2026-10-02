@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import sys
 from types import SimpleNamespace
 
 import pytest
 
+from adapters.her_v2_provider import HashiStageProvider
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
@@ -16,6 +18,7 @@ from orchestrator.her_v2.v3_config import (
     normalise_v3_config,
     resolve_v3_target,
 )
+from orchestrator.privacy_levels import PrivacyLevel, PrivacyPolicyError
 
 
 def _raw_config() -> dict:
@@ -148,6 +151,63 @@ def test_v3_provider_options_derive_deepseek_models_from_provider_catalogue(tmp_
     assert deepseek is not None
     assert deepseek["available"] is True
     assert deepseek["models"] == ["deepseek-flash", "deepseek-v4-pro"]
+
+
+def test_level_two_persists_only_with_qualified_herv3_provider(tmp_path, monkeypatch):
+    manager = _manager(tmp_path)
+    monkeypatch.setenv("HASHI_PRIVACY_FILTER_PYTHON", sys.executable)
+
+    assert manager.set_privacy_level(2) is PrivacyLevel.BASIC_REDACTION
+    assert manager.state_store.read()["privacy_level"] == 2
+    assert _manager_reloaded(manager).privacy_level is PrivacyLevel.BASIC_REDACTION
+    with pytest.raises(PrivacyPolicyError, match="does not support"):
+        manager.create_ephemeral_backend("deepseek-api", target_model="deepseek-flash")
+
+    manager.config.active_backend = "codex-cli"
+    with pytest.raises(PrivacyPolicyError, match="requires the HERV3 backend"):
+        manager.create_herv3_provider_backend(
+            "deepseek-api", target_model="deepseek-flash"
+        )
+    manager.config.active_backend = "her-v2"
+
+    provider = HashiStageProvider(backend_manager=manager)._create_provider_backend(
+        "deepseek-api", target_model="deepseek-flash"
+    )
+    assert provider.privacy_level is PrivacyLevel.BASIC_REDACTION
+    assert provider._herv3_privacy_scope is True
+
+
+def _manager_reloaded(manager: FlexibleBackendManager) -> FlexibleBackendManager:
+    return FlexibleBackendManager(manager.config, manager.global_config, secrets={})
+
+
+def test_level_two_rejects_unqualified_auxiliary_provider(tmp_path, monkeypatch):
+    manager = _manager(tmp_path)
+    manager.config.allowed_backends[0]["her_v2"]["auxiliary"] = {
+        "provider": "hashi-api", "model": "gpt-5.6-luna",
+    }
+    monkeypatch.setenv("HASHI_PRIVACY_FILTER_PYTHON", sys.executable)
+
+    with pytest.raises(PrivacyPolicyError, match="does not support"):
+        manager.set_privacy_level(2)
+    assert manager.privacy_level is PrivacyLevel.PROVIDER_TRUST
+
+
+def test_level_two_downgrade_does_not_take_effect_if_state_write_fails(
+    tmp_path, monkeypatch
+):
+    manager = _manager(tmp_path)
+    monkeypatch.setenv("HASHI_PRIVACY_FILTER_PYTHON", sys.executable)
+    manager.set_privacy_level(2)
+
+    def failed_write(_update):
+        raise OSError("synthetic state write failure")
+
+    monkeypatch.setattr(manager.state_store, "update", failed_write)
+    with pytest.raises(OSError, match="synthetic state write failure"):
+        manager.set_privacy_level(1)
+
+    assert manager.privacy_level is PrivacyLevel.BASIC_REDACTION
 
 
 @pytest.mark.asyncio

@@ -67,6 +67,24 @@ Detailed contracts:
 [HERV3 upgrade](https://github.com/Bazza1982/HASHI/blob/main/docs/HERV3_UPGRADE.md),
 and [runtime configuration boundaries](https://github.com/Bazza1982/HASHI/blob/main/docs/HASHI_LAYERED_RUNTIME_BOUNDARIES.md).
 
+## Privacy configuration
+
+Each Agent starts at Privacy Level 1 unless its own saved state selects another
+level. Use `/privacy` to inspect or change the effective level; do not edit
+Agent state files by hand. Level 2 is available only with HERV3 and its
+qualified official DeepSeek Model Provider. Its local detector must be ready,
+and the user must explicitly accept the residual PII miss risk before the
+setting is saved. Installing the detector alone does not activate Level 2.
+
+The detector runs in a separate Python environment, outside the HASHI Core
+interpreter. Source, npm, enterprise, and Portable Windows installation paths
+have different preparation steps; see [installation](INSTALL.md) and
+[dependency profiles](DEPENDENCIES.md#isolated-privacy-level-2-detector).
+Advanced deployments may select another local interpreter with
+`HASHI_PRIVACY_FILTER_PYTHON` or a trusted replacement detector with
+`HASHI_PRIVACY_FILTER_SCRIPT`; the replacement must obey the same local span
+contract. Level 2 still cannot guarantee that all PII is found.
+
 ## Credentials and authorization
 
 Enter API credentials and optional Telegram credentials in the masked local

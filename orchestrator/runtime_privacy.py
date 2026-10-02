@@ -8,6 +8,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from orchestrator import ui_language
 from orchestrator.command_ui import card_title, refresh_label, selected_label
 from orchestrator.flexible_backend_registry import get_supported_privacy_levels
+from orchestrator.her_v2.privacy_gate import OutboundPrivacyGate, PrivacyGateError
 from orchestrator.privacy_levels import (
     PrivacyLevel,
     PrivacyPolicyError,
@@ -95,7 +96,21 @@ def privacy_keyboard(
     runtime: Any,
     *,
     confirm_downgrade: int | None = None,
+    confirm_level_two: bool = False,
 ) -> InlineKeyboardMarkup:
+    if confirm_level_two:
+        return InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton(
+                    ui_language.tr("privacy.button.accept_risk"),
+                    callback_data="privacy:accept:2",
+                )],
+                [InlineKeyboardButton(
+                    ui_language.tr("privacy.button.keep"),
+                    callback_data="privacy:menu",
+                )],
+            ]
+        )
     if confirm_downgrade is not None:
         return InlineKeyboardMarkup(
             [
@@ -136,7 +151,7 @@ def privacy_keyboard(
                 ),
             ],
             [
-                InlineKeyboardButton(ui_language.tr("privacy.button.basic"), callback_data="privacy:planned:2"),
+                InlineKeyboardButton(ui_language.tr("privacy.button.basic"), callback_data="privacy:set:2"),
                 InlineKeyboardButton(ui_language.tr("privacy.button.strict"), callback_data="privacy:planned:3"),
             ],
             [
@@ -153,6 +168,21 @@ def _busy(runtime: Any) -> bool:
     return bool(checker()) if callable(checker) else False
 
 
+async def _verify_level_two_detector() -> None:
+    """Check the isolated local model before claiming the trial is active."""
+
+    marker = "privacy-readiness@example.com"
+    try:
+        sanitized = await OutboundPrivacyGate().sanitize(
+            {"model": "privacy-readiness", "messages": [{"content": marker}]},
+            request_id="privacy-level-two-readiness",
+        )
+        if marker in str(sanitized):
+            raise PrivacyGateError("local privacy model missed its readiness probe")
+    except PrivacyGateError as exc:
+        raise PrivacyPolicyError(str(exc)) from exc
+
+
 def _set_level(runtime: Any, requested: int, *, confirmed: bool = False) -> str:
     current = current_privacy_level(runtime)
     target = PrivacyLevel(requested)
@@ -160,12 +190,6 @@ def _set_level(runtime: Any, requested: int, *, confirmed: bool = False) -> str:
         raise PrivacyPolicyError(ui_language.tr("privacy.error.busy"))
     if target < current and not confirmed:
         raise PrivacyPolicyError(ui_language.tr("privacy.error.confirmation"))
-    if target not in {PrivacyLevel.OFF, PrivacyLevel.PROVIDER_TRUST}:
-        raise PrivacyPolicyError(
-            ui_language.tr(
-                "privacy.error.level_unavailable", level=int(target)
-            )
-        )
     supported = get_supported_privacy_levels(runtime.config.active_backend)
     if int(target) not in supported:
         raise PrivacyPolicyError(
@@ -228,10 +252,25 @@ async def cmd_privacy(runtime: Any, update: Any, context: Any) -> None:
             reply_markup=privacy_keyboard(runtime, confirm_downgrade=requested),
         )
         return
+    if requested == 2 and current < PrivacyLevel.BASIC_REDACTION:
+        await runtime._reply_text(
+            update,
+            ui_language.tr("privacy.level2_accept"),
+            reply_markup=privacy_keyboard(runtime, confirm_level_two=True),
+            parse_mode="HTML",
+        )
+        return
 
     try:
         notice = _set_level(runtime, requested)
-    except PrivacyPolicyError as exc:
+    except OSError:
+        await runtime._reply_text(
+            update,
+            ui_language.tr("privacy.persistence_uncertain"),
+            reply_markup=privacy_keyboard(runtime),
+        )
+        return
+    except (PrivacyPolicyError, ValueError) as exc:
         await runtime._reply_text(
             update,
             ui_language.tr("privacy.not_changed", reason=exc),
@@ -264,7 +303,7 @@ async def callback_privacy(runtime: Any, update: Any, context: Any) -> None:
     parts = data.split(":")
     if (
         len(parts) != 3
-        or parts[1] not in {"set", "confirm", "planned"}
+        or parts[1] not in {"set", "confirm", "planned", "accept"}
         or parts[2] not in {"0", "1", "2", "3", "4", "5"}
     ):
         await query.answer(
@@ -300,9 +339,38 @@ async def callback_privacy(runtime: Any, update: Any, context: Any) -> None:
         )
         await query.answer()
         return
+    if requested == 2 and current < PrivacyLevel.BASIC_REDACTION:
+        if parts[1] != "accept":
+            await query.edit_message_text(
+                ui_language.tr("privacy.level2_accept"),
+                reply_markup=privacy_keyboard(runtime, confirm_level_two=True),
+                parse_mode="HTML",
+            )
+            await query.answer()
+            return
     try:
+        if requested == 2 and current < PrivacyLevel.BASIC_REDACTION:
+            if 2 not in get_supported_privacy_levels(runtime.config.active_backend):
+                raise PrivacyPolicyError(
+                    ui_language.tr(
+                        "privacy.error.backend",
+                        backend=runtime.config.active_backend,
+                        level=2,
+                        supported=", ".join(
+                            str(item) for item in get_supported_privacy_levels(
+                                runtime.config.active_backend
+                            )
+                        ),
+                    )
+                )
+            await _verify_level_two_detector()
         notice = _set_level(runtime, requested, confirmed=confirmed)
-    except PrivacyPolicyError as exc:
+    except OSError:
+        await query.answer(
+            ui_language.tr("privacy.persistence_uncertain"), show_alert=True
+        )
+        return
+    except (PrivacyPolicyError, ValueError) as exc:
         await query.answer(str(exc), show_alert=True)
         return
     await query.edit_message_text(

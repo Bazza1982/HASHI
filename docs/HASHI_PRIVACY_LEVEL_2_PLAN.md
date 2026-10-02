@@ -1,5 +1,14 @@
 # HASHI Privacy Framework — Level 2 Design and Implementation Plan
 
+> **Historical design; superseded 2026-10-02.** The approved Level 2 trial is
+> HERV3-only local PII detection and masking. Direct API engines and other
+> outer backends are unavailable at Level 2. Detection is inherently incomplete,
+> especially for non-English text; the user accepts this residual risk when
+> enabling the trial. The current implementation and verification status live
+> in the [HERV3 Level 2 decision](HASHI_HERV3_PRIVACY_PILOT_2026-10-02.md).
+> The older eligibility, 100% coverage, and release-gate proposals below are
+> preserved as design history, not the current activation criteria.
+
 **Status:** design, initial WSL/Windows hardware validation, and Level 0/1
 control foundation complete  
 **Scope of this delivery:** six-level framework and Level 2 implementation plan  

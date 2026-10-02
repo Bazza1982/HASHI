@@ -48,6 +48,11 @@ from orchestrator.her_v2.v3_config import (
     resolve_v3_target,
 )
 from orchestrator.her_v2.models import Route
+from orchestrator.her_v2.privacy_gate import (
+    PrivacyGateError,
+    configured_filter_python,
+    configured_filter_script,
+)
 from orchestrator.her_v2.runtime_configuration import (
     HER_V2_CONFIGURATION_DRAFT_STATE_KEY,
     HER_V2_CONFIGURATION_PRESETS_STATE_KEY,
@@ -70,6 +75,7 @@ from orchestrator.privacy_levels import (
     PrivacyPolicyError,
     parse_privacy_level,
     require_backend_compatibility,
+    require_herv3_provider_compatibility,
     require_level_available,
 )
 from orchestrator.runtime_effort_options import get_available_efforts as runtime_available_efforts
@@ -474,10 +480,40 @@ class FlexibleBackendManager:
     def set_privacy_level(self, level: int | str | PrivacyLevel) -> PrivacyLevel:
         parsed = require_level_available(level)
         require_backend_compatibility(self.config.active_backend, parsed)
+        if parsed is PrivacyLevel.BASIC_REDACTION:
+            try:
+                configured_filter_python()
+                configured_filter_script()
+            except PrivacyGateError as exc:
+                raise PrivacyPolicyError(str(exc)) from exc
+            base = self._her_v3_base_config()
+            target = resolve_v3_target(base, self._her_v3_configuration_override)
+            effective = HERv2Config.from_mapping(apply_v3_target(base, target))
+            for profile in effective.all_provider_profiles():
+                require_herv3_provider_compatibility(profile.engine, parsed)
+            if effective.agent_companion.enabled:
+                raise PrivacyPolicyError(
+                    "HERV3 Agent Companion is unavailable at privacy level 2"
+                )
+
+        def update_state(state: dict[str, Any]) -> dict[str, Any]:
+            self._apply_managed_state_fields(state)
+            state["privacy_level"] = int(parsed)
+            return state
+
+        # A write failure may be post-commit. Keep the stricter in-memory
+        # level and report uncertainty; never pretend a downgrade succeeded.
+        try:
+            self.state_store.update(update_state)
+        except Exception:
+            if parsed > self.privacy_level:
+                self.privacy_level = parsed
+                if self.current_backend is not None:
+                    self.current_backend.privacy_level = parsed
+            raise
         self.privacy_level = parsed
         if self.current_backend is not None:
             self.current_backend.privacy_level = parsed
-        self._save_state()
         return parsed
 
     def get_state_snapshot(self) -> dict[str, Any]:
@@ -631,7 +667,7 @@ class FlexibleBackendManager:
                 continue
             try:
                 require_level_available(self.privacy_level)
-                require_backend_compatibility(
+                require_herv3_provider_compatibility(
                     str(option.get("engine") or ""),
                     self.privacy_level,
                 )
@@ -658,7 +694,7 @@ class FlexibleBackendManager:
 
     def _validate_her_v3_target(self, target: HERv3ModelTarget) -> None:
         require_level_available(self.privacy_level)
-        require_backend_compatibility(target.provider, self.privacy_level)
+        require_herv3_provider_compatibility(target.provider, self.privacy_level)
         option = self._her_v3_provider_option(target.provider)
         if option is None or not option.get("available"):
             raise ValueError(
@@ -780,7 +816,7 @@ class FlexibleBackendManager:
                 continue
             try:
                 require_level_available(self.privacy_level)
-                require_backend_compatibility(
+                require_herv3_provider_compatibility(
                     str(option.get("engine") or ""),
                     self.privacy_level,
                 )
@@ -894,7 +930,7 @@ class FlexibleBackendManager:
     ) -> None:
         require_level_available(self.privacy_level)
         for target in selected.all_targets():
-            require_backend_compatibility(target.provider, self.privacy_level)
+            require_herv3_provider_compatibility(target.provider, self.privacy_level)
             option = self._her_v2_provider_option(target.provider)
             if option is None or not option.get("available"):
                 raise ValueError(
@@ -1467,9 +1503,36 @@ class FlexibleBackendManager:
         return result
 
     def create_ephemeral_backend(self, engine: str, target_model: str | None = None):
+        return self._create_ephemeral_backend(
+            engine, target_model=target_model, herv3_provider=False
+        )
+
+    def create_herv3_provider_backend(
+        self, engine: str, target_model: str | None = None
+    ):
+        """Create a qualified model Provider solely for a HERV3 invocation."""
+
+        if canonical_backend_engine(self.config.active_backend) != HER_V2_ENGINE:
+            raise PrivacyPolicyError("HERV3 Provider requires the HERV3 backend")
+        return self._create_ephemeral_backend(
+            engine, target_model=target_model, herv3_provider=True
+        )
+
+    def _create_ephemeral_backend(
+        self,
+        engine: str,
+        *,
+        target_model: str | None,
+        herv3_provider: bool,
+    ):
         engine = canonical_backend_engine(engine)
         require_level_available(self.privacy_level)
-        require_backend_compatibility(engine, self.privacy_level)
+        compatibility = (
+            require_herv3_provider_compatibility
+            if herv3_provider
+            else require_backend_compatibility
+        )
+        compatibility(engine, self.privacy_level)
         backend_cfg_raw = self._select_backend_cfg(engine, target_model=target_model)
         if not backend_cfg_raw:
             backend_cfg_raw = self._instance_provider_backend_cfg(
@@ -1507,7 +1570,15 @@ class FlexibleBackendManager:
 
         BackendClass = get_backend_class(engine)
         api_key = self._resolve_api_key(engine, backend_cfg_raw)
-        return BackendClass(adapter_cfg, self.global_config, api_key)
+        backend = BackendClass(adapter_cfg, self.global_config, api_key)
+        backend.privacy_level = self.privacy_level
+        if herv3_provider:
+            if not hasattr(backend, "_herv3_privacy_scope"):
+                raise PrivacyPolicyError(
+                    f"HERV3 Provider {engine!r} has no privacy gate"
+                )
+            backend._herv3_privacy_scope = True
+        return backend
 
     async def generate_ephemeral_response(
         self,

@@ -59,6 +59,14 @@ dependency preparation fails, npm leaves the program entry installed but
 reports **runtime setup is incomplete**; the failed build is not adopted and
 no instance data is touched.
 
+Post-install also prepares the HERV3 Level 2 privacy detector in a **separate**
+user-scoped environment from `requirements-privacy.txt`. The `hashi` launcher
+selects it automatically. If that optional setup fails, ordinary HASHI remains
+available but `/privacy 2` fails closed until the detector is repaired.
+`HASHI_POSTINSTALL_NO_PRIVACY=1` skips the large detector download. Level 2 is
+never enabled automatically; the user must explicitly accept its residual PII
+miss risk before activation.
+
 One program installation serves multiple isolated named instances in the same
 OS environment. Windows, each WSL distribution, native Linux, and macOS keep
 separate registries and never follow another environment's PATH or runtime.
@@ -224,7 +232,14 @@ Install and check the standard runtime using that environment:
 ```bash
 python -m pip install -r constraints/standard-py312.lock
 python scripts/check_runtime_contract.py --json
+python scripts/provision_privacy_runtime.py
+python scripts/provision_privacy_runtime.py --check
 ```
+
+The last two commands prepare and verify the optional Level 2 detector in
+`.venv-privacy`, separate from the active HASHI interpreter. They need network
+access to download Presidio, spaCy, and the hash-pinned English model. If they
+fail, keep Level 1 and do not send sensitive content under a Level 2 claim.
 
 Open the local connection page from the repository root:
 
@@ -255,6 +270,12 @@ For a self-contained Windows handoff, use the allowlisted Portable Windows
 builder described in the [Portable Windows guide](https://github.com/Bazza1982/HASHI/blob/main/packaging/portable_windows/README.md).
 The resulting USB is verified installation media; HASHI runs from the local
 copy installed on the recipient PC.
+
+The Portable Windows image has a strict 957 MB capacity and does not contain
+the Level 2 detector packages or model. After installation on the PC, run
+`Enable_Privacy_Level2_On_This_PC.bat` **from the local copy** as administrator
+with network access. It installs the isolated detector under local instance
+data and checks it. A failed or skipped setup leaves `/privacy 2` unavailable.
 
 ### Run
 - Preferred: use the unified launcher `bin/bridge-u.bat`.

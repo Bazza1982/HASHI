@@ -87,6 +87,40 @@ process.stdout.write(JSON.stringify({
         assert values["posix"] is True
 
 
+def test_level2_runtime_pointer_stays_inside_its_versioned_private_runtime(node, tmp_path):
+    version_root = tmp_path / "runtimes" / "4.0.0b1"
+    private_dir = version_root / "privacy-ready"
+    executable = private_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"placeholder")
+    pointer = version_root / "privacy-active.json"
+    script = """
+const privacy = require(process.argv[1]);
+process.stdout.write(privacy.preparedPrivacyPython(process.argv[2], '4.0.0b1'));
+"""
+
+    def selected() -> str:
+        result = subprocess.run(
+            [node, "-e", script, str(ROOT / "privacy-runtime.js"), str(version_root)],
+            cwd=ROOT, capture_output=True, text=True, check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        return result.stdout
+
+    pointer.write_text(json.dumps({
+        "schema_version": 1, "program_version": "4.0.0b1", "python": str(executable),
+    }), encoding="utf-8")
+    assert Path(selected()) == executable
+
+    outside = tmp_path / "outside" / executable.name
+    outside.parent.mkdir()
+    outside.write_bytes(b"placeholder")
+    pointer.write_text(json.dumps({
+        "schema_version": 1, "program_version": "4.0.0b1", "python": str(outside),
+    }), encoding="utf-8")
+    assert selected() == ""
+
+
 def test_postinstall_disabled_path_reports_incomplete_without_creating_data(
     node, tmp_path
 ):
