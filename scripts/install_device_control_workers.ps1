@@ -6,6 +6,8 @@ param(
     [string]$AdvertiseHost = "",
     [string]$BrowserEndpoint = "",
     [string]$BrowserAuthFile = "",
+    [string]$BrowserId = "",
+    [string]$BrowserName = "",
     [string]$LogDir = "",
     [switch]$ComputerOnly,
     [switch]$BrowserOnly,
@@ -99,6 +101,12 @@ function Install-CapabilityTask {
         if ($BrowserAuthFile) {
             $Arguments += @("--browser-auth-file", $BrowserAuthFile)
         }
+        if ($BrowserId) {
+            $Arguments += @("--browser-id", $BrowserId)
+        }
+        if ($BrowserName) {
+            $Arguments += @("--browser-name", $BrowserName)
+        }
     }
     $ArgumentLine = ($Arguments | ForEach-Object { Quote-TaskArgument ([string]$_) }) -join " "
     $Action = New-ScheduledTaskAction `
@@ -140,7 +148,10 @@ if (-not $BrowserOnly) {
     Install-CapabilityTask -Kind "computer_control" -TaskSuffix "Computer"
 }
 if (-not $ComputerOnly) {
-    Install-CapabilityTask -Kind "browser_control" -TaskSuffix "Browser"
+    $BrowserSuffix = if ($BrowserId) {
+        "Browser-" + ($BrowserId -replace "[^a-zA-Z0-9_-]", "_")
+    } else { "Browser" }
+    Install-CapabilityTask -Kind "browser_control" -TaskSuffix $BrowserSuffix
 }
 
 Write-Host "Device Control Workers installed for $InstanceId using pythonw.exe."

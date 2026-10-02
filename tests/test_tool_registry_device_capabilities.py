@@ -160,6 +160,24 @@ async def test_capability_disappearing_after_catalogue_preflight_stays_typed(tmp
     assert "unexpected failure" not in result.output
 
 
+@pytest.mark.asyncio
+async def test_requested_browser_missing_keeps_actionable_reason(tmp_path):
+    facade = _CapabilityFacade(
+        CapabilityUnavailableError(
+            "browser_control", action="get_text",
+            reason="requested_browser_not_connected",
+        ),
+        capabilities=[_browser_registration()],
+    )
+    registry = _registry(tmp_path, "browser_get_text", facade)
+    result = await registry.execute(
+        "browser_get_text", {"browser_target": "edge"}, tool_call_id="missing-edge"
+    )
+    assert result.is_error is True
+    assert result.details["reason"] == "requested_browser_not_connected"
+    assert "connected browser target" in result.output
+
+
 def test_cross_instance_capability_never_enters_local_catalogue(tmp_path):
     facade = _CapabilityFacade(capabilities=[_browser_registration()])
     facade.capabilities["instance_id"] = "HASHI2"

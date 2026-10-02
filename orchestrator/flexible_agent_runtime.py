@@ -5453,6 +5453,7 @@ class FlexibleAgentRuntime:
         if not self._is_authorized_user(update.effective_user.id):
             return
         async def reply_browser_status():
+            connected_browsers = []
             secrets = getattr(self.backend_manager, "secrets", {}) or {}
             secrets_path = getattr(getattr(self, "global_config", None), "secrets_path", None)
             if secrets_path:
@@ -5480,6 +5481,11 @@ class FlexibleAgentRuntime:
                         and item.get("capability_kind") == "browser_control"
                         for item in capability_status.get("capabilities") or []
                     )
+                    connected_browsers = [
+                        item for item in capability_status.get("capabilities") or []
+                        if isinstance(item, dict)
+                        and item.get("capability_kind") == "browser_control"
+                    ]
                 except Exception as e:
                     self.logger.warning(
                         "Failed to refresh Browser Control capability status: %s",
@@ -5501,6 +5507,7 @@ class FlexibleAgentRuntime:
                     active_backend=active_backend,
                     brave_configured=bool(secrets.get("brave_api_key")),
                     extension_bridge_configured=extension_bridge_configured,
+                    connected_browsers=connected_browsers,
                 ),
                 parse_mode="HTML",
             )

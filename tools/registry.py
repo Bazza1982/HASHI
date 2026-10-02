@@ -458,6 +458,30 @@ class ToolRegistry:
             for name in ALL_TOOL_NAMES
             if name in available
         ]
+        if any(item["function"]["name"].startswith("browser_") for item in definitions):
+            snapshot = self._capability_status_snapshot() or {}
+            browsers = [
+                row for row in snapshot.get("capabilities") or []
+                if isinstance(row, dict)
+                and row.get("capability_kind") == "browser_control"
+                and isinstance(row.get("expires_at"), (int, float))
+                and row["expires_at"] > time.time()
+            ]
+            choices = ", ".join(
+                f"{row.get('browser_name') or 'Browser'} "
+                f"[{row.get('browser_id') or row.get('capability_id')}]"
+                for row in browsers
+            )
+            if choices:
+                for definition in definitions:
+                    function = definition.get("function") or {}
+                    if str(function.get("name") or "").startswith("browser_"):
+                        function["description"] = (
+                            str(function.get("description") or "").rstrip()
+                            + f" Connected browser choices: {choices}. "
+                            "If the user did not specify a browser, omit browser_target; "
+                            "HASHI selects one and keeps it for this task."
+                        )
         if unavailable_browser:
             for definition in definitions:
                 function = definition.get("function") or {}
@@ -524,7 +548,9 @@ class ToolRegistry:
         status = self._capability_status_snapshot()
         if status is None:
             return {"available": True, "source": "standalone_legacy_executor"}
-        if self._function_worker_capability_facade() is None:
+        proxy = self._effective_audit_context().get("browser_gateway_proxy")
+        gateway_browser = kind == "browser_control" and isinstance(proxy, dict)
+        if self._function_worker_capability_facade() is None and not gateway_browser:
             return {
                 "available": False,
                 "code": "capability_unavailable",
@@ -614,6 +640,13 @@ class ToolRegistry:
             return None
         if reason:
             availability["reason"] = reason
+        if reason == "bound_browser_disconnected":
+            availability["next_step"] = (
+                "Reconnect the selected browser and retry, or start a new "
+                "browser task to choose another connected browser."
+            )
+        elif reason == "requested_browser_not_connected":
+            availability["next_step"] = "Choose a connected browser target shown by HASHI."
         return ToolResult(
             tool_call_id=tool_call_id,
             output=(
@@ -927,28 +960,46 @@ class ToolRegistry:
                 )
             )
             if unavailable_type and _device_tool_requirement(tool_name) is not None:
+                broker_reason = next(
+                    (
+                        code for code in (
+                            "requested_browser_not_connected",
+                            "bound_browser_disconnected",
+                        )
+                        if code in str(e)
+                    ),
+                    "disappeared_before_execution",
+                )
                 result = self._capability_unavailable_result(
                     tool_name,
                     tool_call_id=effective_call_id,
-                    reason="disappeared_before_execution",
+                    reason=broker_reason,
                 )
                 if result is None:
                     # The catalogue may already contain a newly recovered
                     # registration; the failed invocation remains unavailable.
                     kind, action = _device_tool_requirement(tool_name) or ("device", "action")
+                    next_step = (
+                        "Reconnect the selected browser and retry, or start a new "
+                        "browser task to choose another connected browser."
+                        if broker_reason == "bound_browser_disconnected"
+                        else "Choose a connected browser target shown by HASHI."
+                        if broker_reason == "requested_browser_not_connected"
+                        else "Refresh the capability catalogue and choose another tool."
+                    )
                     result = ToolResult(
                         tool_call_id=effective_call_id,
                         output=(
                             "Error: capability_unavailable: "
-                            f"{kind}/{action} disappeared before execution. "
-                            "Refresh the capability catalogue and choose another tool."
+                            f"{kind}/{action} failed ({broker_reason}). "
+                            f"{next_step}"
                         ),
                         is_error=True,
                         details={
                             "available": False,
                             "code": "capability_unavailable",
-                            "reason": "disappeared_before_execution",
-                            "next_step": "Refresh the capability catalogue and choose another tool.",
+                            "reason": broker_reason,
+                            "next_step": next_step,
                             "capability_kind": kind,
                             "action": action,
                             "control_disposition": "unavailable",
@@ -1368,6 +1419,10 @@ class ToolRegistry:
             or f"tool-{uuid4().hex}"
         )
         payload = dict(arguments)
+        if capability_kind == "browser_control":
+            target = str(payload.pop("browser_target", "") or "").strip()
+            if target:
+                payload["_browser_target"] = target
         payload["_authorized_roots"] = [str(self.access_root)]
         result = await facade.invoke_capability(
             capability_kind,
@@ -1380,6 +1435,60 @@ class ToolRegistry:
         if isinstance(result, str):
             return result
         return json.dumps(result, ensure_ascii=False, sort_keys=True)
+
+    async def _dispatch_gateway_browser(
+        self, tool_name: str, arguments: dict, *, tool_call_id: str
+    ) -> str:
+        """Relay a CLI tool call to its owning Function Worker, then Core RPC."""
+        from urllib.parse import urlsplit
+
+        proxy = self._effective_audit_context().get("browser_gateway_proxy")
+        if not isinstance(proxy, dict):
+            return "Error: browser capability gateway is unavailable"
+        url = str(proxy.get("url") or "")
+        token = str(proxy.get("token") or "")
+        parsed = urlsplit(url)
+        if (
+            parsed.scheme != "http"
+            or parsed.hostname != "127.0.0.1"
+            or parsed.path != "/browser-tool"
+            or not parsed.port
+            or not token
+        ):
+            return "Error: browser capability gateway configuration is invalid"
+        payload = json.dumps(
+            {
+                "tool_name": tool_name,
+                "arguments": arguments,
+                "tool_call_id": tool_call_id,
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+
+        def request_proxy() -> str:
+            request = urllib_request.Request(
+                url,
+                data=payload,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            try:
+                with urllib_request.urlopen(request, timeout=80.0) as response:
+                    raw = response.read(48 * 1024 * 1024 + 1)
+                if len(raw) > 48 * 1024 * 1024:
+                    return "Error: browser capability result exceeds gateway limit"
+                result = json.loads(raw.decode("utf-8"))
+                output = str(result.get("output") or "")
+                if result.get("is_error") and not output.startswith("Error:"):
+                    return "Error: " + output
+                return output
+            except Exception as exc:
+                return f"Error: browser capability gateway failed ({type(exc).__name__})"
+
+        return await asyncio.to_thread(request_proxy)
 
     async def _dispatch(
         self,
@@ -1676,6 +1785,12 @@ class ToolRegistry:
                     "browser_control",
                     action,
                     browser_args,
+                    tool_call_id=tool_call_id,
+                )
+            if isinstance(self._effective_audit_context().get("browser_gateway_proxy"), dict):
+                return await self._dispatch_gateway_browser(
+                    tool_name,
+                    arguments,
                     tool_call_id=tool_call_id,
                 )
             browser_options = opts.get("browser", {})

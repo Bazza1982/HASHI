@@ -8,6 +8,25 @@ Decision date: 2026-09-04
 Scope: HASHI3 only until its implementation and live acceptance gates pass.
 Do not patch HASHI1 or HASHI2 from this plan.
 
+## HASHI4 browser route repair — 2026-10-02
+
+HASHI4's `/browser 4` uses the shared Browser Control capability for every
+backend. An isolated CLI Tool Gateway relays its request to its owning Agent
+Function Worker over a request-scoped, loopback-only authenticated proxy. The
+Function Worker repeats Tool Registry admission and invokes the existing Core
+Capability Broker. The gateway never opens the browser pipe or calls the device
+Worker directly. HERV3 uses the same Tool Registry and its existing Core RPC.
+
+Each browser registration advertises a browser ID/name. Chrome and Edge may
+register through separate native-host pipes and Browser Workers. Browser tools
+expose the connected choices and accept an optional `browser_target`. Without a
+user-specified target, the Broker selects any eligible browser and binds that
+Agent task to it. A later registration or disconnect does not switch the task
+silently; an explicit different target requires a new task. The Browser Worker
+rejects CDP routing and requires its registered extension, including when the
+bridge disconnects. Source and offline tests are separate from running
+generation adoption and live Chrome/Edge acceptance.
+
 ## Implementation update — 2026-09-05
 
 The architecture below is now implemented in HASHI3. Core capability

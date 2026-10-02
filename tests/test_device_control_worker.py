@@ -58,6 +58,38 @@ def _state(tmp_path: Path) -> DeviceWorkerState:
     return state
 
 
+@pytest.mark.asyncio
+async def test_browser_worker_stays_on_its_registered_extension(tmp_path, monkeypatch):
+    state = _state(tmp_path)
+    state.executor = None
+    observed = []
+
+    async def execute(_action, args):
+        observed.append(args)
+        return "ok"
+
+    monkeypatch.setattr(device_worker, "_execute_browser_action", execute)
+    with pytest.raises(DeviceWorkerError, match="cdp_url is not allowed"):
+        await state.execute("get_text", {"cdp_url": "http://127.0.0.1:9222"})
+    assert await state.execute("get_text", {"url": "https://example.test"}) == "ok"
+    assert observed[0]["bridge_backend"] == "extension"
+    assert observed[0]["_bound_browser_worker"] is True
+
+
+def test_browser_workers_have_distinct_registration_and_status_identity(tmp_path):
+    chrome = _state(tmp_path)
+    edge = _state(tmp_path)
+    chrome.browser_id = "chrome"
+    edge.browser_id = "edge"
+    edge.browser_name = "Microsoft Edge"
+    edge.bound_port = 49322
+    assert chrome.capability_id != edge.capability_id
+    assert chrome.status_path != edge.status_path
+    registration = device_worker._registration_payload(edge)
+    assert registration["browser_id"] == "edge"
+    assert registration["browser_name"] == "Microsoft Edge"
+
+
 def _write_bootstrap(
     tmp_path: Path,
     *,

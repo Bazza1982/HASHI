@@ -142,6 +142,8 @@ class CapabilityRegistration:
     authorization_key_id: str
     registered_at: float
     expires_at: float
+    browser_id: str = ""
+    browser_name: str = ""
 
     @classmethod
     def from_mapping(
@@ -205,6 +207,8 @@ class CapabilityRegistration:
             ),
             registered_at=current,
             expires_at=current + ttl,
+            browser_id=str(value.get("browser_id") or "").strip().casefold()[:80],
+            browser_name=str(value.get("browser_name") or "").strip()[:120],
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -258,6 +262,7 @@ class CapabilityBroker(ManualDesktopBroker):
         self._records: dict[str, tuple[CapabilityRegistration, str]] = {}
         self._leases: dict[str, ControlLease] = {}
         self._resource_leases: dict[tuple[str, str, str, str | None], str] = {}
+        self._browser_task_bindings: dict[tuple[str, str], tuple[str, float]] = {}
         self._bootstrap_token = ""
         self._registration_url = ""
         self._transport: Transport = self._http_transport
@@ -552,7 +557,9 @@ class CapabilityBroker(ManualDesktopBroker):
         window_id: str | None = None,
         ttl_seconds: float = DEFAULT_LEASE_TTL_SECONDS,
     ) -> ControlLease:
-        registration, _token = self._select(capability_kind, action=action)
+        registration, _token = self._select(
+            capability_kind, action=action, agent_id=agent_id, task_id=task_id
+        )
         return self.acquire_lease(
             registration,
             agent_id=agent_id,
@@ -620,6 +627,10 @@ class CapabilityBroker(ManualDesktopBroker):
 
     def cancel_agent(self, agent_id: str, *, reason: str = "agent-stopped") -> int:
         with self._lock:
+            self._browser_task_bindings = {
+                key: value for key, value in self._browser_task_bindings.items()
+                if key[0] != str(agent_id)
+            }
             matches = [
                 lease.lease_id
                 for lease in self._leases.values()
@@ -693,7 +704,6 @@ class CapabilityBroker(ManualDesktopBroker):
         timeout_seconds: float = 60.0,
         lease_id: str | None = None,
     ) -> Any:
-        registration, worker_token = self._select(capability_kind, action=action)
         normalized_action = _text(action, "action").casefold()
         if authorization not in {
             "tool_registry",
@@ -701,6 +711,15 @@ class CapabilityBroker(ManualDesktopBroker):
             "explicit_user_authorization",
         }:
             raise CapabilityBrokerError("device-control authorization is missing")
+        action_args = dict(args or {})
+        browser_target = str(action_args.pop("_browser_target", "") or "").strip()
+        registration, worker_token = self._select(
+            capability_kind,
+            action=action,
+            browser_target=browser_target,
+            agent_id=agent_id,
+            task_id=task_id,
+        )
         lease = None
         release_after_action = False
         # The current browser adapter may navigate while resolving any action
@@ -723,7 +742,7 @@ class CapabilityBroker(ManualDesktopBroker):
                     registration,
                     agent_id=agent_id,
                     task_id=task_id,
-                    window_id=(args or {}).get("window_id"),
+                    window_id=action_args.get("window_id"),
                 )
                 release_after_action = True
         correlation_id = str(request_id or "cap-" + uuid4().hex)
@@ -739,7 +758,7 @@ class CapabilityBroker(ManualDesktopBroker):
             "agent_id": _text(agent_id, "agent_id"),
             "task_id": _text(task_id, "task_id"),
             "action": normalized_action,
-            "args": dict(args or {}),
+            "args": action_args,
             "lease": lease.to_dict() if lease is not None else None,
         }
         started = time.perf_counter()
@@ -767,7 +786,7 @@ class CapabilityBroker(ManualDesktopBroker):
                 request_id=correlation_id,
                 agent_id=str(agent_id),
                 task_id=str(task_id),
-                argument_names=sorted(str(key) for key in (args or {})),
+                argument_names=sorted(str(key) for key in action_args),
                 duration_ms=round((time.perf_counter() - started) * 1000, 1),
                 ok=True,
             )
@@ -838,6 +857,9 @@ class CapabilityBroker(ManualDesktopBroker):
         capability_kind: str,
         *,
         action: str | None,
+        browser_target: str = "",
+        agent_id: str = "",
+        task_id: str = "",
     ) -> tuple[CapabilityRegistration, str]:
         with self._lock:
             self._prune()
@@ -857,6 +879,63 @@ class CapabilityBroker(ManualDesktopBroker):
                     kind,
                     action=normalized_action or None,
                 )
+            if kind == "browser_control" and agent_id and task_id:
+                def target_names(registration: CapabilityRegistration) -> set[str]:
+                    name = registration.browser_name.casefold()
+                    names = {
+                        registration.capability_id.casefold(),
+                        registration.browser_id.casefold(),
+                        name,
+                    }
+                    if "edge" in name:
+                        names.add("edge")
+                    elif "chrome" in name:
+                        names.add("chrome")
+                    return names
+
+                task_key = (str(agent_id), str(task_id))
+                bound = self._browser_task_bindings.get(task_key)
+                if bound is not None:
+                    bound_id = bound[0]
+                    bound_registration = next(
+                        (item[0] for item in candidates if item[0].capability_id == bound_id),
+                        None,
+                    )
+                    if browser_target and bound_registration is not None and (
+                        browser_target.casefold() not in target_names(bound_registration)
+                    ):
+                        raise CapabilityBrokerError(
+                            "browser target is fixed for this task; start a new task to switch"
+                        )
+                    for item in candidates:
+                        if item[0].capability_id == bound_id:
+                            self._browser_task_bindings[task_key] = (bound_id, time.time())
+                            return item
+                    raise CapabilityUnavailableError(
+                        kind, action=normalized_action or None,
+                        reason="bound_browser_disconnected",
+                    )
+                if browser_target:
+                    matches = [
+                        item for item in candidates
+                        if browser_target.casefold() in target_names(item[0])
+                    ]
+                    if not matches:
+                        raise CapabilityUnavailableError(
+                            kind, action=normalized_action or None,
+                            reason="requested_browser_not_connected",
+                        )
+                    if len(matches) > 1:
+                        raise CapabilityBrokerError(
+                            "browser target is ambiguous; use a capability_id"
+                        )
+                    selected = matches[0]
+                else:
+                    selected = sorted(candidates, key=lambda item: item[0].capability_id)[0]
+                self._browser_task_bindings[task_key] = (
+                    selected[0].capability_id, time.time()
+                )
+                return selected
             return sorted(
                 candidates,
                 key=lambda item: item[0].registered_at,
@@ -888,6 +967,10 @@ class CapabilityBroker(ManualDesktopBroker):
 
     def _prune(self) -> None:
         now = time.time()
+        self._browser_task_bindings = {
+            key: value for key, value in self._browser_task_bindings.items()
+            if now - value[1] < 24 * 60 * 60
+        }
         expired_capabilities = [
             capability_id
             for capability_id, (registration, _token) in self._records.items()

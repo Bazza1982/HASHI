@@ -1,5 +1,13 @@
 # HASHI Agent FYI
 
+2026-10-02 HASHI4 Browser route 4 source repair: fixed CLI Tool Gateways relay
+through their owning Function Worker and the existing Capability Broker. HERV3
+and CLI browser tools share discovery, permission checks, and task-bound browser
+selection. Multiple connected browsers are listed; when the user does not name
+one, try any connected browser and keep it for the task. Chrome/Edge use separate
+bridge endpoints. Offline validation is not running-generation or live acceptance.
+See [device control decision](HASHI_CROSS_PLATFORM_DEVICE_CONTROL_PLAN.md#hashi4-browser-route-repair--2026-10-02).
+
 2026-10-02 MCP/media repair: Codex inventory disables plugins consistently with
 execution, and trusted Telegram media and /long preserve ingress identity.
 See docs/HASHI_MCP_MEDIA_ROLLOUT_2026-10-02.md for source/adoption scope.
