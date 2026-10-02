@@ -257,10 +257,17 @@ class DesktopController:
 
     def _project(self, cached, after, sess, refresh_profile):
         meta = dict(cached["meta"])
-        meta["age_ms"] = round(max(0, self.clock()-sess.last_capture)*1000)
+        now = self.clock()
+        elapsed = max(0.0, now - sess.last_capture)
+        meta["age_ms"] = round(elapsed * 1000)
         meta["cursor"] = self.native.cursor()
         meta["control_active"] = self.owner is not None
-        meta["next_poll_ms"] = round(self._frame_interval(sess, refresh_profile, self.clock()) * 1000)
+        interval = self._frame_interval(sess, refresh_profile, now)
+        if refresh_profile == "ultra_smooth":
+            # The interval is measured between capture starts. The completed
+            # capture has already used part of that budget.
+            interval = max(0.0, interval - elapsed)
+        meta["next_poll_ms"] = round(interval * 1000)
         return {"meta": meta, "jpeg": None if after == meta["frame_id"] else base64.b64encode(cached["data"]).decode("ascii")}
 
     def _frame_interval(self, sess, profile, now):

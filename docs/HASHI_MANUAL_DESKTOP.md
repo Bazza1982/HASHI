@@ -108,7 +108,8 @@ second at no more than 1280x720 and 256 KiB per JPEG. The server spaces attempts
 by the previous frame size to target at most about 4 MiB/s of JPEG data per
 session under sequential polling; Remote/base64 and HTTP overhead add more wire
 traffic. It also spaces capture work to target no more than half of one Worker
-thread's time. After 0.5 seconds without a changed frame or input it drops to 10 FPS;
+thread's time. The returned wait subtracts time already spent capturing, so
+the budget is measured between capture starts. After 0.5 seconds without a changed frame or input it drops to 10 FPS;
 after two seconds it drops to 2 FPS. Hidden Workbench tabs poll at most once per
 second. Capture, encoding and network latency can reduce the delivered FPS, so
 30 FPS is a ceiling rather than a promise. The existing one-at-a-time capture

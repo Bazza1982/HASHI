@@ -141,7 +141,8 @@ def test_ultra_smooth_limits_capture_cpu_duty(desktop):
     native.capture = slow_capture
     first = c.frame('', 'session-a', 'ultra_smooth')
     assert first['meta']['age_ms'] >= 20
-    assert first['meta']['next_poll_ms'] >= 40
+    # Capture time already consumed half of the 40 ms start-to-start budget.
+    assert first['meta']['next_poll_ms'] == 20
     now[0] += .019
     c.frame(first['meta']['frame_id'], 'session-a', 'ultra_smooth')
     assert native.captures == 1
