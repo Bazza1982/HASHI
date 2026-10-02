@@ -35,16 +35,26 @@ paths before they are usable; no missing voice silently aliases to `default`.
 ## Isolated setup
 
 The Worker uses its own Python environment. Install
-`tools/voice_cascade_requirements.txt` there. Set a private
-`CASCADE_WORKER_TOKEN`, `CASCADE_TTS_MODEL` to the local Piper `.onnx` file, and
+`tools/voice_cascade_requirements.txt` there. Set
+`CASCADE_TTS_MODEL` to the local Piper `.onnx` file, and
 optionally `CASCADE_STT_MODEL` (default `small`) and `CASCADE_STT_LANGUAGE`
 (default automatic). Precache the recognition model: the Worker loads it with
 `local_files_only=True` and never downloads during a call. Additional voice
 models can use `CASCADE_TTS_MODEL_<VOICE_ID>` environment variables. Keep
-credentials and machine paths in instance configuration, never this repository.
+machine paths in instance configuration, never this repository.
 
-The HASHI-side adapter still needs an explicit cascade opt-in and the matching
-Worker token. No packages were installed into HASHI's protected interpreter.
+The HASHI-side adapter still needs an explicit cascade opt-in. No packages were
+installed into HASHI's protected interpreter.
+
+## HASHI1 local control update (2026-10-03)
+
+The experimental Worker and HASHI adapter no longer require a shared token.
+Phone call ownership remains enforced by HASHI's existing Agent and Session
+binding. The Worker is restricted to loopback hosts, and the adapter refuses
+nonlocal HTTP and WebSocket Worker URLs. This local-only control design replaces
+the token requirement described in the historical Gate 1 checkpoint. The
+running HASHI1 Function and Worker must adopt the source together before live
+calls can use it; source tests alone do not prove that adoption.
 
 ## Verification and remaining qualification
 

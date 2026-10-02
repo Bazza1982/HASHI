@@ -451,16 +451,14 @@ class CascadeSession:
 class VoiceCascadeWorker:
     def __init__(
         self,
-        token: str,
         host: str = "127.0.0.1",
         port: int = 8775,
         speech_engine: LocalCascadeSpeech | None = None,
         speech_required: bool = False,
         speech_engines: dict[str, LocalCascadeSpeech] | None = None,
     ):
-        if not isinstance(token, str) or not token.strip():
-            raise ValueError("CASCADE_WORKER_TOKEN must be configured")
-        self.token = token.strip()
+        if host not in {"127.0.0.1", "localhost", "::1"}:
+            raise ValueError("Voice Cascade Worker must bind to a loopback host")
         self.host = host
         self.port = port
         self.speech_engines = dict(speech_engines or {})
@@ -481,10 +479,6 @@ class VoiceCascadeWorker:
         self.app.router.add_post("/v1/sessions/{session_id}/simulate_speech", self.handle_simulate_speech)
         self.app.router.add_delete("/v1/sessions/{session_id}", self.handle_delete_session)
 
-    def _verify_auth(self, request: web.Request) -> bool:
-        auth = request.headers.get("Authorization", "")
-        return auth.startswith("Bearer ") and auth[7:].strip() == self.token
-
     async def handle_health(self, request: web.Request) -> web.Response:
         return web.json_response({
             "ok": True,
@@ -497,9 +491,6 @@ class VoiceCascadeWorker:
         })
 
     async def handle_create_session(self, request: web.Request) -> web.Response:
-        if not self._verify_auth(request):
-            return web.json_response({"error": "unauthorized"}, status=401)
-
         try:
             body = await request.json()
         except Exception:
@@ -590,9 +581,6 @@ class VoiceCascadeWorker:
         })
 
     async def handle_attach(self, request: web.Request) -> web.WebSocketResponse:
-        if not self._verify_auth(request):
-            return web.Response(status=401, text="unauthorized")
-
         session_id = request.match_info["session_id"]
         _LOGGER.info("Worker handle_attach entered for session_id=%s", session_id)
         session = self.sessions.get(session_id)
@@ -712,8 +700,6 @@ class VoiceCascadeWorker:
 
     async def handle_speech_started(self, request: web.Request) -> web.Response:
         """Endpoint to signal user speech started / barge-in event."""
-        if not self._verify_auth(request):
-            return web.json_response({"error": "unauthorized"}, status=401)
         session_id = request.match_info["session_id"]
         session = self.sessions.get(session_id)
         if not session:
@@ -722,8 +708,6 @@ class VoiceCascadeWorker:
         return web.json_response({"ok": True, "output_generation": new_gen, "gate_closed": True})
 
     async def handle_interrupt(self, request: web.Request) -> web.Response:
-        if not self._verify_auth(request):
-            return web.json_response({"error": "unauthorized"}, status=401)
         session_id = request.match_info["session_id"]
         session = self.sessions.get(session_id)
         if not session:
@@ -732,8 +716,6 @@ class VoiceCascadeWorker:
         return web.json_response({"ok": True, "output_generation": new_gen})
 
     async def handle_speak(self, request: web.Request) -> web.Response:
-        if not self._verify_auth(request):
-            return web.json_response({"error": "unauthorized"}, status=401)
         session_id = request.match_info["session_id"]
         session = self.sessions.get(session_id)
         if not session:
@@ -748,8 +730,6 @@ class VoiceCascadeWorker:
         })
 
     async def handle_simulate_speech(self, request: web.Request) -> web.Response:
-        if not self._verify_auth(request):
-            return web.json_response({"error": "unauthorized"}, status=401)
         session_id = request.match_info["session_id"]
         session = self.sessions.get(session_id)
         if not session:
@@ -760,8 +740,6 @@ class VoiceCascadeWorker:
         return web.json_response({"ok": True, "simulated": text})
 
     async def handle_delete_session(self, request: web.Request) -> web.Response:
-        if not self._verify_auth(request):
-            return web.json_response({"error": "unauthorized"}, status=401)
         session_id = request.match_info["session_id"]
         session = self.sessions.pop(session_id, None)
         if session:
@@ -769,8 +747,8 @@ class VoiceCascadeWorker:
         return web.json_response({"ok": True})
 
 
-def create_worker_app(token: str) -> web.Application:
-    worker = VoiceCascadeWorker(token=token)
+def create_worker_app() -> web.Application:
+    worker = VoiceCascadeWorker()
     return worker.app
 
 
@@ -778,7 +756,6 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     host = os.environ.get("CASCADE_WORKER_HOST", "127.0.0.1")
     port = int(os.environ.get("CASCADE_WORKER_PORT", "8775"))
-    token = os.environ.get("CASCADE_WORKER_TOKEN", "")
     speech_engines = {}
     for name, model in os.environ.items():
         if name == "CASCADE_TTS_MODEL" or name.startswith("CASCADE_TTS_MODEL_"):
@@ -793,7 +770,7 @@ if __name__ == "__main__":
         raise RuntimeError("CASCADE_TTS_MODEL must name an installed local voice model")
     for engine in speech_engines.values():
         engine.warmup()
-    worker = VoiceCascadeWorker(token=token, host=host, port=port,
+    worker = VoiceCascadeWorker(host=host, port=port,
                                 speech_engines=speech_engines, speech_required=True)
     print(f"Starting Voice Cascade Worker on http://{host}:{port}...", flush=True)
     web.run_app(worker.app, host=host, port=port)

@@ -69,20 +69,19 @@ def test_cascade_provider_capabilities_qualification():
 
 
 def test_cascade_provider_default_off_credential_rule(monkeypatch):
-    """Verify local-cascade is strictly default-off unless explicitly configured."""
+    """Verify local-cascade is opt-in and needs no local service token."""
     for name in ("CASCADE_ENABLED", "CASCADE_WORKER_URL", "CASCADE_WORKER_TOKEN"):
         monkeypatch.delenv(name, raising=False)
     provider = CascadeProvider()
-    # 1. Default empty secrets -> empty credential (disabled)
-    assert provider.credential({}) == ""
-    assert provider.credential({"openai_api_key": "sk-123"}) == ""
-
-    # 2. Enabling without a configured secret must not use a public default.
+    assert not provider.is_available({})
+    assert not provider.is_available({"openai_api_key": "sk-123"})
+    assert provider.is_available({"cascade_enabled": True})
     assert provider.credential({"cascade_enabled": True}) == ""
-    assert provider.credential({"cascade_enabled": True, "cascade_worker_token": "secret-tok"}) == "secret-tok"
-    assert provider.credential({"cascade_enabled": "false", "cascade_worker_token": "secret-tok"}) == ""
+    assert not provider.is_available({"cascade_enabled": "false"})
     monkeypatch.setenv("CASCADE_ENABLED", "false")
-    assert provider.credential({"cascade_worker_token": "secret-tok"}) == ""
+    assert not provider.is_available({})
+    monkeypatch.setenv("CASCADE_ENABLED", "true")
+    assert provider.is_available({})
 
 
 def test_cascade_provider_selection_validation():
@@ -275,13 +274,12 @@ def test_registry_resolution_and_isolation():
 @pytest.mark.asyncio
 async def test_worker_explicit_error_without_synthetic_fallback():
     """Verify worker returns explicit errors on invalid SDP or missing aiortc; no synthetic answer fallback."""
-    worker = VoiceCascadeWorker(token="test-token")
+    worker = VoiceCascadeWorker()
     async with TestClient(TestServer(worker.app)) as client:
         # 1. Invalid SDP offer returns HTTP 400
         resp = await client.post(
             "/v1/sessions",
             json={"sdp": "invalid-garbage-sdp"},
-            headers={"Authorization": "Bearer test-token"},
         )
         assert resp.status == 400
         data = await resp.json()
@@ -289,44 +287,49 @@ async def test_worker_explicit_error_without_synthetic_fallback():
 
 
 @pytest.mark.asyncio
-async def test_worker_auth_protection_on_all_endpoints():
-    """Verify all mutating endpoints require authentication and return 401 when token is missing/wrong."""
-    with pytest.raises(ValueError, match="CASCADE_WORKER_TOKEN"):
-        VoiceCascadeWorker(token="")
-    worker = VoiceCascadeWorker(token="secret-auth-token")
+async def test_worker_local_only_and_no_token_required():
+    """Local Worker accepts component calls without a token and rejects external binds."""
+    with pytest.raises(ValueError, match="loopback"):
+        VoiceCascadeWorker(host="0.0.0.0")
+    worker = VoiceCascadeWorker()
     async with TestClient(TestServer(worker.app)) as client:
-        # Create session unauthenticated
-        resp = await client.post("/v1/sessions", json={"sdp": "v=0\r\n"})
-        assert resp.status == 401
+        resp = await client.post("/v1/sessions", json={"sdp": "invalid"})
+        assert resp.status == 400
 
-        # Attach unauthenticated -> handshake rejected with 401
         with pytest.raises(aiohttp.client_exceptions.WSServerHandshakeError) as ws_err:
             await client.ws_connect("/v1/sessions/any-session/attach")
-        assert ws_err.value.status == 401
+        assert ws_err.value.status == 404
 
-        # Interrupt unauthenticated
         resp = await client.post("/v1/sessions/any-session/interrupt")
-        assert resp.status == 401
-        resp = await client.post("/v1/sessions/any-session/interrupt?token=secret-auth-token")
-        assert resp.status == 401
-
-        # Speech started unauthenticated
+        assert resp.status == 404
         resp = await client.post("/v1/sessions/any-session/speech_started")
-        assert resp.status == 401
-
-        # Speak unauthenticated
+        assert resp.status == 404
         resp = await client.post("/v1/sessions/any-session/speak", json={"text": "hello"})
-        assert resp.status == 401
-
-        # Delete session unauthenticated
+        assert resp.status == 404
         resp = await client.delete("/v1/sessions/any-session")
-        assert resp.status == 401
+        assert resp.status == 200
+
+
+@pytest.mark.asyncio
+async def test_cascade_provider_rejects_nonlocal_worker(monkeypatch):
+    """An unauthenticated Worker must not be configured across the network."""
+    provider = CascadeProvider()
+    monkeypatch.setenv("CASCADE_WORKER_URL", "http://example.com:8775")
+    assert not provider.is_available({"cascade_enabled": True})
+    with pytest.raises(LiveVoiceError, match="live_provider_endpoint_invalid"):
+        await provider.create(
+            object(), key="", sdp="v=0\r\n", instructions="", model="cascade-v1",
+            voice="default", input_messages=[], input_token_count_exact=0,
+        )
+    monkeypatch.setenv("CASCADE_WORKER_URL", "http://127.0.0.1:8775")
+    monkeypatch.setenv("CASCADE_WORKER_WS_URL", "ws://example.com:8775")
+    assert not provider.is_available({"cascade_enabled": True})
 
 
 @pytest.mark.asyncio
 async def test_sideband_reconnect_preserves_session():
     """Verify sideband websocket reconnect preserves the underlying session and resumes event delivery."""
-    worker = VoiceCascadeWorker(token="test-token")
+    worker = VoiceCascadeWorker()
     session = CascadeSession(
         session_id="reconnect-sess-1",
         sdp_offer="v=0\r\n",
@@ -340,7 +343,6 @@ async def test_sideband_reconnect_preserves_session():
         # 1. First connection
         ws1 = await client.ws_connect(
             f"/v1/sessions/{session.session_id}/attach",
-            headers={"Authorization": "Bearer test-token"},
         )
         msg1 = await ws1.receive_json()
         assert msg1["type"] == "session.started"
@@ -355,7 +357,6 @@ async def test_sideband_reconnect_preserves_session():
         # 3. Second connection (reconnect)
         ws2 = await client.ws_connect(
             f"/v1/sessions/{session.session_id}/attach",
-            headers={"Authorization": "Bearer test-token"},
         )
         msg2 = await ws2.receive_json()
         assert msg2["type"] == "session.started"
@@ -377,13 +378,12 @@ async def test_sideband_reconnect_preserves_session():
 
 @pytest.mark.asyncio
 async def test_context_updates_do_not_become_spoken_output():
-    worker = VoiceCascadeWorker(token="test-token")
+    worker = VoiceCascadeWorker()
     session = CascadeSession("private-context", "v=0", "test", "cascade-v1", "default")
     worker.sessions[session.session_id] = session
     async with TestClient(TestServer(worker.app)) as client:
         ws = await client.ws_connect(
             "/v1/sessions/private-context/attach",
-            headers={"Authorization": "Bearer test-token"},
         )
         await ws.receive_json()
         for kind in ("thinking", "instructions", "commentary"):
@@ -411,13 +411,12 @@ async def test_foreground_speech_is_rejected_while_caller_is_speaking():
         def synthesize_pcm48(self, _text):
             return b"\x01\x00" * 4800
 
-    worker = VoiceCascadeWorker(token="test-token", speech_engine=Speech())
+    worker = VoiceCascadeWorker(speech_engine=Speech())
     session = CascadeSession("caller-first", "v=0", "test", "cascade-v1", "default",
                              speech_engine=worker.speech_engines["default"])
     worker.sessions[session.session_id] = session
     async with TestClient(TestServer(worker.app)) as client:
-        ws = await client.ws_connect("/v1/sessions/caller-first/attach",
-                                     headers={"Authorization": "Bearer test-token"})
+        ws = await client.ws_connect("/v1/sessions/caller-first/attach")
         await ws.receive_json()
         await session.on_user_speech_started()
         assert (await ws.receive_json())["type"] == "session.output_gate.closed"
@@ -595,7 +594,7 @@ async def run():
     speech = LocalCascadeSpeech(stt_model='small', tts_model=MODEL, language='zh')
     speech.warmup()
     input_pcm = speech.synthesize_pcm48('你好，我在听。')
-    worker = VoiceCascadeWorker(token='turn-token', speech_engine=speech, speech_required=True)
+    worker = VoiceCascadeWorker(speech_engine=speech, speech_required=True)
     pc = RTCPeerConnection()
     pc.addTrack(SpokenTrack(input_pcm))
     channel = pc.createDataChannel('oai-events')
@@ -607,12 +606,10 @@ async def run():
     async with TestClient(TestServer(worker.app)) as client:
         await pc.setLocalDescription(await pc.createOffer())
         response = await client.post('/v1/sessions',
-            json={'sdp': pc.localDescription.sdp},
-            headers={'Authorization': 'Bearer turn-token'})
+            json={'sdp': pc.localDescription.sdp})
         assert response.status == 200, await response.text()
         body = await response.json()
-        ws = await client.ws_connect('/v1/sessions/' + body['provider_session_id'] + '/attach',
-            headers={'Authorization': 'Bearer turn-token'})
+        ws = await client.ws_connect('/v1/sessions/' + body['provider_session_id'] + '/attach')
         try:
             assert (await ws.receive_json())['type'] == 'session.started'
             await pc.setRemoteDescription(RTCSessionDescription(sdp=body['sdp_answer'], type='answer'))
@@ -691,7 +688,7 @@ async def run():
             assert text == 'spoken foreground reply'
             return b'\x10\x00' * (48000 * 3)
 
-    worker = VoiceCascadeWorker(token='worker-test-token', speech_engine=StubSpeech(), speech_required=True)
+    worker = VoiceCascadeWorker(speech_engine=StubSpeech(), speech_required=True)
     pc = RTCPeerConnection()
     source = AdjustableTrack()
     pc.addTrack(source)
@@ -714,13 +711,11 @@ async def run():
     async with TestClient(TestServer(worker.app)) as client:
         await pc.setLocalDescription(await pc.createOffer())
         response = await client.post('/v1/sessions',
-            json={'sdp': pc.localDescription.sdp},
-            headers={'Authorization': 'Bearer worker-test-token'})
+            json={'sdp': pc.localDescription.sdp})
         assert response.status == 200, await response.text()
         body = await response.json()
         session = worker.sessions[body['provider_session_id']]
-        ws = await client.ws_connect('/v1/sessions/' + session.session_id + '/attach',
-            headers={'Authorization': 'Bearer worker-test-token'})
+        ws = await client.ws_connect('/v1/sessions/' + session.session_id + '/attach')
         assert (await ws.receive_json())['type'] == 'session.started'
         try:
             await pc.setRemoteDescription(RTCSessionDescription(
@@ -806,7 +801,6 @@ async def test_live_voice_manager_start_to_transcript_integration():
         env={
             **os.environ,
             "CASCADE_WORKER_PORT": str(port),
-            "CASCADE_WORKER_TOKEN": "integration-secret-token",
             "CASCADE_TTS_MODEL": str(tts_model),
         },
     )
@@ -844,10 +838,7 @@ async def test_live_voice_manager_start_to_transcript_integration():
         session_id = session_row["session_id"]
 
         cascade_provider = CascadeProvider()
-        secrets = {
-            "cascade_enabled": True,
-            "cascade_worker_token": "integration-secret-token",
-        }
+        secrets = {"cascade_enabled": True}
 
         # Setup phone session definition
         phone_def = {
@@ -949,7 +940,6 @@ async def test_live_voice_manager_start_to_transcript_integration():
             async with http.post(
                 f"http://127.0.0.1:{port}/v1/sessions/{provider_session_id}/simulate_speech",
                 json={"text": "这是测试说话的完整语音转录"},
-                headers={"Authorization": "Bearer integration-secret-token"},
             ) as resp:
                 assert resp.status == 200
 
@@ -1024,7 +1014,6 @@ async def test_live_voice_manager_start_to_transcript_integration():
         async with aiohttp.ClientSession() as http:
             async with http.post(
                 f"http://127.0.0.1:{port}/v1/sessions/{provider_session_id}/speech_started",
-                headers={"Authorization": "Bearer integration-secret-token"},
             ) as resp:
                 assert (await resp.json())["output_generation"] == 1
         mute = await manager._op_control("owner-1", {
@@ -1035,7 +1024,6 @@ async def test_live_voice_manager_start_to_transcript_integration():
             async with http.post(
                 f"http://127.0.0.1:{port}/v1/sessions/{provider_session_id}/simulate_speech",
                 json={"text": "第二个问题"},
-                headers={"Authorization": "Bearer integration-secret-token"},
             ) as resp:
                 assert resp.status == 200
         second_answered = False

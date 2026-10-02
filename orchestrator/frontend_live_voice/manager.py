@@ -303,7 +303,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
     def available(self) -> bool:
         if self._availability_override is not None:
             return self._availability_override
-        return self._feature_enabled and any(adapter.credential(self.secrets) for adapter in self.providers.values())
+        return self._feature_enabled and any(adapter.is_available(self.secrets) for adapter in self.providers.values())
 
     @available.setter
     def available(self, value: bool) -> None:
@@ -2845,7 +2845,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             "binding": {"instance_id": self.instance_id, "instance_generation": self.instance_generation,
                         "agent_id": agent_id, "session_id": session_id, "context_generation": generation},
             "foreground_call": foreground_call,
-            "capability": {"protocol_version": "1.0", "available": bool(self.available and phone and resolved_phone["adapter"].credential(self.secrets)),
+            "capability": {"protocol_version": "1.0", "available": bool(self.available and phone and resolved_phone["adapter"].is_available(self.secrets)),
                            "phone": phone, "configuration_error": configuration_error,
                            "media": resolved_phone["media"] if phone else None,
                            "heartbeat_interval_seconds": 10, "lease_expiry_seconds": 45,
@@ -2868,6 +2868,8 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             context_generation=expected["context_generation"],
         )
         adapter = phone_session["adapter"]
+        if not adapter.is_available(self.secrets):
+            raise LiveVoiceError("live_not_enabled", 503)
         key = adapter.credential(self.secrets)
         expected_phone_revision = str(payload.get("phone_revision") or "")
         if expected_phone_revision != phone_session["public"]["revision"]:
@@ -3183,6 +3185,8 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             frozen_selection=stored_selection,
         )
         adapter = phone_session["adapter"]
+        if not adapter.is_available(self.secrets):
+            raise LiveVoiceError("live_not_enabled", 503)
         key = adapter.credential(self.secrets)
         expected_revision = str(payload.get("phone_revision") or "")
         if expected_revision != str(phone_session["public"].get("revision") or ""):

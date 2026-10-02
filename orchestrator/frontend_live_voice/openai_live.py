@@ -415,6 +415,9 @@ class OpenAILiveProvider:
         import os
         return str(secrets.get("openai_api_key") or os.environ.get("OPENAI_API_KEY", "")).strip()
 
+    def is_available(self, secrets: Mapping[str, Any]) -> bool:
+        return bool(self.credential(secrets))
+
     def validate_selection(self, model: str, voice: str) -> None:
         if model != "gpt-live-1":
             raise LiveVoiceError("live_model_unqualified", 503)

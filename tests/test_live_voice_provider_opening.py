@@ -68,6 +68,9 @@ class AlternateProvider:
     def credential(self, secrets):
         return secrets.get("fixture_credential", "")
 
+    def is_available(self, secrets):
+        return bool(self.credential(secrets))
+
     def validate_selection(self, model, voice):
         if model != "fixture-speech" or voice != "fixture-voice":
             raise LiveVoiceError("fixture_selection_invalid")
@@ -304,6 +307,19 @@ class TestPhoneProviderOpening:
             if task is not None:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
+
+    async def test_selected_provider_must_be_enabled_even_when_another_is_ready(self):
+        self.manager.secrets = {"openai_api_key": "fixture-only"}
+        self.manager.providers["openai"] = OpenAILiveProvider()
+        assert self.manager.available
+        assert not self.adapter.is_available(self.manager.secrets)
+        with pytest.raises(LiveVoiceError) as error:
+            await self.manager._op_start("owner", {
+                **self.context["binding"], "phone_revision": "a" * 64,
+                "sdp": "v=0\r\n", "idempotency_key": "disabled-provider",
+            })
+        assert error.value.code == "live_not_enabled"
+        assert not self.adapter.created
 
     async def test_confirmed_continuous_silence_gets_only_one_opening_continuation(self):
         await self.start_call()

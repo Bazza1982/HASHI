@@ -45,7 +45,7 @@ Model/provider cards share one contract; chat-only models disclose that they hav
 
 ## UI, media, and Phone
 
-The optional `local-cascade` Phone provider has an experimental Gate 2 source checkpoint: local recognition and synthesis connect to the existing selected Agent's Phone judgment and action route. It stays out of the default qualified provider registry and requires an explicit Worker token and offline models. Sideband reconnect replays only a bounded in-memory gap; live Workbench device acceptance is pending. See [local cascade Gate 2](HASHI_PHONE_LOCAL_CASCADE_GATE2.md).
+The optional `local-cascade` Phone provider has an experimental Gate 2 source checkpoint: local recognition and synthesis connect to the existing selected Agent's Phone judgment and action route. It stays out of the default qualified provider registry and requires an explicit opt-in and offline models. HASHI1 source now uses a loopback-only Worker with no shared token; live adoption is pending. Sideband reconnect replays only a bounded in-memory gap; live Workbench device acceptance is pending. See [local cascade Gate 2](HASHI_PHONE_LOCAL_CASCADE_GATE2.md).
 
 Live Phone defaults on; a missing provider API key blocks calls and must be named in `/phone`. An explicit instance opt-out remains valid. The Agent's Phone settings and PCM readiness do not prove provider readiness.
 

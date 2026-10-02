@@ -11,7 +11,7 @@ import os
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from orchestrator.phone_catalog import CASCADE_VOICES
 from tools.token_tracker import estimate_tokens
@@ -26,6 +26,31 @@ from .provider import ProviderCapabilities
 
 DEFAULT_CASCADE_WORKER_URL = "http://127.0.0.1:8775"
 MAX_FRAME_BYTES = 262144
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def _local_worker_url(value: str, *, websocket: bool = False) -> str:
+    """Keep unauthenticated Worker control traffic on this machine."""
+    try:
+        parsed = urlsplit(value)
+    except ValueError as exc:
+        raise LiveVoiceError("live_provider_endpoint_invalid", 503) from exc
+    schemes = {"ws", "wss"} if websocket else {"http", "https"}
+    if (
+        parsed.scheme not in schemes
+        or parsed.hostname not in _LOOPBACK_HOSTS
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise LiveVoiceError("live_provider_endpoint_invalid", 503)
+    try:
+        parsed.port
+    except ValueError as exc:
+        raise LiveVoiceError("live_provider_endpoint_invalid", 503) from exc
+    return value.rstrip("/")
 
 
 def _normalise_input_messages(
@@ -91,17 +116,27 @@ class CascadeProvider:
         output_completion="unavailable",
     )
 
-    def credential(self, secrets: Mapping[str, Any]) -> str:
-        """Return non-empty credential only when local cascade is explicitly configured."""
+    def is_available(self, secrets: Mapping[str, Any]) -> bool:
+        """Local cascade is an explicit opt-in, independent of provider credentials."""
         env_enabled = os.environ.get("CASCADE_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
         configured_enabled = secrets.get("cascade_enabled")
         if isinstance(configured_enabled, str):
             configured_enabled = configured_enabled.strip().lower() in {"1", "true", "yes", "on"}
         enabled = bool(configured_enabled or env_enabled or os.environ.get("CASCADE_WORKER_URL"))
         if not enabled:
-            return ""
-        token = secrets.get("cascade_worker_token") or os.environ.get("CASCADE_WORKER_TOKEN")
-        return str(token or "").strip()
+            return False
+        try:
+            _local_worker_url(os.environ.get("CASCADE_WORKER_URL", DEFAULT_CASCADE_WORKER_URL))
+            ws_url = os.environ.get("CASCADE_WORKER_WS_URL")
+            if ws_url:
+                _local_worker_url(ws_url, websocket=True)
+        except LiveVoiceError:
+            return False
+        return True
+
+    def credential(self, secrets: Mapping[str, Any]) -> str:
+        """This local provider has no credential; the shared interface may pass an empty key."""
+        return ""
 
     def validate_selection(self, model: str, voice: str) -> None:
         if model != "cascade-v1":
@@ -190,14 +225,12 @@ class CascadeProvider:
         input_messages: Sequence[Mapping[str, Any]],
         input_token_count_exact: int,
     ) -> Mapping[str, Any]:
-        if not key:
-            raise LiveVoiceError("live_credential_unavailable", 503)
         if not isinstance(sdp, str) or not sdp.startswith("v=0") or len(sdp.encode("utf-8")) > 65536:
             raise LiveVoiceError("live_sdp_invalid")
         self.validate_selection(model, voice)
 
-        worker_url = os.environ.get("CASCADE_WORKER_URL", DEFAULT_CASCADE_WORKER_URL)
-        create_endpoint = f"{worker_url.rstrip('/')}/v1/sessions"
+        worker_url = _local_worker_url(os.environ.get("CASCADE_WORKER_URL", DEFAULT_CASCADE_WORKER_URL))
+        create_endpoint = f"{worker_url}/v1/sessions"
         payload = {
             "sdp": sdp,
             "instructions": instructions,
@@ -209,12 +242,9 @@ class CascadeProvider:
             async with http.post(
                 create_endpoint,
                 json=payload,
-                headers={"Authorization": f"Bearer {key}"},
                 allow_redirects=False,
                 timeout=10,
             ) as response:
-                if response.status == 401:
-                    raise LiveVoiceError("live_credential_invalid", 401)
                 if response.status in (400, 422):
                     raise LiveVoiceError("live_provider_create_rejected", 400)
                 if response.status not in (200, 201):
@@ -232,16 +262,14 @@ class CascadeProvider:
         return {"provider_session_id": session_id, "sdp_answer": answer_sdp}
 
     async def attach(self, http: Any, *, key: str, provider_session_id: str) -> Any:
-        if not key:
-            raise LiveVoiceError("live_credential_unavailable", 503)
-        worker_url = os.environ.get("CASCADE_WORKER_URL", DEFAULT_CASCADE_WORKER_URL)
+        worker_url = _local_worker_url(os.environ.get("CASCADE_WORKER_URL", DEFAULT_CASCADE_WORKER_URL))
         worker_ws_url = os.environ.get("CASCADE_WORKER_WS_URL") or (
             worker_url.replace("https://", "wss://", 1).replace("http://", "ws://", 1)
         )
-        target = f"{worker_ws_url.rstrip('/')}/v1/sessions/{quote(identifier(provider_session_id), safe='')}/attach"
+        worker_ws_url = _local_worker_url(worker_ws_url, websocket=True)
+        target = f"{worker_ws_url}/v1/sessions/{quote(identifier(provider_session_id), safe='')}/attach"
         return await http.ws_connect(
             target,
-            headers={"Authorization": f"Bearer {key}"},
             heartbeat=20,
             max_msg_size=MAX_FRAME_BYTES,
         )
