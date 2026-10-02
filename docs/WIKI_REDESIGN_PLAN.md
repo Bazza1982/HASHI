@@ -1,5 +1,10 @@
 # HASHI Wiki Organiser — Redesign Plan
 
+> Deployment update (2026-10-02): the production Lily Wiki writer moved to an
+> [independent Windows installation](LILY_MEMORY_WIKI_INDEPENDENCE_2026-10-02.md).
+> Historical HASHI Scheduler and model-backend details below describe the old
+> implementation and are not current operating instructions.
+
 **Version:** 2.2-draft
 **Author:** Lily (小蕾), reviewed by Ajiao (阿娇 @ HASHI2)
 **Date:** 2026-05-03
@@ -106,6 +111,13 @@ consolidated_memory.sqlite
 ```
 
 Each stage is a standalone Python module with a `run(config, logger)` entry point. The orchestrator `scripts/wiki/run_pipeline.py` calls them in sequence, manages the watermark, and writes a run report. The production trigger is Lily's HASHI cron job, not system crontab and not an external API service.
+
+Deployment correction (2026-10-02): the former Wiki was co-located with a HASHI
+checkout for convenient access to Lily's consolidated database, backend
+configuration, and Scheduler. The independent deployment now owns its code,
+environment, configuration, state, schedule, and vault publisher; it consumes a
+versioned, read-only memory input and completion evidence from PCM. The
+co-located runner described below is historical, not a current operating model.
 
 ---
 
@@ -324,6 +336,11 @@ failures must remain failures at the Function boundary and identify the local
 automation error. The wiki pipeline continues to trust only the dated embed
 completion event in the consolidation log and must stay fail-closed when that
 event is absent.
+
+Candidate promotion counts successful transitions into the promoted state.
+Repeated daily or segmented discovery runs must leave already-promoted private
+knowledge candidates and their review timestamps unchanged; otherwise the
+reported promotion count is inflated without adding knowledge.
 
 The shared PCM Functions evidence gate in
 `orchestrator/wiki_consolidation_evidence.py` owns that decision for local Wiki

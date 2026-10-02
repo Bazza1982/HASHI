@@ -173,3 +173,12 @@ Physical microphone/camera and hearing remain personal acceptance.
 
 
 Remaining Move/Scheduler/HCC and prior deployment notes are preserved in [October 9 history](AGENT_FYI_HISTORY_MEDIA_20261009.md). Historical deployment scopes grant no current authority.
+
+The Lily Wiki pipeline counts only newly promoted candidates. Repeated private
+knowledge promotion must not rewrite an already-promoted candidate or inflate
+the daily promotion total. Its dated consolidation scan and embed log remains
+the publication gate; a Scheduler trigger timestamp alone is insufficient.
+
+The legacy incoming bridge now checks every successful ACK field through the
+standalone importer's validator before it skips a previously delivered batch;
+inconsistent receipts fail closed and retain the old source batch.

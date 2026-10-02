@@ -1,5 +1,12 @@
 # Remote Memory Consolidation Rollout
 
+> Lily central import update (2026-10-02): its authoritative database, inbox,
+> import ACKs, and daily writer moved to the
+> [independent Windows installation](LILY_MEMORY_WIKI_INDEPENDENCE_2026-10-02.md).
+> The old HASHI4 commands below are retained as historical rollout examples;
+> remote sources may still use the old landing directory through a read-only
+> compatibility adapter until direct delivery changes separately.
+
 Status: implemented package baseline for `auto_vibe_code` superloop.
 
 ## Package Entry
@@ -68,12 +75,8 @@ place until Lily acknowledges import.
 
 - CPython 3.12.13 (approved HASHI Core runtime)
 - Python standard library only for the package entry itself
-- Optional: existing HASHI `scripts.wiki.fetcher` privacy helpers are reused
-  when available; otherwise the script falls back to conservative local checks.
-- Remote export and central import both run privacy filters. When full wiki
-  helpers are unavailable on a remote machine, the package uses built-in
-  conservative fallback patterns and Lily central import performs the full
-  privacy gate again.
+- Remote export and central import use the script's built-in privacy filter.
+  The result is the same whether or not the Wiki package is installed.
 
 No HASHI bot runtime, Telegram command registration, scheduler reload, or
 reboot is required to run export/import/sync directly.
@@ -116,10 +119,17 @@ Expected signal:
 On Lily PC:
 
 ```bash
+python3 scripts/remote_memory_consolidation.py --root /path/to/hashi promote-incoming --check
+python3 scripts/remote_memory_consolidation.py --root /path/to/hashi promote-incoming
 python3 scripts/remote_memory_consolidation.py --root /path/to/hashi import --check
-python3 scripts/remote_memory_consolidation.py --root /path/to/hashi import --dry-run
-python3 scripts/remote_memory_consolidation.py --root /path/to/hashi import
+python3 scripts/remote_memory_consolidation.py --root /path/to/hashi import --acknowledge --destination-instance-id HASHI4
 ```
+
+The legacy HASHI4 compatibility task used an installed script outside the
+mutable checkout and passed `--root` only for instance data and configuration.
+The independent Memory/Wiki installation now owns its executable path and
+schedule. Source pending batches remain untouched until an independently
+verified source-side acknowledgement.
 
 Accepted records are inserted into Lily's `consolidated_memory.sqlite` with:
 
