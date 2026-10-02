@@ -15,15 +15,17 @@ Computer Worker. No `CORE_SOURCE_PATHS` file is edited. No model/Agent Run is cr
    to `true` using the established revision-safe configuration workflow. Default is
    false. `HASHI_DESKTOP_ENABLED=1` is an optional process-local alternative.
 3. The existing ignored `secrets.json` MUST contain a nonempty
-   `workbench_admin_token`. Reuse the existing value. Do not overwrite the file or
-   add another pairing system. The existing authenticated Remote proxy injects
-   this token on its loopback Backend API hop.
+   `workbench_admin_token`. Reuse the existing value, or create a unique random
+   value for this instance through revision-safe configuration when absent.
+   Preserve every other secret and do not add another pairing system. The
+   authenticated Remote proxy injects this token on its loopback Backend API hop.
 4. Adopt the updated shared Functions using the instance's established hot adoption
    procedure. These are shared services, not merely one Agent's code. Source pull
    and running-generation adoption are distinct facts.
-5. Adopt the updated Remote process separately: its allowlist now forwards
-   `X-Desktop-Meta`, and an uncertain desktop write must not retry another loopback
-   address. Do not widen the existing Remote lifecycle scope.
+5. Adopt the updated Remote process separately: its allowlist forwards
+   `X-Desktop-Meta`. Remote verifies which local Backend API address belongs to
+   this instance before the first desktop request. An uncertain desktop write
+   never retries another address. Do not widen the Remote lifecycle scope.
 6. Update the Windows Computer Worker code root to this feature checkout. Run it
    once per logged-in Windows user, through the existing installer:
 

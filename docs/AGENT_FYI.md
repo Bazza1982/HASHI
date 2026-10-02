@@ -66,6 +66,6 @@ Use authorized capabilities only; device actions require a same-instance Worker.
 
 Isolated Tool routes must not advertise inaccessible Browser/Computer Workers. Untyped Codex exits report exit code, leave side effects unknown and forbid auto-retry. HASHI process-kill refuses its current Function and parent. These HASHI3 guards do not explain historical exits.
 
-Manual Desktop is opt-in; PAO leases the Windows Worker. Frames/input stay out of PCM/logs. Source, Remote, Worker and UI adoption need separate proof.
+Manual Desktop opts in. Remote probes local API before input; never retries uncertain writes. PAO leases Worker. Each process needs adoption proof.
 
 HASHI3 bounds text Tool output and rejects oversized text requests against declared Provider capacity. `/stop` blocks cross-Session autonomous wakeups until the next explicit user request; delays persist, completed background results remain in job records without replay. Terminal failure separates readback-confirmed writes from unverified actions and warns against blind retry. Offline source changes need Worker adoption proof.
