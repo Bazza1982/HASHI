@@ -1,5 +1,11 @@
 # HASHI Privacy Framework — Level 2 Design and Implementation Plan
 
+> **2026-10-02 decision update:** Level 2 is now planned for **HERV3 only**;
+> direct API engines and other outer backends will be unavailable at that
+> level. The engine-eligibility and UI examples below are historical and are
+> superseded by the [HERV3 feasibility pilot](HASHI_HERV3_PRIVACY_PILOT_2026-10-02.md).
+> `/privacy 2` remains unavailable until the remaining release gates pass.
+
 **Status:** design, initial WSL/Windows hardware validation, and Level 0/1
 control foundation complete  
 **Scope of this delivery:** six-level framework and Level 2 implementation plan  
