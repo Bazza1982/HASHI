@@ -14,7 +14,7 @@ import threading
 import time
 from collections import OrderedDict
 
-from orchestrator.desktop_contract import CONTROL_TTL, SESSION_TTL, DesktopError, fields, identifier, validate_input, view_options
+from orchestrator.desktop_contract import CONTROL_TTL, SESSION_TTL, DesktopError, fields, frame_interval_seconds, identifier, validate_input, view_options
 from tools.windows_helper.desktop_capture import fit_size, jpeg_bytes
 
 
@@ -140,8 +140,8 @@ class DesktopController:
         if operation == "desktop_view":
             return self._set_view(args, actor, session_id)
         if operation == "desktop_frame":
-            fields(args, {"after_frame"})
-            return self.frame(str(args.get("after_frame", "")), session_id)
+            fields(args, {"after_frame", "refresh_profile"})
+            return self.frame(str(args.get("after_frame", "")), session_id, args.get("refresh_profile", "standard"))
         if operation == "desktop_close":
             fields(args, set())
             with self.guard:
@@ -179,7 +179,8 @@ class DesktopController:
             return self.input(args["event"], actor, session_id, args["lease_id"])
         raise DesktopError("desktop_invalid_operation")
 
-    def frame(self, after, session_id):
+    def frame(self, after, session_id, refresh_profile="standard"):
+        frame_interval_seconds(refresh_profile, idle=False)
         if not self.capture_guard.acquire(blocking=False):
             raise DesktopError("desktop_capture_busy", 429)
         try:
@@ -187,10 +188,12 @@ class DesktopController:
             with self.guard:
                 now = self.clock()
                 sess = self._get_session(session_id)
-                interval = 2.0 if now-max(sess.last_changed, self.last_input) > 10 else .5
+                interval = frame_interval_seconds(
+                    refresh_profile, idle=now-max(sess.last_changed, self.last_input) > 10
+                )
                 cached = sess.frame_cache
                 if cached and now-sess.last_capture < interval:
-                    return self._project(cached, after, sess)
+                    return self._project(cached, after, sess, refresh_profile)
                 rows, revision = self.native.displays()
                 if sess.view is None:
                     sess.view = view_options({"display_id": rows[0]["id"]})
@@ -239,16 +242,17 @@ class DesktopController:
                 sess.frame_history.move_to_end(frame_id)
                 while len(sess.frame_history) > 8: sess.frame_history.popitem(last=False)
                 sess.frame_cache = {"meta": meta, "digest": digest, "data": data}
-                return self._project(sess.frame_cache, after, sess)
+                return self._project(sess.frame_cache, after, sess, refresh_profile)
         finally:
             self.capture_guard.release()
 
-    def _project(self, cached, after, sess):
+    def _project(self, cached, after, sess, refresh_profile):
         meta = dict(cached["meta"])
         meta["age_ms"] = round(max(0, self.clock()-sess.last_capture)*1000)
         meta["cursor"] = self.native.cursor()
         meta["control_active"] = self.owner is not None
-        meta["next_poll_ms"] = 2000 if self.clock()-max(sess.last_changed, self.last_input) > 10 else 500
+        idle = self.clock()-max(sess.last_changed, self.last_input) > 10
+        meta["next_poll_ms"] = round(frame_interval_seconds(refresh_profile, idle=idle) * 1000)
         return {"meta": meta, "jpeg": None if after == meta["frame_id"] else base64.b64encode(cached["data"]).decode("ascii")}
 
     def input(self, value, actor, session_id, lease_id):

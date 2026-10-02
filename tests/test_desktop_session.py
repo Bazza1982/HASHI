@@ -73,6 +73,27 @@ def test_preview_is_bounded_shared_and_memory_only(desktop, tmp_path):
     c.frame('', 'session-a'); assert n.captures==3
 
 
+def test_smooth_refresh_is_opt_in_and_returns_to_idle_rate(desktop):
+    c, native, now = desktop
+    first = c.handle('desktop_frame', {}, 'owner-a', 'session-a')
+    assert first['meta']['next_poll_ms'] == 500
+    now[0] += .09
+    standard = c.handle('desktop_frame', {}, 'owner-a', 'session-a')
+    assert native.captures == 1 and standard['meta']['frame_id'] == first['meta']['frame_id']
+
+    smooth = c.handle('desktop_frame', {'refresh_profile': 'smooth'}, 'owner-a', 'session-a')
+    assert native.captures == 2 and smooth['meta']['next_poll_ms'] == 50
+    now[0] += .04
+    c.handle('desktop_frame', {'refresh_profile': 'smooth'}, 'owner-a', 'session-a')
+    assert native.captures == 2
+
+    now[0] += 11
+    idle = c.handle('desktop_frame', {'refresh_profile': 'smooth'}, 'owner-a', 'session-a')
+    assert idle['meta']['next_poll_ms'] == 500
+    with pytest.raises(DesktopError, match='refresh_profile'):
+        c.handle('desktop_frame', {'refresh_profile': 'unbounded'}, 'owner-a', 'session-a')
+
+
 def test_capture_limit_and_output_size():
     assert fit_size(3840,2160)==(1600,900)
     assert fit_size(2560,1440,True)==(1280,720)
@@ -222,11 +243,12 @@ async def test_real_http_route_relays_frame_and_input_receipt(desktop,tmp_path,m
         targets=await (await call('targets')).json()
         opened=await (await call('open',target=targets['targets'][0])).json()
         sid=opened['session_id']
-        frame=await call('frame',session_id=sid)
+        frame=await call('frame',session_id=sid,refresh_profile='smooth')
         assert frame.status==200 and frame.content_type=='image/jpeg'
         assert (await frame.read()).startswith(b'\xff\xd8')
         import json
         meta=json.loads(frame.headers['X-Desktop-Meta'])
+        assert meta['next_poll_ms'] == 50
         same=await call('frame',session_id=sid,after_frame=meta['frame_id'])
         assert same.status==204 and 'X-Desktop-Meta' in same.headers
         lease=await (await call('control',session_id=sid,mode='acquire')).json()

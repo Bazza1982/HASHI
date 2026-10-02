@@ -35,7 +35,7 @@ class DesktopSessionService:
         return broker
 
     async def run(self, owner, body):
-        b = fields(body, {"operation", "client_id", "session_id", "target", "options", "after_frame", "mode", "lease_id", "event"}, {"operation", "client_id"})
+        b = fields(body, {"operation", "client_id", "session_id", "target", "options", "after_frame", "refresh_profile", "mode", "lease_id", "event"}, {"operation", "client_id"})
         client = identifier(b["client_id"], "client")
         op = b["operation"]
         for key, record in list(self.sessions.items()):
@@ -63,7 +63,9 @@ class DesktopSessionService:
         record.expires = self.clock()+SESSION_TTL
         mapping = {"frame": "desktop_frame", "control": "desktop_control", "input": "desktop_input", "view": "desktop_view", "close": "desktop_close"}
         if op not in mapping: raise DesktopError("desktop_invalid_operation")
-        if op == "frame": args = {"after_frame": str(b.get("after_frame", ""))[:160]}
+        if op == "frame":
+            args = {"after_frame": str(b.get("after_frame", ""))[:160]}
+            if "refresh_profile" in b: args["refresh_profile"] = b["refresh_profile"]
         elif op == "view": args = view_options(b.get("options"))
         elif op == "input": args = {"lease_id": identifier(b.get("lease_id"), "lease"), "event": validate_input(b.get("event"))}
         elif op == "control":

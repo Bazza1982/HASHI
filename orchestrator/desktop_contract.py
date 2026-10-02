@@ -12,6 +12,7 @@ MAX_FRAME_BYTES = 512 * 1024
 MAX_TEXT = 4096
 CONTROL_TTL = 8.0
 SESSION_TTL = 60.0
+FRAME_INTERVAL_SECONDS = {"standard": (0.5, 2.0), "smooth": (1 / 20, 0.5)}
 ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$")
 
 
@@ -43,6 +44,12 @@ def unit(value) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 1:
         raise DesktopError("desktop_invalid_coordinate")
     return float(value)
+
+
+def frame_interval_seconds(profile, *, idle: bool) -> float:
+    if not isinstance(profile, str) or profile not in FRAME_INTERVAL_SECONDS:
+        raise DesktopError("desktop_invalid_refresh_profile")
+    return FRAME_INTERVAL_SECONDS[profile][int(idle)]
 
 
 def view_options(value) -> dict:

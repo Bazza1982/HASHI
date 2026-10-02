@@ -5,13 +5,13 @@ execution, and trusted Telegram media and /long preserve ingress identity.
 See docs/HASHI_MCP_MEDIA_ROLLOUT_2026-10-02.md for source/adoption scope.
 HASHI2 is outside this rollout.
 
-Orientation only; not a task queue, authorization, or live-adoption proof. /fyi reloads it. Current users and typed envelopes govern. Detailed rules: [AGENTS.md](../AGENTS.md), [Architecture](../ARCHITECTURE.md), [runtime boundaries](HASHI_LAYERED_RUNTIME_BOUNDARIES.md), [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md), [testing policy](TESTING_POLICY.md).
+Orientation only; not a task queue or proof of authority/adoption. /fyi reloads it. Current typed requests govern; see AGENTS.md, ARCHITECTURE.md, runtime boundaries, UI guide and testing policy.
 
 ## Authority and ownership
 
 PCM owns Persona, Context, Memory, authority and projections. PAO owns Agents, Sessions, Runs, jobs, Workzones, recovery and delivery. HERV3 owns Engine Turns, model/tool loop, Provider choice and cost. Frontend Connectors authenticate and render. Use the narrowest Function or configuration owner. Core has no product policy or imports. Protected Core requires explicit major-migration authorization, major bump, core-change-approved label and independent review; flags grant nothing.
 
-Source, commits, artifacts, running Workers and delivery need separate proof. Agent tools cannot alter live Core/Python, read secrets, kill Core or self-grant authority. /reboot min|same replaces one Agent Worker; max adopts shared Functions and Workers, leaving Core and Remote live. Check identity, generation, health, receipts, instance authority and idle window. Windows restart needs exact actuator and exit code; use process_is_alive.
+Source, running Workers and delivery need separate proof. Agent tools cannot edit live Core/Python, read secrets, kill Core or grant authority. /reboot min|same replaces one Worker; max adopts shared Functions and Workers, leaving Core and Remote live. Check identity, generation, receipts and idle window. Windows restart needs exact actuator and exit code.
 
 ## Configuration, identity, and persistence
 
@@ -71,6 +71,6 @@ Use authorized capabilities only; device actions require a same-instance Worker.
 
 Isolated Tool routes must not advertise inaccessible Browser/Computer Workers. Untyped Codex exits report exit code, leave side effects unknown and forbid auto-retry. HASHI process-kill refuses its current Function and parent. These HASHI3 guards do not explain historical exits.
 
-Manual Desktop opts in. Remote probes local API before input; never retries uncertain writes. PAO leases Worker. Each process needs adoption proof.
+Manual Desktop opts in. Standard peaks at 2 FPS; explicit Smooth permits up to 20 FPS and more bandwidth/CPU, backing off when idle. Remote probes local API before input and never retries uncertain writes. PAO leases Worker. Source, Function, Windows Worker and frontend adoption need separate proof.
 
-HASHI3 bounds text Tool output and rejects oversized text requests against declared Provider capacity. `/stop` blocks cross-Session autonomous wakeups until the next explicit user request; delays persist, completed background results remain in job records without replay. Terminal failure separates readback-confirmed writes from unverified actions and warns against blind retry. Offline source changes need Worker adoption proof.
+HASHI3 caps Tool text at Provider capacity. `/stop` blocks autonomous wakeups until an explicit request; completed background results stay in job records. Distinguish verified writes from uncertain effects; adopt offline changes before claiming live behavior.

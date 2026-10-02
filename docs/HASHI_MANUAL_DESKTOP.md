@@ -1,6 +1,7 @@
 # Manual Desktop v1 — Functions / Windows Worker
 
-Status: reviewed source integration; running adoption and Windows/external-client live acceptance pending.
+Status: Standard profile adopted on HASHI1 and exercised by the user. Smooth-profile
+source and offline validation are separate from running adoption and user acceptance.
 Prior feature baseline: `3004fb1799928506880b7ae3139edf8b96937625`.
 
 Functional owner: Frontend Connectors for the public desktop ingress/projection;
@@ -57,7 +58,8 @@ is tab correlation, not an authentication credential. Operations:
 - `targets`: sanitized Windows computer capabilities with all desktop actions.
 - `open`: an exact target including worker generation; server returns session ID
   and display metadata. No new OS login session is created.
-- `frame`: session ID and optional `after_frame`; returns `image/jpeg` or HTTP 204
+- `frame`: session ID, optional `after_frame`, and optional `refresh_profile=smooth`;
+  returns `image/jpeg` or HTTP 204
   when unchanged. `X-Desktop-Meta` holds bounded ASCII JSON, frame/view revisions,
   source rectangle, scaled size, cursor, check age and polling interval.
 - `view`: validated display, optional normalized crop and small-screen hint.
@@ -88,10 +90,19 @@ sessions without contact expire after 60 seconds and release their cached frames
 Quality starts at 75, with four bounded encoding attempts maximum. GDI captures/scales
 the selected monitor/region directly; no screenshot temp files. Capture/encoding
 uses the existing request worker thread, not Core/HTTP event loops. Concurrent frame
-requests do not start independent capture jobs. Active max 2 FPS, stable idle .5 FPS;
-no requests means no capturing. Full-resolution 4K frames are never transmitted.
+requests do not start independent capture jobs. The default Standard profile stays
+at up to 2 FPS while active and .5 FPS after ten seconds without a changed frame or
+remote input. Workbench's Save data choice polls Standard at up to 1 FPS.
+The explicit Smooth profile permits up to 20 FPS while active, then backs off to
+2 FPS after the same idle period. It is a bounded polling target, not a guaranteed
+display rate: capture, encoding and network latency can lower the effective rate.
+At the 512 KiB frame ceiling, continuously changing Smooth images can reach about
+10 MiB/s of JPEG data, plus transport overhead and greater CPU use. Client requests
+remain sequential; busy captures back off, and no requests means no capturing.
+Full-resolution 4K frames are never transmitted.
 
-Only pending mouse moves may be coalesced by clients. Input validation checks finite
+Only pending mouse moves may be coalesced by clients. Smooth flushes them at most
+every 33 ms, versus 100 ms in Standard and Save data. Input validation checks finite
 normalized coordinates, display revision, a recently checked frame, sequence and
 lease. Releases remain possible with expired frames. Displays are revalidated at
 input time. Unicode text uses SendInput, never clipboard sync. No command/shell/file
