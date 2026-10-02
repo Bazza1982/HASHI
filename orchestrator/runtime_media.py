@@ -476,9 +476,10 @@ async def handle_media_message(
             rendered_prompt,
             media_kind.lower(),
             summary,
-            request_metadata=_single_attachment_metadata(
-                request_content, manifest
-            ),
+            request_metadata={
+                **_single_attachment_metadata(request_content, manifest),
+                "ingress_transport": "telegram",
+            },
             request_content=request_content,
         )
     except Exception as e:
@@ -656,7 +657,10 @@ def _admit_native_telegram_audio(
             transport=transport,
             semantic_role=semantic_role,
         )
-        return content, manifest, _single_attachment_metadata(content, manifest)
+        return content, manifest, {
+            **_single_attachment_metadata(content, manifest),
+            "ingress_transport": "telegram",
+        }
 
     from orchestrator import runtime_session
 
@@ -1335,7 +1339,11 @@ async def handle_voice_or_audio(
                 f"{media_kind}: {filename}",
             ):
                 return
-            await runtime.enqueue_request(update.effective_chat.id, prompt, "voice_transcript", f"{media_kind}: {filename}")
+            await runtime.enqueue_request(
+                update.effective_chat.id, prompt, "voice_transcript",
+                f"{media_kind}: {filename}",
+                request_metadata={"ingress_transport": "telegram"},
+            )
     except Exception as e:
         runtime.error_logger.exception(f"{media_kind} voice handler failed for '{filename}': {e}")
         try:
@@ -1377,4 +1385,7 @@ async def handle_sticker(runtime: Any, update: Any, context: Any):
         transport_metadata=_transport_metadata(update, "sticker"),
     ):
         return
-    await runtime.enqueue_request(update.effective_chat.id, prompt, "sticker", summary)
+    await runtime.enqueue_request(
+        update.effective_chat.id, prompt, "sticker", summary,
+        request_metadata={"ingress_transport": "telegram"},
+    )

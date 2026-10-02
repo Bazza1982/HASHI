@@ -327,6 +327,28 @@ async def test_codex_mcp_inventory_starts_in_an_isolated_session(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("standalone_names", [[], ["github", "local-files"]])
+async def test_codex_mcp_inventory_excludes_disabled_plugin_servers(
+    tmp_path, monkeypatch, standalone_names
+):
+    adapter = _build_adapter(tmp_path)
+
+    async def create_subprocess(*argv, **kwargs):
+        names = list(standalone_names)
+        if not any(
+            argv[index:index + 2] == ("--disable", "plugins")
+            for index in range(len(argv) - 1)
+        ):
+            names.append("code-review")
+        return _CompletedProc(
+            stdout=json.dumps([{"name": name} for name in names]).encode()
+        )
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+    assert await adapter._discover_mcp_servers() == tuple(sorted(standalone_names))
+
+
+@pytest.mark.asyncio
 async def test_codex_mcp_inventory_retries_one_timeout_without_stale_fallback(
     tmp_path, monkeypatch
 ):

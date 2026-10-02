@@ -18,6 +18,10 @@ the authoritative rollout evidence and remaining gates are tracked in
 
 ## 1. Definition
 
+Trusted Telegram media handlers and `/long` submission carry explicit Telegram
+ingress metadata into admission. Media kinds such as photo, document, sticker,
+and multimodal describe content; they do not identify a frontend connector.
+
 Frontend Connectors expose HASHI to users and compatible clients without
 creating a second source of Agent, Session, Message, Run, Event, PCM, or Engine
 state. A Connector translates between one user-facing transport and the typed

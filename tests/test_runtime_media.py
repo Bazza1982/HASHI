@@ -118,6 +118,14 @@ def _runtime(tmp_path: Path):
         replies.append({"text": text, **kwargs})
 
     async def enqueue_request(chat_id, prompt, source, summary, **kwargs):
+        # Exercise the real admission boundary, not merely download/enqueue mocks.
+        from orchestrator.frontend_delivery import telegram_delivery_for_admission
+
+        assert telegram_delivery_for_admission(
+            source=source,
+            request_metadata=kwargs.get("request_metadata"),
+            state_root=tmp_path,
+        ) is True
         enqueued.append(
             {
                 "chat_id": chat_id,
@@ -385,6 +393,7 @@ async def test_handle_sticker_enqueues_reaction(tmp_path):
             "prompt": "User sent a sticker (emoji: ✨). React warmly.",
             "source": "sticker",
             "summary": "✨",
+            "request_metadata": {"ingress_transport": "telegram"},
         }
     ]
 

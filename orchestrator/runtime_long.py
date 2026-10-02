@@ -817,11 +817,12 @@ async def _finish_batch(runtime: Any, batch_id: str) -> None:
             f"(text_count={submission.text_count}, media_count={submission.media_count}, "
             f"receipt_count={len(submission.attachment_receipts)})"
         )
-    enqueue_kwargs = (
-        {"request_metadata": submission.request_metadata}
-        if submission.media_count
-        else {}
-    )
+    enqueue_kwargs = {
+        "request_metadata": {
+            **(submission.request_metadata if submission.media_count else {}),
+            "ingress_transport": "telegram",
+        }
+    }
     await runtime.enqueue_request(
         submission.chat_id,
         submission.prompt,
