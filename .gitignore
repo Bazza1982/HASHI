@@ -230,6 +230,8 @@ exp/barry/aonsw_data_analysis/
 
 # Local virtualenv symlink used by some checkouts (.venv -> .venv-wsl)
 .venv
+# Isolated, replaceable local PII detector runtime for Privacy Level 2.
+/.venv-privacy/
 
 # Root-level local credential/state backups (never commit)
 /agents.json.bak-*

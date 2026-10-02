@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -7,6 +8,7 @@ import pytest
 
 from orchestrator.privacy_levels import PrivacyLevel
 from orchestrator.runtime_privacy import (
+    _verify_level_two_detector,
     callback_privacy,
     cmd_privacy,
     privacy_status_text,
@@ -55,7 +57,7 @@ def test_privacy_status_explains_level_zero_and_default() -> None:
     assert "<b>Current</b> · <b>LEVEL 0</b> · Privacy Off" in status
     assert "Privacy framework bypassed" in status
     assert "Default: Level 1 — Provider Trust" in status
-    assert "🔒 2  Basic · one filter · API only" in status
+    assert "2  Trial · local PII masking · HERV3 only" in status
     assert "🔒 5  Local · nothing leaves the environment" in status
 
 
@@ -102,21 +104,55 @@ async def test_privacy_menu_uses_compact_two_column_level_buttons() -> None:
     assert kwargs["parse_mode"] == "HTML"
     assert [button.text for button in keyboard.inline_keyboard[0]] == ["0 · Off", "✓ 1 · Trust"]
     assert [button.text for button in keyboard.inline_keyboard[1]] == [
-        "🔒 2 · Basic",
+        "2 · Trial",
         "🔒 3 · Strict",
     ]
+    assert keyboard.inline_keyboard[1][0].callback_data == "privacy:set:2"
 
 
 @pytest.mark.asyncio
-async def test_privacy_level_two_is_visible_but_not_activatable_yet() -> None:
+async def test_privacy_level_two_requires_risk_acceptance() -> None:
     runtime = _runtime()
     runtime.config.active_backend = "openrouter-api"
 
     await cmd_privacy(runtime, _update(), SimpleNamespace(args=["2"]))
 
     message = runtime._reply_text.await_args.args[1]
-    assert "not available until its outbound protection is installed" in message
+    assert "Undetected PII may still be sent" in message
+    keyboard = runtime._reply_text.await_args.kwargs["reply_markup"]
+    assert keyboard.inline_keyboard[0][0].callback_data == "privacy:accept:2"
     assert runtime.backend_manager.privacy_level is PrivacyLevel.PROVIDER_TRUST
+
+    await callback_privacy(runtime, _callback_update("privacy:accept:2"), SimpleNamespace())
+    assert runtime.backend_manager.privacy_level is PrivacyLevel.PROVIDER_TRUST
+
+
+@pytest.mark.asyncio
+async def test_herv3_level_two_acceptance_activates_trial(monkeypatch) -> None:
+    runtime = _runtime()
+    runtime.config.active_backend = "her-v2"
+    update = _callback_update("privacy:accept:2")
+    detector_check = AsyncMock()
+    monkeypatch.setattr(
+        "orchestrator.runtime_privacy._verify_level_two_detector", detector_check
+    )
+
+    await callback_privacy(runtime, update, SimpleNamespace())
+
+    assert runtime.backend_manager.privacy_level is PrivacyLevel.BASIC_REDACTION
+    detector_check.assert_awaited_once()
+    message = update.callback_query.edit_message_text.await_args.args[0]
+    assert "Local PII Masking (Trial)" in message
+    assert "Detection can miss PII" in message
+
+
+@pytest.mark.platform
+@pytest.mark.asyncio
+async def test_level_two_readiness_uses_local_model() -> None:
+    if not os.getenv("HASHI_PRIVACY_FILTER_PYTHON"):
+        pytest.skip("isolated privacy model interpreter is not configured")
+
+    await _verify_level_two_detector()
 
 
 @pytest.mark.asyncio

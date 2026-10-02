@@ -2381,6 +2381,22 @@ class HashiStageProvider(StageProvider):
         self.usage_line_items: list[PerCallUsageLineItem] = []
         self._observed_provider_request_ids: set[str] = set()
 
+    def _create_provider_backend(self, engine: str, *, target_model: str):
+        if int(getattr(self.backend_manager, "privacy_level", 1)) == 2:
+            create_qualified = getattr(
+                self.backend_manager, "create_herv3_provider_backend", None
+            )
+            if not callable(create_qualified):
+                raise StageInvocationError(
+                    "HERV3 Level 2 Provider gate is unavailable",
+                    retryable=False,
+                    code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+                )
+            return create_qualified(engine, target_model=target_model)
+        return self.backend_manager.create_ephemeral_backend(
+            engine, target_model=target_model
+        )
+
     def bind_commentary_port(self, commentary: CommentaryPort | None) -> None:
         """Bind the typed Persona lane for provider-authored commentary."""
 
@@ -2506,7 +2522,7 @@ class HashiStageProvider(StageProvider):
             return dict(cached)
 
         try:
-            backend = self.backend_manager.create_ephemeral_backend(
+            backend = self._create_provider_backend(
                 profile.engine, target_model=profile.model
             )
         except Exception as exc:
@@ -3281,7 +3297,7 @@ class HashiStageProvider(StageProvider):
                     validation_source="runtime_voice_boundary",
                 )
         try:
-            backend = self.backend_manager.create_ephemeral_backend(
+            backend = self._create_provider_backend(
                 profile.engine, target_model=profile.model
             )
         except Exception as exc:
@@ -3470,8 +3486,6 @@ class HashiStageProvider(StageProvider):
             backend.tool_registry = selected_registry
         fallback_registry = selected_registry
         backend.privacy_level = self.backend_manager.privacy_level
-        if hasattr(backend, "_herv3_privacy_scope"):
-            backend._herv3_privacy_scope = True
         media_routing: tuple[dict[str, Any], ...] = ()
         provider_request_content = request.request_content
         media_preflight_error: StageInvocationError | None = None
@@ -4470,7 +4484,7 @@ class HashiStageProvider(StageProvider):
                     ).strip()
                     try:
                         fallback_backend = (
-                            self.backend_manager.create_ephemeral_backend(
+                            self._create_provider_backend(
                                 fallback_provider,
                                 target_model=fallback_model,
                             )
@@ -4491,8 +4505,6 @@ class HashiStageProvider(StageProvider):
                         fallback_backend.privacy_level = (
                             self.backend_manager.privacy_level
                         )
-                        if hasattr(fallback_backend, "_herv3_privacy_scope"):
-                            fallback_backend._herv3_privacy_scope = True
                         if hasattr(fallback_backend, "tool_registry"):
                             fallback_backend.tool_registry = None
                         if profile.reasoning is not None and hasattr(
@@ -5147,7 +5159,7 @@ class HashiStageProvider(StageProvider):
     ) -> str:
         backend = None
         try:
-            backend = self.backend_manager.create_ephemeral_backend(
+            backend = self._create_provider_backend(
                 profile.engine, target_model=profile.model
             )
             self._track_active_backend(backend)
@@ -5177,8 +5189,6 @@ class HashiStageProvider(StageProvider):
             if controls_tools:
                 backend.tool_registry = None
             backend.privacy_level = self.backend_manager.privacy_level
-            if hasattr(backend, "_herv3_privacy_scope"):
-                backend._herv3_privacy_scope = True
 
             async def _discard_stream(event: StreamEvent) -> None:
                 activity.record(

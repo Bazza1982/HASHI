@@ -1088,6 +1088,63 @@ async def test_compactor_does_not_require_capability_or_prompt_isolation_declara
 
 
 @pytest.mark.asyncio
+async def test_level_two_compactor_uses_only_qualified_herv3_provider(tmp_path):
+    runtime = _Runtime(tmp_path)
+    runtime.backend_manager.privacy_level = 2
+
+    class Backend:
+        def __init__(self):
+            self.config = SimpleNamespace(extra={})
+            self.tool_registry = object()
+            self.shutdown_calls = 0
+
+        async def initialize(self):
+            return True
+
+        async def generate_response(self, *_args, **_kwargs):
+            return BackendResponse(text="safe compact result", duration_ms=1)
+
+        async def shutdown(self):
+            self.shutdown_calls += 1
+
+    backend = Backend()
+    created = []
+
+    def qualified(engine, *, target_model):
+        created.append((engine, target_model))
+        return backend
+
+    runtime.backend_manager.create_herv3_provider_backend = qualified
+    runtime.backend_manager.create_ephemeral_backend = lambda *_args, **_kwargs: (
+        pytest.fail("direct Provider path used at privacy level 2")
+    )
+    route = resolve_compact_route(runtime)
+    request = CompactionRequest(
+        compaction_id="cmp-private",
+        request_ref="req-private",
+        trigger="test",
+        provider=route.provider,
+        model=route.model,
+        reasoning=route.reasoning,
+        her_effort=route.her_effort,
+        timeout_tier=route.timeout_tier,
+        deadline_s=1,
+        attempt=1,
+        source_digest="sha256:test",
+        source_segment_ids=("turn:1",),
+    )
+
+    response = await ContextCompactionCoordinator(runtime)._invoke_model(
+        route, request, "private compact system", "quoted source"
+    )
+
+    assert response.text == "safe compact result"
+    assert created == [(route.provider, route.model)]
+    assert backend.tool_registry is None
+    assert backend.shutdown_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_compactor_accounting_failure_is_terminal_and_backend_is_reaped(tmp_path):
     runtime = _Runtime(tmp_path)
 

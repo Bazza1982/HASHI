@@ -52,7 +52,7 @@ async def test_backend_catalogue_exposes_public_selectable_registry(tmp_path):
         "default_model": None,
         "efforts": [],
         "default_effort": None,
-        "privacy_levels": [0, 1],
+        "privacy_levels": [0, 1, 2],
         "providers": {
             "deepseek-api": {
                 "engine": "deepseek-api",
