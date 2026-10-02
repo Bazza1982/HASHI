@@ -1,7 +1,8 @@
 # Manual Desktop v1 — Functions / Windows Worker
 
-Status: Standard profile adopted on HASHI1 and exercised by the user. Smooth-profile
-source and offline validation are separate from running adoption and user acceptance.
+Status: Standard and Smooth are adopted on HASHI1; the user reports Smooth looks good.
+Ultra Smooth source, running adoption, measured performance and physical acceptance
+are tracked separately.
 Prior feature baseline: `3004fb1799928506880b7ae3139edf8b96937625`.
 
 Functional owner: Frontend Connectors for the public desktop ingress/projection;
@@ -58,7 +59,8 @@ is tab correlation, not an authentication credential. Operations:
 - `targets`: sanitized Windows computer capabilities with all desktop actions.
 - `open`: an exact target including worker generation; server returns session ID
   and display metadata. No new OS login session is created.
-- `frame`: session ID, optional `after_frame`, and optional `refresh_profile=smooth`;
+- `frame`: session ID, optional `after_frame`, and optional `refresh_profile=smooth`
+  or `refresh_profile=ultra_smooth`;
   returns `image/jpeg` or HTTP 204
   when unchanged. `X-Desktop-Meta` holds bounded ASCII JSON, frame/view revisions,
   source rectangle, scaled size, cursor, check age and polling interval.
@@ -101,8 +103,19 @@ At the 512 KiB frame ceiling, continuously changing Smooth images can reach abou
 remain sequential; busy captures back off, and no requests means no capturing.
 Full-resolution 4K frames are never transmitted.
 
-Only pending mouse moves may be coalesced by clients. Smooth flushes them at most
-every 33 ms, versus 100 ms in Standard and Save data. Input validation checks finite
+Ultra Smooth is an explicit motion-first choice: up to 30 capture attempts per
+second at no more than 1280x720 and 256 KiB per JPEG. The server spaces attempts
+by the previous frame size to target at most about 4 MiB/s of JPEG data per
+session under sequential polling; Remote/base64 and HTTP overhead add more wire
+traffic. It also spaces capture work to target no more than half of one Worker
+thread's time. After 0.5 seconds without a changed frame or input it drops to 10 FPS;
+after two seconds it drops to 2 FPS. Hidden Workbench tabs poll at most once per
+second. Capture, encoding and network latency can reduce the delivered FPS, so
+30 FPS is a ceiling rather than a promise. The existing one-at-a-time capture
+guard and session expiry also apply. Smooth remains the clearer 900p option.
+
+Only pending mouse moves may be coalesced by clients. Smooth and Ultra Smooth flush
+them at most every 33 ms, versus 100 ms in Standard and Save data. Input validation checks finite
 normalized coordinates, display revision, a recently checked frame, sequence and
 lease. Releases remain possible with expired frames. Displays are revalidated at
 input time. Unicode text uses SendInput, never clipboard sync. No command/shell/file

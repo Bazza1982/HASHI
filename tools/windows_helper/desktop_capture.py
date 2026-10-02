@@ -19,18 +19,35 @@ def fit_size(width, height, small=False):
     return max(1, round(width * scale)), max(1, round(height * scale))
 
 
-def jpeg_bytes(image):
+def jpeg_bytes(image, max_bytes=MAX_FRAME_BYTES):
     """Bounded work: at most four encodes, never loop until a byte target fits."""
+    if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or not 0 < max_bytes <= MAX_FRAME_BYTES:
+        raise DesktopError("desktop_invalid_size")
+    if max_bytes < MAX_FRAME_BYTES:
+        # Motion-first frames trade chroma detail for a smaller, predictable payload.
+        for quality in (70, 55):
+            out = io.BytesIO()
+            image.save(out, format="JPEG", quality=quality, subsampling=2, optimize=False)
+            if out.tell() <= max_bytes:
+                return out.getvalue()
+        for divisor, quality in ((4, 50), (2, 40)):
+            scaled = image.resize((max(1, image.width * (divisor - 1) // divisor),
+                                   max(1, image.height * (divisor - 1) // divisor)))
+            out = io.BytesIO()
+            scaled.save(out, format="JPEG", quality=quality, subsampling=2, optimize=False)
+            if out.tell() <= max_bytes:
+                return out.getvalue()
+        raise DesktopError("desktop_frame_too_large", 413)
     for quality in (75, 60, 45):
         out = io.BytesIO()
         image.save(out, format="JPEG", quality=quality, subsampling=0, optimize=False)
         data = out.getvalue()
-        if len(data) <= MAX_FRAME_BYTES:
+        if len(data) <= max_bytes:
             return data
     image = image.resize((max(1, image.width * 3 // 4), max(1, image.height * 3 // 4)))
     out = io.BytesIO()
     image.save(out, format="JPEG", quality=55, optimize=False)
-    if out.tell() > MAX_FRAME_BYTES:
+    if out.tell() > max_bytes:
         raise DesktopError("desktop_frame_too_large", 413)
     return out.getvalue()
 

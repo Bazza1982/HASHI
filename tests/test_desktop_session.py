@@ -13,7 +13,7 @@ from PIL import Image
 
 from orchestrator.capability_broker import CapabilityBroker, CapabilityRegistration, CapabilityLeaseConflict
 from orchestrator.desktop_api import DesktopSessionService, register_desktop_api
-from orchestrator.desktop_contract import ACTIONS, DesktopError, validate_input
+from orchestrator.desktop_contract import ACTIONS, DesktopError, ULTRA_FRAME_BYTES, validate_input
 from tools.desktop_session import DesktopController
 from tools.device_control_worker import _DeviceLock
 from tools.windows_helper.desktop_capture import fit_size, jpeg_bytes
@@ -94,12 +94,70 @@ def test_smooth_refresh_is_opt_in_and_returns_to_idle_rate(desktop):
         c.handle('desktop_frame', {'refresh_profile': 'unbounded'}, 'owner-a', 'session-a')
 
 
+def test_ultra_smooth_bounds_capture_rate_size_and_idle_work(desktop):
+    c, native, now = desktop
+    c.frame('', 'session-a')
+    ultra = c.frame('', 'session-a', 'ultra_smooth')
+    assert native.captures == 2
+    assert (ultra['meta']['width'], ultra['meta']['height']) == (1280, 720)
+    assert ultra['meta']['next_poll_ms'] == 33
+    assert len(base64.b64decode(ultra['jpeg'])) <= ULTRA_FRAME_BYTES
+    frame_id = ultra['meta']['frame_id']
+
+    now[0] += .025
+    with pytest.raises(DesktopError) as busy:
+        c.frame('', 'session-a', 'ultra_smooth')
+    assert busy.value.status == 429
+    c.frame(frame_id, 'session-a', 'ultra_smooth')
+    assert native.captures == 2
+    now[0] += .009
+    c.frame('', 'session-a', 'ultra_smooth')
+    assert native.captures == 3
+
+    c.sessions['session-a'].last_frame_bytes = ULTRA_FRAME_BYTES
+    assert c.frame(frame_id, 'session-a', 'ultra_smooth')['meta']['next_poll_ms'] >= 62
+    now[0] += .06
+    c.frame(frame_id, 'session-a', 'ultra_smooth')
+    assert native.captures == 3
+    now[0] += .01
+    c.frame('', 'session-a', 'ultra_smooth')
+    assert native.captures == 4
+
+    now[0] += .6
+    assert c.frame('', 'session-a', 'ultra_smooth')['meta']['next_poll_ms'] == 100
+    now[0] += 2.1
+    assert c.frame('', 'session-a', 'ultra_smooth')['meta']['next_poll_ms'] == 500
+
+
+def test_ultra_smooth_limits_capture_cpu_duty(desktop):
+    c, native, now = desktop
+    original_capture = native.capture
+
+    def slow_capture(rect, size):
+        image = original_capture(rect, size)
+        now[0] += .02
+        return image
+
+    native.capture = slow_capture
+    first = c.frame('', 'session-a', 'ultra_smooth')
+    assert first['meta']['age_ms'] >= 20
+    assert first['meta']['next_poll_ms'] >= 40
+    now[0] += .019
+    c.frame(first['meta']['frame_id'], 'session-a', 'ultra_smooth')
+    assert native.captures == 1
+    now[0] += .002
+    c.frame(first['meta']['frame_id'], 'session-a', 'ultra_smooth')
+    assert native.captures == 2
+
+
 def test_capture_limit_and_output_size():
     assert fit_size(3840,2160)==(1600,900)
     assert fit_size(2560,1440,True)==(1280,720)
     assert fit_size(600,900)==(600,900)
     data=jpeg_bytes(Image.effect_noise((1600,900),100).convert('RGB'))
     assert len(data)<=524288
+    ultra=jpeg_bytes(Image.effect_noise((1280,720),100).convert('RGB'), max_bytes=ULTRA_FRAME_BYTES)
+    assert len(ultra)<=ULTRA_FRAME_BYTES
 
 
 def test_coordinates_crop_and_replay_are_fenced(desktop):

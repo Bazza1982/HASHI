@@ -9,10 +9,12 @@ VERSION = 1
 ACTIONS = frozenset({"desktop_info", "desktop_frame", "desktop_view", "desktop_control", "desktop_input", "desktop_close"})
 PIN_FIELDS = ("instance_id", "capability_id", "device_id", "user_session_id", "worker_generation")
 MAX_FRAME_BYTES = 512 * 1024
+ULTRA_FRAME_BYTES = 256 * 1024
+ULTRA_BYTES_PER_SECOND = 4 * 1024 * 1024
 MAX_TEXT = 4096
 CONTROL_TTL = 8.0
 SESSION_TTL = 60.0
-FRAME_INTERVAL_SECONDS = {"standard": (0.5, 2.0), "smooth": (1 / 20, 0.5)}
+FRAME_INTERVAL_SECONDS = {"standard": (0.5, 2.0), "smooth": (1 / 20, 0.5), "ultra_smooth": (1 / 30, 0.5)}
 ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$")
 
 

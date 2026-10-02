@@ -14,7 +14,7 @@ import threading
 import time
 from collections import OrderedDict
 
-from orchestrator.desktop_contract import CONTROL_TTL, SESSION_TTL, DesktopError, fields, frame_interval_seconds, identifier, validate_input, view_options
+from orchestrator.desktop_contract import CONTROL_TTL, SESSION_TTL, MAX_FRAME_BYTES, ULTRA_BYTES_PER_SECOND, ULTRA_FRAME_BYTES, DesktopError, fields, frame_interval_seconds, identifier, validate_input, view_options
 from tools.windows_helper.desktop_capture import fit_size, jpeg_bytes
 
 
@@ -29,6 +29,9 @@ class SessionState:
         self.last_capture = -100.0
         self.last_changed = -100.0
         self.frames = 0
+        self.last_profile = None
+        self.last_frame_bytes = 0
+        self.last_work_seconds = 0.0
 
 
 class DesktopController:
@@ -188,11 +191,12 @@ class DesktopController:
             with self.guard:
                 now = self.clock()
                 sess = self._get_session(session_id)
-                interval = frame_interval_seconds(
-                    refresh_profile, idle=now-max(sess.last_changed, self.last_input) > 10
-                )
+                interval = self._frame_interval(sess, refresh_profile, now)
                 cached = sess.frame_cache
-                if cached and now-sess.last_capture < interval:
+                size_profile_changed = (sess.last_profile == "ultra_smooth") != (refresh_profile == "ultra_smooth")
+                if cached and not size_profile_changed and now-sess.last_capture < interval:
+                    if refresh_profile == "ultra_smooth" and after != cached["meta"]["frame_id"]:
+                        raise DesktopError("desktop_capture_busy", 429)
                     return self._project(cached, after, sess, refresh_profile)
                 rows, revision = self.native.displays()
                 if sess.view is None:
@@ -214,26 +218,31 @@ class DesktopController:
                         "width": max(1, min(display["width"]-x, round(c["width"]*display["width"]))),
                         "height": max(1, min(display["height"]-y, round(c["height"]*display["height"])))}
             # Encoding never holds the input lock. Sessions have independent views.
-            image = self.native.capture(rect, fit_size(rect["width"], rect["height"], view["small"]))
+            capture_at = self.clock()
+            image = self.native.capture(rect, fit_size(rect["width"], rect["height"], view["small"] or refresh_profile == "ultra_smooth"))
             digest = hashlib.blake2b(image.tobytes(), digest_size=16).hexdigest()
             with self.guard:
                 cached = sess.frame_cache
-                changed = not cached or cached["digest"] != digest or cached["meta"]["view_revision"] != view_revision
-            data = jpeg_bytes(image) if changed else cached["data"]
+                changed = not cached or cached["digest"] != digest or cached["meta"]["view_revision"] != view_revision or (cached["profile"] == "ultra_smooth") != (refresh_profile == "ultra_smooth")
+            data = jpeg_bytes(image, max_bytes=ULTRA_FRAME_BYTES if refresh_profile == "ultra_smooth" else MAX_FRAME_BYTES) if changed else cached["data"]
             if changed:
                 from PIL import Image
                 with Image.open(io.BytesIO(data)) as encoded: encoded_size = encoded.size
             else: encoded_size = cached["meta"]["width"], cached["meta"]["height"]
+            work_seconds = max(0.0, self.clock() - capture_at)
             with self.guard:
                 if self.sessions.get(session_id) is not sess:
                     raise DesktopError("desktop_session_expired", 410)
                 if view_revision != sess.view_revision:
                     raise DesktopError("desktop_view_changed", 409)
-                sess.last_capture = self.clock()
+                sess.last_capture = capture_at
+                sess.last_profile = refresh_profile
+                sess.last_work_seconds = work_seconds
                 if changed:
                     sess.frames += 1
-                    sess.last_changed = sess.last_capture
+                    sess.last_changed = capture_at
                 frame_id = f"frame-{view_revision}-{sess.frames}"
+                sess.last_frame_bytes = len(data) if after != frame_id else 0
                 meta = {"frame_id": frame_id, "view_revision": view_revision,
                         "display_revision": revision, "display_id": view["display_id"],
                         "width": encoded_size[0], "height": encoded_size[1], "rect": rect,
@@ -241,7 +250,7 @@ class DesktopController:
                 sess.frame_history[frame_id] = (sess.last_capture, rect, view_revision)
                 sess.frame_history.move_to_end(frame_id)
                 while len(sess.frame_history) > 8: sess.frame_history.popitem(last=False)
-                sess.frame_cache = {"meta": meta, "digest": digest, "data": data}
+                sess.frame_cache = {"meta": meta, "digest": digest, "data": data, "profile": refresh_profile}
                 return self._project(sess.frame_cache, after, sess, refresh_profile)
         finally:
             self.capture_guard.release()
@@ -251,9 +260,18 @@ class DesktopController:
         meta["age_ms"] = round(max(0, self.clock()-sess.last_capture)*1000)
         meta["cursor"] = self.native.cursor()
         meta["control_active"] = self.owner is not None
-        idle = self.clock()-max(sess.last_changed, self.last_input) > 10
-        meta["next_poll_ms"] = round(frame_interval_seconds(refresh_profile, idle=idle) * 1000)
+        meta["next_poll_ms"] = round(self._frame_interval(sess, refresh_profile, self.clock()) * 1000)
         return {"meta": meta, "jpeg": None if after == meta["frame_id"] else base64.b64encode(cached["data"]).decode("ascii")}
+
+    def _frame_interval(self, sess, profile, now):
+        inactive = now - max(sess.last_changed, self.last_input)
+        if profile == "ultra_smooth":
+            if inactive > 2:
+                return 0.5
+            if inactive > 0.5:
+                return 0.1
+            return max(frame_interval_seconds(profile, idle=False), sess.last_frame_bytes / ULTRA_BYTES_PER_SECOND, sess.last_work_seconds * 2)
+        return frame_interval_seconds(profile, idle=inactive > 10)
 
     def input(self, value, actor, session_id, lease_id):
         event = validate_input(value)
