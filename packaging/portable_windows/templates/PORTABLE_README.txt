@@ -156,3 +156,9 @@ Runtime profile / 运行配置
 
 For a 957 MB drive, use NTFS with the default 4 KiB allocation unit.
 957 MB USB 建议使用 NTFS 与默认 4 KiB 分配单元。
+The Level 2 local privacy detector is not on the USB image. After installation,
+run Enable_Privacy_Level2_On_This_PC.bat from the local HASHI folder as
+administrator with network access. A failed setup leaves Level 2 unavailable.
+957 MB U 盘镜像不含 Level 2 本地隐私检测模型。完成本机安装后，请从本机 HASHI
+文件夹以管理员身份运行 Enable_Privacy_Level2_On_This_PC.bat，并保持联网。
+安装失败时，Level 2 不可用。

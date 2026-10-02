@@ -205,6 +205,13 @@ function Initialize-PortableEnvironment {
     New-Item -ItemType Directory -Force -Path (Join-Path $script:DataRoot 'tmp') | Out-Null
 
     $env:BRIDGE_HOME = $script:DataRoot
+    Remove-Item Env:HASHI_PRIVACY_FILTER_SCRIPT -ErrorAction SilentlyContinue
+    $privacyPython = Join-Path $script:DataRoot 'state\runtimes\privacy\Scripts\python.exe'
+    if (Test-Path -LiteralPath $privacyPython -PathType Leaf) {
+        $env:HASHI_PRIVACY_FILTER_PYTHON = $privacyPython
+    } else {
+        Remove-Item Env:HASHI_PRIVACY_FILTER_PYTHON -ErrorAction SilentlyContinue
+    }
     $env:HASHI_REMOTE_ROOT = $script:DataRoot
     $env:HASHI_REMOTE_CONTROL_ROOT = $script:HashiRoot
     $env:HASHI_REMOTE_STATE_DIR = Join-Path $script:DataRoot 'state\remote'

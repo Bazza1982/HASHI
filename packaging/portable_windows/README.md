@@ -13,6 +13,15 @@ and clean configuration templates to:
 C:\HASHI-Portable\
 ```
 
+The 957 MB image does not bundle the large Level 2 PII detector. Once the
+local installation is complete, run
+`Enable_Privacy_Level2_On_This_PC.bat` from that local folder as administrator
+with network access. It creates and checks an isolated runtime in the local
+`data` tree. The launcher then selects that interpreter automatically. Repeat
+the check after a program update before relying on Level 2. If installation or
+readiness fails, Level 2 stays unavailable and its outbound gate fails closed.
+No privacy setting is enabled automatically.
+
 Copying uses a unique staging directory on the selected destination drive. The
 installer verifies the static program image against `SHA256SUMS.txt`, verifies
 mutable files against their authoritative source, writes an identity-bound

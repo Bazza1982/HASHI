@@ -6,11 +6,13 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
+const { preparedPrivacyPython } = require('./privacy-runtime');
 
 const HASHI_ROOT = __dirname;
 const PACKAGE = require(path.join(HASHI_ROOT, 'package.json'));
 const LOCK = path.join(HASHI_ROOT, 'constraints', 'standard-py312.lock');
 const RUNTIME_CHECK = path.join(HASHI_ROOT, 'scripts', 'check_runtime_contract.py');
+const PRIVACY_SETUP = path.join(HASHI_ROOT, 'scripts', 'provision_privacy_runtime.py');
 
 function dataRoot() {
   if (process.env.HASHI_DATA_ROOT) return path.resolve(process.env.HASHI_DATA_ROOT);
@@ -57,6 +59,51 @@ function preparedPython(buildRoot) {
   return process.platform === 'win32'
     ? path.join(buildRoot, 'Scripts', 'python.exe')
     : path.join(buildRoot, 'bin', 'python');
+}
+
+function preparePrivacy(base, versionRoot) {
+  if (process.env.HASHI_POSTINSTALL_NO_PRIVACY === '1') {
+    process.stdout.write('Level 2 privacy setup was skipped by request.\n');
+    return;
+  }
+  const pointer = path.join(versionRoot, 'privacy-active.json');
+  const active = preparedPrivacyPython(versionRoot, PACKAGE.version);
+  const ready = (python) => {
+    const runtimeDir = path.dirname(path.dirname(python));
+    const result = spawnSync(base.command, [
+      ...base.prefix, PRIVACY_SETUP, '--runtime-dir', runtimeDir, '--check',
+    ], { stdio: 'ignore', windowsHide: true, timeout: 120_000 });
+    return result.status === 0;
+  };
+  if (active && ready(active)) {
+    process.stdout.write('HASHI Level 2 privacy detector is ready.\n');
+    return;
+  }
+  const buildRoot = path.join(versionRoot, `privacy-${Date.now()}-${crypto.randomUUID()}`);
+  const install = spawnSync(base.command, [
+    ...base.prefix, PRIVACY_SETUP, '--runtime-dir', buildRoot,
+  ], { stdio: 'inherit', windowsHide: true, timeout: 960_000 });
+  const python = preparedPython(buildRoot);
+  if (install.status !== 0 || !ready(python)) {
+    safeRemoveBuild(versionRoot, buildRoot);
+    process.stderr.write('Level 2 privacy detector setup is incomplete; Level 2 remains unavailable.\n');
+    return;
+  }
+  atomicJson(pointer, {
+    schema_version: 1,
+    program_version: PACKAGE.version,
+    python,
+    prepared_at: new Date().toISOString(),
+  });
+  process.stdout.write('HASHI Level 2 privacy detector is ready.\n');
+}
+
+function tryPreparePrivacy(base, versionRoot) {
+  try {
+    preparePrivacy(base, versionRoot);
+  } catch (_) {
+    process.stderr.write('Level 2 privacy detector setup is incomplete; Level 2 remains unavailable.\n');
+  }
 }
 
 function atomicJson(target, payload) {
@@ -156,6 +203,7 @@ function main() {
       const candidate = { command: activePython, prefix: [] };
       if (checkRuntime(candidate, true)) {
         process.stdout.write(`✓ HASHI ${PACKAGE.version} isolated runtime is ready.\n`);
+        tryPreparePrivacy(base, versionRoot);
         process.stdout.write('No instance data was changed. Run `hashi` to create or select an instance.\n\n');
         return 0;
       }
@@ -195,6 +243,7 @@ function main() {
     prepared_at: new Date().toISOString(),
   });
   process.stdout.write(`✓ HASHI ${PACKAGE.version} isolated runtime is ready.\n`);
+  tryPreparePrivacy(base, versionRoot);
   process.stdout.write('No instance data was changed. Run `hashi` to create or select an instance.\n\n');
   return 0;
 }

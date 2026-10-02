@@ -36,6 +36,12 @@ Model and provider cards share one contract. Tool support is per model: chat-onl
 
 ## UI, media, and Phone
 
+Level 2 deployment uses `requirements-privacy.txt` in a separate interpreter.
+Source installs run `scripts/provision_privacy_runtime.py`; npm and enterprise
+builds prepare it automatically; the 957 MB Portable Windows image supplies a
+separate on-target installer. Readiness checks use synthetic PII, and setup
+does not activate `/privacy 2` or prove running Worker adoption.
+
 HASHI2's optional `local-cascade` Phone provider has an experimental Gate 2 source checkpoint: local recognition and synthesis connect to the existing selected Agent's Phone judgment and action route. It stays out of the default qualified provider registry and requires an explicit Worker token and offline models. Sideband reconnect replays only a bounded in-memory gap; live Workbench device acceptance is pending. See [local cascade Gate 2](HASHI_PHONE_LOCAL_CASCADE_GATE2.md).
 
 Live Phone defaults on; a missing provider API key blocks calls and must be named in `/phone`. An explicit instance opt-out remains valid. The Agent's Phone settings and PCM readiness do not prove provider readiness.
