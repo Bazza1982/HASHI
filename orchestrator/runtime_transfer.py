@@ -4,8 +4,10 @@ import asyncio
 import errno
 import json
 import socket
+import threading
 from datetime import datetime
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -29,6 +31,7 @@ from remote.security.shared_token import load_shared_token
 _TRANSFER_REDIRECT_ERROR_PREFIX = "HASHI_TRANSFER_REDIRECT_V1:"
 _BRIDGE_HANDOFF_CLIENT_TIMEOUT_SECONDS = 3600
 _MAX_REMOTE_HANDOFF_CANDIDATES = 8
+_MAX_TRANSFER_FENCE_BYTES = 64 * 1024
 _RETRYABLE_CONNECT_ERRNOS = {
     errno.ECONNREFUSED,
     errno.ECONNRESET,
@@ -75,8 +78,12 @@ def transfer_redirect_snapshot(runtime: Any) -> dict[str, str] | None:
 
     state = getattr(runtime, "_transfer_state", None)
     if not isinstance(state, Mapping):
+        if hasattr(runtime, "_transfer_state"):
+            return None
         metadata = getattr(runtime, "metadata", None)
-        if not isinstance(metadata, Mapping):
+        if not isinstance(metadata, Mapping) and getattr(
+            runtime, "is_function_worker_proxy", False
+        ):
             getter = getattr(runtime, "get_runtime_metadata", None)
             metadata = getter() if callable(getter) else None
         state = (
@@ -101,6 +108,97 @@ def transfer_redirect_snapshot(runtime: Any) -> dict[str, str] | None:
     if any(not value for value in snapshot.values()):
         return None
     return snapshot
+
+
+def _transfer_fence_path(runtime: Any) -> Path | None:
+    raw_path = getattr(runtime, "transfer_state_path", None)
+    if raw_path is None:
+        workspace_dir = getattr(runtime, "workspace_dir", None)
+        if workspace_dir is None:
+            return None
+        raw_path = Path(str(workspace_dir)) / "active_transfer.json"
+    path = Path(str(raw_path))
+    return path if path.is_absolute() else None
+
+
+def transfer_admission_lock(runtime: Any) -> Any:
+    """Return the per-runtime lock that linearizes fence flips and Run writes."""
+
+    lock = getattr(runtime, "_transfer_admission_lock", None)
+    if lock is None:
+        lock = threading.RLock()
+        runtime._transfer_admission_lock = lock
+    return lock
+
+
+def _unavailable_transfer_fence_snapshot(runtime: Any) -> dict[str, str]:
+    return {
+        "status": "unknown",
+        "transfer_id": "unknown",
+        "target_agent": str(getattr(runtime, "name", None) or "target"),
+        "target_instance": "unknown",
+    }
+
+
+def authoritative_transfer_redirect_snapshot(runtime: Any) -> dict[str, str] | None:
+    """Read the exact runtime fence when a worker metadata snapshot is stale.
+
+    A missing fence means no durable transfer fact.  Once the trusted runtime
+    workspace contains a fence, an unreadable or malformed value is kept
+    fail-closed instead of being confused with an absent transfer.
+    """
+
+    snapshot = transfer_redirect_snapshot(runtime)
+    if snapshot is not None:
+        return snapshot
+    path = _transfer_fence_path(runtime)
+    if path is None:
+        return None
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(_MAX_TRANSFER_FENCE_BYTES + 1)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return _unavailable_transfer_fence_snapshot(runtime)
+    if len(raw) > _MAX_TRANSFER_FENCE_BYTES:
+        return _unavailable_transfer_fence_snapshot(runtime)
+    try:
+        state = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+        return _unavailable_transfer_fence_snapshot(runtime)
+    if not isinstance(state, Mapping):
+        return _unavailable_transfer_fence_snapshot(runtime)
+    status = state.get("status")
+    outcome_unknown = state.get("outcome_unknown", False)
+    if (
+        status not in {"pending", "accepted", "unknown"}
+        or not isinstance(outcome_unknown, bool)
+        or any(
+            not isinstance(state.get(key), str) or not state.get(key).strip()
+            for key in ("transfer_id", "target_agent", "target_instance")
+        )
+    ):
+        return _unavailable_transfer_fence_snapshot(runtime)
+    holder = type("_TransferFenceProjection", (), {"_transfer_state": state})()
+    return transfer_redirect_snapshot(holder)
+
+
+def session_request_requires_transfer_fence(
+    request_content: Mapping[str, Any] | None,
+) -> bool:
+    """Keep the non-voice fence when any ordinary attachment is present."""
+
+    from orchestrator.multimodal_contract import attachment_manifest
+
+    manifest = attachment_manifest(request_content)
+    voice_attachments = [
+        item
+        for item in manifest
+        if item.get("modality") == "audio"
+        and item.get("semantic_role") == "voice_message"
+    ]
+    return not voice_attachments or len(voice_attachments) != len(manifest)
 
 
 def transfer_redirect_from_exception(exc: BaseException) -> dict[str, str] | None:
@@ -156,9 +254,10 @@ def persist_transfer_state(runtime: Any) -> None:
 
 
 def clear_transfer_state(runtime: Any) -> None:
-    runtime._transfer_state = None
-    runtime._suppressed_transfer_results.clear()
-    runtime._persist_transfer_state()
+    with transfer_admission_lock(runtime):
+        runtime._transfer_state = None
+        runtime._suppressed_transfer_results.clear()
+        runtime._persist_transfer_state()
 
 
 def record_transfer_outcome_unknown(
@@ -169,16 +268,36 @@ def record_transfer_outcome_unknown(
 ) -> None:
     """Preserve the pending fence and identity without claiming success or failure."""
 
-    state = getattr(runtime, "_transfer_state", None)
-    if not isinstance(state, dict) or str(state.get("transfer_id")) != str(
-        transfer_id
-    ):
-        raise ValueError("active transfer identity changed before unknown outcome")
-    state["status"] = "pending"
-    state["outcome_unknown"] = True
-    state["unknown_at"] = datetime.now().isoformat()
-    state["error"] = str(error)
-    runtime._persist_transfer_state()
+    with transfer_admission_lock(runtime):
+        state = getattr(runtime, "_transfer_state", None)
+        if not isinstance(state, dict) or str(state.get("transfer_id")) != str(
+            transfer_id
+        ):
+            raise ValueError("active transfer identity changed before unknown outcome")
+        state["status"] = "pending"
+        state["outcome_unknown"] = True
+        state["unknown_at"] = datetime.now().isoformat()
+        state["error"] = str(error)
+        runtime._persist_transfer_state()
+
+
+def record_transfer_accepted(
+    runtime: Any,
+    *,
+    transfer_id: str,
+    target_status: str,
+) -> None:
+    """Commit an accepted fence against the same boundary as Run admission."""
+
+    with transfer_admission_lock(runtime):
+        state = getattr(runtime, "_transfer_state", None)
+        if not isinstance(state, dict) or str(state.get("transfer_id")) != str(
+            transfer_id
+        ):
+            raise ValueError("active transfer identity changed before acceptance")
+        state["status"] = "accepted"
+        state["target_status"] = str(target_status)
+        runtime._persist_transfer_state()
 
 
 def has_active_transfer(runtime: Any) -> bool:

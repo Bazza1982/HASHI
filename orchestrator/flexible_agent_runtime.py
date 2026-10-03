@@ -340,6 +340,7 @@ class FlexibleAgentRuntime:
         self.project_chat_logger = ProjectChatLogger(self.workspace_dir)
         self.runtime_session_path = self.workspace_dir / ".runtime_session.json"
         self.transfer_state_path = self.workspace_dir / "active_transfer.json"
+        runtime_transfer.transfer_admission_lock(self)
         self._cos_enabled: bool = (self.workspace_dir / ".cos_on").exists()
         runtime_session.initialize_runtime_sessions(self)
         workzone_state = self.session_store.get_agent_workzone_set(
@@ -5150,9 +5151,11 @@ class FlexibleAgentRuntime:
 
         final_status = str(body.get("status") or "accepted")
         if action == "transfer":
-            self._transfer_state["status"] = "accepted"
-            self._transfer_state["target_status"] = final_status
-            self._persist_transfer_state()
+            runtime_transfer.record_transfer_accepted(
+                self,
+                transfer_id=package["transfer_id"],
+                target_status=final_status,
+            )
             publish_metadata = getattr(self, "_publish_worker_metadata", None)
             if callable(publish_metadata):
                 try:

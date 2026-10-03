@@ -80,6 +80,40 @@ def test_persist_and_clear_transfer_state(tmp_path):
     assert not runtime.transfer_state_path.exists()
 
 
+def test_record_transfer_accepted_preserves_identity_and_persists_fence(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime._persist_transfer_state = lambda: runtime_transfer.persist_transfer_state(
+        runtime
+    )
+    runtime._transfer_state = {
+        "status": "pending",
+        "transfer_id": "trf-accepted",
+        "target_agent": "akane",
+        "target_instance": "HASHI2",
+    }
+
+    runtime_transfer.record_transfer_accepted(
+        runtime,
+        transfer_id="trf-accepted",
+        target_status="accepted_but_chat_offline",
+    )
+
+    assert runtime_transfer.transfer_redirect_snapshot(runtime) == {
+        "status": "accepted",
+        "transfer_id": "trf-accepted",
+        "target_agent": "akane",
+        "target_instance": "HASHI2",
+    }
+    persisted = json.loads(runtime.transfer_state_path.read_text(encoding="utf-8"))
+    assert persisted["target_status"] == "accepted_but_chat_offline"
+    with pytest.raises(ValueError, match="identity changed"):
+        runtime_transfer.record_transfer_accepted(
+            runtime,
+            transfer_id="trf-other",
+            target_status="accepted",
+        )
+
+
 def test_transfer_redirect_and_buffer_rules(tmp_path):
     runtime = _runtime(tmp_path)
     runtime._transfer_state = {
@@ -138,6 +172,157 @@ def test_transfer_redirect_snapshot_supports_worker_metadata_and_remote_error():
     assert runtime_transfer.transfer_redirect_from_exception(unknown_remote) == (
         unknown_snapshot
     )
+
+
+def test_authoritative_transfer_redirect_snapshot_reads_workspace_fence(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state_path = workspace / "active_transfer.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "status": "pending",
+                "outcome_unknown": True,
+                "transfer_id": "trf-workspace-unknown",
+                "target_agent": "akane",
+                "target_instance": "HASHI2",
+            }
+        ),
+        encoding="utf-8",
+    )
+    runtime = SimpleNamespace(metadata={}, workspace_dir=workspace)
+
+    assert runtime_transfer.authoritative_transfer_redirect_snapshot(runtime) == {
+        "status": "unknown",
+        "transfer_id": "trf-workspace-unknown",
+        "target_agent": "akane",
+        "target_instance": "HASHI2",
+    }
+
+
+def test_authoritative_transfer_redirect_snapshot_preserves_pending_policy(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "active_transfer.json").write_text(
+        json.dumps(
+            {
+                "status": "pending",
+                "transfer_id": "trf-still-pending",
+                "target_agent": "akane",
+                "target_instance": "HASHI2",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert runtime_transfer.authoritative_transfer_redirect_snapshot(
+        SimpleNamespace(metadata={}, workspace_dir=workspace)
+    ) is None
+    assert runtime_transfer.authoritative_transfer_redirect_snapshot(
+        SimpleNamespace(metadata={}, workspace_dir=tmp_path / "no-fence")
+    ) is None
+
+
+@pytest.mark.parametrize(
+    ("parts", "requires_fence"),
+    [
+        (
+            [{"type": "text", "item_index": 1, "text": "ordinary message"}],
+            True,
+        ),
+        (
+            [
+                {
+                    "type": "media",
+                    "item_index": 1,
+                    "attachment_id": "att_voice",
+                    "modality": "audio",
+                    "semantic_role": "voice_message",
+                    "mime_type": "audio/wav",
+                    "local_ref": "attachments/att_voice.wav",
+                    "size_bytes": 44,
+                    "sha256": "a" * 64,
+                    "transport": {},
+                },
+                {"type": "text", "item_index": 2, "text": "Optional caption"},
+            ],
+            False,
+        ),
+        (
+            [
+                {
+                    "type": "media",
+                    "item_index": 1,
+                    "attachment_id": "att_voice",
+                    "modality": "audio",
+                    "semantic_role": "voice_message",
+                    "mime_type": "audio/wav",
+                    "local_ref": "attachments/att_voice.wav",
+                    "size_bytes": 44,
+                    "sha256": "a" * 64,
+                    "transport": {},
+                },
+                {
+                    "type": "media",
+                    "item_index": 2,
+                    "attachment_id": "att_document",
+                    "modality": "document",
+                    "mime_type": "application/pdf",
+                    "local_ref": "attachments/att_document.pdf",
+                    "size_bytes": 128,
+                    "sha256": "b" * 64,
+                    "transport": {},
+                },
+            ],
+            True,
+        ),
+    ],
+)
+def test_session_request_transfer_fence_classifies_canonical_attachments(
+    parts, requires_fence
+):
+    assert (
+        runtime_transfer.session_request_requires_transfer_fence(
+            {"version": 1, "parts": parts}
+        )
+        is requires_fence
+    )
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        "{",
+        "[]",
+        "{}",
+        '{"status":"garbage"}',
+        '{"status":"accepted","target_agent":"akane","target_instance":"HASHI2"}',
+        (
+            '{"status":"pending","outcome_unknown":"true",'
+            '"transfer_id":"trf-bad-bool","target_agent":"akane",'
+            '"target_instance":"HASHI2"}'
+        ),
+    ],
+)
+def test_authoritative_transfer_redirect_snapshot_fails_closed_on_invalid_fence(
+    tmp_path, contents
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "active_transfer.json").write_text(contents, encoding="utf-8")
+
+    assert runtime_transfer.authoritative_transfer_redirect_snapshot(
+        SimpleNamespace(
+            name="zelda",
+            metadata={"active_transfer": True},
+            workspace_dir=workspace,
+        )
+    ) == {
+        "status": "unknown",
+        "transfer_id": "unknown",
+        "target_agent": "zelda",
+        "target_instance": "unknown",
+    }
 
 
 @pytest.mark.asyncio

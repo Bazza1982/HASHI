@@ -6501,6 +6501,42 @@ class WorkbenchApiServer:
                 else:
                     raise ValueError(f"unsupported message content type {block_type!r}")
             canonical_content = canonical_request_content(canonical_parts)
+            from orchestrator import runtime_transfer
+
+            transfer_session_metadata = {
+                "session_id": session["session_id"],
+                "owner_id": owner,
+                "session_surface": surface,
+                "session_channel_key": client_id,
+            }
+            transfer_request_fingerprint = {
+                "kind": "session-run",
+                "payload_sha256": hashlib.sha256(
+                    json.dumps(
+                        payload,
+                        ensure_ascii=True,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+            }
+            if runtime_transfer.session_request_requires_transfer_fence(
+                canonical_content
+            ):
+                redirect = runtime_transfer.authoritative_transfer_redirect_snapshot(
+                    runtime
+                )
+                if redirect is not None:
+                    transfer_response = self._transfer_redirect_response(
+                        runtime,
+                        source="session-api",
+                        session_metadata=transfer_session_metadata,
+                        idempotency_key=idempotency_key,
+                        request_fingerprint=transfer_request_fingerprint,
+                        redirect=redirect,
+                    )
+                    if transfer_response is not None:
+                        return transfer_response
             source_declaration = payload.get("message_source")
             normalized_source_declaration = None
             if source_declaration is not None:
@@ -6572,9 +6608,21 @@ class WorkbenchApiServer:
                     },
                     request_content=canonical_content,
                 )
-            except Exception:
+            except Exception as exc:
                 if transcript_state is not None:
                     transcript_state["task"].cancel()
+                redirect = runtime_transfer.transfer_redirect_from_exception(exc)
+                if redirect is not None:
+                    transfer_response = self._transfer_redirect_response(
+                        runtime,
+                        source="session-api",
+                        session_metadata=transfer_session_metadata,
+                        idempotency_key=idempotency_key,
+                        request_fingerprint=transfer_request_fingerprint,
+                        redirect=redirect,
+                    )
+                    if transfer_response is not None:
+                        return transfer_response
                 raise
             if not request_id:
                 if transcript_state is not None:
@@ -7300,6 +7348,61 @@ class WorkbenchApiServer:
             return self._v1_error(ValueError("not authenticated"), status=401)
         try:
             payload = await request.json()
+            media_type = str(payload.get("media_type") or "").strip().casefold()
+            semantic_role = (
+                str(payload.get("semantic_role") or "").strip().casefold()
+            )
+            voice_message = media_type.startswith("audio/") and (
+                semantic_role == "voice_message"
+            )
+            if not voice_message:
+                session = self.session_store.get_session(
+                    request.match_info["session_id"],
+                    owner_id=owner,
+                    include_deleted=False,
+                )
+                runtime = self._runtime_map().get(session["agent_id"])
+                if runtime is not None:
+                    from orchestrator import runtime_transfer
+
+                    redirect = (
+                        runtime_transfer.authoritative_transfer_redirect_snapshot(
+                            runtime
+                        )
+                    )
+                    if redirect is not None:
+                        transfer_response = self._transfer_redirect_response(
+                            runtime,
+                            source="session-api",
+                            session_metadata={
+                                "session_id": session["session_id"],
+                                "owner_id": owner,
+                                "session_surface": str(
+                                    session.get("surface") or "session-api"
+                                ),
+                                "session_channel_key": str(
+                                    request.headers.get("X-Client-Id") or "default"
+                                ),
+                            },
+                            idempotency_key=(
+                                str(payload.get("idempotency_key") or "").strip()
+                                or None
+                            ),
+                            request_fingerprint={
+                                "kind": "attachment-stage",
+                                "payload_sha256": hashlib.sha256(
+                                    json.dumps(
+                                        payload,
+                                        ensure_ascii=True,
+                                        sort_keys=True,
+                                        separators=(",", ":"),
+                                    ).encode("utf-8")
+                                ).hexdigest(),
+                            },
+                            redirect=redirect,
+                        )
+                        if transfer_response is not None:
+                            return transfer_response
             attachment = self._v1_stage_attachment(
                 session_id=request.match_info["session_id"],
                 owner_id=owner,

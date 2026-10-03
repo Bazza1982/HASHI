@@ -2,6 +2,13 @@
 
 2026-10-03 non-voice repairs require separate source, instance-adoption and
 live evidence. Core is unchanged; no new API supervisor is added.
+Canonical Session API user messages and ordinary attachment staging now honor
+already-observable accepted and outcome-unknown transfer fences before their
+normal side effects. The Worker
+rechecks the same durable fact at the PAO Run writer; ordinary pending transfer,
+trusted target bridge ingress, Agent-owned scheduled/background activity and
+existing voice-message routing keep their prior semantics. Source validation
+does not itself prove a running Function generation adopted the fence.
 `/reboot min` keeps the Backend API connection. Workbench-origin `max` may
 disconnect, but its browser must first render and ACK the accepted operation;
 missing confirmation rejects the handoff. See

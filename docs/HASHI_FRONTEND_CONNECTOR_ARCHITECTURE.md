@@ -1087,3 +1087,33 @@ capability registration and resource leases, accepts an authenticated human acto
 and never creates a conversational Run. It is not a new frontend product inside
 HASHI. Source/automated checks and physical-device acceptance remain separate;
 feature availability defaults to disabled.
+
+### Post-transfer Session admission fence (2026-10-03)
+
+The canonical Session API rejects new non-voice user Runs and ordinary
+attachment staging after a transfer is accepted or its receiver outcome is
+unknown.  The shared API performs an early rejection for clear HTTP 409
+feedback.  The selected Function Worker repeats the same check at PAO's sole
+Run writer; that check and the accepted/unknown fence transition share one
+per-runtime lock, so a request linearizes either before the fence or after it
+and cannot create a Run in between.
+
+Attachment staging is rejected early only when the shared process can already
+observe a persisted fence; staging and a later Worker fence transition are not
+one cross-process transaction.  If the transition happens after staging, the
+Worker-side Run writer still prevents the attachment from entering execution.
+
+The durable `active_transfer.json` fact is a bounded read-only fallback when a
+Worker metadata projection is stale.  No file plus no metadata means no fence.
+An existing unreadable, oversized, malformed, or semantically invalid fence is
+fail-closed as outcome unknown.  A complete ordinary pending transfer retains
+its prior admission semantics.  Rejections reuse the existing typed Frontend
+Command admission/result and do not create a second transfer ledger.
+
+This fence is limited to the canonical `session_api` user-message connector.
+Agent-owned scheduler, cron, heartbeat and background activity retain their
+existing PAO admission behavior.  Exact trusted `bridge-transfer:` and
+`bridge-fork:` ingress remains available to create the target Run; public API
+clients cannot assert those reserved sources.  Existing canonical
+`voice_message` content, including a caption, remains on its prior route and
+is outside this non-voice change.

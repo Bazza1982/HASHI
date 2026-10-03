@@ -1339,6 +1339,174 @@ async def test_unknown_transfer_outcome_rejects_chat_without_claiming_redirect(t
 
 
 @pytest.mark.asyncio
+async def test_session_run_reads_unknown_transfer_fence_before_creating_run(tmp_path):
+    server, runtime = _server(tmp_path)
+    workspace = tmp_path / "lily"
+    workspace.mkdir()
+    runtime.workspace_dir = workspace
+    (workspace / "active_transfer.json").write_text(
+        json.dumps(
+            {
+                "status": "pending",
+                "outcome_unknown": True,
+                "transfer_id": "trf-session-unknown",
+                "target_agent": "akane",
+                "target_instance": "HASHI2",
+            }
+        ),
+        encoding="utf-8",
+    )
+    session = server.session_store.resolve_primary_session(
+        owner_id="user:7", agent_id="lily", establish=True
+    )
+
+    response = await server.handle_v1_session_runs_create(
+        _Request(
+            {
+                "idempotency_key": "session-transfer-unknown-1",
+                "surface": "workbench",
+                "client_id": "workbench-window-1",
+                "message_source": {"id": "scheduler"},
+                "request_metadata": {"voice_origin": True},
+                "message": {
+                    "content": [
+                        {"type": "text", "text": "must not create a Run"}
+                    ]
+                },
+            },
+            match_info={"session_id": session["session_id"]},
+        )
+    )
+    payload = json.loads(response.text)
+
+    assert response.status == 409
+    assert payload["accepted"] is False
+    assert payload["error_code"] == "session_transfer_outcome_unknown"
+    assert payload["transfer_id"] == "trf-session-unknown"
+    assert runtime.enqueue_request_calls == 0
+    assert server.session_store.recent_session_runs(
+        session["session_id"], owner_id="user:7"
+    ) == []
+    assert not any(
+        message["role"] == "user"
+        for message in server.session_store.messages(
+            session["session_id"], owner_id="user:7"
+        )
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("redirect", "error_code"),
+    [
+        (
+            {
+                "status": "accepted",
+                "transfer_id": "trf-worker-race-accepted",
+                "target_agent": "akane",
+                "target_instance": "HASHI3",
+            },
+            "session_transferred",
+        ),
+        (
+            {
+                "status": "unknown",
+                "transfer_id": "trf-worker-race-unknown",
+                "target_agent": "akane",
+                "target_instance": "HASHI3",
+            },
+            "session_transfer_outcome_unknown",
+        ),
+    ],
+)
+async def test_session_run_maps_worker_transfer_fence_to_canonical_409(
+    tmp_path, redirect, error_code
+):
+    from orchestrator.function_worker_protocol import FunctionWorkerRemoteError
+    from orchestrator.runtime_transfer import TransferRedirectRequired
+
+    server, runtime = _server(tmp_path)
+    runtime.workspace_dir = tmp_path / "lily"
+    runtime.workspace_dir.mkdir()
+    session = server.session_store.resolve_primary_session(
+        owner_id="user:7", agent_id="lily", establish=True
+    )
+
+    async def reject_after_worker_recheck(*_args, **_kwargs):
+        typed = TransferRedirectRequired(redirect)
+        raise FunctionWorkerRemoteError(
+            "runtime.enqueue_request",
+            {"type": "TransferRedirectRequired", "message": str(typed)},
+        )
+
+    runtime.enqueue_request = reject_after_worker_recheck
+    response = await server.handle_v1_session_runs_create(
+        _Request(
+            {
+                "idempotency_key": f"worker-race-{redirect['status']}",
+                "surface": "workbench",
+                "client_id": "workbench-window-race",
+                "message": {
+                    "content": [{"type": "text", "text": "must stay fenced"}]
+                },
+            },
+            match_info={"session_id": session["session_id"]},
+        )
+    )
+    payload = json.loads(response.text)
+
+    assert response.status == 409
+    assert payload["accepted"] is False
+    assert payload["error_code"] == error_code
+    assert payload["admission"]["run_id"] is None
+    assert payload["transfer_id"] == redirect["transfer_id"]
+    assert server.session_store.recent_session_runs(
+        session["session_id"], owner_id="user:7"
+    ) == []
+
+
+@pytest.mark.asyncio
+async def test_session_attachment_stage_rejects_transfer_before_staging(tmp_path):
+    server, runtime = _server(tmp_path)
+    workspace = tmp_path / "lily"
+    workspace.mkdir()
+    runtime.workspace_dir = workspace
+    runtime._transfer_state = {
+        "status": "accepted",
+        "transfer_id": "trf-session-attachment",
+        "target_agent": "akane",
+        "target_instance": "HASHI2",
+    }
+    session = server.session_store.resolve_primary_session(
+        owner_id="user:7", agent_id="lily", establish=True
+    )
+
+    response = await server.handle_v1_attachment_stage(
+        _Request(
+            {
+                "filename": "never-staged.txt",
+                "media_type": "text/plain",
+                "size_bytes": 8,
+                "sha256": hashlib.sha256(b"fixture").hexdigest(),
+                "idempotency_key": "attachment-transfer-1",
+            },
+            match_info={"session_id": session["session_id"]},
+        )
+    )
+    payload = json.loads(response.text)
+
+    assert response.status == 409
+    assert payload["error_code"] == "session_transferred"
+    assert runtime.enqueue_request_calls == 0
+    with server.session_store._connection() as connection:
+        attachment_count = connection.execute(
+            "SELECT COUNT(*) FROM session_attachments WHERE session_id=?",
+            (session["session_id"],),
+        ).fetchone()[0]
+    assert attachment_count == 0
+
+
+@pytest.mark.asyncio
 async def test_transferred_nonvoice_media_is_rejected_before_upload_is_written(
     tmp_path,
 ):
