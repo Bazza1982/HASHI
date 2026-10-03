@@ -106,10 +106,13 @@ def test_cold_release_saves_new_verified_generation_for_future_boots(
     artifact = bridge_home / "state" / "function_generations" / ("a" * 64)
     generation = SimpleNamespace(manifest=_Manifest())
     persisted = []
+
+    def probe_with_timing(*_args, timing_callback, **_kwargs):
+        timing_callback("isolated_probe.imports_contract", 7.5)
+        return generation
+
     monkeypatch.setattr(
-        runtime_release,
-        "probe_function_generation",
-        lambda *_args, **_kwargs: generation,
+        runtime_release, "probe_function_generation", probe_with_timing
     )
     monkeypatch.setattr(
         runtime_release,
@@ -127,6 +130,12 @@ def test_cold_release_saves_new_verified_generation_for_future_boots(
     assert release["generation_root"] == str(artifact)
     assert persisted == [(bridge_home.resolve(), generation, artifact)]
     assert release["adoption"] == {"status": "qualified", "reason_code": None}
+    timing = release["qualification_timing"]
+    assert timing["started_at"]
+    assert timing["total_ms"] >= 0
+    assert timing["phases_ms"]["isolated_probe.imports_contract"] == 7.5
+    assert timing["phases_ms"]["materialize_artifact"] >= 0
+    assert timing["phases_ms"]["persist_cache"] >= 0
 
 
 def test_cold_release_fails_only_without_candidate_or_verified_fallback(

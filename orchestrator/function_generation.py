@@ -20,9 +20,10 @@ import re
 import stat
 import subprocess
 import sys
+import time
 import traceback
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from types import ModuleType
 from typing import Any
@@ -206,6 +207,8 @@ class CandidateProbeReceipt:
     runtime: RuntimeFingerprint
     probe_pid: int
     source_commit: str = ""
+    # Diagnostics from the disposable probe; not part of the generation identity.
+    stage_timings_ms: tuple[tuple[str, float], ...] = field(default=(), compare=False)
 
 
 @dataclass(frozen=True)
@@ -892,6 +895,10 @@ def run_candidate_probe(
         runtime=runtime,
         probe_pid=int(result["probe_pid"]),
         source_commit=str(result["source_commit"]),
+        stage_timings_ms=tuple(
+            (str(name), float(elapsed_ms))
+            for name, elapsed_ms in result.get("stage_timings_ms", {}).items()
+        ),
     )
 
 
@@ -904,8 +911,17 @@ def probe_function_generation(
     *,
     module_names: list[str] | tuple[str, ...] | None = None,
     probe_runner=run_candidate_probe,
+    timing_callback=None,
 ) -> VerifiedFunctionGeneration:
     """Qualify exact source/assets without importing them into HASHI Core."""
+
+    def timed(name, function, *args, **kwargs):
+        started = time.perf_counter()
+        try:
+            return function(*args, **kwargs)
+        finally:
+            if timing_callback is not None:
+                timing_callback(name, (time.perf_counter() - started) * 1000)
 
     code_root = Path(kernel.paths.code_root).resolve()
     expected_runtime = getattr(kernel, "runtime_fingerprint", None)
@@ -927,20 +943,31 @@ def probe_function_generation(
     # the single deterministic qualification path for both cases.
     if module_names is not None:
         requested.update(module_names)
-    initial_manifest = build_source_manifest(
+    initial_manifest = timed(
+        "initial_manifest",
+        build_source_manifest,
         tuple(sorted(requested, key=function_module_order_key)),
         code_root=code_root,
     )
-    source_commit = verify_manifest_source_commit(
+    source_commit = timed(
+        "initial_commit_check",
+        verify_manifest_source_commit,
         initial_manifest,
         code_root=code_root,
     )
-    receipt = probe_runner(
+    receipt = timed(
+        "isolated_probe",
+        probe_runner,
         code_root=code_root,
         module_names=initial_manifest.module_names,
         expected_runtime=expected_runtime,
     )
-    manifest = build_source_manifest(receipt.module_names, code_root=code_root)
+    if timing_callback is not None:
+        for name, elapsed_ms in receipt.stage_timings_ms:
+            timing_callback(f"isolated_probe.{name}", elapsed_ms)
+    manifest = timed(
+        "final_manifest", build_source_manifest, receipt.module_names, code_root=code_root
+    )
     if manifest.generation_id != receipt.generation_id:
         raise FunctionGenerationError(
             "Candidate source/assets differ between Core and staging Worker"
@@ -949,7 +976,10 @@ def probe_function_generation(
         raise FunctionGenerationError(
             "Candidate source commit differs between Core and staging Worker"
         )
-    if verify_manifest_source_commit(manifest, code_root=code_root) != source_commit:
+    if timed(
+        "final_commit_check", verify_manifest_source_commit, manifest,
+        code_root=code_root,
+    ) != source_commit:
         raise FunctionGenerationError(
             "Candidate source commit changed during Function qualification"
         )
@@ -958,17 +988,32 @@ def probe_function_generation(
         manifest=manifest,
         receipt=receipt,
     )
-    generation.verify(expected_runtime)
+    timed("generation_verify", generation.verify, expected_runtime)
     return generation
 
 
 def _probe_main() -> int:
+    stage_timings_ms: dict[str, float] = {}
+
+    def timed(name, function, *args, **kwargs):
+        started = time.perf_counter()
+        try:
+            return function(*args, **kwargs)
+        finally:
+            stage_timings_ms[name] = round(
+                (time.perf_counter() - started) * 1000, 1
+            )
+
     try:
         payload = json.loads(sys.stdin.read())
         code_root = Path(payload["code_root"]).resolve()
         sys.path.insert(0, str(code_root))
         policy = load_runtime_policy(code_root)
-        runtime = current_runtime_fingerprint(policy, code_root=code_root)
+        runtime = timed(
+            "runtime_fingerprint",
+            current_runtime_fingerprint,
+            policy, code_root=code_root,
+        )
         expected = RuntimeFingerprint.from_mapping(payload["expected_runtime"])
         compare_function_candidate_runtime(
             expected,
@@ -976,13 +1021,24 @@ def _probe_main() -> int:
             code_root=code_root,
         )
         requested = tuple(str(name) for name in payload["module_names"])
-        with candidate_import_guard():
-            for name in requested:
-                importlib.import_module(name)
-            validate_function_contract()
-        expanded = tuple(discover_loaded_function_modules(code_root=code_root))
-        manifest = build_source_manifest(expanded, code_root=code_root)
-        source_commit = verify_manifest_source_commit(
+        def import_and_validate():
+            with candidate_import_guard():
+                for name in requested:
+                    importlib.import_module(name)
+                validate_function_contract()
+
+        timed("imports_contract", import_and_validate)
+        expanded = timed(
+            "loaded_module_discovery",
+            discover_loaded_function_modules,
+            code_root=code_root,
+        )
+        manifest = timed(
+            "manifest", build_source_manifest, tuple(expanded), code_root=code_root
+        )
+        source_commit = timed(
+            "commit_check",
+            verify_manifest_source_commit,
             manifest,
             code_root=code_root,
         )
@@ -993,6 +1049,7 @@ def _probe_main() -> int:
             "runtime": runtime.to_dict(),
             "probe_pid": os.getpid(),
             "source_commit": source_commit,
+            "stage_timings_ms": stage_timings_ms,
         }
         print(PROBE_RESULT_PREFIX + json.dumps(result, sort_keys=True), flush=True)
         return 0
@@ -1002,6 +1059,7 @@ def _probe_main() -> int:
             "error": f"{type(exc).__name__}: {exc}",
             "traceback": traceback.format_exc(limit=20),
             "probe_pid": os.getpid(),
+            "stage_timings_ms": stage_timings_ms,
         }
         print(PROBE_RESULT_PREFIX + json.dumps(result, sort_keys=True), flush=True)
         return 1

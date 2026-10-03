@@ -90,6 +90,9 @@ class RuntimeAppHost:
         self.app.function_release_adoption = dict(
             self.bootstrap.get("adoption") or {"status": "unknown", "reason_code": None}
         )
+        self.app.function_release_timing = dict(
+            self.bootstrap.get("qualification_timing") or {}
+        )
         from orchestrator.function_worker_supervisor import (
             generation_artifact_source_commit,
             generation_from_dict,
