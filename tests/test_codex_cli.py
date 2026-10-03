@@ -12,8 +12,14 @@ import pytest
 
 from adapters.base import BackendResponse
 from adapters.codex_cli import CodexCLIAdapter
-from adapters.stream_events import KIND_COMMENTARY, KIND_THINKING
+from adapters.stream_events import (
+    KIND_COMMENTARY,
+    KIND_THINKING,
+    KIND_TOOL_END,
+    KIND_TOOL_START,
+)
 from orchestrator.multimodal_contract import canonical_request_content
+from orchestrator.request_activity import RequestActivityStore
 from tests.mocks.mock_adapters import SimpleGlobalConfig, SimpleTestConfig
 from tools import model_capability_sources, pricing_sources
 
@@ -499,6 +505,97 @@ async def test_codex_only_emits_agent_messages_that_are_proven_intermediate(tmp_
     assert [(event.kind, event.summary) for event in events] == [
         (KIND_COMMENTARY, "first update")
     ]
+
+
+@pytest.mark.asyncio
+async def test_codex_mcp_lifecycle_projects_safe_activity_without_double_count(
+    tmp_path, monkeypatch
+):
+    adapter = _build_adapter(tmp_path)
+    item = {
+        "id": "mcp-call-1",
+        "type": "mcp_tool_call",
+        "server": "hashi_tools",
+        "tool": "frontend_send_attachments",
+    }
+    proc = _HangingProc(
+        [
+            json.dumps(
+                {
+                    "type": "item.started",
+                    "item": {
+                        **item,
+                        "arguments": {"token": "SECRET-ARGUMENT"},
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {**item, "result": "SECRET-RESULT"},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "Delivered."},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "turn.completed",
+                    "usage": {"input_tokens": 4, "output_tokens": 2},
+                }
+            ),
+        ]
+    )
+    events = []
+
+    async def collect(event):
+        events.append(event)
+
+    async def create_subprocess(*_args, **_kwargs):
+        async def finish():
+            await asyncio.sleep(0)
+            proc.finish(0)
+
+        asyncio.create_task(finish())
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+
+    response = await adapter.generate_response(
+        "deliver attachments",
+        "req-mcp-count",
+        on_stream_event=collect,
+    )
+    await asyncio.sleep(0)
+
+    assert response.is_success is True
+    assert response.tool_call_count == 1
+    assert [event.kind for event in events] == [KIND_TOOL_START, KIND_TOOL_END]
+    assert [event.tool_name for event in events] == [
+        "frontend_send_attachments",
+        "frontend_send_attachments",
+    ]
+    assert events[0].event_id != events[1].event_id
+    assert [dict(event.metadata) for event in events] == [
+        {"server": "hashi_tools", "tool": "frontend_send_attachments"},
+        {"server": "hashi_tools", "tool": "frontend_send_attachments"},
+    ]
+    assert "SECRET-ARGUMENT" not in repr(events)
+    assert "SECRET-RESULT" not in repr(events)
+
+    activity = RequestActivityStore()
+    activity.start("req-mcp")
+    for event in events:
+        activity.publish_stream("req-mcp", event)
+    projected = activity.poll("req-mcp")["events"][-2:]
+    assert [event["kind"] for event in projected] == [
+        KIND_TOOL_START,
+        KIND_TOOL_END,
+    ]
+    assert [event["status"] for event in projected] == ["running", "completed"]
 
 
 def test_codex_accepts_completed_turn_even_if_process_needs_forced_exit(tmp_path, monkeypatch: pytest.MonkeyPatch):

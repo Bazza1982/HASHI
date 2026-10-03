@@ -48,6 +48,15 @@ non-retryable `CODEX_TOOL_GATEWAY_UNAVAILABLE` adapter result with no possible
 side effects; it does not silently run a model without the advertised HASHI
 tools and does not automatically replay the request.
 
+Codex JSONL `mcp_tool_call` start and completion items are projected into the
+existing `tool_start`/`tool_end` activity contract. The projection includes
+only bounded server and tool names; raw MCP arguments and results never enter
+the user-visible activity stream. Start/end events share a hashed provider-item
+identity with distinct lifecycle suffixes, so repeated transport delivery is
+deduplicated while one completed call remains one terminal
+`BackendResponse.tool_call_count`. Frontend activity views therefore report the
+real operation instead of incorrectly describing the response as tool-free.
+
 ## Runtime verification
 
 The exact-instance runtime task recovered HASHI3. Its adopted generation is

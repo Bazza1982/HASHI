@@ -27,7 +27,7 @@ from adapters.codex_usage import (
 from adapters.stream_io import iter_stream_lines
 from adapters.stream_events import (
     StreamCallback, StreamEvent,
-    KIND_TOOL_END,
+    KIND_TOOL_END, KIND_TOOL_START,
     KIND_FILE_EDIT, KIND_SHELL_EXEC, KIND_PROGRESS,
 )
 from orchestrator.multimodal_contract import (
@@ -609,6 +609,54 @@ class CodexCLIAdapter(BaseBackend):
                 metadata={
                     "command": self._command_text(item),
                     "exit_code": exit_code,
+                },
+            )
+        elif (
+            etype in {"item.started", "item.completed"}
+            and item_type == "mcp_tool_call"
+        ):
+            raw_server = item.get("server")
+            raw_tool = item.get("tool") or item.get("name")
+            server_name = (
+                " ".join(raw_server.split())[:80]
+                if isinstance(raw_server, str)
+                else ""
+            )
+            tool_name = (
+                " ".join(raw_tool.split())[:160]
+                if isinstance(raw_tool, str)
+                else ""
+            )
+            display_name = tool_name or "MCP tool"
+            server_suffix = f" via {server_name}" if server_name else ""
+            phase = "start" if etype == "item.started" else "end"
+            raw_item_id = item.get("id")
+            item_id = raw_item_id.strip() if isinstance(raw_item_id, str) else ""
+            event_id = (
+                "codex:mcp:"
+                f"{hashlib.sha256(item_id.encode('utf-8')).hexdigest()[:24]}:{phase}"
+                if item_id
+                else ""
+            )
+            se = StreamEvent(
+                kind=(KIND_TOOL_START if etype == "item.started" else KIND_TOOL_END),
+                summary=(
+                    f"Calling {display_name}{server_suffix}"
+                    if etype == "item.started"
+                    else f"Completed {display_name}{server_suffix}"
+                ),
+                tool_name=tool_name or "MCP",
+                event_id=event_id,
+                origin="codex-cli:mcp",
+                phase="execution",
+                provenance="provider_returned",
+                metadata={
+                    key: value
+                    for key, value in (
+                        ("server", server_name),
+                        ("tool", tool_name),
+                    )
+                    if value
                 },
             )
         elif etype == "item.completed" and item_type == "file_change":
