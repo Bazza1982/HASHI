@@ -3262,6 +3262,8 @@ async def prepare_successful_response(runtime, item, response, *, completion_pat
         )
         visible_text = normalize_user_visible_paths(visible_text)
     has_typed_audio = bool(audio_parts(getattr(response, "content", ())))
+    diagnostic_fields = backend_diagnostic_fields(response)
+    effect_reconciliation = await reconcile_backend_effects(runtime, item, response)
     # Empty visible completion still settles as a terminal error downstream;
     # an already accepted exact stop must win that publication as well.
     if not await runtime_cancel.claim_final_result(runtime, item):
@@ -3301,6 +3303,12 @@ async def prepare_successful_response(runtime, item, response, *, completion_pat
                 for part in getattr(response, "content", ())
                 if isinstance(part, Mapping)
             ],
+            **diagnostic_fields,
+            **(
+                {"effect_reconciliation": effect_reconciliation}
+                if effect_reconciliation
+                else {}
+            ),
             **request_context_warning_fields(runtime, item.request_id),
             **runtime._wrapper_listener_fields(safe_core_raw, visible_text, wrapper_result),
         },
@@ -3779,6 +3787,73 @@ def backend_failure_diagnostics(response: Any) -> dict[str, Any]:
     return {}
 
 
+async def reconcile_backend_effects(
+    runtime: Any,
+    item: Any,
+    response: Any,
+) -> dict[str, Any] | None:
+    """Project existing typed effect evidence for one terminal response.
+
+    Execution owners remain the backend response and the existing tool audit
+    ledgers.  This function creates no receipt state and never infers effects
+    from model text.
+    """
+
+    from orchestrator.request_diagnostics import build_user_effect_reconciliation
+
+    diagnostic_fields = backend_diagnostic_fields(response)
+    try:
+        backend = getattr(
+            getattr(runtime, "backend_manager", None), "current_backend", None
+        )
+        registry = getattr(backend, "tool_registry", None)
+        tool_workspace = getattr(registry, "workspace_dir", None)
+        manager = getattr(runtime, "background_job_manager", None) or getattr(
+            getattr(runtime, "orchestrator", None), "background_job_manager", None
+        )
+        jobs = await asyncio.to_thread(manager.list, limit=50) if manager is not None else ()
+        reconciliation = await asyncio.to_thread(
+            build_user_effect_reconciliation,
+            workspace_dir=runtime.workspace_dir,
+            request_id=item.request_id,
+            tool_call_count=int(diagnostic_fields.get("tool_call_count") or 0),
+            side_effects_possible=bool(
+                diagnostic_fields.get("side_effects_possible")
+            ),
+            additional_workspaces=((tool_workspace,) if tool_workspace else ()),
+            background_jobs=jobs,
+        )
+        if any(
+            (
+                reconciliation["confirmed_read_count"],
+                reconciliation["confirmed_write_count"],
+                reconciliation["observed_tool_count"],
+                reconciliation["unverified_action_count"],
+                reconciliation["completed_background_job_count"],
+                reconciliation["evidence_limited"],
+            )
+        ):
+            return reconciliation
+        return None
+    except Exception as exc:
+        runtime.logger.warning(
+            "Effect reconciliation unavailable for %s (%s)",
+            item.request_id,
+            type(exc).__name__,
+        )
+        tool_call_count = int(diagnostic_fields.get("tool_call_count") or 0)
+        if diagnostic_fields.get("side_effects_possible") or tool_call_count:
+            return {
+                "confirmed_read_count": 0,
+                "confirmed_write_count": 0,
+                "observed_tool_count": tool_call_count,
+                "unverified_action_count": max(1, tool_call_count),
+                "completed_background_job_count": 0,
+                "evidence_limited": True,
+            }
+        return None
+
+
 def _typed_capacity_recovery_is_safe(response: Any) -> bool:
     if str(getattr(response, "error_code", "") or "") != "CONTEXT_CAPACITY_REJECTED":
         return False
@@ -4063,50 +4138,7 @@ async def handle_backend_error(
                 default=str,
             ),
         )
-    effect_reconciliation: dict[str, Any] | None = None
-    from orchestrator.request_diagnostics import build_user_effect_reconciliation
-
-    try:
-        backend = getattr(getattr(runtime, "backend_manager", None), "current_backend", None)
-        registry = getattr(backend, "tool_registry", None)
-        tool_workspace = getattr(registry, "workspace_dir", None)
-        manager = getattr(runtime, "background_job_manager", None) or getattr(
-            getattr(runtime, "orchestrator", None), "background_job_manager", None
-        )
-        jobs = await asyncio.to_thread(manager.list, limit=50) if manager is not None else ()
-        effect_reconciliation = await asyncio.to_thread(
-            build_user_effect_reconciliation,
-            workspace_dir=runtime.workspace_dir,
-            request_id=item.request_id,
-            tool_call_count=int(failure_fields.get("tool_call_count") or 0),
-            side_effects_possible=bool(failure_fields.get("side_effects_possible")),
-            additional_workspaces=((tool_workspace,) if tool_workspace else ()),
-            background_jobs=jobs,
-        )
-        if not (
-            effect_reconciliation["confirmed_read_count"]
-            or effect_reconciliation["confirmed_write_count"]
-            or effect_reconciliation["observed_tool_count"]
-            or effect_reconciliation["unverified_action_count"]
-            or effect_reconciliation["completed_background_job_count"]
-            or effect_reconciliation["evidence_limited"]
-        ):
-            effect_reconciliation = None
-    except Exception as exc:
-        runtime.logger.warning(
-            "Effect reconciliation unavailable for %s (%s)",
-            item.request_id,
-            type(exc).__name__,
-        )
-        if failure_fields.get("side_effects_possible") or failure_fields.get("tool_call_count"):
-            effect_reconciliation = {
-                "confirmed_read_count": 0,
-                "confirmed_write_count": 0,
-                "observed_tool_count": int(failure_fields.get("tool_call_count") or 0),
-                "unverified_action_count": max(1, int(failure_fields.get("tool_call_count") or 0)),
-                "completed_background_job_count": 0,
-                "evidence_limited": True,
-            }
+    effect_reconciliation = await reconcile_backend_effects(runtime, item, response)
     if runtime._should_buffer_during_transfer(item.request_id):
         runtime._record_suppressed_transfer_result(item, success=False, error=err_msg)
     await runtime._notify_request_listeners(

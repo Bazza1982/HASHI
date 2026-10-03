@@ -647,12 +647,16 @@ that raced with `/stop`; another Session's already-running user request remains
 untouched. Delayed records are preserved, not silently consumed. A failed
 fence-state read fails closed for new admissions.
 
-Terminal failures with possible tool effects now attach a bounded reconciliation
-to the existing Session failure and terminal diagnostic projection. A file
-write is called confirmed only when its Tool receipt includes a readback;
-other tool actions and untyped CLI exits remain uncertain. User error text
-separates those categories and warns against blind replay. Audit-log truncation
-is disclosed; absence of an audit row never proves absence of an effect.
+Terminal completions with observed tool effects attach a bounded reconciliation
+to the existing Session result and terminal diagnostic projection. The outer
+`BackendResponse` supplies the observed count/effect flag; the existing Tool
+audit, Smart Tool ledger, and BackgroundJob receipts remain the evidence
+owners for both success and failure. A file write is called confirmed only when
+its Tool receipt includes a readback; other tool actions and untyped CLI exits
+remain uncertain. User error text separates those categories and warns against
+blind replay. Audit-log truncation is disclosed; absence of an audit row never
+proves absence of an effect. Successful reconciliation is diagnostic only and
+does not change execution, continuation, or retry admission.
 
 ### HASHI1 automatic debug-reporting trial (2026-09-13)
 

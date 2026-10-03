@@ -33,6 +33,7 @@ from adapters.stream_events import (
 )
 from orchestrator import (
     runtime_cross_session,
+    runtime_debug_reporting,
     runtime_pipeline,
     runtime_retry,
     runtime_session,
@@ -3481,6 +3482,100 @@ async def test_prepare_successful_response_applies_wrapper_and_notifies_listener
     ]
     assert runtime.listener_payloads[0]["text"] == "wrapped:core text"
     assert runtime.listener_payloads[0]["wrapped"] is True
+
+
+@pytest.mark.asyncio
+async def test_prepare_successful_response_projects_one_verified_read_without_double_count():
+    runtime = _runtime()
+    item = _item(request_id="req-success-read")
+    digest = "a" * 64
+    details = {
+        "receipt_completed": True,
+        "receipt_status": "success",
+        "effect_receipt": {
+            "kind": "read",
+            "tool_name": "file_read",
+            "evidence_ref": f"tool:call-read:sha256:{digest}",
+            "revision": f"sha256:{digest}",
+        },
+    }
+    for _ in range(2):
+        record_tool_action(
+            workspace_dir=runtime.workspace_dir,
+            tool_name="file_read",
+            tool_call_id="call-read",
+            arguments={"path": "qa-final-read.txt"},
+            output="synthetic fixture",
+            is_error=False,
+            duration_ms=1,
+            audit_context={"request_id": item.request_id},
+            details=details,
+        )
+    response = SimpleNamespace(
+        text="read complete",
+        tool_call_count=1,
+        side_effects_possible=False,
+        stream_metadata={},
+    )
+
+    await runtime_pipeline.prepare_successful_response(
+        runtime, item, response, completion_path="foreground"
+    )
+
+    payload = runtime.listener_payloads[0]
+    assert payload["tool_call_count"] == 1
+    assert payload["effect_reconciliation"] == {
+        "confirmed_read_count": 1,
+        "confirmed_write_count": 0,
+        "observed_tool_count": 1,
+        "unverified_action_count": 0,
+        "completed_background_job_count": 0,
+        "evidence_limited": False,
+    }
+    assert runtime_debug_reporting.safe_retry_evidence(payload)["status"] == "not_applicable"
+    projection_path = runtime_debug_reporting.persist_terminal_diagnostic(
+        runtime, item.request_id, payload
+    )
+    assert projection_path is not None
+    projection = json.loads(projection_path.read_text(encoding="utf-8"))
+    assert projection["effects"]["tool_call_count"] == 1
+    assert projection["effects"]["reconciliation"] == payload["effect_reconciliation"]
+    assert projection["safe_retry_evidence"]["status"] == "not_applicable"
+
+
+@pytest.mark.asyncio
+async def test_prepare_successful_response_projects_write_and_unknown_effects():
+    runtime = _runtime()
+    item = _item(request_id="req-success-effects")
+    record_tool_action(
+        workspace_dir=runtime.workspace_dir,
+        tool_name="file_write",
+        tool_call_id="call-write",
+        arguments={},
+        output="ok",
+        is_error=False,
+        duration_ms=1,
+        audit_context={"request_id": item.request_id},
+        details={"effect_receipt": {"kind": "write", "readback": True}},
+    )
+    response = SimpleNamespace(
+        text="write complete",
+        tool_call_count=2,
+        side_effects_possible=True,
+        stream_metadata={},
+    )
+
+    await runtime_pipeline.prepare_successful_response(
+        runtime, item, response, completion_path="foreground"
+    )
+
+    payload = runtime.listener_payloads[0]
+    assert payload["tool_call_count"] == 2
+    assert payload["side_effects_possible"] is True
+    assert payload["effect_reconciliation"]["confirmed_write_count"] == 1
+    assert payload["effect_reconciliation"]["observed_tool_count"] == 2
+    assert payload["effect_reconciliation"]["unverified_action_count"] == 1
+    assert runtime_debug_reporting.safe_retry_evidence(payload)["status"] == "not_applicable"
 
 
 @pytest.mark.asyncio
