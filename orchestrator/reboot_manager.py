@@ -32,6 +32,10 @@ REBOOT_DRAIN_TIMEOUT_SECONDS = 10.0
 # have independent bounded stages. Leave headroom before declaring a missing
 # Core receipt unconfirmed; this timeout never changes Core's own transaction.
 SHARED_REPLACEMENT_TIMEOUT_SECONDS = 1200.0
+# A Workbench-origin broad reboot may interrupt the API that accepted it.  The
+# browser therefore gets a short, explicit window to confirm that it rendered
+# the accepted operation before the shared handoff can be published.
+START_PRESENTATION_ACK_TIMEOUT_SECONDS = 15.0
 
 TARGETED_REBOOT_MODES = frozenset({"min", "same", "number"})
 BROAD_REBOOT_MODES = frozenset({"max"})
@@ -91,6 +95,7 @@ class RebootManager:
         self.delivery_task = None
         self.delivery_lock = asyncio.Lock()
         self.receipt_fault = False
+        self._presentation_ack_events: dict[str, asyncio.Event] = {}
 
     def _new_receipt(self, restart, targets=None):
         if targets is None:
@@ -232,6 +237,7 @@ class RebootManager:
             (int(event.get("sequence") or 0) for event in record.get("progress") or ()),
             default=0,
         )
+        presentation_ack = record.get("presentation_ack") or {}
         return {
             "operation_id": record["id"],
             "action": "reboot",
@@ -243,6 +249,12 @@ class RebootManager:
             "targets": list(record.get("targets") or ()),
             "lifecycle_state": record.get("lifecycle_state"),
             "reason": record.get("reason") or "",
+            "presentation_ack": {
+                "required": presentation_ack.get("status") != "not_required",
+                "status": presentation_ack.get("status") or "not_required",
+                "expected_sequence": presentation_ack.get("expected_sequence"),
+                "sequence": presentation_ack.get("sequence"),
+            },
         }
 
     def operation(
@@ -284,6 +296,120 @@ class RebootManager:
         ):
             return None
         return self._operation_projection(record, after_sequence=after_sequence)
+
+    def acknowledge_start_presentation(
+        self,
+        operation_id: str,
+        *,
+        owner_id: str,
+        agent_id: str,
+        sequence: int,
+        message_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Confirm that the originating Workbench rendered the start state.
+
+        Authentication supplies ``owner_id``; callers must not take it from
+        the request body.  Scope mismatch is intentionally indistinguishable
+        from a missing operation.
+        """
+
+        operation = self.operation(
+            operation_id,
+            owner_id=owner_id,
+            agent_id=agent_id,
+        )
+        if operation is None:
+            return {"acknowledged": False, "reason": "not_found"}
+        if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence <= 0:
+            return {"acknowledged": False, "reason": "invalid_sequence"}
+        if message_id is not None and (
+            not isinstance(message_id, str) or len(message_id) > 200
+        ):
+            return {"acknowledged": False, "reason": "invalid_message_id"}
+        record = self.receipts.get(operation_id)
+        ack = dict(record.get("presentation_ack") or {})
+        status = ack.get("status") or "not_required"
+        if status == "not_required":
+            return {"acknowledged": False, "reason": "not_required"}
+        expected_sequence = ack.get("expected_sequence")
+        if sequence != expected_sequence:
+            return {"acknowledged": False, "reason": "sequence_mismatch"}
+        if status == "confirmed":
+            if ack.get("sequence") != sequence:
+                return {"acknowledged": False, "reason": "sequence_mismatch"}
+            return {
+                "acknowledged": True,
+                "duplicate": True,
+                "operation": self._operation_projection(record),
+            }
+        if status == "expired" or record.get("status") not in ACTIVE:
+            return {"acknowledged": False, "reason": "not_pending"}
+        ack.update(
+            status="confirmed",
+            sequence=sequence,
+            message_id=message_id,
+            confirmed_at=time.time(),
+        )
+        record = self.receipts.update(
+            operation_id,
+            phase="start_presented",
+            presentation_ack=ack,
+            progress_message_id=message_id,
+        )
+        event = self._presentation_ack_events.get(operation_id)
+        if event is not None:
+            event.set()
+        return {
+            "acknowledged": True,
+            "duplicate": False,
+            "operation": self._operation_projection(record),
+        }
+
+    async def _wait_for_start_presentation_ack(
+        self, record: Mapping[str, Any]
+    ) -> dict[str, Any] | None:
+        """Wait for the persisted browser-render acknowledgement, if required."""
+
+        operation_id = str(record["id"])
+        ack = record.get("presentation_ack") or {}
+        if ack.get("status") == "not_required":
+            return dict(record)
+        event = self._presentation_ack_events.setdefault(operation_id, asyncio.Event())
+        deadline = (
+            asyncio.get_running_loop().time()
+            + START_PRESENTATION_ACK_TIMEOUT_SECONDS
+        )
+        try:
+            while True:
+                event.clear()
+                current = self.receipts.get(operation_id)
+                current_ack = current.get("presentation_ack") or {}
+                if current_ack.get("status") == "confirmed":
+                    return current
+                if (
+                    current_ack.get("status") != "pending"
+                    or current.get("status") not in ACTIVE
+                ):
+                    return None
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    latest = self.receipts.get(operation_id)
+                    latest_ack = dict(latest.get("presentation_ack") or {})
+                    if latest_ack.get("status") == "confirmed":
+                        return latest
+                    if latest_ack.get("status") == "pending":
+                        latest_ack["status"] = "expired"
+                        self.receipts.update(
+                            operation_id,
+                            presentation_ack=latest_ack,
+                        )
+                    return None
+                try:
+                    await asyncio.wait_for(event.wait(), timeout=remaining)
+                except TimeoutError:
+                    continue
+        finally:
+            self._presentation_ack_events.pop(operation_id, None)
 
     async def _deliver(self, record, *, starting=False):
         origin = record.get("origin", {})
@@ -1109,6 +1235,19 @@ class RebootManager:
                     reason="start_notice_unavailable",
                 )
                 return False
+            if (record.get("presentation_ack") or {}).get("status") != "not_required":
+                presentation_operation_id = record["id"]
+                record = await self._wait_for_start_presentation_ack(record)
+                if record is None:
+                    current = self.receipts.get(presentation_operation_id)
+                    self._finish(
+                        current,
+                        "rejected",
+                        lifecycle_state="rejected",
+                        reason="start_presentation_unconfirmed",
+                    )
+                    record = current
+                    return False
             self.receipts.update(record["id"], phase="preparing")
             if str(restart.get("mode") or "same") in BROAD_REBOOT_MODES:
                 self._fence_reboot_routes(record)

@@ -27,7 +27,7 @@ LIFECYCLE_STATES = frozenset(
         "unconfirmed",
     }
 )
-RECEIPT_SCHEMA_VERSION = 4
+RECEIPT_SCHEMA_VERSION = 5
 MAX_PROGRESS_EVENTS = 32
 
 
@@ -46,6 +46,16 @@ def _default_delivery(*, requested: bool = False):
         "status": "pending" if requested else "not_requested",
         "attempts": 0,
         "next_attempt_at": 0,
+    }
+
+
+def _default_presentation_ack(*, required: bool = False):
+    return {
+        "status": "pending" if required else "not_required",
+        "expected_sequence": 1 if required else None,
+        "sequence": None,
+        "message_id": None,
+        "confirmed_at": None,
     }
 
 
@@ -80,6 +90,10 @@ def _normalize_record(record):
     # Legacy receipts have no separately provable start-delivery event.  Do
     # not infer one merely because their final origin was deliverable.
     record.setdefault("start_delivery", _default_delivery())
+    # v1-v4 receipts predate browser-render confirmation.  Historical
+    # operations must remain readable, but must never be reinterpreted as
+    # having received a presentation acknowledgement.
+    record.setdefault("presentation_ack", _default_presentation_ack())
     record.setdefault("progress", [])
     return record
 
@@ -225,6 +239,52 @@ def validate_record(record):
             and isinstance(record["start_delivery"]["attempts"], int)
             and 0 <= record["start_delivery"]["attempts"] <= MAX_DELIVERY_ATTEMPTS
             and math.isfinite(record["start_delivery"]["next_attempt_at"])
+            and record["presentation_ack"]["status"]
+            in {"not_required", "pending", "confirmed", "expired"}
+            and (
+                record["presentation_ack"].get("expected_sequence") is None
+                or (
+                    isinstance(
+                        record["presentation_ack"].get("expected_sequence"), int
+                    )
+                    and not isinstance(
+                        record["presentation_ack"].get("expected_sequence"), bool
+                    )
+                    and record["presentation_ack"]["expected_sequence"] > 0
+                )
+            )
+            and (
+                record["presentation_ack"].get("sequence") is None
+                or (
+                    isinstance(record["presentation_ack"].get("sequence"), int)
+                    and not isinstance(
+                        record["presentation_ack"].get("sequence"), bool
+                    )
+                    and record["presentation_ack"]["sequence"] > 0
+                )
+            )
+            and (
+                record["presentation_ack"].get("message_id") is None
+                or (
+                    isinstance(
+                        record["presentation_ack"].get("message_id"), str
+                    )
+                    and len(record["presentation_ack"]["message_id"]) <= 200
+                )
+            )
+            and (
+                record["presentation_ack"].get("confirmed_at") is None
+                or (
+                    isinstance(
+                        record["presentation_ack"].get("confirmed_at"),
+                        (int, float),
+                    )
+                    and not isinstance(
+                        record["presentation_ack"].get("confirmed_at"), bool
+                    )
+                    and math.isfinite(record["presentation_ack"]["confirmed_at"])
+                )
+            )
             and isinstance(record["progress"], list)
             and len(record["progress"]) <= MAX_PROGRESS_EVENTS
             and all(
@@ -240,6 +300,24 @@ def validate_record(record):
             )
         )
         clean_origin(record["origin"])
+        ack = record["presentation_ack"]
+        if ack["status"] == "not_required" and any(
+            ack.get(key) is not None
+            for key in ("expected_sequence", "sequence", "confirmed_at")
+        ):
+            valid = False
+        if ack["status"] in {"pending", "expired"} and (
+            ack.get("expected_sequence") is None
+            or ack.get("sequence") is not None
+            or ack.get("confirmed_at") is not None
+        ):
+            valid = False
+        if ack["status"] == "confirmed" and (
+            ack.get("expected_sequence") is None
+            or ack.get("sequence") != ack.get("expected_sequence")
+            or ack.get("confirmed_at") is None
+        ):
+            valid = False
         if not valid:
             raise ValueError("Invalid reboot receipt record")
     except (KeyError, TypeError, ValueError, OverflowError) as exc:
@@ -261,7 +339,8 @@ class RebootReceipts:
                 payload = json.loads(self.path.read_text(encoding="utf-8"))
                 if (
                     not isinstance(payload, dict)
-                    or payload.get("schema") not in {1, 2, 3, RECEIPT_SCHEMA_VERSION}
+                    or payload.get("schema")
+                    not in {1, 2, 3, 4, RECEIPT_SCHEMA_VERSION}
                     or not isinstance(payload.get("records"), list)
                 ):
                     raise ValueError("Invalid reboot receipt storage")
@@ -332,6 +411,9 @@ class RebootReceipts:
         ):
             raise ValueError("Invalid reboot request key")
         now = time.time()
+        presentation_ack_required = (
+            origin.get("surface") == "workbench" and str(mode) == "max"
+        )
         record = {
             "id": uuid4().hex,
             "request_key": request_key,
@@ -354,6 +436,9 @@ class RebootReceipts:
             "shared_replacement": _default_shared_replacement(),
             "start_delivery": _default_delivery(
                 requested=origin_delivery_requested(origin)
+            ),
+            "presentation_ack": _default_presentation_ack(
+                required=presentation_ack_required
             ),
             "delivery": _default_delivery(requested=origin_delivery_requested(origin)),
             "progress": [
