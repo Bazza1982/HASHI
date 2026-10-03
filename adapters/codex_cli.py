@@ -24,7 +24,6 @@ from adapters.codex_usage import (
     cumulative_usage,
     last_logged_usage,
 )
-from adapters.codex_process_guard import CodexProcessGuard
 from adapters.stream_io import iter_stream_lines
 from adapters.stream_events import (
     StreamCallback, StreamEvent,
@@ -204,28 +203,6 @@ class CodexCLIAdapter(BaseBackend):
                 return False
             version = stdout.decode(errors="replace").strip()
             self.logger.info(f"Codex CLI version: {version}")
-            guard_probe = resolve_argv_invocation(
-                (self.cmd_base, "exec", "--enable", "hooks", "--help")
-            )
-            guard_proc = await asyncio.create_subprocess_exec(
-                *guard_probe.argv,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                **process_group_kwargs(),
-            )
-            guard_stdout, guard_stderr = await guard_proc.communicate()
-            guard_help = (guard_stdout + guard_stderr).decode(
-                errors="replace"
-            )
-            if (
-                guard_proc.returncode != 0
-                or "--dangerously-bypass-hook-trust" not in guard_help
-            ):
-                self.logger.error(
-                    "Codex CLI lacks the required session-scoped PreToolUse "
-                    "hook support; refusing to start an unprotected backend."
-                )
-                return False
             descriptor = prepare_hashi_mcp(self, backend="codex-cli")
             if descriptor is not None:
                 descriptor.close()
@@ -657,7 +634,6 @@ class CodexCLIAdapter(BaseBackend):
         *,
         reasoning_effort: str | None = None,
         image_paths: tuple[Path, ...] = (),
-        process_guard: CodexProcessGuard | None = None,
     ) -> list[str]:
         """Build the codex exec command. Uses 'resume' sub-command if a session exists.
 
@@ -697,6 +673,7 @@ class CodexCLIAdapter(BaseBackend):
                 "browser_use",
                 "computer_use",
                 "image_generation",
+                "hooks",
             ):
                 base_flags += ["--disable", feature]
             base_flags += ["-c", 'web_search="disabled"']
@@ -714,8 +691,6 @@ class CodexCLIAdapter(BaseBackend):
                 "-c",
                 mcp_value,
             ]
-        if process_guard is not None:
-            base_flags += process_guard.cli_flags()
 
         if self._session_mode and self._session_id:
             # Resume existing session — access root already set in session, no --add-dir needed
@@ -1065,6 +1040,12 @@ class CodexCLIAdapter(BaseBackend):
                     )
                 )
 
+        cmd = self._build_cmd(
+            prompt_arg,
+            output_path,
+            reasoning_effort=reasoning_effort,
+            image_paths=native_image_paths,
+        )
         session_mode = "resume" if self._session_id else "new"
         resumed_thread_id = self._session_id if self._session_mode else None
         logged_usage_baseline = None
@@ -1104,24 +1085,8 @@ class CodexCLIAdapter(BaseBackend):
         side_effect_item_ids: set[str] = set()
         provider_activity_observed = False
         last_tool_receipt: dict[str, object] | None = None
-        process_guard: CodexProcessGuard | None = None
-        cmd: list[str] = []
 
         try:
-            process_guard = CodexProcessGuard.create(
-                self.config.workspace_dir
-                / "backend_state"
-                / "codex_cli"
-                / "process_guards",
-                request_id=request_id,
-            )
-            cmd = self._build_cmd(
-                prompt_arg,
-                output_path,
-                reasoning_effort=reasoning_effort,
-                image_paths=native_image_paths,
-                process_guard=process_guard,
-            )
             try:
                 event_log = self._event_log_writer()
                 event_log.__enter__()
@@ -1156,7 +1121,6 @@ class CodexCLIAdapter(BaseBackend):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(effective_workdir),
-                env=process_guard.subprocess_environment(),
                 **process_group_kwargs(),
             )
             # Capture local ref to avoid race with shutdown() nulling self.current_proc
@@ -1728,15 +1692,6 @@ class CodexCLIAdapter(BaseBackend):
                     request_id,
                     unlink_exc,
                 )
-            if process_guard is not None:
-                try:
-                    process_guard.close()
-                except OSError as guard_close_exc:
-                    self.logger.warning(
-                        "Codex process-guard cleanup failed for %s: %s",
-                        request_id,
-                        guard_close_exc,
-                    )
 
     async def shutdown(self):
         if self.current_proc:
