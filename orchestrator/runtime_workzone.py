@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Mapping
 
 from telegram import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup
@@ -569,6 +570,7 @@ def _clear_pending_path(runtime: Any, update: Any) -> bool:
 
 async def _begin_path_reply(
     runtime: Any,
+    update: Any,
     query: Any,
     *,
     owner_id: str,
@@ -576,13 +578,34 @@ async def _begin_path_reply(
     slot_id: str,
 ) -> None:
     slot = normalize_workzone_slot(slot_id)
-    prompt = await query.message.reply_text(
+    projected = SimpleNamespace(
+        update_id=getattr(update, "update_id", None),
+        effective_user=getattr(update, "effective_user", None)
+        or getattr(query, "from_user", None),
+        effective_chat=getattr(update, "effective_chat", None)
+        or getattr(query.message, "chat", None),
+        message=query.message,
+    )
+    for attribute in (
+        "_hashi_session_surface",
+        "_hashi_session_channel_key",
+        "_hashi_session_id",
+        "_hashi_session_owner_id",
+        "_hashi_ui_locale",
+    ):
+        if hasattr(update, attribute):
+            setattr(projected, attribute, getattr(update, attribute))
+    prompt = await runtime._reply_text(
+        projected,
         ui_language.tr("workzone.path_prompt", slot=slot),
         reply_markup=ForceReply(
             selective=True,
             input_field_placeholder=ui_language.tr("workzone.path_placeholder"),
         ),
     )
+    prompt_message_id = int(getattr(prompt, "message_id", 0) or 0)
+    if prompt_message_id <= 0:
+        raise RuntimeError("Workzone path prompt delivery was not confirmed")
     chat_id = int(getattr(getattr(query.message, "chat", None), "id", 0) or 0)
     user_id = int(getattr(getattr(query, "from_user", None), "id", 0) or 0)
     _pending_paths(runtime)[(chat_id, user_id)] = {
@@ -590,7 +613,7 @@ async def _begin_path_reply(
         "agent_id": str(runtime.name).lower(),
         "slot": slot,
         "revision": int(normalize_workzone_state(state)["revision"]),
-        "prompt_message_id": int(getattr(prompt, "message_id", 0) or 0),
+        "prompt_message_id": prompt_message_id,
         "expires_at": time.monotonic() + _PATH_REPLY_TTL_SECONDS,
     }
 
@@ -668,6 +691,42 @@ async def handle_pending_path_reply(runtime: Any, update: Any) -> bool:
         _clear_pending_path(runtime, update)
         await runtime._reply_text(update, ui_language.tr("workzone.path_stale"))
         return True
+    transport_id = getattr(message, "message_id", None)
+    if transport_id is None:
+        transport_id = getattr(update, "update_id", None)
+    if transport_id is None:
+        _clear_pending_path(runtime, update)
+        await runtime._reply_text(update, ui_language.tr("workzone.path_stale"))
+        return True
+    from orchestrator.frontend_command_admission import (
+        reserve_telegram_command_invocation,
+    )
+
+    raw_path = str(getattr(message, "text", "") or "")
+    ticket = reserve_telegram_command_invocation(
+        runtime,
+        update,
+        command_name="workzone",
+        arguments=[str(pending["slot"]), raw_path],
+        transport_id=transport_id,
+        ingress_transport="telegram.force-reply",
+        request_payload={
+            "message_id": str(transport_id),
+            "prompt_message_id": int(pending["prompt_message_id"]),
+            "revision": int(pending["revision"]),
+            "slot": str(pending["slot"]),
+            "path": raw_path,
+        },
+    )
+    if ticket.state == "completed":
+        _clear_pending_path(runtime, update)
+        current = agent_state(runtime, owner_id=str(session["owner_id"]))
+        await _reply_slot(runtime, update, current, pending["slot"])
+        return True
+    if ticket.state != "reserved":
+        _clear_pending_path(runtime, update)
+        await runtime._reply_text(update, ui_language.tr("workzone.path_stale"))
+        return True
     state = agent_state(runtime, owner_id=str(session["owner_id"]))
     try:
         after, deferred = await _save_path(
@@ -675,22 +734,47 @@ async def handle_pending_path_reply(runtime: Any, update: Any) -> bool:
             owner_id=str(session["owner_id"]),
             state=state,
             slot_id=pending["slot"],
-            raw_path=str(getattr(message, "text", "") or ""),
+            raw_path=raw_path,
             expected_revision=int(pending["revision"]),
             enable=None,
             source="telegram_force_reply",
         )
     except SessionConflict:
+        ticket.complete(
+            {
+                "ok": False,
+                "error_code": "workzone_revision_conflict",
+                "execution_state": "rejected",
+            }
+        )
         _clear_pending_path(runtime, update)
         await runtime._reply_text(update, ui_language.tr("workzone.path_stale"))
         return True
     except ValueError as exc:
+        ticket.complete(
+            {
+                "ok": False,
+                "error_code": "workzone_path_invalid",
+                "execution_state": "rejected",
+            }
+        )
         await runtime._reply_text(
             update,
             ui_language.tr("workzone.not_changed", reason=html.escape(str(exc))),
             parse_mode="HTML",
         )
         return True
+    ticket.complete(
+        {
+            "ok": True,
+            "command": "workzone",
+            "execution_state": "completed",
+            "workzone_revision": int(after["revision"]),
+            "slot": str(pending["slot"]),
+            "connector_id": "telegram",
+            "transport_delivery_state": "not_observed",
+        }
+    )
     _clear_pending_path(runtime, update)
     await _reply_slot(
         runtime,
@@ -1064,6 +1148,7 @@ async def callback_workzone(runtime: Any, update: Any, context: Any) -> None:
     if action == "p" and slot is not None:
         await _begin_path_reply(
             runtime,
+            update,
             query,
             owner_id=resolved_owner,
             state=state,

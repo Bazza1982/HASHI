@@ -3325,6 +3325,36 @@ async def test_handle_empty_success_response_buffers_transfer():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("wrapped_text", ["completed provider output", ""])
+async def test_stop_during_final_wrapper_never_publishes_success(wrapped_text):
+    from orchestrator import runtime_cancel
+
+    runtime = _runtime()
+    item = _item()
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def wrapper(_item, text):
+        entered.set()
+        await release.wait()
+        return wrapped_text, None
+
+    runtime._apply_wrapper_to_visible_text = wrapper
+    pending = asyncio.create_task(runtime_pipeline.prepare_successful_response(
+        runtime, item, SimpleNamespace(text="completed provider output"), completion_path="foreground"
+    ))
+    await entered.wait()
+    runtime_cancel.requested_ids(runtime).add(item.request_id)
+    release.set()
+    result = await pending
+    assert result.cancelled
+    assert not runtime.success_marked
+    assert runtime.transcripts == []
+    assert len(runtime.listener_payloads) == 1
+    assert runtime.listener_payloads[0]["interrupted"]
+    assert not runtime.listener_payloads[0]["success"]
+
+
+@pytest.mark.asyncio
 async def test_prepare_successful_response_applies_wrapper_and_notifies_listeners():
     runtime = _runtime()
     item = _item()

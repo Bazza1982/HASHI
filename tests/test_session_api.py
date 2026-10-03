@@ -37,20 +37,37 @@ class _Request:
 
 
 class _MultipartPart:
-    filename = None
-    headers = {}
-
-    def __init__(self, name: str, value: str):
+    def __init__(
+        self,
+        name: str,
+        value: str = "",
+        *,
+        filename: str | None = None,
+        payload: bytes = b"",
+        content_type: str = "",
+    ):
         self.name = name
         self._value = value
+        self.filename = filename
+        self.headers = {"Content-Type": content_type} if content_type else {}
+        self._payload = bytes(payload)
+        self._read = False
 
     async def text(self):
         return self._value
 
+    async def read_chunk(self):
+        if self._read:
+            return b""
+        self._read = True
+        return self._payload
+
 
 class _MultipartReader:
-    def __init__(self, fields: dict[str, str]):
-        self._parts = iter(_MultipartPart(key, value) for key, value in fields.items())
+    def __init__(self, fields: dict[str, str], uploads=None):
+        parts = [_MultipartPart(key, value) for key, value in fields.items()]
+        parts.extend(uploads or [])
+        self._parts = iter(parts)
 
     async def next(self):
         return next(self._parts, None)
@@ -59,12 +76,13 @@ class _MultipartReader:
 class _MultipartRequest(_Request):
     content_type = "multipart/form-data"
 
-    def __init__(self, fields: dict[str, str]):
+    def __init__(self, fields: dict[str, str], uploads=None):
         super().__init__()
         self._fields = fields
+        self._uploads = list(uploads or [])
 
     async def multipart(self):
-        return _MultipartReader(self._fields)
+        return _MultipartReader(self._fields, self._uploads)
 
 
 class _Runtime:
@@ -1215,6 +1233,159 @@ async def test_legacy_chat_response_is_queue_ack_without_transport_receipt(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_transferred_chat_returns_canonical_409_without_model_run_or_telegram(
+    tmp_path,
+):
+    server, runtime = _server(tmp_path)
+    runtime._transfer_state = {
+        "status": "accepted",
+        "transfer_id": "trf-chat-1",
+        "target_agent": "akane",
+        "target_instance": "HASHI2",
+    }
+    request = _Request(
+        {
+            "agent": "lily",
+            "text": "must continue on the target",
+            "idempotency_key": "chat-after-transfer-1",
+        }
+    )
+    request.content_type = "application/json"
+
+    first = await server.handle_chat(request)
+    replay = await server.handle_chat(request)
+    conflicting_request = _Request(
+        {
+            "agent": "lily",
+            "text": "different content with the same key",
+            "idempotency_key": "chat-after-transfer-1",
+        }
+    )
+    conflicting_request.content_type = "application/json"
+    conflict = await server.handle_chat(conflicting_request)
+    first_payload = json.loads(first.text)
+    replay_payload = json.loads(replay.text)
+    conflict_payload = json.loads(conflict.text)
+
+    assert first.status == replay.status == 409
+    assert first_payload["ok"] is False
+    assert first_payload["accepted"] is False
+    assert first_payload["error_code"] == "session_transferred"
+    assert first_payload["transfer_id"] == "trf-chat-1"
+    assert first_payload["target_agent"] == "akane"
+    assert first_payload["target_instance"] == "HASHI2"
+    assert first_payload["admission"]["status"] == "rejected"
+    assert first_payload["admission"]["reason"] == "session_transferred"
+    assert replay_payload["admission"]["replayed"] is True
+    assert replay_payload["canonical_result"] == first_payload["canonical_result"]
+    assert conflict.status == 409
+    assert conflict_payload["error_code"] == "idempotency_conflict"
+    assert conflict_payload["admission"]["status"] == "conflict"
+    assert runtime.api_request_metadata == []
+
+    session_id = first_payload["session_id"]
+    assert server.session_store.recent_session_runs(
+        session_id, owner_id="user:7"
+    ) == []
+    messages = server.session_store.messages(session_id, owner_id="user:7")
+    assert len(messages) == 1
+    assert messages[0]["source"] == "workbench.transfer-redirect"
+    events = server.session_store.events(session_id, owner_id="user:7")
+    assert sum(event["kind"] == "frontend.command_result" for event in events) == 1
+    assert sum(event["kind"] == "frontend.message.recorded" for event in events) == 1
+    claims = server.session_store.claim_delivery_outbox(
+        session_id=session_id,
+        owner_id="user:7",
+        worker_id="test-transfer-redirect",
+        event_id=first_payload["canonical_result"]["message_event_id"],
+        connector_id="backend_api",
+        limit=1,
+    )
+    assert len(claims) == 1
+
+
+@pytest.mark.asyncio
+async def test_transferred_nonvoice_media_is_rejected_before_upload_is_written(
+    tmp_path,
+):
+    from orchestrator.frontend_delivery import tui_run_delivery_policy
+
+    server, runtime = _server(tmp_path)
+    runtime._transfer_state = {
+        "status": "accepted",
+        "transfer_id": "trf-media-1",
+        "target_agent": "akane",
+        "target_instance": "HASHI2",
+    }
+    content = b"\x89PNG\r\n\x1a\nnot-written"
+    request = _Request(
+        {
+            "agent": "lily",
+            "text": "inspect",
+            "source": "tui",
+            "client_id": "tui-transfer",
+            "delivery_policy": tui_run_delivery_policy(
+                telegram_mirror=False,
+                client_id="tui-transfer",
+            ),
+            "attachment": {
+                "filename": "image.png",
+                "media_type": "image/png",
+                "content_b64": base64.b64encode(content).decode("ascii"),
+                "size_bytes": len(content),
+                "sha256": hashlib.sha256(content).hexdigest(),
+            },
+            "idempotency_key": "media-after-transfer-1",
+        }
+    )
+    request.content_type = "application/json"
+
+    response = await server.handle_chat(request)
+    payload = json.loads(response.text)
+
+    assert response.status == 409
+    assert payload["error_code"] == "session_transferred"
+    assert runtime.api_media_calls == []
+    assert [path for path in runtime.media_dir.rglob("*") if path.is_file()] == []
+
+
+@pytest.mark.asyncio
+async def test_transferred_multipart_media_is_rejected_before_upload_is_written(
+    tmp_path,
+):
+    server, runtime = _server(tmp_path)
+    runtime._transfer_state = {
+        "status": "accepted",
+        "transfer_id": "trf-multipart-1",
+        "target_agent": "akane",
+        "target_instance": "HASHI2",
+    }
+    request = _MultipartRequest(
+        {
+            "agent": "lily",
+            "text": "inspect multipart",
+            "idempotency_key": "multipart-after-transfer-1",
+        },
+        uploads=[
+            _MultipartPart(
+                "file",
+                filename="image.png",
+                payload=b"\x89PNG\r\n\x1a\nnot-written",
+                content_type="image/png",
+            )
+        ],
+    )
+
+    response = await server.handle_chat(request)
+    payload = json.loads(response.text)
+
+    assert response.status == 409
+    assert payload["error_code"] == "session_transferred"
+    assert runtime.api_media_calls == []
+    assert [path for path in runtime.media_dir.rglob("*") if path.is_file()] == []
+
+
+@pytest.mark.asyncio
 async def test_protocol_hchat_attachments_enter_one_canonical_session_request(tmp_path):
     from orchestrator.hchat_attachment_contract import (
         HCHAT_ATTACHMENT_CLAIM_KEY,
@@ -1299,6 +1470,95 @@ async def test_protocol_hchat_attachments_enter_one_canonical_session_request(tm
     assert Path(media[0]["local_ref"]).is_relative_to(
         server.session_store.attachment_files_root
     )
+
+
+@pytest.mark.asyncio
+async def test_transferred_protocol_hchat_document_is_rejected_before_staging(tmp_path):
+    from orchestrator.hchat_attachment_contract import (
+        HCHAT_ATTACHMENT_CLAIM_KEY,
+        canonical_hchat_attachment_manifest,
+    )
+    from orchestrator.message_context import seal_connector_evidence
+
+    (tmp_path / "secrets.json").write_text(
+        json.dumps({"hashi_remote_shared_token": "test-network-secret"}),
+        encoding="utf-8",
+    )
+    server, runtime = _server(tmp_path)
+    runtime._transfer_state = {
+        "status": "accepted",
+        "transfer_id": "trf-hchat-document-1",
+        "target_agent": "akane",
+        "target_instance": "HASHI2",
+    }
+    content = b"%PDF-1.7 remote document"
+    received = (
+        tmp_path
+        / "state"
+        / "remote_attachments"
+        / "hashi1"
+        / "messages"
+        / "wire-transfer-document"
+        / "report.pdf"
+    )
+    received.parent.mkdir(parents=True)
+    received.write_bytes(content)
+    attachments = [
+        {
+            "attachment_id": "att-transfer-document",
+            "filename": "report.pdf",
+            "mime_type": "application/pdf",
+            "size_bytes": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "caption": "read after moving",
+            "stored_path": str(received),
+        }
+    ]
+    text = "System exchange message from testing@HASHI2:\ninspect this document"
+    claims = {
+        "_message_source_reserved": "hchat",
+        "_hchat_context": {
+            "from_agent": "testing",
+            "from_instance": "HASHI2",
+            "to_agent": "lily",
+            "to_instance": "HASHI1",
+            "authenticated_peer": "HASHI2",
+            "network_authentication": "shared_network_hmac",
+            "sender_assurance": "shared_network_member_declared",
+            "relay_chain": [],
+            "origin_instance": {
+                "id": "HASHI2",
+                "assurance": "shared_network_hmac",
+            },
+        },
+        HCHAT_ATTACHMENT_CLAIM_KEY: canonical_hchat_attachment_manifest(attachments),
+    }
+    request = _Request(
+        {
+            "agent": "lily",
+            "text": text,
+            "source": "protocol:message",
+            "request_metadata": {
+                "session_surface": "remote",
+                "session_channel_key": "HASHI2:conversation-transfer-document",
+                "_connector_evidence": seal_connector_evidence(
+                    tmp_path, claims=claims, prompt=text
+                ),
+            },
+            "remote_attachments": attachments,
+            "idempotency_key": "protocol:message:wire-transfer-document",
+        }
+    )
+    request.content_type = "application/json"
+
+    response = await server.handle_chat(request)
+    payload = json.loads(response.text)
+
+    assert response.status == 409
+    assert payload["error_code"] == "session_transferred"
+    assert payload["transfer_id"] == "trf-hchat-document-1"
+    assert runtime.api_request_content == []
+    assert list(server.session_store.attachment_files_root.iterdir()) == []
 
 
 @pytest.mark.asyncio
@@ -2109,6 +2369,14 @@ async def test_request_cancel_fences_session_and_run_before_worker_call(tmp_path
     assert accepted_response.status == 202
     assert len(calls) == 1
     assert calls[0]["request_id"] == accepted.request_id
+    controls = [event for event in server.session_store.events(session["session_id"])
+                if event["kind"] == "run.control"]
+    assert [event["status"] for event in controls] == ["requested", "cancellation_requested"]
+    assert controls[-1]["detail"] == {
+        "action": "cancel", "actor_id": session["owner_id"], "source": "backend_api.request_cancel",
+        "agent_id": "lily", "session_id": session["session_id"], "run_id": accepted.run_id,
+        "request_id": accepted.request_id, "reason": "cancelled_by_user", "error_code": "",
+    }
 
 
 @pytest.mark.asyncio

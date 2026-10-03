@@ -2076,7 +2076,7 @@
     "api.restart.confirm_action": "Confirm below, or keep {instance} running.",
     "api.restart.setup_error": "❌ Unable to start the restart:\n<code>{reason}</code>",
     "api.restart.setup_incomplete": "Restart setup incomplete.",
-    "api.restart.requested": "🔄 Restarting {instance}. You'll be notified when it's back online.",
+    "api.restart.requested": "🔄 Restart request accepted for {instance}. Workbench will disconnect; wait for it to reconnect and verify the instance status.",
     "api.restart.requested_short": "Restart requested.",
     "api.restart.unknown": "Unknown restart control.",
     "api.restart.failed": "❌ Restart failed: {reason}",

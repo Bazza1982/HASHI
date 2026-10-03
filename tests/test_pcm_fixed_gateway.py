@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import os
@@ -13,8 +14,13 @@ sys.modules.setdefault("edge_tts", types.ModuleType("edge_tts"))
 
 import pytest
 
+import adapters.hashi_mcp as hashi_mcp
 from adapters.codex_cli import CodexCLIAdapter
-from adapters.hashi_mcp import prepare_hashi_mcp, write_claude_mcp_config
+from adapters.hashi_mcp import (
+    current_hashi_mcp_invocation,
+    prepare_hashi_mcp,
+    write_claude_mcp_config,
+)
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
 from tools.gateway.context import load_gateway_context
@@ -72,13 +78,16 @@ def test_fixed_cli_gateway_context_matches_registry_workzone_and_permissions(tmp
     )
 
     descriptor = prepare_hashi_mcp(adapter, backend="codex-cli")
-    context = load_gateway_context(Path(descriptor["context_path"]))
+    try:
+        context = load_gateway_context(Path(descriptor["context_path"]))
 
-    assert context.allowed_tools == ["file_read", "memory_search"]
-    assert Path(context.workspace_dir) == registry.workspace_dir.resolve()
-    assert Path(context.access_root) == registry.access_root.resolve()
-    assert context.enforce_legacy_limits is False
-    assert set(descriptor["exposed_tools"]) == {"hashi_file_read", "memory_search"}
+        assert context.allowed_tools == ["file_read", "memory_search"]
+        assert Path(context.workspace_dir) == registry.workspace_dir.resolve()
+        assert Path(context.access_root) == registry.access_root.resolve()
+        assert context.enforce_legacy_limits is False
+        assert set(descriptor["exposed_tools"]) == {"hashi_file_read", "memory_search"}
+    finally:
+        descriptor.close()
 
 
 def test_codex_fixed_command_connects_only_the_per_invocation_hashi_gateway(tmp_path):
@@ -91,16 +100,14 @@ def test_codex_fixed_command_connects_only_the_per_invocation_hashi_gateway(tmp_
         resolve_access_root=lambda: tmp_path,
     )
     adapter = CodexCLIAdapter(config, _global(tmp_path))
+    adapter.tool_registry = _registry(tmp_path, adapter.global_config)
     adapter._hashi_mcp_enabled = True
-    adapter._hashi_mcp_descriptor = {
-        "name": "hashi_tools",
-        "command": "/usr/bin/python",
-        "args": ["-m", "tools.gateway.mcp_stdio", "--context", "/tmp/context.json"],
-        "cwd": "/repo",
-    }
     adapter._external_mcp_server_names = ("github", "openaiDeveloperDocs")
-
-    command = adapter._build_cmd("prompt", tmp_path / "last.txt")
+    descriptor = prepare_hashi_mcp(adapter, backend="codex-cli")
+    try:
+        command = adapter._build_cmd("prompt", tmp_path / "last.txt")
+    finally:
+        descriptor.close()
 
     overrides = [
         command[index + 1]
@@ -134,6 +141,59 @@ def test_claude_fixed_config_is_owner_only_and_strictly_scoped(tmp_path):
     assert payload["mcpServers"]["hashi_tools"]["cwd"] == "/repo"
     if os.name != "nt":
         assert path.stat().st_mode & 0o077 == 0
+
+
+def test_invocation_cleanup_revokes_unique_context_and_claude_config_files(tmp_path):
+    global_config = _global(tmp_path)
+    adapter = SimpleNamespace(
+        config=SimpleNamespace(workspace_dir=tmp_path),
+        global_config=global_config,
+        tool_registry=_registry(tmp_path, global_config),
+    )
+    first = prepare_hashi_mcp(
+        adapter,
+        backend="claude-cli",
+        audit_context={**adapter.tool_registry.audit_context, "request_id": "req-a"},
+    )
+    second = prepare_hashi_mcp(
+        adapter,
+        backend="claude-cli",
+        audit_context={**adapter.tool_registry.audit_context, "request_id": "req-b"},
+    )
+    first_config = write_claude_mcp_config(adapter, first)
+    second_config = write_claude_mcp_config(adapter, second)
+    paths = {
+        Path(first["context_path"]),
+        Path(second["context_path"]),
+        first_config,
+        second_config,
+    }
+
+    assert len(paths) == 4
+    assert all(path.exists() for path in paths)
+    assert len(adapter._active_hashi_mcp_invocations) == 2
+    second.close()
+    first.close()
+    assert all(not path.exists() for path in paths)
+    assert adapter._active_hashi_mcp_invocations == {}
+
+
+def test_invocation_limit_is_fail_closed_and_cleanup_reopens_capacity(
+    tmp_path, monkeypatch
+):
+    global_config = _global(tmp_path)
+    adapter = SimpleNamespace(
+        config=SimpleNamespace(workspace_dir=tmp_path),
+        global_config=global_config,
+        tool_registry=_registry(tmp_path, global_config),
+    )
+    monkeypatch.setattr(hashi_mcp, "MAX_ACTIVE_INVOCATIONS_PER_ADAPTER", 1)
+    first = prepare_hashi_mcp(adapter, backend="codex-cli")
+    with pytest.raises(RuntimeError, match="too many active HASHI MCP invocations"):
+        prepare_hashi_mcp(adapter, backend="codex-cli")
+    first.close()
+    second = prepare_hashi_mcp(adapter, backend="codex-cli")
+    second.close()
 
 
 def test_modern_mcp_jsonl_and_legacy_content_length_framing_are_both_supported():
@@ -251,20 +311,23 @@ def test_fixed_gateway_context_is_refreshed_with_request_bound_authority(
 
     manager._refresh_tool_runtime_context("req-1")
 
-    assert registry.audit_context["request_id"] == "req-1"
-    assert registry.audit_context["hashi_session_id"] == "session-1"
-    assert registry.audit_context["hashi_run_id"] == "run-1"
-    assert registry.audit_context["owner_id"] == "user:7"
-    assert registry.audit_context["session_surface"] == "generic-desktop"
-    assert registry.audit_context["session_channel_key"] == "client-1"
-    assert registry.audit_context["session_store_descriptor"] == {
+    assert registry.audit_context.get("request_id") is None
+    request_context = refresh.call_args.kwargs["audit_context"]
+    assert request_context["request_id"] == "req-1"
+    assert request_context["hashi_session_id"] == "session-1"
+    assert request_context["hashi_run_id"] == "run-1"
+    assert request_context["owner_id"] == "user:7"
+    assert request_context["session_surface"] == "generic-desktop"
+    assert request_context["session_channel_key"] == "client-1"
+    assert request_context["session_store_descriptor"] == {
         "db_path": str(tmp_path / "state" / "sessions.sqlite3"),
         "instance_id": "HASHI3",
         "attachment_root": str(tmp_path / "media" / "session_attachments"),
     }
-    assert registry.audit_context["memory_search_authorization"]["agent_id"] == "arale"
-    assert registry.audit_context["request_tool_allowlist"] == ["memory_search"]
-    refresh.assert_called_once_with(backend, backend="codex-cli")
+    assert request_context["memory_search_authorization"]["agent_id"] == "arale"
+    assert request_context["request_tool_allowlist"] == ["memory_search"]
+    assert refresh.call_args.args == (backend,)
+    assert refresh.call_args.kwargs["backend"] == "codex-cli"
 
     manager.runtime._request_meta_by_id["req-2"] = {
         "request_id": "req-2",
@@ -272,4 +335,58 @@ def test_fixed_gateway_context_is_refreshed_with_request_bound_authority(
         "request_metadata": {},
     }
     manager._refresh_tool_runtime_context("req-2")
-    assert "memory_search_authorization" not in registry.audit_context
+    second_context = refresh.call_args.kwargs["audit_context"]
+    assert "memory_search_authorization" not in second_context
+
+
+@pytest.mark.asyncio
+async def test_fixed_manager_keeps_descriptor_request_scoped_across_await(tmp_path):
+    global_config = _global(tmp_path)
+    registry = _registry(tmp_path, global_config)
+    observed = {}
+    both_entered = asyncio.Event()
+    entered = 0
+
+    class Backend:
+        _hashi_mcp_enabled = True
+
+        def __init__(self):
+            self.tool_registry = registry
+            self.config = SimpleNamespace(workspace_dir=tmp_path)
+            self.global_config = global_config
+
+        async def generate_response(self, _prompt, request_id, **_kwargs):
+            nonlocal entered
+            entered += 1
+            if entered == 2:
+                both_entered.set()
+            await both_entered.wait()
+            invocation = current_hashi_mcp_invocation(self)
+            context = load_gateway_context(Path(invocation["context_path"]))
+            observed[request_id] = (context.audit["request_id"], Path(invocation["context_path"]))
+            return request_id
+
+    backend = Backend()
+    manager = FlexibleBackendManager.__new__(FlexibleBackendManager)
+    manager.config = SimpleNamespace(active_backend="codex-cli")
+    manager.current_backend = backend
+    manager.runtime = SimpleNamespace(
+        name="rika",
+        session_store=None,
+        _request_meta_by_id={
+            "req-a": {"request_id": "req-a", "request_metadata": {}},
+            "req-b": {"request_id": "req-b", "request_metadata": {}},
+        },
+        current_request_meta=None,
+    )
+
+    results = await asyncio.gather(
+        manager.generate_response("A", "req-a"),
+        manager.generate_response("B", "req-b"),
+    )
+
+    assert results == ["req-a", "req-b"]
+    assert observed["req-a"][0] == "req-a"
+    assert observed["req-b"][0] == "req-b"
+    assert observed["req-a"][1] != observed["req-b"][1]
+    assert all(not path.exists() for _request, path in observed.values())

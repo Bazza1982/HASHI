@@ -1696,6 +1696,36 @@ async def test_explicit_stop_with_tool_calls_is_audited_conflict_without_side_ef
 
 
 @pytest.mark.asyncio
+async def test_explicit_stop_without_usable_output_is_typed_empty_response(
+    monkeypatch,
+    tmp_path,
+):
+    adapter = _adapter(tmp_path)
+    observed = []
+    adapter.set_provider_call_observer(observed.append)
+
+    async def fake_call(payload, headers, on_stream_event):
+        return _APIResult(
+            text="",
+            tool_calls=None,
+            finish_reason="stop",
+            completion_tokens=1,
+            provider_response_id="response-empty",
+        )
+
+    monkeypatch.setattr(adapter, "_call_api_once", fake_call)
+
+    response = await adapter.generate_response("answer", "req-empty-stop")
+
+    assert response.is_success is False
+    assert response.error_code == "PROVIDER_EMPTY_RESPONSE"
+    assert response.error_retryable is True
+    assert response.provider_request_id == "response-empty"
+    assert observed[0]["decision"] == "reject_empty_response"
+    assert observed[0]["decision_reason"] == "stop_without_usable_output"
+
+
+@pytest.mark.asyncio
 async def test_missing_finish_reason_is_unknown_failure_not_natural_stop(
     monkeypatch,
     tmp_path,

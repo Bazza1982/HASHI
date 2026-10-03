@@ -1,7 +1,8 @@
 # HASHI Reboot Presentation Decision
 
 Status: approved current behavior; Workbench-origin max presentation barrier
-implemented offline; frontend integration and live acceptance remain pending.
+and frontend integration implemented offline; instance adoption and live
+acceptance remain pending.
 
 Decision date: 2026-10-03
 

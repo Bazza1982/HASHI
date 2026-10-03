@@ -679,7 +679,26 @@ class AgentRuntimeHandle:
         return self.kernel.runtime_fingerprint.core_source_digest
 
     def get_runtime_metadata(self) -> dict[str, Any]:
-        return dict(self.metadata)
+        from orchestrator.startup_manager import StartupManager
+
+        metadata = dict(self.metadata)
+        metadata["online"] = StartupManager._runtime_is_online(
+            self, str(metadata.get("status") or ("online" if metadata.get("online") else "offline"))
+        )
+        workers = getattr(self.kernel, "function_workers", None)
+        snapshot = getattr(workers, "telegram_ingress_snapshot", None)
+        ingress = dict(snapshot(self.name) or {}) if callable(snapshot) else {}
+        outbound = self.telegram_connected
+        inbound = bool(ingress.get("running") and ingress.get("connected"))
+        metadata["telegram_outbound_connected"] = outbound
+        metadata["telegram_ingress"] = ingress
+        metadata["telegram_connected"] = bool(outbound and inbound)
+        channels = dict(metadata.get("channels") or {})
+        channels["telegram"] = metadata["telegram_connected"]
+        metadata["channels"] = channels
+        if not metadata["online"]:
+            metadata["status"] = "offline"
+        return metadata
 
     def get_display_name(self) -> str:
         return str(self.metadata.get("display_name") or self.name)
@@ -1443,7 +1462,7 @@ class FunctionWorkerSupervisor:
         if not str(token or "").strip():
             return False
         existing = self._telegram_ingress.get(name)
-        if existing is not None and existing.is_running:
+        if existing is not None and existing.is_running and existing.token == str(token):
             return True
         if existing is not None:
             await existing.stop()
@@ -1460,9 +1479,9 @@ class FunctionWorkerSupervisor:
             ingress.offset = offsets[name]
             drop_pending_updates = False
         ingress.drop_pending_on_start = drop_pending_updates
+        self._telegram_ingress[name] = ingress
         if not getattr(self.kernel, "_handoff_draining", False):
             await ingress.start(drop_pending_updates=drop_pending_updates)
-        self._telegram_ingress[name] = ingress
         return True
 
     def _checkpoint_telegram_offset(self, name: str, offset: int) -> None:
@@ -1482,11 +1501,17 @@ class FunctionWorkerSupervisor:
     def telegram_ingress_snapshot(self, agent_name: str) -> dict[str, Any]:
         ingress = self._telegram_ingress.get(str(agent_name))
         return {
-            "configured": ingress is not None,
+            "configured": ingress is not None or bool(self._telegram_token(agent_name)),
             "running": bool(ingress is not None and ingress.is_running),
             "connected": bool(ingress is not None and ingress.connected),
             "offset": None if ingress is None else ingress.offset,
         }
+
+    def _telegram_token(self, agent_name: str) -> str:
+        handle = self.kernel._runtime_map().get(str(agent_name))
+        config = getattr(handle, "config", None)
+        key = getattr(config, "telegram_token_key", str(agent_name))
+        return str(getattr(self.kernel, "secrets", {}).get(key) or "").strip()
 
     def _queue_telegram_status_warning(self, agent_name: str, exc: Exception) -> None:
         name = str(agent_name)
@@ -1778,6 +1803,11 @@ class FunctionWorkerSupervisor:
         for handle in list(self.kernel.runtimes):
             if not isinstance(handle, AgentRuntimeHandle):
                 continue
+            token = self._telegram_token(handle.name)
+            if token:
+                await self.start_telegram_ingress(
+                    handle.name, token, drop_pending_updates=False
+                )
             snapshot = self.topology_snapshot(agent_name=handle.name)
             calls.append(
                 handle.client.call(

@@ -285,9 +285,13 @@ async def dispatch_command_interaction(runtime, payload: Mapping, metadata: Mapp
                         return {**capture.result(), "ok": False,
                                 "error_code": "command_menu_command_failed",
                                 "error": "command_menu_command_failed", "http_status": 400}
+                    extra = {}
+                    if "result" in result:
+                        extra["result"] = result["result"]
                     return capture.result(
                         refresh_required=before != _refresh_signature(runtime),
                         command_invocation=typed_invocations[0],
+                        **extra,
                     )
                 if op == "close":
                     menu = store.require(payload.get("menu_id"), binding, payload.get("revision"))
@@ -355,11 +359,11 @@ async def dispatch_command_interaction(runtime, payload: Mapping, metadata: Mapp
                                   ui_language.language_scope(runtime, update, locale=locale),
                                   bind_slash_command_audit_session(session)):
                                 if dynamic:
-                                    await callback(runtime, update, context)
+                                    return await callback(runtime, update, context)
                                 else:
                                     wrap = getattr(runtime, "_wrap_callback", None)
                                     handler = wrap(method_name, callback) if callable(wrap) else callback
-                                    await handler(update, context)
+                                    return await handler(update, context)
                         except BaseException:
                             session.fail("command_menu_callback_failed")
                             raise

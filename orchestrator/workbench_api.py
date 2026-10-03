@@ -15,6 +15,7 @@ import time
 from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
@@ -27,13 +28,16 @@ from orchestrator.admin_local_testing import (
 )
 from orchestrator.agent_creation import (
     AgentCreationError,
-    AgentCreationService,
-    AgentCreationSpec,
 )
 from orchestrator.agent_deletion import (
     AgentDeletionError,
-    AgentDeletionService,
     CleanupPendingError,
+)
+from orchestrator.agent_management import (
+    AgentManagementAction,
+    AgentManagementAdmission,
+    AgentManagementError,
+    AgentManagementManager,
 )
 from orchestrator.agent_overview import build_agent_overview
 from orchestrator.chat_transcript_projection import (
@@ -45,7 +49,6 @@ from orchestrator.config_json import (
     ConfigConflictError,
     ConfigDurabilityError,
     read_config_json,
-    write_config_json,
 )
 from orchestrator.conversation_router import ConversationRouter
 from orchestrator.enterprise.audit_export import format_otel_log, format_siem_event
@@ -351,6 +354,7 @@ class WorkbenchApiServer:
         self.secrets = dict(secrets or {})
         self.admin_token = (self.secrets.get("workbench_admin_token") or "").strip()
         self._agent_config_lock = asyncio.Lock()
+        self._standalone_agent_management = None
         self._static_connectors = list(connectors or [])
         self.session_store = SessionStore.from_global_config(self.global_config)
         self.reconciled_session_runs = (
@@ -919,6 +923,13 @@ class WorkbenchApiServer:
             self.handle_device_capability_status,
         )
         self.app.router.add_get("/api/health", self.handle_health)
+        self.app.router.add_get(
+            "/api/runtime/reboot/operations/{operation_id}", self.handle_reboot_operation
+        )
+        self.app.router.add_post(
+            "/api/runtime/reboot/operations/{operation_id}/presentation-ack",
+            self.handle_reboot_presentation_ack,
+        )
         self.app.router.add_get("/api/version", self.handle_version)
         self.app.router.add_post("/api/jobs/import", self.handle_jobs_import)
         self.runner = None
@@ -961,8 +972,80 @@ class WorkbenchApiServer:
     def _load_raw_agent_config(self) -> dict:
         return read_config_json(self.config_path)
 
-    def _write_raw_agent_config(self, raw: dict) -> None:
-        write_config_json(self.config_path, raw)
+    def _bridge_paths(self) -> BridgePaths:
+        config_dir = self.config_path.parent
+        return BridgePaths(
+            code_root=config_dir,
+            bridge_home=config_dir,
+            instance_id=resolve_instance_id(self.config_path),
+            config_path=self.config_path,
+            secrets_path=config_dir / "secrets.json",
+            tasks_path=config_dir / "tasks.json",
+            state_path=config_dir / "scheduler_state.json",
+            lock_path=config_dir / "process.lock",
+            pid_path=config_dir / "process.pid",
+            workspaces_root=config_dir / "workspaces",
+        )
+
+    def _agent_management_manager(self):
+        manager = getattr(self.orchestrator, "agent_management", None)
+        if manager is not None:
+            return manager
+        if self._standalone_agent_management is None:
+            self._standalone_agent_management = AgentManagementManager.standalone(
+                self._bridge_paths(),
+                global_config=self.global_config,
+                orchestrator=self.orchestrator,
+            )
+        return self._standalone_agent_management
+
+    def _agent_management_action(
+        self,
+        request,
+        *,
+        kind: str,
+        operation: str,
+        agent_id: str | None,
+        payload: Mapping[str, Any],
+    ) -> AgentManagementAction:
+        owner_id = self._v1_owner_id(request)
+        if owner_id is None:
+            raise AgentManagementError(
+                "not authenticated",
+                error_code="not_authenticated",
+                status_code=401,
+            )
+        admission = None
+        if operation == "lifecycle.set_active":
+            target = str(agent_id or "").strip().casefold()
+            session = self.session_store.resolve_primary_session(
+                owner_id=owner_id,
+                agent_id=target,
+            )
+            headers = getattr(request, "headers", {}) or {}
+            request_id = str(
+                headers.get("Idempotency-Key")
+                or headers.get("X-Request-ID")
+                or f"api-agent-control-{uuid4().hex}"
+            ).strip()
+            admission = AgentManagementAdmission(
+                session_id=str(session["session_id"]),
+                context_generation=int(session["context_generation"]),
+                request_id=request_id,
+                client_id=f"backend_api:agent-management:{owner_id}",
+                source_agent_id=target,
+                actor_id=owner_id,
+                endpoint_id=f"backend_api:agent-management:{owner_id}",
+            )
+        return AgentManagementAction(
+            kind=kind,
+            operation=operation,
+            owner_id=owner_id,
+            connector_id="backend_api",
+            agent_id=agent_id,
+            payload=payload,
+            admission=admission,
+        )
 
     def _load_agent_capability_rows(self):
         capabilities_path = self.config_path.parent / "agent_capabilities.json"
@@ -1691,6 +1774,13 @@ class WorkbenchApiServer:
         if not metadata["is_active"]:
             metadata["online"] = False
             metadata["status"] = "inactive"
+        elif runtime is None and agent_row["name"] in getattr(self.orchestrator, "_startup_tasks", {}):
+            metadata["online"] = False
+            metadata["status"] = "starting"
+        elif runtime is None and (getattr(self.orchestrator, "startup_status", {}) or {}).get("agent_states", {}).get(agent_row["name"]) == "failed":
+            metadata["online"] = False
+            metadata["status"] = "failed"
+            metadata["status_reason"] = (getattr(self.orchestrator, "startup_status", {}) or {}).get("agent_reasons", {}).get(agent_row["name"], "Agent startup failed.")
         elif runtime is None and agent_row["name"] in getattr(
             getattr(self.orchestrator, "agent_lifecycle", None),
             "manually_stopped_agents",
@@ -4365,6 +4455,7 @@ class WorkbenchApiServer:
             "backend",
             "preset",
             "model",
+            "provider",
             "effort",
             "is_active",
         }
@@ -4418,7 +4509,7 @@ class WorkbenchApiServer:
                 },
                 status=400,
             )
-        for key in ("preset", "model", "effort"):
+        for key in ("preset", "model", "effort", "provider"):
             value = payload.get(key)
             if value is not None and not isinstance(value, str):
                 return web.json_response(
@@ -4442,32 +4533,25 @@ class WorkbenchApiServer:
                 status=400,
             )
 
-        started = time.monotonic()
-        spec = AgentCreationSpec(
-            name=name.strip(),
-            backend=backend.strip(),
-            display_name=display_name,
-            model=payload.get("model"),
-            effort=payload.get("effort"),
-            is_active=is_active,
-        )
-        config_dir = self.config_path.parent
-        paths = BridgePaths(
-            code_root=config_dir,
-            bridge_home=config_dir,
-            instance_id=resolve_instance_id(self.config_path),
-            config_path=self.config_path,
-            secrets_path=config_dir / "secrets.json",
-            tasks_path=config_dir / "tasks.json",
-            state_path=config_dir / "scheduler_state.json",
-            lock_path=config_dir / "process.lock",
-            pid_path=config_dir / "process.pid",
-            workspaces_root=config_dir / "workspaces",
-        )
         try:
-            result = AgentCreationService(
-                paths, global_config=self.global_config
-            ).create(spec)
+            action = self._agent_management_action(
+                request,
+                kind="action",
+                operation="agent.create",
+                agent_id=name.strip(),
+                payload={
+                    "display_name": display_name,
+                    "backend": backend.strip(),
+                    "model": payload.get("model"),
+                    "provider": payload.get("provider"),
+                    "effort": payload.get("effort"),
+                    "is_active": is_active,
+                },
+            )
+            outcome = await self._agent_management_manager().dispatch(
+                action,
+                session_store=self.session_store,
+            )
         except AgentCreationError as exc:
             status = (
                 409
@@ -4477,19 +4561,24 @@ class WorkbenchApiServer:
             )
             logger.info(
                 "agent_create.rejected agent_name=%s backend=%s error_code=%s",
-                spec.name,
-                spec.backend,
+                name,
+                backend,
                 exc.error_code,
             )
             return web.json_response(
                 {"ok": False, "error": str(exc), "error_code": exc.error_code},
                 status=status,
             )
+        except AgentManagementError as exc:
+            return web.json_response(
+                {"ok": False, "error": str(exc), "error_code": exc.error_code},
+                status=exc.status_code,
+            )
         except Exception as exc:
             logger.error(
                 "agent_create.failed agent_name=%s backend=%s error=%s",
-                spec.name,
-                spec.backend,
+                name,
+                backend,
                 type(exc).__name__,
             )
             return web.json_response(
@@ -4500,148 +4589,28 @@ class WorkbenchApiServer:
                 },
                 status=500,
             )
-        elapsed_ms = int((time.monotonic() - started) * 1000)
-        logger.info(
-            "agent_create.completed agent_name=%s backend=%s elapsed_ms=%s",
-            spec.name,
-            spec.backend,
-            elapsed_ms,
-        )
-        lifecycle = {
-            "ok": True,
-            "message": "Agent was created inactive; no start was requested.",
-        }
-        response_is_active = result.is_active
-        if result.is_active:
-            start_agent = getattr(self.orchestrator, "start_agent", None)
-            if callable(start_agent):
-                try:
-                    started_ok, start_message = await start_agent(result.name)
-                except Exception as exc:
-                    logger.exception(
-                        "agent_create.start_failed agent_name=%s error=%s",
-                        result.name,
-                        type(exc).__name__,
-                    )
-                    started_ok = False
-                    start_message = (
-                        "Agent was created, but its Function Worker could not be "
-                        "started."
-                    )
-            else:
-                started_ok = False
-                start_message = (
-                    "Agent was created, but the lifecycle service is unavailable."
-                )
-
-            lifecycle = {"ok": bool(started_ok), "message": str(start_message)}
-            if not started_ok:
-                deactivation_error: str | None = None
-                try:
-                    async with self._agent_config_lock:
-                        raw = self._load_raw_agent_config()
-                        agent_row = next(
-                            (
-                                row
-                                for row in raw.get("agents", [])
-                                if row.get("name") == result.name
-                            ),
-                            None,
-                        )
-                        if agent_row is None:
-                            deactivation_error = (
-                                "created Agent configuration is no longer present"
-                            )
-                        else:
-                            if agent_row.get("is_active", True) is not False:
-                                agent_row["is_active"] = False
-                                self._write_raw_agent_config(raw)
-                            response_is_active = False
-                except ConfigDurabilityError:
-                    # Atomic replacement committed. Do not retry a durability
-                    # error; report the inactive state with a warning instead.
-                    response_is_active = False
-                    deactivation_error = (
-                        "inactive state was committed but directory durability "
-                        "could not be confirmed"
-                    )
-                except ConfigConflictError:
-                    # A fresh action must resolve the newer configuration. Never
-                    # overwrite it with the pre-start snapshot.
-                    deactivation_error = (
-                        "Agent configuration changed while startup was failing"
-                    )
-                    try:
-                        fresh = self._load_raw_agent_config()
-                        fresh_row = next(
-                            (
-                                row
-                                for row in fresh.get("agents", [])
-                                if row.get("name") == result.name
-                            ),
-                            None,
-                        )
-                        if fresh_row is not None:
-                            response_is_active = bool(
-                                fresh_row.get("is_active", True)
-                            )
-                    except Exception:
-                        # The conflict remains the classified result. A failed
-                        # display refresh cannot authorize another write.
-                        pass
-                except Exception as exc:
-                    logger.exception(
-                        "agent_create.deactivate_failed agent_name=%s error=%s",
-                        result.name,
-                        type(exc).__name__,
-                    )
-                    deactivation_error = (
-                        "Agent startup failed and its inactive state could not be "
-                        "confirmed"
-                    )
-
-                logger.error(
-                    "agent_create.start_rejected agent_name=%s deactivated=%s "
-                    "deactivation_error=%s",
-                    result.name,
-                    response_is_active is False,
-                    deactivation_error or "",
-                )
-                error_code = (
-                    "agent_start_failed"
-                    if response_is_active is False
-                    else "agent_start_failed_config_unconfirmed"
-                )
-                payload = {
-                    "ok": False,
-                    "error": str(start_message),
-                    "error_code": error_code,
-                    "agent": {
-                        "name": result.name,
-                        "display_name": result.display_name,
-                        "is_active": response_is_active,
-                        "active_backend": result.active_backend,
-                    },
-                    "created": {
-                        "workspace": result.workspace_created,
-                        "config": result.config_published,
-                    },
-                    "lifecycle": lifecycle,
-                }
-                if deactivation_error:
-                    payload["configuration_warning"] = deactivation_error
-                return web.json_response(
-                    payload,
-                    status=503 if response_is_active is False else 409,
-                )
-
+        result = outcome["creation"]
+        lifecycle = outcome["lifecycle"]
+        ok = not bool(outcome.get("error"))
         return web.json_response(
             {
-                "ok": True,
+                "ok": ok,
+                **(
+                    {
+                        "error": outcome["error"],
+                        "error_code": outcome.get("error_code", "agent_start_failed"),
+                    }
+                    if not ok
+                    else {}
+                ),
                 "agent": {
                     "name": result.name,
                     "display_name": result.display_name,
-                    "is_active": response_is_active,
+                    "is_active": bool(
+                        (outcome.get("agent_row") or {}).get(
+                            "is_active", result.is_active
+                        )
+                    ),
                     "active_backend": result.active_backend,
                 },
                 "created": {
@@ -4649,8 +4618,13 @@ class WorkbenchApiServer:
                     "config": result.config_published,
                 },
                 "lifecycle": lifecycle,
+                **(
+                    {"configuration_warning": outcome["configuration_warning"]}
+                    if outcome.get("configuration_warning")
+                    else {}
+                ),
             },
-            status=201,
+            status=int(outcome.get("status", 201)),
         )
 
     async def handle_admin_agent_deletion_preview(self, request):
@@ -4664,27 +4638,24 @@ class WorkbenchApiServer:
                 status=403,
             )
         agent_id = request.match_info.get("agent_id")
-        config_dir = self.config_path.parent
-        paths = BridgePaths(
-            code_root=config_dir,
-            bridge_home=config_dir,
-            instance_id=resolve_instance_id(self.config_path),
-            config_path=self.config_path,
-            secrets_path=config_dir / "secrets.json",
-            tasks_path=config_dir / "tasks.json",
-            state_path=config_dir / "scheduler_state.json",
-            lock_path=config_dir / "process.lock",
-            pid_path=config_dir / "process.pid",
-            workspaces_root=config_dir / "workspaces",
-        )
         try:
-            service = AgentDeletionService(
-                paths,
-                orchestrator=self.orchestrator,
+            action = self._agent_management_action(
+                request,
+                kind="action",
+                operation="deletion.preview",
+                agent_id=agent_id,
+                payload={},
+            )
+            outcome = await self._agent_management_manager().dispatch(
+                action,
                 session_store=self.session_store,
             )
-            preview = service.preview(agent_id)
-            return web.json_response(preview.to_dict(), status=200)
+            return web.json_response(outcome["preview"], status=outcome["status"])
+        except AgentManagementError as exc:
+            return web.json_response(
+                {"ok": False, "error": str(exc), "error_code": exc.error_code},
+                status=exc.status_code,
+            )
         except AgentDeletionError as exc:
             return web.json_response(
                 {"ok": False, "error": str(exc), "error_code": exc.error_code},
@@ -4734,32 +4705,23 @@ class WorkbenchApiServer:
                 status=400,
             )
 
-        config_dir = self.config_path.parent
-        paths = BridgePaths(
-            code_root=config_dir,
-            bridge_home=config_dir,
-            instance_id=resolve_instance_id(self.config_path),
-            config_path=self.config_path,
-            secrets_path=config_dir / "secrets.json",
-            tasks_path=config_dir / "tasks.json",
-            state_path=config_dir / "scheduler_state.json",
-            lock_path=config_dir / "process.lock",
-            pid_path=config_dir / "process.pid",
-            workspaces_root=config_dir / "workspaces",
-        )
         try:
-            service = AgentDeletionService(
-                paths,
-                orchestrator=self.orchestrator,
+            action = self._agent_management_action(
+                request,
+                kind="action",
+                operation="deletion.commit",
+                agent_id=agent_id,
+                payload={
+                    "preview_token": preview_token,
+                    "confirmed_agent_id": confirmed_agent_id,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+            outcome = await self._agent_management_manager().dispatch(
+                action,
                 session_store=self.session_store,
             )
-            result = service.delete(
-                agent_id,
-                preview_token=preview_token,
-                confirmed_agent_id=confirmed_agent_id,
-                idempotency_key=idempotency_key,
-            )
-            return web.json_response(result, status=200)
+            return web.json_response(outcome["result"], status=outcome["status"])
         except CleanupPendingError as exc:
             return web.json_response(
                 {
@@ -4772,6 +4734,11 @@ class WorkbenchApiServer:
                 status=500,
             )
         except AgentDeletionError as exc:
+            return web.json_response(
+                {"ok": False, "error": str(exc), "error_code": exc.error_code},
+                status=exc.status_code,
+            )
+        except AgentManagementError as exc:
             return web.json_response(
                 {"ok": False, "error": str(exc), "error_code": exc.error_code},
                 status=exc.status_code,
@@ -4794,31 +4761,27 @@ class WorkbenchApiServer:
                 status=403,
             )
         operation_id = request.match_info.get("operation_id")
-        config_dir = self.config_path.parent
-        paths = BridgePaths(
-            code_root=config_dir,
-            bridge_home=config_dir,
-            instance_id=resolve_instance_id(self.config_path),
-            config_path=self.config_path,
-            secrets_path=config_dir / "secrets.json",
-            tasks_path=config_dir / "tasks.json",
-            state_path=config_dir / "scheduler_state.json",
-            lock_path=config_dir / "process.lock",
-            pid_path=config_dir / "process.pid",
-            workspaces_root=config_dir / "workspaces",
-        )
-        service = AgentDeletionService(
-            paths,
-            orchestrator=self.orchestrator,
-            session_store=self.session_store,
-        )
-        receipt = service.get_receipt(operation_id)
-        if receipt is None:
-            return web.json_response(
-                {"ok": False, "error": "operation not found", "error_code": "not_found"},
-                status=404,
+        try:
+            action = self._agent_management_action(
+                request,
+                kind="action",
+                operation="deletion.status",
+                agent_id=None,
+                payload={"operation_id": operation_id},
             )
-        return web.json_response({"ok": True, "receipt": receipt}, status=200)
+            outcome = await self._agent_management_manager().dispatch(
+                action,
+                session_store=self.session_store,
+            )
+        except AgentManagementError as exc:
+            return web.json_response(
+                {"ok": False, "error": str(exc), "error_code": exc.error_code},
+                status=exc.status_code,
+            )
+        return web.json_response(
+            {"ok": True, "receipt": outcome["receipt"]},
+            status=outcome["status"],
+        )
 
     async def handle_agents(self, request):
         runtime_map = self._runtime_map()
@@ -4867,47 +4830,42 @@ class WorkbenchApiServer:
                 status=400,
             )
 
-        async with self._agent_config_lock:
-            raw = self._load_raw_agent_config()
-            agent_row = next(
-                (row for row in raw.get("agents", []) if row.get("name") == name),
-                None,
-            )
-            if agent_row is None:
+        display_name = None
+        emoji = None
+        if has_display_name:
+            display_name = str(payload.get("display_name") or "").strip()
+            if not display_name or len(display_name) > 160:
                 return web.json_response(
-                    {"ok": False, "error": "agent not found"}, status=404
+                    {"ok": False, "error": "display_name is invalid"}, status=400
                 )
-            if has_display_name:
-                display_name = str(payload.get("display_name") or "").strip()
-                if not display_name or len(display_name) > 160:
-                    return web.json_response(
-                        {"ok": False, "error": "display_name is invalid"},
-                        status=400,
-                    )
-                agent_row["display_name"] = display_name
-            if has_emoji:
-                emoji = str(payload.get("emoji") or "").strip()
-                if not emoji or len(emoji) > 32:
-                    return web.json_response(
-                        {"ok": False, "error": "emoji is invalid"}, status=400
-                    )
-                agent_row["emoji"] = emoji
-            self._write_raw_agent_config(raw)
-
-            runtime = self._runtime_map().get(name)
-            if runtime is not None and getattr(runtime, "config", None) is not None:
-                extra = dict(getattr(runtime.config, "extra", None) or {})
-                if has_display_name:
-                    extra["display_name"] = agent_row["display_name"]
-                if has_emoji:
-                    extra["emoji"] = agent_row["emoji"]
-                runtime.config.extra = extra
-
+        if has_emoji:
+            emoji = str(payload.get("emoji") or "").strip()
+            if not emoji or len(emoji) > 32:
+                return web.json_response(
+                    {"ok": False, "error": "emoji is invalid"}, status=400
+                )
+        try:
+            action = self._agent_management_action(
+                request,
+                kind="action",
+                operation="metadata.update",
+                agent_id=name,
+                payload={"display_name": display_name, "emoji": emoji},
+            )
+            outcome = await self._agent_management_manager().dispatch(
+                action,
+                session_store=self.session_store,
+            )
+        except AgentManagementError as exc:
+            return web.json_response(
+                {"ok": False, "error": str(exc), "error_code": exc.error_code},
+                status=exc.status_code,
+            )
+        agent_row = outcome["agent_row"]
+        runtime = self._runtime_map().get(name.casefold())
         return web.json_response(
-            {
-                "ok": True,
-                "agent": self._metadata_for_agent(agent_row, runtime),
-            }
+            {"ok": True, "agent": self._metadata_for_agent(agent_row, runtime)},
+            status=int(outcome.get("status", 200)),
         )
 
     async def handle_agent_active(self, request):
@@ -4933,76 +4891,46 @@ class WorkbenchApiServer:
                 status=400,
             )
 
-        async with self._agent_config_lock:
-            raw = self._load_raw_agent_config()
-            agent_row = next(
-                (row for row in raw.get("agents", []) if row.get("name") == name),
-                None,
+        try:
+            action = self._agent_management_action(
+                request,
+                kind="control",
+                operation="lifecycle.set_active",
+                agent_id=name,
+                payload={"is_active": desired},
             )
-            if agent_row is None:
-                return web.json_response(
-                    {"ok": False, "error": "agent not found"}, status=404
-                )
-            previous = bool(agent_row.get("is_active", True))
-            runtime_before = self._runtime_map().get(name)
-            lifecycle = {"ok": True, "message": "No lifecycle change was needed."}
-
-            if desired:
-                if not previous:
-                    agent_row["is_active"] = True
-                    self._write_raw_agent_config(raw)
-                if runtime_before is None:
-                    ok, message = await self.orchestrator.start_agent(name)
-                    lifecycle = {"ok": ok, "message": message}
-                    if not ok and "already" not in str(message).lower():
-                        if not previous:
-                            agent_row["is_active"] = False
-                            self._write_raw_agent_config(raw)
-                        return web.json_response(
-                            {"ok": False, "error": message, "lifecycle": lifecycle},
-                            status=400,
-                        )
-            else:
-                if previous and sum(
-                    1
-                    for row in raw.get("agents", [])
-                    if isinstance(row, dict)
-                    and row.get("is_active", True) is not False
-                ) <= 1:
-                    return web.json_response(
-                        {
-                            "ok": False,
-                            "error": (
-                                "cannot deactivate the last active Agent; create or "
-                                "clone another Agent first"
-                            ),
-                        },
-                        status=409,
-                    )
-                if runtime_before is not None:
-                    ok, message = await self.orchestrator.stop_agent(name)
-                    lifecycle = {"ok": ok, "message": message}
-                    if not ok and "not running" not in str(message).lower():
-                        return web.json_response(
-                            {"ok": False, "error": message, "lifecycle": lifecycle},
-                            status=400,
-                        )
-                if previous:
-                    agent_row["is_active"] = False
-                    self._write_raw_agent_config(raw)
-
-            updated_raw = self._load_raw_agent_config()
-            updated_row = next(
-                row for row in updated_raw.get("agents", []) if row.get("name") == name
+            outcome = await self._agent_management_manager().dispatch(
+                action,
+                session_store=self.session_store,
             )
-            runtime_after = self._runtime_map().get(name)
-
+        except AgentManagementError as exc:
+            return web.json_response(
+                {"ok": False, "error": str(exc), "error_code": exc.error_code},
+                status=exc.status_code,
+            )
+        if outcome.get("ok") is False:
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": str(outcome.get("error") or outcome.get("message") or "Agent lifecycle control failed."),
+                    "error_code": str(outcome.get("error_code") or "agent_lifecycle_failed"),
+                    "state": str(outcome.get("state") or "failed"),
+                    "replayed": bool(outcome.get("replayed")),
+                },
+                status=int(outcome.get("status", 400)),
+            )
+        lifecycle = outcome["lifecycle"]
+        runtime_after = self._runtime_map().get(name.casefold())
+        metadata = self._metadata_for_agent(outcome["agent_row"], runtime_after)
+        if lifecycle.get("status") == "starting":
+            metadata["status"] = "starting"
         return web.json_response(
             {
                 "ok": True,
-                "agent": self._metadata_for_agent(updated_row, runtime_after),
+                "agent": metadata,
                 "lifecycle": lifecycle,
-            }
+            },
+            status=int(outcome.get("status", 200)),
         )
 
     async def handle_agent_overview(self, request):
@@ -5271,18 +5199,31 @@ class WorkbenchApiServer:
         )
         return web.json_response(payload)
 
-    async def _cancel_selected_run(self, run, *, owner_id: str, reason: str):
+    async def _cancel_selected_run(self, run, *, owner_id: str, reason: str, source: str):
+        def audit(status, error_code=""):
+            self.session_store.record_run_control(
+                run["run_id"], owner_id=owner_id, source=source, status=status,
+                reason=reason, error_code=error_code,
+            )
+
+        audit("requested")
         runtime = self._runtime_map().get(run["agent_id"])
         cancel = getattr(runtime, "cancel_session_run", None) if runtime is not None else None
         if not callable(cancel):
+            audit("unavailable", "run_cancel_unavailable")
             return web.json_response(
                 {"ok": False, "error_code": "run_cancel_unavailable",
                  "error": "The selected Agent Worker is unavailable."}, status=503,
             )
-        result = await cancel(
-            owner_id=owner_id, session_id=run["session_id"],
-            run_id=run["run_id"], request_id=run["request_id"], reason=reason,
-        )
+        try:
+            result = await cancel(
+                owner_id=owner_id, session_id=run["session_id"],
+                run_id=run["run_id"], request_id=run["request_id"], reason=reason,
+            )
+        except Exception:
+            audit("outcome_unknown", "worker_cancel_outcome_unknown")
+            raise
+        audit(str(result.get("status") or "outcome_unknown"), str(result.get("error_code") or ""))
         status = 200 if result.get("ok") and result.get("terminal") else (
             202 if result.get("ok") else 409
         )
@@ -5310,6 +5251,7 @@ class WorkbenchApiServer:
             return await self._cancel_selected_run(
                 run, owner_id=owner,
                 reason=str(payload.get("reason") or "cancelled_by_user")[:160],
+                source="backend_api.request_cancel",
             )
         except Exception as exc:
             return self._v1_error(exc)
@@ -6995,6 +6937,7 @@ class WorkbenchApiServer:
             response = await self._cancel_selected_run(
                 run, owner_id=owner,
                 reason=str(payload.get("reason") or "cancelled_by_user")[:160],
+                source="session_api.run_cancel",
             )
             if response.status not in {200, 202}:
                 return response
@@ -8075,6 +8018,243 @@ class WorkbenchApiServer:
                 )
             raise
 
+    def _transfer_redirect_response(
+        self,
+        runtime: Any,
+        *,
+        source: str,
+        session_metadata: Mapping[str, Any],
+        request_fingerprint: Mapping[str, Any],
+        idempotency_key: str | None,
+        redirect: Mapping[str, Any] | None = None,
+    ) -> web.Response | None:
+        """Persist one canonical post-transfer rejection and return HTTP 409."""
+
+        from orchestrator import runtime_session, runtime_transfer
+        from orchestrator.frontend_command_admission import (
+            reserve_frontend_command_in_store,
+        )
+        from orchestrator.frontend_connector_registry import (
+            canonical_connector_id,
+            endpoint_id_for,
+            require_connector_operation,
+        )
+        from orchestrator.frontend_contracts import normalize_admission_receipt
+
+        snapshot = dict(redirect or {}) or runtime_transfer.transfer_redirect_snapshot(
+            runtime
+        )
+        if not snapshot:
+            return None
+        adapter = SimpleNamespace(
+            name=str(runtime.name),
+            global_config=self.global_config,
+            session_store=self.session_store,
+        )
+        metadata = dict(session_metadata)
+        channel_key = str(metadata.get("session_channel_key") or "default")
+        session, owner, surface, channel_key = runtime_session.resolve_request_session(
+            adapter,
+            source=source,
+            chat_id=channel_key,
+            metadata=metadata,
+        )
+        connector_id = canonical_connector_id(
+            source,
+            ingress_transport=source,
+            surface=surface,
+        )
+        require_connector_operation(connector_id, "ingress", "command")
+        endpoint_id = endpoint_id_for(
+            connector_id,
+            ingress_transport=surface,
+            channel_key=channel_key,
+        )
+        identity_payload = {
+            "idempotency_key": str(idempotency_key or ""),
+            "request": dict(request_fingerprint),
+            "session_id": str(session["session_id"]),
+            "context_generation": int(session["context_generation"]),
+            "transfer": snapshot,
+        }
+        identity_json = json.dumps(
+            identity_payload,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        request_digest = hashlib.sha256(identity_json.encode("utf-8")).hexdigest()
+        request_identity = (
+            {
+                "session_id": str(session["session_id"]),
+                "idempotency_key": str(idempotency_key),
+            }
+            if idempotency_key
+            else identity_payload
+        )
+        request_identity_digest = hashlib.sha256(
+            json.dumps(
+                request_identity,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        request_id = f"transfer_redirect_{request_identity_digest[:32]}"
+        actor_digest = "sha256:" + hashlib.sha256(owner.encode("utf-8")).hexdigest()
+        invocation = {
+            "type": "hashi.frontend-command",
+            "version": 2,
+            "invocation_id": f"transferctl_{request_identity_digest[:32]}",
+            "request_id": request_id,
+            "connector_id": connector_id,
+            "endpoint_id": endpoint_id,
+            "session_id": str(session["session_id"]),
+            "context_generation": int(session["context_generation"]),
+            "command": "transfer-redirect",
+            "issued_action_id": None,
+            "revision": None,
+            "arguments": [
+                str(snapshot["transfer_id"]),
+                str(snapshot["target_agent"]),
+                str(snapshot["target_instance"]),
+            ],
+            "actor_digest": actor_digest,
+            "idempotency_digest": f"sha256:{request_digest}",
+            "authorization": {
+                "decision": "allowed",
+                "scope": "session-transfer-redirect",
+            },
+        }
+        try:
+            reservation = reserve_frontend_command_in_store(
+                self.session_store,
+                session_id=str(session["session_id"]),
+                owner_id=owner,
+                client_id=f"{connector_id}_transfer:{endpoint_id}",
+                request_id=request_id,
+                context_generation=int(session["context_generation"]),
+                payload=identity_payload,
+                invocation=invocation,
+            )
+        except IdempotencyConflict:
+            conflict = normalize_admission_receipt(
+                {
+                    "type": "hashi.admission-receipt",
+                    "version": 1,
+                    "status": "conflict",
+                    "session_id": str(session["session_id"]),
+                    "run_id": None,
+                    "request_id": request_id,
+                    "idempotency_digest": f"sha256:{request_digest}",
+                    "replayed": False,
+                    "reason": "idempotency_conflict",
+                }
+            )
+            return web.json_response(
+                {
+                    "ok": False,
+                    "accepted": False,
+                    "error": "idempotency key is already bound to another request",
+                    "error_code": "idempotency_conflict",
+                    "admission": conflict,
+                },
+                status=409,
+            )
+        redirect_text = runtime_transfer.transfer_redirect_text_from_snapshot(snapshot)
+        result = {
+            "ok": False,
+            "accepted": False,
+            "state": "rejected",
+            "error": redirect_text,
+            "error_code": "session_transferred",
+            "transfer_id": str(snapshot["transfer_id"]),
+            "target_agent": str(snapshot["target_agent"]),
+            "target_instance": str(snapshot["target_instance"]),
+            "redirect": {
+                "transfer_id": str(snapshot["transfer_id"]),
+                "target_agent": str(snapshot["target_agent"]),
+                "target_instance": str(snapshot["target_instance"]),
+            },
+        }
+        replayed = reservation.state == "completed"
+        command_event_id = reservation.event_id
+        if reservation.state == "reserved":
+            completed = reservation.complete(result)
+            command_event_id = str(completed.get("event_id") or "") or None
+        elif reservation.state == "completed" and reservation.response is not None:
+            result = dict(reservation.response)
+        elif reservation.state == "pending":
+            result.update(
+                accepted=None,
+                state="pending",
+                error="Transfer redirect result is already being recorded.",
+            )
+
+        from orchestrator.frontend_delivery import freeze_run_delivery_route
+        from orchestrator.frontend_projection import (
+            build_frontend_presentation_context,
+        )
+
+        message_context = build_frontend_presentation_context(
+            text=redirect_text,
+            content_format="plain-text",
+            presentation_channel="status",
+            message_context={
+                "transfer_id": str(snapshot["transfer_id"]),
+                "target_agent": str(snapshot["target_agent"]),
+                "target_instance": str(snapshot["target_instance"]),
+            },
+        )
+        delivery_route = freeze_run_delivery_route(
+            message_source_id=connector_id,
+            session_surface=surface,
+            session_channel_key=channel_key,
+            chat_id=channel_key,
+            telegram_requested=False,
+        )
+        publication = self.session_store.append_presentation_message(
+            session_id=str(session["session_id"]),
+            owner_id=owner,
+            agent_id=str(runtime.name),
+            role="assistant",
+            text=redirect_text,
+            source="workbench.transfer-redirect",
+            idempotency_key=(
+                f"{surface}:{channel_key}:publication:{request_id}"
+            ),
+            content_format="plain-text",
+            presentation_channel="status",
+            history_eligible=False,
+            message_context=message_context,
+            outbox=True,
+            delivery_route=delivery_route,
+        )
+        admission = normalize_admission_receipt(
+            {
+                "type": "hashi.admission-receipt",
+                "version": 1,
+                "status": "rejected",
+                "session_id": str(session["session_id"]),
+                "run_id": None,
+                "request_id": request_id,
+                "idempotency_digest": f"sha256:{request_digest}",
+                "replayed": replayed,
+                "reason": "session_transferred",
+            }
+        )
+        result.update(
+            admission=admission,
+            session_id=str(session["session_id"]),
+            request_id=request_id,
+            canonical_result={
+                "event_id": command_event_id,
+                "message_id": str(publication["message_id"]),
+                "message_event_id": str(publication["delivery_event_id"]),
+            },
+        )
+        return web.json_response(result, status=409)
+
     async def handle_chat(self, request):
         runtime_map = self._runtime_map()
 
@@ -8148,6 +8328,40 @@ class WorkbenchApiServer:
             base_idempotency_key = (
                 str(fields.get("idempotency_key") or "").strip() or None
             )
+            for upload in uploads:
+                upload["media_kind"] = self._classify_upload(
+                    upload["filename"],
+                    declared_media_type,
+                    upload["content_type"],
+                )
+            if (text and not uploads) or any(
+                upload["media_kind"] != "voice" for upload in uploads
+            ):
+                transfer_response = self._transfer_redirect_response(
+                    runtime,
+                    source="api",
+                    session_metadata=session_metadata,
+                    idempotency_key=base_idempotency_key,
+                    request_fingerprint={
+                        "kind": "multipart",
+                        "text_sha256": hashlib.sha256(
+                            text.encode("utf-8")
+                        ).hexdigest(),
+                        "uploads": [
+                            {
+                                "filename": str(upload["filename"]),
+                                "content_type": str(upload["content_type"]),
+                                "media_kind": str(upload["media_kind"]),
+                                "sha256": hashlib.sha256(
+                                    upload["payload"]
+                                ).hexdigest(),
+                            }
+                            for upload in uploads
+                        ],
+                    },
+                )
+                if transfer_response is not None:
+                    return transfer_response
 
             request_ids = []
             if text and not uploads:
@@ -8162,12 +8376,32 @@ class WorkbenchApiServer:
                     slash_result["slash_command"] = True
                     status = 200 if slash_result.get("ok") else 400
                     return web.json_response(slash_result, status=status)
-                request_id = await runtime.enqueue_api_text(
-                    text,
-                    deliver_to_telegram=True,
-                    request_metadata=session_metadata,
-                    idempotency_key=base_idempotency_key,
-                )
+                try:
+                    request_id = await runtime.enqueue_api_text(
+                        text,
+                        deliver_to_telegram=True,
+                        request_metadata=session_metadata,
+                        idempotency_key=base_idempotency_key,
+                    )
+                except Exception as exc:
+                    from orchestrator import runtime_transfer
+
+                    redirect = runtime_transfer.transfer_redirect_from_exception(exc)
+                    if redirect is None:
+                        raise
+                    return self._transfer_redirect_response(
+                        runtime,
+                        source="api",
+                        session_metadata=session_metadata,
+                        idempotency_key=base_idempotency_key,
+                        request_fingerprint={
+                            "kind": "text",
+                            "text_sha256": hashlib.sha256(
+                                text.encode("utf-8")
+                            ).hexdigest(),
+                        },
+                        redirect=redirect,
+                    )
                 request_ids.append(request_id)
 
             for upload_index, upload in enumerate(uploads):
@@ -8176,11 +8410,7 @@ class WorkbenchApiServer:
                     filename=upload["filename"],
                     payload=upload["payload"],
                 )
-                media_kind = self._classify_upload(
-                    original_name,
-                    declared_media_type,
-                    upload["content_type"],
-                )
+                media_kind = str(upload["media_kind"])
                 try:
                     request_id = await runtime.enqueue_api_media(
                         local_path=local_path,
@@ -8196,6 +8426,30 @@ class WorkbenchApiServer:
                         ),
                     )
                 except Exception as exc:
+                    from orchestrator import runtime_transfer
+
+                    redirect = runtime_transfer.transfer_redirect_from_exception(exc)
+                    if redirect is not None and media_kind != "voice":
+                        local_path.unlink(missing_ok=True)
+                        return self._transfer_redirect_response(
+                            runtime,
+                            source="api",
+                            session_metadata=session_metadata,
+                            idempotency_key=(
+                                f"{base_idempotency_key}:{upload_index}"
+                                if base_idempotency_key
+                                else None
+                            ),
+                            request_fingerprint={
+                                "kind": "media",
+                                "filename": str(original_name),
+                                "media_kind": media_kind,
+                                "sha256": hashlib.sha256(
+                                    upload["payload"]
+                                ).hexdigest(),
+                            },
+                            redirect=redirect,
+                        )
                     from orchestrator.runtime_media import VoiceIngressError
                     remote = getattr(exc, "error", {})
                     code = str(exc) if isinstance(exc, VoiceIngressError) else (
@@ -8390,6 +8644,55 @@ class WorkbenchApiServer:
         if isinstance(binding, Mapping):
             session_metadata[PRIVATE_AUTHORIZATION_BINDING_METADATA_KEY] = dict(binding)
         remote_attachments = payload.get("remote_attachments")
+        attachment_kind = None
+        if isinstance(attachment_spec, Mapping):
+            attachment_kind = self._classify_upload(
+                str(attachment_spec.get("filename") or "attachment"),
+                content_type=str(
+                    attachment_spec.get("media_type") or "application/octet-stream"
+                ),
+            )
+        elif workzone_ref:
+            attachment_kind = self._classify_upload(Path(workzone_ref).name)
+        nonvoice_request = (
+            remote_attachments is None
+            and (
+                (attachment_kind is not None and attachment_kind != "voice")
+                or (bool(text) and attachment_kind is None)
+            )
+        )
+        if nonvoice_request:
+            attachment_fingerprint = None
+            if isinstance(attachment_spec, Mapping):
+                attachment_fingerprint = {
+                    "filename": str(attachment_spec.get("filename") or ""),
+                    "media_type": str(attachment_spec.get("media_type") or ""),
+                    "size_bytes": attachment_spec.get("size_bytes"),
+                    "sha256": str(attachment_spec.get("sha256") or "")
+                    or hashlib.sha256(
+                        str(attachment_spec.get("content_b64") or "").encode("utf-8")
+                    ).hexdigest(),
+                }
+            transfer_response = self._transfer_redirect_response(
+                runtime,
+                source=source,
+                session_metadata=session_metadata,
+                idempotency_key=(
+                    str(payload.get("idempotency_key") or "").strip() or None
+                ),
+                request_fingerprint={
+                    "kind": "media" if attachment_kind else "text",
+                    "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                    "attachment": attachment_fingerprint,
+                    "workzone_ref_sha256": (
+                        hashlib.sha256(workzone_ref.encode("utf-8")).hexdigest()
+                        if workzone_ref
+                        else ""
+                    ),
+                },
+            )
+            if transfer_response is not None:
+                return transfer_response
         if remote_attachments is not None:
             if isinstance(attachment_spec, Mapping) or workzone_ref:
                 return web.json_response(
@@ -8454,6 +8757,45 @@ class WorkbenchApiServer:
                     {"ok": False, "error": "idempotency_key is required"},
                     status=400,
                 )
+            # HChat signs the declared MIME together with the content digest.
+            # Fence only attachments whose signed MIME is explicit and whose
+            # canonical modality is non-audio. Opaque binary and audio batches
+            # retain the existing admission path, so this does not infer voice
+            # semantics from a filename or alter the voice ingress contract.
+            explicit_nonvoice_attachment = any(
+                str(item["mime_type"]) != "application/octet-stream"
+                and modality_for_attachment(
+                    "",
+                    mime_type=str(item["mime_type"]),
+                    filename=str(item["filename"]),
+                )
+                != "audio"
+                for item in normalized_remote_attachments
+            )
+            if explicit_nonvoice_attachment:
+                transfer_response = self._transfer_redirect_response(
+                    runtime,
+                    source=source,
+                    session_metadata=session_metadata,
+                    idempotency_key=idempotency_key,
+                    request_fingerprint={
+                        "kind": "remote_attachments",
+                        "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                        "attachments": [
+                            {
+                                "attachment_id": str(item["attachment_id"]),
+                                "filename": str(item["filename"]),
+                                "mime_type": str(item["mime_type"]),
+                                "size_bytes": int(item["size_bytes"]),
+                                "sha256": str(item["sha256"]),
+                                "caption": item.get("caption"),
+                            }
+                            for item in normalized_remote_attachments
+                        ],
+                    },
+                )
+                if transfer_response is not None:
+                    return transfer_response
             try:
                 (
                     canonical_content,
@@ -8617,13 +8959,34 @@ class WorkbenchApiServer:
             status = 200 if slash_result.get("ok") else 400
             return web.json_response(slash_result, status=status)
 
-        request_id = await runtime.enqueue_api_text(
-            text,
-            source=source,
-            deliver_to_telegram=telegram_mirror,
-            request_metadata=session_metadata,
-            idempotency_key=str(payload.get("idempotency_key") or "").strip() or None,
+        text_idempotency_key = (
+            str(payload.get("idempotency_key") or "").strip() or None
         )
+        try:
+            request_id = await runtime.enqueue_api_text(
+                text,
+                source=source,
+                deliver_to_telegram=telegram_mirror,
+                request_metadata=session_metadata,
+                idempotency_key=text_idempotency_key,
+            )
+        except Exception as exc:
+            from orchestrator import runtime_transfer
+
+            redirect = runtime_transfer.transfer_redirect_from_exception(exc)
+            if redirect is None:
+                raise
+            return self._transfer_redirect_response(
+                runtime,
+                source=source,
+                session_metadata=session_metadata,
+                idempotency_key=text_idempotency_key,
+                request_fingerprint={
+                    "kind": "text",
+                    "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                },
+                redirect=redirect,
+            )
         response_payload = {"ok": True, "request_id": request_id}
         if request_id:
             try:
@@ -9311,6 +9674,11 @@ class WorkbenchApiServer:
                 {"ok": False, "error": "admin auth failed"}, status=403
             )
 
+        owner_id = self._v1_owner_id(request)
+        if owner_id is None:
+            return web.json_response(
+                {"ok": False, "error": "not authenticated"}, status=401
+            )
         payload = await request.json()
         agent_name = payload.get("agent") or payload.get("agentId")
         command = (payload.get("command") or "").strip()
@@ -9333,6 +9701,7 @@ class WorkbenchApiServer:
             session_metadata={
                 "connector_id": "backend_api",
                 "fc_compatibility_adapter_id": "backend_api.admin_command",
+                "_hashi_owner_id": owner_id,
             },
         )
         status = 200 if result.get("ok") else 400
@@ -9344,6 +9713,11 @@ class WorkbenchApiServer:
         agent_name = request.match_info.get("name")
         payload = await request.json()
         command = (payload.get("command") or "").strip()
+        owner_id = self._v1_owner_id(request)
+        if owner_id is None:
+            return web.json_response(
+                {"ok": False, "error": "not authenticated"}, status=401
+            )
 
         runtime = self._runtime_map().get(agent_name)
         if runtime is None:
@@ -9361,6 +9735,7 @@ class WorkbenchApiServer:
             session_metadata={
                 "connector_id": "backend_api",
                 "fc_compatibility_adapter_id": "backend_api.agent_command",
+                "_hashi_owner_id": owner_id,
             },
         )
         status_code = 200 if result.get("ok") else 400
@@ -10667,6 +11042,9 @@ class WorkbenchApiServer:
         """A local configuration save uses admin authority, independently of Telegram."""
         if not self._check_admin_auth(request):
             return web.json_response({"ok": False, "error": "admin auth failed"}, status=403)
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
         try:
             payload = await request.json()
         except (ValueError, TypeError):
@@ -10691,13 +11069,63 @@ class WorkbenchApiServer:
         if state["is_generating"] or state["queue_depth"]:
             return web.json_response({"ok": False, "error": "AGENT_BUSY"}, status=409)
         result = await submit(mode="min", agent_name=name, request_key=request_key,
-            origin={"surface": "workbench"}, locale=str(payload.get("locale") or "en"))
+            origin={"surface": "workbench", "owner_id": owner},
+            locale=str(payload.get("locale") or "en"))
         record = result.get("record") or {}
         accepted = result.get("accepted") is True and record.get("status") in {"accepted", "running", "succeeded"}
         return web.json_response({"ok": accepted, "accepted": accepted,
             "operation_id": record.get("id"), "status": record.get("status"),
+            "operation": result.get("operation"),
             "error": None if accepted else result.get("reason") or record.get("reason") or "reboot rejected"},
             status=200 if accepted else 409)
+
+    async def handle_reboot_presentation_ack(self, request):
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        manager = getattr(self.orchestrator, "reboot_manager", None)
+        if manager is None:
+            return web.json_response({"ok": False, "error": "reboot unavailable"}, status=503)
+        try:
+            payload = await request.json()
+            if not isinstance(payload, dict) or not str(payload.get("agent_id") or "").strip():
+                raise ValueError("agent_id is required")
+            result = manager.acknowledge_start_presentation(
+                request.match_info["operation_id"], owner_id=owner,
+                agent_id=str(payload["agent_id"]), sequence=payload.get("sequence"),
+                message_id=payload.get("message_id"),
+            )
+        except (ValueError, TypeError) as exc:
+            return self._v1_error(exc)
+        if result.get("acknowledged"):
+            return web.json_response({"ok": True, **result})
+        reason = result.get("reason") or "not_pending"
+        status = 404 if reason == "not_found" else 400 if reason.startswith("invalid_") else 409
+        return web.json_response({"ok": False, "error_code": reason}, status=status)
+
+    async def handle_reboot_operation(self, request):
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        manager = getattr(self.orchestrator, "reboot_manager", None)
+        if manager is None:
+            return web.json_response({"ok": False, "error": "reboot unavailable"}, status=503)
+        try:
+            after = int(request.query.get("after_sequence", 0))
+            agent = str(request.query.get("agent_id") or "").strip()
+            if not agent or after < 0:
+                raise ValueError("agent_id and non-negative after_sequence are required")
+            operation = manager.operation(
+                request.match_info["operation_id"], owner_id=owner, agent_id=agent,
+                after_sequence=after,
+            )
+        except ValueError as exc:
+            return self._v1_error(exc)
+        if operation is None:
+            return web.json_response({"ok": False, "error": "operation not found"}, status=404)
+        response = web.json_response({"ok": True, "operation": operation})
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     async def handle_admin_reboot_agent_status(self, request):
         if not self._check_admin_auth(request):

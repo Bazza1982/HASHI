@@ -170,14 +170,25 @@ async def test_restart_command_dispatches_background_request(monkeypatch):
 
     monkeypatch.setattr(api_restart, "_dispatch_restart", fake_dispatch)
 
-    await api_restart.restart_command(runtime, _command_update(), SimpleNamespace(args=[]))
+    result = await api_restart.restart_command(
+        runtime, _command_update(), SimpleNamespace(args=[])
+    )
     await asyncio.sleep(0)
 
     text, _kwargs = runtime.messages[-1]
-    assert "Restarting HASHI_TEST" in text
+    assert "Restart request accepted for HASHI_TEST" in text
+    assert "wait for it to reconnect and verify" in text
     assert observed["chat_id"] == 777
     assert observed["payload"]["target_instance"] == "HASHI_TEST"
     assert "human_restart_proof" not in observed["payload"]
+    assert result == {
+        "action": "restart",
+        "kind": "cold",
+        "accepted": True,
+        "status": "accepted",
+        "terminal": False,
+        "outcome": "unknown",
+    }
 
 
 @pytest.mark.asyncio
@@ -205,11 +216,18 @@ async def test_restart_command_fails_closed_when_own_remote_unavailable(monkeypa
     monkeypatch.setattr(api_restart.remote_rescue, "rescue_status", lambda *args, **kwargs: (4, {"error": "forbidden"}))
     monkeypatch.setattr(api_restart.remote_rescue, "_candidate_base_urls", lambda instance: ["http://127.0.0.1:43766"])
 
-    await api_restart.restart_command(runtime, _command_update(), SimpleNamespace(args=[]))
+    result = await api_restart.restart_command(
+        runtime, _command_update(), SimpleNamespace(args=[])
+    )
 
     text, kwargs = runtime.messages[-1]
     assert "forbidden" in text
     assert "reply_markup" not in kwargs
+    assert result["action"] == "restart"
+    assert result["kind"] == "cold"
+    assert result["accepted"] is False
+    assert result["status"] == "rejected"
+    assert result["reason"] == "forbidden"
 
 
 @pytest.mark.asyncio
@@ -240,7 +258,7 @@ async def test_restart_confirm_dispatches_background_request(monkeypatch):
     await asyncio.sleep(0)
 
     assert observed["chat_id"] == 777
-    assert "Restarting HASHI_TEST" in query.edits[-1][0]
+    assert "Restart request accepted for HASHI_TEST" in query.edits[-1][0]
 
 
 @pytest.mark.asyncio

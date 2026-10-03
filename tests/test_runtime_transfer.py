@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from orchestrator import runtime_transfer
+from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 
 
 def _runtime(tmp_path):
@@ -82,6 +83,50 @@ def test_transfer_redirect_and_buffer_rules(tmp_path):
     assert runtime_transfer.should_buffer_during_transfer(runtime, "req-7") is True
     assert runtime_transfer.should_buffer_during_transfer(runtime, "req-8") is False
     assert "akane@HASHI2" in runtime_transfer.transfer_redirect_text(runtime)
+
+
+def test_transfer_redirect_snapshot_supports_worker_metadata_and_remote_error():
+    snapshot = {
+        "status": "accepted",
+        "target_agent": "akane",
+        "target_instance": "HASHI2",
+        "transfer_id": "trf-metadata",
+    }
+    handle = SimpleNamespace(metadata={"transfer_redirect": snapshot})
+
+    assert runtime_transfer.transfer_redirect_snapshot(handle) == snapshot
+    direct = runtime_transfer.TransferRedirectRequired(snapshot)
+    remote = SimpleNamespace(
+        error={"type": "TransferRedirectRequired", "message": str(direct)}
+    )
+    assert runtime_transfer.transfer_redirect_from_exception(remote) == snapshot
+
+
+@pytest.mark.asyncio
+async def test_nonvoice_api_ingress_fails_before_primary_telegram_redirect(tmp_path):
+    sent = []
+    runtime = SimpleNamespace(
+        _transfer_state={
+            "status": "accepted",
+            "target_agent": "akane",
+            "target_instance": "HASHI2",
+            "transfer_id": "trf-no-telegram",
+        },
+        _should_redirect_after_transfer=lambda: True,
+        send_long_message=lambda *args, **kwargs: sent.append((args, kwargs)),
+    )
+
+    with pytest.raises(runtime_transfer.TransferRedirectRequired):
+        await FlexibleAgentRuntime.enqueue_api_text(runtime, "hello")
+    with pytest.raises(runtime_transfer.TransferRedirectRequired):
+        await FlexibleAgentRuntime.enqueue_api_media(
+            runtime,
+            local_path=tmp_path / "never-read.png",
+            media_kind="photo",
+            filename="never-read.png",
+        )
+
+    assert sent == []
 
 
 @pytest.mark.asyncio

@@ -4459,6 +4459,29 @@ class SessionStore:
             ).fetchone()
         return row is not None
 
+    def record_run_control(
+        self, run_id: str, *, owner_id: str, source: str, status: str,
+        reason: str = "", error_code: str = "",
+    ) -> dict[str, Any]:
+        """Audit a scoped stop through the existing canonical Session event log."""
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            run = connection.execute(
+                """SELECT r.* FROM runs r JOIN sessions s ON s.session_id=r.session_id
+                   WHERE r.run_id=? AND s.instance_id=? AND s.owner_id=?""",
+                (str(run_id), self.instance_id, str(owner_id)),
+            ).fetchone()
+            if run is None:
+                raise SessionNotFound(str(run_id))
+            return self._append_event(
+                connection, session_id=str(run["session_id"]), run_id=str(run_id),
+                kind="run.control", status=str(status), phase="control", summary="Stop selected Run",
+                detail={"action": "cancel", "actor_id": str(owner_id), "source": str(source),
+                        "agent_id": str(run["agent_id"]), "session_id": str(run["session_id"]),
+                        "run_id": str(run_id), "request_id": str(run["request_id"]),
+                        "reason": str(reason)[:160], "error_code": str(error_code)},
+            )
+
     def cancel_run(
         self, run_id: str, *, owner_id: str, reason: str = "cancelled_by_user"
     ) -> dict[str, Any]:

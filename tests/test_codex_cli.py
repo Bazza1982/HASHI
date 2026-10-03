@@ -39,6 +39,20 @@ class _FakeStderr:
         return b""
 
 
+class _BufferedStderr:
+    def __init__(self, proc: "_HangingProc", text: str):
+        self._proc = proc
+        self._payload = text.encode("utf-8")
+
+    async def read(self, _size: int) -> bytes:
+        if self._payload:
+            payload = self._payload
+            self._payload = b""
+            return payload
+        await self._proc.wait()
+        return b""
+
+
 class _FakeStdin:
     def __init__(self):
         self.data = bytearray()
@@ -784,6 +798,142 @@ def test_codex_nonzero_exit_preserves_last_agent_message(tmp_path, monkeypatch: 
     )
     assert logged_message["redacted"] is True
     assert logged_message["chars"] == len("Latest progress before stop.")
+
+
+def test_codex_broken_top_level_workspace_link_fails_before_process_start(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    broken = tmp_path / "_hashi_workbench_v2"
+    try:
+        broken.symlink_to(tmp_path / "missing-workbench", target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable on this platform")
+    adapter = _build_adapter(tmp_path)
+    launches = []
+
+    async def _fake_create_subprocess_exec(*args, **kwargs):
+        launches.append((args, kwargs))
+        raise AssertionError("Codex must not start with a broken workspace link")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    response = asyncio.run(adapter.generate_response("hello", "req-broken-link"))
+
+    assert response.is_success is False
+    assert response.error_code == "CODEX_WORKSPACE_LINK_UNAVAILABLE"
+    assert response.error_retryable is False
+    assert "_hashi_workbench_v2" in (response.error or "")
+    assert launches == []
+
+
+def test_codex_workspace_link_preflight_is_bounded_and_reports_io_failures(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class _Entry:
+        def __init__(self, name: str, *, linked: bool, stat_error: OSError | None = None):
+            self.name = name
+            self.path = str(tmp_path / name)
+            self._linked = linked
+            self._stat_error = stat_error
+            self.stat_calls = 0
+
+        def is_symlink(self):
+            return self._linked
+
+        def stat(self, *, follow_symlinks: bool):
+            assert follow_symlinks is True
+            self.stat_calls += 1
+            if self._stat_error is not None:
+                raise self._stat_error
+            return SimpleNamespace()
+
+    class _Scandir:
+        def __init__(self, entries):
+            self._entries = entries
+
+        def __enter__(self):
+            return iter(self._entries)
+
+        def __exit__(self, *_args):
+            return False
+
+    ordinary = _Entry("ordinary", linked=False)
+    broken = _Entry(
+        "_hashi_workbench_v2",
+        linked=True,
+        stat_error=FileNotFoundError("missing target"),
+    )
+    monkeypatch.setattr(os, "scandir", lambda _path: _Scandir([ordinary, broken]))
+
+    failure = CodexCLIAdapter._workspace_preflight_failure(tmp_path)
+
+    assert failure is not None
+    assert failure[0] == "CODEX_WORKSPACE_LINK_UNAVAILABLE"
+    assert "_hashi_workbench_v2" in failure[1]
+    assert ordinary.stat_calls == 0
+    assert broken.stat_calls == 1
+
+    def _denied(_path):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(os, "scandir", _denied)
+    denied = CodexCLIAdapter._workspace_preflight_failure(tmp_path)
+    assert denied is not None
+    assert denied[0] == "CODEX_WORKSPACE_PREFLIGHT_FAILED"
+    assert "permissions" in denied[1]
+
+
+def test_codex_file_tool_exit_records_typed_failure_and_bounded_tool_receipt(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    adapter = _build_adapter(tmp_path)
+    command = "apply_patch update missing.py"
+    proc = _HangingProc(
+        [
+            json.dumps(
+                {
+                    "type": "item.started",
+                    "item": {
+                        "id": "item-apply-patch",
+                        "type": "command_execution",
+                        "command": command,
+                    },
+                }
+            )
+        ]
+    )
+    proc.stderr = _BufferedStderr(
+        proc,
+        "Failed to find expected lines in "
+        "C:\\Users\\example-user\\project\\missing.py",
+    )
+
+    async def _fake_create_subprocess_exec(*_args, **_kwargs):
+        proc.finish(1)
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    response = asyncio.run(adapter.generate_response("hello", "req-file-tool"))
+
+    assert response.is_success is False
+    assert response.error_code == "CODEX_FILE_TOOL_VALIDATION_FAILED"
+    assert response.side_effects_possible is True
+    assert response.stream_metadata["codex_process_exit_code"] == 1
+    assert response.stream_metadata["codex_last_tool"] == {
+        "event_type": "item.started",
+        "item_id": "item-apply-patch",
+        "item_type": "command_execution",
+        "status": "",
+        "exit_code": None,
+        "command_sha256": hashlib.sha256(command.encode("utf-8")).hexdigest(),
+        "command_chars": len(command),
+    }
+    assert "C:\\Users\\example-user" not in (response.error or "")
+    assert "%USERPROFILE%" in (response.error or "")
 
 
 @pytest.mark.asyncio

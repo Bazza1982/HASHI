@@ -20,6 +20,75 @@ from orchestrator.process_execution import (
 )
 
 
+def _gemini_failure_response(message: str, *, duration_ms: float) -> BackendResponse:
+    """Map Gemini CLI terminal stderr to a small typed failure contract."""
+
+    raw = str(message or "").strip()
+    signal = raw.casefold()
+    if (
+        "unsupported_client" in signal
+        or "ineligibletiererror" in signal
+        or "gemini code assist for individuals" in signal
+    ):
+        return BackendResponse(
+            text="",
+            duration_ms=duration_ms,
+            error=(
+                "This Gemini CLI client is no longer supported for the current "
+                "account tier. Select the Antigravity backend or another configured "
+                "engine; repeating this request will not repair the account route."
+            ),
+            is_success=False,
+            error_code="PROVIDER_CLIENT_UNSUPPORTED",
+            error_retryable=False,
+            stream_metadata={
+                "provider_failure_description": (
+                    "Google rejected the Gemini CLI client/account tier as unsupported."
+                )
+            },
+        )
+    if any(
+        marker in signal
+        for marker in (
+            "authentication failed",
+            "please sign in",
+            "unauthorized",
+            "unauthorised",
+        )
+    ):
+        return BackendResponse(
+            text="",
+            duration_ms=duration_ms,
+            error=(
+                "Gemini CLI authentication failed. Sign in for the runtime account "
+                "before trying a new request."
+            ),
+            is_success=False,
+            error_code="PROVIDER_AUTHENTICATION_FAILED",
+            error_retryable=False,
+            stream_metadata={
+                "provider_failure_description": (
+                    "Gemini CLI could not authenticate the runtime account."
+                )
+            },
+        )
+    return BackendResponse(
+        text="",
+        duration_ms=duration_ms,
+        error=(raw[:4000] or "Gemini CLI exited without a terminal result."),
+        is_success=False,
+        error_code="GEMINI_PROCESS_EXIT_UNCONFIRMED",
+        error_retryable=False,
+        side_effects_possible=True,
+        stream_metadata={
+            "provider_failure_description": (
+                "Gemini CLI exited without a typed terminal result; side effects "
+                "cannot be ruled out."
+            )
+        },
+    )
+
+
 class GeminiCLIAdapter(BaseBackend):
     MAX_PROMPT_ARG_CHARS = 24000
     DEFAULT_IDLE_TIMEOUT_SEC = 60 * 60
@@ -440,7 +509,7 @@ class GeminiCLIAdapter(BaseBackend):
                     "Gemini returned empty inlineData after a file/image turn. "
                     "Please retry the request."
                 )
-            return BackendResponse(text="", duration_ms=duration_ms, error=err_msg, is_success=False)
+            return _gemini_failure_response(err_msg, duration_ms=duration_ms)
 
         # Assemble response from accumulated assistant message fragments
         response = "".join(text_fragments).strip()
@@ -498,7 +567,7 @@ class GeminiCLIAdapter(BaseBackend):
                     "Gemini returned empty inlineData after a file/image turn. "
                     "Please retry the request."
                 )
-            return BackendResponse(text="", duration_ms=duration_ms, error=err_msg, is_success=False)
+            return _gemini_failure_response(err_msg, duration_ms=duration_ms)
 
         response = stdout_data.decode(errors="replace").strip()
         # if response and not silent:

@@ -121,9 +121,14 @@ class _FakeUpdate:
         self.effective_chat = SimpleNamespace(id=chat_id)
         self.message = _FakeMessage(store, text)
         metadata = dict(session_metadata or {})
+        trusted_owner = str(metadata.get("_hashi_owner_id") or "").strip() or None
+        session_owner = trusted_owner or (
+            str(metadata.get("owner_id") or "").strip() or None
+        )
         self._hashi_session_surface = metadata.get("session_surface")
         self._hashi_session_channel_key = metadata.get("session_channel_key")
-        self._hashi_session_owner_id = metadata.get("owner_id")
+        self._hashi_owner_id = trusted_owner
+        self._hashi_session_owner_id = session_owner
         self._hashi_session_id = metadata.get("session_id")
         self._hashi_session_context_generation = metadata.get(
             "context_generation"
@@ -135,13 +140,26 @@ class _FakeUpdate:
         self.update_id = metadata.get("frontend_invocation_id")
 
 
+def _trusted_command_session_metadata(
+    session_metadata: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Project an authenticated command owner onto the Session owner field."""
+
+    metadata = dict(session_metadata or {})
+    trusted_owner = str(metadata.get("_hashi_owner_id") or "").strip()
+    if trusted_owner:
+        metadata["_hashi_owner_id"] = trusted_owner
+        metadata["owner_id"] = trusted_owner
+    return metadata
+
+
 def _local_command_session_metadata(
     *,
     source_channel: str,
     chat_id: int | str | None,
     session_metadata: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
-    metadata = dict(session_metadata or {})
+    metadata = _trusted_command_session_metadata(session_metadata)
     normalized = str(source_channel or "").strip().lower()
     if not metadata.get("session_surface"):
         if "whatsapp" in normalized:
@@ -307,6 +325,7 @@ async def _execute_connector_mirror_command(
         get_connector_preference, load_preferences, set_connector_preference,
     )
 
+    session_metadata = _trusted_command_session_metadata(session_metadata)
     bridge_home = getattr(
         getattr(runtime, "global_config", None), "bridge_home", None
     )
@@ -422,6 +441,7 @@ async def execute_local_command(
     *,
     capture_store: Any | None = None,
 ) -> dict[str, Any]:
+    session_metadata = _trusted_command_session_metadata(session_metadata)
     if getattr(runtime, "is_function_worker_proxy", False):
         result = await runtime.execute_slash_command(
             command_line,
@@ -557,9 +577,11 @@ async def execute_local_command(
                     slash_command_audit.bind_slash_command_audit_session(session),
                 ):
                     if registry_command is not None:
-                        await registry_command.callback(runtime, update, context)
+                        handler_result = await registry_command.callback(
+                            runtime, update, context
+                        )
                     else:
-                        await method(update, context)
+                        handler_result = await method(update, context)
             except Exception as e:
                 session.fail(e)
                 return {
@@ -573,11 +595,14 @@ async def execute_local_command(
                 if original_send_text is not None:
                     runtime._send_text = original_send_text
 
-        return {
+        response = {
             "ok": True,
             "command": command_name,
             "args": args,
             "messages": store.messages,
         }
+        if handler_result is not None:
+            response["result"] = _json_safe(handler_result)
+        return response
     finally:
         session.finish()

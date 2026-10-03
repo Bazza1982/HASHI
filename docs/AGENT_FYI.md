@@ -1,5 +1,21 @@
 # HASHI Agent FYI
 
+2026-10-03 non-voice repair batch is source-only until instance adoption and
+live evidence are recorded. Core is unchanged; no new API supervisor is added.
+`/reboot min` keeps the Backend API connection. Workbench-origin `max` may
+disconnect, but its browser must first render and ACK the accepted operation;
+missing confirmation rejects the handoff. See
+[reboot presentation](HASHI_REBOOT_CONTINUITY_2026-10-03.md).
+Agent lifecycle is PAO-owned typed admission: accepted startup is not online.
+Cancellation targets one Run; a committed final result is not reported stopped.
+Connector mutations bind trusted owner/Session identity. These changes do not
+authorize replaying failed business requests or changing another instance.
+AGY now sends complete prompts as stdin NDJSON, with no argv prompt or
+head/tail truncation. Direct Windows long-input and continuation probes passed;
+service-launcher adoption remains separately gated. Codex checks top-level
+workspace links before launch and reports file-tool validation failures with
+conservative whole-request effect accounting. No broken links are auto-repaired.
+
 2026-10-03 Lily correction supersedes Windows automation: six Windows tasks and
 eleven old HASHI jobs were removed. Four Agent crons run import 01:00, offline
 embedding 03:00, Wiki 04:05 and report 05:00 Sydney time. Wiki requires a

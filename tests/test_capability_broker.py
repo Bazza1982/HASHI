@@ -270,11 +270,26 @@ async def test_browser_target_is_optional_but_fixed_for_each_task(tmp_path):
             agent_id="agent1", task_id="task-explicit"
         )
     bound_id = broker._browser_task_bindings[("agent1", "task-auto")][0]
+    broker._browser_task_bindings[("agent1", "task-auto")] = (
+        bound_id,
+        time.time() - (25 * 60 * 60),
+    )
+    alternate = "edge" if first == "chrome" else "chrome"
+    with pytest.raises(CapabilityBrokerError, match="fixed for this task"):
+        await broker.invoke(
+            "browser_control", "get_text", {"_browser_target": alternate},
+            agent_id="agent1", task_id="task-auto"
+        )
     broker._records.pop(bound_id)
     with pytest.raises(CapabilityBrokerError, match="bound_browser_disconnected"):
         await broker.invoke(
             "browser_control", "get_text", {}, agent_id="agent1", task_id="task-auto"
         )
+    broker.cancel_task(agent_id="agent1", task_id="task-auto", reason="run-terminal")
+    assert await broker.invoke(
+        "browser_control", "get_text", {"_browser_target": alternate},
+        agent_id="agent1", task_id="task-auto"
+    ) == alternate
 
 
 @pytest.mark.asyncio

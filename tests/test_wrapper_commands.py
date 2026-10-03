@@ -36,6 +36,7 @@ from orchestrator.memory_plus_mode import (
 from orchestrator.runtime_common import QueuedRequest
 from orchestrator import (
     runtime_cross_session,
+    runtime_lifecycle,
     runtime_model_selection,
     telegram_stream_policy,
     ui_language,
@@ -2871,8 +2872,20 @@ async def test_wrapper_final_only_skips_polishing_placeholder_and_typing(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_background_completion_uses_wrapper_output_for_visible_surfaces(tmp_path):
+async def test_background_completion_uses_wrapper_output_for_visible_surfaces(
+    tmp_path, monkeypatch
+):
     runtime, sent, voices = _make_background_runtime(tmp_path)
+    capability_releases = []
+
+    async def release_capability_task(_runtime, request_id):
+        capability_releases.append(request_id)
+
+    monkeypatch.setattr(
+        runtime_lifecycle,
+        "release_capability_task",
+        release_capability_task,
+    )
     listener_payloads = []
     runtime.register_request_listener = (
         FlexibleAgentRuntime.register_request_listener.__get__(
@@ -2916,6 +2929,7 @@ async def test_background_completion_uses_wrapper_output_for_visible_surfaces(tm
     assert core_entry["visible_text"] == "wrapped visible"
     assert core_entry["completion_path"] == "background"
     assert core_entry["wrapper_used"] is True
+    assert capability_releases == ["req-001"]
 
 
 @pytest.mark.asyncio

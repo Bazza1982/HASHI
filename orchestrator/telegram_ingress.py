@@ -49,6 +49,8 @@ class CoreTelegramIngress:
         self.connected = False
         self._stopping = False
         self._poll_task: asyncio.Task[Any] | None = None
+        self._initialized = False
+        self._drop_pending_on_connect = False
 
     @property
     def is_running(self) -> bool:
@@ -58,17 +60,8 @@ class CoreTelegramIngress:
         if self.is_running:
             return
         self._stopping = False
-        try:
-            await self.bot.initialize()
-            await self.bot.delete_webhook(
-                drop_pending_updates=bool(drop_pending_updates)
-            )
-        except Exception:
-            try:
-                await self.bot.shutdown()
-            except Exception:
-                pass
-            raise
+        self._initialized = False
+        self._drop_pending_on_connect = bool(drop_pending_updates)
         self.task = asyncio.create_task(
             self._run(),
             name=f"core-telegram-ingress:{self.agent_name}",
@@ -82,6 +75,23 @@ class CoreTelegramIngress:
     async def _run(self) -> None:
         while not self._stopping:
             try:
+                if not self._initialized:
+                    try:
+                        await self.bot.initialize()
+                        drop_pending = self._drop_pending_on_connect
+                        # A timeout may hide a successful server-side deletion.
+                        # Never discard newly arrived updates on a retry.
+                        self._drop_pending_on_connect = False
+                        await self.bot.delete_webhook(
+                            drop_pending_updates=drop_pending
+                        )
+                        self._initialized = True
+                    except Exception:
+                        try:
+                            await self.bot.shutdown()
+                        except Exception:
+                            pass
+                        raise
                 handle = self.handle_lookup(self.agent_name)
                 if handle is not None and getattr(handle, "route_is_gated", False):
                     await asyncio.sleep(0.05)
@@ -166,6 +176,7 @@ class CoreTelegramIngress:
                 self.agent_name,
                 exc,
             )
+        self._initialized = False
         bridge_logger.info(
             "Core Telegram ingress stopped: agent=%s",
             self.agent_name,

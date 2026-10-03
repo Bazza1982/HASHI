@@ -156,6 +156,56 @@ async def test_tool_result_is_masked_on_second_deepseek_call(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_privacy_expansion_is_capacity_checked_before_http(tmp_path):
+    async def expanding_detector(texts: list[str]) -> list[list[dict]]:
+        return [
+            [
+                {
+                    "start": index,
+                    "end": index + 1,
+                    "label": "PERSON",
+                    "score": 0.9,
+                }
+                for index, character in enumerate(text)
+                if character == "X"
+            ]
+            for text in texts
+        ]
+
+    adapter = _deepseek(tmp_path)
+    adapter.tool_registry = None
+    adapter.privacy_level = 2
+    adapter._herv3_privacy_scope = True
+    adapter._privacy_gate = OutboundPrivacyGate(detector=expanding_detector)
+    adapter.config._hashi_runtime = SimpleNamespace(
+        global_config=SimpleNamespace(
+            her_providers={
+                "providers": {
+                    "deepseek": {
+                        "engine": "deepseek-api",
+                        "model_capabilities": {
+                            "deepseek-flash": {
+                                "context_window_tokens": 400,
+                                "response_headroom_tokens": 100,
+                            }
+                        },
+                    }
+                }
+            }
+        ),
+        backend_manager=None,
+    )
+    adapter._call_api_once = AsyncMock(
+        return_value=_APIResult("unexpected", None, "stop", 1, 1)
+    )
+
+    response = await adapter.generate_response("X " * 200, "req-private-capacity")
+
+    assert response.error_code == "CONTEXT_CAPACITY_REJECTED"
+    adapter._call_api_once.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_streaming_deepseek_call_receives_only_masked_payload(tmp_path):
     adapter = _deepseek(tmp_path)
     adapter.privacy_level = 2

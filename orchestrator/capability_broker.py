@@ -324,6 +324,7 @@ class CapabilityBroker(ManualDesktopBroker):
             self._records.clear()
             self._leases.clear()
             self._resource_leases.clear()
+            self._browser_task_bindings.clear()
             self._bootstrap_token = ""
             self._registration_url = ""
         try:
@@ -616,6 +617,7 @@ class CapabilityBroker(ManualDesktopBroker):
 
     def cancel_task(self, *, agent_id: str, task_id: str, reason: str = "cancelled") -> int:
         with self._lock:
+            self._browser_task_bindings.pop((str(agent_id), str(task_id)), None)
             matches = [
                 lease.lease_id
                 for lease in self._leases.values()
@@ -909,7 +911,6 @@ class CapabilityBroker(ManualDesktopBroker):
                         )
                     for item in candidates:
                         if item[0].capability_id == bound_id:
-                            self._browser_task_bindings[task_key] = (bound_id, time.time())
                             return item
                     raise CapabilityUnavailableError(
                         kind, action=normalized_action or None,
@@ -967,10 +968,6 @@ class CapabilityBroker(ManualDesktopBroker):
 
     def _prune(self) -> None:
         now = time.time()
-        self._browser_task_bindings = {
-            key: value for key, value in self._browser_task_bindings.items()
-            if now - value[1] < 24 * 60 * 60
-        }
         expired_capabilities = [
             capability_id
             for capability_id, (registration, _token) in self._records.items()

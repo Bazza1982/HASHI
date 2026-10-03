@@ -37,7 +37,6 @@ from orchestrator.flexible_backend_registry import (
     PROVIDER_ONLY_ENGINE_IDS,
     canonical_backend_engine,
     get_secret_lookup_order,
-    normalize_effort,
 )
 from orchestrator.her_v2.config import HERv2Config
 from orchestrator.her_v2.v3_config import (
@@ -2066,7 +2065,6 @@ class FlexibleBackendManager:
     ):
         if not self.current_backend:
             raise RuntimeError("No active backend initialized.")
-        self._refresh_tool_runtime_context(request_id)
         kwargs = {
             "is_retry": is_retry,
             "silent": silent,
@@ -2164,13 +2162,18 @@ class FlexibleBackendManager:
                                 ],
                             },
                         )
-        return await self.current_backend.generate_response(
-            prompt,
-            request_id,
-            **kwargs,
-        )
+        invocation = self._refresh_tool_runtime_context(request_id)
+        try:
+            return await self.current_backend.generate_response(
+                prompt,
+                request_id,
+                **kwargs,
+            )
+        finally:
+            if invocation is not None:
+                invocation.close()
 
-    def _refresh_tool_runtime_context(self, request_id: str) -> None:
+    def _refresh_tool_runtime_context(self, request_id: str):
         registry = getattr(self.current_backend, "tool_registry", None)
         if registry is None:
             return
@@ -2268,7 +2271,6 @@ class FlexibleBackendManager:
             authorization = request_metadata.get("memory_search_authorization")
             if isinstance(authorization, dict):
                 context["memory_search_authorization"] = dict(authorization)
-        registry.audit_context = context
         if str(getattr(self.config, "active_backend", "")) in {
             "codex-cli",
             "claude-cli",
@@ -2278,7 +2280,10 @@ class FlexibleBackendManager:
             # scoped authority cannot be stale from backend initialisation.
             from adapters.hashi_mcp import prepare_hashi_mcp
 
-            prepare_hashi_mcp(
+            return prepare_hashi_mcp(
                 self.current_backend,
                 backend=str(self.config.active_backend),
+                audit_context=context,
             )
+        registry.audit_context = context
+        return None

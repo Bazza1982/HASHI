@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from orchestrator.telegram_ingress import CoreTelegramIngress
-from orchestrator.function_worker_supervisor import AgentRuntimeHandle
+from orchestrator.function_worker_supervisor import AgentRuntimeHandle, FunctionWorkerSupervisor
 
 
 class _Update:
@@ -39,6 +39,60 @@ class _Bot:
 
     async def shutdown(self):
         self.calls.append("shutdown")
+
+
+def test_missing_ingress_with_configured_token_is_not_tokenless_local_mode():
+    supervisor = object.__new__(FunctionWorkerSupervisor)
+    supervisor._telegram_ingress = {}
+    handle = SimpleNamespace(config=SimpleNamespace(telegram_token_key="bot_alpha"))
+    supervisor.kernel = SimpleNamespace(
+        secrets={"bot_alpha": "token"}, _runtime_map=lambda: {"alpha": handle}
+    )
+    assert supervisor.telegram_ingress_snapshot("alpha") == {
+        "configured": True, "running": False, "connected": False, "offset": None
+    }
+    assert not supervisor.telegram_ingress_snapshot("tokenless-clone")["configured"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ["initialize", "delete_webhook"])
+async def test_ingress_supervises_initial_connection_failure(monkeypatch, failure_stage):
+    bot = _Bot("token")
+    accepted = asyncio.Event()
+    failed = False
+    original = getattr(bot, failure_stage)
+
+    async def fail_once(*args, **kwargs):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise TimeoutError("transient initial connection failure")
+        return await original(*args, **kwargs)
+
+    setattr(bot, failure_stage, fail_once)
+    monkeypatch.setattr("orchestrator.telegram_ingress.TELEGRAM_RETRY_SECONDS", 0)
+
+    async def deliver(_payload):
+        accepted.set()
+
+    ingress = CoreTelegramIngress(
+        agent_name="alpha",
+        token="token",
+        handle_lookup=lambda _: SimpleNamespace(deliver_telegram_update=deliver),
+        bot_factory=lambda _: bot,
+    )
+    try:
+        await ingress.start(drop_pending_updates=False)
+        assert ingress.is_running
+        assert not ingress.connected
+        await asyncio.wait_for(accepted.wait(), timeout=1)
+        assert failed
+        assert ingress.connected
+        assert ingress.offset == 8
+        assert ("delete_webhook", False) in bot.calls
+        assert ("delete_webhook", True) not in bot.calls
+    finally:
+        await ingress.stop()
 
 
 @pytest.mark.asyncio

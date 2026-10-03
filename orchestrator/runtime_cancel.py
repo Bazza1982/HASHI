@@ -25,6 +25,33 @@ def requested_ids(runtime: Any) -> set[str]:
     return ids
 
 
+def finalizing_ids(runtime: Any) -> set[str]:
+    ids = getattr(runtime, "_finalizing_request_ids", None)
+    if not isinstance(ids, set):
+        ids = set()
+        runtime._finalizing_request_ids = ids
+    return ids
+
+
+async def claim_final_result(runtime: Any, item: Any) -> bool:
+    """Linearize final-result publication against an accepted exact stop.
+
+    Once claimed, publication may already have reached a listener or transport;
+    cancellation must report that boundary rather than promise a false stop.
+    No network I/O is performed while holding the transition lock.
+    """
+    async with transition_lock(runtime):
+        run_id = getattr(item, "run_id", None)
+        store = getattr(runtime, "session_store", None)
+        run = store.get_run(run_id) if run_id and store is not None else None
+        stopped = bool(run and run["request_id"] == item.request_id
+                       and run["agent_id"] == runtime.name and run["state"] == "stopped")
+        if item.request_id in requested_ids(runtime) or stopped:
+            return False
+        finalizing_ids(runtime).add(item.request_id)
+        return True
+
+
 def queued_run_is_terminal(runtime: Any, item: Any) -> bool:
     """Fence a queued item whose durable Run was cancelled before dequeue."""
     run_id = getattr(item, "run_id", None)
@@ -37,13 +64,13 @@ def queued_run_is_terminal(runtime: Any, item: Any) -> bool:
             and run["state"] in TERMINAL_RUN_STATES)
 
 
-async def finish_queued_request(runtime: Any, item: Any) -> None:
+async def finish_queued_request(runtime: Any, item: Any, *, error: str = "Cancelled before execution") -> None:
     """Settle an exact queued request through the normal Session/listener path."""
     await runtime._notify_request_listeners(item.request_id, {
         "request_id": item.request_id,
         "success": False,
         "text": None,
-        "error": "Cancelled before execution",
+        "error": error,
         "source": item.source,
         "summary": item.summary,
         "interrupted": True,
@@ -68,6 +95,11 @@ async def cancel_session_run(
             return {"ok": True, "request_id": request_id, "run_id": run_id,
                     "session_id": session_id, "status": run["state"], "terminal": True,
                     "already_terminal": True}
+        if request_id in finalizing_ids(runtime):
+            return {"ok": False, "request_id": request_id, "run_id": run_id,
+                    "session_id": session_id, "status": "finalizing", "terminal": False,
+                    "error_code": "final_result_committed",
+                    "error": "The final result is already being published; cancellation was not accepted."}
 
         removed = await runtime_pending.take_ready_exact(runtime, request_id, session_id=session_id)
         if removed is not None:

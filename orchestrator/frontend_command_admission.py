@@ -66,6 +66,36 @@ def reserve_frontend_command_invocation(
 
     from orchestrator.runtime_session import ensure_store
 
+    return reserve_frontend_command_in_store(
+        ensure_store(runtime),
+        session_id=session_id,
+        owner_id=owner_id,
+        client_id=client_id,
+        request_id=request_id,
+        context_generation=context_generation,
+        payload=payload,
+        invocation=invocation,
+    )
+
+
+def reserve_frontend_command_in_store(
+    store: Any,
+    *,
+    session_id: str,
+    owner_id: str,
+    client_id: str,
+    request_id: str,
+    context_generation: int,
+    payload: Mapping[str, Any],
+    invocation: Mapping[str, Any],
+) -> FrontendCommandReservation:
+    """Reserve a typed command/control against PAO's shared SessionStore.
+
+    Lifecycle controls may target an Agent that has no running Worker, so this
+    variant deliberately accepts the authoritative store instead of requiring
+    a target runtime merely to locate it.
+    """
+
     identity = {
         "session_id": str(session_id or "").strip(),
         "owner_id": str(owner_id or "").strip(),
@@ -79,7 +109,6 @@ def reserve_frontend_command_invocation(
 
     normalized_invocation = dict(invocation)
     digest = _request_digest(payload, normalized_invocation)
-    store = ensure_store(runtime)
     result = store.reserve_frontend_command_invocation(
         session_id=identity["session_id"],
         owner_id=identity["owner_id"],
@@ -193,6 +222,7 @@ def reserve_telegram_command_invocation(
 
 __all__ = [
     "FrontendCommandReservation",
+    "reserve_frontend_command_in_store",
     "reserve_frontend_command_invocation",
     "reserve_telegram_command_invocation",
 ]

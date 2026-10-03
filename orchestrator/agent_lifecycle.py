@@ -27,12 +27,98 @@ class AgentLifecycleManager:
         self.kernel = kernel
         self.manually_stopped_agents: set[str] = set()
 
+    async def request_start_agent(
+        self,
+        agent_name: str,
+        *,
+        deactivate_on_failure_revision: str | None = None,
+    ) -> dict:
+        """Admit one start without making an HTTP client wait for qualification."""
+        async with self.kernel._lifecycle_lock:
+            if getattr(self.kernel, "_handoff_draining", False):
+                return {"ok": False, "status": "unavailable", "message": "Shared Functions are draining."}
+            if agent_name in self.kernel._runtime_map():
+                return {"ok": True, "status": "running", "message": f"Agent '{agent_name}' is running."}
+            if agent_name not in self.kernel._startup_tasks:
+                task = asyncio.create_task(
+                    self._complete_requested_start(
+                        agent_name,
+                        deactivate_on_failure_revision=deactivate_on_failure_revision,
+                    ),
+                    name=f"agent-start:{agent_name}",
+                )
+                self.kernel._startup_tasks[agent_name] = task
+                self._project_requested_start(agent_name, "starting", "Starting Function Worker.")
+            return {"ok": True, "status": "starting", "message": f"Agent '{agent_name}' is starting."}
+
+    def _project_requested_start(self, name: str, state: str, message: str) -> None:
+        # Existing startup status is a projection; _startup_tasks and the Worker
+        # registry remain the sole owners of pending and active lifecycles.
+        status = dict(getattr(self.kernel, "startup_status", {}) or {})
+        states = dict(status.get("agent_states") or {})
+        reasons = dict(status.get("agent_reasons") or {})
+        states[name] = state
+        if state == "online":
+            reasons.pop(name, None)
+        else:
+            reasons[name] = message
+        status.update(agent_states=states, agent_reasons=reasons)
+        self.kernel.startup_status = status
+
+    async def _complete_requested_start(
+        self,
+        agent_name: str,
+        *,
+        deactivate_on_failure_revision: str | None = None,
+    ) -> None:
+        cancelled: asyncio.CancelledError | None = None
+        try:
+            ok, message = await self.start_agent(
+                agent_name,
+                _retain_startup_task=True,
+            )
+        except asyncio.CancelledError as exc:
+            ok, message = False, "Agent startup was interrupted."
+            cancelled = exc
+        except Exception as exc:
+            ok, message = False, f"Agent startup failed: {type(exc).__name__}: {exc}"
+            main_logger.exception("Requested Agent startup failed: %s", agent_name)
+        if not ok and deactivate_on_failure_revision is not None:
+            try:
+                self.kernel.config_admin.set_agent_active(
+                    agent_name,
+                    False,
+                    expected_revision=deactivate_on_failure_revision,
+                    allow_last_active_deactivation=True,
+                )
+            except Exception as exc:
+                main_logger.error(
+                    "Could not roll back failed newly-created Agent %s: %s: %s",
+                    agent_name,
+                    type(exc).__name__,
+                    exc,
+                )
+                message = f"{message} Inactive-state publication needs reconciliation."
+        try:
+            self._project_requested_start(agent_name, "online" if ok else "failed", message)
+            startup = getattr(self.kernel, "startup_manager", None)
+            reconcile = getattr(startup, "reconcile_connector_status", None)
+            if callable(reconcile):
+                reconcile()
+        finally:
+            async with self.kernel._lifecycle_lock:
+                if self.kernel._startup_tasks.get(agent_name) is asyncio.current_task():
+                    self.kernel._startup_tasks.pop(agent_name, None)
+        if cancelled is not None:
+            raise cancelled
+
     async def start_agent(
         self,
         agent_name: str,
         *,
         generation=None,
         generation_root: Path | None = None,
+        _retain_startup_task: bool = False,
     ) -> tuple[bool, str]:
         current_task = asyncio.current_task()
         if current_task is None:
@@ -41,7 +127,7 @@ class AgentLifecycleManager:
         async with self.kernel._lifecycle_lock:
             if agent_name in self.kernel._runtime_map():
                 return False, f"Agent '{agent_name}' is already running."
-            if agent_name in self.kernel._startup_tasks:
+            if agent_name in self.kernel._startup_tasks and self.kernel._startup_tasks[agent_name] is not current_task:
                 return False, f"Agent '{agent_name}' is already starting."
             self.kernel._startup_tasks[agent_name] = current_task
 
@@ -92,10 +178,8 @@ class AgentLifecycleManager:
                     self.manually_stopped_agents.discard(agent_name)
                     self.kernel.function_workers.publish_generation_state()
 
-                if handle.telegram_connected:
-                    token = str(
-                        loaded_secrets.get(agent_cfg.telegram_token_key) or ""
-                    )
+                token = str(loaded_secrets.get(agent_cfg.telegram_token_key) or "").strip()
+                if token:
                     try:
                         await self.kernel.function_workers.start_telegram_ingress(
                             agent_name,
@@ -152,7 +236,10 @@ class AgentLifecycleManager:
                 return True, message
         finally:
             async with self.kernel._lifecycle_lock:
-                if self.kernel._startup_tasks.get(agent_name) is current_task:
+                if (
+                    not _retain_startup_task
+                    and self.kernel._startup_tasks.get(agent_name) is current_task
+                ):
                     self.kernel._startup_tasks.pop(agent_name, None)
 
     async def stop_agent(

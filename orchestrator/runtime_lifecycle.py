@@ -33,6 +33,26 @@ RUNTIME_SERVICE_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 RUNTIME_TELEGRAM_UPDATER_SHUTDOWN_TIMEOUT_SECONDS = 10.0
 
 
+async def release_capability_task(runtime: Any, request_id: str) -> None:
+    """Release PAO's device/browser binding once the whole Run is terminal."""
+
+    facade = getattr(runtime, "orchestrator", None)
+    release = getattr(facade, "cancel_capability_task", None)
+    if not callable(release) or not str(request_id or "").strip():
+        return
+    try:
+        await release(str(request_id))
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        runtime.error_logger.warning(
+            "Capability task cleanup failed for %s: %s: %s",
+            request_id,
+            type(exc).__name__,
+            exc,
+        )
+
+
 async def _publish_worker_metadata(runtime: Any, *, transition: str) -> None:
     """Republish Worker-owned runtime state without becoming its state owner."""
 
@@ -539,6 +559,8 @@ async def process_queue(runtime: Any) -> None:
                     completion_path="foreground",
                     response=response,
                 )
+                if success_result.cancelled:
+                    continue
                 visible_text = success_result.visible_text
                 wrapper_result = success_result.wrapper_result
                 if (
@@ -676,6 +698,7 @@ async def process_queue(runtime: Any) -> None:
 
                     consume_user_interrupt(runtime, item.request_id)
                     runtime_cancel.requested_ids(runtime).discard(item.request_id)
+                    runtime_cancel.finalizing_ids(runtime).discard(item.request_id)
                     registry = getattr(runtime, "_request_meta_by_id", None)
                     if isinstance(registry, dict):
                         registry.pop(item.request_id, None)
@@ -683,6 +706,7 @@ async def process_queue(runtime: Any) -> None:
                 if isinstance(current_meta, dict) and current_meta.get("request_id") == item.request_id:
                     runtime.current_request_meta = None
                 if item.request_id not in background_ids:
+                    await release_capability_task(runtime, item.request_id)
                     await runtime_delivery_order.complete_turn(runtime, item.request_id)
                     runtime_pipeline.clear_context_compaction_request_state(
                         runtime,

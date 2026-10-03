@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from collections.abc import Mapping
 from typing import Any
 from uuid import uuid4
 
@@ -9,6 +10,87 @@ from orchestrator.runtime_common import QueuedRequest
 from orchestrator.runtime_delivery import format_backend_error_for_user
 from orchestrator import ui_language
 from orchestrator.service_endpoints import ServiceEndpointError
+
+
+_TRANSFER_REDIRECT_ERROR_PREFIX = "HASHI_TRANSFER_REDIRECT_V1:"
+
+
+class TransferRedirectRequired(RuntimeError):
+    """A frontend request reached a Session whose transfer is already accepted."""
+
+    def __init__(self, redirect: Mapping[str, Any]):
+        self.redirect = dict(redirect)
+        super().__init__(
+            _TRANSFER_REDIRECT_ERROR_PREFIX
+            + json.dumps(self.redirect, ensure_ascii=True, sort_keys=True)
+        )
+
+
+def transfer_redirect_snapshot(runtime: Any) -> dict[str, str] | None:
+    """Return the minimal accepted-transfer projection exposed to FC owners."""
+
+    state = getattr(runtime, "_transfer_state", None)
+    if not isinstance(state, Mapping):
+        metadata = getattr(runtime, "metadata", None)
+        if not isinstance(metadata, Mapping):
+            getter = getattr(runtime, "get_runtime_metadata", None)
+            metadata = getter() if callable(getter) else None
+        state = (
+            metadata.get("transfer_redirect")
+            if isinstance(metadata, Mapping)
+            else None
+        )
+    if not isinstance(state, Mapping) or str(state.get("status")) != "accepted":
+        return None
+    snapshot = {
+        "status": "accepted",
+        "transfer_id": str(state.get("transfer_id") or "unknown").strip(),
+        "target_agent": str(state.get("target_agent") or "target").strip(),
+        "target_instance": str(state.get("target_instance") or "unknown").strip(),
+    }
+    if any(not value for value in snapshot.values()):
+        return None
+    return snapshot
+
+
+def transfer_redirect_from_exception(exc: BaseException) -> dict[str, str] | None:
+    """Recover the typed redirect across the Function Worker error envelope."""
+
+    if isinstance(exc, TransferRedirectRequired):
+        raw = exc.redirect
+    else:
+        remote = getattr(exc, "error", None)
+        if not isinstance(remote, Mapping) or str(remote.get("type")) != (
+            "TransferRedirectRequired"
+        ):
+            return None
+        message = str(remote.get("message") or "")
+        if not message.startswith(_TRANSFER_REDIRECT_ERROR_PREFIX):
+            return None
+        try:
+            raw = json.loads(message[len(_TRANSFER_REDIRECT_ERROR_PREFIX) :])
+        except (json.JSONDecodeError, TypeError):
+            return None
+    holder = type("_TransferProjection", (), {"_transfer_state": raw})()
+    return transfer_redirect_snapshot(holder)
+
+
+def require_untransferred(runtime: Any) -> None:
+    """Fail before a post-transfer ingress can create a Run or transport effect."""
+
+    redirect = transfer_redirect_snapshot(runtime)
+    if redirect is not None:
+        raise TransferRedirectRequired(redirect)
+
+
+def transfer_redirect_text_from_snapshot(state: Mapping[str, Any]) -> str:
+    target_agent = state.get("target_agent") or "target"
+    target_instance = state.get("target_instance") or "unknown"
+    transfer_id = state.get("transfer_id") or "unknown"
+    return (
+        f"This session has been transferred to {target_agent}@{target_instance}.\n"
+        f"Continue there. Transfer ID: {transfer_id}"
+    )
 
 
 def persist_transfer_state(runtime: Any) -> None:
@@ -32,18 +114,14 @@ def has_active_transfer(runtime: Any) -> bool:
 
 
 def transfer_redirect_text(runtime: Any) -> str:
-    state = runtime._transfer_state or {}
-    target_agent = state.get("target_agent") or "target"
-    target_instance = state.get("target_instance") or "unknown"
-    transfer_id = state.get("transfer_id") or "unknown"
-    return (
-        f"This session has been transferred to {target_agent}@{target_instance}.\n"
-        f"Continue there. Transfer ID: {transfer_id}"
-    )
+    state = transfer_redirect_snapshot(runtime) or getattr(
+        runtime, "_transfer_state", None
+    ) or {}
+    return transfer_redirect_text_from_snapshot(state)
 
 
 def should_redirect_after_transfer(runtime: Any) -> bool:
-    return bool(runtime._transfer_state and runtime._transfer_state.get("status") == "accepted")
+    return transfer_redirect_snapshot(runtime) is not None
 
 
 def should_buffer_during_transfer(runtime: Any, request_id: str | None) -> bool:

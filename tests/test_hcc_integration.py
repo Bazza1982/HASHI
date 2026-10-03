@@ -98,6 +98,27 @@ async def test_unauthorized_command_does_not_mutate(tmp_path):
     update.message.reply_text.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_hcc_command_uses_canonical_frontend_reply_owner(tmp_path):
+    home = workspace(tmp_path / "agent")
+    runtime = runtime_fixture(home)
+    runtime._reply_text = AsyncMock()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=42),
+        effective_chat=SimpleNamespace(id=42),
+        message=SimpleNamespace(
+            reply_text=AsyncMock(
+                side_effect=AssertionError("direct Telegram egress is forbidden")
+            )
+        ),
+    )
+
+    await runtime.cmd_hcc(update, SimpleNamespace(args=[]))
+
+    runtime._reply_text.assert_awaited_once()
+    update.message.reply_text.assert_not_awaited()
+
+
 def transport_adapter(home, store):
     adapter = HERv2Adapter.__new__(HERv2Adapter)
     adapter._session_coordinator = HerBackendSessionCoordinator(store)

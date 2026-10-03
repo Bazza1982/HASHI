@@ -257,6 +257,11 @@ def bind_runtime_commands(runtime, *, wrap: bool = False) -> None:
             with ui_language.language_scope(runtime, update):
                 await _callback.callback(runtime, update, context)
 
+        if wrap and hasattr(runtime, "_wrap_callback"):
+            handler = runtime._wrap_callback(
+                f"dynamic:{callback.pattern}",
+                handler,
+            )
         runtime.app.add_handler(CallbackQueryHandler(handler, pattern=callback.pattern))
 
 

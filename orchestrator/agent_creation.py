@@ -78,6 +78,10 @@ class InvalidModelError(AgentCreationError):
     error_code = "invalid_model"
 
 
+class InvalidProviderError(AgentCreationError):
+    error_code = "invalid_provider"
+
+
 class InvalidEffortError(AgentCreationError):
     error_code = "invalid_effort"
 
@@ -108,6 +112,7 @@ class AgentCreationSpec:
     model: str | None = None
     effort: str | None = None
     is_active: bool = False
+    provider: str | None = None
 
 
 @dataclass(frozen=True)
@@ -119,6 +124,7 @@ class AgentCreationResult:
     workspace_created: bool
     config_published: bool
     durability_warning: bool = False
+    config_revision: str | None = None
 
 
 def validate_agent_name(name: str) -> str:
@@ -212,6 +218,7 @@ def build_her_backend_row(
     effort: str,
     provider_profiles: dict[str, dict[str, Any]],
     model: str | None = None,
+    provider: str | None = None,
 ) -> dict:
     """Build a HERV3 row with one Provider, model and reasoning effort."""
 
@@ -220,17 +227,26 @@ def build_her_backend_row(
     seed = HERv3ModelTarget(engine, pro_model)
     options = build_v3_provider_options([], provider_profiles, seed)
     selected = seed
+    requested_provider = canonical_backend_engine(str(provider or "").strip())
+    available = [option for option in options if option.get("available")]
+    if requested_provider:
+        available = [option for option in available if option["engine"] == requested_provider]
+        if not available:
+            raise InvalidProviderError("the selected HERV3 Provider is not available")
+        selected = HERv3ModelTarget(requested_provider, str(available[0]["default_model"]))
     requested_model = str(model or "").strip()
     if requested_model:
         matches = [
             option
-            for option in options
-            if option.get("available") and requested_model in option.get("models", [])
+            for option in available
+            if requested_model in option.get("models", [])
         ]
         if not matches:
             raise InvalidModelError(
                 f"model {requested_model!r} is not available from a configured HERV3 Provider"
             )
+        if len(matches) != 1:
+            raise InvalidProviderError("this model is available from multiple Providers; select one explicitly")
         selected = HERv3ModelTarget(str(matches[0]["engine"]), requested_model)
 
     choices = [
@@ -331,8 +347,11 @@ def build_agent_config(spec: AgentCreationSpec, provider_profiles: dict) -> dict
             str(spec.effort or DEFAULT_HER_EFFORT).strip(),
             provider_profiles,
             model=spec.model,
+            provider=spec.provider,
         )
     else:
+        if spec.provider:
+            raise InvalidProviderError("provider is only supported for HERV3 creation")
         backend_row = build_ordinary_backend_row(backend, spec.model, spec.effort)
     return {
         "name": spec.name,
@@ -349,10 +368,16 @@ def build_agent_config(spec: AgentCreationSpec, provider_profiles: dict) -> dict
 class AgentCreationService:
     """Safe public creation path.  See module docstring for the contract."""
 
-    def __init__(self, paths: BridgePaths, global_config: Any = None):
+    def __init__(
+        self,
+        paths: BridgePaths,
+        global_config: Any = None,
+        *,
+        admin: ConfigAdmin | None = None,
+    ):
         self.paths = paths
         self.global_config = global_config
-        self.admin = ConfigAdmin(paths)
+        self.admin = admin or ConfigAdmin(paths)
 
     def _name_collides(self, raw: dict, name: str) -> bool:
         existing = [
@@ -434,6 +459,7 @@ class AgentCreationService:
                 backend=backend,
                 display_name=display_name,
                 model=spec.model,
+                provider=spec.provider,
                 effort=spec.effort,
                 is_active=spec.is_active,
             ),
@@ -473,6 +499,7 @@ class AgentCreationService:
                     workspace_created=True,
                     config_published=True,
                     durability_warning=True,
+                    config_revision=self.admin.load_raw_config().revision,
                 )
             raise CreationFailedError(
                 "configuration publication could not be confirmed"
@@ -497,4 +524,5 @@ class AgentCreationService:
             active_backend=public_backend_engine(backend),
             workspace_created=True,
             config_published=True,
+            config_revision=self.admin.load_raw_config().revision,
         )

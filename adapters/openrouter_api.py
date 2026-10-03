@@ -818,6 +818,19 @@ def _provider_response_decision(
                 "decision_reason": f"{normalized}_with_tool_calls",
                 "error_code": "PROVIDER_FINISH_REASON_CONFLICT",
             }
+        if not (
+            str(result.text or "").strip()
+            or isinstance(result.structured_data, Mapping)
+            or result.audio_bytes
+            or str(result.audio_transcript or "").strip()
+        ):
+            return {
+                **base,
+                "decision": "reject_empty_response",
+                "decision_reason": f"{normalized}_without_usable_output",
+                "error_code": "PROVIDER_EMPTY_RESPONSE",
+                "error_retryable": True,
+            }
         return {
             **base,
             "decision": "complete",
@@ -944,6 +957,9 @@ _PROVIDER_PROTOCOL_ERROR_MESSAGES = {
     ),
     "PROVIDER_INCOMPLETE_STREAM": (
         "The Provider response stream ended before a complete decision could be made."
+    ),
+    "PROVIDER_EMPTY_RESPONSE": (
+        "The Provider completed the response without returning usable output."
     ),
 }
 
@@ -3390,6 +3406,12 @@ class OpenRouterAdapter(BaseBackend):
                     payload = await self._protect_outbound_payload(
                         payload, request_id=str(request_id or ""), gate=privacy_gate
                     )
+                    # Level-2 placeholders may be longer than the sensitive
+                    # spans they replace.  The first check protects the local
+                    # privacy sidecar from an already-oversized request; this
+                    # second check governs the exact text payload that will be
+                    # audited and sent over HTTP.
+                    self._preflight_payload_capacity(payload)
                     provider_call_emitted_text = False
                     effective_parameters = _effective_protocol_parameters(payload)
 

@@ -55,11 +55,13 @@ def _json_safe(value: Any) -> Any:
 def live_workbench_api_base_url(
     registry: ToolRegistry,
     global_config: Any,
+    *,
+    audit_context: Mapping[str, Any] | None = None,
 ) -> str:
     """Return the live Backend API address for an isolated Tool Gateway."""
 
     url = _live_workbench_api_base_url(
-        registry.audit_context,
+        audit_context if audit_context is not None else registry.audit_context,
         global_config,
     )
     if not url:
@@ -103,8 +105,14 @@ class GatewayContext:
         workbench_api_base_url: str = "",
         scheduler_api_base_url: str = "",
         vision_enabled: bool = True,
+        audit_context: Mapping[str, Any] | None = None,
     ) -> GatewayContext:
-        audit = _json_safe(registry.audit_context or {}) or {}
+        effective_audit = (
+            dict(audit_context)
+            if audit_context is not None
+            else dict(registry.audit_context or {})
+        )
+        audit = _json_safe(effective_audit) or {}
         required_secret_keys = set()
         allowed_tools = set(registry._allowed)
         allowed_tools.update(additional_allowed_tools or set())
@@ -123,7 +131,7 @@ class GatewayContext:
             .strip()
             .rstrip("/")
         )
-        global_config = (registry.audit_context or {}).get("global_config")
+        global_config = effective_audit.get("global_config")
         canonical = getattr(registry, "canonical_audit", None)
         return cls(
             schema_version=CONTEXT_SCHEMA_VERSION,
@@ -234,6 +242,7 @@ def write_gateway_context(
     scheduler_api_base_url: str = "",
     vision_enabled: bool = True,
     backend: str = "her",
+    audit_context: Mapping[str, Any] | None = None,
 ) -> GatewayContext:
     context = GatewayContext.from_registry(
         registry,
@@ -243,6 +252,7 @@ def write_gateway_context(
         workbench_api_base_url=workbench_api_base_url,
         scheduler_api_base_url=scheduler_api_base_url,
         vision_enabled=vision_enabled,
+        audit_context=audit_context,
     )
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

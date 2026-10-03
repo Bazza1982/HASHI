@@ -46,6 +46,51 @@ def test_local_command_update_carries_frontend_invocation_identity():
     assert update.update_id == "cmd_meter_status_001"
 
 
+def test_local_command_update_preserves_trusted_enterprise_owner_for_reboot_and_session():
+    from orchestrator.runtime_reboot import origin_from_update
+
+    update = _FakeUpdate(
+        7,
+        7,
+        _CaptureStore(messages=[]),
+        "/reboot min",
+        session_metadata={
+            "_hashi_owner_id": "enterprise:trusted-user",
+            "owner_id": "enterprise:forged-user",
+            "session_surface": "workbench",
+        },
+    )
+    runtime = NS(global_config=NS(authorized_id=7))
+
+    assert update._hashi_owner_id == "enterprise:trusted-user"
+    assert update._hashi_session_owner_id == "enterprise:trusted-user"
+    assert origin_from_update(runtime, update)["owner_id"] == (
+        "enterprise:trusted-user"
+    )
+
+
+def test_reboot_origin_preserves_bound_source_session_owner_without_command_override():
+    from orchestrator.runtime_reboot import origin_from_update
+
+    update = _FakeUpdate(
+        7,
+        7,
+        _CaptureStore(messages=[]),
+        "/reboot min",
+        session_metadata={
+            "owner_id": "enterprise:session-user",
+            "session_surface": "workbench",
+        },
+    )
+    runtime = NS(global_config=NS(authorized_id=7))
+
+    assert update._hashi_owner_id is None
+    assert update._hashi_session_owner_id == "enterprise:session-user"
+    assert origin_from_update(runtime, update)["owner_id"] == (
+        "enterprise:session-user"
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("surface", "channel_key", "connector_id"),

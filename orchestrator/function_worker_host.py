@@ -946,6 +946,7 @@ class FunctionWorkerHost:
     def metadata(self) -> dict[str, Any]:
         runtime = self._require_runtime()
         from orchestrator.agent_incarnation import lifecycle_id_from_config
+        from orchestrator.runtime_transfer import transfer_redirect_snapshot
         from orchestrator.telegram_delivery_failover import telegram_bot_fingerprint
 
         result = dict(runtime.get_runtime_metadata())
@@ -1032,6 +1033,7 @@ class FunctionWorkerHost:
                 "supported_commands": commands,
                 "command_registry_notices": command_registry_notices,
                 "active_transfer": bool(runtime.has_active_transfer()),
+                "transfer_redirect": transfer_redirect_snapshot(runtime),
                 "is_generating": bool(runtime.is_generating),
                 "queue_depth": int(runtime.queue.qsize()),
                 "current_request_meta": self._current_request_metadata(runtime),

@@ -138,6 +138,23 @@ def _handle(kernel: _Kernel, client: _Client) -> AgentRuntimeHandle:
     return AgentRuntimeHandle(kernel, client, _metadata(client.agent_name, client.pid))
 
 
+def test_public_metadata_requires_live_worker_and_actual_telegram_ingress():
+    kernel = _Kernel()
+    client = _Client("alpha", 101)
+    handle = _handle(kernel, client)
+    handle.metadata.update(telegram_connected=True, worker_phase="ACTIVE", worker_accepting=True)
+    ingress = {"configured": True, "running": False, "connected": False}
+    kernel.function_workers = SimpleNamespace(telegram_ingress_snapshot=lambda _: ingress)
+    metadata = handle.get_runtime_metadata()
+    assert metadata["online"]
+    assert metadata["telegram_outbound_connected"]
+    assert not metadata["telegram_connected"]
+    ingress.update(running=True, connected=True)
+    assert handle.get_runtime_metadata()["telegram_connected"]
+    client.process.alive = False
+    assert not handle.get_runtime_metadata()["online"]
+
+
 def _scheduler_rpc_stack(tmp_path: Path, *, worker_agent: str):
     kernel = _Kernel()
     state_path = tmp_path / "scheduler_state.json"

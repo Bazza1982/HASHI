@@ -940,6 +940,7 @@ class SuccessfulResponse:
     display_text: str
     visible_text: str
     wrapper_result: Any
+    cancelled: bool = False
 
 
 @dataclass
@@ -3216,8 +3217,13 @@ def _terminal_exchange_verbatim_text(item) -> str | None:
 
 
 async def prepare_successful_response(runtime, item, response, *, completion_path: str) -> SuccessfulResponse:
+    from orchestrator import runtime_cancel
+
     observe_terminal_response(runtime, item, response)
     if item.source == "bridge:hchat-draft" and hasattr(runtime, "_prepare_hchat_draft_success"):
+        if not await runtime_cancel.claim_final_result(runtime, item):
+            await runtime_cancel.finish_queued_request(runtime, item, error="Cancelled before final delivery")
+            return SuccessfulResponse("", "", None, cancelled=True)
         return await runtime._prepare_hchat_draft_success(
             item,
             core_raw=response.text,
@@ -3263,6 +3269,11 @@ async def prepare_successful_response(runtime, item, response, *, completion_pat
         )
         visible_text = normalize_user_visible_paths(visible_text)
     has_typed_audio = bool(audio_parts(getattr(response, "content", ())))
+    # Empty visible completion still settles as a terminal error downstream;
+    # an already accepted exact stop must win that publication as well.
+    if not await runtime_cancel.claim_final_result(runtime, item):
+        await runtime_cancel.finish_queued_request(runtime, item, error="Cancelled before final delivery")
+        return SuccessfulResponse(display_text, "", wrapper_result, cancelled=True)
     if not visible_text.strip() and not has_typed_audio:
         return SuccessfulResponse(
             display_text=display_text,

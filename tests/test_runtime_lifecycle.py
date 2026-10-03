@@ -20,6 +20,24 @@ class _Logger:
 
 
 @pytest.mark.asyncio
+async def test_terminal_run_releases_capability_task_by_request_id():
+    released = []
+
+    async def release(request_id):
+        released.append(request_id)
+        return 1
+
+    runtime = SimpleNamespace(
+        orchestrator=SimpleNamespace(cancel_capability_task=release),
+        error_logger=_Logger(),
+    )
+
+    await runtime_lifecycle.release_capability_task(runtime, "req-terminal")
+
+    assert released == ["req-terminal"]
+
+
+@pytest.mark.asyncio
 async def test_shutdown_cancels_long_batch_timeout_and_finalize_tasks():
     async def _wait_forever():
         await asyncio.Event().wait()

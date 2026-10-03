@@ -309,6 +309,20 @@ _COMPATIBILITY_ADAPTERS: tuple[dict[str, str], ...] = (
         "route": "standard_fc",
     },
     {
+        "id": "backend_api.agent_management_action",
+        "connector_id": "backend_api",
+        "direction": "ingress",
+        "operation": "action",
+        "route": "standard_fc",
+    },
+    {
+        "id": "backend_api.agent_management_control",
+        "connector_id": "backend_api",
+        "direction": "ingress",
+        "operation": "control",
+        "route": "standard_fc",
+    },
+    {
         "id": "session_api.run",
         "connector_id": "session_api",
         "direction": "ingress",
@@ -400,6 +414,13 @@ _COMPATIBILITY_ADAPTERS: tuple[dict[str, str], ...] = (
         "route": "standard_fc",
     },
     {
+        "id": "whatsapp.agent_management_control",
+        "connector_id": "whatsapp",
+        "direction": "ingress",
+        "operation": "control",
+        "route": "standard_fc",
+    },
+    {
         "id": "whatsapp.local_command",
         "connector_id": "whatsapp",
         "direction": "ingress",
@@ -464,7 +485,7 @@ _CONNECTORS: tuple[dict[str, Any], ...] = (
     {
         "id": "backend_api",
         "class": "api",
-        "ingress": ["message", "command", "media"],
+        "ingress": ["message", "command", "media", "action", "control"],
         "egress": ["text", "media", "status", "approval"],
         "running_media_delivery": "pull",
         "canonical_feed": "persistent_session_events",
@@ -506,7 +527,7 @@ _CONNECTORS: tuple[dict[str, Any], ...] = (
     {
         "id": "whatsapp",
         "class": "messaging",
-        "ingress": ["message", "command", "media"],
+        "ingress": ["message", "command", "media", "control"],
         "egress": ["text", "receipt"],
         "canonical_feed": "persistent_session_events",
         "customizations": (

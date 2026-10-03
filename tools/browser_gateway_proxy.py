@@ -18,6 +18,7 @@ from typing import Any
 
 MAX_REQUEST_BYTES = 1024 * 1024
 MAX_RESPONSE_BYTES = 48 * 1024 * 1024
+MAX_ACTIVE_SCOPES = 32
 
 
 class BrowserGatewayProxy:
@@ -25,8 +26,7 @@ class BrowserGatewayProxy:
         self.registry = registry
         self.loop = loop
         self._lock = threading.Lock()
-        self._token = ""
-        self._audit_context: dict[str, Any] = {}
+        self._scopes: dict[str, dict[str, Any]] = {}
         proxy = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -46,10 +46,21 @@ class BrowserGatewayProxy:
                     self.send_error(413)
                     return
                 authorization = self.headers.get("Authorization", "")
+                prefix = "Bearer "
+                presented = authorization[len(prefix):] if authorization.startswith(prefix) else ""
                 with proxy._lock:
-                    token = proxy._token
-                    audit_context = dict(proxy._audit_context)
-                if not token or not hmac.compare_digest(authorization, f"Bearer {token}"):
+                    matched = next(
+                        (
+                            token
+                            for token in proxy._scopes
+                            if presented and hmac.compare_digest(presented, token)
+                        ),
+                        None,
+                    )
+                    audit_context = (
+                        dict(proxy._scopes[matched]) if matched is not None else None
+                    )
+                if audit_context is None:
                     self.send_error(403)
                     return
                 try:
@@ -105,16 +116,21 @@ class BrowserGatewayProxy:
 
     def issue(self, audit_context: dict[str, Any]) -> dict[str, str]:
         with self._lock:
-            self._token = secrets.token_urlsafe(48)
-            self._audit_context = dict(audit_context)
+            if len(self._scopes) >= MAX_ACTIVE_SCOPES:
+                raise RuntimeError("browser gateway has too many active request scopes")
+            token = secrets.token_urlsafe(48)
+            self._scopes[token] = dict(audit_context)
             return {
                 "url": f"http://127.0.0.1:{self.server.server_port}/browser-tool",
-                "token": self._token,
+                "token": token,
             }
+
+    def revoke(self, token: str) -> bool:
+        with self._lock:
+            return self._scopes.pop(str(token or ""), None) is not None
 
     def close(self) -> None:
         with self._lock:
-            self._token = ""
-            self._audit_context = {}
+            self._scopes.clear()
         self.server.shutdown()
         self.server.server_close()

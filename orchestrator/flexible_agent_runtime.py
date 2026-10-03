@@ -705,17 +705,19 @@ class FlexibleAgentRuntime:
                             )
                             return
                     with bind_slash_command_audit_session(session):
-                        await handler(update, context)
+                        handler_result = await handler(update, context)
                     if ticket is not None:
-                        ticket.complete(
-                            {
-                                "ok": True,
-                                "command": command_name,
-                                "execution_state": "completed",
-                                "connector_id": "telegram",
-                                "transport_delivery_state": "not_observed",
-                            }
-                        )
+                        response = {
+                            "ok": True,
+                            "command": command_name,
+                            "execution_state": "completed",
+                            "connector_id": "telegram",
+                            "transport_delivery_state": "not_observed",
+                        }
+                        if isinstance(handler_result, Mapping):
+                            response["result"] = dict(handler_result)
+                        ticket.complete(response)
+                    return handler_result
             except Exception as exc:
                 session.fail(exc)
                 raise
@@ -2277,14 +2279,14 @@ class FlexibleAgentRuntime:
         }
         if fixed_mcp and not bool(getattr(backend, "_hashi_mcp_enabled", False)):
             return []
-        exposed_names = {
-            str(name)
-            for name in (
-                (getattr(backend, "_hashi_mcp_descriptor", None) or {}).get(
-                    "exposed_tools", []
-                )
-            )
-        }
+        exposed_names: set[str] = set()
+        if fixed_mcp:
+            from tools.gateway.mcp_stdio import exposed_tool_name
+
+            exposed_names = {
+                exposed_tool_name(name)
+                for name in registry.allowed_tool_names()
+            }
         definitions = registry.get_tool_definitions()
         catalogue: list[dict[str, str]] = []
         for definition in definitions:
@@ -2323,11 +2325,10 @@ class FlexibleAgentRuntime:
                 return False
             from tools.gateway.mcp_stdio import exposed_tool_name
 
-            return exposed_tool_name(tool_name) in set(
-                (getattr(backend, "_hashi_mcp_descriptor", None) or {}).get(
-                    "exposed_tools", []
-                )
-            )
+            return exposed_tool_name(tool_name) in {
+                exposed_tool_name(item)
+                for item in registry.allowed_tool_names()
+            }
         return True
 
     def _get_available_skill_catalogue(self) -> list[dict[str, str]]:
@@ -3142,14 +3143,7 @@ class FlexibleAgentRuntime:
         idempotency_key: str | None = None,
     ):
         if self._should_redirect_after_transfer() and not source.startswith(("bridge-transfer:", "bridge-fork:")):
-            if deliver_to_telegram:
-                await self.send_long_message(
-                    self._primary_chat_id(),
-                    self._transfer_redirect_text(),
-                    request_id=f"transfer-redirect-{uuid4().hex[:8]}",
-                    purpose="transfer-redirect",
-                )
-            return None
+            runtime_transfer.require_untransferred(self)
         _print_user_message(self.name, text)
         return await self.enqueue_request(
             self._primary_chat_id() if chat_id is None else chat_id,
@@ -3450,6 +3444,8 @@ class FlexibleAgentRuntime:
         request_metadata: Mapping[str, Any] | None = None,
         idempotency_key: str | None = None,
     ):
+        if media_kind.lower() != "voice" and self._should_redirect_after_transfer():
+            runtime_transfer.require_untransferred(self)
         if self._should_redirect_after_transfer():
             if deliver_to_telegram:
                 await self.send_long_message(
@@ -4730,7 +4726,7 @@ class FlexibleAgentRuntime:
             await query.answer()
 
         elif target == "reboot":
-            await runtime_reboot.callback(self, update, query, value)
+            return await runtime_reboot.callback(self, update, query, value)
         else:
             await query.answer()
 
@@ -4811,7 +4807,7 @@ class FlexibleAgentRuntime:
         asyncio.create_task(orchestrator.stop_agent(self.name))
 
     async def cmd_reboot(self, update: Update, context: Any):
-        await runtime_reboot.command(self, update, context)
+        return await runtime_reboot.command(self, update, context)
 
     # ── /move command ────────────────────────────────────────────────────────
     def _load_instances(self) -> dict:
@@ -5148,6 +5144,15 @@ class FlexibleAgentRuntime:
             self._transfer_state["status"] = "accepted"
             self._transfer_state["target_status"] = final_status
             self._persist_transfer_state()
+            publish_metadata = getattr(self, "_publish_worker_metadata", None)
+            if callable(publish_metadata):
+                try:
+                    await publish_metadata()
+                except Exception:
+                    self.logger.warning(
+                        "Transfer accepted but Worker metadata refresh failed",
+                        exc_info=True,
+                    )
             self._suppressed_transfer_results.clear()
             if final_status == "accepted_but_chat_offline":
                 target_status = body.get("target_chat_status") or "offline"
@@ -12390,6 +12395,7 @@ class FlexibleAgentRuntime:
             registry = getattr(self, "_request_meta_by_id", None)
             if isinstance(registry, dict):
                 registry.pop(item.request_id, None)
+            await runtime_lifecycle.release_capability_task(self, item.request_id)
             return
 
         receipt_text = ""
@@ -12515,9 +12521,13 @@ class FlexibleAgentRuntime:
 
             if response.is_success and response.text:
                 display_text = self._strip_transfer_accept_prefix(item, response.text)
-                self._mark_success()
                 visible_text, wrapper_result = await self._apply_wrapper_to_visible_text(item, display_text or response.text)
                 visible_text = normalize_user_visible_paths(visible_text)
+                from orchestrator.runtime_cancel import claim_final_result
+
+                if not await claim_final_result(self, item):
+                    raise asyncio.CancelledError
+                self._mark_success()
                 receipt_text = visible_text
                 runtime_retry.clear_completed_interrupted_task(self, item)
                 safe_core_raw = extract_memory_plus_update_details(response.text).visible_text
@@ -12894,6 +12904,8 @@ class FlexibleAgentRuntime:
 
             completion_started.discard(item.request_id)
             requested_ids(self).discard(item.request_id)
+            from orchestrator.runtime_cancel import finalizing_ids
+            finalizing_ids(self).discard(item.request_id)
             tasks_by_request = getattr(self, "_generation_tasks_by_request", None)
             if isinstance(tasks_by_request, dict) and tasks_by_request.get(item.request_id) is task:
                 tasks_by_request.pop(item.request_id, None)
@@ -12932,6 +12944,7 @@ class FlexibleAgentRuntime:
                 self,
                 item.request_id,
             )
+            await runtime_lifecycle.release_capability_task(self, item.request_id)
             await runtime_delivery_order.complete_turn(self, item.request_id)
 
     async def process_queue(self):

@@ -24,7 +24,9 @@ async def cmd_hcc(runtime: Any, update: Any, context: Any) -> None:
     if args == ["status"]:
         args = []
     if args and (len(args) != 1 or args[0] not in {"on", "off"}):
-        await update.message.reply_text(ui_language.tr("hcc.usage"), parse_mode="HTML")
+        await runtime._reply_text(
+            update, ui_language.tr("hcc.usage"), parse_mode="HTML"
+        )
         return
     notice = ""
     if args:
@@ -32,7 +34,8 @@ async def cmd_hcc(runtime: Any, update: Any, context: Any) -> None:
             # File locking may wait; do not block the Agent event loop.
             await asyncio.to_thread(hcc.set_hcc_enabled, runtime.workspace_dir, args[0] == "on")
         except (OSError, ValueError, RuntimeError) as exc:
-            await update.message.reply_text(
+            await runtime._reply_text(
+                update,
                 ui_language.tr("hcc.save_failed", error=html.escape(type(exc).__name__)),
                 parse_mode="HTML",
             )
@@ -54,4 +57,4 @@ async def cmd_hcc(runtime: Any, update: Any, context: Any) -> None:
     if notice:
         lines.append(notice)
     lines.append("<code>/hcc on</code> · <code>/hcc off</code>")
-    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+    await runtime._reply_text(update, "\n".join(lines), parse_mode="HTML")

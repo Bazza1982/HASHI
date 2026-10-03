@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from adapters.hashi_mcp import prepare_hashi_mcp
-from tools.browser_gateway_proxy import BrowserGatewayProxy
+from tools.browser_gateway_proxy import BrowserGatewayProxy, MAX_ACTIVE_SCOPES
 from tools.gateway.context import load_gateway_context
 from tools.registry import ToolRegistry
 
@@ -87,6 +87,83 @@ async def test_cli_browser_gateway_uses_owner_registry_and_core_facade(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_cli_browser_gateway_tokens_are_concurrent_and_independently_revoked(tmp_path):
+    facade = _Facade()
+    owner_registry = _registry(tmp_path, {
+        "_runtime": SimpleNamespace(orchestrator=facade),
+        "agent_name": "agent1",
+        "request_id": "bootstrap",
+        "global_config": SimpleNamespace(instance_id="HASHI4"),
+    })
+    proxy = BrowserGatewayProxy(owner_registry, asyncio.get_running_loop())
+    try:
+        descriptors = {
+            request_id: proxy.issue({
+                "_runtime": SimpleNamespace(orchestrator=facade),
+                "agent_name": "agent1",
+                "request_id": request_id,
+                "global_config": SimpleNamespace(instance_id="HASHI4"),
+            })
+            for request_id in ("request-a", "request-b")
+        }
+        gateways = {
+            request_id: _registry(tmp_path, {
+                "browser_gateway_proxy": descriptor,
+                "agent_name": "agent1",
+                "request_id": request_id,
+                "global_config": SimpleNamespace(instance_id="HASHI4"),
+            })
+            for request_id, descriptor in descriptors.items()
+        }
+
+        first = await asyncio.gather(*(
+            registry.execute("browser_get_text", {}, tool_call_id=f"call-{request_id}")
+            for request_id, registry in gateways.items()
+        ))
+        assert [result.output for result in first] == [
+            "page from Broker", "page from Broker"
+        ]
+        assert {call[3]["task_id"] for call in facade.calls} == {
+            "request-a", "request-b"
+        }
+
+        assert proxy.revoke(descriptors["request-a"]["token"]) is True
+        revoked, still_live = await asyncio.gather(
+            gateways["request-a"].execute(
+                "browser_get_text", {}, tool_call_id="revoked"
+            ),
+            gateways["request-b"].execute(
+                "browser_get_text", {}, tool_call_id="still-live"
+            ),
+        )
+        assert revoked.is_error is True
+        assert still_live.is_error is False
+        assert facade.calls[-1][3]["task_id"] == "request-b"
+    finally:
+        await asyncio.to_thread(proxy.close)
+
+
+@pytest.mark.asyncio
+async def test_cli_browser_gateway_scope_limit_is_fail_closed_and_recoverable(tmp_path):
+    facade = _Facade()
+    audit = {
+        "_runtime": SimpleNamespace(orchestrator=facade),
+        "agent_name": "agent1",
+        "request_id": "bounded",
+        "global_config": SimpleNamespace(instance_id="HASHI4"),
+    }
+    proxy = BrowserGatewayProxy(_registry(tmp_path, audit), asyncio.get_running_loop())
+    try:
+        descriptors = [proxy.issue(audit) for _index in range(MAX_ACTIVE_SCOPES)]
+        with pytest.raises(RuntimeError, match="too many active request scopes"):
+            proxy.issue(audit)
+        assert proxy.revoke(descriptors[0]["token"]) is True
+        assert proxy.issue(audit)["token"]
+    finally:
+        await asyncio.to_thread(proxy.close)
+
+
+@pytest.mark.asyncio
 async def test_cli_context_publishes_only_owning_worker_proxy(tmp_path):
     facade = _Facade()
     registry = _registry(tmp_path, {
@@ -99,6 +176,7 @@ async def test_cli_context_publishes_only_owning_worker_proxy(tmp_path):
         config=SimpleNamespace(workspace_dir=tmp_path),
         global_config=SimpleNamespace(project_root=Path(__file__).resolve().parents[1]),
     )
+    descriptor = None
     try:
         descriptor = prepare_hashi_mcp(adapter, backend="codex-cli")
         assert descriptor is not None
@@ -109,6 +187,8 @@ async def test_cli_context_publishes_only_owning_worker_proxy(tmp_path):
         assert context.audit["request_id"] == "request-8"
         assert "_runtime" not in context.audit
     finally:
+        if descriptor is not None:
+            descriptor.close()
         proxy = getattr(adapter, "_browser_gateway_proxy", None)
         if proxy is not None:
             await asyncio.to_thread(proxy.close)

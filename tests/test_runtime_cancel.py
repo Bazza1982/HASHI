@@ -37,6 +37,35 @@ def _runtime(store):
 
 
 @pytest.mark.asyncio
+async def test_exact_cancel_after_final_result_claim_is_honestly_rejected(monkeypatch):
+    store = _Store()
+    runtime = _runtime(store)
+    monkeypatch.setattr(runtime_cancel.runtime_session, "ensure_store", lambda _: store)
+    assert await runtime_cancel.claim_final_result(runtime, SimpleNamespace(request_id="req-target"))
+    result = await runtime_cancel.cancel_session_run(
+        runtime, owner_id="owner", session_id="ses-one", run_id="run-one", request_id="req-target"
+    )
+    assert not result["ok"]
+    assert result["error_code"] == "final_result_committed"
+    assert "req-target" not in runtime_cancel.requested_ids(runtime)
+    assert store.run["state"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_accepted_exact_cancel_prevents_final_result_claim(monkeypatch):
+    store = _Store()
+    runtime = _runtime(store)
+    runtime.current_request_meta = {"request_id": "req-target", "hashi_session_id": "ses-one", "hashi_run_id": "run-one"}
+    monkeypatch.setattr(runtime_cancel.runtime_session, "ensure_store", lambda _: store)
+    result = await runtime_cancel.cancel_session_run(
+        runtime, owner_id="owner", session_id="ses-one", run_id="run-one", request_id="req-target"
+    )
+    assert result["status"] == "cancellation_requested"
+    assert not await runtime_cancel.claim_final_result(runtime, SimpleNamespace(request_id="req-target"))
+    assert await runtime_cancel.claim_final_result(runtime, SimpleNamespace(request_id="req-other"))
+
+
+@pytest.mark.asyncio
 async def test_cancel_run_cancels_only_selected_generation(monkeypatch):
     store = _Store()
     monkeypatch.setattr(runtime_cancel.runtime_session, "ensure_store", lambda runtime: store)

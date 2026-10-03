@@ -41,6 +41,7 @@ def _runtime(tmp_path):
 
 async def _reply(replies, text, kwargs):
     replies.append({"text": text, **kwargs})
+    return SimpleNamespace(message_id=700)
 
 
 def _update(chat_id=123):
@@ -162,6 +163,8 @@ async def test_callback_path_entry_is_bound_to_exact_force_reply(tmp_path):
     await runtime_workzone.callback_workzone(
         runtime, _callback_update(query), SimpleNamespace()
     )
+    assert runtime.replies[-1]["reply_markup"].force_reply is True
+    assert query.message.replies == []
     unrelated = SimpleNamespace(
         effective_user=SimpleNamespace(id=1),
         effective_chat=SimpleNamespace(id=123),
@@ -172,6 +175,7 @@ async def test_callback_path_entry_is_bound_to_exact_force_reply(tmp_path):
     assert await runtime_workzone.handle_pending_path_reply(runtime, unrelated) is False
 
     reply_message = SimpleNamespace(
+        message_id=701,
         text="shared",
         reply_to_message=SimpleNamespace(message_id=query.message.prompt_message_id),
     )
@@ -190,6 +194,18 @@ async def test_callback_path_entry_is_bound_to_exact_force_reply(tmp_path):
         ("1", str(attached.resolve()))
     ]
     assert runtime._pending_workzone_paths == {}
+    session = runtime_session.current_session_for_update(runtime, reply)
+    events = runtime.session_store.events(
+        session["session_id"], owner_id=session["owner_id"]
+    )
+    command_events = [
+        event for event in events if event["kind"] == "frontend.command_result"
+    ]
+    assert len(command_events) == 1
+    assert command_events[0]["detail"]["command_invocation"]["command"] == (
+        "workzone"
+    )
+    assert command_events[0]["detail"]["result"]["workzone_revision"] == 1
 
 
 @pytest.mark.asyncio
@@ -458,8 +474,9 @@ async def test_busy_callback_path_add_and_delete_are_saved(tmp_path):
     await runtime_workzone.callback_workzone(
         runtime, _callback_update(query), SimpleNamespace()
     )
-    assert query.message.replies
+    assert runtime.replies[-1]["reply_markup"].force_reply is True
     reply_message = SimpleNamespace(
+        message_id=702,
         text="shared",
         reply_to_message=SimpleNamespace(message_id=query.message.prompt_message_id),
     )

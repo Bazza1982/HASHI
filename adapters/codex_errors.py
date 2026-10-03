@@ -15,6 +15,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from adapters.codex_event_log import redact_codex_diagnostic_text
+
 _STATUS_RE = re.compile(
     r"\b(?:unexpected\s+)?(?:http(?:\s+status)?(?:\s+code)?|status)"
     r"\s*[:=]?\s*(?P<status>[45]\d\d)\b",
@@ -187,6 +189,19 @@ def _classify(
     lowered = message.casefold()
     signal = f"{provider_code} {lowered}"
 
+    if any(
+        token in signal
+        for token in (
+            "failed to read file to update",
+            "failed to find expected lines in",
+        )
+    ):
+        return (
+            "CODEX_FILE_TOOL_VALIDATION_FAILED",
+            False,
+            status,
+            "A Codex file mutation tool could not validate its target path or expected content.",
+        )
     if any(
         token in signal
         for token in (
@@ -416,7 +431,7 @@ def parse_codex_failure(
 
     payload: Mapping[str, Any] = event if isinstance(event, Mapping) else {}
     authoritative = _error_payload(payload)
-    message = _message_from(payload, fallback_message)
+    message = redact_codex_diagnostic_text(_message_from(payload, fallback_message))
     status = _http_status(authoritative, message) or _http_status(payload, message)
     provider_code = _provider_code(authoritative) or _provider_code(payload)
     code, retryable, status, description = _classify(

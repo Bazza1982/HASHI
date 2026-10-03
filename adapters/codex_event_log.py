@@ -91,6 +91,12 @@ def _redact_text(value: str) -> str:
     return text
 
 
+def redact_codex_diagnostic_text(value: str) -> str:
+    """Apply the Codex diagnostic redaction policy to user-visible errors."""
+
+    return _redact_text(value)
+
+
 def _content_receipt(value: Any) -> dict[str, Any]:
     """Replace provider/model/tool content with non-reversible diagnostics."""
 

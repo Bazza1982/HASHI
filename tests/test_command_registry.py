@@ -225,6 +225,42 @@ def test_runtime_command_registry_loads_external_private_callbacks(monkeypatch, 
     assert any(callback.pattern == r"^private:" for callback in callbacks)
 
 
+def test_dynamic_callbacks_use_the_same_fc_admission_wrapper(monkeypatch):
+    async def callback(runtime, update, context):
+        return None
+
+    added = []
+    wrapped = []
+    runtime = SimpleNamespace(
+        app=SimpleNamespace(add_handler=added.append),
+        _wrap_cmd=lambda name, handler: handler,
+    )
+
+    def wrap_callback(kind, handler):
+        wrapped.append((kind, handler))
+        return ("fc-admitted", kind, handler)
+
+    runtime._wrap_callback = wrap_callback
+    monkeypatch.setattr(command_registry, "load_runtime_commands", lambda: [])
+    monkeypatch.setattr(
+        command_registry,
+        "load_runtime_callbacks",
+        lambda: [RuntimeCallback(r"^dynamic:", callback)],
+    )
+    monkeypatch.setattr(
+        command_registry,
+        "CallbackQueryHandler",
+        lambda handler, pattern: (handler, pattern),
+    )
+
+    command_registry.bind_runtime_commands(runtime, wrap=True)
+
+    assert len(wrapped) == 1
+    kind, inner = wrapped[0]
+    assert kind == "dynamic:^dynamic:"
+    assert added == [(("fc-admitted", kind, inner), r"^dynamic:")]
+
+
 def test_runtime_command_registry_reuses_one_snapshot(monkeypatch):
     imports = 0
 
