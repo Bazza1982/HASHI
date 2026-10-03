@@ -10,6 +10,9 @@ Agent lifecycle is PAO-owned typed admission: accepted startup is not online.
 Cancellation targets one Run; a committed final result is not reported stopped.
 Connector mutations bind trusted owner/Session identity. These changes do not
 authorize replaying failed business requests or changing another instance.
+Shared commit receipts use reconciled Connector health: a scheduled Telegram
+poller is not a connected transport. Initial connection failures remain degraded
+while the ingress retries; successful recovery clears only its own issues.
 AGY now sends complete prompts as stdin NDJSON, with no argv prompt or
 head/tail truncation. Direct Windows long-input and continuation probes passed;
 service-launcher adoption remains separately gated. Codex checks top-level

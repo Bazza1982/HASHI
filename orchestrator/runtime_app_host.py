@@ -268,7 +268,14 @@ class RuntimeAppHost:
                 self._retry_connectors(), name="connector-activation-retry"
             )
         runtime_handoff.persist(app)
-        return {"committed": True, "degraded": bool(errors), "connector_errors": errors}
+        # Starting an ingress schedules its own connection/retry loop. A clean
+        # activation call is not evidence of a successful poll; use the health
+        # owner's reconciled state for the commit receipt as well.
+        return {
+            "committed": True,
+            "degraded": bool(errors or app.startup_status.get("degraded")),
+            "connector_errors": errors,
+        }
 
     async def quiesce(self):
         app = self.app

@@ -145,6 +145,11 @@ successful retries and later polling recovery clear only Connector-owned issues.
 Unrelated service and Agent failures remain visible. Recovery is logged and the
 startup table is refreshed when the derived state changes.
 
+Telegram start schedules its supervised connection loop without waiting for
+network readiness. The shared commit receipt derives `degraded` from the same
+reconciled startup health, not merely from exceptions raised by start. Connection
+retry stays with the ingress; the host retries only connector activation errors.
+
 Agent Worker logging has no independent console handler. Each Worker retains
 diagnostics in `logs/function-workers/worker-<pid>.log` and relays warning/error
 records through Function IPC only when the creating shared supervisor advertises
