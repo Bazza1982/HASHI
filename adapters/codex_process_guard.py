@@ -48,19 +48,8 @@ _TERMINATION_TOOLS = frozenset(
 _SHELL_TOOL_NAMES = frozenset(
     {"bash", "shell", "shell_command", "unified_exec", "command_execution"}
 )
-_CODE_TOOL_NAMES = frozenset({"exec"})
 _INTEGER = re.compile(r"^[0-9]+$")
 _INTEGER_LIST = re.compile(r"^[0-9]+(?:\s*,\s*[0-9]+)*$")
-_TERMINATION_MARKER = re.compile(
-    r"(?<![\w-])(?:"
-    + "|".join(re.escape(item) for item in sorted(_TERMINATION_TOOLS, key=len, reverse=True))
-    + r")(?![\w-])",
-    re.IGNORECASE,
-)
-_EXEC_COMMAND_LITERAL = re.compile(
-    r"(?<![\w$])cmd\s*:\s*(?P<literal>\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*')",
-    re.IGNORECASE | re.DOTALL,
-)
 
 
 @dataclass(frozen=True)
@@ -526,71 +515,6 @@ def _contains_termination_tool(command: str) -> bool:
         return any(tool in str(command).casefold() for tool in _TERMINATION_TOOLS)
 
 
-def _decode_code_literal(value: str) -> str:
-    if value.startswith('"'):
-        decoded = json.loads(value)
-        if not isinstance(decoded, str):
-            raise ValueError("exec command literal must be a string")
-        return decoded
-    body = value[1:-1]
-    replacements = {
-        "\\\\": "\\",
-        "\\'": "'",
-        '\\"': '"',
-        "\\n": "\n",
-        "\\r": "\r",
-        "\\t": "\t",
-    }
-
-    def replace_escape(match: re.Match[str]) -> str:
-        escaped = match.group(0)
-        if escaped not in replacements:
-            raise ValueError("unsupported escape in exec command literal")
-        return replacements[escaped]
-
-    return re.sub(r"\\.", replace_escape, body)
-
-
-def _termination_commands_from_payload(
-    payload: Mapping[str, object],
-) -> tuple[tuple[str, ...], bool]:
-    """Return literal termination commands and whether any target is unresolved."""
-
-    tool_name = str(payload.get("tool_name") or "").casefold()
-    tool_input = payload.get("tool_input")
-    if not isinstance(tool_input, Mapping):
-        return (), False
-    if tool_name in _SHELL_TOOL_NAMES:
-        command_value = tool_input.get("command")
-        if isinstance(command_value, Sequence) and not isinstance(command_value, str):
-            command = " ".join(str(item) for item in command_value)
-        else:
-            command = str(command_value or "")
-        return ((command,), False) if _contains_termination_tool(command) else ((), False)
-    if tool_name not in _CODE_TOOL_NAMES:
-        return (), False
-
-    code = tool_input.get("code")
-    if not isinstance(code, str) or not _TERMINATION_MARKER.search(code):
-        return (), False
-    commands: list[str] = []
-    unresolved = False
-    masked = list(code)
-    for match in _EXEC_COMMAND_LITERAL.finditer(code):
-        try:
-            command = _decode_code_literal(match.group("literal"))
-        except (json.JSONDecodeError, ValueError):
-            unresolved = True
-            continue
-        for index in range(match.start(), match.end()):
-            masked[index] = " "
-        if _TERMINATION_MARKER.search(command):
-            commands.append(command)
-    if _TERMINATION_MARKER.search("".join(masked)):
-        unresolved = True
-    return tuple(commands), unresolved
-
-
 def _denial(reason: str) -> dict[str, object]:
     return {
         "hookSpecificOutput": {
@@ -607,14 +531,19 @@ def evaluate_hook_payload(
     context_path: Path,
     hook_pid: int | None = None,
 ) -> dict[str, object] | None:
-    commands, unresolved = _termination_commands_from_payload(payload)
-    if not commands and not unresolved:
+    tool_name = str(payload.get("tool_name") or "").casefold()
+    if tool_name not in _SHELL_TOOL_NAMES:
         return None
-    if unresolved:
-        return _denial(
-            "Refused an unresolved process-termination command in Codex exec code. "
-            "Use one literal exec_command cmd with an exact external PID or process name."
-        )
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, Mapping):
+        return None
+    command_value = tool_input.get("command")
+    if isinstance(command_value, Sequence) and not isinstance(command_value, str):
+        command = " ".join(str(item) for item in command_value)
+    else:
+        command = str(command_value or "")
+    if not _contains_termination_tool(command):
+        return None
     try:
         protected = protected_process_inventory(context_path, hook_pid=hook_pid)
     except Exception as exc:
@@ -622,22 +551,20 @@ def evaluate_hook_payload(
             "HASHI process guard is unavailable; refusing termination command "
             f"({type(exc).__name__}: {exc})."
         )
-    for command in commands:
-        decision = evaluate_termination_command(command, protected)
-        if decision.allowed:
-            continue
-        if decision.matched_pids:
-            targets = ", ".join(str(pid) for pid in decision.matched_pids)
-            return _denial(
-                "Refused to terminate a protected HASHI/Codex process "
-                f"(PID {targets}). Use an exact PID belonging to the intended external process."
-            )
+    decision = evaluate_termination_command(command, protected)
+    if decision.allowed:
+        return None
+    if decision.matched_pids:
+        targets = ", ".join(str(pid) for pid in decision.matched_pids)
         return _denial(
-            "Refused an unresolved process-termination selector. Use an exact PID or "
-            "process name that does not belong to HASHI Worker/Core/Shared, Codex, MCP, "
-            "or this invocation's child processes."
+            "Refused to terminate a protected HASHI/Codex process "
+            f"(PID {targets}). Use an exact PID belonging to the intended external process."
         )
-    return None
+    return _denial(
+        "Refused an unresolved process-termination selector. Use an exact PID or "
+        "process name that does not belong to HASHI Worker/Core/Shared, Codex, MCP, "
+        "or this invocation's child processes."
+    )
 
 
 def main() -> int:
