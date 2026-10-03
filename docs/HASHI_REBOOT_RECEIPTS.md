@@ -135,6 +135,11 @@ claiming that the first Worker switch was the complete broad reboot.
 the same authenticated actor, frontend, original chat and thread. Another Agent in the
 same instance can serve this query. The view separates outcome from delivery;
 a queued start or an exhausted notification budget is never rendered as success.
+The interactive menu labels an active receipt as the current reboot and a
+terminal receipt as the previous reboot result. It shows the immutable target
+scope and the receipt's UTC `created_at` or `finished_at` time, so an earlier
+whole-instance success cannot be mistaken for a newly selected operation. This
+menu context does not alter the concise proactive start and final notices.
 No final message means **unconfirmed**: the runtime, network or Telegram channel
 may be unavailable. The saved status is the recovery/query path when available.
 

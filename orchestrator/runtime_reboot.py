@@ -9,7 +9,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from orchestrator import ui_language
 from orchestrator.command_ui import card_title, refresh_label
-from orchestrator.reboot_ui import render_status
+from orchestrator.reboot_ui import render_menu_status, render_status
 from orchestrator import runtime_session
 
 
@@ -93,7 +93,7 @@ async def show_menu(runtime, update, *, status_only=False, query=None):
     orchestrator = runtime.orchestrator
     try:
         record = await latest(runtime, update)
-        status = render_status(
+        status = render_menu_status(
             record, locale=ui_language.preferred_locale(runtime, update)
         )
     except Exception:

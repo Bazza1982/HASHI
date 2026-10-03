@@ -1,5 +1,6 @@
 """Frontend-owned reboot notification and status rendering."""
 
+from datetime import datetime, timezone
 from html import escape
 
 from orchestrator import ui_language
@@ -152,3 +153,71 @@ def render_status(record, *, locale=None):
         ),
     )
     return text
+
+
+def _receipt_time(value):
+    try:
+        return datetime.fromtimestamp(float(value), tz=timezone.utc).strftime(
+            "%Y-%m-%d %H:%M:%S UTC"
+        )
+    except (OverflowError, TypeError, ValueError):
+        return None
+
+
+def _menu_target(record, *, locale=None):
+    mode = str(record.get("mode") or "generic")
+    if mode not in {"min", "number", "same", "max", "group"}:
+        mode = "generic"
+    scope = ui_language.tr("reboot.scope." + mode, locale=locale)
+    targets = list(record.get("targets") or ())
+    if mode == "max" or not targets:
+        return ui_language.tr(
+            "reboot.menu.target_count",
+            locale=locale,
+            scope=escape(scope),
+            count=len(targets),
+        )
+    names = dict(record.get("display_names") or {})
+    shown = [escape(str(names.get(name) or name)) for name in targets[:6]]
+    if len(targets) > 6:
+        shown.append(
+            escape(
+                ui_language.tr(
+                    "reboot.more_targets", locale=locale, count=len(targets) - 6
+                )
+            )
+        )
+    return ui_language.tr(
+        "reboot.menu.target_agents",
+        locale=locale,
+        scope=escape(scope),
+        agents=", ".join(shown),
+    )
+
+
+def render_menu_status(record, *, locale=None):
+    """Label a menu projection without changing proactive receipt notices."""
+
+    if not record:
+        return render_status(record, locale=locale)
+    active = record.get("status") in {"accepted", "running"}
+    heading_key = "reboot.menu.current" if active else "reboot.menu.previous"
+    time_key = "reboot.menu.started_at" if active else "reboot.menu.completed_at"
+    timestamp = _receipt_time(
+        record.get("created_at") if active else record.get("finished_at")
+    )
+    lines = [f"<b>{escape(ui_language.tr(heading_key, locale=locale))}</b>"]
+    if timestamp:
+        lines.append(
+            f"{escape(ui_language.tr(time_key, locale=locale))} · "
+            f"<code>{escape(timestamp)}</code>"
+        )
+    lines.extend(
+        [
+            f"{escape(ui_language.tr('common.target', locale=locale))} · "
+            f"{_menu_target(record, locale=locale)}",
+            "",
+            render_status(record, locale=locale),
+        ]
+    )
+    return "\n".join(lines)

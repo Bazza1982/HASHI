@@ -25,6 +25,7 @@ class _Orchestrator:
     def __init__(self):
         self.requests: list[dict] = []
         self.runtimes = []
+        self.latest_record = None
 
     async def request_reboot(self, **request):
         self.requests.append(request)
@@ -41,7 +42,7 @@ class _Orchestrator:
         }
 
     async def reboot_status(self, **_origin):
-        return None
+        return self.latest_record
 
     def configured_agent_names(self):
         return ["zelda"]
@@ -186,3 +187,84 @@ async def test_typed_reboot_menu_action_returns_callback_operation(tmp_path):
     assert result["ok"] is True
     assert result["result"]["operation"] == _operation(1, "max")
     assert len(orchestrator.requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "lifecycle_state", "heading_key", "time_key", "time_field"),
+    [
+        (
+            "succeeded",
+            "online",
+            "reboot.menu.previous",
+            "reboot.menu.completed_at",
+            "finished_at",
+        ),
+        (
+            "running",
+            "accepted",
+            "reboot.menu.current",
+            "reboot.menu.started_at",
+            "created_at",
+        ),
+    ],
+)
+async def test_typed_reboot_menu_identifies_previous_and_current_results(
+    tmp_path,
+    status,
+    lifecycle_state,
+    heading_key,
+    time_key,
+    time_field,
+):
+    from datetime import datetime, timezone
+
+    from orchestrator import ui_language
+
+    runtime, orchestrator = _runtime(tmp_path)
+    created_at = 1_759_457_700.0  # 2025-10-03 02:15 UTC
+    record = {
+        "id": "a" * 32,
+        "source_agent": "zelda",
+        "mode": "max",
+        "targets": ["zelda", "sunny"],
+        "display_names": {"zelda": "Zelda", "sunny": "Sunny"},
+        "status": status,
+        "lifecycle_state": lifecycle_state,
+        "locale": "en",
+        "created_at": created_at,
+        "duration_seconds": 12.5,
+        "online": {"zelda": True, "sunny": True},
+        "delivery": {"status": "sent"},
+    }
+    if time_field == "finished_at":
+        record["finished_at"] = created_at + 12.5
+    orchestrator.latest_record = record
+
+    opened = await dispatch_command_interaction(
+        runtime,
+        _open("/reboot", f"request{status}abcdefgh"),
+        _metadata(),
+    )
+
+    text = opened["messages"][0]["text"]
+    heading = ui_language.tr(heading_key, locale="en")
+    time_label = ui_language.tr(time_key, locale="en")
+    target_label = ui_language.tr("common.target", locale="en")
+    scope = ui_language.tr("reboot.scope.max", locale="en")
+    expected_time = datetime.fromtimestamp(
+        record[time_field], tz=timezone.utc
+    ).strftime("%Y-%m-%d %H:%M:%S UTC")
+    expected_target = ui_language.tr(
+        "reboot.menu.target_count",
+        locale="en",
+        scope=scope,
+        count=2,
+    )
+    outcome_at = text.index(
+        "✅" if status == "succeeded" else "🔄",
+        text.index(heading),
+    )
+    assert text.index(heading) < outcome_at
+    assert f"{time_label} · <code>{expected_time}</code>" in text
+    assert f"{target_label} · {expected_target}" in text

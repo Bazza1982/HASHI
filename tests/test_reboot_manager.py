@@ -1575,6 +1575,33 @@ def test_reboot_notices_use_names_for_one_target_and_counts_for_many():
     assert "18/20" in warning and "Agent 18" in warning and "Agent 0" not in warning
 
 
+@pytest.mark.parametrize("locale", ["en", "zh-CN"])
+def test_reboot_menu_status_escapes_target_in_every_runtime_locale(locale):
+    from orchestrator import ui_language
+    from orchestrator.reboot_ui import render_menu_status
+
+    record = {
+        "source_agent": "zelda",
+        "mode": "min",
+        "targets": ["zelda"],
+        "display_names": {"zelda": "<Zelda & Co>"},
+        "status": "succeeded",
+        "lifecycle_state": "online",
+        "locale": locale,
+        "created_at": 1_759_457_700.0,
+        "finished_at": 1_759_457_712.5,
+        "duration_seconds": 12.5,
+        "online": {"zelda": True},
+        "delivery": {"status": "sent"},
+    }
+
+    text = render_menu_status(record, locale=locale)
+
+    assert ui_language.tr("reboot.menu.previous", locale=locale) in text
+    assert "&lt;Zelda &amp; Co&gt;" in text
+    assert "<Zelda & Co>" not in text
+
+
 @pytest.mark.asyncio
 async def test_shared_frontend_acceptance_relies_on_start_and_final_notices():
     from orchestrator import runtime_reboot

@@ -6,6 +6,8 @@ live evidence are recorded. Core is unchanged; no new API supervisor is added.
 disconnect, but its browser must first render and ACK the accepted operation;
 missing confirmation rejects the handoff. See
 [reboot presentation](HASHI_REBOOT_CONTINUITY_2026-10-03.md).
+The reboot menu labels prior outcomes as history, with receipt time and target;
+opening the menu is not itself a successful reboot.
 Agent lifecycle is PAO-owned typed admission: accepted startup is not online.
 Cancellation targets one Run; a committed final result is not reported stopped.
 Connector mutations bind trusted owner/Session identity. These changes do not
