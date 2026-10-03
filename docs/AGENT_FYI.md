@@ -9,6 +9,10 @@ rechecks the same durable fact at the PAO Run writer; ordinary pending transfer,
 trusted target bridge ingress, Agent-owned scheduled/background activity and
 existing voice-message routing keep their prior semantics. Source validation
 does not itself prove a running Function generation adopted the fence.
+For Session transfer and fork, a valid target model acknowledgement decides
+`accepted`. Telegram system-notice delivery is reported separately and never
+means another frontend is offline; the older `accepted_but_chat_offline` value
+is interpreted only as a legacy Telegram-notification limitation.
 `/reboot min` keeps the Backend API connection. Workbench-origin `max` may
 disconnect, but its browser must first render and ACK the accepted operation;
 missing confirmation rejects the handoff. See

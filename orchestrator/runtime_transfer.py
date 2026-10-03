@@ -300,6 +300,63 @@ def record_transfer_accepted(
         runtime._persist_transfer_state()
 
 
+def handoff_telegram_notification(body: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the bounded Telegram-notification projection for a handoff ACK."""
+
+    raw = body.get("telegram_notification")
+    if isinstance(raw, Mapping) and str(raw.get("channel") or "") == "telegram":
+        status = str(raw.get("status") or "")
+        if status in {"delivered", "partial", "not_delivered"}:
+            reasons: list[str] = []
+            for name in ("incoming", "accepted"):
+                note = raw.get(name)
+                if not isinstance(note, Mapping) or note.get("delivered") is True:
+                    continue
+                reason = str(note.get("reason") or "notification_unavailable").strip()
+                if reason and reason not in reasons:
+                    reasons.append(reason)
+            return {
+                "channel": "telegram",
+                "status": status,
+                "reasons": reasons,
+            }
+    if str(body.get("status") or "") == "accepted_but_chat_offline":
+        return {
+            "channel": "telegram",
+            "status": "not_delivered",
+            "reasons": ["legacy_notification_unavailable"],
+        }
+    return {"channel": "telegram", "status": "delivered", "reasons": []}
+
+
+def handoff_acceptance_text(
+    body: Mapping[str, Any],
+    *,
+    mode: str,
+    target: str,
+    transfer_id: str,
+) -> str:
+    notification = handoff_telegram_notification(body)
+    if notification["status"] == "delivered":
+        key = "transfer.fork_accepted" if mode == "fork" else "transfer.accepted"
+        return ui_language.tr(key, target=target, transfer_id=transfer_id)
+    status_text = ui_language.tr(
+        f"transfer.telegram_notification.{notification['status']}"
+    )
+    key = (
+        "transfer.fork_accepted_telegram_limited"
+        if mode == "fork"
+        else "transfer.accepted_telegram_limited"
+    )
+    return ui_language.tr(
+        key,
+        target=target,
+        notification_status=status_text,
+        reason=", ".join(notification["reasons"]) or "notification_unavailable",
+        transfer_id=transfer_id,
+    )
+
+
 def has_active_transfer(runtime: Any) -> bool:
     return bool(runtime._transfer_state and runtime._transfer_state.get("status") in {"pending", "accepted"})
 

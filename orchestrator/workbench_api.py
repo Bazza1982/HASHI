@@ -9524,10 +9524,35 @@ class WorkbenchApiServer:
 
     def _finalize_transfer_status(
         self, *notifications: dict[str, Any]
-    ) -> tuple[str, str]:
-        if any(not note.get("delivered") for note in notifications):
-            return "accepted_but_chat_offline", "offline"
-        return "accepted", "online"
+    ) -> tuple[str, dict[str, Any]]:
+        names = ("incoming", "accepted")
+        projected: dict[str, Any] = {}
+        delivered_count = 0
+        for index, name in enumerate(names):
+            note = notifications[index] if index < len(notifications) else {}
+            delivered = note.get("delivered") is True
+            if delivered:
+                delivered_count += 1
+            try:
+                chunks = max(0, int(note.get("chunks") or 0))
+            except (TypeError, ValueError):
+                chunks = 0
+            projected[name] = {
+                "delivered": delivered,
+                "reason": str(note.get("reason") or "").strip(),
+                "chunks": chunks,
+            }
+        if delivered_count == len(names):
+            notification_status = "delivered"
+        elif delivered_count:
+            notification_status = "partial"
+        else:
+            notification_status = "not_delivered"
+        return "accepted", {
+            "channel": "telegram",
+            "status": notification_status,
+            **projected,
+        }
 
     async def handle_bridge_transfer(self, request):
         return await self._handle_bridge_handoff(request, mode="transfer")
@@ -9711,7 +9736,7 @@ class WorkbenchApiServer:
         self.transfer_store.append_event(
             transfer_id, "accepted_notice", accepted_notice
         )
-        final_status, target_chat_status = self._finalize_transfer_status(
+        final_status, telegram_notification = self._finalize_transfer_status(
             incoming_notice, accepted_notice
         )
         self.transfer_store.update_transfer(
@@ -9723,7 +9748,7 @@ class WorkbenchApiServer:
             {
                 "request_id": request_id,
                 "ack_mode": ack_mode,
-                "target_chat_status": target_chat_status,
+                "telegram_notification": telegram_notification,
             },
         )
         return web.json_response(
@@ -9733,7 +9758,7 @@ class WorkbenchApiServer:
                 "request_id": request_id,
                 "status": final_status,
                 "ack_mode": ack_mode,
-                "target_chat_status": target_chat_status,
+                "telegram_notification": telegram_notification,
             }
         )
 

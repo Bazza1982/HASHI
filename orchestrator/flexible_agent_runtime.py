@@ -5166,40 +5166,24 @@ class FlexibleAgentRuntime:
                         exc_info=True,
                     )
             self._suppressed_transfer_results.clear()
-            if final_status == "accepted_but_chat_offline":
-                target_status = body.get("target_chat_status") or "offline"
-                message = ui_language.tr(
-                    "transfer.accepted_offline",
-                    target=f"{target_agent}@{target_instance}",
-                    status=target_status,
-                    transfer_id=package["transfer_id"],
-                )
-            else:
-                message = ui_language.tr(
-                    "transfer.accepted",
-                    target=f"{target_agent}@{target_instance}",
-                    transfer_id=package["transfer_id"],
-                )
+            message = runtime_transfer.handoff_acceptance_text(
+                body,
+                mode="transfer",
+                target=f"{target_agent}@{target_instance}",
+                transfer_id=package["transfer_id"],
+            )
             await self._send_text(
                 update.effective_chat.id,
                 message,
             )
             return
 
-        if final_status == "accepted_but_chat_offline":
-            target_status = body.get("target_chat_status") or "offline"
-            message = ui_language.tr(
-                "transfer.fork_accepted_offline",
-                target=f"{target_agent}@{target_instance}",
-                status=target_status,
-                transfer_id=package["transfer_id"],
-            )
-        else:
-            message = ui_language.tr(
-                "transfer.fork_accepted",
-                target=f"{target_agent}@{target_instance}",
-                transfer_id=package["transfer_id"],
-            )
+        message = runtime_transfer.handoff_acceptance_text(
+            body,
+            mode="fork",
+            target=f"{target_agent}@{target_instance}",
+            transfer_id=package["transfer_id"],
+        )
         await self._send_text(
             update.effective_chat.id,
             message,

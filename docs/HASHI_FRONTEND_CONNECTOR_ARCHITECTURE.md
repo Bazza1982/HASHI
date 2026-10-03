@@ -450,6 +450,15 @@ budget: the target relay has 3,590 seconds and the source client 3,600 seconds
 so the relay can return a signed result before the client deadline. Generic
 Backend API proxy requests retain their existing shorter timeout.
 
+The target model acknowledgement is the authority for a successful Session
+transfer or fork. Once that acknowledgement is valid, the target records and
+returns `status=accepted`; delivery of the accompanying Telegram system notices
+is an independent Connector projection and cannot downgrade the transfer or
+imply that another frontend is offline. New peers return a bounded
+`telegram_notification` result. Consumers accept the older
+`accepted_but_chat_offline` response only as a compatibility indication that
+the Telegram notice was unavailable, while preserving the accepted handoff.
+
 ## 8. Connector neutrality
 
 Shared contracts must be transport-neutral. A Connector may implement

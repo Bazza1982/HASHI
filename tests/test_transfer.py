@@ -135,17 +135,104 @@ class TransferTests(unittest.TestCase):
         self.assertTrue(implicit["ok"])
         self.assertEqual(implicit["ack_mode"], "implicit")
 
-    def test_transfer_status_degrades_when_target_chat_offline(self):
+    def test_transfer_status_keeps_model_ack_authoritative_when_telegram_is_unavailable(self):
         server = WorkbenchApiServer.__new__(WorkbenchApiServer)
-        status, target_chat_status = server._finalize_transfer_status(
+        status, telegram_notification = server._finalize_transfer_status(
             {"delivered": True},
             {"delivered": False, "reason": "telegram_disconnected"},
         )
-        self.assertEqual(status, "accepted_but_chat_offline")
-        self.assertEqual(target_chat_status, "offline")
+        self.assertEqual(status, "accepted")
+        self.assertEqual(telegram_notification["channel"], "telegram")
+        self.assertEqual(telegram_notification["status"], "partial")
+        self.assertEqual(
+            telegram_notification["accepted"]["reason"],
+            "telegram_disconnected",
+        )
 
 
 class TransferHandlerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_model_ack_accepts_transfer_even_when_telegram_notices_are_not_delivered(self):
+        package = {
+            "transfer_id": "trf-accepted-without-telegram",
+            "source_agent": "source",
+            "source_instance": "HASHI2",
+            "target_agent": "target",
+            "target_instance": "HASHI3",
+            "created_at": "2026-10-03T07:43:09+00:00",
+            "recent_context_block": "ctx",
+            "last_user_message": "u",
+            "last_assistant_message": "a",
+        }
+
+        class _Request:
+            async def json(self):
+                return dict(package)
+
+        class _Runtime:
+            startup_success = True
+
+            def has_active_transfer(self):
+                return False
+
+            async def enqueue_api_text(self, *_args, **_kwargs):
+                return "req-transfer-accepted"
+
+            def register_request_listener(self, _request_id, listener):
+                import asyncio
+
+                asyncio.create_task(
+                    listener(
+                        {
+                            "success": True,
+                            "text": (
+                                "TRANSFER_ACCEPTED trf-accepted-without-telegram\n"
+                                "Continuing the transferred task."
+                            ),
+                        }
+                    )
+                )
+
+        notices = iter(
+            [
+                {"delivered": False, "reason": "telegram_disconnected", "chunks": 0},
+                {"delivered": False, "reason": "telegram_disconnected", "chunks": 0},
+            ]
+        )
+
+        async def _notify(*_args, **_kwargs):
+            return next(notices)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TransferStore(Path(tmp) / "bridge_transfers.sqlite")
+            server = WorkbenchApiServer.__new__(WorkbenchApiServer)
+            server.TRANSFER_ACCEPT_PREFIX = "TRANSFER_ACCEPTED "
+            server.global_config = SimpleNamespace(instance_id="HASHI3")
+            server.transfer_store = store
+            server._validate_transfer_payload = lambda payload: dict(payload)
+            server._runtime_map = lambda: {"target": _Runtime()}
+            server._notify_transfer_chat = _notify
+            server._build_transfer_prompt = lambda _package: "transfer prompt"
+
+            response = await server.handle_bridge_transfer(_Request())
+            body = json.loads(response.text)
+            record = store.get_transfer(package["transfer_id"])
+            store.close()
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(body["status"], "accepted")
+        self.assertNotIn("target_chat_status", body)
+        self.assertEqual(
+            body["telegram_notification"]["status"], "not_delivered"
+        )
+        self.assertEqual(record["status"], "accepted")
+        accepted = next(
+            event for event in record["events"] if event["event_type"] == "accepted"
+        )
+        self.assertEqual(
+            accepted["details"]["telegram_notification"],
+            body["telegram_notification"],
+        )
+
     async def test_target_enqueue_exception_preserves_unknown_receipt_as_json(self):
         package = {
             "transfer_id": "trf-enqueue-unknown",

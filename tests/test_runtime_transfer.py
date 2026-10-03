@@ -114,6 +114,68 @@ def test_record_transfer_accepted_preserves_identity_and_persists_fence(tmp_path
         )
 
 
+def test_handoff_acceptance_notice_keeps_telegram_delivery_separate_from_transfer():
+    body = {
+        "status": "accepted",
+        "telegram_notification": {
+            "channel": "telegram",
+            "status": "not_delivered",
+            "incoming": {
+                "delivered": False,
+                "reason": "telegram_disconnected",
+                "chunks": 0,
+            },
+            "accepted": {
+                "delivered": False,
+                "reason": "telegram_disconnected",
+                "chunks": 0,
+            },
+        },
+    }
+
+    projection = runtime_transfer.handoff_telegram_notification(body)
+    assert projection["status"] == "not_delivered"
+    assert projection["reasons"] == ["telegram_disconnected"]
+    for locale in ("en", "zh-CN"):
+        with ui_language.language_scope(SimpleNamespace(), locale=locale):
+            text = runtime_transfer.handoff_acceptance_text(
+                body,
+                mode="transfer",
+                target="target@HASHI3",
+                transfer_id="trf-notify-1",
+            )
+        assert "target@HASHI3" in text
+        assert "Telegram" in text
+        assert "trf-notify-1" in text
+        assert "target chat is" not in text
+        assert "目标聊天当前" not in text
+        assert "reconnect" not in text
+        assert "连接恢复" not in text
+
+
+def test_handoff_acceptance_notice_compatibly_interprets_legacy_degraded_status():
+    body = {
+        "status": "accepted_but_chat_offline",
+        "target_chat_status": "offline",
+    }
+
+    projection = runtime_transfer.handoff_telegram_notification(body)
+    assert projection == {
+        "channel": "telegram",
+        "status": "not_delivered",
+        "reasons": ["legacy_notification_unavailable"],
+    }
+    text = runtime_transfer.handoff_acceptance_text(
+        body,
+        mode="fork",
+        target="target@HASHI3",
+        transfer_id="fork-notify-1",
+    )
+    assert "Fork accepted" in text
+    assert "Telegram" in text
+    assert "Both Sessions remain usable" in text
+
+
 def test_transfer_redirect_and_buffer_rules(tmp_path):
     runtime = _runtime(tmp_path)
     runtime._transfer_state = {
