@@ -12,6 +12,7 @@ import psutil
 from adapters.codex_process_guard import (
     CodexProcessGuard,
     ProcessIdentity,
+    evaluate_hook_payload,
     evaluate_termination_command,
 )
 
@@ -78,13 +79,15 @@ def test_hook_denies_engine_standin_without_terminating_it(tmp_path: Path):
     result_path = tmp_path / "standin-result.json"
     wrapper = (
         "import json, os, pathlib, subprocess, sys, time; "
-        "payload={'hook_event_name':'PreToolUse','tool_name':'command_execution',"
-        "'tool_input':{'command':\"pwsh.exe -NoProfile -Command "
-        "'Stop-Process -Id $PID -Force'\"}}; "
+        "code=('const r = await tools.exec_command({cmd:\"Stop-Process -Id %s "
+        "-Force\",shell:\"powershell\",login:false});' % os.getpid()); "
+        "payload={'hook_event_name':'PreToolUse','tool_name':'exec',"
+        "'tool_input':{'code':code}}; "
         "child=subprocess.run([sys.executable, '-m', 'adapters.codex_process_guard'],"
         "input=json.dumps(payload), text=True, capture_output=True, check=False); "
         f"pathlib.Path({str(result_path)!r}).write_text(json.dumps("
-        "{'stdout':child.stdout,'stderr':child.stderr,'returncode':child.returncode}),"
+        "{'stdout':child.stdout,'stderr':child.stderr,'returncode':child.returncode,"
+        "'target_pid':os.getpid()}),"
         "encoding='utf-8'); time.sleep(60)"
     )
     environment = guard.subprocess_environment()
@@ -110,11 +113,11 @@ def test_hook_denies_engine_standin_without_terminating_it(tmp_path: Path):
         assert envelope["returncode"] == 0, envelope
         result = json.loads(envelope["stdout"])
         decision = result["hookSpecificOutput"]
+        target_pid = int(envelope["target_pid"])
         assert decision["permissionDecision"] == "deny"
-        assert "unresolved process-termination selector" in decision[
-            "permissionDecisionReason"
-        ]
-        assert psutil.pid_exists(standin.pid)
+        assert "protected HASHI/Codex process" in decision["permissionDecisionReason"]
+        assert str(target_pid) in decision["permissionDecisionReason"]
+        assert psutil.pid_exists(target_pid)
         assert standin.poll() is None
     finally:
         standin.terminate()
@@ -137,3 +140,64 @@ def test_guard_cli_flags_trust_only_the_session_hook(tmp_path: Path):
         context_path = guard.context_path
         guard.close()
     assert not context_path.exists()
+
+
+def test_exec_code_allows_external_pid_and_ordinary_code(monkeypatch, tmp_path: Path):
+    protected = {4101: _identity(4101, "codex.exe")}
+    calls = 0
+
+    def inventory(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return protected
+
+    monkeypatch.setattr(
+        "adapters.codex_process_guard.protected_process_inventory",
+        inventory,
+    )
+    external = evaluate_hook_payload(
+        {
+            "tool_name": "exec",
+            "tool_input": {
+                "code": (
+                    "const r = await tools.exec_command("
+                    '{cmd:"Stop-Process -Id 99991 -Force",shell:"powershell"});'
+                )
+            },
+        },
+        context_path=tmp_path / "unused.json",
+    )
+    ordinary = evaluate_hook_payload(
+        {
+            "tool_name": "exec",
+            "tool_input": {
+                "code": "const r = await tools.exec_command({cmd:\"Get-Date\"});"
+            },
+        },
+        context_path=tmp_path / "unused.json",
+    )
+
+    assert external is None
+    assert ordinary is None
+    assert calls == 1
+
+
+def test_exec_code_fails_closed_when_termination_command_is_computed(tmp_path: Path):
+    result = evaluate_hook_payload(
+        {
+            "tool_name": "exec",
+            "tool_input": {
+                "code": (
+                    "const command = 'Stop-Process -Id ' + target; "
+                    "await tools.exec_command({cmd: command});"
+                )
+            },
+        },
+        context_path=tmp_path / "unused.json",
+    )
+
+    assert result is not None
+    assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "unresolved process-termination command" in result[
+        "hookSpecificOutput"
+    ]["permissionDecisionReason"]
