@@ -1,7 +1,7 @@
 # HASHI Agent FYI
 
-2026-10-03 non-voice repair batch is source-only until instance adoption and
-live evidence are recorded. Core is unchanged; no new API supervisor is added.
+2026-10-03 non-voice repairs require separate source, instance-adoption and
+live evidence. Core is unchanged; no new API supervisor is added.
 `/reboot min` keeps the Backend API connection. Workbench-origin `max` may
 disconnect, but its browser must first render and ACK the accepted operation;
 missing confirmation rejects the handoff. See
@@ -20,6 +20,17 @@ head/tail truncation. Direct Windows long-input and continuation probes passed;
 service-launcher adoption remains separately gated. Codex checks top-level
 workspace links before launch and reports file-tool validation failures with
 conservative whole-request effect accounting. No broken links are auto-repaired.
+Fixed CLI gateway resources are allocated only at backend launch and released
+at request termination, never while assembling a prompt. HERV3 may resume an
+interrupted model call only when every executed tool has a completed, verified
+observational-read receipt; it reuses those results and never replays tools.
+Writes, background jobs, arbitrary verification commands and unknown effects
+still stop. Optional progress is serialized and quiesced before Final or
+Clarification delivery, including shielded Persona packaging tasks.
+The user deferred native Codex process-kill prevention and the complete
+dual-browser live matrix. Installed CLI execution did not invoke the tested
+pre-tool hook; reverted experiments provide no protection. Do not report these
+items passed or touch another instance/browser to fill the evidence gap.
 
 2026-10-03 Lily correction supersedes Windows automation: six Windows tasks and
 eleven old HASHI jobs were removed. Four Agent crons run import 01:00, offline
