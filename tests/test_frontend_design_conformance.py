@@ -259,6 +259,50 @@ def test_telegram_html_is_projected_as_transport_neutral_text():
     ]
 
 
+def test_public_failure_projection_carries_only_whitelisted_typed_error_code():
+    from orchestrator.frontend_projection import project_frontend_event
+
+    projected = project_frontend_event(
+        {
+            "event_id": "evt_auth_failed",
+            "session_id": "ses_1",
+            "run_id": "run_1",
+            "request_id": "req_1",
+            "sequence": 4,
+            "kind": "run.failed",
+            "summary": "Provider request failed",
+            "detail": {
+                "error": "raw provider text must not become structured metadata",
+                "error_context": {
+                    "error_code": "PROVIDER_AUTHENTICATION_FAILED",
+                    "provider_request_id": "provider-private-id",
+                    "diagnostic_log": "credential-shaped provider details",
+                },
+            },
+            "created_at": "2026-10-03T03:56:08Z",
+        }
+    )
+
+    assert projected["error_code"] == "PROVIDER_AUTHENTICATION_FAILED"
+    assert "provider_request_id" not in projected
+    assert "diagnostic_log" not in projected
+
+    unlisted = project_frontend_event(
+        {
+            "event_id": "evt_private_failure",
+            "session_id": "ses_1",
+            "run_id": "run_2",
+            "request_id": "req_2",
+            "sequence": 5,
+            "kind": "run.failed",
+            "summary": "Provider request failed",
+            "detail": {"error_context": {"error_code": "PROVIDER_RAW_SECRET_FAILURE"}},
+            "created_at": "2026-10-03T03:56:09Z",
+        }
+    )
+    assert "error_code" not in unlisted
+
+
 def test_registered_compatibility_routes_are_thin_fc_adapters():
     assert get_compatibility_adapter("backend_api.agent_command") == {
         "id": "backend_api.agent_command",

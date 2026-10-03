@@ -303,6 +303,12 @@ def project_frontend_event(
         blocks.append({"type": "text", "text": summary or "Event", "format": "plain"})
 
     created_at = str(raw.get("created_at") or "") or "2026-09-25T00:00:00Z"
+    error_context = detail.get("error_context")
+    typed_error_code = (
+        str(error_context.get("error_code") or "").strip()
+        if isinstance(error_context, Mapping)
+        else ""
+    )
 
     return normalize_frontend_event(
         {
@@ -323,6 +329,7 @@ def project_frontend_event(
             "semantic_kind": semantic_kind,
             "presentation_channel": presentation_channel,
             "content_blocks": blocks,
+            **({"error_code": typed_error_code} if typed_error_code else {}),
             "delivery_intent_ref": None,
             "replaces_event_id": None,
             "superseded_by": None,

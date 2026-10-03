@@ -37,6 +37,7 @@ RELAY_ENVELOPE_VERSION = 1
 TOOL_INTERACTION_TYPE = "hashi.frontend-tool-interaction"
 TOOL_INTERACTION_VERSION = 1
 MAX_CONTENT_BLOCKS = 128
+PUBLIC_FRONTEND_ERROR_CODES = frozenset({"PROVIDER_AUTHENTICATION_FAILED"})
 
 
 def _object(value: Any, name: str) -> Mapping[str, Any]:
@@ -379,7 +380,7 @@ def normalize_delivery_intent(value: Any) -> dict[str, Any]:
         if role not in {"primary", "mirror", "subscriber"}:
             raise ValueError("delivery destination role is invalid")
         primary_count += role == "primary"
-        channel_key = _string(item.get("channel_key"), "channel_key")
+        _string(item.get("channel_key"), "channel_key")
         modes_raw = item.get("content_modes")
         if not isinstance(modes_raw, (list, tuple)) or not modes_raw:
             raise ValueError("content_modes must be a non-empty list")
@@ -792,6 +793,19 @@ def normalize_frontend_event(value: Any) -> dict[str, Any]:
     content_blocks = normalize_content_blocks(raw.get("content_blocks", []))
     created_at = _string(raw.get("created_at") or "", "created_at", maximum=64)
 
+    error_code = None
+    candidate_error_code = raw.get("error_code")
+    if (
+        semantic_kind == "error"
+        and presentation_channel == "error"
+        and interface_kind == "display"
+        and audience == "user"
+        and visibility == "public"
+        and isinstance(candidate_error_code, str)
+        and candidate_error_code in PUBLIC_FRONTEND_ERROR_CODES
+    ):
+        error_code = candidate_error_code
+
     return {
         "type": FRONTEND_EVENT_TYPE,
         "version": FRONTEND_EVENT_VERSION,
@@ -814,6 +828,7 @@ def normalize_frontend_event(value: Any) -> dict[str, Any]:
         "semantic_kind": semantic_kind,
         "presentation_channel": presentation_channel,
         "content_blocks": content_blocks,
+        **({"error_code": error_code} if error_code else {}),
         "delivery_intent_ref": _token(raw.get("delivery_intent_ref"), "delivery_intent_ref")
         if raw.get("delivery_intent_ref")
         else None,

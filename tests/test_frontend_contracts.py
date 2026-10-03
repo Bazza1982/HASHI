@@ -359,6 +359,37 @@ def test_frontend_event_envelope_validates_durable_and_ephemeral_lanes():
     assert ephemeral["ephemeral_sequence"] == 10
 
 
+def test_frontend_event_exposes_only_public_typed_error_codes():
+    from orchestrator.frontend_contracts import normalize_frontend_event
+
+    base = {
+        "type": "hashi.frontend-event",
+        "version": 2,
+        "event_id": "evt-error",
+        "session_id": "ses-1",
+        "sequence": 6,
+        "run_id": "run-1",
+        "request_id": "req-1",
+        "durability": "durable",
+        "audience": "user",
+        "visibility": "public",
+        "interface_kind": "display",
+        "semantic_kind": "error",
+        "presentation_channel": "error",
+        "content_blocks": [{"type": "text", "text": "Request failed"}],
+        "created_at": "2026-10-03T03:56:08Z",
+    }
+    public = normalize_frontend_event(
+        {**base, "error_code": "PROVIDER_AUTHENTICATION_FAILED"}
+    )
+    assert public["error_code"] == "PROVIDER_AUTHENTICATION_FAILED"
+
+    unlisted = normalize_frontend_event(
+        {**base, "event_id": "evt-private", "error_code": "RAW_PROVIDER_FAILURE"}
+    )
+    assert "error_code" not in unlisted
+
+
 def test_content_component_normalization_supports_standard_components():
     from orchestrator.frontend_contracts import normalize_content_blocks
 
