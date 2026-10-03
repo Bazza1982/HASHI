@@ -303,6 +303,16 @@ class RequestActivityStore:
                 "tool_end": "completed",
                 "error": "failed",
             }.get(kind, "running")
+            if kind == "tool_end":
+                metadata = getattr(event, "metadata", None)
+                if isinstance(metadata, Mapping):
+                    outcome = str(metadata.get("outcome") or "").casefold()
+                    if metadata.get("is_error") is True or outcome == "failed":
+                        status = "failed"
+                    elif metadata.get("is_error") is False or outcome == "success":
+                        status = "completed"
+                    elif outcome == "unknown":
+                        status = "unknown"
             with self._lock:
                 record = self._requests.get(str(request_id or ""))
                 if record is None:

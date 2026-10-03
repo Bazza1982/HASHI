@@ -509,6 +509,39 @@ class CodexCLIAdapter(BaseBackend):
             return "Running command"
         return f"Running: {cmd[:100]}"
 
+    @staticmethod
+    def _mcp_completion_outcome(item: Mapping[str, object]) -> str:
+        """Classify only typed MCP terminal evidence; never inspect result text."""
+
+        status = str(item.get("status") or "").strip().casefold()
+        result = item.get("result")
+        result_is_error = (
+            result.get("is_error") if isinstance(result, Mapping) else None
+        )
+        error = item.get("error")
+        if (
+            result_is_error is True
+            or error not in (None, "", {}, [])
+            or status
+            in {
+                "failed",
+                "failure",
+                "error",
+                "declined",
+                "cancelled",
+                "canceled",
+            }
+        ):
+            return "failed"
+        if result_is_error is False or status in {
+            "completed",
+            "complete",
+            "success",
+            "succeeded",
+        }:
+            return "success"
+        return "unknown"
+
     def _summarize_file_change(self, item: dict) -> tuple[str, str, tuple[str, ...]]:
         changes = item.get("changes")
         if isinstance(changes, list) and changes:
@@ -638,26 +671,39 @@ class CodexCLIAdapter(BaseBackend):
                 if item_id
                 else ""
             )
+            outcome = (
+                self._mcp_completion_outcome(item)
+                if etype == "item.completed"
+                else ""
+            )
+            if outcome == "failed":
+                summary = f"Failed {display_name}{server_suffix}"
+            elif outcome == "success":
+                summary = f"Completed {display_name}{server_suffix}"
+            elif outcome == "unknown":
+                summary = f"Finished {display_name}{server_suffix} (outcome unknown)"
+            else:
+                summary = f"Calling {display_name}{server_suffix}"
+            metadata = {
+                key: value
+                for key, value in (
+                    ("server", server_name),
+                    ("tool", tool_name),
+                    ("outcome", outcome),
+                )
+                if value
+            }
+            if outcome in {"success", "failed"}:
+                metadata["is_error"] = outcome == "failed"
             se = StreamEvent(
                 kind=(KIND_TOOL_START if etype == "item.started" else KIND_TOOL_END),
-                summary=(
-                    f"Calling {display_name}{server_suffix}"
-                    if etype == "item.started"
-                    else f"Completed {display_name}{server_suffix}"
-                ),
+                summary=summary,
                 tool_name=tool_name or "MCP",
                 event_id=event_id,
                 origin="codex-cli:mcp",
                 phase="execution",
                 provenance="provider_returned",
-                metadata={
-                    key: value
-                    for key, value in (
-                        ("server", server_name),
-                        ("tool", tool_name),
-                    )
-                    if value
-                },
+                metadata=metadata,
             )
         elif etype == "item.completed" and item_type == "file_change":
             summary, path, paths = self._summarize_file_change(item)

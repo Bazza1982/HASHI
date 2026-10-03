@@ -532,7 +532,13 @@ async def test_codex_mcp_lifecycle_projects_safe_activity_without_double_count(
             json.dumps(
                 {
                     "type": "item.completed",
-                    "item": {**item, "result": "SECRET-RESULT"},
+                    "item": {
+                        **item,
+                        "result": {
+                            "content": "SECRET-RESULT",
+                            "is_error": False,
+                        },
+                    },
                 }
             ),
             json.dumps(
@@ -581,7 +587,12 @@ async def test_codex_mcp_lifecycle_projects_safe_activity_without_double_count(
     assert events[0].event_id != events[1].event_id
     assert [dict(event.metadata) for event in events] == [
         {"server": "hashi_tools", "tool": "frontend_send_attachments"},
-        {"server": "hashi_tools", "tool": "frontend_send_attachments"},
+        {
+            "server": "hashi_tools",
+            "tool": "frontend_send_attachments",
+            "outcome": "success",
+            "is_error": False,
+        },
     ]
     assert "SECRET-ARGUMENT" not in repr(events)
     assert "SECRET-RESULT" not in repr(events)
@@ -596,6 +607,91 @@ async def test_codex_mcp_lifecycle_projects_safe_activity_without_double_count(
         KIND_TOOL_END,
     ]
     assert [event["status"] for event in projected] == ["running", "completed"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    (
+        "completion",
+        "expected_summary",
+        "expected_outcome",
+        "expected_status",
+        "expected_is_error",
+    ),
+    [
+        (
+            {"status": "failed", "error": {"message": "SECRET-FAILURE"}},
+            "Failed remote_check via hashi_tools",
+            "failed",
+            "failed",
+            True,
+        ),
+        (
+            {"result": {"content": "SECRET-ERROR", "is_error": True}},
+            "Failed remote_check via hashi_tools",
+            "failed",
+            "failed",
+            True,
+        ),
+        (
+            {"status": "future-provider-status", "result": "SECRET-UNKNOWN"},
+            "Finished remote_check via hashi_tools (outcome unknown)",
+            "unknown",
+            "unknown",
+            None,
+        ),
+    ],
+)
+async def test_codex_mcp_completion_projects_failed_and_unknown_without_payload(
+    tmp_path,
+    completion,
+    expected_summary,
+    expected_outcome,
+    expected_status,
+    expected_is_error,
+):
+    adapter = _build_adapter(tmp_path)
+    events = []
+
+    async def collect(event):
+        events.append(event)
+
+    item = {
+        "id": "mcp-call-terminal",
+        "type": "mcp_tool_call",
+        "server": "hashi_tools",
+        "tool": "remote_check",
+    }
+    adapter._parse_codex_event(
+        json.dumps({"type": "item.started", "item": item}),
+        collect,
+    )
+    adapter._parse_codex_event(
+        json.dumps(
+            {
+                "type": "item.completed",
+                "item": {**item, **completion},
+            }
+        ),
+        collect,
+    )
+    await asyncio.sleep(0)
+
+    assert [event.kind for event in events] == [KIND_TOOL_START, KIND_TOOL_END]
+    assert events[-1].summary == expected_summary
+    assert events[-1].metadata["outcome"] == expected_outcome
+    if expected_is_error is None:
+        assert "is_error" not in events[-1].metadata
+    else:
+        assert events[-1].metadata["is_error"] is expected_is_error
+    assert "SECRET-" not in repr(events)
+
+    activity = RequestActivityStore()
+    activity.start("req-mcp-terminal")
+    for event in events:
+        activity.publish_stream("req-mcp-terminal", event)
+    projected = activity.poll("req-mcp-terminal")["events"][-2:]
+    assert [event["status"] for event in projected] == ["running", expected_status]
 
 
 def test_codex_accepts_completed_turn_even_if_process_needs_forced_exit(tmp_path, monkeypatch: pytest.MonkeyPatch):

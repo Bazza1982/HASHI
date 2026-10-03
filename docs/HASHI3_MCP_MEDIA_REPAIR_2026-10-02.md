@@ -56,6 +56,11 @@ identity with distinct lifecycle suffixes, so repeated transport delivery is
 deduplicated while one completed call remains one terminal
 `BackendResponse.tool_call_count`. Frontend activity views therefore report the
 real operation instead of incorrectly describing the response as tool-free.
+MCP completion status is derived only from typed provider status, error, and
+`result.is_error` fields. Explicit failures project as failed, explicit success
+projects as completed, and an unrecognised terminal shape remains unknown; no
+raw arguments, result content, or error payload is exposed, and an unknown
+outcome is never presented as success.
 
 ## Runtime verification
 
