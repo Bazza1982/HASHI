@@ -2308,6 +2308,8 @@
     "transfer.label.fork": "Fork",
     "transfer.failed": "Transfer failed: {reason}\nThe Session remains here.",
     "transfer.fork_failed": "Fork failed: {reason}",
+    "transfer.unknown": "Transfer outcome is unknown after submission. It was not sent again.\nTransfer ID: {transfer_id}\nCheck this ID on the target before continuing.",
+    "transfer.fork_unknown": "Fork outcome is unknown after submission. It was not sent again.\nFork ID: {transfer_id}\nCheck this ID on the target before retrying.",
     "transfer.accepted_offline": "Transfer accepted by {target}, but the target chat is {status}.\nContinue there once it reconnects. Transfer ID: {transfer_id}",
     "transfer.accepted": "Transfer accepted by {target}.\nContinue there. Transfer ID: {transfer_id}",
     "transfer.fork_accepted_offline": "Fork accepted by {target}, but the target chat is {status}.\nBoth Sessions remain usable. Fork ID: {transfer_id}",

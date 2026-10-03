@@ -8046,6 +8046,12 @@ class WorkbenchApiServer:
         )
         if not snapshot:
             return None
+        outcome_unknown = str(snapshot.get("status") or "") == "unknown"
+        rejection_reason = (
+            "session_transfer_outcome_unknown"
+            if outcome_unknown
+            else "session_transferred"
+        )
         adapter = SimpleNamespace(
             name=str(runtime.name),
             global_config=self.global_config,
@@ -8111,7 +8117,11 @@ class WorkbenchApiServer:
             "endpoint_id": endpoint_id,
             "session_id": str(session["session_id"]),
             "context_generation": int(session["context_generation"]),
-            "command": "transfer-redirect",
+            "command": (
+                "transfer-outcome-unknown"
+                if outcome_unknown
+                else "transfer-redirect"
+            ),
             "issued_action_id": None,
             "revision": None,
             "arguments": [
@@ -8123,7 +8133,11 @@ class WorkbenchApiServer:
             "idempotency_digest": f"sha256:{request_digest}",
             "authorization": {
                 "decision": "allowed",
-                "scope": "session-transfer-redirect",
+                "scope": (
+                    "session-transfer-outcome-unknown"
+                    if outcome_unknown
+                    else "session-transfer-redirect"
+                ),
             },
         }
         try:
@@ -8167,16 +8181,17 @@ class WorkbenchApiServer:
             "accepted": False,
             "state": "rejected",
             "error": redirect_text,
-            "error_code": "session_transferred",
+            "error_code": rejection_reason,
             "transfer_id": str(snapshot["transfer_id"]),
             "target_agent": str(snapshot["target_agent"]),
             "target_instance": str(snapshot["target_instance"]),
-            "redirect": {
+        }
+        if not outcome_unknown:
+            result["redirect"] = {
                 "transfer_id": str(snapshot["transfer_id"]),
                 "target_agent": str(snapshot["target_agent"]),
                 "target_instance": str(snapshot["target_instance"]),
-            },
-        }
+            }
         replayed = reservation.state == "completed"
         command_event_id = reservation.event_id
         if reservation.state == "reserved":
@@ -8240,7 +8255,7 @@ class WorkbenchApiServer:
                 "request_id": request_id,
                 "idempotency_digest": f"sha256:{request_digest}",
                 "replayed": replayed,
-                "reason": "session_transferred",
+                "reason": rejection_reason,
             }
         )
         result.update(

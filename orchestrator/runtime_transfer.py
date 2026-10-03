@@ -1,18 +1,40 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime
 from collections.abc import Mapping
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import uuid4
+
+import aiohttp
 
 from orchestrator.runtime_common import QueuedRequest
 from orchestrator.runtime_delivery import format_backend_error_for_user
-from orchestrator import ui_language
+from orchestrator import runtime_remote, ui_language
+from orchestrator.agent_move.remote_client import (
+    candidate_remote_base_urls,
+    request_authenticated_json,
+)
 from orchestrator.service_endpoints import ServiceEndpointError
+from remote.peer.base import normalize_instance_id
+from remote.security.shared_token import load_shared_token
 
 
 _TRANSFER_REDIRECT_ERROR_PREFIX = "HASHI_TRANSFER_REDIRECT_V1:"
+_BRIDGE_HANDOFF_CLIENT_TIMEOUT_SECONDS = 3600
+
+
+class BridgeHandoffOutcomeUnknown(RuntimeError):
+    """The target may have committed a handoff whose signed reply was lost."""
+
+    def __init__(self, transfer_id: str, cause: BaseException):
+        self.transfer_id = str(transfer_id or "unknown")
+        self.cause = cause
+        super().__init__(
+            f"handoff outcome is unknown for {self.transfer_id}: {cause}"
+        )
 
 
 class TransferRedirectRequired(RuntimeError):
@@ -40,10 +62,16 @@ def transfer_redirect_snapshot(runtime: Any) -> dict[str, str] | None:
             if isinstance(metadata, Mapping)
             else None
         )
-    if not isinstance(state, Mapping) or str(state.get("status")) != "accepted":
+    if not isinstance(state, Mapping):
+        return None
+    status = str(state.get("status") or "")
+    outcome_unknown = status == "unknown" or (
+        status == "pending" and state.get("outcome_unknown") is True
+    )
+    if status != "accepted" and not outcome_unknown:
         return None
     snapshot = {
-        "status": "accepted",
+        "status": "unknown" if outcome_unknown else "accepted",
         "transfer_id": str(state.get("transfer_id") or "unknown").strip(),
         "target_agent": str(state.get("target_agent") or "target").strip(),
         "target_instance": str(state.get("target_instance") or "unknown").strip(),
@@ -87,6 +115,8 @@ def transfer_redirect_text_from_snapshot(state: Mapping[str, Any]) -> str:
     target_agent = state.get("target_agent") or "target"
     target_instance = state.get("target_instance") or "unknown"
     transfer_id = state.get("transfer_id") or "unknown"
+    if str(state.get("status") or "") == "unknown":
+        return ui_language.tr("transfer.unknown", transfer_id=transfer_id)
     return (
         f"This session has been transferred to {target_agent}@{target_instance}.\n"
         f"Continue there. Transfer ID: {transfer_id}"
@@ -106,6 +136,26 @@ def persist_transfer_state(runtime: Any) -> None:
 def clear_transfer_state(runtime: Any) -> None:
     runtime._transfer_state = None
     runtime._suppressed_transfer_results.clear()
+    runtime._persist_transfer_state()
+
+
+def record_transfer_outcome_unknown(
+    runtime: Any,
+    *,
+    transfer_id: str,
+    error: BaseException,
+) -> None:
+    """Preserve the pending fence and identity without claiming success or failure."""
+
+    state = getattr(runtime, "_transfer_state", None)
+    if not isinstance(state, dict) or str(state.get("transfer_id")) != str(
+        transfer_id
+    ):
+        raise ValueError("active transfer identity changed before unknown outcome")
+    state["status"] = "pending"
+    state["outcome_unknown"] = True
+    state["unknown_at"] = datetime.now().isoformat()
+    state["error"] = str(error)
     runtime._persist_transfer_state()
 
 
@@ -244,33 +294,137 @@ def resolve_bridge_handoff_endpoint(
                 "cross-instance Workbench route rejected: "
                 f"target={normalized_target} discovered={declared_instance}"
             )
-        host = str(
-            inst.get("workbench_host")
-            or inst.get("api_host")
-            or inst.get("host")
-            or ""
-        ).strip()
-        port = inst.get("workbench_port")
-        if not port:
-            raise ValueError(f"instance {normalized_target} has no workbench_port configured")
-        if host.casefold() == local_host.casefold() and int(port) == local_port:
+        candidates = candidate_remote_base_urls(inst)
+        if not candidates:
+            raise ValueError(f"instance {normalized_target} has no Remote route configured")
+        base_url = candidates[0].rstrip("/")
+        split = urlsplit(base_url)
+        if (
+            str(split.hostname or "").casefold() == local_host.casefold()
+            and int(split.port or (443 if split.scheme == "https" else 80)) == local_port
+        ):
             raise ValueError(
-                "cross-instance Workbench route rejected: target resolves to the "
-                "local instance endpoint"
+                "cross-instance Remote route rejected: target resolves to the local "
+                "Workbench endpoint"
             )
-        return normalized_target, _render_http_endpoint(
-            host,
-            int(port),
-            f"/api/bridge/{action}",
+        return (
+            normalized_target,
+            f"{base_url}/workbench/v1/proxy/api/bridge/{action}",
         )
     raise ValueError(f"unknown instance: {target_instance}")
 
 
 def handoff_health_endpoint(handoff_endpoint: str) -> str:
+    remote_marker = "/workbench/v1/proxy/api/bridge/"
+    if remote_marker in str(handoff_endpoint):
+        return str(handoff_endpoint).split(remote_marker, 1)[0] + "/workbench/v1/status"
     marker = "/api/bridge/"
     if marker not in str(handoff_endpoint):
         raise ValueError("invalid Workbench handoff endpoint")
     return str(handoff_endpoint).split(marker, 1)[0] + "/api/health"
+
+
+def _verify_remote_handoff_status(
+    payload: Mapping[str, Any],
+    *,
+    expected_source: str,
+    expected_target: str,
+) -> None:
+    instance = payload.get("instance") if isinstance(payload, Mapping) else None
+    health = payload.get("workbench_health") if isinstance(payload, Mapping) else None
+    source = normalize_instance_id(payload.get("authenticated_instance"))
+    target = normalize_instance_id(
+        instance.get("instance_id") if isinstance(instance, Mapping) else None
+    )
+    health_target = normalize_instance_id(
+        health.get("instance_id") if isinstance(health, Mapping) else None
+    )
+    if (
+        payload.get("gateway") != "workbench_v1"
+        or payload.get("workbench_online") is not True
+        or source != normalize_instance_id(expected_source)
+        or target != normalize_instance_id(expected_target)
+        or health_target != normalize_instance_id(expected_target)
+    ):
+        raise ValueError("cross-instance Workbench identity check failed")
+
+
+def _request_remote_handoff(
+    runtime: Any,
+    *,
+    endpoint: str,
+    expected_target: str,
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    token = load_shared_token(runtime_remote.instance_root(runtime))
+    source = normalize_instance_id(runtime._detect_instance_name())
+    if not token or not source:
+        raise ValueError("authenticated HASHI Remote Session transfer is unavailable")
+    status_endpoint = handoff_health_endpoint(endpoint)
+    status = request_authenticated_json(
+        status_endpoint,
+        method="GET",
+        shared_token=token,
+        from_instance=source,
+        timeout=10,
+    )
+    _verify_remote_handoff_status(
+        status,
+        expected_source=source,
+        expected_target=expected_target,
+    )
+    try:
+        return request_authenticated_json(
+            endpoint,
+            method="POST",
+            payload=dict(payload),
+            shared_token=token,
+            from_instance=source,
+            timeout=_BRIDGE_HANDOFF_CLIENT_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        raise BridgeHandoffOutcomeUnknown(
+            str(payload.get("transfer_id") or "unknown"),
+            exc,
+        ) from exc
+
+
+async def send_bridge_handoff(
+    runtime: Any,
+    *,
+    endpoint: str,
+    expected_target: str,
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Send once; a transport failure after POST is an unknown outcome, never replayed."""
+
+    if "/workbench/v1/proxy/api/bridge/" in urlsplit(endpoint).path:
+        return await asyncio.to_thread(
+            _request_remote_handoff,
+            runtime,
+            endpoint=endpoint,
+            expected_target=expected_target,
+            payload=payload,
+        )
+
+    timeout = aiohttp.ClientTimeout(total=None, connect=10, sock_connect=10)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        health_endpoint = handoff_health_endpoint(endpoint)
+        async with session.get(health_endpoint) as health_response:
+            health = await health_response.json()
+            if health_response.status >= 400:
+                raise RuntimeError(
+                    str(health.get("error") or f"HTTP {health_response.status}")
+                )
+            verify_handoff_instance_identity(
+                health,
+                expected_instance=expected_target,
+            )
+        async with session.post(endpoint, json=dict(payload)) as response:
+            body = await response.json()
+            if response.status >= 400 or not body.get("ok"):
+                raise RuntimeError(str(body.get("error") or f"HTTP {response.status}"))
+            return body
 
 
 def verify_handoff_instance_identity(

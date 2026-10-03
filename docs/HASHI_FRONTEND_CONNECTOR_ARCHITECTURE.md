@@ -439,6 +439,17 @@ documentation and user-facing text must say **Backend API** unless it is
 explaining an exact compatibility name. Private external product names must not
 appear in general HASHI architecture.
 
+Cross-instance Session transfer uses the existing authenticated Hashi Remote
+relay rather than exposing the loopback Backend API. The source verifies one
+explicit target's signed gateway status, including the target's local Backend
+API identity, before sending the transfer exactly once. The transfer/fork relay
+response is bound to the request nonce; an unsigned response, wrong instance,
+or uncertain write outcome can never mark the source Session accepted or cause
+an automatic replay. Only transfer/fork uses the bounded long-running relay
+budget: the target relay has 3,590 seconds and the source client 3,600 seconds
+so the relay can return a signed result before the client deadline. Generic
+Backend API proxy requests retain their existing shorter timeout.
+
 ## 8. Connector neutrality
 
 Shared contracts must be transport-neutral. A Connector may implement

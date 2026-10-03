@@ -1305,6 +1305,40 @@ async def test_transferred_chat_returns_canonical_409_without_model_run_or_teleg
 
 
 @pytest.mark.asyncio
+async def test_unknown_transfer_outcome_rejects_chat_without_claiming_redirect(tmp_path):
+    server, runtime = _server(tmp_path)
+    runtime._transfer_state = {
+        "status": "pending",
+        "outcome_unknown": True,
+        "transfer_id": "trf-chat-unknown",
+        "target_agent": "akane",
+        "target_instance": "HASHI2",
+    }
+    request = _Request(
+        {
+            "agent": "lily",
+            "text": "must not enter a new Run",
+            "idempotency_key": "chat-transfer-unknown-1",
+        }
+    )
+    request.content_type = "application/json"
+
+    response = await server.handle_chat(request)
+    payload = json.loads(response.text)
+
+    assert response.status == 409
+    assert payload["accepted"] is False
+    assert payload["error_code"] == "session_transfer_outcome_unknown"
+    assert payload["transfer_id"] == "trf-chat-unknown"
+    assert payload["admission"]["reason"] == "session_transfer_outcome_unknown"
+    assert "redirect" not in payload
+    assert runtime.api_request_metadata == []
+    assert server.session_store.recent_session_runs(
+        payload["session_id"], owner_id="user:7"
+    ) == []
+
+
+@pytest.mark.asyncio
 async def test_transferred_nonvoice_media_is_rejected_before_upload_is_written(
     tmp_path,
 ):

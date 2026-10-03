@@ -5099,27 +5099,36 @@ class FlexibleAgentRuntime:
 
         try:
             _, endpoint = self._resolve_bridge_handoff_endpoint(target_instance, action)
-            timeout = aiohttp.ClientTimeout(
-                total=None,
-                connect=10,
-                sock_connect=10,
+            body = await runtime_transfer.send_bridge_handoff(
+                self,
+                endpoint=endpoint,
+                expected_target=target_instance,
+                payload=package,
             )
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                health_endpoint = runtime_transfer.handoff_health_endpoint(endpoint)
-                async with session.get(health_endpoint) as health_response:
-                    health = await health_response.json()
-                    if health_response.status >= 400:
-                        raise RuntimeError(
-                            str(health.get("error") or f"HTTP {health_response.status}")
-                        )
-                    runtime_transfer.verify_handoff_instance_identity(
-                        health,
-                        expected_instance=target_instance,
-                    )
-                async with session.post(endpoint, json=package) as response:
-                    body = await response.json()
-                    if response.status >= 400 or not body.get("ok"):
-                        raise RuntimeError(str(body.get("error") or f"HTTP {response.status}"))
+        except runtime_transfer.BridgeHandoffOutcomeUnknown as e:
+            self.logger.warning(
+                "%s outcome unknown for %s: %s",
+                label,
+                package["transfer_id"],
+                e.cause,
+            )
+            if action == "transfer":
+                runtime_transfer.record_transfer_outcome_unknown(
+                    self,
+                    transfer_id=package["transfer_id"],
+                    error=e.cause,
+                )
+                message_key = "transfer.unknown"
+            else:
+                message_key = "transfer.fork_unknown"
+            await self._send_text(
+                update.effective_chat.id,
+                ui_language.tr(
+                    message_key,
+                    transfer_id=package["transfer_id"],
+                ),
+            )
+            return
         except Exception as e:
             self.logger.warning(f"{label} failed for {package['transfer_id']}: {e}")
             if action == "transfer":

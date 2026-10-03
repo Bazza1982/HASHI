@@ -138,6 +138,7 @@ API_PROTOCOL_CAPABILITIES = [
 ]
 
 _WORKBENCH_GATEWAY_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE"})
+_BRIDGE_HANDOFF_PROXY_TIMEOUT_SECONDS = 3590.0
 _WORKBENCH_GATEWAY_REQUEST_HEADERS = frozenset(
     {
         "accept",
@@ -1924,6 +1925,11 @@ def _workbench_gateway_route_timeout(
     *, method: str, api_path: str
 ) -> float | None:
     normalized_path = str(api_path or "").strip().strip("/")
+    if str(method or "").upper() == "POST" and normalized_path in {
+        "bridge/transfer",
+        "bridge/fork",
+    }:
+        return _BRIDGE_HANDOFF_PROXY_TIMEOUT_SECONDS
     if str(method or "").upper() == "POST" and re.fullmatch(
         r"agents/[^/]+/active", normalized_path
     ):
@@ -2497,7 +2503,7 @@ def create_app(
             detail = "Shared token required" if reason == "auth_required" else "Invalid or expired shared token"
             raise HTTPException(status_code=401, detail=detail)
         health = await asyncio.to_thread(_fetch_workbench_health, 1.0)
-        return {
+        return _shared_token_response(request, {
             "ok": True,
             "gateway": "workbench_v1",
             "authenticated_instance": authenticated_instance,
@@ -2511,7 +2517,7 @@ def create_app(
             },
             "workbench_online": health is not None,
             "workbench_health": health,
-        }
+        })
 
     @app.api_route(
         "/workbench/v1/proxy/api/{api_path:path}",
@@ -2554,6 +2560,23 @@ def create_app(
                     "detail": str(exc),
                 },
             )
+        normalized_api_path = str(api_path or "").strip().strip("/")
+        if normalized_api_path in {"bridge/transfer", "bridge/fork"}:
+            try:
+                payload = json.loads(content.decode("utf-8")) if content else {}
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return _shared_token_response(
+                    request,
+                    {"ok": False, "error": "Local Workbench returned invalid JSON"},
+                    status_code=502,
+                )
+            if not isinstance(payload, dict):
+                return _shared_token_response(
+                    request,
+                    {"ok": False, "error": "Local Workbench returned invalid JSON"},
+                    status_code=502,
+                )
+            return _shared_token_response(request, payload, status_code=status)
         return Response(content=content, status_code=status, headers=headers)
 
     # ── Peers ────────────────────────────────────────────────

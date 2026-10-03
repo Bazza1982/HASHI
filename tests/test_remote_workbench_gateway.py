@@ -12,7 +12,12 @@ from fastapi.testclient import TestClient
 from remote.api import server as remote_server
 from remote.api.server import create_app
 from remote.security.pairing import PairingManager
-from remote.security.shared_token import build_auth_headers, canonical_request_target
+from remote.security.shared_token import (
+    HEADER_NONCE,
+    build_auth_headers,
+    canonical_request_target,
+    verify_response_auth,
+)
 from remote.terminal.executor import TerminalExecutor
 
 
@@ -67,14 +72,19 @@ def test_gateway_status_requires_shared_token_even_in_lan_mode(tmp_path, monkeyp
     monkeypatch.setattr(remote_server, "_fetch_workbench_health", lambda timeout=1.0: {"ok": True})
 
     unauthenticated = client.get("/workbench/v1/status")
-    authenticated = client.get(
-        "/workbench/v1/status",
-        headers=_signed_headers(token, method="GET", path="/workbench/v1/status"),
-    )
+    headers = _signed_headers(token, method="GET", path="/workbench/v1/status")
+    authenticated = client.get("/workbench/v1/status", headers=headers)
 
     assert unauthenticated.status_code == 401
     assert authenticated.status_code == 200
     payload = authenticated.json()
+    response_auth = payload.pop("response_auth")
+    assert verify_response_auth(
+        shared_token=token,
+        request_nonce=headers[HEADER_NONCE],
+        payload=payload,
+        response_auth=response_auth,
+    ) is True
     assert payload["gateway"] == "workbench_v1"
     assert payload["authenticated_instance"] == "WORKBENCH"
     assert payload["instance"]["instance_id"] == "HASHI1"
@@ -114,6 +124,41 @@ def test_gateway_proxy_authenticates_exact_body_and_forwards_api_request(tmp_pat
     assert captured["api_path"] == "chat"
     assert captured["query"] == query
     assert captured["body_bytes"] == body
+
+
+def test_gateway_proxy_authenticates_bridge_transfer_response(tmp_path, monkeypatch):
+    client, token = _client(tmp_path)
+    captured = {}
+    body = b'{"transfer_id":"trf-1"}'
+    path = "/workbench/v1/proxy/api/bridge/transfer"
+    headers = {
+        "Content-Type": "application/json",
+        **_signed_headers(token, method="POST", path=path, body=body),
+    }
+    def forward(**kwargs):
+        captured.update(kwargs)
+        return (
+            200,
+            b'{"ok":true,"status":"accepted"}',
+            {"content-type": "application/json"},
+        )
+
+    monkeypatch.setattr(remote_server, "_forward_workbench_gateway_request", forward)
+
+    response = client.post(path, content=body, headers=headers)
+
+    assert response.status_code == 200
+    payload = response.json()
+    response_auth = payload.pop("response_auth")
+    assert payload == {"ok": True, "status": "accepted"}
+    assert verify_response_auth(
+        shared_token=token,
+        request_nonce=headers[HEADER_NONCE],
+        payload=payload,
+        response_auth=response_auth,
+    ) is True
+    assert captured["timeout"] == remote_server._BRIDGE_HANDOFF_PROXY_TIMEOUT_SECONDS
+    assert captured["timeout"] < 3600
 
 
 def test_gateway_proxy_uses_agent_lifecycle_budget_for_active_route(tmp_path, monkeypatch):

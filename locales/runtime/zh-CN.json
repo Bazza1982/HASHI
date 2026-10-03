@@ -2308,6 +2308,8 @@
     "transfer.label.fork": "分叉",
     "transfer.failed": "传输失败：{reason}\n当前会话仍保留在这里。",
     "transfer.fork_failed": "分叉失败：{reason}",
+    "transfer.unknown": "提交后的传输结果未知，系统未自动重发。\n传输标识：{transfer_id}\n继续操作前，请在目标实例核对此标识。",
+    "transfer.fork_unknown": "提交后的分叉结果未知，系统未自动重发。\n分叉标识：{transfer_id}\n重试前，请在目标实例核对此标识。",
     "transfer.accepted_offline": "{target} 已接受传输，但目标聊天当前为{status}。\n连接恢复后请在那里继续。传输标识：{transfer_id}",
     "transfer.accepted": "{target} 已接受传输。\n请在那里继续。传输标识：{transfer_id}",
     "transfer.fork_accepted_offline": "{target} 已接受分叉，但目标聊天当前为{status}。\n两个会话都仍可使用。分叉标识：{transfer_id}",
