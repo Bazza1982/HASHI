@@ -124,7 +124,12 @@ class RebootManager:
         except (OSError, ValueError):
             return {"accepted": False, "reason": "storage"}
         if previous is not None:
-            return {"accepted": True, "duplicate": True, "record": previous}
+            return {
+                "accepted": True,
+                "duplicate": True,
+                "record": previous,
+                "operation": self._operation_projection(previous),
+            }
         if (
             self.active_operation
             or getattr(self.kernel, "_restart_request", None) is not None
@@ -145,15 +150,10 @@ class RebootManager:
             record = self._new_receipt(restart, targets)
         except (OSError, ValueError):
             return {"accepted": False, "reason": "storage"}
-        # Admission closes only the selected routes. Existing calls may finish.
-        # Targeted calls wait for the new route; max rejects new shared-process
-        # calls while Telegram retains unaccepted updates at its server.
-        for handle in handles.values():
-            handle.fence_for_reboot(reject_new=restart.get("mode") in BROAD_REBOOT_MODES)
-        if restart.get("mode") in BROAD_REBOOT_MODES:
-            gateway = getattr(self.kernel, "api_gateway", None)
-            if gateway is not None and hasattr(gateway, "_accepting_requests"):
-                gateway._accepting_requests = False
+        # Admission is intentionally non-disruptive.  The accepted receipt and
+        # origin-visible start notice must exist before any selected route is
+        # fenced; otherwise Workbench can only discover the start after the
+        # target Worker returns.
         self.kernel._restart_request = {
             **restart,
             "operation_id": record["id"],
@@ -167,16 +167,36 @@ class RebootManager:
             record["mode"],
             record["targets"],
         )
-        return {"accepted": True, "record": record}
+        return {
+            "accepted": True,
+            "record": record,
+            "operation": self._operation_projection(record),
+        }
 
     def latest(
-        self, *, actor_id=None, chat_id=None, thread_id=None, surface="telegram"
+        self,
+        *,
+        owner_id=None,
+        actor_id=None,
+        chat_id=None,
+        thread_id=None,
+        surface="telegram",
     ):
         if not actor_id or not chat_id:
             return None
         for record in reversed(self.receipts.records()):
             origin = record.get("origin", {})
+            recorded_owner = str(origin.get("owner_id") or "")
+            if not recorded_owner:
+                legacy_actor = str(origin.get("actor_id") or "")
+                if legacy_actor.isdigit():
+                    recorded_owner = f"user:{legacy_actor}"
             if (
+                (
+                    owner_id is None
+                    or recorded_owner == str(owner_id)
+                )
+                and
                 str(origin.get("actor_id")) == str(actor_id)
                 and str(origin.get("chat_id")) == str(chat_id)
                 and origin.get("thread_id") == thread_id
@@ -187,10 +207,89 @@ class RebootManager:
                 return record
         return None
 
+    @staticmethod
+    def _operation_projection(record, *, after_sequence: int = 0):
+        if (
+            isinstance(after_sequence, bool) or not isinstance(after_sequence, int)
+        ):
+            raise ValueError("after_sequence must be an integer")
+        receipt_status = str(record.get("status") or "")
+        terminal = receipt_status not in ACTIVE
+        if receipt_status == "succeeded":
+            status = "completed"
+        elif receipt_status == "failed" and record.get("restored"):
+            status = "rolled_back"
+        elif terminal:
+            status = "failed"
+        else:
+            status = receipt_status
+        progress = [
+            event
+            for event in record.get("progress") or ()
+            if int(event.get("sequence") or 0) > after_sequence
+        ]
+        latest_sequence = max(
+            (int(event.get("sequence") or 0) for event in record.get("progress") or ()),
+            default=0,
+        )
+        return {
+            "operation_id": record["id"],
+            "action": "reboot",
+            "mode": record["mode"],
+            "status": status,
+            "terminal": terminal,
+            "latest_sequence": latest_sequence,
+            "progress": progress,
+            "targets": list(record.get("targets") or ()),
+            "lifecycle_state": record.get("lifecycle_state"),
+            "reason": record.get("reason") or "",
+        }
+
+    def operation(
+        self,
+        operation_id: str,
+        *,
+        owner_id: str,
+        agent_id: str,
+        after_sequence: int = 0,
+    ):
+        """Return one owner/Agent-scoped monotonic PAO operation projection."""
+
+        if (
+            not isinstance(operation_id, str)
+            or len(operation_id) != 32
+            or any(char not in "0123456789abcdef" for char in operation_id)
+        ):
+            return None
+        if isinstance(after_sequence, bool) or not isinstance(after_sequence, int):
+            raise ValueError("after_sequence must be an integer")
+        if after_sequence < 0:
+            raise ValueError("after_sequence must be non-negative")
+        owner = str(owner_id or "").strip()
+        agent = str(agent_id or "").strip().casefold()
+        if not owner or not agent:
+            return None
+        record = self.receipts.get(operation_id)
+        if record is None:
+            return None
+        origin = record.get("origin") or {}
+        recorded_owner = str(origin.get("owner_id") or "")
+        if not recorded_owner:
+            legacy_actor = str(origin.get("actor_id") or "")
+            if legacy_actor.isdigit():
+                recorded_owner = f"user:{legacy_actor}"
+        if (
+            recorded_owner != owner
+            or str(record.get("source_agent") or "").casefold() != agent
+        ):
+            return None
+        return self._operation_projection(record, after_sequence=after_sequence)
+
     async def _deliver(self, record, *, starting=False):
         origin = record.get("origin", {})
         surface = origin.get("surface", "telegram")
-        if record["delivery"]["status"] == "not_requested":
+        delivery_key = "start_delivery" if starting else "delivery"
+        if record[delivery_key]["status"] == "not_requested":
             return {"sent": False}
         if surface == "telegram" and not origin.get("chat_id"):
             return {"sent": False}
@@ -240,6 +339,39 @@ class RebootManager:
                 "message_id": message.get("message_id"),
             }
         return {"sent": False}
+
+    def _record_start_delivery(self, record, result):
+        delivery = dict(record.get("start_delivery") or {})
+        if delivery.get("status") == "not_requested":
+            return record
+        delivery["attempts"] = int(delivery.get("attempts") or 0) + 1
+        if result.get("sent"):
+            delivery.update(
+                status="sent",
+                sender=result.get("sender"),
+                message_id=result.get("message_id"),
+                sent_at=time.time(),
+            )
+            return self.receipts.update(
+                record["id"],
+                phase="start_visible",
+                start_delivery=delivery,
+                progress_message_id=result.get("message_id"),
+            )
+        delivery.update(status="exhausted", next_attempt_at=0)
+        return self.receipts.update(record["id"], start_delivery=delivery)
+
+    def _fence_reboot_routes(self, record: Mapping[str, Any]) -> None:
+        """Gate the frozen target set only after start progress is readable."""
+
+        handles = self._target_handles(tuple(record.get("targets") or ()))
+        broad = str(record.get("mode") or "") in BROAD_REBOOT_MODES
+        for handle in handles.values():
+            handle.fence_for_reboot(reject_new=broad)
+        if broad:
+            gateway = getattr(self.kernel, "api_gateway", None)
+            if gateway is not None and hasattr(gateway, "_accepting_requests"):
+                gateway._accepting_requests = False
 
     async def send_pending(self, *, now=None):
         if getattr(self.kernel, "_handoff_draining", False) or getattr(
@@ -955,14 +1087,31 @@ class RebootManager:
         staged_shared = None
         result = False
         try:
-            self.receipts.update(record["id"], status="running", phase="preparing")
+            record = self.receipts.update(
+                record["id"], status="running", phase="announcing"
+            )
             try:
-                await self._deliver(record, starting=True)
+                start_result = await self._deliver(record, starting=True)
             except Exception as exc:
                 bridge_logger.warning(
                     "Reboot start notification failed (%s)", type(exc).__name__
                 )
+                start_result = {"sent": False}
+            record = self._record_start_delivery(record, start_result)
+            if (
+                record.get("origin", {}).get("surface") == "workbench"
+                and not start_result.get("sent")
+            ):
+                self._finish(
+                    record,
+                    "rejected",
+                    lifecycle_state="rejected",
+                    reason="start_notice_unavailable",
+                )
+                return False
+            self.receipts.update(record["id"], phase="preparing")
             if str(restart.get("mode") or "same") in BROAD_REBOOT_MODES:
+                self._fence_reboot_routes(record)
                 staged_shared = self._stage_shared_replacement(record)
                 result = True
             else:
@@ -1076,6 +1225,7 @@ class RebootManager:
         quiesced: set[str] = set()
         failure_reason = "route_busy"
         try:
+            self._fence_reboot_routes(record)
             self.receipts.update(record["id"], phase="switching")
             for name in selected_targets:
                 old_clients[name] = await asyncio.wait_for(

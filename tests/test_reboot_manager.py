@@ -350,6 +350,139 @@ async def test_admission_freezes_target_and_repeated_requests_do_not_overwrite(
 
 
 @pytest.mark.asyncio
+async def test_workbench_start_notice_is_durable_before_target_route_is_gated(
+    tmp_path,
+    monkeypatch,
+):
+    kernel, manager, request = _notice_manager(tmp_path)
+    request["origin"] = {
+        "surface": "workbench",
+        "owner_id": "owner:operator",
+        "actor_id": "operator",
+        "chat_id": "session-1",
+        "thread_id": None,
+    }
+    kernel.queue_generation("a", names=("zelda",))
+    observed = []
+
+    def record_notice(_kernel, **kwargs):
+        observed.append(
+            {
+                "idempotency_key": kwargs["idempotency_key"],
+                "cutover": kernel._runtime_map()["zelda"]._cutover,
+            }
+        )
+        return {"message_id": "reboot-progress-1"}
+
+    monkeypatch.setattr(
+        "orchestrator.reboot_manager.runtime_session.record_kernel_presentation_notice",
+        record_notice,
+    )
+
+    accepted = manager.submit(request)
+
+    assert accepted["accepted"]
+    assert kernel._runtime_map()["zelda"]._cutover is False
+    assert await manager.hot_restart(kernel._restart_request)
+    starting = next(
+        item for item in observed if item["idempotency_key"].endswith(":starting")
+    )
+    assert starting["cutover"] is False
+    record = manager.receipts.get(accepted["record"]["id"])
+    assert record["start_delivery"]["status"] == "sent"
+    assert record["start_delivery"]["message_id"] == "reboot-progress-1"
+    phases = [event["phase"] for event in record["progress"]]
+    assert phases.index("start_visible") < phases.index("switching")
+    assert [event["sequence"] for event in record["progress"]] == list(
+        range(1, len(record["progress"]) + 1)
+    )
+
+
+@pytest.mark.asyncio
+async def test_workbench_start_notice_failure_rejects_before_candidate_or_cutover(
+    tmp_path,
+    monkeypatch,
+):
+    kernel, manager, request = _notice_manager(tmp_path)
+    request["origin"] = {
+        "surface": "workbench",
+        "owner_id": "owner:operator",
+        "actor_id": "operator",
+        "chat_id": "session-1",
+        "thread_id": None,
+    }
+    monkeypatch.setattr(
+        "orchestrator.reboot_manager.runtime_session.record_kernel_presentation_notice",
+        lambda *_args, **_kwargs: None,
+    )
+
+    accepted = manager.submit(request)
+
+    assert accepted["accepted"]
+    assert not await manager.hot_restart(kernel._restart_request)
+    assert kernel._runtime_map()["zelda"]._cutover is False
+    assert "qualify" not in kernel.events
+    record = manager.receipts.get(accepted["record"]["id"])
+    assert record["status"] == "rejected"
+    assert record["reason"] == "start_notice_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_reboot_operation_projection_is_monotonic_and_incremental(
+    tmp_path,
+    monkeypatch,
+):
+    kernel, manager, request = _notice_manager(tmp_path)
+    request["origin"] = {
+        "surface": "workbench",
+        "owner_id": "owner:operator",
+        "actor_id": "operator",
+        "chat_id": "session-1",
+        "thread_id": None,
+    }
+    monkeypatch.setattr(
+        "orchestrator.reboot_manager.runtime_session.record_kernel_presentation_notice",
+        lambda *_args, **_kwargs: {"message_id": "progress-1"},
+    )
+    kernel.queue_generation("a", names=("zelda",))
+    accepted = manager.submit(request)
+    operation_id = accepted["record"]["id"]
+
+    initial = manager.operation(
+        operation_id, owner_id="owner:operator", agent_id="zelda"
+    )
+    assert initial["status"] == "accepted"
+    assert initial["terminal"] is False
+    assert initial["latest_sequence"] == 1
+
+    assert await manager.hot_restart(kernel._restart_request)
+    completed = manager.operation(
+        operation_id, owner_id="owner:operator", agent_id="zelda"
+    )
+    assert completed["status"] == "completed"
+    assert completed["terminal"] is True
+    assert completed["progress"][-1]["phase"] == "finished"
+    assert next(
+        event for event in completed["progress"] if event["phase"] == "start_visible"
+    )["message_id"] == "progress-1"
+
+    delta = manager.operation(
+        operation_id,
+        owner_id="owner:operator",
+        agent_id="zelda",
+        after_sequence=3,
+    )
+    assert delta["latest_sequence"] == completed["latest_sequence"]
+    assert all(event["sequence"] > 3 for event in delta["progress"])
+    assert manager.operation(
+        operation_id, owner_id="another-owner", agent_id="zelda"
+    ) is None
+    assert manager.operation(
+        operation_id, owner_id="owner:operator", agent_id="sunny"
+    ) is None
+
+
+@pytest.mark.asyncio
 async def test_failed_restore_is_reported_as_unavailable_not_restored(
     tmp_path, monkeypatch
 ):
@@ -560,9 +693,22 @@ async def test_reboot_admission_queues_only_selected_routes(tmp_path, mode):
     old = {name: handle.client for name, handle in handles.items()}
 
     assert manager.submit(request)["accepted"]
-    assert handles["zelda"]._cutover
-    assert handles["sunny"]._cutover is (mode == "max")
-    assert kernel.api_gateway._accepting_requests is (mode != "max")
+    # Admission is durable but non-disruptive.  Route fencing happens only
+    # after the start notice has been made readable by the origin frontend.
+    assert not handles["zelda"]._cutover
+    assert not handles["sunny"]._cutover
+    assert kernel.api_gateway._accepting_requests
+
+    for name in ("zelda", "sunny"):
+        await handles[name]._route("runtime.probe")
+        assert f"{name}:{old[name].pid}:runtime.probe" in kernel.events
+    kernel.events.clear()
+
+    selected = ("zelda", "sunny") if mode == "max" else ("zelda",)
+    for name in selected:
+        handles[name].fence_for_reboot(reject_new=mode == "max")
+    if mode == "max":
+        kernel.api_gateway._accepting_requests = False
 
     blocked = None
     if mode == "max":
@@ -961,8 +1107,9 @@ async def test_failed_shared_replacement_reopens_all_agent_routes(tmp_path):
     kernel.api_gateway = SimpleNamespace(_accepting_requests=True)
     accepted = manager.submit({"mode": "max", "agent_name": "zelda"})
     assert accepted["accepted"]
-    assert all(handle._cutover for handle in kernel.runtimes)
+    assert all(not handle._cutover for handle in kernel.runtimes)
     assert await manager.hot_restart(kernel._restart_request)
+    assert all(handle._cutover for handle in kernel.runtimes)
     record = manager.receipts.get(accepted["record"]["id"])
     state_dir = tmp_path / "state" / "instance"
     (state_dir / "kernel-requests" / f"{record['id']}.json").unlink()
