@@ -262,10 +262,14 @@ class PersonaCommentaryPipeline:
             )
         self.stage_authored_persona_stages = authored
         self._lock = asyncio.Lock()
+        self._delivery_lock = asyncio.Lock()
         self._attempts: dict[str, asyncio.Task[bool]] = {}
+        self._closed = False
 
     async def publish(self, commentary: NeutralCommentary) -> bool:
         async with self._lock:
+            if self._closed:
+                return False
             task = self._attempts.get(commentary.event_id)
             if task is None:
                 task = asyncio.create_task(self._prepare_then_deliver(commentary))
@@ -274,28 +278,50 @@ class PersonaCommentaryPipeline:
 
     async def publish_draft(self, commentary: DraftResponseCommentary) -> bool:
         async with self._lock:
+            if self._closed:
+                return False
             task = self._attempts.get(commentary.event_id)
             if task is None:
                 task = asyncio.create_task(self._deliver_draft(commentary))
                 self._attempts[commentary.event_id] = task
         return await asyncio.shield(task)
 
+    async def close(self) -> None:
+        """Fence new commentary and cancel the real shielded attempts."""
+
+        async with self._lock:
+            self._closed = True
+            pending = tuple(
+                task for task in self._attempts.values() if not task.done()
+            )
+            for task in pending:
+                task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
     async def _prepare_then_deliver(self, commentary: NeutralCommentary) -> bool:
         try:
-            if commentary.stage in self.stage_authored_persona_stages:
-                packaged = PackagedCommentary(
-                    source_event_id=commentary.event_id,
-                    stage=commentary.stage,
-                    text=commentary.text,
-                    provenance="stage_authored_persona",
+            async with self._delivery_lock:
+                if self._closed:
+                    return False
+                if commentary.stage in self.stage_authored_persona_stages:
+                    packaged = PackagedCommentary(
+                        source_event_id=commentary.event_id,
+                        stage=commentary.stage,
+                        text=commentary.text,
+                        provenance="stage_authored_persona",
+                    )
+                else:
+                    packaged = await self.packager.package(commentary)
+                if packaged.source_event_id != commentary.event_id:
+                    raise CommentaryValidationError(
+                        "packager changed the source commentary identity"
+                    )
+                if self._closed:
+                    return False
+                return bool(
+                    await self.delivery.deliver_packaged_commentary(packaged)
                 )
-            else:
-                packaged = await self.packager.package(commentary)
-            if packaged.source_event_id != commentary.event_id:
-                raise CommentaryValidationError(
-                    "packager changed the source commentary identity"
-                )
-            return bool(await self.delivery.deliver_packaged_commentary(packaged))
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -303,14 +329,19 @@ class PersonaCommentaryPipeline:
 
     async def _deliver_draft(self, commentary: DraftResponseCommentary) -> bool:
         try:
-            packaged = PackagedCommentary(
-                source_event_id=commentary.event_id,
-                stage=Stage.EXECUTION,
-                text=commentary.text,
-                provenance="primary_execution_draft",
-                draft_response=True,
-            )
-            return bool(await self.delivery.deliver_packaged_commentary(packaged))
+            async with self._delivery_lock:
+                if self._closed:
+                    return False
+                packaged = PackagedCommentary(
+                    source_event_id=commentary.event_id,
+                    stage=Stage.EXECUTION,
+                    text=commentary.text,
+                    provenance="primary_execution_draft",
+                    draft_response=True,
+                )
+                return bool(
+                    await self.delivery.deliver_packaged_commentary(packaged)
+                )
         except asyncio.CancelledError:
             raise
         except Exception:

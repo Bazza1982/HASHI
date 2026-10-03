@@ -399,6 +399,26 @@ class RuntimeSupportMixin:
         )
         return rendered.text, rendered.provenance, detail
 
+    async def _close_commentary_before_terminal_delivery(self) -> None:
+        if getattr(self, "_terminal_commentary_closed", False):
+            return
+        self._terminal_commentary_closed = True
+        target = self.turn_services
+        if target is None:
+            return
+        closer = getattr(target, "close", None)
+        if not callable(closer):
+            return
+        try:
+            await closer()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - final delivery remains required
+            self.logger.warning(
+                "HER v2 commentary close failed before terminal delivery: %s",
+                exc,
+            )
+
     async def _deliver(
         self,
         state: _TurnState,
@@ -416,6 +436,8 @@ class RuntimeSupportMixin:
             raise ValueError(
                 "raw commentary cannot use the workflow delivery boundary"
             )
+        if kind in {"final", "clarification"}:
+            await self._close_commentary_before_terminal_delivery()
         if any(item.event_id == event_id for item in state.deliveries):
             return True
         delivery_id = ""
@@ -514,6 +536,8 @@ class RuntimeSupportMixin:
         target_event_id: str,
         event_id: str,
     ) -> bool:
+        if resolution in {"final", "clarification"}:
+            await self._close_commentary_before_terminal_delivery()
         resolver = getattr(self.delivery, "resolve_initial", None)
         if not callable(resolver):
             return False

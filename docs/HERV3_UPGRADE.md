@@ -86,6 +86,25 @@ background, and unknown-effect counts for reconciliation. Provider-call
 continuations share the existing bounded local recovery budget; they never
 authorize replay of a prior Tool call or user request.
 
+### Terminal commentary fence
+
+Progress commentary is request-local and must quiesce before a required Final
+or Clarification delivery starts. `TurnServices` serializes commentary in
+source order and reserves the rate-limit interval before awaiting Persona
+packaging or transport, so fast Tool start/completion events cannot launch
+competing deliveries. The request-local Persona commentary pipeline retains
+one attempt per event ID and never replays an attempt whose transport outcome
+may be ambiguous.
+
+At the terminal boundary, `TurnServices.close()` first rejects new progress,
+cancels its observers, and then closes the Persona pipeline. Closing the
+pipeline cancels the real package/delivery tasks even when callers were waiting
+through a shield. Pending optional commentary is discarded before the Final or
+Clarification is delivered; an already-started transport is not retried.
+Execution drafts and required terminal messages keep their existing typed
+delivery and replacement contracts. The adapter-level close remains an
+idempotent cleanup fallback, not the ordering barrier.
+
 ## Foreground path
 
 `PCM -> main model <-> tools -> delivery`

@@ -102,6 +102,7 @@ class TurnServices(CommentaryPort):
         self._intervention_progress_revision = -1
         self._tasks: set[asyncio.Task] = set()
         self._companion_task: asyncio.Task | None = None
+        self._forward_lock = asyncio.Lock()
         self._closed = False
         self._initial_ack_sent = False
 
@@ -114,6 +115,8 @@ class TurnServices(CommentaryPort):
             self._companion_task = asyncio.create_task(self._companion_loop())
 
     async def close(self) -> None:
+        if self._closed:
+            return
         self._closed = True
         if self._companion_task is not None:
             self._companion_task.cancel()
@@ -124,6 +127,9 @@ class TurnServices(CommentaryPort):
             await asyncio.gather(*pending, return_exceptions=True)
         self._tasks.clear()
         self._companion_task = None
+        close_downstream = getattr(self.downstream, "close", None)
+        if callable(close_downstream):
+            await close_downstream()
 
     def _spawn(self, coroutine: Awaitable[Any]) -> None:
         if self._closed:
@@ -232,9 +238,7 @@ class TurnServices(CommentaryPort):
 
     async def publish(self, commentary: NeutralCommentary) -> bool:
         text = str(commentary.text or "").strip()
-        if not text:
-            return False
-        if self.clock() - self.last_commentary_at < self.commentary_interval_s:
+        if self._closed or not text:
             return False
         accepted = await self._forward(commentary)
         if accepted:
@@ -242,16 +246,17 @@ class TurnServices(CommentaryPort):
         return accepted
 
     async def publish_draft(self, commentary: DraftResponseCommentary) -> bool:
-        if self.downstream is None:
+        if self._closed or self.downstream is None:
             return False
-        return bool(await self.downstream.publish_draft(commentary))
+        async with self._forward_lock:
+            if self._closed or self.downstream is None:
+                return False
+            return bool(await self.downstream.publish_draft(commentary))
 
     async def _emit(
         self, text: str, *, required: bool, bypass_interval: bool = False
     ) -> bool:
         if self.downstream is None or not str(text).strip():
-            return False
-        if not bypass_interval and self.clock() - self.last_commentary_at < self.commentary_interval_s:
             return False
         self._event_serial += 1
         commentary = NeutralCommentary(
@@ -261,15 +266,36 @@ class TurnServices(CommentaryPort):
             attempt=1,
             text=str(text).strip(),
         )
-        return await self._forward(commentary)
+        return await self._forward(
+            commentary,
+            bypass_interval=bypass_interval,
+        )
 
-    async def _forward(self, commentary: NeutralCommentary) -> bool:
-        if self.downstream is None:
-            return False
-        accepted = bool(await self.downstream.publish(commentary))
-        if accepted:
-            self.last_commentary_at = self.clock()
-        return accepted
+    async def _forward(
+        self,
+        commentary: NeutralCommentary,
+        *,
+        bypass_interval: bool = False,
+    ) -> bool:
+        async with self._forward_lock:
+            if self._closed or self.downstream is None:
+                return False
+            now = self.clock()
+            if (
+                not bypass_interval
+                and now - self.last_commentary_at < self.commentary_interval_s
+            ):
+                return False
+            previous_commentary_at = self.last_commentary_at
+            self.last_commentary_at = now
+            try:
+                accepted = bool(await self.downstream.publish(commentary))
+            except BaseException:
+                self.last_commentary_at = previous_commentary_at
+                raise
+            if not accepted:
+                self.last_commentary_at = previous_commentary_at
+            return accepted
 
     async def _companion_loop(self) -> None:
         while not self._closed:
