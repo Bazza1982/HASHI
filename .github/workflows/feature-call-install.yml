@@ -1,56 +1,36 @@
-name: Apply reviewed call implementation
+name: Normalize call PRD source formatting
 on:
   push:
     branches: [feature-call]
-    paths: ['.github/workflows/feature-call-install.yml', '.call-stage/**']
+    paths: ['.github/workflows/feature-call-install.yml']
 permissions:
   contents: write
 jobs:
-  apply-and-check:
+  normalize:
     if: github.repository == 'Bazza1982/HASHI' && github.ref == 'refs/heads/feature-call'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
         with:
           ref: feature-call
           fetch-depth: 0
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Apply exact offline-tested patch
+      - name: Preserve Markdown line breaks without trailing whitespace
         shell: bash
         run: |
           set -euo pipefail
           test "$(git branch --show-current)" = feature-call
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          cat .call-stage/*.bin > "$RUNNER_TEMP/call.patch.gz"
-          echo "28b9cfe353f7618dae09a9aaefdb6d88d10c15e2435caee5a3c9a0d371705c90  $RUNNER_TEMP/call.patch.gz" | sha256sum --check
-          gzip -dc "$RUNNER_TEMP/call.patch.gz" > "$RUNNER_TEMP/call.patch"
-          git apply --check --exclude='.github/workflows/*' "$RUNNER_TEMP/call.patch"
-          git apply --exclude='.github/workflows/*' "$RUNNER_TEMP/call.patch"
-          rm -r .call-stage
-      - name: Test dependencies and formatting
-        run: |
-          python -m pip install pytest pytest-asyncio anyio aiohttp pillow PyYAML httpx jsonschema python-telegram-bot croniter psutil rich ruff
-          ruff format orchestrator/frontend_call tests/frontend_call
-          ruff check --select F401 --fix orchestrator/frontend_call tests/frontend_call
-          ruff check orchestrator/frontend_call tests/frontend_call
-      - name: Commit implementation on feature branch only
-        shell: bash
-        run: |
-          set -euo pipefail
-          git add -A
-          python scripts/check_protected_core_changes.py --base 6a4b29b881dd3077c1c2302e4bbc6e41b0277bf9
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('docs/call/HASHI_Call_PRD_2026-10-03.md')
+          lines = p.read_text().splitlines()
+          p.write_text('\n'.join(line.rstrip() + ('<br>' if line.endswith('  ') else '') for line in lines) + '\n')
+          PY
+          git add docs/call/HASHI_Call_PRD_2026-10-03.md
           git diff --cached --check
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'feat(call): add independent half-duplex media connector and focused tests'
+          git commit -m 'docs(call): preserve PRD hard breaks without whitespace errors'
           git push origin HEAD:refs/heads/feature-call
-          echo "Implementation commit: $(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
-      - name: Focused connector and phone regression tests
-        run: python -m pytest -q tests/frontend_call tests/test_live_voice_integration.py tests/test_architecture_boundaries.py
-      - name: Final source invariants
-        run: |
-          python scripts/check_protected_core_changes.py --base 6a4b29b881dd3077c1c2302e4bbc6e41b0277bf9
           git diff --check 6a4b29b881dd3077c1c2302e4bbc6e41b0277bf9
