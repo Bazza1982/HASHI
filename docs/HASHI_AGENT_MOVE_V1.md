@@ -420,3 +420,51 @@ This transport addition does not itself change the workspace size/mode contract.
   Formal HASHI2/HASHI3 processes were not restarted or rebooted; HASHI1/HASHI4
   were untouched by this work. Branch adoption, the HASHI4 20-Agent dry-run and
   backfill, and a real browser Workbench refresh remain separate operations.
+
+## Existing-target history backfill operator — 2026-10-03
+
+The one-time operator for already-moved Agents reuses PAO's schema-5
+conversation-continuity export, import, status and rollback owners. It is not a
+second migration path: it changes no Agent registry, workspace, credential,
+lifecycle state or source Session, and it never reads legacy transcripts.
+
+Cross-platform sources export frozen capsules with their native Python and
+SQLite implementation. In particular, a Windows target must not open a live WSL
+SQLite/WAL database through a UNC path. Each source runs `export` against the
+same strict manifest and a private capsule directory; the target consumes only
+the completed capsule set:
+
+```
+python scripts/backfill_agent_history.py export --source-root <source-root> \
+  --source-instance <instance> --manifest <manifest.json> \
+  --capsule-dir <private-capsule-dir>
+python scripts/backfill_agent_history.py dry-run --target-root <target-root> \
+  --manifest <manifest.json> --capsule-dir <private-capsule-dir>
+python scripts/backfill_agent_history.py apply --target-root <target-root> \
+  --manifest <manifest.json> --capsule-dir <private-capsule-dir> \
+  --expected-plan-digest <dry-run-digest> --backup-dir <new-backup-dir>
+```
+
+The manifest binds the exact owner, target instance, expected entry count and
+one-to-one source-instance/source-Agent/source-lifecycle/target-Agent/
+target-lifecycle mappings. Source and target must carry the same lifecycle ID;
+missing or changed lifecycle IDs fail closed. This
+operator has no legacy name-only exception. Deterministic transfer IDs and
+capsule names derive from that batch and mapping. Apply holds the target's
+existing instance process lock, repeats target identity/lifecycle validation,
+checks every owner's Runs, and requires the dry-run digest. The original target
+database and Session workspaces are privately backed up before a live
+SessionStore is initialized. The backup is additive evidence; it is never
+restored over newer target work. Symlinks, junctions, other reparse points,
+unreadable inventory and backup paths overlapping target state fail closed.
+On a partial batch failure the operator calls the existing per-transfer rollback
+owner in reverse order only for claims newly created by that invocation; an
+earlier successful same-batch claim is retained. `status` reads a SQLite
+snapshot without initializing the live store. Explicit `rollback` uses the same
+deterministic transfer IDs and holds the target process lock.
+
+The 2026-10-03 formal scope is the twelve HASHI1-origin Agents whose source and
+HASHI4 target lifecycle IDs are proven equal. The eight HASHI2-origin histories
+remain in place and are excluded by user decision because their old packages do
+not provide lifecycle-strength provenance; package hashes or matching names do
+not authorize a legacy bypass.

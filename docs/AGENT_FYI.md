@@ -131,6 +131,16 @@ Commands follow the [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md), retain Session 
 
 /move and /clone share package, registry, workspace, Scheduler, secret, and lifecycle owners. Move removes verified source only after activation. Clone preserves it, excludes Telegram credentials, and disables imported jobs. Accepted is not completed. See [Agent Move](HASHI_AGENT_MOVE_V1.md).
 
+Existing-target history backfill is an offline PAO operator, not Move. Export
+schema-5 capsules on each source's native OS, then stop the exact target; apply
+and rollback hold its process lock for their full mutation boundary. The strict
+manifest binds owner and 1:1 Agent identities; no UNC live SQLite, legacy
+transcript fallback, source retirement, registry change or whole-database
+restore is allowed. Source and target must share the same lifecycle ID, which
+must match both current registry rows exactly;
+name-only legacy evidence fails closed. Apply backs up before live store
+initialization and compensates only claims created by that invocation.
+
 Scheduler stores UTC instants, wall time and IANA zone. Missed-trigger decisions belong to FC Conversation; only an unambiguous choice for the exact batch may resolve recovery. Never rerun recovery without explicit authority. HERV3 uses the same-instance published Backend API endpoint; never invent a port.
 
 Use authorized capabilities only; device actions require a same-instance Worker. Prefer bounded log queries. Work in the foreground unless /bg is explicit. Tests prove their scope, not adoption. HCC is optional, non-authoritative PCM context; /hcc and hcc-refresh refresh sources without rewriting PCM or creating retry authority.

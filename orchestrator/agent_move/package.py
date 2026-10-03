@@ -1233,6 +1233,33 @@ def _export_conversation_continuity_snapshot(
         )
 
 
+def export_conversation_continuity_snapshot(
+    root: Path,
+    *,
+    source_instance: str,
+    agent_id: str,
+    transfer_id: str,
+    history_mode: str,
+    explicit_owner_id: str | None,
+) -> dict[str, Any]:
+    """Public PAO helper for an owner-checked, read-only SessionStore snapshot."""
+
+    return _export_conversation_continuity_snapshot(
+        root,
+        source_instance=source_instance,
+        agent_id=agent_id,
+        transfer_id=transfer_id,
+        history_mode=history_mode,
+        explicit_owner_id=explicit_owner_id,
+    )
+
+
+def configured_conversation_owner_id(root: Path) -> str:
+    """Return the configured conversation owner without exposing secret values."""
+
+    return _configured_owner_id(root)
+
+
 def _resolve_conversation_owner(
     root: Path,
     store: SessionStore,
