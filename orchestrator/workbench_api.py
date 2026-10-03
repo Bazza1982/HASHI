@@ -433,6 +433,8 @@ class WorkbenchApiServer:
             self._authorize_live_voice,
             qualified=True,
         )
+        from orchestrator.frontend_call.routes import register_call_api
+        register_call_api(self)
         self.app.router.add_post("/api/auth/login", self.handle_auth_login)
         self.app.router.add_post("/api/auth/logout", self.handle_auth_logout)
         self.app.router.add_get("/api/auth/me", self.handle_auth_me)

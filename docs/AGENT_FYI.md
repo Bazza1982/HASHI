@@ -1,5 +1,12 @@
 # HASHI Agent FYI
 
+2026-10-04 HASHI2 /call is being integrated only on an isolated experiment
+branch. OpenRouter Whisper Large V3 is not a guaranteed Groq route because
+speech requests ignore provider pinning. Gemini 3.8 Flash-Lite TTS accepts
+voice plus provider speech style metadata. Existing HASHI2 OpenRouter
+credential returned HTTP 401 during the first live probe; source tests and
+running adoption are separate. No main merge or HASHI2 restart is implied.
+
 2026-10-03 non-voice repairs require separate source, instance-adoption and
 live evidence. Core is unchanged; no new API supervisor is added.
 Canonical Session API user messages and ordinary attachment staging now honor

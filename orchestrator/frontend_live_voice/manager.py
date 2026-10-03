@@ -241,6 +241,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         opening_grace_seconds: float = 0.25,
     ):
         self.session_store = session_store
+        self.external_call_busy = lambda owner_id: False
         self.global_config = global_config
         self.secrets = dict(secrets or {})
         self.providers = dict(default_registry(include_experimental=True) if provider_registry is None else provider_registry)
@@ -2852,7 +2853,24 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                            "provider_session_max_duration_seconds": (resolved_phone["adapter"].capabilities.max_session_seconds if phone else None)},
         }
 
+    def has_foreground_call(self, owner_id: str) -> bool:
+        """Read-only admission interlock for other media Connectors."""
+        with self.session_store._lock, self.session_store._connection() as connection:
+            active = connection.execute(
+                "SELECT 1 FROM live_calls WHERE owner_id=? AND foreground=1 "
+                "AND phase IN ('connecting','active','ending','recovering') LIMIT 1",
+                (owner_id,),
+            ).fetchone()
+            pending = connection.execute(
+                "SELECT 1 FROM live_call_attempts WHERE owner_id=? "
+                "AND state IN ('reserved','provider_created') LIMIT 1",
+                (owner_id,),
+            ).fetchone()
+        return bool(active or pending)
+
     async def _op_start(self, owner_id: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        if self.external_call_busy(owner_id):
+            raise LiveVoiceError("live_other_call_active", 409)
         if not self.available:
             raise LiveVoiceError("live_not_enabled", 503)
         expected = self._expected_scope(payload)

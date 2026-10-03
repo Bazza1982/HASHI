@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "enabled": false,
+  "targets": [
+    {
+      "id": "openrouter-whisper",
+      "kind": "stt",
+      "adapter": "openai_compatible",
+      "location": "cloud",
+      "label": "Whisper Large V3 (OpenRouter)",
+      "base_url": "https://openrouter.ai/api/v1",
+      "model": "openai/whisper-large-v3",
+      "credential_ref": "secrets://openrouter-api_key",
+      "options": {}
+    },
+    {
+      "id": "openrouter-gemini-tts",
+      "kind": "tts",
+      "adapter": "openai_compatible",
+      "location": "cloud",
+      "label": "Gemini 3.8 Flash-Lite TTS (OpenRouter)",
+      "base_url": "https://openrouter.ai/api/v1",
+      "model": "google/gemini-3.8-flash-lite-tts",
+      "credential_ref": "secrets://openrouter-api_key",
+      "audio_format": "mp3",
+      "voices": [
+        "Achernar", "Achird", "Algenib", "Algieba", "Alnilam", "Aoede",
+        "Autonoe", "Callirrhoe", "Charon", "Despina", "Enceladus", "Erinome",
+        "Fenrir", "Gacrux", "Iapetus", "Kore", "Laomedeia", "Leda", "Orus",
+        "Pulcherrima", "Puck", "Rasalgethi", "Sadachbia", "Sadaltager",
+        "Schedar", "Sulafat", "Umbriel", "Vindemiatrix", "Zephyr", "Zubenelgenubi"
+      ],
+      "voice_styles": {
+        "Achernar": "Soft",
+        "Achird": "Friendly",
+        "Algenib": "Gravelly",
+        "Algieba": "Smooth",
+        "Alnilam": "Firm",
+        "Aoede": "Breezy",
+        "Autonoe": "Bright",
+        "Callirrhoe": "Easy-going",
+        "Charon": "Informative",
+        "Despina": "Smooth",
+        "Enceladus": "Breathy",
+        "Erinome": "Clear",
+        "Fenrir": "Excitable",
+        "Gacrux": "Mature",
+        "Iapetus": "Clear",
+        "Kore": "Firm",
+        "Laomedeia": "Upbeat",
+        "Leda": "Youthful",
+        "Orus": "Firm",
+        "Pulcherrima": "Forward",
+        "Puck": "Upbeat",
+        "Rasalgethi": "Informative",
+        "Sadachbia": "Lively",
+        "Sadaltager": "Knowledgeable",
+        "Schedar": "Even",
+        "Sulafat": "Warm",
+        "Umbriel": "Easy-going",
+        "Vindemiatrix": "Gentle",
+        "Zephyr": "Bright",
+        "Zubenelgenubi": "Casual"
+      },
+      "options": {
+        "style": {"type": "string", "max_length": 160}
+      }
+    },
+    {
+      "id": "openrouter-gemini-vision",
+      "kind": "vision",
+      "adapter": "openai_compatible",
+      "location": "cloud",
+      "label": "Gemini 3.8 Flash visual snapshot (OpenRouter)",
+      "base_url": "https://openrouter.ai/api/v1",
+      "model": "google/gemini-3.8-flash",
+      "credential_ref": "secrets://openrouter-api_key",
+      "options": {}
+    }
+  ],
+  "default_profile": {
+    "stt": {"target_id": "openrouter-whisper", "options": {}},
+    "tts": {"target_id": "openrouter-gemini-tts", "voice_id": "Achernar", "options": {}},
+    "vision": null
+  },
+  "profiles": {}
+}
