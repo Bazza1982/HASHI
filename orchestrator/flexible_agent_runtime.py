@@ -2217,6 +2217,7 @@ class FlexibleAgentRuntime:
             "model": self.get_current_model(),
             "provider": self.get_current_provider(),
             "allowed_backends": public_allowed_backends,
+            "privacy_level": int(getattr(self.backend_manager, "privacy_level", 1)),
             "workspace_dir": str(self.workspace_dir),
             "transcript_path": str(self.transcript_log_path),
             "online": bool(self.backend_ready),
