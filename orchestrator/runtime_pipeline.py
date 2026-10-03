@@ -1134,13 +1134,6 @@ def begin_queue_item(runtime, item) -> QueueItemStart:
 
 
 async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPrompt:
-    refresh_tool_context = getattr(
-        getattr(runtime, "backend_manager", None),
-        "_refresh_tool_runtime_context",
-        None,
-    )
-    if callable(refresh_tool_context):
-        refresh_tool_context(item.request_id)
     effective_prompt = runtime._consume_session_primer(item)
     backend = runtime.backend_manager.current_backend
     request_meta = request_meta_for(runtime, item.request_id)

@@ -14,6 +14,8 @@ from types import SimpleNamespace
 import pytest
 from telegram.error import BadRequest, RetryAfter
 
+from adapters.codex_cli import CodexCLIAdapter
+from adapters.hashi_mcp import current_hashi_mcp_invocation
 from adapters.stream_events import (
     DELIVERY_CONTROL,
     DELIVERY_FINAL,
@@ -43,8 +45,10 @@ from orchestrator.canonical_audit import (
     CanonicalAuditStore,
 )
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+from orchestrator.flexible_backend_manager import FlexibleBackendManager
 from orchestrator.session_store import SessionStore
 from tools.tool_audit import record_tool_action
+from tools.registry import ToolRegistry
 
 
 class _Logger:
@@ -769,6 +773,103 @@ async def test_build_turn_prompt_collects_context_sections_and_updates_audit_sta
     assert "codex-cli" in prompt.final_prompt
     assert runtime._thinking_chars_this_req == 0
     assert runtime._last_full_prompt_tokens == len(prompt.final_prompt) // 4
+
+
+@pytest.mark.asyncio
+async def test_build_turn_prompt_defers_fixed_gateway_until_backend_launch(tmp_path):
+    runtime = _runtime()
+    runtime.global_config.project_root = Path(__file__).resolve().parents[1]
+    runtime.global_config.api_host = "127.0.0.1"
+    runtime.global_config.workbench_port = 18800
+    runtime.global_config.central_memory = {}
+    runtime.global_config.wiki_provider = {}
+    runtime.global_config.codex_cmd = "codex"
+
+    access_root = tmp_path / "access"
+    workspace = access_root / "workzone"
+    workspace.mkdir(parents=True)
+
+    def resolve_service_endpoint(service, *, expected_instance=None):
+        assert service == "workbench"
+        assert expected_instance == runtime.global_config.instance_id
+        return {
+            "service": service,
+            "instance_id": expected_instance,
+            "base_url": "http://127.0.0.1:18800",
+        }
+
+    backend_config = SimpleNamespace(
+        name="zelda",
+        model="gpt-test",
+        workspace_dir=workspace,
+        system_md=workspace / "agent.md",
+        extra={},
+        resolve_access_root=lambda: access_root,
+    )
+    backend = CodexCLIAdapter(backend_config, runtime.global_config)
+    backend.tool_registry = ToolRegistry(
+        allowed_tools=["file_read"],
+        access_root=access_root,
+        workspace_dir=workspace,
+        secrets={},
+        audit_context={
+            "agent_name": runtime.name,
+            "global_config": runtime.global_config,
+            "_kernel": SimpleNamespace(
+                resolve_service_endpoint=resolve_service_endpoint
+            ),
+        },
+    )
+    backend._hashi_mcp_enabled = True
+    backend._external_mcp_server_names = ()
+
+    manager = FlexibleBackendManager.__new__(FlexibleBackendManager)
+    manager.config = runtime.config
+    manager.current_backend = backend
+    manager.runtime = runtime
+    manager.agent_mode = "fixed"
+    runtime.backend_manager = manager
+
+    observed = []
+
+    async def fake_generate_response(prompt, request_id, **_kwargs):
+        invocation = current_hashi_mcp_invocation(backend)
+        assert invocation is not None
+        context_path = Path(invocation["context_path"])
+        command = backend._build_cmd(prompt, workspace / f"{request_id}.txt")
+        observed.append((request_id, context_path, command))
+        return SimpleNamespace(is_success=True, text=request_id)
+
+    backend.generate_response = fake_generate_response
+
+    for request_id in ("req-fixed-a", "req-fixed-b"):
+        item = _item(request_id=request_id)
+        runtime_pipeline.begin_queue_item(runtime, item)
+        turn = await runtime_pipeline.build_turn_prompt(
+            runtime,
+            item,
+            is_bridge_request=False,
+        )
+
+        assert current_hashi_mcp_invocation(backend) is None
+        assert not list((workspace / "backend_state").glob("*-hashi-mcp-*.json"))
+
+        response = await manager.generate_response(turn.final_prompt, request_id)
+
+        assert response.text == request_id
+        assert current_hashi_mcp_invocation(backend) is None
+        assert backend._active_hashi_mcp_invocations == {}
+
+    assert observed[0][1] != observed[1][1]
+    assert all(not context_path.exists() for _, context_path, _ in observed)
+    for _, _, command in observed:
+        overrides = [
+            command[index + 1]
+            for index, value in enumerate(command[:-1])
+            if value == "-c"
+            and command[index + 1].startswith("mcp_servers.hashi_tools=")
+        ]
+        assert len(overrides) == 1
 
 
 def test_begin_queue_item_marks_typed_scheduled_jobs_isolated():
