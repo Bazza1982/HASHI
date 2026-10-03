@@ -1,0 +1,23 @@
+name: Feature call source snapshot
+on:
+  push:
+    branches: [feature-call]
+    paths: [.github/workflows/feature-call-source-snapshot.yml]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Archive tracked source only
+        run: git archive --format=tar.gz -o source.tar.gz HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: feature-call-source
+          path: source.tar.gz
+          retention-days: 1
+          if-no-files-found: error
