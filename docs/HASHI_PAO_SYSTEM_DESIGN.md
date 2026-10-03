@@ -429,6 +429,19 @@ capability negotiation, Session binding, incremental input, activity, terminal
 results, cancellation, and recovery. It may translate a legacy `backend` API,
 but compatibility naming does not change conceptual ownership.
 
+An Engine's native tool path can sit outside HASHI's Tool Registry. The fixed
+Codex CLI adapter therefore installs a request-scoped `PreToolUse` hook before
+starting each invocation. The hook receives an owner-only receipt containing
+PID plus creation-time identities, and protects the bounded Worker/Core/Shared
+host lineage together with the current Codex engine branch and its MCP/child
+processes. Exact unrelated process targets remain available; unresolved or
+dynamic termination selectors fail closed. Hook trust is granted only to that
+session flag and the receipt is removed when the invocation ends. A CLI that
+cannot prove this hook capability is unavailable instead of starting silently
+unprotected. This is command-text enforcement at the Engine Adapter boundary,
+not OS-level isolation: termination hidden inside arbitrary interpreter code
+is a residual limitation and must not be represented as protected.
+
 A Model Provider Adapter belongs to the Engine that uses it. Provider-native
 IDs and continuation state may optimise transport, but they are never PAO
 Conversation Session authority.

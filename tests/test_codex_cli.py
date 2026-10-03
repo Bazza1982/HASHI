@@ -12,6 +12,7 @@ import pytest
 
 from adapters.base import BackendResponse
 from adapters.codex_cli import CodexCLIAdapter
+from adapters.codex_process_guard import CodexProcessGuard
 from adapters.stream_events import KIND_COMMENTARY, KIND_THINKING
 from orchestrator.multimodal_contract import canonical_request_content
 from tests.mocks.mock_adapters import SimpleGlobalConfig, SimpleTestConfig
@@ -118,6 +119,37 @@ def _build_adapter(tmp_path: Path, *, model: str = "gpt-5.4") -> CodexCLIAdapter
     global_cfg = SimpleGlobalConfig()
     global_cfg.project_root = tmp_path
     return CodexCLIAdapter(cfg, global_cfg)
+
+
+def test_codex_command_installs_request_scoped_process_guard(tmp_path):
+    adapter = _build_adapter(tmp_path)
+    guard = CodexProcessGuard.create(
+        tmp_path / "backend_state" / "codex_cli" / "process_guards",
+        request_id="req-command-guard",
+    )
+    try:
+        command = adapter._build_cmd(
+            "safe request",
+            tmp_path / "last.txt",
+            process_guard=guard,
+        )
+    finally:
+        guard.close()
+
+    pairs = list(zip(command, command[1:]))
+    assert ("--enable", "hooks") in pairs
+    assert ("--disable", "hooks") not in pairs
+    assert "--dangerously-bypass-hook-trust" not in command
+    assert any(
+        value.startswith("hooks.PreToolUse=")
+        for key, value in pairs
+        if key == "-c"
+    )
+    assert any(
+        value.startswith("hooks.state={") and "trusted_hash" in value
+        for key, value in pairs
+        if key == "-c"
+    )
 
 
 @pytest.mark.asyncio
