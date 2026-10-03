@@ -1,0 +1,33 @@
+name: Call connector focused checks
+on:
+  push:
+    branches: [feature-call]
+    paths: ['orchestrator/frontend_call/**', 'orchestrator/workbench_api.py', 'orchestrator/flexible_agent_runtime.py', 'orchestrator/frontend_live_voice/manager.py', 'tests/frontend_call/**', 'examples/call_profiles.example.json', 'docs/call/**', '.github/workflows/call-checks.yml']
+  pull_request:
+    paths: ['orchestrator/frontend_call/**', 'orchestrator/workbench_api.py', 'orchestrator/flexible_agent_runtime.py', 'orchestrator/frontend_live_voice/manager.py', 'tests/frontend_call/**', '.github/workflows/call-checks.yml']
+permissions:
+  contents: read
+jobs:
+  focused:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Isolated offline test dependencies
+        run: python -m pip install pytest pytest-asyncio anyio aiohttp pillow PyYAML httpx jsonschema python-telegram-bot croniter psutil rich ruff
+      - name: New connector lint
+        run: |
+          ruff check orchestrator/frontend_call tests/frontend_call
+          ruff format --check orchestrator/frontend_call tests/frontend_call
+      - name: Focused connector and phone regression
+        run: python -m pytest -q tests/frontend_call tests/test_live_voice_integration.py tests/test_architecture_boundaries.py
+      - name: Protected Core and source invariants
+        run: |
+          python scripts/check_protected_core_changes.py --base 6a4b29b881dd3077c1c2302e4bbc6e41b0277bf9
+          git diff --check 6a4b29b881dd3077c1c2302e4bbc6e41b0277bf9
