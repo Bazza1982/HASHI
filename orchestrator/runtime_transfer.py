@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
+import socket
 from datetime import datetime
 from collections.abc import Mapping
 from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -14,6 +17,7 @@ from orchestrator.runtime_common import QueuedRequest
 from orchestrator.runtime_delivery import format_backend_error_for_user
 from orchestrator import runtime_remote, ui_language
 from orchestrator.agent_move.remote_client import (
+    AgentMoveRemoteError,
     candidate_remote_base_urls,
     request_authenticated_json,
 )
@@ -24,6 +28,24 @@ from remote.security.shared_token import load_shared_token
 
 _TRANSFER_REDIRECT_ERROR_PREFIX = "HASHI_TRANSFER_REDIRECT_V1:"
 _BRIDGE_HANDOFF_CLIENT_TIMEOUT_SECONDS = 3600
+_MAX_REMOTE_HANDOFF_CANDIDATES = 8
+_RETRYABLE_CONNECT_ERRNOS = {
+    errno.ECONNREFUSED,
+    errno.ECONNRESET,
+    errno.EHOSTUNREACH,
+    errno.ENETUNREACH,
+    errno.ETIMEDOUT,
+    101,  # Linux ENETUNREACH when this source runs on Windows
+    104,  # Linux ECONNRESET when this source runs on Windows
+    110,  # Linux ETIMEDOUT when this source runs on Windows
+    111,  # Linux ECONNREFUSED when this source runs on Windows
+    113,  # Linux EHOSTUNREACH when this source runs on Windows
+    10051,  # WSAENETUNREACH
+    10054,  # WSAECONNRESET
+    10060,  # WSAETIMEDOUT
+    10061,  # WSAECONNREFUSED
+    10065,  # WSAEHOSTUNREACH
+}
 
 
 class BridgeHandoffOutcomeUnknown(RuntimeError):
@@ -349,6 +371,56 @@ def _verify_remote_handoff_status(
         raise ValueError("cross-instance Workbench identity check failed")
 
 
+def _remote_handoff_candidate_endpoints(
+    runtime: Any,
+    *,
+    endpoint: str,
+    expected_target: str,
+) -> list[str]:
+    marker = "/workbench/v1/proxy/api/bridge/"
+    path = urlsplit(endpoint).path
+    if path not in {marker + "transfer", marker + "fork"}:
+        raise ValueError("invalid cross-instance Workbench handoff endpoint")
+
+    target = runtime._normalize_instance_name(expected_target)
+    for name, raw in runtime._load_instances().items():
+        if not isinstance(raw, Mapping):
+            continue
+        declared = runtime._normalize_instance_name(raw.get("instance_id") or name)
+        if runtime._normalize_instance_name(name) != target and declared != target:
+            continue
+        if declared != target:
+            raise ValueError(
+                "cross-instance Workbench route rejected: "
+                f"target={target} discovered={declared}"
+            )
+        bases = candidate_remote_base_urls(raw)[:_MAX_REMOTE_HANDOFF_CANDIDATES]
+        if not bases:
+            raise ValueError(f"instance {target} has no Remote route configured")
+        return [base.rstrip("/") + path for base in bases]
+    raise ValueError(f"unknown instance: {expected_target}")
+
+
+def _is_remote_candidate_connect_failure(exc: BaseException) -> bool:
+    """Return true only when no authenticated HTTP response could exist."""
+
+    current: BaseException | object | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, HTTPError):
+            return False
+        if isinstance(current, URLError):
+            current = current.reason
+            continue
+        if isinstance(current, (TimeoutError, socket.timeout, socket.gaierror)):
+            return True
+        if isinstance(current, OSError):
+            return current.errno in _RETRYABLE_CONNECT_ERRNOS
+        current = getattr(current, "__cause__", None)
+    return False
+
+
 def _request_remote_handoff(
     runtime: Any,
     *,
@@ -360,22 +432,42 @@ def _request_remote_handoff(
     source = normalize_instance_id(runtime._detect_instance_name())
     if not token or not source:
         raise ValueError("authenticated HASHI Remote Session transfer is unavailable")
-    status_endpoint = handoff_health_endpoint(endpoint)
-    status = request_authenticated_json(
-        status_endpoint,
-        method="GET",
-        shared_token=token,
-        from_instance=source,
-        timeout=10,
-    )
-    _verify_remote_handoff_status(
-        status,
-        expected_source=source,
+    selected_endpoint = None
+    last_connect_error: AgentMoveRemoteError | None = None
+    for candidate_endpoint in _remote_handoff_candidate_endpoints(
+        runtime,
+        endpoint=endpoint,
         expected_target=expected_target,
-    )
+    ):
+        try:
+            status = request_authenticated_json(
+                handoff_health_endpoint(candidate_endpoint),
+                method="GET",
+                shared_token=token,
+                from_instance=source,
+                timeout=10,
+            )
+        except AgentMoveRemoteError as exc:
+            if not _is_remote_candidate_connect_failure(exc):
+                raise
+            last_connect_error = exc
+            continue
+        _verify_remote_handoff_status(
+            status,
+            expected_source=source,
+            expected_target=expected_target,
+        )
+        selected_endpoint = candidate_endpoint
+        break
+    if selected_endpoint is None:
+        if last_connect_error is not None:
+            raise last_connect_error
+        raise AgentMoveRemoteError(
+            f"no reachable authenticated Remote route for {expected_target}"
+        )
     try:
         return request_authenticated_json(
-            endpoint,
+            selected_endpoint,
             method="POST",
             payload=dict(payload),
             shared_token=token,

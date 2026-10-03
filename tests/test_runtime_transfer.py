@@ -1,9 +1,11 @@
 import json
 from types import SimpleNamespace
+from urllib.error import URLError
 
 import pytest
 
 from orchestrator import runtime_transfer, ui_language
+from orchestrator.agent_move.remote_client import AgentMoveRemoteError
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 
 
@@ -37,6 +39,16 @@ def _runtime(tmp_path):
         send_long_message=lambda **kwargs: _send(sent, kwargs),
         sent_messages=sent,
     )
+
+
+def _remote_target(instance="HASHI2", host="10.0.0.2", port=9001):
+    return {
+        instance.casefold(): {
+            "instance_id": instance,
+            "api_host": host,
+            "remote_port": port,
+        }
+    }
 
 
 async def _send(sent, kwargs):
@@ -280,6 +292,7 @@ def test_remote_bridge_handoff_authenticates_status_identity_and_posts_once(
 ):
     runtime = _runtime(tmp_path)
     runtime.global_config.bridge_home = tmp_path
+    runtime._load_instances = _remote_target
     (tmp_path / "secrets.json").write_text(
         json.dumps({"hashi_remote_shared_token": "shared-secret"}),
         encoding="utf-8",
@@ -334,9 +347,152 @@ def test_remote_bridge_handoff_authenticates_status_identity_and_posts_once(
     ]
 
 
+def test_remote_bridge_handoff_selects_reachable_explicit_target_before_post(
+    tmp_path, monkeypatch
+):
+    runtime = _runtime(tmp_path)
+    runtime.global_config.bridge_home = tmp_path
+    runtime._load_instances = lambda: {
+        "hashi2": {
+            "instance_id": "HASHI2",
+            "remote_port": 9001,
+            "address_candidates": [
+                {"host": "127.0.0.1"},
+                {"host": "10.0.0.2"},
+            ],
+        }
+    }
+    (tmp_path / "secrets.json").write_text(
+        json.dumps({"hashi_remote_shared_token": "shared-secret"}),
+        encoding="utf-8",
+    )
+    calls = []
+
+    def request(url, **kwargs):
+        calls.append((url, kwargs["method"]))
+        if url.startswith("http://127.0.0.1:"):
+            try:
+                raise URLError(ConnectionRefusedError(111, "connection refused"))
+            except URLError as exc:
+                raise AgentMoveRemoteError(f"receiver request failed: {exc}") from exc
+        if kwargs["method"] == "GET":
+            return {
+                "ok": True,
+                "gateway": "workbench_v1",
+                "authenticated_instance": "HASHI1",
+                "instance": {"instance_id": "HASHI2"},
+                "workbench_online": True,
+                "workbench_health": {"ok": True, "instance_id": "HASHI2"},
+            }
+        return {"ok": True, "status": "accepted"}
+
+    monkeypatch.setattr(runtime_transfer, "request_authenticated_json", request)
+
+    result = runtime_transfer._request_remote_handoff(
+        runtime,
+        endpoint="http://127.0.0.1:9001/workbench/v1/proxy/api/bridge/transfer",
+        expected_target="HASHI2",
+        payload={"transfer_id": "trf-select"},
+    )
+
+    assert result == {"ok": True, "status": "accepted"}
+    assert calls == [
+        ("http://127.0.0.1:9001/workbench/v1/status", "GET"),
+        ("http://10.0.0.2:9001/workbench/v1/status", "GET"),
+        (
+            "http://10.0.0.2:9001/workbench/v1/proxy/api/bridge/transfer",
+            "POST",
+        ),
+    ]
+
+
+def test_remote_bridge_handoff_wrong_identity_does_not_try_later_candidate(
+    tmp_path, monkeypatch
+):
+    runtime = _runtime(tmp_path)
+    runtime.global_config.bridge_home = tmp_path
+    runtime._load_instances = lambda: {
+        "hashi2": {
+            "instance_id": "HASHI2",
+            "remote_port": 9001,
+            "address_candidates": [
+                {"host": "127.0.0.1"},
+                {"host": "10.0.0.2"},
+            ],
+        }
+    }
+    (tmp_path / "secrets.json").write_text(
+        json.dumps({"hashi_remote_shared_token": "shared-secret"}),
+        encoding="utf-8",
+    )
+    calls = []
+
+    def request(url, **kwargs):
+        calls.append((url, kwargs["method"]))
+        return {
+            "ok": True,
+            "gateway": "workbench_v1",
+            "authenticated_instance": "HASHI1",
+            "instance": {"instance_id": "HASHI4"},
+            "workbench_online": True,
+            "workbench_health": {"ok": True, "instance_id": "HASHI4"},
+        }
+
+    monkeypatch.setattr(runtime_transfer, "request_authenticated_json", request)
+
+    with pytest.raises(ValueError, match="identity check failed"):
+        runtime_transfer._request_remote_handoff(
+            runtime,
+            endpoint="http://127.0.0.1:9001/workbench/v1/proxy/api/bridge/transfer",
+            expected_target="HASHI2",
+            payload={"transfer_id": "trf-wrong-candidate"},
+        )
+
+    assert calls == [("http://127.0.0.1:9001/workbench/v1/status", "GET")]
+
+
+def test_remote_bridge_handoff_auth_failure_does_not_try_later_candidate(
+    tmp_path, monkeypatch
+):
+    runtime = _runtime(tmp_path)
+    runtime.global_config.bridge_home = tmp_path
+    runtime._load_instances = lambda: {
+        "hashi2": {
+            "instance_id": "HASHI2",
+            "remote_port": 9001,
+            "address_candidates": [
+                {"host": "127.0.0.1"},
+                {"host": "10.0.0.2"},
+            ],
+        }
+    }
+    (tmp_path / "secrets.json").write_text(
+        json.dumps({"hashi_remote_shared_token": "shared-secret"}),
+        encoding="utf-8",
+    )
+    calls = []
+
+    def request(url, **kwargs):
+        calls.append((url, kwargs["method"]))
+        raise AgentMoveRemoteError("receiver response authentication failed")
+
+    monkeypatch.setattr(runtime_transfer, "request_authenticated_json", request)
+
+    with pytest.raises(AgentMoveRemoteError, match="authentication failed"):
+        runtime_transfer._request_remote_handoff(
+            runtime,
+            endpoint="http://127.0.0.1:9001/workbench/v1/proxy/api/bridge/transfer",
+            expected_target="HASHI2",
+            payload={"transfer_id": "trf-auth-failed"},
+        )
+
+    assert calls == [("http://127.0.0.1:9001/workbench/v1/status", "GET")]
+
+
 def test_remote_bridge_handoff_rejects_wrong_identity_before_post(tmp_path, monkeypatch):
     runtime = _runtime(tmp_path)
     runtime.global_config.bridge_home = tmp_path
+    runtime._load_instances = _remote_target
     (tmp_path / "secrets.json").write_text(
         json.dumps({"hashi_remote_shared_token": "shared-secret"}),
         encoding="utf-8",
@@ -372,6 +528,7 @@ def test_remote_bridge_handoff_post_error_is_unknown_and_never_replayed(
 ):
     runtime = _runtime(tmp_path)
     runtime.global_config.bridge_home = tmp_path
+    runtime._load_instances = _remote_target
     (tmp_path / "secrets.json").write_text(
         json.dumps({"hashi_remote_shared_token": "shared-secret"}),
         encoding="utf-8",
