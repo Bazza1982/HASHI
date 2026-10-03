@@ -8,6 +8,7 @@ json whole-response mode, exit-0-with-ERROR payloads, --conversation resume).
 from __future__ import annotations
 
 import os
+import json
 import sys
 import tempfile
 import asyncio
@@ -243,47 +244,157 @@ def test_empty_prompt_rejected(tmp_path):
     assert "Empty prompt" in (resp.error or "")
 
 
-def test_overlong_prompt_fits_argv_limit(tmp_path, monkeypatch):
+@pytest.mark.parametrize("body", ["x" * 4000, "汉" * 40000], ids=["short", "long-cjk"])
+def test_prompt_is_delivered_verbatim_over_stdin_not_argv(tmp_path, monkeypatch, body):
+    argv_log = tmp_path / "argv.log"
+    input_log = tmp_path / "input.jsonl"
+    monkeypatch.setenv("AGY_MOCK_LOG", str(argv_log))
+    monkeypatch.setenv("AGY_MOCK_INPUT_LOG", str(input_log))
+    prompt = "permanent_system:DO_NOT_OMIT\n" + body + "\ncurrent_user_request:保留全文"
     adapter = make_adapter(tmp_path)
-    fitted = adapter._fit_prompt_for_argv("x" * 25000)
-    assert len(fitted.encode("utf-8")) <= AntigravityCLIAdapter.MAX_PROMPT_BYTES
-    assert "truncated by the antigravity-cli adapter" in fitted
-    assert fitted.endswith("x" * 200)
-    # The .cmd mock travels through cmd.exe, whose command line is limited
-    # to 8191 chars, so exercise the fitting path end-to-end with a smaller
-    # cap. Production agy.exe is a direct CreateProcess (32767 limit).
-    monkeypatch.setattr(AntigravityCLIAdapter, "MAX_PROMPT_BYTES", 7000)
-    resp = run(adapter.generate_response("x" * 8000, "req-1"))
-    assert resp.is_success is True
-    assert resp.text == "PONG"
+    response = run(adapter.generate_response(prompt, "req-stdin"))
+    assert response.is_success is True, response.error
+    assert json.loads(input_log.read_text(encoding="utf-8"))["prompt"] == prompt
+    argv = argv_log.read_text(encoding="utf-8")
+    assert "permanent_system" not in argv
+    assert "current_user_request" not in argv
+    assert "--input-format stream-json" in argv
+    transport = response.stream_metadata["prompt_transport"]
+    assert transport["transport"] == "stdin_stream_json"
+    assert transport["degraded"] is False
+    assert transport["original_bytes"] == transport["sent_bytes"] == len(prompt.encode("utf-8"))
+    assert transport["omitted_source_bytes"] == 0
+    assert transport["pipe_write_state"] == "complete"
+    assert transport["pipe_write_complete"] is True
+    assert transport["provider_consumption"] == "confirmed_by_result"
 
 
-def test_fit_prompt_cjk_bytes_under_limit(tmp_path):
-    adapter = make_adapter(tmp_path)
-    prompt = ("汉" * 20000) + "\n请回复：pong"
-    fitted = adapter._fit_prompt_for_argv(prompt)
-    assert len(fitted.encode("utf-8")) <= AntigravityCLIAdapter.MAX_PROMPT_BYTES
-    assert "Truncation marker" in fitted
-    assert fitted.endswith("请回复：pong")
+def test_stdin_is_written_in_bounded_chunks(tmp_path, monkeypatch):
+    class RecordingStdin:
+        def __init__(self):
+            self.chunks = []
+            self.closed = False
+
+        def write(self, data):
+            self.chunks.append(bytes(data))
+
+        async def drain(self):
+            return None
+
+        def close(self):
+            self.closed = True
+
+    async def exercise():
+        stdout = asyncio.StreamReader()
+        stderr = asyncio.StreamReader()
+        stdout.feed_data(
+            (
+                '{"event":"result","result":{"conversation_id":"cid",'
+                '"status":"SUCCESS","response":"PONG","duration_seconds":0,'
+                '"num_turns":1,"usage":{"input_tokens":1,'
+                '"output_tokens":1,"thinking_tokens":0,"total_tokens":2}}}\n'
+            ).encode()
+        )
+        stdout.feed_eof()
+        stderr.feed_eof()
+
+        class Proc:
+            pid = 424242
+            returncode = None
+            stdin = RecordingStdin()
+
+            async def wait(self):
+                self.returncode = 0
+                return 0
+
+        proc = Proc()
+
+        async def fake_spawn(*args, **kwargs):
+            proc.stdout = stdout
+            proc.stderr = stderr
+            return proc
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_spawn)
+        monkeypatch.setattr(AntigravityCLIAdapter, "STDIN_WRITE_CHUNK_BYTES", 32)
+        adapter = make_adapter(tmp_path)
+        prompt = "汉" * 200
+        response = await adapter.generate_response(prompt, "req-chunks")
+        return proc, prompt, response, adapter
+
+    proc, prompt, response, adapter = run(exercise())
+    assert response.is_success is True
+    assert proc.stdin.closed is True
+    assert max(map(len, proc.stdin.chunks)) <= 32
+    envelope = json.loads(b"".join(proc.stdin.chunks).decode("utf-8"))
+    assert envelope["message"]["content"] == prompt
+    assert response.stream_metadata["prompt_transport"]["pipe_write_complete"] is True
+    assert adapter.current_proc is None
+    assert adapter._active_read_tasks == []
 
 
-def test_fit_prompt_keeps_head_and_tail(tmp_path):
-    adapter = make_adapter(tmp_path)
-    prompt = (
-        "HEAD:SYSTEM INSTRUCTIONS START\n"
-        + ("m" * 30000)
-        + "\nTAIL:latest user request END"
-    )
-    fitted = adapter._fit_prompt_for_argv(prompt)
-    assert fitted.startswith("HEAD:SYSTEM INSTRUCTIONS START")
-    assert fitted.endswith("TAIL:latest user request END")
-    assert "Truncation marker" in fitted
+def test_stdin_failure_kills_process_and_reports_unconfirmed_delivery(tmp_path, monkeypatch):
+    class FailingStdin:
+        def __init__(self):
+            self.closed = False
 
+        def write(self, data):
+            return None
 
-def test_fit_prompt_short_unchanged(tmp_path):
-    adapter = make_adapter(tmp_path)
-    prompt = "short prompt"
-    assert adapter._fit_prompt_for_argv(prompt) == prompt
+        async def drain(self):
+            raise OSError("simulated stdin failure")
+
+        def close(self):
+            self.closed = True
+
+    async def exercise():
+        stdout = asyncio.StreamReader()
+        stderr = asyncio.StreamReader()
+        stopped = asyncio.Event()
+
+        class Proc:
+            pid = 424243
+            returncode = None
+            stdin = FailingStdin()
+
+            async def wait(self):
+                await stopped.wait()
+                return self.returncode
+
+        proc = Proc()
+        proc.stdout = stdout
+        proc.stderr = stderr
+        killed = []
+
+        async def fake_spawn(*args, **kwargs):
+            return proc
+
+        async def fake_kill(target, logger=None, reason=""):
+            killed.append(reason)
+            target.returncode = -9
+            stdout.feed_eof()
+            stderr.feed_eof()
+            stopped.set()
+            return True
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_spawn)
+        adapter = make_adapter(tmp_path)
+        monkeypatch.setattr(adapter, "force_kill_process_tree", fake_kill)
+        response = await adapter.generate_response("hello", "req-write-fail")
+        return proc, killed, response, adapter
+
+    proc, killed, response, adapter = run(exercise())
+    assert response.is_success is False
+    assert "simulated stdin failure" in (response.error or "")
+    assert killed == ["transport-error:req-write-fail"]
+    assert proc.stdin.closed is True
+    assert response.side_effects_possible is True
+    transport = response.stream_metadata["prompt_transport"]
+    assert transport["pipe_write_state"] == "writing"
+    assert transport["pipe_write_complete"] is False
+    assert transport["sent_bytes"] is None
+    assert transport["provider_consumption"] == "unconfirmed"
+    assert adapter.current_proc is None
+    assert adapter._active_read_tasks == []
 
 
 def test_hollow_success_detected_in_json_mode(tmp_path, monkeypatch):
@@ -316,8 +427,53 @@ def test_stale_conversation_rebuild_retry(tmp_path, monkeypatch):
     resp1 = run(adapter.generate_response("stale please", "req-1"))
     assert resp1.is_success is True
     lines = log.read_text(encoding="utf-8").strip().splitlines()
-    assert any("stale please" in l and "--conversation" in l for l in lines)
-    assert any("stale please" in l and "--conversation" not in l for l in lines)
+    assert len(lines) == 3
+    assert "--conversation" in lines[1]
+    assert "--conversation" not in lines[2]
+
+
+def test_stale_marker_without_resumed_conversation_does_not_retry(tmp_path, monkeypatch):
+    marker = tmp_path / "stale-once"
+    log = tmp_path / "argv.log"
+    monkeypatch.setenv("AGY_MOCK_STALE_ONCE", str(marker))
+    monkeypatch.setenv("AGY_MOCK_LOG", str(log))
+    adapter = make_adapter(tmp_path)
+    response = run(adapter.generate_response("stale please", "req-initial"))
+    assert response.is_success is False
+    assert len(log.read_text(encoding="utf-8").strip().splitlines()) == 1
+    assert adapter._conversation_id is None
+
+
+def test_stale_after_tool_activity_is_not_retried(tmp_path, monkeypatch):
+    log = tmp_path / "argv.log"
+    monkeypatch.setenv("AGY_MOCK_LOG", str(log))
+    adapter = make_adapter(tmp_path)
+    assert run(adapter.generate_response("prime", "req-prime")).is_success is True
+    monkeypatch.setenv("AGY_MOCK_STALE_WITH_TOOL", "1")
+    response = run(adapter.generate_response("stale with tool", "req-stale-tool"))
+    assert response.is_success is False
+    assert response.side_effects_possible is True
+    assert response.stream_metadata["stale_retry_suppressed"] == (
+        "effects_not_proven_absent"
+    )
+    observation = response.stream_metadata["antigravity_attempt"]
+    assert observation["tool_activity_observed"] is True
+    assert len(log.read_text(encoding="utf-8").strip().splitlines()) == 2
+    assert adapter._conversation_id is None
+
+
+def test_stale_after_answer_output_is_not_retried(tmp_path, monkeypatch):
+    log = tmp_path / "argv.log"
+    monkeypatch.setenv("AGY_MOCK_LOG", str(log))
+    adapter = make_adapter(tmp_path)
+    assert run(adapter.generate_response("prime", "req-prime")).is_success is True
+    monkeypatch.setenv("AGY_MOCK_STALE_WITH_ANSWER", "1")
+    response = run(adapter.generate_response("stale with answer", "req-stale-answer"))
+    assert response.is_success is False
+    assert response.side_effects_possible is True
+    observation = response.stream_metadata["antigravity_attempt"]
+    assert observation["answer_output_observed"] is True
+    assert len(log.read_text(encoding="utf-8").strip().splitlines()) == 2
 
 
 def test_stale_conversation_marker_matching(tmp_path):
@@ -352,7 +508,8 @@ def test_cancel_propagates_and_kills(tmp_path):
             await task
 
     run(_cancel())
-    run(adapter.shutdown())
+    assert adapter.current_proc is None
+    assert adapter._active_read_tasks == []
 
 
 # -------------------------------------------------------------- preflights

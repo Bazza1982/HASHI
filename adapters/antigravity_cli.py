@@ -25,11 +25,11 @@ exp/antigravity-cli-hashi1/):
 * IMPORTANT: agy can exit 0 while reporting ``status:"ERROR"`` inside the JSON
   payload (captured 2026-09-16, f3-stdin.txt), so the parser treats the
   payload status as authoritative, not just the exit code.
-* Prompt transport: prompts travel as the ``-p`` argument only.  agy 1.2.4
-  silently drops prompts above ~24 KiB of UTF-8 BYTES (empty SUCCESS payload
-  with zero usage, rc=0), so the adapter fits prompts to ``MAX_PROMPT_BYTES``
-  (head+tail keep with an explicit truncation marker) and treats hollow
-  results as errors.
+* Prompt transport: one ``event:user`` NDJSON envelope over stdin, followed
+  by EOF, using ``--input-format stream-json --output-format stream-json``.
+  This preserves the entire prompt and avoids both Windows argv limits and
+  agy's former ``-p`` acceptance ceiling. Verified with the installed CLI and
+  its official headless protocol on 2026-10-03; hollow results remain errors.
 """
 
 from __future__ import annotations
@@ -63,19 +63,12 @@ from orchestrator.process_execution import (
 class AntigravityCLIAdapter(BaseBackend):
     """Headless Antigravity CLI backend with cross-process conversation resume."""
 
-    # Verified agy 1.2.4 ``-p`` acceptance ceiling (probes, 2026-09-16):
-    # 24060 UTF-8 bytes -> real response; 24560 bytes -> hollow success
-    # (rc=0, status SUCCESS, empty response, zero usage) in json mode and the
-    # same silent drop at 28060 bytes in stream-json mode.  24000 bytes keeps
-    # a safety margin below every observed failure.  The legacy char-based
-    # name is retained for compatibility; fitting now uses MAX_PROMPT_BYTES.
-    MAX_PROMPT_ARG_CHARS = 24000
-    MAX_PROMPT_BYTES = 24000
     DEFAULT_IDLE_TIMEOUT_SEC = 60 * 60
+    STDIN_WRITE_CHUNK_BYTES = 64 * 1024
 
     HOLLOW_RESULT_ERROR = (
         "Antigravity CLI returned an empty result with zero token usage "
-        "(prompt likely exceeded agy's -p byte limit or was silently dropped)."
+        "(the stream-json input was rejected or silently dropped before model use)."
     )
 
     _STALE_CONVERSATION_MARKERS = (
@@ -142,9 +135,10 @@ class AntigravityCLIAdapter(BaseBackend):
         self._conversation_id: str | None = None
         extra = dict(getattr(self.config, "extra", {}) or {})
         self._session_mode: bool = bool(extra.get("session_mode", True))
-        self._output_format: str = str(extra.get("output_format") or "stream-json").strip()
-        if self._output_format not in {"stream-json", "json"}:
-            self._output_format = "stream-json"
+        # Input streaming requires matching output streaming. This is adapter
+        # transport, not an Agent/model preference; legacy JSON output config
+        # cannot force an unsafe argv fallback.
+        self._output_format = "stream-json"
         self._result_payload: dict = {}
         self.access_root = str(self.config.resolve_access_root())
 
@@ -195,16 +189,6 @@ class AntigravityCLIAdapter(BaseBackend):
                 **process_group_kwargs(),
             )
             stdout, stderr = await proc.communicate()
-            try:
-                with open(r"C:\ProgramData\HASHI\HASHI3\tmp\rika-plana-20260916\probes\worker-init-trace.log", "a", encoding="utf-8") as _fh:
-                    _fh.write(
-                        "version check: rc=%s out=%r err=%r\n"
-                        % (proc.returncode,
-                            stdout.decode(errors="replace")[:200],
-                            stderr.decode(errors="replace")[:800])
-                    )
-            except Exception:
-                pass
             if proc.returncode != 0:
                 err = stderr.decode(errors="replace").strip()
                 self.logger.error(f"Antigravity CLI version check failed: {err}")
@@ -386,17 +370,17 @@ class AntigravityCLIAdapter(BaseBackend):
     # request handling
     # ------------------------------------------------------------------
 
-    def _build_cmd(self, prompt: str) -> list[str]:
+    def _build_cmd(self, resumed_conversation_id: str | None) -> list[str]:
         cmd = [
             self.cmd_base,
-            "-p", prompt,
+            "--input-format", "stream-json",
             "--model", self.config.model,
             "--output-format", self._output_format,
             "--print-timeout", f"{int(self.DEFAULT_IDLE_TIMEOUT_SEC)}s",
             "--dangerously-skip-permissions",
         ]
-        if self._session_mode and self._conversation_id:
-            cmd.extend(["--conversation", self._conversation_id])
+        if self._session_mode and resumed_conversation_id:
+            cmd.extend(["--conversation", resumed_conversation_id])
         for directory in self.effective_add_dirs:
             cmd.extend(["--add-dir", str(directory)])
         return cmd
@@ -427,51 +411,6 @@ class AntigravityCLIAdapter(BaseBackend):
             )
         return (sys.executable, str(self._launcher_script), "--", *tuple(cmd))
 
-    @staticmethod
-    def _cut_bytes(text: str, max_bytes: int, from_end: bool = False) -> str:
-        """Cut ``text`` to at most ``max_bytes`` UTF-8 bytes."""
-        raw = text.encode("utf-8", errors="replace")
-        if len(raw) <= max_bytes:
-            return text
-        cut = raw[-max_bytes:] if from_end else raw[:max_bytes]
-        return cut.decode("utf-8", errors="ignore")
-
-    def _fit_prompt_for_argv(self, prompt: str) -> str:
-        """Fit the prompt to the measured agy ``-p`` transport ceiling.
-
-        agy 1.2.4 accepts up to ~24 KiB measured in UTF-8 BYTES and silently
-        drops oversized prompts (empty success, zero usage) instead of
-        erroring; the Windows CreateProcess command line additionally caps
-        argv at 32767 chars.  Oversized prompts keep the HEAD (system
-        instructions / role framing) and the TAIL (recent context and the
-        latest user request) and replace the excised middle with an explicit
-        marker, so content is never dropped silently.
-        """
-        if len(prompt.encode("utf-8", errors="replace")) <= self.MAX_PROMPT_BYTES:
-            return prompt
-        marker = (
-            "\n[Truncation marker: earlier context was truncated by the "
-            "antigravity-cli adapter (the middle of this prompt, i.e. older "
-            "conversation history / intermediate context) to fit agy's "
-            "verified -p byte limit. Head instructions and the latest "
-            "request were kept.]\n"
-        )
-        remaining = max(1, self.MAX_PROMPT_BYTES - len(marker.encode("utf-8")))
-        head_budget = remaining * 40 // 100
-        tail_budget = remaining - head_budget
-        head = self._cut_bytes(prompt, head_budget)
-        tail = self._cut_bytes(prompt, tail_budget, from_end=True)
-        fitted = head + marker + tail
-        self.logger.warning(
-            "Prompt fitted for agy transport: %d chars / %d bytes -> "
-            "%d chars / %d bytes",
-            len(prompt),
-            len(prompt.encode("utf-8", errors="replace")),
-            len(fitted),
-            len(fitted.encode("utf-8", errors="replace")),
-        )
-        return fitted
-
     async def generate_response(
         self, prompt: str, request_id: str, is_retry: bool = False, silent: bool = False,
         on_stream_event: StreamCallback = None,
@@ -483,21 +422,37 @@ class AntigravityCLIAdapter(BaseBackend):
                 error="Empty prompt. Request was not sent to Antigravity CLI.",
                 is_success=False,
             )
-        prompt = self._fit_prompt_for_argv(prompt)
-
-        cmd = self._build_cmd(prompt)
+        original_prompt_bytes = len(prompt.encode("utf-8", errors="replace"))
+        prompt_transport_metadata = {
+            "transport": "stdin_stream_json", "degraded": False,
+            "retention": "complete", "original_chars": len(prompt),
+            "original_bytes": original_prompt_bytes, "sent_chars": None,
+            "sent_bytes": None, "omitted_source_chars": 0,
+            "omitted_source_bytes": 0,
+            "pipe_write_state": "not_started", "pipe_write_complete": False,
+            "pipe_payload_bytes": 0, "pipe_bytes_written": 0,
+            "provider_consumption": "unconfirmed",
+        }
+        input_bytes = (json.dumps(
+            {"event": "user", "message": {"content": prompt}}, ensure_ascii=False,
+        ) + "\n").encode("utf-8")
+        prompt_transport_metadata["pipe_payload_bytes"] = len(input_bytes)
+        attempted_conversation_id = (
+            self._conversation_id if self._session_mode else None
+        )
+        cmd = self._build_cmd(attempted_conversation_id)
         self._result_payload = {}
         started = time.perf_counter()
         self.logger.info(
             f"Launching Antigravity request {request_id} "
-            f"(conversation_id={self._conversation_id}, retry={is_retry}, "
+            f"(conversation_id={attempted_conversation_id}, retry={is_retry}, "
             f"output_format={self._output_format}, prompt_len={len(prompt)})"
         )
         try:
             invocation = resolve_argv_invocation(self._launcher_argv(cmd))
             self.current_proc = await asyncio.create_subprocess_exec(
                 *invocation.argv,
-                stdin=asyncio.subprocess.DEVNULL,
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(self.effective_workdir),
@@ -517,42 +472,129 @@ class AntigravityCLIAdapter(BaseBackend):
                 is_success=False,
             )
 
-        try:
-            response = await self._read_streaming(
-                request_id, started, cmd, on_stream_event,
+        proc = self.current_proc
+        pipe_write = {"state": "not_started", "bytes_written": 0}
+
+        async def send_input():
+            try:
+                pipe_write["state"] = "writing"
+                for offset in range(0, len(input_bytes), self.STDIN_WRITE_CHUNK_BYTES):
+                    chunk = input_bytes[offset:offset + self.STDIN_WRITE_CHUNK_BYTES]
+                    proc.stdin.write(chunk)
+                    await proc.stdin.drain()
+                    pipe_write["bytes_written"] += len(chunk)
+                    self._touch_activity()
+                pipe_write["state"] = "complete"
+            except (BrokenPipeError, ConnectionResetError):
+                # The reader owns the CLI's actual error (e.g. auth rejection).
+                # Never resubmit a partially delivered turn automatically.
+                pipe_write["state"] = "peer_closed"
+            finally:
+                proc.stdin.close()
+
+        send_task = asyncio.create_task(send_input())
+        read_task = asyncio.create_task(
+            self._read_streaming(
+                request_id,
+                started,
+                cmd,
+                on_stream_event,
+                proc=proc,
+                resumed_conversation_id=attempted_conversation_id,
             )
+        )
+        try:
+            _, response = await asyncio.gather(send_task, read_task)
         except asyncio.CancelledError:
             self.logger.warning(f"Generation cancelled for {request_id}")
-            if self.current_proc:
+            for task in (send_task, read_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(send_task, read_task, return_exceptions=True)
+            if proc.returncode is None:
                 await self.force_kill_process_tree(
-                    self.current_proc,
+                    proc,
                     logger=self.logger,
                     reason=f"cancelled:{request_id}",
                 )
+            if self.current_proc is proc:
+                self.current_proc = None
             raise
         except Exception as exc:
-            return BackendResponse(text="", duration_ms=0, error=str(exc), is_success=False)
+            for task in (send_task, read_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(send_task, read_task, return_exceptions=True)
+            if proc.returncode is None:
+                await self.force_kill_process_tree(
+                    proc,
+                    logger=self.logger,
+                    reason=f"transport-error:{request_id}",
+                )
+            if self.current_proc is proc:
+                self.current_proc = None
+            response = BackendResponse(
+                text="",
+                duration_ms=round((time.perf_counter() - started) * 1000, 2),
+                error=str(exc),
+                is_success=False,
+                side_effects_possible=pipe_write["state"] != "not_started",
+            )
+
+        pipe_complete = pipe_write["state"] == "complete"
+        prompt_transport_metadata.update({
+            "pipe_write_state": pipe_write["state"],
+            "pipe_write_complete": pipe_complete,
+            "pipe_bytes_written": pipe_write["bytes_written"],
+            "sent_chars": len(prompt) if pipe_complete else None,
+            "sent_bytes": original_prompt_bytes if pipe_complete else None,
+            "provider_consumption": (
+                "confirmed_by_result"
+                if str((response.stream_metadata or {}).get("status") or "").strip()
+                else "unconfirmed"
+            ),
+        })
+        metadata = dict(response.stream_metadata or {})
+        metadata["prompt_transport"] = prompt_transport_metadata
+        response.stream_metadata = metadata
+
+        if response.error:
+            # An init/error payload must not silently replace the conversation
+            # binding that this attempt actually resumed.
+            self._conversation_id = attempted_conversation_id
         if (
             response.error
-            and self._conversation_id
+            and attempted_conversation_id
             and not is_retry
             and self._stale_conversation_error(response.error)
         ):
-            stale = self._conversation_id
+            observation = dict(metadata.get("antigravity_attempt") or {})
+            retry_is_effect_safe = (
+                observation.get("resumed_conversation_id")
+                == attempted_conversation_id
+                and observation.get("result_seen") is True
+                and observation.get("tool_activity_observed") is False
+                and observation.get("answer_output_observed") is False
+                and observation.get("result_num_turns") == 0
+                and observation.get("result_usage_explicit_zero") is True
+            )
             self._conversation_id = None
             self._persist_session_state()
-            self.logger.warning(
-                "Dropping stale agy conversation %s and retrying once: %s",
-                stale,
-                response.error[:160],
-            )
-            return await self.generate_response(
-                prompt,
-                request_id,
-                is_retry=True,
-                silent=silent,
-                on_stream_event=on_stream_event,
-            )
+            if retry_is_effect_safe:
+                self.logger.warning(
+                    "Dropping stale agy conversation %s and retrying once: %s",
+                    attempted_conversation_id,
+                    response.error[:160],
+                )
+                return await self.generate_response(
+                    prompt,
+                    request_id,
+                    is_retry=True,
+                    silent=silent,
+                    on_stream_event=on_stream_event,
+                )
+            response.side_effects_possible = True
+            metadata["stale_retry_suppressed"] = "effects_not_proven_absent"
         return response
 
     async def _read_streaming(
@@ -561,14 +603,18 @@ class AntigravityCLIAdapter(BaseBackend):
         started: float,
         cmd: list[str],
         on_stream_event: StreamCallback,
+        *,
+        proc,
+        resumed_conversation_id: str | None,
     ) -> BackendResponse:
-        proc = self.current_proc  # local ref — shutdown() may null self.current_proc
         text_fragments: list[str] = []
         stdout_line_count = 0
         stdout_tail: list[str] = []
         stderr_lines: list[str] = []
         done_with_error: str | None = None
         timeout_kind: str | None = None
+        tool_activity_observed = False
+        answer_output_observed = False
 
         async def _read_stderr():
             async for line in iter_stream_lines(proc.stderr):
@@ -578,7 +624,18 @@ class AntigravityCLIAdapter(BaseBackend):
         stderr_task = asyncio.create_task(_read_stderr())
 
         def _handle_line(decoded: str):
-            nonlocal done_with_error
+            nonlocal done_with_error, tool_activity_observed, answer_output_observed
+            try:
+                observed_event = json.loads(decoded.strip())
+            except (json.JSONDecodeError, AttributeError, TypeError):
+                observed_event = {}
+            if observed_event.get("event") == "step_update":
+                update = observed_event.get("step_update") or {}
+                step_type = str(update.get("step_type") or "")
+                if step_type == "agent_response" and update.get("text_delta"):
+                    answer_output_observed = True
+                elif step_type not in {"", "user_input", "agent_response"}:
+                    tool_activity_observed = True
             if self._output_format == "json":
                 done, err = self._parse_json_line(decoded)
             else:
@@ -600,52 +657,71 @@ class AntigravityCLIAdapter(BaseBackend):
                 _handle_line(decoded)
 
         stdout_task = asyncio.create_task(_read_stdout())
-        self._active_read_tasks = [stdout_task, stderr_task]
+        reader_tasks = [stdout_task, stderr_task]
+        self._active_read_tasks = reader_tasks
 
-        while proc.returncode is None:
-            idle_for = self._last_activity_age()
-            if idle_for >= self.DEFAULT_IDLE_TIMEOUT_SEC:
-                timeout_kind = "idle"
-                break
-            wait_slice = min(5.0, max(0.1, self.DEFAULT_IDLE_TIMEOUT_SEC - idle_for))
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=wait_slice)
-            except asyncio.TimeoutError:
-                continue
+        try:
+            while proc.returncode is None:
+                idle_for = self._last_activity_age()
+                if idle_for >= self.DEFAULT_IDLE_TIMEOUT_SEC:
+                    timeout_kind = "idle"
+                    break
+                wait_slice = min(5.0, max(0.1, self.DEFAULT_IDLE_TIMEOUT_SEC - idle_for))
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=wait_slice)
+                except asyncio.TimeoutError:
+                    continue
 
-        if timeout_kind is not None:
-            duration_ms = round((time.perf_counter() - started) * 1000, 2)
-            pid = getattr(proc, "pid", "unknown")
-            diagnostic = self._timeout_diagnostic(
-                timeout_kind,
-                started_monotonic=started,
-            )
-            self.logger.error(
-                f"Antigravity request {request_id} {timeout_kind}-timed out "
-                f"(pid={pid}, duration_ms={duration_ms}, {diagnostic})"
-            )
-            await self.force_kill_process_tree(
-                proc, logger=self.logger,
-                reason=f"{timeout_kind}-timeout:{request_id}",
-            )
-            self.current_proc = None
-            await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
-            self._active_read_tasks = []
-            return BackendResponse(
-                text="",
-                duration_ms=duration_ms,
-                error=(
-                    f"Antigravity CLI was idle for {self.DEFAULT_IDLE_TIMEOUT_SEC}s "
-                    f"with no output."
-                ),
-                is_success=False,
-            )
+            if timeout_kind is not None:
+                duration_ms = round((time.perf_counter() - started) * 1000, 2)
+                pid = getattr(proc, "pid", "unknown")
+                diagnostic = self._timeout_diagnostic(
+                    timeout_kind,
+                    started_monotonic=started,
+                )
+                self.logger.error(
+                    f"Antigravity request {request_id} {timeout_kind}-timed out "
+                    f"(pid={pid}, duration_ms={duration_ms}, {diagnostic})"
+                )
+                for task in reader_tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*reader_tasks, return_exceptions=True)
+                await self.force_kill_process_tree(
+                    proc, logger=self.logger,
+                    reason=f"{timeout_kind}-timeout:{request_id}",
+                )
+                if self.current_proc is proc:
+                    self.current_proc = None
+                return BackendResponse(
+                    text="",
+                    duration_ms=duration_ms,
+                    error=(
+                        f"Antigravity CLI was idle for {self.DEFAULT_IDLE_TIMEOUT_SEC}s "
+                        f"with no output."
+                    ),
+                    is_success=False,
+                )
 
-        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
-        self._active_read_tasks = []
-        await proc.wait()
+            reader_results = await asyncio.gather(
+                *reader_tasks,
+                return_exceptions=True,
+            )
+            for result in reader_results:
+                if isinstance(result, BaseException):
+                    raise result
+            await proc.wait()
+        finally:
+            for task in reader_tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*reader_tasks, return_exceptions=True)
+            if self._active_read_tasks == reader_tasks:
+                self._active_read_tasks = []
+
         returncode = proc.returncode
-        self.current_proc = None
+        if self.current_proc is proc:
+            self.current_proc = None
         duration_ms = round((time.perf_counter() - started) * 1000, 2)
 
         self.logger.info(
@@ -655,15 +731,49 @@ class AntigravityCLIAdapter(BaseBackend):
             f"conversation_id={self._conversation_id})"
         )
 
+        payload = self._result_payload
+        if str(payload.get("response") or "").strip():
+            answer_output_observed = True
+        usage = payload.get("usage") if isinstance(payload, dict) else None
+        explicit_zero_usage = False
+        if isinstance(usage, dict) and "total_tokens" in usage:
+            try:
+                explicit_zero_usage = int(usage.get("total_tokens")) == 0 and all(
+                    int(usage.get(key) or 0) == 0
+                    for key in (
+                        "input_tokens", "output_tokens", "thinking_tokens",
+                        "cache_read_tokens", "cache_write_tokens",
+                    )
+                )
+            except (TypeError, ValueError):
+                explicit_zero_usage = False
+        attempt_metadata = {
+            "resumed_conversation_id": resumed_conversation_id,
+            "result_seen": bool(payload),
+            "tool_activity_observed": tool_activity_observed,
+            "answer_output_observed": answer_output_observed,
+            "result_num_turns": payload.get("num_turns") if payload else None,
+            "result_usage_explicit_zero": explicit_zero_usage,
+        }
+
         if done_with_error:
             return BackendResponse(
                 text="",
                 duration_ms=duration_ms,
                 error=done_with_error,
                 is_success=False,
+                stream_metadata={
+                    "conversation_id": payload.get("conversation_id"),
+                    "num_turns": payload.get("num_turns"),
+                    "duration_seconds": payload.get("duration_seconds"),
+                    "status": payload.get("status"),
+                    "antigravity_attempt": attempt_metadata,
+                },
+                side_effects_possible=(
+                    tool_activity_observed or answer_output_observed
+                ),
             )
 
-        payload = self._result_payload
         response_text = str(payload.get("response") or "").strip()
         if not response_text:
             response_text = "".join(text_fragments).strip()
@@ -706,6 +816,7 @@ class AntigravityCLIAdapter(BaseBackend):
             "num_turns": payload.get("num_turns"),
             "duration_seconds": payload.get("duration_seconds"),
             "status": payload.get("status"),
+            "antigravity_attempt": attempt_metadata,
         }
         if self._session_mode and self._conversation_id:
             self._persist_session_state()

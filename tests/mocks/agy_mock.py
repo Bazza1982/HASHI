@@ -19,6 +19,7 @@ adapter's own ``resolve_argv_invocation`` COMSPEC path executes it.
 from __future__ import annotations
 
 import os
+import json
 import sys
 import time
 
@@ -27,10 +28,15 @@ USAGE_JSON = (
     '"input_tokens":10,"output_tokens":3,"thinking_tokens":0,'
     '"cache_read_tokens":0,"total_tokens":13'
 )
+ZERO_USAGE_JSON = (
+    '"input_tokens":0,"output_tokens":0,"thinking_tokens":0,'
+    '"cache_read_tokens":0,"cache_write_tokens":0,"total_tokens":0'
+)
 
 
 def main() -> int:
     output_format = "stream-json"
+    input_format = "text"
     prompt = ""
     conversation_id = MOCK_CID
     args = sys.argv[1:]
@@ -52,6 +58,9 @@ def main() -> int:
             if index + 1 < len(args):
                 output_format = args[index + 1]
             index += 2
+        elif arg == "--input-format":
+            input_format = args[index + 1]
+            index += 2
         elif arg in ("--print-timeout", "--add-dir"):
             index += 2
         elif arg == "--dangerously-skip-permissions":
@@ -67,6 +76,18 @@ def main() -> int:
     if log_path:
         with open(log_path, "a", encoding="utf-8") as handle:
             handle.write(orig_args + "\n")
+
+    if input_format == "stream-json":
+        envelope = json.loads(sys.stdin.buffer.readline().decode("utf-8"))
+        if envelope.get("event") != "user":
+            return 2
+        prompt = envelope["message"]["content"]
+        if sys.stdin.buffer.read():
+            return 2
+    input_log = os.environ.get("AGY_MOCK_INPUT_LOG")
+    if input_log:
+        with open(input_log, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"prompt": prompt, "conversation_id": conversation_id}) + "\n")
 
     if os.environ.get("AGY_MOCK_NOISE_STDOUT"):
         print("warning: mock noise line (not JSON)")
@@ -94,27 +115,52 @@ def main() -> int:
         return 0
 
     stale_once = os.environ.get("AGY_MOCK_STALE_ONCE")
-    if stale_once and "stale" in prompt and not os.path.exists(stale_once):
-        with open(stale_once, "w", encoding="utf-8") as _fh:
-            _fh.write("1")
+    stale_with_tool = bool(os.environ.get("AGY_MOCK_STALE_WITH_TOOL"))
+    stale_with_answer = bool(os.environ.get("AGY_MOCK_STALE_WITH_ANSWER"))
+    stale_once_due = bool(
+        stale_once and "stale" in prompt and not os.path.exists(stale_once)
+    )
+    if (
+        stale_once_due
+        or (stale_with_tool and "stale" in prompt)
+        or (stale_with_answer and "stale" in prompt)
+    ):
+        if stale_once_due:
+            with open(stale_once, "w", encoding="utf-8") as _fh:
+                _fh.write("1")
         if output_format == "json":
             print(
-                '{"conversation_id":"%s","status":"ERROR","response":"",'
+                '{"conversation_id":"%s","status":"ERROR","response":"%s",'
                 '"error":"Error: conversation not found",'
-                '"duration_seconds":0,"num_turns":0,"usage":{}}'
-                % conversation_id
+                '"duration_seconds":0,"num_turns":0,"usage":{%s}}'
+                % (
+                    conversation_id,
+                    "partial answer" if stale_with_answer else "",
+                    ZERO_USAGE_JSON,
+                )
             )
         else:
             print(
                 '{"event":"init","conversation_id":"%s",'
                 '"init":{"permission_mode":"always-proceed"}}' % conversation_id
             )
+            if stale_with_tool:
+                print(
+                    '{"event":"step_update","step_update":{'
+                    '"conversation_id":"%s","step_index":1,'
+                    '"state":"ACTIVE","step_type":"shell"}}'
+                    % conversation_id
+                )
             print(
                 '{"event":"result","result":{"conversation_id":"%s",'
-                '"status":"ERROR","response":"",'
+                '"status":"ERROR","response":"%s",'
                 '"error":"Error: conversation not found",'
-                '"duration_seconds":0,"num_turns":0,"usage":{}}}'
-                % conversation_id
+                '"duration_seconds":0,"num_turns":0,"usage":{%s}}}'
+                % (
+                    conversation_id,
+                    "partial answer" if stale_with_answer else "",
+                    ZERO_USAGE_JSON,
+                )
             )
         return 0
 
