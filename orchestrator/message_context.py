@@ -266,7 +266,15 @@ def _legacy_source_id(source: str, chat_id: Any, metadata: Mapping[str, Any]) ->
         "system",
         "session_reset",
     } or normalized.startswith(
-        ("scheduler:", "cron:", "heartbeat:", "proactive:", "bridge:")
+        (
+            "scheduler:",
+            "cron:",
+            "heartbeat:",
+            "proactive:",
+            "bridge:",
+            "bridge-transfer:",
+            "bridge-fork:",
+        )
     ):
         # Runtime work remains a system source even when the Connector needs a
         # Telegram chat ID for its eventual notification.

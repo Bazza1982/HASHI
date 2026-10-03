@@ -628,7 +628,19 @@ def canonical_connector_id(
 
     if source.startswith(("protocol:message", "protocol:reply", "hchat-reply:")):
         return "hchat"
-    if source in _INTERNAL_SOURCE_IDS or source.startswith(("hashi.internal", "scheduler:", "cron:", "heartbeat:", "proactive:", "bridge:", "browser:")):
+    if source in _INTERNAL_SOURCE_IDS or source.startswith(
+        (
+            "hashi.internal",
+            "scheduler:",
+            "cron:",
+            "heartbeat:",
+            "proactive:",
+            "bridge:",
+            "bridge-transfer:",
+            "bridge-fork:",
+            "browser:",
+        )
+    ):
         return "internal"
     if source == "telegram" or source.startswith("telegram."):
         return "telegram"

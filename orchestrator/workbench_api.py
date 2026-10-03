@@ -8539,13 +8539,23 @@ class WorkbenchApiServer:
                 {"ok": False, "error": "text is required"}, status=400
             )
 
+        source = str(payload.get("source") or "api").strip() or "api"
+        if source.casefold().startswith(("bridge-transfer:", "bridge-fork:")):
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "source is reserved for internal bridge handoff",
+                    "error_code": "reserved_internal_source",
+                },
+                status=400,
+            )
+
         # Auto-learn reply route from hchat messages (updates contacts.json)
         reply_route = payload.get("reply_route")
         if reply_route and isinstance(reply_route, dict):
             self._learn_reply_route(text, reply_route)
 
         supplied_metadata = payload.get("request_metadata")
-        source = str(payload.get("source") or "api").strip() or "api"
         session_metadata = {
             "session_id": payload.get("session_id") or None,
             "owner_id": self._v1_owner_id(request),
@@ -9485,11 +9495,38 @@ class WorkbenchApiServer:
             transfer_id, "incoming_notice", incoming_notice
         )
         bridge_prompt = self._build_transfer_prompt(package)
-        request_id = await runtime.enqueue_api_text(
-            bridge_prompt,
-            source=f"bridge-{mode}:{transfer_id}",
-            deliver_to_telegram=True,
-        )
+        try:
+            request_id = await runtime.enqueue_api_text(
+                bridge_prompt,
+                source=f"bridge-{mode}:{transfer_id}",
+                deliver_to_telegram=True,
+            )
+        except Exception as exc:
+            # The Worker may have durably admitted the Run before its RPC
+            # response was interrupted.  Preserve the target receipt and make
+            # the ambiguity explicit; never rewrite it as a definite failure
+            # or retry the mutating enqueue here.
+            error_text = f"{type(exc).__name__}: {exc}"
+            self.transfer_store.update_transfer(
+                transfer_id,
+                status="received",
+                error_code="enqueue_outcome_unknown",
+                error_text=error_text,
+            )
+            self.transfer_store.append_event(
+                transfer_id,
+                "enqueue_outcome_unknown",
+                {"error_type": type(exc).__name__, "error": str(exc)},
+            )
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "target enqueue outcome is unknown",
+                    "error_code": "enqueue_outcome_unknown",
+                    "transfer_id": transfer_id,
+                },
+                status=503,
+            )
         if request_id is None:
             self.transfer_store.update_transfer(
                 transfer_id,

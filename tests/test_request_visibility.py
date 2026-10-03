@@ -50,7 +50,9 @@ async def test_legacy_hidden_request_is_admitted_as_visible(tmp_path, monkeypatc
         {"session_id": "session-visible", "context_generation": 1},
         "user:123", "workbench", "default",
     ))
-    monkeypatch.setattr(runtime_session, "session_workzone_state", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        runtime_session, "session_workzone_state", lambda *args, **kwargs: {}
+    )
 
     result = await runtime.enqueue_request(
         123, "Visible work", source, "Visible work",
@@ -75,6 +77,62 @@ async def test_legacy_hidden_request_is_admitted_as_visible(tmp_path, monkeypatc
     assert item.request_metadata["message_context_snapshot"]["message_source"][
         "id"
     ] == expected_source
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["bridge-transfer:trf-red", "bridge-fork:frk-red"])
+async def test_transfer_bridge_request_uses_internal_connector(
+    tmp_path, monkeypatch, source
+):
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.name = "target"
+    runtime.global_config = SimpleNamespace(project_root=None, instance_id="HASHI3")
+    runtime.next_request_id = lambda: "req-transfer"
+    runtime.session_store = SimpleNamespace(session_workspace=lambda *args: tmp_path)
+    runtime.message_logger = Mock()
+    runtime.request_activity = Mock()
+    runtime.queue = asyncio.Queue()
+    monkeypatch.setattr(
+        runtime_session,
+        "accept_request",
+        lambda *args, **kwargs: (
+            {"session_id": "session-target", "context_generation": 1},
+            SimpleNamespace(
+                replayed=False,
+                run_id="run-transfer",
+                message_id="message-transfer",
+                request_id="req-transfer",
+            ),
+            "user:123",
+            "bridge",
+            "default",
+        ),
+    )
+    monkeypatch.setattr(
+        runtime_session,
+        "resolve_request_session",
+        lambda *args, **kwargs: (
+            {"session_id": "session-target", "context_generation": 1},
+            "user:123",
+            "bridge",
+            "default",
+        ),
+    )
+    monkeypatch.setattr(runtime_session, "session_workzone_state", lambda *args, **kwargs: {})
+
+    result = await runtime.enqueue_request(
+        123,
+        "Continue transferred work",
+        source,
+        "Transfer",
+        deliver_to_telegram=True,
+    )
+
+    item = runtime.queue.get_nowait()
+    assert result == item.request_id == "req-transfer"
+    context = item.request_metadata["message_context_snapshot"]
+    assert context["message_source"]["id"] == "hashi.internal"
+    assert context["frontend_ingress"]["connector"]["id"] == "internal"
 
 
 @pytest.mark.asyncio

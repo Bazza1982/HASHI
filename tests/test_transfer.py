@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from orchestrator.admin_local_testing import supported_commands
 from orchestrator.handoff_builder import HandoffBuilder
@@ -142,6 +143,66 @@ class TransferTests(unittest.TestCase):
         )
         self.assertEqual(status, "accepted_but_chat_offline")
         self.assertEqual(target_chat_status, "offline")
+
+
+class TransferHandlerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_target_enqueue_exception_preserves_unknown_receipt_as_json(self):
+        package = {
+            "transfer_id": "trf-enqueue-unknown",
+            "source_agent": "source",
+            "source_instance": "HASHI2",
+            "target_agent": "target",
+            "target_instance": "HASHI3",
+            "created_at": "2026-10-03T07:43:09+00:00",
+            "recent_context_block": "ctx",
+            "last_user_message": "u",
+            "last_assistant_message": "a",
+        }
+
+        class _Request:
+            async def json(self):
+                return dict(package)
+
+        class _Runtime:
+            startup_success = True
+
+            def has_active_transfer(self):
+                return False
+
+            async def enqueue_api_text(self, *_args, **_kwargs):
+                raise ValueError("unregistered frontend connector")
+
+        async def _notify(*_args, **_kwargs):
+            return {"delivered": False, "reason": "telegram_disconnected", "chunks": 0}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TransferStore(Path(tmp) / "bridge_transfers.sqlite")
+            server = WorkbenchApiServer.__new__(WorkbenchApiServer)
+            server.global_config = SimpleNamespace(instance_id="HASHI3")
+            server.transfer_store = store
+            server._validate_transfer_payload = lambda payload: dict(payload)
+            server._runtime_map = lambda: {"target": _Runtime()}
+            server._notify_transfer_chat = _notify
+            server._build_transfer_prompt = lambda _package: "transfer prompt"
+
+            response = await server.handle_bridge_transfer(_Request())
+            body = json.loads(response.text)
+            record = store.get_transfer(package["transfer_id"])
+            store.close()
+
+        self.assertEqual(response.status, 503)
+        self.assertEqual(body["error_code"], "enqueue_outcome_unknown")
+        self.assertNotIn("redirect", body)
+        self.assertEqual(record["status"], "received")
+        self.assertEqual(record["error_code"], "enqueue_outcome_unknown")
+        self.assertIsNone(record["request_id"])
+        self.assertEqual(
+            [event["event_type"] for event in record["events"]],
+            ["received", "incoming_notice", "enqueue_outcome_unknown"],
+        )
+        event_types = [event["event_type"] for event in record["events"]]
+        self.assertNotIn("queued_on_target", event_types)
+        self.assertNotIn("failed", event_types)
 
 
 if __name__ == "__main__":

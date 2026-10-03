@@ -138,6 +138,56 @@ def _handle(kernel: _Kernel, client: _Client) -> AgentRuntimeHandle:
     return AgentRuntimeHandle(kernel, client, _metadata(client.agent_name, client.pid))
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "source", ["bridge-transfer:trf-rpc", "bridge-fork:frk-rpc"]
+)
+async def test_bridge_handoff_enqueue_crosses_worker_rpc_once(source):
+    calls = []
+
+    async def enqueue_api_text(text, **kwargs):
+        calls.append((text, kwargs))
+        return "req-target-once"
+
+    host = FunctionWorkerHost.__new__(FunctionWorkerHost)
+    host.runtime = SimpleNamespace(enqueue_api_text=enqueue_api_text)
+    host.phase = "ACTIVE"
+    host.accepting = True
+
+    async def emit_metadata():
+        return None
+
+    host.emit_metadata = emit_metadata
+
+    async def responder(method, params):
+        return await host.handle_request(method, params)
+
+    kernel = _Kernel()
+    client = _Client("target", 101, responder=responder)
+    handle = _handle(kernel, client)
+
+    request_id = await handle.enqueue_api_text(
+        "continue transferred work",
+        source=source,
+        deliver_to_telegram=True,
+    )
+
+    assert request_id == "req-target-once"
+    assert client.calls == ["runtime.enqueue_api_text"]
+    assert calls == [
+        (
+            "continue transferred work",
+            {
+                "source": source,
+                "deliver_to_telegram": True,
+                "chat_id": None,
+                "request_metadata": {},
+                "idempotency_key": None,
+            },
+        )
+    ]
+
+
 def test_public_metadata_requires_live_worker_and_actual_telegram_ingress():
     kernel = _Kernel()
     client = _Client("alpha", 101)
