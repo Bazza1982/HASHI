@@ -4091,7 +4091,9 @@ async def handle_backend_error(
             background_jobs=jobs,
         )
         if not (
-            effect_reconciliation["observed_tool_count"]
+            effect_reconciliation["confirmed_read_count"]
+            or effect_reconciliation["confirmed_write_count"]
+            or effect_reconciliation["observed_tool_count"]
             or effect_reconciliation["unverified_action_count"]
             or effect_reconciliation["completed_background_job_count"]
             or effect_reconciliation["evidence_limited"]
@@ -4105,6 +4107,7 @@ async def handle_backend_error(
         )
         if failure_fields.get("side_effects_possible") or failure_fields.get("tool_call_count"):
             effect_reconciliation = {
+                "confirmed_read_count": 0,
                 "confirmed_write_count": 0,
                 "observed_tool_count": int(failure_fields.get("tool_call_count") or 0),
                 "unverified_action_count": max(1, int(failure_fields.get("tool_call_count") or 0)),

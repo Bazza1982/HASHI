@@ -59,6 +59,33 @@ native-media accounting still depend on Provider rejection; the preflight
 does not promise that every request will fit. A capacity rejection after tool
 activity remains non-replayable without user reconciliation.
 
+### Verified read-only provider-call continuation
+
+HERV3 may make a bounded transport retry of only the unfinished physical Model
+Provider call after tool activity when every tool that actually executed has a
+completed successful execution receipt and an exact Tool-owner observation
+receipt typed as `read`. The receipt must bind the Tool name and call ID to a
+valid SHA-256 revision. A registry `read_only` declaration, Smart Tool effect,
+successful shell exit, or interpretation of command text is not effect proof.
+The effect-receipt owner maintains the observational-tool allowlist;
+`verification_run` is excluded because even a successful verification argv or
+recipe may execute subprocesses and modify the workspace.
+
+The continuation reuses the already assembled Provider messages, including the
+existing tool results. It does not execute a Tool again, restart the HER Turn,
+or mark the whole PAO Run safe to replay. Provider text emitted by a
+tool-enabled HERV3 stage remains internal until its final result, so an
+incomplete draft may be discarded before this same-call continuation. The
+existing no-Tool rule remains stricter: once an answer preview may have become
+user-visible, an incomplete call is not retried in place.
+
+Any write receipt, shell execution, background action, failed or incomplete
+receipt, mismatched identity, unknown effect, or limited evidence blocks this
+continuation. The terminal failure retains the observed read, write,
+background, and unknown-effect counts for reconciliation. Provider-call
+continuations share the existing bounded local recovery budget; they never
+authorize replay of a prior Tool call or user request.
+
 ## Foreground path
 
 `PCM -> main model <-> tools -> delivery`

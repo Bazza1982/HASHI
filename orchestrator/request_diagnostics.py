@@ -20,6 +20,19 @@ _MAX_ACTIONS = 256
 _FILE_WRITE_TOOLS = frozenset({"file_write", "apply_patch"})
 
 
+def _confirmed_read(action: Mapping[str, Any]) -> bool:
+    from tools.effect_receipts import is_verified_read_effect_receipt
+
+    receipt = action.get("effect_receipt")
+    return is_verified_read_effect_receipt(
+        tool_name=str(action.get("tool_name") or ""),
+        tool_call_id=str(action.get("tool_call_id") or ""),
+        receipt=receipt if isinstance(receipt, Mapping) else None,
+        completed=action.get("status") == "success",
+        status=action.get("status"),
+    )
+
+
 def safe_request_id(request_id: str) -> str:
     value = _SAFE_ID.sub("_", str(request_id or "")).strip("._")
     if not value:
@@ -260,6 +273,7 @@ def build_user_effect_reconciliation(
                 by_call[key] = action
         for job in report["background_jobs"]:
             jobs_by_id[str(job.get("job_id") or "")] = job
+    confirmed_reads = sum(1 for action in by_call.values() if _confirmed_read(action))
     confirmed_writes = sum(
         1
         for action in by_call.values()
@@ -269,10 +283,16 @@ def build_user_effect_reconciliation(
         and action["effect_receipt"].get("readback") is True
     )
     observed = max(max(0, int(tool_call_count)), len(by_call))
-    unverified = max(0, observed - confirmed_writes)
-    if side_effects_possible and not confirmed_writes and not unverified:
+    unverified = max(0, observed - confirmed_reads - confirmed_writes)
+    if (
+        side_effects_possible
+        and not confirmed_reads
+        and not confirmed_writes
+        and not unverified
+    ):
         unverified = 1
     return {
+        "confirmed_read_count": confirmed_reads,
         "confirmed_write_count": confirmed_writes,
         "observed_tool_count": observed,
         "unverified_action_count": unverified,

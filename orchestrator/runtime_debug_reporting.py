@@ -212,6 +212,7 @@ def safe_retry_evidence(payload: dict[str, Any]) -> dict[str, Any]:
             and not isinstance(reconciliation.get(key), bool)
             and reconciliation[key] > 0
             for key in (
+                "confirmed_read_count",
                 "confirmed_write_count",
                 "observed_tool_count",
                 "unverified_action_count",

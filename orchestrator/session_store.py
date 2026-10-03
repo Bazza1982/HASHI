@@ -4007,6 +4007,7 @@ class SessionStore:
             if isinstance(reconciliation, Mapping):
                 safe_summary: dict[str, Any] = {}
                 for key in (
+                    "confirmed_read_count",
                     "confirmed_write_count",
                     "observed_tool_count",
                     "unverified_action_count",

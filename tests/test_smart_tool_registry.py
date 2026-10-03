@@ -364,6 +364,46 @@ async def test_her_receipt_stays_internal_to_five_field_result(
 
 
 @pytest.mark.asyncio
+async def test_verification_run_can_write_but_never_receives_read_effect_receipt(
+    tmp_path,
+) -> None:
+    registry = ToolRegistry(
+        allowed_tools=["verification_run"],
+        access_root=tmp_path,
+        workspace_dir=tmp_path,
+        secrets={},
+        tool_options={
+            "verification_run": {"direct_timeout_s": 10},
+            "smart_registry": {
+                "enabled": True,
+                "ledger_path": "tool_ledger.jsonl",
+            },
+        },
+        audit_context={"task_id": "verify-write", "stage": "verification"},
+    )
+
+    result = await registry.execute(
+        "verification_run",
+        {
+            "operation": "run",
+            "argv": [
+                "{python}",
+                "-c",
+                (
+                    "import pathlib; "
+                    "pathlib.Path('verification-marker.txt').write_text('written')"
+                ),
+            ],
+        },
+        "call-verify-write",
+    )
+
+    assert result.is_error is False
+    assert (tmp_path / "verification-marker.txt").read_text(encoding="utf-8") == "written"
+    assert "effect_receipt" not in (result.details or {})
+
+
+@pytest.mark.asyncio
 async def test_large_record_grep_is_rejected_before_dispatch_with_replan_guidance(
     tmp_path, monkeypatch
 ) -> None:

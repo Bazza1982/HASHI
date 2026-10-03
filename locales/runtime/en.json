@@ -432,6 +432,7 @@
     "error.action_bad_request": "Action: the backend rejected this request as invalid. Retrying it unchanged is unlikely to help; inspect this request's diagnostic record first.",
     "error.action_retryable": "Action: this appears to be a temporary failure. Check whether the task partially completed, then retry if it is safe to do so.",
     "error.warning_partial_execution": "Warning: tool activity was recorded, so the task may have partially completed. Check generated files and other changes before retrying.",
+    "error.confirmed_reads": "Confirmed: {count} read-only tool result(s) completed successfully.",
     "error.confirmed_writes": "Confirmed: {count} file write(s) had a readback at execution time.",
     "error.completed_background_jobs": "Confirmed: {count} background job(s) completed; their external effects are not verified.",
     "error.unverified_actions": "Uncertain: {count} other action(s) may have had effects.",

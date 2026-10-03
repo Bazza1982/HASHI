@@ -10,6 +10,7 @@ import pytest
 
 from adapters import deepseek_api
 from adapters.deepseek_api import DeepSeekAdapter
+from adapters.her_v2_provider import _EvidenceRecordingToolRegistry
 from adapters.deepseek_tool_protocol import (
     DeepSeekToolMarkupStreamGate,
     inspect_deepseek_text_tool_calls,
@@ -19,6 +20,7 @@ from adapters.openrouter_api import (
     _backend_failure_response,
     _provider_http_failure_diagnostics,
     _tool_call_forensic_details,
+    _verified_read_effect_fact,
 )
 from adapters.stream_events import (
     KIND_COMMENTARY,
@@ -29,8 +31,9 @@ from adapters.stream_events import (
     StreamEvent,
 )
 from orchestrator.enterprise import IdentityService, PolicyEvaluator
+from orchestrator.her_v2.models import Effort, Stage, StageRequest
 from orchestrator.multimodal_contract import canonical_request_content
-from tools.registry import ToolResult
+from tools.registry import ToolRegistry, ToolResult
 
 
 class _DummyToolRegistry:
@@ -94,6 +97,58 @@ def _adapter(tmp_path, *, global_config=None, model="deepseek-v4-pro"):
     adapter = DeepSeekAdapter(cfg, global_config or SimpleNamespace(), api_key="test-key")
     adapter.tool_registry = _DummyToolRegistry()
     return adapter
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("receipt_completed", False),
+        ("receipt_status", "failed"),
+        ("kind", "write"),
+        ("tool_name", "other_tool"),
+        ("evidence_ref", "tool:other:sha256:" + "a" * 64),
+        ("revision", "sha256:not-a-digest"),
+        ("invocation_tool_name", "shell"),
+        ("invocation_tool_name", "verification_run"),
+        ("result_tool_call_id", "different-call"),
+    ],
+)
+def test_verified_read_effect_requires_every_typed_receipt_field(field, value):
+    digest = "a" * 64
+    details = {
+        "receipt_completed": True,
+        "receipt_status": "success",
+        "effect_receipt": {
+            "kind": "read",
+            "tool_name": "file_read",
+            "evidence_ref": f"tool:call-read:sha256:{digest}",
+            "revision": f"sha256:{digest}",
+        },
+    }
+    invocation_tool_name = "file_read"
+    result_tool_call_id = "call-read"
+    if field == "invocation_tool_name":
+        invocation_tool_name = value
+        details["effect_receipt"]["tool_name"] = value
+    elif field == "result_tool_call_id":
+        result_tool_call_id = value
+    elif field in {"receipt_completed", "receipt_status"}:
+        details[field] = value
+    else:
+        details["effect_receipt"][field] = value
+
+    fact = _verified_read_effect_fact(
+        tool_name=invocation_tool_name,
+        tool_call_id="call-read",
+        result=ToolResult(
+            tool_call_id=result_tool_call_id,
+            output="observed",
+            details=details,
+        ),
+    )
+
+    assert fact["executed"] is True
+    assert fact["verified_read"] is False
 
 
 @pytest.mark.asyncio
@@ -2480,11 +2535,36 @@ async def test_deepseek_retries_only_the_unfinished_call_after_completed_tool_lo
     seen_messages = []
     observed_provider_calls = []
     adapter.set_provider_call_observer(observed_provider_calls.append)
+    observed = tmp_path / "observed.txt"
+    observed.write_text("tool output", encoding="utf-8")
+    base_registry = ToolRegistry(
+        allowed_tools=["file_read"],
+        access_root=tmp_path,
+        workspace_dir=tmp_path,
+        secrets={},
+        audit_context={"request_id": "req-transport-retry"},
+    )
+    evidence_registry = _EvidenceRecordingToolRegistry(
+        base_registry,
+        StageRequest(
+            turn_id="turn-read-continuation",
+            request_ref="req-transport-retry",
+            stage=Stage.EXECUTION,
+            role="primary",
+            attempt=1,
+            goal="Inspect the observed file.",
+            classification=None,
+            effort=Effort.HIGH,
+            allow_tools=True,
+        ),
+        model="deepseek-test",
+    )
+    adapter.tool_registry = evidence_registry
     tool_calls = [
         {
             "id": "call_1",
             "type": "function",
-            "function": {"name": "file_list", "arguments": '{"path": "/tmp"}'},
+            "function": {"name": "file_read", "arguments": '{"path": "observed.txt"}'},
         }
     ]
 
@@ -2516,9 +2596,12 @@ async def test_deepseek_retries_only_the_unfinished_call_after_completed_tool_lo
     assert response.text == "done"
     assert len(seen_messages) == 3
     assert seen_messages[1] == seen_messages[2]
-    assert adapter.tool_registry.calls == [
-        ("file_list", {"path": "/tmp"}, "call_1")
-    ]
+    assert len(evidence_registry.receipts) == 1
+    receipt = evidence_registry.receipts[0]
+    assert receipt.tool_name == "file_read"
+    assert receipt.tool_call_id == "call_1"
+    assert receipt.completed is True
+    assert receipt.status.value.casefold() == "success"
     assert events.count(KIND_THINKING) == 1
     assert response.stream_metadata["provider_transport_retry_count"] == 1
     provider_calls = response.stream_metadata["meter"]["provider_calls"]
@@ -2529,8 +2612,151 @@ async def test_deepseek_retries_only_the_unfinished_call_after_completed_tool_lo
         "completed",
     ]
     assert [call["retry_count"] for call in provider_calls] == [0, 0, 1]
-    assert provider_calls[-1]["recovery_kind"] == "provider_transport_retry"
+    assert provider_calls[1]["decision"] == "retry_verified_read_only_continuation"
+    assert provider_calls[1]["effect_recovery"] == {
+        "executed_tool_count": 1,
+        "verified_read_count": 1,
+        "unsafe_or_unverified_count": 0,
+        "safe_current_call_continuation": True,
+        "tools_replayed": False,
+        "discarded_partial_draft": False,
+    }
+    assert provider_calls[-1]["recovery_kind"] == "verified_read_only_continuation"
     assert len({call["provider_request_id"] for call in provider_calls}) == 3
+
+
+@pytest.mark.asyncio
+async def test_deepseek_discards_internal_partial_draft_only_after_verified_reads(
+    monkeypatch,
+    tmp_path,
+):
+    adapter = _adapter(tmp_path)
+    adapter.TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S = 0
+    seen_messages = []
+    tool_calls = [{
+        "id": "call_read",
+        "type": "function",
+        "function": {"name": "file_list", "arguments": '{"path": "."}'},
+    }]
+
+    async def execute_verified_read(tool_name, arguments, tool_call_id=""):
+        adapter.tool_registry.calls.append((tool_name, arguments, tool_call_id))
+        digest = hashlib.sha256(b"tool output").hexdigest()
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            output="tool output",
+            details={
+                "receipt_completed": True,
+                "receipt_status": "success",
+                "effect_receipt": {
+                    "kind": "read",
+                    "tool_name": tool_name,
+                    "evidence_ref": f"tool:{tool_call_id}:sha256:{digest}",
+                    "revision": f"sha256:{digest}",
+                },
+            },
+        )
+
+    async def fake_stream(payload, headers, on_stream_event):
+        seen_messages.append(repr(payload["messages"]))
+        if len(seen_messages) == 1:
+            return _APIResult("", tool_calls, "tool_calls")
+        if len(seen_messages) == 2:
+            await on_stream_event(StreamEvent(kind=KIND_TEXT_DELTA, summary="draft"))
+            raise httpx.RemoteProtocolError("peer closed after internal draft")
+        return _APIResult("complete answer", None, "stop")
+
+    monkeypatch.setattr(adapter.tool_registry, "execute", execute_verified_read)
+    monkeypatch.setattr(adapter, "_stream_api_once", fake_stream)
+
+    response = await adapter.generate_response(
+        "inspect files",
+        "req-read-partial-continuation",
+        on_stream_event=lambda _event: asyncio.sleep(0),
+    )
+
+    assert response.is_success is True
+    assert response.text == "complete answer"
+    assert len(seen_messages) == 3
+    assert seen_messages[1] == seen_messages[2]
+    assert len(adapter.tool_registry.calls) == 1
+    failed_call = response.stream_metadata["meter"]["provider_calls"][1]
+    assert failed_call["decision"] == "retry_verified_read_only_continuation"
+    assert failed_call["effect_recovery"]["discarded_partial_draft"] is True
+    assert failed_call["effect_recovery"]["tools_replayed"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "arguments", "effect_receipt"),
+    [
+        (
+            "file_write",
+            {"path": "state.txt", "content": "changed"},
+            {
+                "kind": "write",
+                "tool_name": "file_write",
+                "evidence_ref": f"tool:call_effect:sha256:{'a' * 64}",
+                "revision": f"sha256:{'a' * 64}",
+                "readback": True,
+            },
+        ),
+        ("shell", {"command": "git status --short"}, None),
+        ("background_job_start", {"command": "work"}, None),
+    ],
+)
+async def test_deepseek_never_continues_after_write_unknown_or_background_effect(
+    monkeypatch,
+    tmp_path,
+    tool_name,
+    arguments,
+    effect_receipt,
+):
+    adapter = _adapter(tmp_path)
+    adapter.TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S = 0
+    calls = 0
+    tool_calls = [{
+        "id": "call_effect",
+        "type": "function",
+        "function": {"name": tool_name, "arguments": json.dumps(arguments)},
+    }]
+
+    async def execute_effect(name, received, tool_call_id=""):
+        adapter.tool_registry.calls.append((name, received, tool_call_id))
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            output="effect completed",
+            details={
+                "receipt_completed": True,
+                "receipt_status": "success",
+                **({"effect_receipt": effect_receipt} if effect_receipt else {}),
+            },
+        )
+
+    async def fake_stream(payload, headers, on_stream_event):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return _APIResult("", tool_calls, "tool_calls")
+        raise httpx.RemoteProtocolError("peer closed after tool result")
+
+    monkeypatch.setattr(adapter.tool_registry, "execute", execute_effect)
+    monkeypatch.setattr(adapter, "_stream_api_once", fake_stream)
+
+    response = await adapter.generate_response(
+        "perform task",
+        f"req-block-{tool_name}",
+        on_stream_event=lambda _event: asyncio.sleep(0),
+    )
+
+    assert response.is_success is False
+    assert response.error_code == "PROVIDER_INCOMPLETE_STREAM"
+    assert calls == 2
+    assert len(adapter.tool_registry.calls) == 1
+    failed_call = response.stream_metadata["meter"]["provider_calls"][-1]
+    assert failed_call["decision"] == "return_provider_failure"
+    assert failed_call["effect_recovery"]["safe_current_call_continuation"] is False
+    assert failed_call["effect_recovery"]["unsafe_or_unverified_count"] == 1
 
 
 @pytest.mark.asyncio

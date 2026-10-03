@@ -3793,6 +3793,7 @@ async def test_handle_backend_error_exposes_typed_failure_metadata_to_listeners(
         "tool_call_count": 3,
         "side_effects_possible": True,
         "effect_reconciliation": {
+            "confirmed_read_count": 0,
             "confirmed_write_count": 0,
             "observed_tool_count": 3,
             "unverified_action_count": 3,

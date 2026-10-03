@@ -966,12 +966,14 @@ def test_backend_error_reports_confirmed_and_unverified_effects_separately():
         error_context={
             "side_effects_possible": True,
             "effect_reconciliation": {
+                "confirmed_read_count": 1,
                 "confirmed_write_count": 1,
                 "unverified_action_count": 2,
             },
         },
     )
 
+    assert "1 read-only tool result" in text
     assert "1 file write" in text
     assert "2 other action" in text
     assert "Do not retry blindly" in text

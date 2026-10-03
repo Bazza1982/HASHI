@@ -432,6 +432,7 @@
     "error.action_bad_request": "建议：后端认为本次请求无效；原样重试通常无法解决问题，请先查看本轮请求的诊断记录。",
     "error.action_retryable": "建议：这可能是临时故障。请先确认任务是否已部分完成，再在安全的情况下重试。",
     "error.warning_partial_execution": "注意：已记录到工具活动，任务可能已部分执行。重试前请先检查生成的文件和其他更改。",
+    "error.confirmed_reads": "已确认：{count} 次只读工具调用成功完成。",
     "error.confirmed_writes": "已确认：{count} 次文件写入在执行时通过读回核对。",
     "error.completed_background_jobs": "已确认：{count} 个后台任务已结束；其外部效果尚未核实。",
     "error.unverified_actions": "未确认：另有 {count} 项动作可能产生效果。",

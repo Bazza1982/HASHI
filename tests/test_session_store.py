@@ -41,6 +41,7 @@ def test_terminal_failure_exposes_bounded_effect_reconciliation(tmp_path):
         error_text="backend failed",
         error_context={
             "effect_reconciliation": {
+                "confirmed_read_count": 1,
                 "confirmed_write_count": 1,
                 "unverified_action_count": 2,
                 "observed_tool_count": 3,
@@ -54,6 +55,7 @@ def test_terminal_failure_exposes_bounded_effect_reconciliation(tmp_path):
     failure = store.request_failure_detail(
         accepted.request_id, owner_id="user:7", agent_id="lily"
     )
+    assert failure["effect_reconciliation"]["confirmed_read_count"] == 1
     assert failure["effect_reconciliation"]["confirmed_write_count"] == 1
     assert failure["effect_reconciliation"]["unverified_action_count"] == 2
     assert "untrusted" not in failure["effect_reconciliation"]

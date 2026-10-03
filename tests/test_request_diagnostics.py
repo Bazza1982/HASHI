@@ -93,6 +93,91 @@ def test_user_reconciliation_distinguishes_confirmed_write_from_unknown_actions(
     assert summary["observed_tool_count"] == 2
 
 
+def test_user_reconciliation_counts_only_strict_completed_read_receipts(tmp_path):
+    digest = "a" * 64
+    record_tool_action(
+        workspace_dir=tmp_path,
+        tool_name="file_read",
+        tool_call_id="call-read",
+        arguments={},
+        output="observed",
+        is_error=False,
+        duration_ms=1,
+        audit_context={"request_id": "req-read"},
+        details={
+            "receipt_completed": True,
+            "receipt_status": "success",
+            "effect_receipt": {
+                "kind": "read",
+                "tool_name": "file_read",
+                "evidence_ref": f"tool:call-read:sha256:{digest}",
+                "revision": f"sha256:{digest}",
+            },
+        },
+    )
+    record_tool_action(
+        workspace_dir=tmp_path,
+        tool_name="shell",
+        tool_call_id="call-shell",
+        arguments={"command": "git status --short"},
+        output="clean",
+        is_error=False,
+        duration_ms=1,
+        audit_context={"request_id": "req-read"},
+        details={
+            "effect_receipt": {
+                "kind": "read",
+                "tool_name": "shell",
+                "evidence_ref": f"tool:call-shell:sha256:{digest}",
+                "revision": f"sha256:{digest}",
+            },
+        },
+    )
+    record_tool_action(
+        workspace_dir=tmp_path,
+        tool_name="verification_run",
+        tool_call_id="call-verification",
+        arguments={"operation": "run", "argv": ["python", "-m", "pytest"]},
+        output="passed",
+        is_error=False,
+        duration_ms=1,
+        audit_context={"request_id": "req-read"},
+        details={
+            "effect_receipt": {
+                "kind": "read",
+                "tool_name": "verification_run",
+                "evidence_ref": (
+                    f"tool:call-verification:sha256:{digest}"
+                ),
+                "revision": f"sha256:{digest}",
+            },
+        },
+    )
+
+    summary = request_diagnostics.build_user_effect_reconciliation(
+        workspace_dir=tmp_path,
+        request_id="req-read",
+        tool_call_count=3,
+        side_effects_possible=True,
+    )
+
+    assert summary == {
+        "confirmed_read_count": 1,
+        "confirmed_write_count": 0,
+        "observed_tool_count": 3,
+        "unverified_action_count": 2,
+        "completed_background_job_count": 0,
+        "evidence_limited": False,
+    }
+    assert runtime_debug_reporting.safe_retry_evidence({
+        "success": False,
+        "error_retryable": True,
+        "side_effects_possible": False,
+        "tool_call_count": 3,
+        "effect_reconciliation": summary,
+    })["status"] == "absent"
+
+
 def test_user_reconciliation_retains_unknown_when_cli_exits_without_tool_log(tmp_path):
     summary = request_diagnostics.build_user_effect_reconciliation(
         workspace_dir=tmp_path,

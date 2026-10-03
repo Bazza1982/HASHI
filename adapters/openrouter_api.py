@@ -63,6 +63,75 @@ INVALID_TOOL_CALL_REPAIR_LIMIT = 3
 _PROVIDER_FORENSIC_WRITE_LOCK = threading.Lock()
 
 
+def _verified_read_effect_fact(
+    *,
+    tool_name: str,
+    tool_call_id: str,
+    result: Any,
+) -> dict[str, Any]:
+    """Return bounded recovery evidence for one completed tool invocation.
+
+    Registry declarations and model-visible output are not effect evidence.
+    HERV3's execution wrapper must have completed the call successfully, and
+    the Tool owner must have attached the exact typed observation receipt.
+    """
+
+    name = str(tool_name or "")
+    call_id = str(tool_call_id or "")
+    details = dict(getattr(result, "details", None) or {})
+    result_call_id = str(getattr(result, "tool_call_id", "") or "")
+    from tools.effect_receipts import is_verified_read_effect_receipt
+
+    verified_read = bool(
+        not bool(getattr(result, "is_error", False))
+        and result_call_id == call_id
+        and is_verified_read_effect_receipt(
+            tool_name=name,
+            tool_call_id=call_id,
+            receipt=details.get("effect_receipt"),
+            completed=details.get("receipt_completed"),
+            status=details.get("receipt_status"),
+        )
+    )
+    return {
+        "tool_name": name,
+        "tool_call_id": call_id,
+        "executed": True,
+        "verified_read": verified_read,
+    }
+
+
+def _nonexecuted_tool_fact(*, tool_name: str, tool_call_id: str) -> dict[str, Any]:
+    return {
+        "tool_name": str(tool_name or ""),
+        "tool_call_id": str(tool_call_id or ""),
+        "executed": False,
+        "verified_read": False,
+    }
+
+
+def _effect_recovery_summary(
+    facts: list[dict[str, Any]],
+    *,
+    discarded_partial_draft: bool = False,
+) -> dict[str, Any]:
+    executed = [fact for fact in facts if fact.get("executed") is True]
+    verified_reads = sum(
+        1 for fact in executed if fact.get("verified_read") is True
+    )
+    unsafe_or_unverified = len(executed) - verified_reads
+    return {
+        "executed_tool_count": len(executed),
+        "verified_read_count": verified_reads,
+        "unsafe_or_unverified_count": unsafe_or_unverified,
+        "safe_current_call_continuation": bool(
+            executed and unsafe_or_unverified == 0
+        ),
+        "tools_replayed": False,
+        "discarded_partial_draft": bool(discarded_partial_draft),
+    }
+
+
 class ProviderProtocolForensicError(RuntimeError):
     """A mandatory private Provider-protocol record could not be persisted."""
 
@@ -2585,8 +2654,9 @@ class OpenRouterAdapter(BaseBackend):
         native_local_refs: set[str] | None = None,
         all_media_native: bool = False,
         provider_call_context: Mapping[str, Any] | None = None,
-    ) -> None:
+    ) -> tuple[dict[str, Any], ...]:
         """Execute all tool_calls and append tool result messages to `messages`."""
+        effect_facts: list[dict[str, Any]] = []
         for tc in tool_calls:
             fn = tc.get("function", {})
             tool_name = fn.get("name", "unknown")
@@ -2616,6 +2686,12 @@ class OpenRouterAdapter(BaseBackend):
                     else (json.loads(raw_args) if raw_args else {})
                 )
             except json.JSONDecodeError as e:
+                effect_facts.append(
+                    _nonexecuted_tool_fact(
+                        tool_name=tool_name,
+                        tool_call_id=tc_id,
+                    )
+                )
                 result_text = f"Error: could not parse tool arguments: {e}"
                 await self._emit(
                     on_stream_event,
@@ -2666,6 +2742,12 @@ class OpenRouterAdapter(BaseBackend):
                     local_refs=set(native_local_refs or ()),
                 )
             ):
+                effect_facts.append(
+                    _nonexecuted_tool_fact(
+                        tool_name=tool_name,
+                        tool_call_id=tc_id,
+                    )
+                )
                 result_text = (
                     "Error: this attachment was already supplied through the native "
                     "media route; duplicate fallback processing is blocked."
@@ -2688,6 +2770,12 @@ class OpenRouterAdapter(BaseBackend):
 
             policy = self._evaluate_tool_policy(tool_name, arguments)
             if not policy.allowed:
+                effect_facts.append(
+                    _nonexecuted_tool_fact(
+                        tool_name=tool_name,
+                        tool_call_id=tc_id,
+                    )
+                )
                 result_text = self._blocked_tool_result_text(tool_name, policy)
                 denial_recorder = getattr(
                     self.tool_registry, "record_policy_denial", None
@@ -2738,6 +2826,13 @@ class OpenRouterAdapter(BaseBackend):
                 raise
 
             output_preview = result.output[:100].replace("\n", " ")
+            effect_facts.append(
+                _verified_read_effect_fact(
+                    tool_name=tool_name,
+                    tool_call_id=tc_id,
+                    result=result,
+                )
+            )
             await self._emit(on_stream_event, KIND_TOOL_END,
                              f"{tool_name}: {output_preview}", tool_name=tool_name,
                              metadata={
@@ -2751,6 +2846,7 @@ class OpenRouterAdapter(BaseBackend):
                 "tool_call_id": tc_id,
                 "content": result.output,
             })
+        return tuple(effect_facts)
 
     def _evaluate_tool_policy(self, tool_name: str, arguments: dict):
         action, resource = self._tool_policy_action_resource(tool_name, arguments)
@@ -3341,6 +3437,7 @@ class OpenRouterAdapter(BaseBackend):
         last_forensic_path: Path | None = None
         total_tool_repair_requests = 0
         total_local_recovery_requests = 0
+        tool_effect_facts: list[dict[str, Any]] = []
 
         try:
             self._touch_activity()
@@ -3575,11 +3672,31 @@ class OpenRouterAdapter(BaseBackend):
                             INVALID_TOOL_CALL_REPAIR_LIMIT,
                             max(0, int(self.TRANSIENT_PROVIDER_CALL_RETRIES)),
                         )
+                        effect_recovery = _effect_recovery_summary(
+                            tool_effect_facts
+                        )
+                        verified_read_continuation = bool(
+                            effect_recovery["safe_current_call_continuation"]
+                        )
+                        no_executed_effect = (
+                            effect_recovery["executed_tool_count"] == 0
+                        )
                         can_transport_retry = bool(
                             not can_media_fallback
                             and recovery_attempts_used < retry_limit
-                            and not provider_call_emitted_text
                             and _transient_provider_call_error(exc)
+                            and (
+                                verified_read_continuation
+                                or (
+                                    no_executed_effect
+                                    and not provider_call_emitted_text
+                                )
+                            )
+                        )
+                        effect_recovery["discarded_partial_draft"] = bool(
+                            can_transport_retry
+                            and verified_read_continuation
+                            and provider_call_emitted_text
                         )
                         partial_protocol = dict(
                             getattr(exc, "hashi_provider_protocol", {}) or {}
@@ -3590,6 +3707,9 @@ class OpenRouterAdapter(BaseBackend):
                             if can_media_fallback
                             else (
                                 "retry_unfinished_provider_call"
+                                if can_transport_retry
+                                and not verified_read_continuation
+                                else "retry_verified_read_only_continuation"
                                 if can_transport_retry
                                 else "return_provider_failure"
                             )
@@ -3644,6 +3764,11 @@ class OpenRouterAdapter(BaseBackend):
                                     "decision": failure_decision,
                                     "decision_reason": type(exc).__name__,
                                     "decision_success": False,
+                                    **(
+                                        {"effect_recovery": effect_recovery}
+                                        if tool_effect_facts
+                                        else {}
+                                    ),
                                     "provider_wire_evidence_refs": list(
                                         provider_wire_refs
                                     ),
@@ -3675,7 +3800,9 @@ class OpenRouterAdapter(BaseBackend):
                             total_local_recovery_requests += 1
                             provider_transport_retry_count += 1
                             next_provider_recovery_kind = (
-                                "provider_transport_retry"
+                                "verified_read_only_continuation"
+                                if verified_read_continuation
+                                else "provider_transport_retry"
                             )
                             await asyncio.sleep(
                                 _provider_call_retry_delay(
@@ -3946,19 +4073,21 @@ class OpenRouterAdapter(BaseBackend):
                         )
 
                 # Execute tools, append results
-                await self._run_tool_calls(
-                    result.tool_calls,
-                    messages,
-                    on_stream_event,
-                    native_attachment_ids=native_attachment_ids,
-                    native_local_refs=native_local_refs,
-                    all_media_native=all_media_native,
-                    provider_call_context={
-                        "provider_call_serial": provider_attempt_serial,
-                        "provider_request_id": last_provider_call_record.get(
-                            "provider_request_id", ""
-                        ),
-                    },
+                tool_effect_facts.extend(
+                    await self._run_tool_calls(
+                        result.tool_calls,
+                        messages,
+                        on_stream_event,
+                        native_attachment_ids=native_attachment_ids,
+                        native_local_refs=native_local_refs,
+                        all_media_native=all_media_native,
+                        provider_call_context={
+                            "provider_call_serial": provider_attempt_serial,
+                            "provider_request_id": last_provider_call_record.get(
+                                "provider_request_id", ""
+                            ),
+                        },
+                    )
                 )
                 completed_tool_calls.extend(
                     {
