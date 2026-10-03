@@ -122,8 +122,57 @@ def test_codex_fixed_command_connects_only_the_per_invocation_hashi_gateway(tmp_
     assert overrides[2].startswith("mcp_servers.hashi_tools={command=")
     assert "args=" in overrides[2] and "cwd=" in overrides[2]
     assert "enabled=true" in overrides[2]
+    assert "required=true" in overrides[2]
     assert command.count("--disable") == 7
     assert 'web_search="disabled"' in command
+
+
+def test_codex_fixed_resume_requires_the_per_invocation_hashi_gateway(tmp_path):
+    config = SimpleNamespace(
+        name="rika",
+        model="gpt-5.4",
+        workspace_dir=tmp_path,
+        system_md=tmp_path / "agent.md",
+        extra={"session_mode": True},
+        resolve_access_root=lambda: tmp_path,
+    )
+    adapter = CodexCLIAdapter(config, _global(tmp_path))
+    adapter.tool_registry = _registry(tmp_path, adapter.global_config)
+    adapter._hashi_mcp_enabled = True
+    adapter._external_mcp_server_names = ()
+    adapter._session_id = "thread-existing"
+    descriptor = prepare_hashi_mcp(adapter, backend="codex-cli")
+    try:
+        command = adapter._build_cmd("prompt", tmp_path / "last.txt")
+    finally:
+        descriptor.close()
+
+    assert command[1:4] == ["exec", "resume", "thread-existing"]
+    gateway_overrides = [
+        command[index + 1]
+        for index, value in enumerate(command[:-1])
+        if value == "-c"
+        and command[index + 1].startswith("mcp_servers.hashi_tools=")
+    ]
+    assert len(gateway_overrides) == 1
+    assert "enabled=true" in gateway_overrides[0]
+    assert "required=true" in gateway_overrides[0]
+
+
+def test_codex_fixed_command_rejects_missing_request_gateway(tmp_path):
+    config = SimpleNamespace(
+        name="rika",
+        model="gpt-5.4",
+        workspace_dir=tmp_path,
+        system_md=tmp_path / "agent.md",
+        extra={},
+        resolve_access_root=lambda: tmp_path,
+    )
+    adapter = CodexCLIAdapter(config, _global(tmp_path))
+    adapter._hashi_mcp_enabled = True
+
+    with pytest.raises(RuntimeError, match="request-scoped invocation is missing"):
+        adapter._build_cmd("prompt", tmp_path / "last.txt")
 
 
 def test_claude_fixed_config_is_owner_only_and_strictly_scoped(tmp_path):

@@ -1300,6 +1300,34 @@ def test_codex_resume_is_used_only_in_explicit_session_mode(tmp_path):
     assert adapter._session_id is None
 
 
+@pytest.mark.asyncio
+async def test_codex_fixed_generate_fails_before_launch_without_request_gateway(
+    tmp_path, monkeypatch
+):
+    adapter = _build_adapter(tmp_path)
+    adapter._hashi_mcp_enabled = True
+    stale_output = tmp_path / ".codex_last_req-missing-gateway.txt"
+    stale_output.write_text("prior diagnostic", encoding="utf-8")
+
+    async def unexpected_inventory():
+        raise AssertionError("MCP inventory must not run without a request gateway")
+
+    async def unexpected_launch(*_args, **_kwargs):
+        raise AssertionError("Codex must not launch without a request gateway")
+
+    monkeypatch.setattr(adapter, "_discover_mcp_servers", unexpected_inventory)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", unexpected_launch)
+
+    response = await adapter.generate_response("hello", "req-missing-gateway")
+
+    assert response.is_success is False
+    assert response.error_code == "CODEX_TOOL_GATEWAY_UNAVAILABLE"
+    assert response.error_retryable is False
+    assert response.side_effects_possible is False
+    assert "request-scoped" in response.error
+    assert stale_output.read_text(encoding="utf-8") == "prior diagnostic"
+
+
 @pytest.mark.parametrize("reasoning_effort", ["max", "ultra"])
 def test_codex_command_reasoning_effort_is_request_scoped(
     tmp_path, reasoning_effort

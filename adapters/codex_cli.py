@@ -656,11 +656,13 @@ class CodexCLIAdapter(BaseBackend):
             base_flags += ["-c", f'model_reasoning_effort="{selected_effort}"']
         for image_path in image_paths:
             base_flags += ["--image", str(image_path)]
-        descriptor = (
-            current_hashi_mcp_invocation(self)
-            if self._hashi_mcp_enabled
-            else None
-        )
+        descriptor = None
+        if self._hashi_mcp_enabled:
+            descriptor = current_hashi_mcp_invocation(self)
+            if descriptor is None:
+                raise RuntimeError(
+                    "Codex Fixed Tool Gateway request-scoped invocation is missing"
+                )
         if descriptor:
             # A Fixed CLI request must expose exactly the request-scoped HASHI
             # Gateway plus Codex's ordinary local coding surface. Disable every
@@ -685,7 +687,7 @@ class CodexCLIAdapter(BaseBackend):
             server_name = str(descriptor["name"])
             mcp_value = (
                 f"mcp_servers.{server_name}={{command={command_value},"
-                f"args={args_value},cwd={cwd_value},enabled=true}}"
+                f"args={args_value},cwd={cwd_value},enabled=true,required=true}}"
             )
             base_flags += [
                 "-c",
@@ -972,6 +974,26 @@ class CodexCLIAdapter(BaseBackend):
                 )
 
         started = time.perf_counter()
+        if (
+            self._hashi_mcp_enabled
+            and current_hashi_mcp_invocation(self) is None
+        ):
+            return with_media_metadata(
+                BackendResponse(
+                    text="",
+                    duration_ms=round((time.perf_counter() - started) * 1000, 2),
+                    error=(
+                        "Codex Fixed Tool Gateway is unavailable because its "
+                        "request-scoped invocation is missing."
+                    ),
+                    is_success=False,
+                    error_code="CODEX_TOOL_GATEWAY_UNAVAILABLE",
+                    error_retryable=False,
+                    side_effects_possible=False,
+                    stream_metadata={"provider_activity_observed": False},
+                )
+            )
+
         workspace_preflight = self._workspace_preflight_failure(
             self.effective_workdir
         )
