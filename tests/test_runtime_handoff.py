@@ -183,12 +183,18 @@ async def test_runtime_host_retains_artifact_source_commit(tmp_path, monkeypatch
             "runtime": runtime.to_dict(),
             "kernel_pid": 123,
             "arguments": {},
+            "qualification_timing": {
+                "started_at": "2026-10-04T10:00:00+11:00",
+                "total_ms": 1200.0,
+                "phases_ms": {"isolated_probe": 800.0},
+            },
         },
     )
 
     await host.prepare()
 
     assert app._shared_replacement_candidate is True
+    assert app.function_release_timing["phases_ms"]["isolated_probe"] == 800.0
     startup_generation, startup_root = app._startup_artifact
     assert startup_root == qualified.generation_root
     assert (
