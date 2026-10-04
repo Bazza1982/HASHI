@@ -10,7 +10,41 @@ from orchestrator.bridge_memory import BridgeContextAssembler, BridgeMemoryStore
 from orchestrator.pcm import render_pcm_document
 from orchestrator.frontend_call.context import CALL_INTERACTION_GUIDANCE
 from orchestrator.her_v2.v3_prompt import compile_main_prompt
+from orchestrator.her_v2.backend_session import HerBackendSessionCoordinator
 from test_call_service import document
+
+
+def test_fixed_session_explicitly_revokes_call_policy_for_next_normal_message(tmp_path):
+    pcm=tmp_path/'agent.md'
+    pcm.write_text(render_pcm_document(persona='Arale speaks warmly.',system='Follow the current user.',memory=''))
+    assembler=BridgeContextAssembler(BridgeMemoryStore(tmp_path),pcm)
+    snapshot={'type':'hashi.current-message-context','version':1,'call':{
+        'type':'hashi.call-context','version':1,'call_id':'call-1','turn_id':'turn-1',
+        'mode':'voice','interaction':'conversation_with_current_user','scope':'current_input_only',
+        'camera':{'state':'off'}}}
+    coordinator=HerBackendSessionCoordinator(tmp_path/'fixed')
+    def prepare(payload,message,request):
+        wire=payload['transport_snapshot']
+        return coordinator.prepare_transport(session_id='same-session',sections=wire['sections'],
+            resources=[],user_message=message,request_id=request,message_id=request,
+            instance_id='TEST',agent_id='arale',owner_id='owner',hashi_conversation_id='same-conversation',
+            context_generation=1,workzone_identity='same-workzone',removed_section_keys=wire['removed_section_keys'])[0]
+    active=assembler.build_prompt_payload('Hello on the call','her-v2',
+        extra_sections=[pcm_message_context_section(snapshot)])
+    first=coordinator.accept(prepare(active,'Hello on the call','turn-1'))
+    assert CALL_INTERACTION_GUIDANCE in compile_main_prompt(pcm_input=first.pcm_input,fallback_request='',context={})[0]
+    coordinator.complete(first,assistant_text='Hello.')
+    # Use the persisted Session after replacing the transport coordinator.
+    coordinator=HerBackendSessionCoordinator(tmp_path/'fixed')
+    normal=assembler.build_prompt_payload('Give a full written explanation','her-v2',
+        extra_sections=[pcm_message_context_section({'type':'hashi.current-message-context','version':1})])
+    encoded=prepare(normal,'Give a full written explanation','turn-2')
+    operations=coordinator.decode(encoded)['pcm_delta']['operations']
+    assert {'op':'remove','key':'call_interaction_policy'} in operations
+    second=coordinator.accept(encoded)
+    system,user=compile_main_prompt(pcm_input=second.pcm_input,fallback_request='',context={})
+    assert CALL_INTERACTION_GUIDANCE not in system
+    assert 'Arale speaks warmly.' in system and 'Give a full written explanation' in user
 
 
 def test_model_wire_separates_call_policy_from_camera_data_and_clears_it(tmp_path):
