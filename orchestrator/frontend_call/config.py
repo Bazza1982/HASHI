@@ -169,6 +169,8 @@ class CallConfig:
         if route not in ("phone", "call"):
             raise CallError("call_configuration_invalid", 503)
         ready = doc.get("enabled") is True
+        if not ready:
+            route = "phone"
         camera = False
         if ready:
             if targets is None:
@@ -180,7 +182,15 @@ class CallConfig:
     def select_route(self, owner, agent, revision, route):
         if route not in ("phone", "call"):
             raise CallError("call_route_invalid")
-        doc, _ = self.read()
+        if route == "phone":
+            try:
+                doc = read_config_json(self.path)
+            except Exception as exc:
+                raise CallError("call_configuration_invalid", 503) from exc
+            if doc.get("version") != 1:
+                raise CallError("call_configuration_invalid", 503)
+        else:
+            doc, _ = self.read()
         if doc.revision != revision:
             raise CallError("call_configuration_changed", 409)
         routes = doc.setdefault("routes", {})
@@ -272,6 +282,14 @@ class CallConfig:
         return result
 
     def context(self, owner, agent):
+        try:
+            disabled = read_config_json(self.path)
+        except FileNotFoundError as exc:
+            raise CallError("call_not_configured", 503) from exc
+        if disabled.get("version") == 1 and disabled.get("enabled") is not True:
+            return {"revision": disabled.revision, "targets": [],
+                    "profile": {"stt": None, "tts": None, "vision": None},
+                    **self.route(owner, agent, disabled)}
         doc, targets = self.read()
         public = [
             {

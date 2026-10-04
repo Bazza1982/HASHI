@@ -57,3 +57,17 @@ def test_backend_menu_persists_selection_and_rejects_stale_callbacks(tmp_path):
     rev=settings.config.context(settings.owner,'arale')['revision'][:12]
     with pytest.raises(CallError,match='menu_invalid'):
         settings.apply('target','tts.-1',rev)
+
+
+def test_disabled_call_restores_phone_and_backend_deactivation_still_persists(tmp_path):
+    path=tmp_path/'call_profiles.json';path.write_text(json.dumps(document()))
+    runtime=SimpleNamespace(name='arale',global_config=SimpleNamespace(bridge_home=tmp_path,authorized_id=7))
+    settings=CallSettings(runtime)
+    settings.command(['activate'])
+    doc=json.loads(path.read_text());doc['enabled']=False;path.write_text(json.dumps(doc))
+    assert settings.config.route(settings.owner,'arale')['route']=='phone'
+    assert settings.command(['deactivate'])=='home'
+    text,keyboard=settings.render()
+    assert keyboard.inline_keyboard
+    doc=json.loads(path.read_text());doc['enabled']=True;path.write_text(json.dumps(doc))
+    assert settings.config.route(settings.owner,'arale')['route']=='phone'

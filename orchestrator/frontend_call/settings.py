@@ -43,6 +43,8 @@ class CallSettings:
                     [button(tr("call.stt"), "view", "stt"), button(tr("call.tts"), "view", "tts")],
                     [button(tr("call.vision"), "view", "vision"), button(tr("call.advanced"), "view", "advanced")],
                     [button(selected_label(tr("call.deactivate"), ctx["route"] == "phone"), "route", "phone")]]
+            if not ctx["call_ready"]:
+                rows = [[button(tr("call.deactivate"), "route", "phone")]]
         elif page in ("stt", "tts", "vision"):
             title = tr("call." + page)
             choices = [t for t in targets if t["kind"] == page]
