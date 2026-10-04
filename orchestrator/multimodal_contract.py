@@ -1327,7 +1327,10 @@ def _read_authorized_media(
     flags |= int(getattr(os, "O_BINARY", 0))
     flags |= int(getattr(os, "O_NOFOLLOW", 0))
     try:
-        descriptor = os.open(resolved, flags)
+        from orchestrator.session_attachment_authorization import open_granted_media
+        descriptor = open_granted_media(part, flags)
+        if descriptor is None:
+            descriptor = os.open(resolved, flags)
     except OSError as exc:
         raise MultimodalContractError(
             f"attachment {attachment_id!r} is unavailable",

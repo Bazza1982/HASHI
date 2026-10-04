@@ -323,6 +323,8 @@ class BaseBackend(ABC):
         except (AttributeError, OSError, TypeError, ValueError):
             pass
         candidates.append(getattr(self.global_config, "base_media_dir", None))
+        from orchestrator.session_attachment_authorization import backend_attachment_roots
+        candidates.extend(backend_attachment_roots(self))
         roots: list[Path] = []
         for candidate in candidates:
             if not candidate:
