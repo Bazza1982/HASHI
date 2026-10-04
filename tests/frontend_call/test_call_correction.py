@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import json
 from datetime import datetime, timezone
 import pytest
 
@@ -20,6 +21,17 @@ def test_selected_route_is_persistent_and_configuration_does_not_activate(tmp_pa
     assert config.route('owner', 'other')['route'] == 'phone'
     with pytest.raises(CallError, match='configuration_changed'):
         config.select_route('owner', 'agent-a', context['revision'], 'phone')
+
+
+async def test_disabled_call_context_keeps_minimal_phone_readiness(tmp_path):
+    service, _, _, base, _ = setup(tmp_path)
+    doc=json.loads(service.config.path.read_text());doc['enabled']=False
+    service.config.path.write_text(json.dumps(doc))
+    info=await service.invoke('owner',{**base,'operation':'context'})
+    assert info['route']=='phone' and info['call_ready'] is False
+    assert info['camera_available'] is False and info['video_policy']['interval_ms']>=1000
+    assert 'profile' not in info and 'targets' not in info
+    await service.close()
 
 
 async def test_configured_cloud_start_needs_no_frontend_consent_and_preserves_privacy(tmp_path):

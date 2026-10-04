@@ -289,6 +289,7 @@ class CallConfig:
         if disabled.get("version") == 1 and disabled.get("enabled") is not True:
             return {"revision": disabled.revision, "targets": [],
                     "profile": {"stt": None, "tts": None, "vision": None},
+                    "video_policy": self.video_policy(disabled),
                     **self.route(owner, agent, disabled)}
         doc, targets = self.read()
         public = [
