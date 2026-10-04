@@ -1678,6 +1678,8 @@ class ToolRegistry:
                     browser_args,
                     tool_call_id=tool_call_id,
                 )
+            if browser_args.get("browser_target") == "embedded":
+                return "Error: embedded browser requires an authenticated HASHI capability Worker; no browser fallback was attempted"
             browser_options = opts.get("browser", {})
             if isinstance(browser_options, dict):
                 bridge_endpoint = str(

@@ -142,6 +142,7 @@ class CapabilityRegistration:
     authorization_key_id: str
     registered_at: float
     expires_at: float
+    provider_id: str = ""
 
     @classmethod
     def from_mapping(
@@ -205,6 +206,7 @@ class CapabilityRegistration:
             ),
             registered_at=current,
             expires_at=current + ttl,
+            provider_id=str(value.get("provider_id") or ("extension" if kind == "browser_control" else "")).strip().lower(),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -693,7 +695,10 @@ class CapabilityBroker(ManualDesktopBroker):
         timeout_seconds: float = 60.0,
         lease_id: str | None = None,
     ) -> Any:
-        registration, worker_token = self._select(capability_kind, action=action)
+        requested_provider = str((args or {}).get("browser_target") or "").strip().lower() if capability_kind == "browser_control" else ""
+        if requested_provider not in {"", "embedded", "extension"}:
+            raise CapabilityBrokerError("invalid browser_target")
+        registration, worker_token = self._select(capability_kind, action=action, provider_id=requested_provider)
         normalized_action = _text(action, "action").casefold()
         if authorization not in {
             "tool_registry",
@@ -838,6 +843,7 @@ class CapabilityBroker(ManualDesktopBroker):
         capability_kind: str,
         *,
         action: str | None,
+        provider_id: str = "",
     ) -> tuple[CapabilityRegistration, str]:
         with self._lock:
             self._prune()
@@ -847,6 +853,7 @@ class CapabilityBroker(ManualDesktopBroker):
                 record
                 for record in self._records.values()
                 if record[0].capability_kind == kind
+                and (not provider_id or record[0].provider_id == provider_id)
                 and (
                     not normalized_action
                     or normalized_action in record[0].supported_actions
@@ -857,6 +864,11 @@ class CapabilityBroker(ManualDesktopBroker):
                     kind,
                     action=normalized_action or None,
                 )
+            # Preserve existing extension-first behavior unless the task explicitly
+            # chooses its shared desktop browser. Never fall back across a target.
+            if kind == "browser_control" and not provider_id:
+                external = [item for item in candidates if item[0].provider_id == "extension"]
+                candidates = external or candidates
             return sorted(
                 candidates,
                 key=lambda item: item[0].registered_at,

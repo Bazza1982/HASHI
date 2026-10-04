@@ -2523,6 +2523,16 @@ TOOL_SCHEMAS.extend(
 )
 
 
+# Both browser transports use the same HASHI capability/permission authority.
+# An explicit target never silently falls back to a different browser/profile.
+for _schema in TOOL_SCHEMAS:
+    if _schema["function"]["name"].startswith("browser_"):
+        _properties = _schema["function"]["parameters"].setdefault("properties", {})
+        _properties["browser_target"] = {"type": "string", "enum": ["extension", "embedded"], "description": "Use embedded for a live desktop-browser handoff; repeat the target on every call. Extension retains the existing Chrome/Edge bridge."}
+        _properties["handoff_id"] = {"type": "string", "description": "Exact local live-tab handoff ID; required for embedded browser actions."}
+        _properties.setdefault("tab_id", {"type": "string", "description": "Exact browser tab identity supplied by a live handoff. Never substitute another active tab."})
+
+
 TOOL_SCHEMA_MAP = {s["function"]["name"]: s for s in TOOL_SCHEMAS}
 
 ALL_TOOL_NAMES = list(TOOL_SCHEMA_MAP.keys())
