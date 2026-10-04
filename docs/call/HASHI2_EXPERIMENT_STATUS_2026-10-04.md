@@ -51,9 +51,29 @@ feature worktrees. It is not merged to `main` or adopted by running workers.
   microphone, loudspeaker, camera, PAO projection, and `/phone` acceptance.
 - Adoption of the shared Backend API and Agent Functions requires an expressly
   approved HASHI2 operational scope and a fresh idle/queue/schedule check.
-  The standing rules forbid `/reboot max` and cold HASHI2 restart. Until then,
-  code and test success cannot be described as live adoption.
+  The specific hot `/reboot max` trial was approved later on 2026-10-04; cold
+  HASHI2 restart remains outside scope. Code and test success cannot be
+  described as live adoption.
 - Once adopted, accept with the paired Workbench branch on real microphone,
   loudspeaker and camera, with a short `/phone` regression and a measured
   rollback. Only after HASHI2 live acceptance should any other instance be
   considered.
+
+## 2026-10-04 live adoption preflight
+
+- The user explicitly approved the previously proposed HASHI2-only hot
+  `/reboot max` trial and its necessary rollback. This does not approve a Core
+  change, a cold restart, another instance, or a merge to `main`.
+- Before changing the active HASHI2 source, the live Backend API showed five
+  active Agents, none generating or holding queued requests, and no managed
+  background jobs. All five authoritative Agent Scheduler lists had no enabled
+  jobs.
+- Three nightly QA Agents still reported active cross-instance transfers to
+  HASHI3. The target recorded one transfer as `received` only, one as
+  `accepted_but_chat_offline`, and one as `accepted`. The `received` transfer
+  has no queued target request, so its outcome remains unresolved. Treat these
+  transfer states as live-work admission blockers until reconciled.
+- HASHI2 therefore remains on its original root branch and running Function
+  generation. No `/reboot max`, Workbench cutover, physical-device acceptance,
+  or `/phone` regression has occurred. Recheck the transfer outcome and the
+  complete idle/queue/background/schedule gate immediately before adoption.
