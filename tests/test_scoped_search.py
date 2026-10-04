@@ -181,6 +181,8 @@ async def test_zero_partial_and_exclusions_are_distinct(tmp_path):
     data = payload(await registry.execute('file_search', query))
     assert not data['matches'] and data['coverage_complete']
     assert 'node_modules' in data['coverage']['default_directory_exclusions']
+    assert 'tool_action_audit.jsonl' in data['coverage']['default_file_exclusions']
+    assert '.pdf' in data['coverage']['excluded_content_suffixes']
     shown = await registry.execute('file_list', {'path': str(repo)})
     hidden = await registry.execute('file_list', {'path': str(repo), 'include_hidden': False})
     assert '.env' in shown.output and '.env' not in hidden.output

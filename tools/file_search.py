@@ -287,9 +287,13 @@ async def execute_file_search(args, *, read_roots, cwd, search_scope, audit_cont
                   effective_policy={key: config[key] for key in (
                       'profile', 'include', 'exclude', 'include_hidden', 'follow_links', 'cross_filesystems')})
     result['coverage']['excluded_content'] = 'Containers/media/binary; ordinary UTF-8 text only' if config['mode'] == 'content' else 'No file bodies read'
+    from tools.search_worker import PROJECT_EXCLUDED_DIRS, PROJECT_EXCLUDED_FILES, CONTAINER_SUFFIXES
     result['coverage']['default_directory_exclusions'] = (
-        sorted(__import__('tools.search_worker', fromlist=['PROJECT_EXCLUDED_DIRS']).PROJECT_EXCLUDED_DIRS)
-        if config['profile'] == 'project' else [])
+        sorted(PROJECT_EXCLUDED_DIRS) if config['profile'] == 'project' else [])
+    result['coverage']['default_file_exclusions'] = (
+        sorted(PROJECT_EXCLUDED_FILES) if config['profile'] == 'project' else [])
+    result['coverage']['excluded_content_suffixes'] = (
+        sorted(CONTAINER_SUFFIXES) if config['mode'] == 'content' and operation != 'log_query' else [])
     if broad_scope_advisory([entry['path'] for entry in config['selected_roots']]):
         result['warnings'].append('Broad selected roots may take longer; scope is advisory, not denied')
     status = 'success' if complete else 'partial'

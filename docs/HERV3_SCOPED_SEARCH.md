@@ -46,8 +46,9 @@ The scanner is a short-lived foreground child, using argv/data and the existing
 process cleanup owner. Lazy directory stacks and bounded text batches alternate
 between roots. Directory links/junctions and mount traversal are off by default;
 following a link still rechecks selected and authorized roots and detects cycles.
-Project exclusions are defined once and reported. Expanded profile and hidden
-inclusion change discovery preferences, never authority.
+Project exclusions are defined once and reported, including directory names,
+internal ledger/checkpoint filenames and excluded content suffixes. Expanded
+profile and hidden inclusion change discovery preferences, never authority.
 The project profile prunes nested `workspaces` trees, so an instance checkout
 does not implicitly search every colocated Agent. The exact own-home root is
 scheduled independently. An explicitly selected workspace root remains usable
@@ -125,7 +126,9 @@ terminal event fencing, and native Windows CRLF offset assumptions.
 Focused red/green probes also found ANSI-encoded worker pipes breaking Chinese
 paths, a native search envelope being corrupted by the HERV3 evidence footer,
 an instance checkout visiting colocated workspaces, and the rollback flag
-accidentally disabling old listing/log tools. These defects have behavior checks.
+accidentally disabling old listing/log tools. A final coverage probe exposed
+unreported default filename exclusions; an assertion failed on that omission and
+passes with the complete effective policy. These defects have behavior checks.
 
 Focused checks cover real search/read isolation, exact roots, Gateway round trips,
 long-record paging without duplicate/lost hits, stale/cross-Run cursors, hidden and
@@ -142,8 +145,37 @@ including a real MCP progress/cancel round trip. Windows Unicode coverage also
 forces an inherited ANSI pipe encoding instead of relying on UTF-8 defaults.
 This is platform evidence, not qualification of Python 3.14 as a HASHI runtime.
 The curated gate initially passed 739 checks and refused three generation
-qualifications because the Functions source was not yet committed; qualification
-is rerun from the coherent commit, rather than weakening its commit requirement.
+qualifications because the Functions source was not yet committed. After the
+coherent source commit, all 742 checks passed in 229.42 seconds; the commit
+requirement was retained. The final exclusion-policy amendment passed 56 owning
+and direct-consumer checks, plus two native Windows coverage/budget checks.
+These runs had no failed or skipped tests.
+
+Reproducible commands (run in the HASHI1 checkout):
+
+```bash
+# WSL CPython 3.12.13: final policy and direct consumers, 56 passed
+.venv/bin/python -B -m pytest -q tests/test_scoped_search.py \
+  tests/test_smart_tool_registry.py tests/test_tool_output_limits.py \
+  tests/test_tool_gateway_mcp.py
+# Curated Core gate from committed Functions source, 742 passed
+.venv/bin/python -B -m pytest -q
+```
+
+```powershell
+# Native Windows: owning/platform selection, 25 passed
+& 'C:\Python314\python.exe' -B -m pytest -q tests/test_scoped_search.py `
+  tests/test_search_activity.py tests/test_search_processes.py `
+  --basetemp 'C:\Users\thene\AppData\Local\Temp\hashi1-scoped-search-native'
+# Final policy amendment: coverage and escaped-output budget, 2 passed
+& 'C:\Python314\python.exe' -B -m pytest -q `
+  tests/test_scoped_search.py::test_zero_partial_and_exclusions_are_distinct `
+  tests/test_scoped_search.py::test_large_escaped_results_page_without_invalid_json_or_lost_hits `
+  --basetemp 'C:\Users\thene\AppData\Local\Temp\hashi1-scoped-search-final-policy'
+```
+
+The protected Core guard and `git diff --check` passed. Offline generation probes
+prepare temporary instances only; they do not adopt artifacts into production.
 
 Manual first-action model probes used the actual v3 prompt/compiler and tool
 schemas, synthetic Workzone/home context, Strategy Cards off, and
@@ -155,6 +187,14 @@ used memory search and known logs used `log_query`. Shell was used directly for
 native/Git operations. The daily model sometimes added redundant directory
 inspection. Only the first Provider action was observed: no probe executed its
 Shell, searched a real disk, read live Agent memory or proved a full task outcome.
+
+Four additional Provider probes interpreted real temporary-fixture tool results:
+a completed empty search and a deadline-limited empty search for each model.
+Both models qualified the completed result by its selected scope/policy and
+recognized that the partial result cannot establish absence. The daily model was
+verbose and overcautious about skipped entries; this observation motivated the
+explicit filename-exclusion reporting above. These probes are bounded behavioral
+evidence, not a guarantee across all models or multi-turn tasks.
 
 **Source and offline verification are not production adoption.** No new Function
 artifact was published to HASHI1, no live Worker was replaced and no production
