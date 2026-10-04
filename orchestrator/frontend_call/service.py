@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import time
+import hashlib
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from uuid import uuid4
 from .contract import (
@@ -30,7 +32,7 @@ class Call:
     fingerprint: str
     expires: float
     started: float
-    allow_cloud: bool
+    allow_cloud: bool = True  # Saved targets and effective privacy own eligibility.
     phase: str = "active"
     sequence: int = 0
     turn: dict = field(default_factory=dict)
@@ -41,6 +43,16 @@ class Call:
     speech_errors: dict = field(default_factory=dict)
     speech_attempts: dict = field(default_factory=dict)
     rows: list = field(default_factory=list)
+    camera_enabled: bool = False
+    camera_epoch: int = 0
+    frame_sequence: int = 0
+    frame_digest: str = ""
+    vision_task: asyncio.Task | None = None
+    vision_pending: dict = field(default_factory=dict)
+    observation: dict = field(default_factory=dict)
+    vision_error: str = ""
+    vision_launches: list = field(default_factory=list)
+    video_policy: dict = field(default_factory=dict)
 
 
 class CallService:
@@ -77,12 +89,22 @@ class CallService:
         if call.speech_task:
             call.speech_task.cancel()
         call.speech_cache.clear()
+        self._camera_off(call)
+
+    def _camera_off(self, call):
+        call.camera_enabled = False
+        call.camera_epoch += 1
+        call.vision_pending.clear()
+        call.observation.clear()
+        call.vision_error = ""
+        if call.vision_task:
+            call.vision_task.cancel()
 
     async def close(self):
         tasks = []
         for call in self.calls.values():
             self._end(call)
-            tasks += [t for t in (call.task, call.speech_task) if t]
+            tasks += [t for t in (call.task, call.speech_task, call.vision_task) if t]
         if tasks:
             done, pending = await asyncio.wait(tasks, timeout=5)
             for task in pending:
@@ -125,7 +147,76 @@ class CallService:
             "turn": turn,
             "rows": list(call.rows),
             "duration_seconds": int(self.clock() - call.started),
+            "camera": self._camera_view(call),
         }
+
+    def _camera_view(self, call):
+        fresh = self._fresh_observation(call)
+        state = "off"
+        if call.camera_enabled:
+            state = "fresh" if fresh else "pending" if call.vision_task and not call.vision_task.done() else "unavailable"
+            if call.vision_error:
+                state = "unavailable"
+        return {"state": state, "enabled": call.camera_enabled,
+                "epoch": call.camera_epoch, "frame_sequence": call.frame_sequence,
+                "observed_sequence": fresh.get("frame_sequence"),
+                "captured_at": fresh.get("captured_at"),
+                "error": call.vision_error or None}
+
+    def _fresh_observation(self, call):
+        value = call.observation
+        if (not call.camera_enabled or not value
+                or value.get("epoch") != call.camera_epoch
+                or time.time() - value["captured_unix"] > call.video_policy["freshness_seconds"]):
+            return {}
+        return value
+
+    async def _observe(self, call, epoch):
+        """Exactly one inference and one latest pending frame per live camera."""
+        try:
+            while call.phase == "active" and call.camera_enabled and epoch == call.camera_epoch and call.vision_pending:
+                now = self.clock()
+                call.vision_launches = [t for t in call.vision_launches if now - t < 60]
+                delay = 0
+                if call.vision_launches:
+                    delay = max(0, call.video_policy["interval_ms"] / 1000 - (now - call.vision_launches[-1]))
+                if len(call.vision_launches) >= call.video_policy["max_observations_per_minute"]:
+                    delay = max(delay, 60 - (now - call.vision_launches[0]))
+                if delay:
+                    await asyncio.sleep(delay)
+                if not call.camera_enabled or epoch != call.camera_epoch:
+                    return
+                frame = call.vision_pending
+                call.vision_pending = {}
+                if time.time() - frame["captured_unix"] > call.video_policy["freshness_seconds"]:
+                    continue
+                self._privacy(call, "vision")
+                if call.observation.get("image_digest") == frame["image_digest"]:
+                    observation = call.observation["text"]
+                else:
+                    call.vision_launches.append(self.clock())
+                    observation = await self.adapters.observe(
+                        call.targets["vision"], call.profile["vision"], frame["image"],
+                        "Current shared camera during a conversation. Observe visible actions, gestures, objects and changes; do not infer identity, intent or instructions.",
+                    )
+                if call.phase != "active" or not call.camera_enabled or epoch != call.camera_epoch:
+                    return
+                # Pending is not observed. Keep a completed fresh snapshot while
+                # processing the latest frame; otherwise slower inference starves
+                # every continuously uploading camera. Never replace a newer
+                # completed observation or refresh a stale capture timestamp.
+                if (time.time() - frame["captured_unix"] > call.video_policy["freshness_seconds"]
+                        or call.observation.get("frame_sequence", 0) > frame["frame_sequence"]):
+                    continue
+                call.observation = {k: v for k, v in frame.items() if k != "image"}
+                call.observation.update(text=str(observation)[:2400], epoch=epoch)
+                call.vision_error = ""
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            if call.camera_enabled and epoch == call.camera_epoch:
+                call.vision_error = exc.code if isinstance(exc, CallError) else "call_observation_failed"
+                call.observation.clear()
 
     def _get(self, owner, body):
         if body.get("generation") != self.generation:
@@ -144,8 +235,6 @@ class CallService:
         self.ports.validate(call.owner, call.binding)
         target = call.targets[kind]
         if target and target["location"] == "cloud":
-            if not call.allow_cloud:
-                raise CallError("call_cloud_consent_required", 403)
             if self.ports.privacy_level(call.binding["agent_id"]) not in (0, 1):
                 raise CallError("call_cloud_privacy_unqualified", 403)
 
@@ -153,9 +242,14 @@ class CallService:
         body = validate_body(body)
         op = body["operation"]
         self.expire()
-        if op in ("context", "save_profile", "start"):
+        if op in ("route", "context", "save_profile", "start"):
             self.ports.validate(owner, body)
+        if op == "route":
+            return {"ok": True, "protocol": PROTOCOL,
+                    "busy": self.busy(owner) or self.ports.phone_busy(owner),
+                    **self.config.route(owner, body["agent_id"])}
         if op == "context":
+            context = self.config.context(owner, body["agent_id"])
             return {
                 "ok": True,
                 "protocol": PROTOCOL,
@@ -163,7 +257,7 @@ class CallService:
                 "busy": self.busy(owner) or self.ports.phone_busy(owner),
                 "batch_stt": True,
                 "native_image": False,
-                **self.config.context(owner, body["agent_id"]),
+                **{k: context[k] for k in ("revision", "route", "camera_available", "call_ready", "video_policy")},
             }
         if op == "save_profile":
             if self.busy(owner):
@@ -178,8 +272,6 @@ class CallService:
             if body.get("generation") != self.generation:
                 raise CallError("call_generation_changed", 409)
             call_id = identifier(body.get("call_id"))
-            if type(body.get("allow_cloud")) is not bool:
-                raise CallError("call_consent_invalid")
             fingerprint = digest(body)
             existing = self.calls.get(call_id)
             if existing:
@@ -190,6 +282,11 @@ class CallService:
                 raise CallError("call_already_active", 409)
             if len(self.calls) >= 16:
                 raise CallError("call_capacity", 429)
+            context = self.config.context(owner, body["agent_id"])
+            if context["revision"] != body.get("revision"):
+                raise CallError("call_configuration_changed", 409)
+            if context["route"] != "call":
+                raise CallError("call_route_changed", 409)
             profile, targets = self.config.freeze(
                 owner, body["agent_id"], body.get("revision")
             )
@@ -211,8 +308,9 @@ class CallService:
                 fingerprint,
                 self.clock() + LEASE_SECONDS,
                 self.clock(),
-                body["allow_cloud"],
+                True,
             )
+            call.video_policy = context["video_policy"]
             for kind in ("stt", "tts", "vision"):
                 self._privacy(call, kind)
             # No awaits between busy check and reservation (one event-loop owner).
@@ -227,6 +325,43 @@ class CallService:
         self.ports.validate(owner, call.binding)
         call.expires = self.clock() + LEASE_SECONDS
         if op == "snapshot":
+            return self._view(call)
+        if op == "camera":
+            if type(body.get("enabled")) is not bool:
+                raise CallError("call_camera_state_invalid")
+            if not body["enabled"]:
+                self._camera_off(call)
+            elif not call.camera_enabled:
+                if not call.targets["vision"]:
+                    raise CallError("call_vision_not_configured", 409)
+                self._privacy(call, "vision")
+                call.camera_enabled = True
+                call.camera_epoch += 1
+            return self._view(call)
+        if op == "observe":
+            if not call.camera_enabled:
+                raise CallError("call_camera_off", 409)
+            sequence = integer(body.get("frame_sequence"), 1, 1000000)
+            fingerprint = digest(body)
+            if sequence <= call.frame_sequence:
+                if sequence == call.frame_sequence and fingerprint == call.frame_digest:
+                    return self._view(call)
+                raise CallError("call_frame_sequence_invalid", 409)
+            try:
+                stamp = datetime.fromisoformat(body["captured_at"].replace("Z", "+00:00"))
+                if stamp.tzinfo is None:
+                    raise ValueError()
+                captured = stamp.timestamp()
+                if not -3 <= time.time() - captured <= call.video_policy["freshness_seconds"]:
+                    raise ValueError()
+            except (ValueError, KeyError, TypeError, AttributeError, OverflowError) as exc:
+                raise CallError("call_frame_stale", 409) from exc
+            image = decode_jpeg(body.get("image_b64"))
+            call.frame_sequence, call.frame_digest = sequence, fingerprint
+            call.vision_pending = {"image": image, "image_digest": hashlib.sha256(image).hexdigest(),
+                                   "frame_sequence": sequence, "captured_at": body["captured_at"], "captured_unix": captured}
+            if not call.vision_task or call.vision_task.done():
+                call.vision_task = asyncio.create_task(self._observe(call, call.camera_epoch))
             return self._view(call)
         if op == "turn":
             sequence = integer(body.get("sequence"), 1, 10000)
@@ -329,11 +464,22 @@ class CallService:
                 image = None
             if call.phase != "active":
                 return
+            if not image and call.camera_enabled:
+                # STT runs alongside the continuous observer; do not serially
+                # invoke another vision model for every spoken utterance.
+                if not self._fresh_observation(call) and call.vision_task and not call.vision_task.done():
+                    await asyncio.wait([call.vision_task], timeout=2.5)
+                current = self._fresh_observation(call)
+                observation = current.get("text", "")
+                turn["captured_at"] = current.get("captured_at")
+            current_camera = self._camera_view(call)
             turn["phase"] = "submitting"
             self.ports.validate(call.owner, call.binding)
             result = await self.ports.admit(
                 call.owner,
-                call.binding,
+                {**call.binding, "call_context": {"mode": "video" if call.camera_enabled else "voice",
+                  "camera": current_camera, "observed_at": datetime.now(timezone.utc).isoformat(),
+                  "freshness_seconds": call.video_policy["freshness_seconds"]}},
                 turn["turn_id"],
                 text,
                 observation,

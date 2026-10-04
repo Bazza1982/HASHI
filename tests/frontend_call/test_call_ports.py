@@ -7,7 +7,8 @@ from orchestrator.frontend_live_voice.manager import LiveVoiceManager
 from orchestrator.frontend_live_voice.protocol import LiveVoiceError
 
 
-async def test_real_session_store_is_the_only_message_and_result_owner(tmp_path):
+async def test_real_session_store_is_the_only_message_and_result_owner(tmp_path, monkeypatch):
+    monkeypatch.setattr('orchestrator.message_context._network_secret', lambda root: 'test-secret')
     store = SessionStore(tmp_path / "sessions.db", instance_id="TEST")
     session = store.ensure_default_session(owner_id="owner", agent_id="lily")
     captured = []
@@ -42,6 +43,7 @@ async def test_real_session_store_is_the_only_message_and_result_owner(tmp_path)
             return accepted.request_id
 
     api = SimpleNamespace(
+        config_path=tmp_path / 'agents.json',
         session_store=store,
         _runtime_map=lambda: {"lily": Runtime()},
         _persistent_session_v1_ready=lambda: True,
@@ -70,8 +72,10 @@ async def test_real_session_store_is_the_only_message_and_result_owner(tmp_path)
     user = store.get_message(
         result["message_id"], session_id=session["session_id"], owner_id="owner"
     )
-    assert user["display_text"] == "Read this label." and "AC." in user["text"]
-    assert "Untrusted camera observation" in captured[0][0]
+    assert user["display_text"] == user["text"] == "Read this label."
+    from orchestrator.message_context import verify_connector_evidence, CONNECTOR_EVIDENCE_METADATA_KEY
+    facts = verify_connector_evidence(tmp_path, evidence=captured[0][1]['request_metadata'][CONNECTOR_EVIDENCE_METADATA_KEY], prompt=captured[0][0])
+    assert facts['call_media']['observation'] == 'The label says AC.'
     with pytest.raises(CallError):
         ports.validate("owner", {**binding, "context_generation": 999})
     with pytest.raises(Exception):

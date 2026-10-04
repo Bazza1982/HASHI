@@ -156,6 +156,65 @@ class CallConfig:
     def __init__(self, path):
         self.path = path
 
+    def route(self, owner, agent, doc=None, targets=None):
+        """The backend owns the next-call choice, including legacy defaults."""
+        if doc is None:
+            try:
+                doc = read_config_json(self.path)
+            except FileNotFoundError:
+                return {"route": "phone", "camera_available": False, "call_ready": False}
+            except Exception as exc:
+                raise CallError("call_configuration_invalid", 503) from exc
+        route = doc.get("routes", {}).get(digest([owner, agent]), "phone")
+        if route not in ("phone", "call"):
+            raise CallError("call_configuration_invalid", 503)
+        ready = doc.get("enabled") is True
+        camera = False
+        if ready:
+            if targets is None:
+                targets = {row["id"]: row for row in map(validate_target, doc.get("targets", []))}
+            camera = self.profile(owner, agent, doc, targets).get("vision") is not None
+        return {"route": route, "camera_available": route == "call" and camera,
+                "call_ready": ready, "revision": doc.revision}
+
+    def select_route(self, owner, agent, revision, route):
+        if route not in ("phone", "call"):
+            raise CallError("call_route_invalid")
+        doc, _ = self.read()
+        if doc.revision != revision:
+            raise CallError("call_configuration_changed", 409)
+        routes = doc.setdefault("routes", {})
+        key = digest([owner, agent])
+        if key not in routes and len(routes) >= 200:
+            raise CallError("call_profile_limit", 429)
+        routes[key] = route
+        self._write(doc)
+        return self.route(owner, agent)
+
+    def video_policy(self, doc=None):
+        if doc is None:
+            doc, _ = self.read()
+        policy = {"interval_ms": 2000, "freshness_seconds": 8,
+                  "max_observations_per_minute": 20}
+        supplied = doc.get("video_policy", {})
+        if not isinstance(supplied, dict) or set(supplied) - set(policy):
+            raise CallError("call_video_policy_invalid", 503)
+        policy.update(supplied)
+        bounds = {"interval_ms": (1000, 10000), "freshness_seconds": (3, 30),
+                  "max_observations_per_minute": (1, 60)}
+        if any(type(policy[k]) is not int or not low <= policy[k] <= high
+               for k, (low, high) in bounds.items()):
+            raise CallError("call_video_policy_invalid", 503)
+        return policy
+
+    def _write(self, doc):
+        try:
+            write_config_json(self.path, doc)
+        except ConfigConflictError as exc:
+            raise CallError("call_configuration_changed", 409) from exc
+        except ConfigDurabilityError as exc:
+            raise CallError("call_configuration_outcome_unknown", 503) from exc
+
     def read(self):
         try:
             doc = read_config_json(self.path)
@@ -237,6 +296,8 @@ class CallConfig:
             "revision": doc.revision,
             "targets": public,
             "profile": self.profile(owner, agent, doc, targets),
+            "video_policy": self.video_policy(doc),
+            **self.route(owner, agent, doc, targets),
         }
 
     def freeze(self, owner, agent, revision):
@@ -259,10 +320,5 @@ class CallConfig:
         if len(profiles) >= 200 and digest([owner, agent]) not in profiles:
             raise CallError("call_profile_limit", 429)
         profiles[digest([owner, agent])] = profile
-        try:
-            write_config_json(self.path, doc)
-        except ConfigConflictError as exc:
-            raise CallError("call_configuration_changed", 409) from exc
-        except ConfigDurabilityError as exc:
-            raise CallError("call_configuration_outcome_unknown", 503) from exc
+        self._write(doc)
         return self.context(owner, agent)

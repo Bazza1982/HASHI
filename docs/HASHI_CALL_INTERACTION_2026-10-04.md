@@ -1,0 +1,79 @@
+# Call interaction correction — HASHI2 experiment
+
+## Ownership and approved scope
+
+On 2026-10-04 the user approved the combined voice/video correction and the
+Workbench main UI design, then instructed implementation to continue in HASHI2
+until the next runnable user acceptance point. Frontend Connector owns the
+replaceable Functions media service and Workbench presentation. PCM projects
+sealed current-input call facts. PAO retains the existing Session/Run admission
+and the same Agent, persona, history and work. Core is unchanged. No main merge
+or other instance adoption is part of this experiment.
+
+## Decisions
+
+- The original call button reads the backend-owned route for its owner/Agent.
+  Default is the independent `/phone` engine. `/call activate` and deactivate
+  select the next call. Configuration alone never activates a route. Calls
+  freeze route and media profile for their lifetime.
+- The adjacent video button starts or upgrades the same bound call. Selecting
+  another chat returns to the existing owner. Same-instance navigation neither
+  retargets nor ends the call; Session/connection generation changes close it.
+- `/call` settings use existing command cards, catalogue, callback contract,
+  locale and revision-aware config writer. Browser configuration forms and
+  local command interception are retired. The media context API returns only
+  availability and call facts, never provider/model/voice profiles or secrets.
+- Click starts directly subject to native device permission and existing
+  authority/privacy policy. There is no application consent checkbox. Cloud
+  access still requires the existing privacy level and configured service.
+- Auto VAD produces ordinary speech turns, continuing listening after playback.
+  Speaking begins only after actual playback. Stopping speech preserves the
+  accepted task; hangup stops media and invalidates camera observations.
+- Video observation is independent of utterances, including silence. There is
+  at most one inference in flight and one latest pending frame; backend rate,
+  minute budget, JPEG validation, deduplication and capture-time freshness apply.
+  A newer pending frame does not erase a completed fresh snapshot. Camera
+  epoch changes discard delayed results. Frames do not create Agent Runs.
+- Speech text stays verbatim in PAO. Sealed current-input media facts enter the
+  actual model PCM context with oral-conversation guidance and the effective
+  persona/history. User-shared camera data has no instruction, identity or
+  authorization authority. Freshness is checked again during PCM assembly;
+  immutable admission receipts retain their original snapshot.
+- Both independent engines share the existing themed presentation shell.
+  Desktop voice is about 390×360 and video 390×500; mobile expands to the
+  viewport and minimizes above the composer. Three fixed control positions
+  are microphone, camera and end. Extra recovery/stop actions are contextual.
+  Latest captions use up to three lines. No second launcher or settings gear.
+
+## Focused verification and failure proof
+
+The initial correction tests failed on missing saved route, cloud-start checkbox,
+and unsupported camera observation operations before implementation. Additional
+red/green checks covered queued PCM observations expiring, negative menu callback
+indices, audio unlock before asynchronous route lookup, visible route failures,
+and slow vision starving a continuously uploading camera. Failure and green
+receipts are held in the experiment evidence; none of the temporary defects is
+retained. Retired tests for frontend configuration writers and source-text
+disclosure checks were removed; backend persistence and rendered behavior are
+the acceptance boundaries.
+
+Focused Python and both engine/frontend browser tests passed. The initial
+curated gate passed 764 cases and rejected three qualification cases because
+the candidate was not yet committed. Qualification must be rerun from the
+committed checkpoint. An independent review, source qualification, running
+Functions adoption, real transport/model canary and physical user acceptance
+are separate gates. This document records implementation intent, not an
+adoption or physical acceptance claim.
+
+## Delivery gate
+
+Preserve Core PID/digest and recovery commit. Immediately before the approved
+HASHI2-only hot adoption, read all Agents/queues/background work, authoritative
+scheduled work for the next 30 minutes and transfer evidence. Historical QA
+fences must be preserved, never replayed or deleted for maintenance. A transfer
+notice is not an execution receipt; inspect the actual remaining task and target
+Run state. Replace only the approved experiment source and paired preview.
+After adoption verify Core identity, new Function generation, API, normal and
+video turn context, camera-off/hangup cleanup and actual playback evidence.
+Invite user testing only when that next point is runnable; physical microphone,
+speaker, camera and conversational feel remain user acceptance until observed.

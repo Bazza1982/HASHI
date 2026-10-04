@@ -159,6 +159,13 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         ),
     ),
     CommandSpec(
+        "call",
+        "cmd_call",
+        "Configure voice and video calls",
+        "session",
+        guide=CommandGuide("/call <action>", ("menu", "status", "activate", "deactivate", "stt", "tts", "vision", "voice", "advanced", "option", "reset"), example="/call activate"),
+    ),
+    CommandSpec(
         "safevoice",
         "cmd_safevoice",
         "Toggle voice confirmation safety layer",

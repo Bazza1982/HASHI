@@ -20,6 +20,7 @@ MAX_CALL_SECONDS = 8 * 3600
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}\Z")
 COMMON = {"operation", "client_id", "agent_id", "session_id", "context_generation"}
 OPERATIONS = {
+    "route": set(),
     "context": set(),
     "save_profile": {"revision", "profile"},
     "start": {"generation", "revision", "call_id", "allow_cloud"},
@@ -33,6 +34,8 @@ OPERATIONS = {
         "captured_at",
     },
     "snapshot": {"generation", "call_id"},
+    "camera": {"generation", "call_id", "enabled"},
+    "observe": {"generation", "call_id", "frame_sequence", "image_b64", "captured_at"},
     "speech": {"generation", "call_id", "turn_id", "segment", "retry"},
     "end": {"generation", "call_id"},
 }

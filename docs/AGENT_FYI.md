@@ -1,5 +1,13 @@
 # HASHI Agent FYI
 
+2026-10-04 call interaction correction is approved for the isolated HASHI2
+experiment, with Frontend Connector/PCM/PAO ownership and unchanged Core.
+The existing phone entrance selects a backend-saved route; settings remain
+backend command menus. Independent bounded camera observations and sealed,
+fresh current-call facts reach the same Agent PCM. Source, running adoption,
+independent review and user device acceptance remain separate. See
+[call interaction decision](HASHI_CALL_INTERACTION_2026-10-04.md).
+
 2026-10-04 HASHI2 /call remains on an isolated experiment branch. OpenRouter
 Whisper Large V3 is not a guaranteed Groq route because speech requests ignore
 provider pinning; the user accepts a non-Groq provider. Gemini 3.8 Flash-Lite

@@ -242,6 +242,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
     ):
         self.session_store = session_store
         self.external_call_busy = lambda owner_id: False
+        self.external_route_allowed = lambda owner_id, agent_id: True
         self.global_config = global_config
         self.secrets = dict(secrets or {})
         self.providers = dict(default_registry(include_experimental=True) if provider_registry is None else provider_registry)
@@ -2874,6 +2875,8 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         if not self.available:
             raise LiveVoiceError("live_not_enabled", 503)
         expected = self._expected_scope(payload)
+        if not self.external_route_allowed(owner_id, expected["agent_id"]):
+            raise LiveVoiceError("live_call_route_changed", 409)
         if expected["instance_id"] != self.instance_id or expected["instance_generation"] != self.instance_generation:
             raise LiveVoiceError("live_scope_changed", 409)
         session = self.session_store.get_session(expected["session_id"], owner_id=owner_id, agent_id=expected["agent_id"])

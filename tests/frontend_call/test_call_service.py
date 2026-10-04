@@ -129,6 +129,9 @@ def setup(tmp_path, location="local"):
 
 async def start(service, base, cloud=False):
     info = await service.invoke("owner", {**base, "operation": "context"})
+    if info.get("route") != "call":
+        service.config.select_route("owner", base["agent_id"], info["revision"], "call")
+        info = await service.invoke("owner", {**base, "operation": "context"})
     body = {
         **base,
         "operation": "start",
@@ -272,10 +275,8 @@ async def test_scope_and_owner_fences_prevent_delivery(tmp_path):
     await service.close()
 
 
-async def test_cloud_requires_consent_and_qualified_privacy_at_each_stage(tmp_path):
+async def test_cloud_requires_qualified_privacy_at_each_stage(tmp_path):
     service, ports, adapters, base, _ = setup(tmp_path, "cloud")
-    with pytest.raises(CallError, match="consent"):
-        await start(service, base)
     ports.level = None
     with pytest.raises(CallError, match="privacy"):
         await start(service, base, True)

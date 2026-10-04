@@ -21,6 +21,7 @@ def register_call_api(api):
     )
     api.call_service = service
     api.live_voice_manager.external_call_busy = service.busy
+    api.live_voice_manager.external_route_allowed = lambda owner, agent: service.config.route(owner, agent)["route"] == "phone"
     reaper = None
     headers = {
         "Cache-Control": "no-store, private",
@@ -52,7 +53,7 @@ def register_call_api(api):
             # Disabled file prevents new work; end is still available for cleanup.
             if not isinstance(body, dict):
                 raise CallError("call_json_invalid")
-            if body.get("operation") != "end":
+            if body.get("operation") not in ("end", "route"):
                 service.config.read()
             return web.json_response(await service.invoke(owner, body), headers=headers)
         except CallError as exc:
