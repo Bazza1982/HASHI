@@ -22,7 +22,7 @@ async def probe(args):
     secrets = json.loads((instance / "secrets.json").read_text(encoding="utf-8"))
     adapter = MediaAdapters(secret_resolver=ConnectorSecretResolver(secrets=secrets))
     if args.mode == "auth":
-        key = secrets.get("openrouter-api_key", "")
+        key = secrets.get(args.secret_name, "")
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10), trust_env=False) as session:
             async with session.get(
                 "https://openrouter.ai/api/v1/auth/key",
@@ -66,7 +66,8 @@ def main():
     tts.add_argument("--output", required=True)
     stt = sub.add_parser("stt")
     stt.add_argument("--input", required=True)
-    sub.add_parser("auth")
+    auth = sub.add_parser("auth")
+    auth.add_argument("--secret-name", default="openrouter-api_key")
     args = parser.parse_args()
     print(json.dumps(asyncio.run(probe(args)), ensure_ascii=False))
 

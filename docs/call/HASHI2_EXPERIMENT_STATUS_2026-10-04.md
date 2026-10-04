@@ -12,7 +12,9 @@ feature worktrees. It is not merged to `main` or adopted by running workers.
 - A disabled OpenRouter profile selects `openai/whisper-large-v3` for STT and
   `google/gemini-3.8-flash-lite-tts` for speech. It lists the Gemini voices and
   their descriptors, plus a separate bounded speaking-style option. The style
-  is sent as Google AI Studio speech metadata, never spoken as text.
+  is sent as Google AI Studio speech metadata, never spoken as text. Gemini
+  requires PCM output; the Function packages its validated raw PCM as WAV for
+  the existing browser player.
 - The backend resolves its OpenRouter key through the existing instance secret
   resolver. Workbench receives only the safe catalogue. The front-end flag
   hides the `/call` entry and card as well as blocking new proxy operations.
@@ -26,17 +28,27 @@ feature worktrees. It is not merged to `main` or adopted by running workers.
 
 ## Evidence and remaining gates
 
-- Focused HASHI2 Python tests: 90 passed. Workbench focused Node tests: 52
+- Focused HASHI2 Python tests: 92 passed. Workbench focused Node tests: 52
   passed; its production build passed. Protected Core checker passed. These are
   offline results, not physical or paid-provider acceptance.
-- The existing ignored HASHI2 `openrouter-api_key` returned HTTP 401 from
-  OpenRouter's key-auth endpoint; a bounded TTS probe was rejected as
-  `User not found`. No real speech audio, STT result, microphone, loudspeaker,
-  or camera acceptance has been claimed. No secret value was copied to source.
-- Next: owner updates the HASHI2 local secret with a working OpenRouter key.
-  Recheck key auth, then bounded TTS and STT probes and actual serving-provider
-  receipt. Decide whether OpenRouter Whisper with verified receipt is acceptable
-  or whether a guaranteed Groq backend requires a separate direct Groq key.
+- At first the ignored HASHI2 key returned HTTP 401. The user authorized a
+  narrow copy from HASHI1; its `openrouter_key` passed authentication and is now
+  the HASHI2 `openrouter-api_key`. Other HASHI2 secret fields and the original
+  root ownership, mode, and immutable protection were verified unchanged.
+- The first authenticated Gemini request failed because `mp3` is unsupported
+  for this model. A corrected raw PCM request returned HTTP 200 with a non-silent
+  24 kHz mono stream. The corrected Function adapter then returned a valid
+  1.64-second WAV for voice `Sulafat` and a separate speaking style.
+- That WAV was resampled to the normal 16 kHz call input. OpenRouter Whisper
+  transcribed the expected Chinese phrase as `你好,测试`. This verifies the real
+  TTS-to-STT provider path, not browser playback or PAO turn projection.
+- OpenRouter returned generation IDs for both speech calls but its generation
+  lookup returned 404, including after the calls had finished. Actual serving
+  providers therefore remain unverified. The user accepts a non-Groq provider;
+  no Groq-specific claim is needed for this experiment.
+- Next: validate the corrected source and Core gate, then adopt the paired
+  Functions and Workbench generation in an approved HASHI2 window before real
+  microphone, loudspeaker, camera, PAO projection, and `/phone` acceptance.
 - Adoption of the shared Backend API and Agent Functions requires an expressly
   approved HASHI2 operational scope and a fresh idle/queue/schedule check.
   The standing rules forbid `/reboot max` and cold HASHI2 restart. Until then,

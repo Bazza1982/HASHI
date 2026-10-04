@@ -22,7 +22,7 @@
       "base_url": "https://openrouter.ai/api/v1",
       "model": "google/gemini-3.8-flash-lite-tts",
       "credential_ref": "secrets://openrouter-api_key",
-      "audio_format": "mp3",
+      "audio_format": "pcm",
       "voices": [
         "Achernar", "Achird", "Algenib", "Algieba", "Alnilam", "Aoede",
         "Autonoe", "Callirrhoe", "Charon", "Despina", "Enceladus", "Erinome",

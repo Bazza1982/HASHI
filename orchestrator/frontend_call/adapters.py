@@ -9,15 +9,17 @@ from __future__ import annotations
 
 import base64
 import asyncio
+import io
 import json
 import logging
 import os
 import re
+import wave
 import aiohttp
+from .config import OPENROUTER_API_BASE, OPENROUTER_GEMINI_TTS_MODELS
 from .contract import CallError, MAX_OUTPUT
 
 
-OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 _GENERATION_ID = re.compile(r"gen-[A-Za-z0-9-]{1,120}\Z")
 logger = logging.getLogger(__name__)
 
@@ -102,11 +104,20 @@ class MediaAdapters:
                         allow_redirects=False,
                         timeout=aiohttp.ClientTimeout(total=4),
                     ) as response:
+                        if response.status == 404:
+                            break
                         if response.status != 200:
                             continue
-                        raw = await response.content.read(8193)
-                        if len(raw) > 8192:
+                        parts = []
+                        total = 0
+                        async for part in response.content.iter_chunked(4096):
+                            total += len(part)
+                            if total > 8192:
+                                break
+                            parts.append(part)
+                        if total > 8192:
                             continue
+                        raw = b"".join(parts)
                         record = json.loads(raw).get("data")
                         if not isinstance(record, dict) or record.get("id") != valid_id:
                             continue
@@ -198,7 +209,7 @@ class MediaAdapters:
         options = dict(slot.get("options", {}))
         # Gemini 3.8 speaks input verbatim; style is metadata, never spoken text.
         if (
-            target["model"].startswith("google/gemini-3.8-")
+            target["model"] in OPENROUTER_GEMINI_TTS_MODELS
             and target["base_url"].rstrip("/") == OPENROUTER_API_BASE
         ):
             style = options.pop("style", "")
@@ -218,7 +229,19 @@ class MediaAdapters:
         )
         if not data:
             raise CallError("call_speech_response_empty", 502)
-        if fmt == "wav":
+        if fmt == "pcm":
+            # OpenRouter Gemini 3.8 emits headerless 24 kHz mono signed 16-bit PCM.
+            # Browser playback already accepts WAV; keep raw PCM off the client wire.
+            if mime != "audio/pcm" or len(data) < 4800 or len(data) % 2:
+                raise CallError("call_speech_format_invalid", 502)
+            output = io.BytesIO()
+            with wave.open(output, "wb") as wav:
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(24000)
+                wav.writeframes(data)
+            data, mime = output.getvalue(), "audio/wav"
+        elif fmt == "wav":
             if not (data.startswith(b"RIFF") and data[8:12] == b"WAVE"):
                 raise CallError("call_speech_format_invalid", 502)
             mime = "audio/wav"

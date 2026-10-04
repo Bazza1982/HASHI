@@ -49,7 +49,9 @@ video of the Agent; the Agent uses its existing static avatar.
    and are never returned to the client.
 5. STT is `POST {base_url}/audio/transcriptions` (multipart WAV, `model`, JSON
    response containing `text`). TTS is `POST {base_url}/audio/speech` (JSON
-   `model`, `input`, `voice`, `response_format`), returning MP3 or WAV. Vision is
+   `model`, `input`, `voice`, `response_format`), returning MP3 or WAV. OpenRouter
+   Gemini 3.8 TTS requires raw 24 kHz mono PCM; its validated response is wrapped
+   as WAV by the Function before reaching the browser. Vision is
    `POST {base_url}/chat/completions`, a standard text + `image_url` request.
    Set the base URL to the provider's API prefix, e.g. `/v1`, not an entire endpoint.
 6. For TTS set `voices` to the installed provider's actual IDs; optional
@@ -57,7 +59,8 @@ video of the Agent; the Agent uses its existing static avatar.
    are a bounded schema (`string`, `number`, `boolean`, optional `enum`). Only
    declare options the endpoint supports. Do not copy one provider's emotional
    tags into another model. `instructions` is suitable only where supported.
-   For OpenRouter Gemini 3.8 TTS, the allow-listed `style` option is sent as
+   For OpenRouter Gemini 3.8 TTS, set `audio_format` to `pcm`. The allow-listed
+   `style` option is sent as
    `provider.options.google-ai-studio.speech_metadata.style`; it is not
    prepended to the text that the model speaks. The HASHI2 trial profile is
    `examples/call_profiles.openrouter.example.json`.

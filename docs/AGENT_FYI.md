@@ -1,11 +1,15 @@
 # HASHI Agent FYI
 
-2026-10-04 HASHI2 /call is being integrated only on an isolated experiment
-branch. OpenRouter Whisper Large V3 is not a guaranteed Groq route because
-speech requests ignore provider pinning. Gemini 3.8 Flash-Lite TTS accepts
-voice plus provider speech style metadata. Existing HASHI2 OpenRouter
-credential returned HTTP 401 during the first live probe; source tests and
-running adoption are separate. No main merge or HASHI2 restart is implied.
+2026-10-04 HASHI2 /call remains on an isolated experiment branch. OpenRouter
+Whisper Large V3 is not a guaranteed Groq route because speech requests ignore
+provider pinning; the user accepts a non-Groq provider. Gemini 3.8 Flash-Lite
+TTS needs PCM output, with voice and separate provider speech style metadata.
+The Function validates its 24 kHz mono PCM and wraps it as browser-playable WAV.
+The user-approved HASHI1 key copy restored HASHI2 OpenRouter authentication;
+direct Function TTS and a TTS-to-Whisper transcription passed. OpenRouter's
+generation lookup returned 404 for both speech IDs, so actual serving providers
+remain unverified. Source tests, running adoption, and physical devices remain
+separate; no main merge or HASHI2 restart is implied.
 
 2026-10-03 non-voice repairs require separate source, instance-adoption and
 live evidence. Core is unchanged; no new API supervisor is added.

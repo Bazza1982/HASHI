@@ -1,7 +1,10 @@
 """OpenRouter media options preserve credentials and Gemini speech metadata."""
 
 import asyncio
+import base64
+import io
 import json
+import wave
 from types import SimpleNamespace
 
 import pytest
@@ -62,7 +65,7 @@ def _target(kind, model):
         "options": {"style": {"type": "string", "max_length": 160}} if kind == "tts" else {},
     }
     if kind == "tts":
-        value.update(voices=["Achernar"], voice_styles={"Achernar": "Soft"}, audio_format="mp3")
+        value.update(voices=["Achernar"], voice_styles={"Achernar": "Soft"}, audio_format="pcm")
     return value
 
 
@@ -75,27 +78,44 @@ def test_openrouter_target_keeps_secret_reference_private_and_validates_voice_st
         validate_target({**target, "credential_ref": "file:///tmp/key"})
     with pytest.raises(CallError):
         options_for(target, {"provider": {"only": ["groq"]}})
+    with pytest.raises(CallError):
+        validate_target({**target, "model": "other/tts-model"})
 
 
 def test_gemini_style_is_provider_metadata_and_never_spoken():
     calls = []
     target = _target("tts", "google/gemini-3.8-flash-lite-tts")
     adapter = MediaAdapters(
-        session_factory=lambda **_kw: _Session(calls, b"ID3audio", "audio/mpeg"),
+        session_factory=lambda **_kw: _Session(calls, b"\x00\x01" * 4800, "audio/pcm"),
         secret_resolver=SimpleNamespace(resolve=lambda _ref: SimpleNamespace(value="test-key")),
     )
     result = asyncio.run(
         adapter.synthesize(target, {"voice_id": "Achernar", "options": {"style": "warm and clear"}}, "Hello.")
     )
-    assert result["media_type"] == "audio/mpeg"
+    assert result["media_type"] == "audio/wav"
+    with wave.open(io.BytesIO(base64.b64decode(result["content_b64"])), "rb") as audio:
+        assert (audio.getnchannels(), audio.getsampwidth(), audio.getframerate()) == (1, 2, 24000)
+        assert audio.getnframes() == 4800
     url, request = calls[0]
     assert url.endswith("/audio/speech")
     assert request["headers"]["Authorization"] == "Bearer test-key"
     body = request["json"]
     assert body["input"] == "Hello."
     assert body["voice"] == "Achernar"
+    assert body["response_format"] == "pcm"
     assert "style" not in body
     assert body["provider"]["options"]["google-ai-studio"]["speech_metadata"]["style"] == "warm and clear"
+
+
+def test_gemini_pcm_rejects_invalid_or_truncated_audio():
+    target = _target("tts", "google/gemini-3.8-flash-lite-tts")
+    for payload, mime in ((b"\0" * 4801, "audio/pcm"), (b"\0" * 4800, "application/json")):
+        adapter = MediaAdapters(
+            session_factory=lambda **_kw: _Session([], payload, mime),
+            secret_resolver=SimpleNamespace(resolve=lambda _ref: SimpleNamespace(value="test-key")),
+        )
+        with pytest.raises(CallError, match="call_speech_format_invalid"):
+            asyncio.run(adapter.synthesize(target, {"voice_id": "Achernar", "options": {}}, "Hello."))
 
 
 def test_whisper_transcription_uses_openrouter_multipart_and_secret_reference():

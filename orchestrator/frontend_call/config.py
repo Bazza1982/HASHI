@@ -29,6 +29,11 @@ RESERVED = {
     "tool_choice",
     "provider",
 }
+OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
+OPENROUTER_GEMINI_TTS_MODELS = {
+    "google/gemini-3.8-flash-lite-tts",
+    "google/gemini-3.8-flash-tts",
+}
 
 
 def options_for(target, value):
@@ -122,7 +127,17 @@ def validate_target(target):
         or any(not isinstance(label, str) or not 1 <= len(label) <= 50 for label in voice_styles.values())
     ):
         raise CallError("call_voices_invalid", 503)
-    if target.get("audio_format", "mp3") not in ("mp3", "wav"):
+    audio_format = target.get("audio_format", "mp3")
+    if audio_format not in ("mp3", "wav", "pcm"):
+        raise CallError("call_audio_format_unsupported", 503)
+    gemini_openrouter = (
+        target["kind"] == "tts"
+        and target["model"] in OPENROUTER_GEMINI_TTS_MODELS
+        and target["base_url"].rstrip("/") == OPENROUTER_API_BASE
+    )
+    if (gemini_openrouter and audio_format != "pcm") or (
+        audio_format == "pcm" and not gemini_openrouter
+    ):
         raise CallError("call_audio_format_unsupported", 503)
     schema = target.get("options", {})
     if not isinstance(schema, dict) or len(schema) > 16 or set(schema) & RESERVED:
