@@ -4,6 +4,16 @@ from datetime import datetime, timezone
 from .contract import identifier, CallError
 
 
+class CallMessageContextSection(tuple):
+    """In-process PCM marker for trusted call policy, never a JSON authority hint.
+
+    The tuple itself remains runtime data. PCM adds only its own constant
+    interaction policy; no camera observation or caller text is promoted.
+    """
+
+    __slots__ = ()
+
+
 def project_call_context(value):
     if not isinstance(value, Mapping) or value.get("version") != 2:
         return None
