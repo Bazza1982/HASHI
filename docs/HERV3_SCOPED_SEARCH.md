@@ -163,15 +163,19 @@ Reproducible commands (run in the HASHI1 checkout):
 ```
 
 ```powershell
+# Resolve the validated Windows test interpreter from local configuration.
+$scopedSearchTestPython = '<validated Windows CPython 3.14 executable>'
+$scopedSearchNativeTemp = Join-Path $env:TEMP 'hashi1-scoped-search-native'
+$scopedSearchPolicyTemp = Join-Path $env:TEMP 'hashi1-scoped-search-final-policy'
 # Native Windows: owning/platform selection, 25 passed
-& 'C:\Python314\python.exe' -B -m pytest -q tests/test_scoped_search.py `
+& $scopedSearchTestPython -B -m pytest -q tests/test_scoped_search.py `
   tests/test_search_activity.py tests/test_search_processes.py `
-  --basetemp 'C:\Users\thene\AppData\Local\Temp\hashi1-scoped-search-native'
+  --basetemp $scopedSearchNativeTemp
 # Final policy amendment: coverage and escaped-output budget, 2 passed
-& 'C:\Python314\python.exe' -B -m pytest -q `
+& $scopedSearchTestPython -B -m pytest -q `
   tests/test_scoped_search.py::test_zero_partial_and_exclusions_are_distinct `
   tests/test_scoped_search.py::test_large_escaped_results_page_without_invalid_json_or_lost_hits `
-  --basetemp 'C:\Users\thene\AppData\Local\Temp\hashi1-scoped-search-final-policy'
+  --basetemp $scopedSearchPolicyTemp
 ```
 
 The protected Core guard and `git diff --check` passed. Offline generation probes
@@ -196,10 +200,71 @@ verbose and overcautious about skipped entries; this observation motivated the
 explicit filename-exclusion reporting above. These probes are bounded behavioral
 evidence, not a guarantee across all models or multi-turn tasks.
 
-**Source and offline verification are not production adoption.** No new Function
-artifact was published to HASHI1, no live Worker was replaced and no production
-restart was used. External provider/model behavior and actual user-client rendering
+**At the initial source closeout, production adoption was not authorized or
+performed.** External provider/model behavior and actual user-client rendering
 must be distinguished from deterministic tests and the authenticated activity
 projection. The existing Strategy Cards were not turned into a mandatory flow.
 Optional rg acceleration and persistent indexing are deferred; neither blocks
 the base literal/path capability.
+
+## Subsequent approval and HASHI1 live adoption
+
+Approval was subsequently given on 2026-10-04 at 21:40 Sydney time:
+"批准继续。批准reboot hashi1。" This authorizes the HASHI1 operational adoption,
+not a Core migration or action on another instance. PAO owns the replacement;
+Frontend Connector Functions own the observable delivery boundary.
+
+The canonical operator `main.py --bridge-home ... --replace-functions` submitted
+one request to the existing broad Function handoff, equivalent to `/reboot max`.
+Preflight verified exact configured instance identity, five idle running Agents,
+no active background jobs and compatible CPython 3.12.13/Core API 3. The durable
+replacement receipt `c7be93c7378645cd8085ea40264db399` reports success for generation
+`sha256:3e2b9185395db65b2ced9b7aed9231f53ec72c1e92d48c740273a0b8ff0115c8`.
+Its immutable manifest pins source commit
+`ade8fc82129b4022372e747530d295a14bbea7d5` and includes the new scanner/activity
+modules. This is running-generation evidence, not merely a clean checkout.
+
+The Core PID remains 835 and its full runtime/Core/dependency fingerprint is
+unchanged. Shared Functions changed from PID 1157 to 1497623; sunny's Worker
+changed from 1297 to 1497780. The exact original five-Agent set is ACTIVE,
+accepting and alive on the new generation. All five Telegram connections became
+connected, and authenticated health reports ready with no issues. No Remote
+lifecycle action, Core cold restart, dependency install or other-instance reboot
+was performed.
+
+Three controlled Requests ran in one isolated sunny conversation through the
+authenticated Session API, on `deepseek-api/deepseek-flash/high` with actual
+`her-v3` delivery:
+
+- Search/read: sunny selected `file_search`, searched only its own home and then
+  used `file_read` to return the fixture marker. Audit reports one match, 291
+  directories/3,006 files enumerated, zero file-body characters read, completed
+  declared coverage and reaped worker/group. The model selected expanded/hidden
+  path discovery within that exact root; it did not scan the machine or peers.
+- Quiet foreground work: while commentary was off and verbose on, the live
+  authenticated activity interface exposed the running operation before the
+  ToolResult. The 30.072-second snapshot was a visible update; liveness was alive,
+  scanning progress unknown and last actual work/output remained null. The
+  40-second fixture finished normally with zero observer failures and a reaped
+  process group. A command pointing into the managed `.venv` was first refused
+  by existing live-runtime write protection; the allowed `python3` command ran
+  the same fixture. Protection was not disabled or relaxed.
+- Toggle/cancel: verbose off hid the active snapshot; enabling it exposed the
+  current five-second snapshot without restarting the same PID/creation time.
+  The owner-scoped cancellation endpoint stopped only this probe. The Run became
+  `stopped`; audit confirms SIGTERM/terminated cleanup, `process_reaped=true`,
+  `group_alive=false` and no errors, and the probe PID disappeared. Cleanup was
+  observed within a six-second polling window; no precise latency claim is made.
+
+The three request IDs end in `0001`, `0002`, `0003` under
+`req-sunny-2026-10-04_214410`. Temporary verbose/commentary changes were restored
+to their original true/true values, verified from live presentation metadata.
+Final health remained ready and every Agent idle. Bounded local evidence and
+fixture artifacts are retained in the ignored acceptance/cache directories.
+
+These are live Worker, control and authenticated activity-interface observations.
+They do not prove an external client's screen rendering: the connected browser
+was leased by another task and no control takeover was attempted. Telegram
+connection/delivery and a human observing a progress message are separate facts;
+human display confirmation remains unverified. This was focused acceptance,
+not the separately governed full essential-live-test manifest.

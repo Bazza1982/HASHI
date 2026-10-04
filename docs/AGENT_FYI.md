@@ -3,8 +3,14 @@
 2026-10-04 HASHI1 scoped-search source work adds `file_search`, own-Agent home
 read projection, bounded foreground scans/Shell drains and technical activity
 independent of commentary. Shell remains directly usable; wide scope is advisory,
-not a new denial. No production adoption/restart or external client change is
-authorized by this checkpoint. See [owning decision](HERV3_SCOPED_SEARCH.md).
+not a new denial. That source checkpoint did not authorize production adoption.
+The user subsequently approved HASHI1 reboot; broad Function adoption succeeded
+with the same Core/fingerprint and exact five-Agent set online/connected. sunny
+passed live scoped search/read, commentary-off activity, verbose live-toggle and
+cancel/cleanup checks through the authenticated API; original display settings
+were restored. External client screen rendering remains unverified because its
+browser was leased by another task. No external client/Core change or other
+instance reboot occurred. See [owning decision](HERV3_SCOPED_SEARCH.md).
 
 2026-10-03 Lily correction supersedes Windows automation: six Windows tasks and
 eleven old HASHI jobs were removed. Four Agent crons run import 01:00, offline
