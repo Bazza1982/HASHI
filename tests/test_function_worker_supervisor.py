@@ -366,23 +366,30 @@ async def test_shutdown_status_change_does_not_call_exiting_worker():
 async def test_runtime_status_failures_are_aggregated_once(
     monkeypatch,
     caplog,
+    tmp_path,
 ):
     def fail_status(_method, _params):
         raise ConnectionResetError("worker channel reset")
 
     kernel = _Kernel()
-    kernel.global_cfg = SimpleNamespace(instance_id="HASHI2")
+    kernel.global_cfg = SimpleNamespace(instance_id="HASHI1")
     alpha = _handle(kernel, _Client("alpha", 101, responder=fail_status))
     beta = _handle(kernel, _Client("beta", 202, responder=fail_status))
     kernel.runtimes.extend((alpha, beta))
     supervisor = FunctionWorkerSupervisor(kernel)
+    from orchestrator.telegram_ingress_diagnostics import TelegramIngressDiagnostics
+    for name in ("alpha", "beta"):
+        diagnostic=TelegramIngressDiagnostics(bridge_home=tmp_path,instance_id="HASHI1",
+            agent=name,generation_id="gen-shared",token="private-token-"+name)
+        diagnostic.begin("get_updates")
+        supervisor._telegram_ingress_diagnostics[name]=diagnostic
     monkeypatch.setattr(
         "orchestrator.function_worker_supervisor.TELEGRAM_STATUS_WARNING_DEBOUNCE_SECONDS",
         0.0,
     )
 
     with caplog.at_level(logging.WARNING, logger="BridgeU.Orchestrator"):
-        await asyncio.gather(
+        results=await asyncio.gather(
             supervisor.set_worker_telegram_status("alpha", False),
             supervisor.set_worker_telegram_status("beta", False),
         )
@@ -399,6 +406,14 @@ async def test_runtime_status_failures_are_aggregated_once(
     assert "Worker IPC channels (ConnectionResetError)" in messages[0]
     assert "does not itself stop an active task" in messages[0]
     assert "Diagnostic code: telegram_status_channel_disconnected" in messages[0]
+
+    assert results==[False,False]
+    for name in ("alpha","beta"):
+        records=supervisor.telegram_ingress_diagnostics(name)["records"]
+        assert records[-1]["stage"]=="status_propagation"
+        assert records[-1]["error"]["type"]=="ConnectionResetError"
+        assert records[-1]["agent"]==name
+        assert "worker channel reset" not in json.dumps(records)
 
 
 @pytest.mark.asyncio

@@ -617,3 +617,13 @@ revisions. No new scheduler or cache database exists. Frequency/content length
 remain user-controlled. Protected Core is unchanged. See
 [HCC implementation and verification](HASHI_HCC_IMPLEMENTATION.md) for publication,
 capacity, tests, adoption and rollback boundaries.
+
+
+## Nightly Phone external-context synchronization
+
+The shared PCM handoff consumes durable role-preserving Phone fragments for
+fixed incremental and stateless Engines. Provider-native text history does not
+prove that an external Phone connection has been received. Successful Turns
+advance the durable consumer checkpoint; failed Turns do not. Frozen action
+prefixes and post-call tails retain source identity. See
+[the owning contract](HASHI_PHONE_CONTEXT_HANDOFF.md).

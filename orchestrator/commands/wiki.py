@@ -86,27 +86,37 @@ async def wiki_command(runtime: Any, update: Any, context: Any) -> None:
         )
         return
 
-    chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
-    request_id = await runtime.enqueue_request(
-        chat_id=chat_id,
-        prompt=build_wiki_prompt(
-            query=query,
-            provider_id=provider_id,
-            capability=capability,
-        ),
-        source="wiki:query",
-        summary=f"Wiki query: {query[:120]}",
-        request_metadata={
-            "tool_allowlist": [capability],
-            "wiki_provider_id": provider_id,
-        },
-    )
-    if not request_id:
-        await _reply(
-            runtime,
-            update,
-            f"⚠️ <b>{ui_language.tr('wiki.queue_failed')}</b>",
+    from orchestrator.command_request_context import command_request_context, CommandDerivedRequestError
+    from orchestrator.session_store import SessionConflict
+    route = command_request_context(runtime, update, context, purpose="wiki")
+    chat_id = route.chat_id
+    try:
+        request_id = await runtime.enqueue_request(
+            chat_id=chat_id,
+            prompt=build_wiki_prompt(
+                query=query,
+                provider_id=provider_id,
+                capability=capability,
+            ),
+            source="wiki:query",
+            summary=f"Wiki query: {query[:120]}",
+            request_metadata={
+                **route.metadata,
+                "tool_allowlist": [capability],
+                "wiki_provider_id": provider_id,
+            },
+            idempotency_key=route.idempotency_key,
         )
+    except SessionConflict as exc:
+        raise CommandDerivedRequestError("command_derived_binding_invalid") from exc
+    except CommandDerivedRequestError:
+        raise
+    except Exception as exc:
+        raise CommandDerivedRequestError("command_admission_failed", outcome="unknown") from exc
+    if not request_id:
+        raise CommandDerivedRequestError("command_admission_failed")
+    context.derived_request_id = request_id
+
 
 
 COMMANDS = [

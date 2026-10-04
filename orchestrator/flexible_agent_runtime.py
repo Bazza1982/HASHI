@@ -2163,6 +2163,7 @@ class FlexibleAgentRuntime:
 
     def get_runtime_metadata(self) -> dict:
         from orchestrator.frontend_status import runtime_presentation_status
+        from orchestrator.agent_creation_policy import runtime_backend_catalogue
 
         delivery = telegram_delivery_failover.delivery_status_summary(self)
         display_policy = telegram_stream_policy.get_display_policy(self)
@@ -2217,6 +2218,8 @@ class FlexibleAgentRuntime:
             "model": self.get_current_model(),
             "provider": self.get_current_provider(),
             "allowed_backends": public_allowed_backends,
+            "backend_catalogue": runtime_backend_catalogue(self),
+            "active_provider": self.get_current_provider(),
             "workspace_dir": str(self.workspace_dir),
             "transcript_path": str(self.transcript_log_path),
             "online": bool(self.backend_ready),
@@ -8287,26 +8290,8 @@ class FlexibleAgentRuntime:
             selected = self.backend_manager.get_her_v3_target()
             option = self.backend_manager._her_v3_provider_option(selected.provider)
             return list(option["models"]) if option and option["available"] else []
-        models = get_available_models(engine)
-        backend_cfg = self._get_backend_cfg(engine)
-        if not backend_cfg:
-            return models
-
-        # Agent-local model rows extend the shared catalog. This lets one Agent
-        # opt into an OpenRouter model without exposing it to every Agent or
-        # removing any globally registered choices.
-        configured_models: list[object] = []
-        raw_models = backend_cfg.get("models")
-        if isinstance(raw_models, list):
-            configured_models.extend(raw_models)
-        configured_models.extend(
-            [backend_cfg.get("model"), backend_cfg.get("default_model")]
-        )
-        for configured_model in configured_models:
-            model = str(configured_model or "").strip()
-            if model and model not in models:
-                models.append(model)
-        return models
+        from orchestrator.runtime_effort_options import get_available_models as effective_models
+        return effective_models(engine, allowed_backends=self.config.allowed_backends)
 
     def _get_configured_model_for(self, engine: str) -> str | None:
         configured = str(

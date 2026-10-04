@@ -105,6 +105,8 @@ class ConfigAdmin:
         agent_name: str,
         agent_cfg: dict | str | None = None,
         token: str | None = None,
+        *,
+        raw_config: dict | None = None,
     ):
         """Add a flex agent scaffold.
 
@@ -115,7 +117,7 @@ class ConfigAdmin:
         wants_message = isinstance(agent_cfg, str) or token is not None
         display_name = agent_cfg if isinstance(agent_cfg, str) else agent_name
 
-        raw = self.load_raw_config()
+        raw = raw_config if raw_config is not None else self.load_raw_config()
         existing_names = {ag.get("name") for ag in raw.get("agents", [])}
         if agent_name in existing_names:
             return (False, f"Agent '{agent_name}' already exists.") if wants_message else False

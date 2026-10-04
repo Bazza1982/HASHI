@@ -260,7 +260,7 @@ def test_desktop_gateway_selects_live_local_api_before_post(monkeypatch):
         if request.full_url.startswith("http://10.255.255.254:"):
             raise URLError("connection refused")
         if request.get_method() == "GET":
-            return Response(b'{"ok":true,"instance_id":"HASHI1","workbench_port":18800}')
+            return Response(b'{"ok":true,"instance_id":"HASHI1","workbench_port":18800,"protocol":"hashi-instance-identity-v1"}')
         return Response(b'{"ok":true,"targets":[{"instance_id":"HASHI1"}]}')
 
     monkeypatch.setattr(remote_server, "local_http_hosts", lambda: ("10.255.255.254", "127.0.0.1"))
@@ -296,7 +296,7 @@ def test_desktop_input_unknown_outcome_is_never_retried(monkeypatch):
             return False
 
         def read(self, *_args):
-            return b'{"ok":true,"instance_id":"HASHI1","workbench_port":18800}'
+            return b'{"ok":true,"instance_id":"HASHI1","workbench_port":18800,"protocol":"hashi-instance-identity-v1"}'
 
     posted = []
 
@@ -314,7 +314,7 @@ def test_desktop_input_unknown_outcome_is_never_retried(monkeypatch):
     monkeypatch.setattr(remote_server, "_workbench_admin_token", lambda: "existing-token")
     monkeypatch.setattr(remote_server.urllib_request, "urlopen", urlopen)
 
-    with pytest.raises(ConnectionError, match="response lost"):
+    with pytest.raises(remote_server.WorkbenchGatewayError, match="request_outcome_unknown") as outcome:
         remote_server._forward_workbench_gateway_request(
             method="POST",
             api_path="v1/desktop/operation",
@@ -323,4 +323,74 @@ def test_desktop_input_unknown_outcome_is_never_retried(monkeypatch):
             request_headers={"content-type": "application/json"},
         )
 
+    assert outcome.value.accepted is None
+    assert outcome.value.retryable is False
     assert posted == ["http://127.0.0.1:18800/api/v1/desktop/operation"]
+
+
+def test_desktop_identity_preflight_is_small_authenticated_and_exact(monkeypatch):
+    class Response:
+        status = 200
+        headers = {"Content-Type": "application/json"}
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def read(self, *_args):
+            return b'{"ok":true,"instance_id":"HASHI1","workbench_port":18800,"protocol":"hashi-instance-identity-v1"}'
+    calls = []
+    def urlopen(request, timeout):
+        calls.append(request)
+        if request.get_method() == "GET":
+            assert request.full_url.endswith("/api/v1/instance/identity")
+            assert request.get_header("X-workbench-token") == "local-admin"
+        return Response()
+    monkeypatch.setattr(remote_server, "local_http_hosts", lambda: ("127.0.0.1",))
+    monkeypatch.setattr(remote_server, "_workbench_admin_token", lambda: "local-admin")
+    monkeypatch.setattr(remote_server.urllib_request, "urlopen", urlopen)
+    assert remote_server._desktop_workbench_host("HASHI1", 18800) == "127.0.0.1"
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("identity", [
+    {"ok":True,"instance_id":"HASHI2","workbench_port":18800,"protocol":"hashi-instance-identity-v1"},
+    {"ok":True,"instance_id":"HASHI1","workbench_port":18801,"protocol":"hashi-instance-identity-v1"},
+    {"ok":True,"instance_id":"HASHI1","workbench_port":18800},
+])
+def test_desktop_identity_unverified_is_rejected_before_input(monkeypatch, identity):
+    class Response:
+        status = 200
+        headers = {}
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def read(self, *_args): return json.dumps(identity).encode()
+    posts = []
+    def urlopen(request, timeout):
+        if request.get_method() != "GET": posts.append(request)
+        return Response()
+    monkeypatch.setattr(remote_server, "local_http_hosts", lambda: ("127.0.0.1",))
+    monkeypatch.setattr(remote_server, "_instance_info", {"instance_id":"HASHI1"})
+    monkeypatch.setattr(remote_server, "_workbench_port", 18800)
+    monkeypatch.setattr(remote_server, "_workbench_admin_token", lambda: "local-admin")
+    monkeypatch.setattr(remote_server.urllib_request, "urlopen", urlopen)
+    with pytest.raises(ConnectionError):
+        remote_server._forward_workbench_gateway_request(
+            method="POST", api_path="v1/desktop/operation", query="",
+            body_bytes=b'{"operation":"input"}', request_headers={})
+    assert posts == []
+
+
+def test_desktop_error_envelope_distinguishes_preflight_from_unknown_outcome(tmp_path, monkeypatch):
+    client,token=_client(tmp_path)
+    path="/workbench/v1/proxy/api/v1/desktop/operation"
+    body=b'{"operation":"input"}'
+    for code,accepted,retryable,status in [
+        ("local_workbench_identity_unverified",False,True,503),
+        ("request_outcome_unknown",None,False,502),
+    ]:
+        def fail(**_kwargs):
+            raise remote_server.WorkbenchGatewayError(code,accepted=accepted,retryable=retryable,status=status)
+        monkeypatch.setattr(remote_server,"_forward_workbench_gateway_request",fail)
+        response=client.post(path,content=body,headers=_signed_headers(token,method="POST",path=path,body=body))
+        assert response.status_code==status
+        assert response.json()["code"]==code
+        assert response.json()["accepted"] is accepted
+        assert response.json()["retryable"] is retryable

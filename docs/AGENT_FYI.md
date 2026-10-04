@@ -1,5 +1,19 @@
 # HASHI Agent FYI
 
+2026-10-05 HASHI1 nightly repair source adds scoped same-Run questions, explicit
+sunny creation selection policy, trusted Wiki command continuations, compact
+Remote desktop identity preflight, durable Telegram ingress diagnostics and
+role-preserving Phone context synchronization. Question answers do not grant
+permissions. Phone action context is frozen at its authorization cutoff; unknown
+ownership, pending transcript or oversized required context rejects admission.
+Private Workbench changes use authenticated instance/Agent avatar persistence,
+unbounded roster selection and authority-owned model/Provider catalogues.
+Source/offline checks and runtime/UI adoption are recorded separately; only
+HASHI1 is authorized. Do not sync or restart other instances. See
+[questions](HASHI_RUN_QUESTIONS.md), [creation](HASHI_AGENT_CREATION_POLICY.md),
+[Phone handoff](HASHI_PHONE_CONTEXT_HANDOFF.md), and
+[Telegram diagnostics](HASHI_TELEGRAM_INGRESS_DIAGNOSTICS.md).
+
 2026-10-04 HASHI1 scoped-search source work adds `file_search`, own-Agent home
 read projection, bounded foreground scans/Shell drains and technical activity
 independent of commentary. Shell remains directly usable; wide scope is advisory,

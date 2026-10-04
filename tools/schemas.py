@@ -4,6 +4,44 @@ HER v2 exposes the permitted subset through the HASHI Tool Gateway.
 """
 
 TOOL_SCHEMAS = [
+    {'function': {'description': 'Ask a clarification or preference question in this active Run. '
+                             'Returns immediately with question_id. Continue independent work, '
+                             'then get_user_answer in the same Run. Answers never authorize side '
+                             'effects. Do not assume an unanswered or default option is approval.',
+              'name': 'ask_user',
+              'parameters': {'additionalProperties': False,
+                             'properties': {'allow_free_text': {'type': 'boolean'},
+                                            'expires_seconds': {'maximum': 3600,
+                                                                'minimum': 30,
+                                                                'type': 'integer'},
+                                            'idempotency_key': {'maxLength': 160, 'type': 'string'},
+                                            'options': {'items': {'additionalProperties': False,
+                                                                  'properties': {'description': {'type': 'string'},
+                                                                                 'id': {'type': 'string'},
+                                                                                 'label': {'type': 'string'}},
+                                                                  'required': ['id', 'label'],
+                                                                  'type': 'object'},
+                                                        'maxItems': 8,
+                                                        'type': 'array'},
+                                            'purpose': {'enum': ['clarification', 'preference'],
+                                                        'type': 'string'},
+                                            'question': {'maxLength': 2000, 'type': 'string'}},
+                             'required': ['question', 'idempotency_key'],
+                             'type': 'object'}},
+ 'type': 'function'},
+    {'function': {'description': 'Read the authorized answer to this Run question. wait_seconds is '
+                             'bounded at 30; pending/expired/cancelled are not answers or '
+                             'approval. Keep doing independent work while pending. A returned '
+                             'answer belongs to this exact question and original Run.',
+              'name': 'get_user_answer',
+              'parameters': {'additionalProperties': False,
+                             'properties': {'question_id': {'type': 'string'},
+                                            'wait_seconds': {'maximum': 30,
+                                                             'minimum': 0,
+                                                             'type': 'number'}},
+                             'required': ['question_id'],
+                             'type': 'object'}},
+ 'type': 'function'},
     {
         "type": "function",
         "function": {

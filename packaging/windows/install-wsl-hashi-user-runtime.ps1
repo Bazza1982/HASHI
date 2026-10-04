@@ -30,6 +30,8 @@ param(
 
     [string]$WslExecutable = '',
 
+    [switch]$SkipTranscription,
+
     [switch]$StartNow
 )
 
@@ -213,6 +215,24 @@ if (-not $PSCmdlet.ShouldProcess(
     "Install the shared WSL launcher and register the $InstanceId logon task"
 )) {
     return
+}
+
+
+if (-not $SkipTranscription) {
+    foreach ($checkOnly in @($false, $true)) {
+        $transcriptionArguments = @(
+            '--distribution', $Distro, '--cd', $LinuxRoot,
+            '--', $LinuxPython, 'scripts/provision_transcription_runtime.py',
+            '--bridge-home', $LinuxRoot
+        )
+        if ($checkOnly) { $transcriptionArguments += '--check' }
+        if ((Invoke-WslProbe -Executable $WslExecutable -Arguments $transcriptionArguments) -ne 0) {
+            throw 'Transcription runtime preparation failed; no runtime task was registered.'
+        }
+    }
+}
+else {
+    Write-Warning 'Local recording transcription was explicitly skipped for this deployment.'
 }
 
 New-Item -ItemType Directory -Path $sharedDirectory -Force | Out-Null

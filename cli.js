@@ -6,6 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { preparedPrivacyPython } = require('./privacy-runtime');
+const { preparedTranscriptionPython } = require('./transcription-runtime');
 
 const HASHI_ROOT = __dirname;
 const PACKAGE = require(path.join(HASHI_ROOT, 'package.json'));
@@ -149,6 +150,9 @@ function run(argv = process.argv.slice(2)) {
   const privacyPython = process.env.HASHI_PRIVACY_FILTER_PYTHON || preparedPrivacyPython(
     path.join(dataRoot(), 'runtimes', PACKAGE.version), PACKAGE.version,
   );
+  const transcriptionPython = process.env.HASHI_TRANSCRIPTION_PYTHON || preparedTranscriptionPython(
+    path.join(dataRoot(), 'runtimes', PACKAGE.version), PACKAGE.version,
+  );
   const child = spawn(
     python.command,
     [...python.prefix, INSTANCE_CLI, ...normalizeGlobalArguments(argv)],
@@ -159,6 +163,7 @@ function run(argv = process.argv.slice(2)) {
       env: {
         ...process.env,
         ...(privacyPython ? { HASHI_PRIVACY_FILTER_PYTHON: privacyPython } : {}),
+        ...(transcriptionPython ? { HASHI_TRANSCRIPTION_PYTHON: transcriptionPython } : {}),
         HASHI_PROGRAM_ROOT: HASHI_ROOT,
         HASHI_PROGRAM_VERSION: PACKAGE.version,
         HASHI_INVOCATION_CWD: process.cwd(),

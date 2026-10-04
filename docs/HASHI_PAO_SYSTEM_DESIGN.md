@@ -51,7 +51,9 @@ no separate per-instance opt-in. Frontends derive availability from the
 authenticated capability response and hide the action when the capability is
 absent. Active or running Agents and other reported blockers remain protected.
 
-Agent creation is also a PAO-owned lifecycle operation. Creating an Agent with
+Agent creation is also a PAO-owned lifecycle operation. Its explicit Instance
+Configuration template and effective selection/publication contract are defined
+in [Agent creation policy](HASHI_AGENT_CREATION_POLICY.md). Creating an Agent with
 `is_active=false` publishes only its validated configuration and workspace.
 Creating one with `is_active=true` succeeds only after the isolated Function
 Worker start contract accepts it. If startup fails, the created Agent remains
@@ -74,6 +76,10 @@ The current working-mode contract is defined in
 [Fixed and Flex Working Modes](FIXED_FLEX_WORKING_MODES.md).
 
 ### 2.2 HASHI Conversation Sessions
+
+[Asynchronous Run questions](HASHI_RUN_QUESTIONS.md) defines PAO-owned,
+authenticated clarification/preference questions that remain in one active Run.
+Answers provide data and never confer tool or side-effect authorization.
 
 PAO is the sole owner of:
 

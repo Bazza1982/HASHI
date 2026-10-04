@@ -1911,6 +1911,10 @@ class BridgeContextAssembler:
             section_key = str(
                 options.pop("key", f"extra:{str(title).lower().replace(' ', '_')}")
             )
+            # A mandatory external transcript remains history even when it
+            # must survive budgeting; protection never elevates its authority.
+            if options.pop("authority", None) == "history":
+                authority = "history"
             protected = bool(options.pop("protected", False))
             add_section(
                 section_key,

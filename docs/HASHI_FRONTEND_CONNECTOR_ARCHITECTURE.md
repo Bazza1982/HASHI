@@ -1076,3 +1076,19 @@ capability registration and resource leases, accepts an authenticated human acto
 and never creates a conversational Run. It is not a new frontend product inside
 HASHI. Source/automated checks and physical-device acceptance remain separate;
 feature availability defaults to disabled.
+
+
+## Nightly HASHI1 connector contracts
+
+Remote desktop preflight uses the authenticated, compact
+/api/v1/instance/identity endpoint, never the unbounded health document.
+Unverified targets reject before input; uncertain submitted input is never
+replayed automatically. Telegram ingress uses a bounded durable sink with
+stage, exception, retry and recovery evidence. Read it through the authenticated
+Agent diagnostics endpoint; missing evidence remains unknown. See
+[diagnostics](HASHI_TELEGRAM_INGRESS_DIAGNOSTICS.md) and
+[same-Run question delivery](HASHI_RUN_QUESTIONS.md).
+The isolated HASHI1 Workbench consumes authoritative creation/Provider views,
+keeps future avatars by authenticated instance/Agent identity and stores the
+complete selected roster. Its private source/build/live evidence is separate
+from adoption of a shared Workbench.

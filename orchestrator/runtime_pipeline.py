@@ -1197,11 +1197,20 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
         if isinstance(item_metadata, dict)
         else None
     )
+    from orchestrator.phone_context_handoff import prepare_turn as prepare_phone_context
+    phone_sections, phone_audit = (
+        ([], {}) if isolated_activity_run else prepare_phone_context(runtime, item, incremental=incremental)
+    )
+    # The quoted Phone history has its own durable external-event watermark.
+    # Exclude the old lossy display timeline so post-cutoff speech cannot leak
+    # into a frozen action and stateless prompts cannot duplicate the transcript.
+    if phone_audit and session_history is not None:
+        session_history = [row for row in session_history if not str(row.get("exchange_id") or "").startswith("live:")]
     # This is a mandatory PAO -> PCM projection, not an optional observer.
     # Supplying the same fixed key on every Turn makes HER fixed-session
     # transport issue an upsert whenever the source or authorization changes,
     # including an explicit ``unknown``/``none`` reset.
-    extra_sections = [pcm_message_context_section(message_context)]
+    extra_sections = [pcm_message_context_section(message_context), *phone_sections]
     extra_sections += runtime._workzone_prompt_section()
     pre_turn_builder = runtime._build_pre_turn_context_sections
     pre_turn_kwargs = {"is_bridge_request": is_bridge_request}
@@ -1418,6 +1427,8 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
                 request_id=item.request_id,
             )
 
+    if phone_audit:
+        prompt_payload.setdefault("audit", {})["phone_context_handoff"] = phone_audit
     _canonical_record(
         runtime,
         "provider_request",
@@ -1434,6 +1445,8 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
     )
     final_prompt = prompt_payload["final_prompt"]
     prompt_audit = prompt_payload.get("audit", {})
+    if phone_audit:
+        prompt_audit["phone_context_handoff"] = phone_audit
     runtime._last_prompt_audit = prompt_audit
     runtime._thinking_chars_this_req = 0
     if runtime.config.active_backend != "her-v2":
@@ -1553,6 +1566,14 @@ async def run_backend_generation(
                 )
             )
             tasks[item.request_id] = generation_task
+            def commit_detached_phone_context(completed):
+                if completed.cancelled():
+                    return
+                try:
+                    _commit_phone_context_safely(runtime, item, completed.result())
+                except Exception as exc:
+                    runtime.logger.warning("Phone context consumption checkpoint failed: %s", type(exc).__name__)
+            generation_task.add_done_callback(commit_detached_phone_context)
             detached = False
             try:
                 response = await asyncio.wait_for(
@@ -1615,6 +1636,7 @@ async def run_backend_generation(
             _flush_canonical_stream_callback(
                 on_stream_event, reason="provider_request_end"
             )
+        _commit_phone_context_safely(runtime, item, response)
         return BackendGeneration(
             response=response,
             detached=False,
@@ -1627,6 +1649,17 @@ async def run_backend_generation(
             item,
             provider_isolation,
         )
+
+
+def _commit_phone_context_safely(runtime, item, response):
+    from orchestrator.phone_context_handoff import commit_success
+    try:
+        commit_success(item, response)
+    except Exception as exc:
+        # The Provider may already have executed actions. A diagnostic/receipt
+        # write failure must never turn that result into an automatic replay.
+        runtime.logger.warning("Phone context consumption checkpoint failed: %s", type(exc).__name__)
+        runtime._log_maintenance(item, "phone_context_checkpoint_failed", error_type=type(exc).__name__)
 
 
 def _cancelled_generation_response():
@@ -1668,6 +1701,7 @@ def log_backend_finished(
     backend_elapsed_s: float,
     final_prompt: str,
 ) -> None:
+    _commit_phone_context_safely(runtime, item, response)
     runtime.logger.info(
         f"Backend finished {item.request_id} via {runtime.config.active_backend} "
         f"(success={response.is_success}, elapsed_s={backend_elapsed_s:.2f}, "

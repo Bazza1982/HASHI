@@ -27,7 +27,7 @@ from tools.smart_tools import SmartToolRuntime
 # Models can still *call* any allowed tool; tiers only control which
 # schemas are included in the API payload.
 TOOL_TIERS: dict[str, list[str]] = {
-    "core": ["shell", "file_search", "log_query", "file_read", "file_write", "file_list"],
+    "core": ["ask_user", "get_user_answer", "shell", "file_search", "log_query", "file_read", "file_write", "file_list"],
     "vision": ["vision_inspect"],
     "system": ["process_list", "process_kill", "apply_patch"],
     "verification": ["workspace_inspect", "verification_run", "request_diagnostics"],
@@ -80,6 +80,7 @@ TOOL_TIERS: dict[str, list[str]] = {
 # built-in defaults remain fail-closed for every mutating or unknown action.
 READ_ONLY_TOOL_NAMES = frozenset(
     {
+        "get_user_answer",
         "background_job_list",
         "background_job_status",
         "background_job_tail",
@@ -1839,6 +1840,12 @@ class ToolRegistry:
                 workspace_dir=self.workspace_dir,
                 options=opts.get("verification_run", {}),
             )
+
+        if tool_name in {"ask_user", "get_user_answer"}:
+            from tools.run_questions import execute_run_question_tool
+            return await execute_run_question_tool(tool_name, arguments,
+                audit_context=self._effective_audit_context(), secrets=self.secrets,
+                tool_call_id=tool_call_id)
 
         if tool_name == "request_diagnostics":
             return await execute_request_diagnostics(

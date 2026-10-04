@@ -126,6 +126,11 @@ class GatewayContext:
             .rstrip("/")
         )
         global_config = (registry.audit_context or {}).get("global_config")
+        if allowed_tools.intersection({"ask_user", "get_user_answer"}) and audit.get("request_id") and registry.secrets.get("workbench_admin_token"):
+            from orchestrator.run_questions import issue_tool_token
+            scoped_secrets["run_question_token"] = issue_tool_token(registry.secrets["workbench_admin_token"],
+                instance_id=str(getattr(global_config, "instance_id", None) or audit.get("instance_id") or ""),
+                agent_id=str(audit.get("agent_name") or ""), request_id=str(audit["request_id"]))
         canonical = getattr(registry, "canonical_audit", None)
         return cls(
             schema_version=CONTEXT_SCHEMA_VERSION,

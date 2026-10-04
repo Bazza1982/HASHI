@@ -25,6 +25,7 @@ class CommandSpec:
     sensitive: bool = False
     alias_of: str | None = None
     guide: CommandGuide | None = None
+    picker_visible: bool | None = None
 
 
 COMMAND_GROUPS: tuple[tuple[str, str, str], ...] = (
@@ -735,8 +736,8 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
     CommandSpec("token", "cmd_token", "Manage API tokens", "tools", menu_visible=False, sensitive=True),
     CommandSpec("usage", "cmd_usage", "View detailed usage", "tools", menu_visible=False),
     CommandSpec("logo", "cmd_logo", "Play startup animation", "tools", menu_visible=False),
-    CommandSpec("move", "cmd_move", "Move an agent to another instance", "tools", menu_visible=False),
-    CommandSpec("clone", "cmd_clone", "Clone an agent locally or to another instance", "tools", menu_visible=False),
+    CommandSpec("move", "cmd_move", "Move an agent to another instance", "tools", menu_visible=False, picker_visible=True, guide=CommandGuide("/move [<agent> [<target>]] [--identity-memory|--workspace] [--dry-run]", ("--identity-memory", "--workspace", "--dry-run"))),
+    CommandSpec("clone", "cmd_clone", "Clone an agent locally or to another instance", "tools", menu_visible=False, picker_visible=True, guide=CommandGuide("/clone [<agent> [<target>]] [--as <new-agent>] [--dry-run]")),
     CommandSpec("wa_on", "cmd_wa_on", "Start WhatsApp transport", "tools"),
     CommandSpec("wa_off", "cmd_wa_off", "Stop WhatsApp transport", "tools"),
     CommandSpec(

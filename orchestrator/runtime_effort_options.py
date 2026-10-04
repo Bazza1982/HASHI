@@ -11,6 +11,7 @@ from orchestrator.flexible_backend_registry import (
     canonical_backend_engine,
     get_available_efforts as registry_efforts,
     get_backend_entry,
+    get_available_models as registry_models,
     get_provider_reasoning_efforts as registry_provider_efforts,
     normalize_effort as registry_normalize,
 )
@@ -60,3 +61,20 @@ def normalize_effort(engine, effort, model=None, *, allowed_backends=()):
         return normalized
     default = registry_normalize(engine, effort, model)
     return default if default in choices else next(iter(choices), None)
+
+
+def get_available_models(engine, *, allowed_backends=()):
+    """One Function-side model view: compatibility baseline plus Agent opt-ins."""
+    engine = canonical_backend_engine(engine)
+    models = registry_models(engine)
+    for backend in allowed_backends:
+        if canonical_backend_engine(backend.get("engine")) != engine:
+            continue
+        configured = backend.get("models")
+        values = list(configured) if isinstance(configured, list) else []
+        values.extend([backend.get("model"), backend.get("default_model")])
+        for value in values:
+            model = str(value or "").strip()
+            if model and model not in models:
+                models.append(model)
+    return models

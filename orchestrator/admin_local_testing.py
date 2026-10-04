@@ -523,6 +523,11 @@ async def execute_local_command(
             chat_id=chat_id,
             session_metadata=session_metadata,
         )
+        if not (session_metadata or {}).get("session_surface"):
+            connector = frontend_boundary["connector_id"]
+            local_session_metadata["session_surface"] = {
+                "backend_api": "workbench", "session_api": "workbench",
+            }.get(connector, connector)
         update = _FakeUpdate(
             runtime.global_config.authorized_id,
             local_chat_id,
@@ -567,7 +572,10 @@ async def execute_local_command(
                     "command": command_name,
                     "args": args,
                     "messages": store.messages,
-                    "error": f"{type(e).__name__}: {e}",
+                    "error": (str(getattr(e, "error_code")) if getattr(e, "error_code", None)
+                              else f"{type(e).__name__}: {e}"),
+                    "error_code": getattr(e, "error_code", "command_execution_failed"),
+                    "request_outcome": getattr(e, "request_outcome", "unknown"),
                 }
             finally:
                 if original_send_text is not None:
@@ -578,6 +586,8 @@ async def execute_local_command(
             "command": command_name,
             "args": args,
             "messages": store.messages,
+            **({"derived_request_id": context.derived_request_id, "request_outcome": "accepted"}
+               if getattr(context, "derived_request_id", None) else {}),
         }
     finally:
         session.finish()
