@@ -3,47 +3,23 @@ on:
   push:
     branches: [simple-upgrade]
 permissions:
-  contents: write
+  contents: read
 concurrency:
   group: simple-upgrade-hashi
   cancel-in-progress: true
 jobs:
   integration:
-    if: github.ref == 'refs/heads/simple-upgrade'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: simple-upgrade
-          fetch-depth: 2
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      - name: Apply checksum-verified integration patch on this branch only
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$GITHUB_REF" = refs/heads/simple-upgrade
-          if [ -f implementation/simple-upgrade.patch.xz.b64 ]; then
-            python - <<'PY'
-          import base64, hashlib, lzma
-          from pathlib import Path
-          encoded = ''.join(Path('implementation/simple-upgrade.patch.xz.b64').read_text().split())
-          patch = lzma.decompress(base64.b64decode(encoded, validate=True))
-          assert hashlib.sha256(patch).hexdigest() == '0df9ffaa5bdcc5d8d33ef39a355154b284064a3b7953f017d738ea7e638bb327', 'patch checksum mismatch'
-          Path('/tmp/simple-upgrade.patch').write_bytes(patch)
-          PY
-            git apply --check /tmp/simple-upgrade.patch
-            git apply --index /tmp/simple-upgrade.patch
-            git rm implementation/simple-upgrade.patch.xz.b64
-            git config user.name 'github-actions[bot]'
-            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'feat(browser): integrate embedded desktop browser through HASHI capability authority'
-            git push origin HEAD:simple-upgrade
-          fi
       - name: Install focused test dependencies
-        run: python -m pip install pytest pytest-asyncio pydantic requests Pillow
+        run: python -m pip install pytest pytest-asyncio anyio pydantic requests Pillow
       - name: Compile and run focused integration checks
         run: python scripts/check_embedded_browser.py
       - name: Record tested source revision
