@@ -154,6 +154,15 @@ def sync_workzone_to_backend_config(runtime: Any) -> None:
     )
     registry.access_roots = tuple(roots)
     registry.access_root = roots[0]
+    from orchestrator.workzone import build_search_scope
+
+    setter = getattr(registry, "set_search_scope", None)
+    if callable(setter):
+        setter(build_search_scope(
+            state, owner_id=str(getattr(runtime.global_config, "authorized_id", "") or ""),
+            agent_id=str(getattr(runtime.config, "name", runtime.name)), agent_home=runtime.workspace_dir,
+            execution_cwd=registry.workspace_dir, access_roots=tuple(roots),
+        ))
 
 
 def workzone_prompt_section(runtime: Any) -> list[tuple]:
@@ -171,6 +180,10 @@ def workzone_prompt_section(runtime: Any) -> list[tuple]:
         state,
         runtime.workspace_dir,
         can_access_files=can_access_files,
+        scoped_search_enabled=(
+            (getattr(getattr(backend, "tool_registry", None), "tool_options", {}) or {})
+            .get("file_search", {}).get("enabled") is not False
+        ),
     )
     if not section:
         return []

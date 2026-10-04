@@ -86,7 +86,7 @@ Each HASHI agent has a native workspace configured during setup. By default, the
 
 #### Workzones
 
-Workzones give an agent access to, and focus on, one or more project folders. Each Session owns ten independent slots: `main` plus `1` through `9`. `/workzone` without a number addresses `main`; `/workzone 1` through `/workzone 9` address attached roots.
+Workzones give an Agent access to, and focus on, one or more project folders. PAO owns ten owner/Agent-scoped slots, shared across Sessions: `main` plus `1` through `9`. Each Run freezes the admitted profile revision. `/workzone` without a number addresses `main`; `/workzone 1` through `/workzone 9` address attached roots.
 
   - An enabled `main` slot becomes the effective working directory and first inspection location.
 
@@ -98,15 +98,22 @@ Workzones give an agent access to, and focus on, one or more project folders. Ea
 
   - The HASHI Tool Registry receives the exact active roots. Multiple roots are not widened to their common parent.
 
-  - Slot mutations carry an internal Session revision so stale inline menus and delayed path replies cannot overwrite newer state. This revision is control metadata and is not rendered as user-facing menu or PCM text.
+  - Slot mutations carry an internal Agent profile revision so stale inline menus and delayed path replies cannot overwrite newer state. This revision is control metadata and is not rendered as user-facing menu text.
 
 |                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Important** Workzone is primarily a focus and default execution location mechanism, not a security boundary by itself. Access restrictions are enforced jointly by the active backend and HASHI. Native backend sandboxes and permission modes remain applicable, while the HASHI Tool Registry and Tool Gateway enforce configured tool permissions, exact `access_roots` and other admission controls. Workzone does not override or weaken any of these controls. |
 
-When at least one slot is enabled, HASHI emits one protected `working_environment.workzones` runtime-context section. It lists only enabled slots, marks `main` as primary and numbered slots as attached, and treats every path and label as data rather than instructions. Disabled slots are retained in Session state but omitted from PCM.
+When at least one slot is enabled, HASHI emits one protected `working_environment.workzones` runtime-context section. It lists only enabled slots, marks `main` as primary and numbered slots as attached, and treats every path and label as data rather than instructions. Disabled slots are retained in the Agent profile but omitted from PCM.
 
-When all Workzones are off, HASHI does not generate a WORKZONES prompt section. The runtime restores the backend and Tool Registry working directory to the Agent home workspace and uses its normal default access root. The Agent home workspace is therefore a normal task folder when no Workzone is active; the instruction to reserve it for memory, identity, logs and workspace-state work applies only while one or more Workzones are active.
+For locating local material without a user-specified location, PCM projects the
+enabled Run Workzones and this Agent's own workspace as relevant candidates.
+An explicit location overrides the default candidates. PAO supplies home read
+access separately from writable roots; PCM is not a capability writer and never
+promises access through a stronger denial. See [scoped search](HERV3_SCOPED_SEARCH.md).
+When all Workzones are off, HASHI omits the WORKZONES section and restores the
+working directory to Agent home. Default discovery still starts there rather
+than at the widest configured access root.
 
 #### High-permission or “YOLO” mode
 

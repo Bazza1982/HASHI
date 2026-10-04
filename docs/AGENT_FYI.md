@@ -1,5 +1,11 @@
 # HASHI Agent FYI
 
+2026-10-04 HASHI1 scoped-search source work adds `file_search`, own-Agent home
+read projection, bounded foreground scans/Shell drains and technical activity
+independent of commentary. Shell remains directly usable; wide scope is advisory,
+not a new denial. No production adoption/restart or external client change is
+authorized by this checkpoint. See [owning decision](HERV3_SCOPED_SEARCH.md).
+
 2026-10-03 Lily correction supersedes Windows automation: six Windows tasks and
 eleven old HASHI jobs were removed. Four Agent crons run import 01:00, offline
 embedding 03:00, Wiki 04:05 and report 05:00 Sydney time. Wiki requires a

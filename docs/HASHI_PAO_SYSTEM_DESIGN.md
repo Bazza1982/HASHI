@@ -388,6 +388,18 @@ PCM projects the authorised catalogue into an Engine request. HERV3 decides
 when to request an available Tool during its Turn and preserves HER-level Tool
 evidence. Neither PCM nor HER may grant a capability withheld by PAO.
 
+Scoped local discovery is a PAO Functions capability. Admission derives exact
+preferred Workzone roots, Agent home, execution cwd and Workzone revision from
+the same Run snapshot. Tool Registry has a separate, owner/Agent-bound home
+read projection for `file_search`, `file_read`, `file_list` and `log_query`;
+it never appends that grant to writable `access_roots`. Enterprise/privacy and
+live-runtime read denials override it. A default search does not use a broad
+configured access root. Explicit selected roots replace defaults. Cursor state
+is bounded, ephemeral and bound to Run identity, query, scope and generation.
+Registry/Gateway, HERV3 observer and Connector projection share factual progress;
+elapsed time and heartbeat are not evidence of scanning work. Details and
+rollout boundaries are in [HERV3 scoped search](HERV3_SCOPED_SEARCH.md).
+
 Personal HASHI instances use an open Tool Registry default: when
 `global.default_tools` is absent, `allowed` resolves to `["*"]`, and new-instance
 creation paths persist that wildcard. The policy applies to every Agent whose

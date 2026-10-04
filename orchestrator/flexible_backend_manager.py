@@ -1932,6 +1932,11 @@ class FlexibleBackendManager:
                     getattr(self, "runtime", None), "canonical_audit", None
                 ),
                 access_roots=list(access_roots),
+                search_scope=workzone_module.build_search_scope(
+                    state, owner_id=str(getattr(self.global_config, "authorized_id", "") or ""),
+                    agent_id=str(adapter_cfg.name), agent_home=adapter_cfg.workspace_dir,
+                    execution_cwd=workspace_dir, access_roots=tuple(access_roots),
+                ),
             )
             target = backend if backend is not None else self.current_backend
             target.tool_registry = registry

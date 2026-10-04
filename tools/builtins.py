@@ -404,7 +404,12 @@ async def execute_shell(
             **_bash_process_kwargs(),
         )
         pgid = _bash_process_group_id(proc)
-        communicate_task = asyncio.create_task(proc.communicate())
+        from tools.tool_activity import CURRENT_ACTIVITY, bounded_communicate
+        activity = CURRENT_ACTIVITY.get()
+        if activity:
+            activity.watch_process(proc)
+            activity.update(state="running", liveness="alive")
+        communicate_task = asyncio.create_task(bounded_communicate(proc, activity=activity))
         if timeout is None:
             stdout, stderr = await asyncio.shield(communicate_task)
         else:
@@ -495,6 +500,10 @@ async def execute_shell(
         )
 
     except asyncio.CancelledError as exc:
+        from tools.tool_activity import CURRENT_ACTIVITY
+        activity = CURRENT_ACTIVITY.get()
+        if activity:
+            await activity.finish("cancelling", stop_reason="interrupted")
         cleanup = None
         if proc is not None and communicate_task is not None:
             cleanup = await _shield_bash_cleanup(
@@ -620,91 +629,19 @@ def _literal_log_query(
     max_results: int,
     context_chars: int,
 ) -> dict[str, Any]:
-    flags = 0 if case_sensitive else re.IGNORECASE
-    patterns = tuple((term, re.compile(re.escape(term), flags)) for term in terms)
-    longest_term = max(len(term) for term in terms)
-    buffer = ""
-    buffer_offset = 0
-    newlines_before_buffer = 0
-    next_scan_offset = 0
-    characters_read = 0
-    matches: list[dict[str, Any]] = []
-    result_limit_reached = False
-
-    with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as stream:
-        while True:
-            chunk = stream.read(_LOG_QUERY_CHUNK_CHARS)
-            eof = chunk == ""
-            if chunk:
-                buffer += chunk
-                characters_read += len(chunk)
-
-            safe_start_limit = buffer_offset + len(buffer)
-            if not eof:
-                safe_start_limit = max(
-                    next_scan_offset,
-                    safe_start_limit - context_chars - longest_term,
-                )
-            local_cursor = max(0, next_scan_offset - buffer_offset)
-            local_limit = max(local_cursor, safe_start_limit - buffer_offset)
-
-            while local_cursor < local_limit and len(matches) < max_results:
-                candidates: list[tuple[int, int, str, re.Match[str]]] = []
-                for index, (term, pattern) in enumerate(patterns):
-                    match = pattern.search(buffer, local_cursor)
-                    if match is not None and match.start() < local_limit:
-                        candidates.append((match.start(), index, term, match))
-                if not candidates:
-                    break
-                _start, _index, term, match = min(
-                    candidates, key=lambda candidate: (candidate[0], candidate[1])
-                )
-                start = match.start()
-                end = match.end()
-                excerpt_start = max(0, start - context_chars)
-                excerpt_end = min(len(buffer), end + context_chars)
-                matches.append(
-                    {
-                        "term": term,
-                        "line": newlines_before_buffer
-                        + buffer.count("\n", 0, start)
-                        + 1,
-                        "character_offset": buffer_offset + start,
-                        "excerpt": buffer[excerpt_start:excerpt_end],
-                    }
-                )
-                local_cursor = max(end, start + 1)
-
-            if len(matches) >= max_results:
-                result_limit_reached = True
-                break
-            next_scan_offset = safe_start_limit
-            if eof:
-                break
-
-            keep_from = max(buffer_offset, next_scan_offset - context_chars)
-            drop_count = keep_from - buffer_offset
-            if drop_count:
-                newlines_before_buffer += buffer.count("\n", 0, drop_count)
-                buffer = buffer[drop_count:]
-                buffer_offset = keep_from
-
-    return {
-        "path": str(path),
-        "file_size_bytes": path.stat().st_size,
-        "literal_only": True,
-        "case_sensitive": case_sensitive,
-        "terms": list(terms),
-        "matches": matches,
-        "result_limit_reached": result_limit_reached,
-        "characters_read": characters_read,
-    }
+    from tools.literal_search import scan_literal
+    result = scan_literal(path, terms=terms, case_sensitive=case_sensitive,
+                          max_results=max_results, context_chars=context_chars,
+                          chunk_chars=_LOG_QUERY_CHUNK_CHARS)
+    result.pop('continuation')
+    return result
 
 
 async def execute_log_query(
     args: dict,
     access_root: Path | Sequence[Path],
     workspace_dir: Path,
+    *, continuations=None, search_scope=None, audit_context=None, options=None,
 ) -> str | BuiltinExecutionResult:
     """Search bounded literal excerpts without materialising whole records."""
 
@@ -759,25 +696,30 @@ async def execute_log_query(
         return f"Error: file not found: {path}"
     assert max_results is not None and context_chars is not None
     try:
-        payload = await asyncio.to_thread(
-            _literal_log_query,
-            path,
-            terms=tuple(terms),
-            case_sensitive=case_sensitive,
-            max_results=max_results,
-            context_chars=context_chars,
-        )
+        from tools.file_search import Continuations, execute_file_search
+        result = await execute_file_search(
+            {'query': terms[0], 'mode': 'content', 'roots': [str(path)],
+             '_terms': terms, 'max_results': max_results, 'context_chars': context_chars,
+             'case_sensitive': case_sensitive, 'profile': 'expanded', 'include_hidden': True,
+             **({'cursor': args['cursor']} if args.get('cursor') else {})},
+            read_roots=_access_roots(access_root), cwd=workspace_dir,
+            search_scope=search_scope or {}, audit_context=audit_context or {},
+            continuations=continuations or Continuations(), options=options or {},
+            operation='log_query')
+        envelope = json.loads(result.output)
+        if envelope['data'] is None:
+            return BuiltinExecutionResult('Error: ' + envelope['error']['message'], result.details)
+        payload = envelope['data']
+        payload['matches'] = [{key: item[key] for key in (
+            'term', 'line', 'character_offset', 'excerpt')} for item in payload['matches']]
+        payload.update(path=str(path), terms=terms, case_sensitive=case_sensitive,
+                       literal_only=True, file_size_bytes=path.stat().st_size,
+                       result_limit_reached=payload['stop_reason'] in {'page_limit', 'output_budget'},
+                       characters_read=payload['counters']['characters_read'])
+        return BuiltinExecutionResult(json.dumps(payload, ensure_ascii=False), result.details)
     except OSError as exc:
-        return f"Error reading file: {exc}"
-    return BuiltinExecutionResult(
-        json.dumps(payload, ensure_ascii=False, sort_keys=True),
-        {
-            "query_mode": "literal",
-            "file_size_bytes": payload["file_size_bytes"],
-            "match_count": len(payload["matches"]),
-            "result_limit_reached": payload["result_limit_reached"],
-        },
-    )
+        return f'Error reading file: {exc}'
+
 
 async def execute_file_read(
     args: dict,
@@ -924,55 +866,50 @@ async def execute_web_search(
 # ---------------------------------------------------------------------------
 
 async def execute_file_list(
-    args: dict,
-    access_root: Path | Sequence[Path],
-    workspace_dir: Path,
-) -> str:
-    raw_path = args.get("path", "")
+    args: dict, access_root: Path | Sequence[Path], workspace_dir: Path,
+    *, continuations=None, search_scope=None, audit_context=None, options=None,
+) -> str | BuiltinExecutionResult:
+    raw_path = args.get('path', '')
     if not raw_path:
-        return "Error: no path provided"
-
+        return 'Error: no path provided'
     try:
         path = _resolve_path(raw_path, access_root, workspace_dir)
-    except ValueError as e:
-        return f"Error: {e}"
-
+    except ValueError as exc:
+        return f'Error: {exc}'
     if not path.exists():
-        return f"Error: path not found: {path}"
+        return f'Error: path not found: {path}'
     if not path.is_dir():
-        return f"Error: path is not a directory: {path}"
-
-    pattern = args.get("pattern", "*")
-    recursive = bool(args.get("recursive", False))
-
-    try:
-        entries = []
-        max_entries = 1000
-        if recursive:
-            all_paths = sorted(islice(path.rglob(pattern), max_entries + 1))
-        else:
-            all_paths = sorted(islice(path.glob(pattern), max_entries + 1))
-        truncated = len(all_paths) > max_entries
-
-        for p in all_paths[:max_entries]:
-            rel = p.relative_to(path)
-            kind = "dir" if p.is_dir() else "file"
-            try:
-                size = p.stat().st_size if p.is_file() else 0
-                size_str = f"{size:,}B" if size < 1024 else f"{size//1024:,}KB"
-            except Exception:
-                size_str = "?"
-            entries.append(f"{'[dir] ' if kind=='dir' else '      '}{rel}  {size_str if kind=='file' else ''}")
-
-        if not entries:
-            return f"No entries found in {path} (pattern: {pattern})"
-
-        header = f"[{path}]  {len(entries)} items shown"
-        if truncated:
-            header += " [truncated; narrow the pattern or path]"
-        return header + "\n" + "\n".join(entries)
-    except Exception as e:
-        return f"Error listing directory: {e}"
+        return f'Error: path is not a directory: {path}'
+    from tools.file_search import Continuations, execute_file_search
+    pattern = args.get('pattern', '*')
+    result = await execute_file_search(
+        {'query': pattern, 'mode': 'path', 'match': 'glob',
+         'roots': [str(path)], 'profile': 'expanded',
+         'include_hidden': args.get('include_hidden', True),
+         '_recursive': args.get('recursive', False),
+         'max_results': args.get('max_results', 50),
+         **({'cursor': args['cursor']} if args.get('cursor') else {})},
+        read_roots=_access_roots(access_root), cwd=workspace_dir,
+        search_scope=search_scope or {}, audit_context=audit_context or {},
+        continuations=continuations or Continuations(), options=options or {},
+        operation='file_list')
+    envelope = json.loads(result.output)
+    data = envelope['data']
+    if data is None:
+        return BuiltinExecutionResult('Error: ' + envelope['error']['message'], result.details)
+    entries = [('[dir] ' if item['type'] == 'dir' else '      ') +
+               str(Path(item['path']).relative_to(path)) +
+               (f"  ({item['size_bytes']} bytes)" if item['type'] == 'file' else '')
+               for item in data['matches']]
+    header = f'[{path}]  {len(entries)} items shown'
+    if not data['coverage_complete']:
+        header += ' [partial; continue with cursor or narrow the search]'
+    if not entries and data['coverage_complete']:
+        header = f'No entries found in {path} (pattern: {pattern})'
+    footer = json.dumps({key: data[key] for key in (
+        'coverage_complete', 'scope_exhausted', 'stop_reason', 'can_continue', 'next_cursor',
+        'counters', 'coverage')}, ensure_ascii=False)
+    return BuiltinExecutionResult(header + '\n' + '\n'.join(entries) + '\n' + footer, result.details)
 
 
 # ---------------------------------------------------------------------------

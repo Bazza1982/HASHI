@@ -286,6 +286,15 @@ CLI work before normal event-loop cleanup. Agent Workzone slots publish only
 their exact enabled roots to backends and tools; `/new`, `/use`, and context
 generation changes never replace them. Each Run retains its admission-time
 Workzone snapshot, and implementations must not widen multiple roots to their
-common parent. HASHI Remote rescue remains a separately
+common parent.
+
+Local discovery additionally receives a PAO-derived, owner/Agent-bound read-only
+projection of the Agent home workspace, even with a main Workzone. This does
+not change writable `access_roots`, Shell authority or native backend sandboxes.
+Preferred search roots are exact enabled Run Workzones plus own home; explicit
+query roots replace those defaults. Enterprise/privacy/live-runtime policies
+still take precedence. See [scoped search](docs/HERV3_SCOPED_SEARCH.md).
+
+HASHI Remote rescue remains a separately
 deployed `L3_RESTART` sidecar, and its local hot-reboot hop must use the
 token-protected Backend API admin command endpoint.

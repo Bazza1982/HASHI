@@ -125,6 +125,9 @@ class RequestActivityStore:
                 "completed_at": None,
                 "latest_sequence": 0,
                 "events": [],
+                "tool_activities": OrderedDict(),
+                "activity_generation": None,
+                "last_verbose": False,
             }
             self._requests[safe_id] = record
             self._prune_unlocked()
@@ -273,6 +276,11 @@ class RequestActivityStore:
     def publish_stream(self, request_id: str, event: object) -> None:
         try:
             kind = str(getattr(event, "kind", "progress") or "progress")
+            activity = None
+            if kind == "tool_activity":
+                activity = _tool_activity_fields(getattr(event, "metadata", None))
+                if activity is None or activity.get("request_id") not in {"", request_id}:
+                    return
             model_route_fields: dict[str, Any] = {}
             if kind == "model_route":
                 metadata = getattr(event, "metadata", None)
@@ -309,6 +317,32 @@ class RequestActivityStore:
                     return
                 if record.get("terminal"):
                     return
+                if activity is not None:
+                    generation = activity["function_generation"]
+                    if record["activity_generation"] not in {None, generation}:
+                        return
+                    record["activity_generation"] = generation
+                    key = activity["operation_id"] + ":" + activity["tool_call_id"]
+                    snapshots = record["tool_activities"]
+                    previous = snapshots.get(key)
+                    if previous and (previous["update_sequence"] >= activity["update_sequence"] or
+                                     previous["state"] in {"completed", "failed", "interrupted", "cleanup_pending"}):
+                        return
+                    snapshots[key] = activity
+                    snapshots.move_to_end(key)
+                    while len(snapshots) > 32:
+                        snapshots.popitem(last=False)
+                    if previous is None or activity["visible_update"]:
+                        record["last_verbose"] = bool(self._settings_for_request_unlocked(request_id).get("verbose", False))
+                    # Quiet snapshots are not chat events. Poll can project the
+                    # latest one when verbose is enabled during a running tool.
+                    if not activity["visible_update"]:
+                        return
+                    status = activity["state"]
+                if kind == "tool_end":
+                    details = (getattr(event, "metadata", None) or {}).get("tool_result_details") or {}
+                    if details.get("search_outcome") in {"partial", "failed", "unavailable"}:
+                        status = str(details["search_outcome"])
                 event_id = _safe_text(getattr(event, "event_id", ""), limit=240)
                 if event_id and any(
                     existing.get("event_id") == event_id
@@ -383,6 +417,8 @@ class RequestActivityStore:
                                  presentation_enabled=enabled)
                 if model_route_fields:
                     projected.update(model_route_fields)
+                if activity is not None:
+                    projected["tool_activity"] = activity
                 if channel == "answer":
                     projected.update(
                         answer_state=(
@@ -450,6 +486,19 @@ class RequestActivityStore:
                     "error_code": "request_activity_not_found",
                     "ephemeral_epoch": self.epoch,
                 }
+            verbose = bool(self._settings_for_request_unlocked(request_id).get("verbose", False))
+            if verbose and not record["last_verbose"] and not record["terminal"]:
+                for key, snapshot in list(record["tool_activities"].items()):
+                    if snapshot["state"] not in {"running", "started", "cancelling"}:
+                        continue
+                    self._append_unlocked(record, kind="tool_activity",
+                        summary=snapshot["display_summary"], status=snapshot["state"],
+                        tool_name=snapshot["tool"], delivery_class="technical",
+                        event_id=f"{key}:verbose-snapshot:{record['latest_sequence']+1}")
+                    projected = record["events"][-1]
+                    projected.update(presentation_channel="verbose", presentation_enabled=True,
+                                     tool_activity=dict(snapshot))
+            record["last_verbose"] = verbose
             events = [
                 dict(event)
                 for event in list(record.get("events") or [])
@@ -470,4 +519,49 @@ class RequestActivityStore:
                 "replay_complete": not record["events"] or after >= int(record["events"][0]["sequence"]) - 1,
                 "presentation_available": callable(getattr(self, "presentation_settings", None)),
                 "events": events,
+                "active_tool_activities": [dict(snapshot) for snapshot in record["tool_activities"].values()
+                    if snapshot["state"] in {"running", "started", "cancelling"}] if verbose else [],
             }
+
+
+def _tool_activity_fields(metadata: object) -> dict[str, Any] | None:
+    """Functions-only metadata allowlist; never forward arbitrary tool payloads."""
+    if not isinstance(metadata, Mapping):
+        return None
+    state = metadata.get("state")
+    if state not in {"started", "running", "cancelling", "completed", "failed", "interrupted", "cleanup_pending"}:
+        return None
+    try:
+        sequence = int(metadata.get("update_sequence"))
+    except (TypeError, ValueError):
+        return None
+    if not 1 <= sequence <= 1_000_000:
+        return None
+    result = {"state": state, "update_sequence": sequence,
+              "visible_update": metadata.get("visible_update") is True}
+    for key, limit in {"operation_id": 100, "tool_call_id": 160, "tool": 80,
+                       "function_generation": 160, "request_id": 160, "agent_id": 160,
+                       "operation_type": 80, "scope_provenance": 40, "liveness": 32,
+                       "progress": 32, "stop_reason": 64, "scope_advisory": 300,
+                       "display_summary": 2000}.items():
+        result[key] = _safe_text(metadata.get(key), limit=limit)
+    if not all(result[key] for key in ("operation_id", "tool_call_id", "function_generation")):
+        return None
+    for key in ("started_at", "elapsed_ms", "last_worker_response", "last_output", "last_work_progress"):
+        result[key] = RequestActivityStore._safe_progress_value(metadata.get(key))
+    roots = metadata.get("selected_roots") or []
+    if not isinstance(roots, list):
+        return None
+    result["selected_roots"] = [_safe_text(root, limit=512) for root in roots[:16] if isinstance(root, str)]
+    counters = metadata.get("counters") or {}
+    result["counters"] = {key: RequestActivityStore._safe_progress_value(counters.get(key)) for key in (
+        "directories_enumerated", "files_enumerated", "text_files_checked", "characters_read",
+        "bytes_read", "matches", "skipped", "errors", "stdout_bytes", "stderr_bytes")}
+    for key in ("partial", "coverage_complete"):
+        value = metadata.get(key)
+        result[key] = value if isinstance(value, bool) else None
+    cleanup = metadata.get("cleanup") or {}
+    result["cleanup"] = {key: cleanup.get(key) for key in (
+        "process_reaped", "group_alive", "forced") if isinstance(cleanup.get(key), bool)}
+    result["cleanup"]["status"] = _safe_text(cleanup.get("status"), limit=40)
+    return result

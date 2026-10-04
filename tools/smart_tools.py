@@ -57,6 +57,7 @@ _QUERY_TOOLS = frozenset(
         "web_search",
         "web_fetch",
         "file_list",
+        "file_search",
         "process_list",
         "request_diagnostics",
         "browser_active_tab",
@@ -554,6 +555,14 @@ def _generic_outcome(
     raw_is_error: bool,
     details: Mapping[str, Any],
 ) -> SmartToolOutcome:
+    if spec.name == "file_search" and details.get("search_outcome"):
+        data = _result_data(output)
+        if isinstance(data, Mapping) and data.get("status") in {"success", "partial", "failed", "unavailable"}:
+            error = data.get("error")
+            warning = data.get("warning")
+            return SmartToolOutcome(status=data["status"], effect=data["effect"], data=data.get("data"),
+                error=SmartToolError(**error) if isinstance(error, Mapping) else None,
+                warning=SmartToolWarning(**warning) if isinstance(warning, Mapping) else None)
     if raw_is_error:
         if details.get("unavailable") is True:
             return SmartToolOutcome(
@@ -590,7 +599,7 @@ def _generic_outcome(
         "observed" if spec.profile in {"query", "poll", "verify"} else "unknown"
     )
     return SmartToolOutcome(
-        status="success",
+        status="partial" if details.get("search_outcome") == "partial" else "success",
         effect=_effect_from_data(data, fallback=default_effect),
         data=data,
     )
@@ -952,7 +961,16 @@ class SmartToolRuntime:
                 "error_code": outcome.error.code if outcome.error else None,
             }
         )
-        fingerprint = _sha256([tool_name, args_hash, result_hash])
+        repeat_hash = result_hash
+        if tool_name == "file_search" and isinstance(outcome.data, Mapping):
+            # Correlation/timing changes are not new search evidence. Keep the
+            # full result hash in the receipt, but compare coverage and matches
+            # for the advisory. Cursor arguments still distinguish pages.
+            evidence = {key: value for key, value in outcome.data.items() if key not in {
+                "operation_id", "elapsed_ms", "next_cursor", "cleanup"}}
+            repeat_hash = _sha256({"status": outcome.status, "data": evidence,
+                                  "error_code": outcome.error.code if outcome.error else None})
+        fingerprint = _sha256([tool_name, args_hash, repeat_hash])
         state_key = task_id if task_id != "unscoped" else f"unscoped:{call_id}"
 
         with self._lock:
