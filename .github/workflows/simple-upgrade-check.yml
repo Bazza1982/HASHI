@@ -1,0 +1,34 @@
+name: Simple upgrade checks
+on:
+  push:
+    branches: [simple-upgrade]
+permissions:
+  contents: read
+concurrency:
+  group: simple-upgrade-hashi
+  cancel-in-progress: true
+jobs:
+  source-and-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Export tracked source for this implementation review
+        run: |
+          git archive HEAD -o /tmp/hashi-source.tar
+          git rev-parse HEAD > /tmp/hashi-source-commit.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: simple-upgrade-hashi-source
+          path: |
+            /tmp/hashi-source.tar
+            /tmp/hashi-source-commit.txt
+          retention-days: 3
+      - name: Focused embedded browser checks
+        run: |
+          if [ -f scripts/check_embedded_browser.py ]; then python scripts/check_embedded_browser.py; fi
