@@ -1,7 +1,7 @@
 # HASHI Model Capability Discovery
 
 Status: accepted PAO/Engine Adapter decision; Functions implementation candidate
-updated 2026-09-12. Live adoption is recorded separately per instance.
+updated 2026-10-05. Live adoption is recorded separately per instance.
 
 Parent specifications:
 [HASHI System Architecture](../ARCHITECTURE.md),
@@ -26,21 +26,25 @@ One fact is bound to the exact requested Engine ID and model ID. It records:
 - the exact external source model and canonical model IDs;
 - input and output modality state as `supported`, `unsupported`, or `unknown`;
 - source URL and source kind;
-- fetch and expiry timestamps;
+- fetch timestamp and, only for an unknown lookup, a retry deadline;
 - adapter revision, content revision, and SHA-256 evidence digest; and
-- an explicit unknown reason plus last-known diagnostic snapshot when stale.
+- an explicit unknown reason plus any historical last-known diagnostic snapshot.
 
 Missing fields, malformed responses, 404s, timeouts, network failures, ID
-mismatches, ambiguous aliases, and unqualified sources are `unknown`. They are
-never converted to `unsupported`. An expired or failed fact may preserve its
-last valid snapshot for diagnosis, but stale data grants no native media
-route.
+mismatches, ambiguous aliases, and unqualified sources are `unknown` when no
+verified exact-model fact exists. They are never converted to `unsupported`.
+Once verified, both supported and unsupported modality facts remain valid
+without a clock deadline. A failed later lookup cannot erase a verified fact;
+only newly validated evidence or an explicit model-identity/adapter-revision
+change may replace it. Truly unknown models still grant no native media route.
 
 The derived cache is not configuration. It uses the shared revision-aware,
 BOM-tolerant UTF-8/LF persistence boundary under the
 instance `tmp` directory and never overwrites `agents.json`, state selection,
-or a user-authored override. Successful facts are fresh for 24 hours; unknown
-facts retry after 15 minutes. Whole-cache file locks cover only cache
+or a user-authored override. Existing known facts with a historical 24-hour
+`expires_at` are accepted without time-based revocation; newly verified facts
+have no expiry. Unknown lookup failures retry after 15 minutes. Price facts
+retain their separate freshness policy. Whole-cache file locks cover only cache
 read/replace operations, never network I/O; different models may refresh in
 parallel while duplicate refreshes for one exact fact remain coalesced.
 
@@ -106,7 +110,10 @@ Model selection/configuration schedules a best-effort asynchronous refresh
 after the selection is durably accepted. Startup loading, direct model
 changes, API Gateway configured/default models, and the selected HERV3 main target
 use the same cache path. Message admission and Provider invocation never wait
-for a capability network request.
+for a capability network request. Re-reading or reselecting a known exact model
+does not trigger a time-based requalification; an explicit forced refresh may
+replace it only with newly validated evidence, and transient refresh failure
+preserves the known fact.
 
 After refresh, direct adapters, Telegram media intake, API Gateway structured
 conversation validation, and HERV3 main-target resolution all read the same exact
@@ -137,8 +144,9 @@ codes.
 
 ## Verification boundary
 
-Focused verification covers exact mapping, text-only facts, unknown and stale
-facts, 404/timeout/network/schema/ID/alias failures, manual override priority,
+Focused verification covers exact mapping, text-only facts, unknown retries,
+legacy expired-known facts that remain routable, forced-refresh failure that
+preserves known facts, 404/timeout/network/schema/ID/alias failures, manual override priority,
 atomic concurrent refresh, independent pricing failure, model-switch cache
 invalidation, API Gateway, HER stage consumption, image/audio/video/file
 boundaries, local fallback, and Codex's actual `--image` command argument.

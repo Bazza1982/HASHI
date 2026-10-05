@@ -80,7 +80,7 @@ def test_codex_namespace_discovers_image_without_treating_file_as_document(
     assert fact.output_status("text") == "supported"
     assert fact.source_url.endswith("/openai/gpt-6-astra")
     assert fact.fetched_at == NOW.isoformat()
-    assert fact.expires_at == (NOW + timedelta(hours=24)).isoformat()
+    assert fact.expires_at is None
     assert fact.source_revision and fact.evidence_sha256 in fact.source_revision
     assert capability.supports("image", "local_path") is True
     assert capability.supports("document") is False
@@ -356,22 +356,41 @@ def test_exact_manual_override_has_priority_over_dynamic_fact(tmp_path):
     assert capability.supports("image", "data_url") is True
 
 
-def test_stale_last_known_fact_is_preserved_but_does_not_grant_media(tmp_path):
+@pytest.mark.parametrize(
+    ("inputs", "expected_image_status"),
+    [
+        (["text", "image"], "supported"),
+        (["text"], "unsupported"),
+    ],
+)
+def test_verified_model_capability_survives_legacy_cache_expiry(
+    tmp_path, inputs, expected_image_status
+):
     cache = tmp_path / "capabilities.json"
-    model = "gpt-stale-cache-only"
+    model = "gpt-future-verified-model"
     old_now = datetime.now(timezone.utc) - timedelta(days=2)
     known = model_capability_sources.refresh_capability_fact(
         "codex-cli",
         model,
         cache_path=cache,
         fetcher=lambda _url: _evidence(
-            "openai/gpt-stale-cache-only",
+            "openai/gpt-future-verified-model",
+            inputs=inputs,
             fetched_at=old_now,
         ),
         now=old_now,
     )
 
-    stale = model_capability_sources.get_cached_capability_fact(
+    # Existing HASHI4 facts already contain a 24-hour expiry.  Preserve that
+    # on-disk shape to prove it no longer revokes a verified model capability.
+    payload = json.loads(cache.read_text(encoding="utf-8"))
+    key = model_capability_sources._cache_key("codex-cli", model)
+    payload["facts"][key]["expires_at"] = (
+        old_now + timedelta(hours=24)
+    ).isoformat()
+    cache.write_text(json.dumps(payload), encoding="utf-8")
+
+    retained = model_capability_sources.get_cached_capability_fact(
         "codex-cli",
         model,
         cache_path=cache,
@@ -383,14 +402,52 @@ def test_stale_last_known_fact_is_preserved_but_does_not_grant_media(tmp_path):
         capability_cache_path=cache,
     )
 
-    assert stale.status == "unknown"
-    assert stale.stale is True
-    assert stale.last_known_revision == known.source_revision
-    assert stale.last_known_input_modalities["image"] == "supported"
-    # The real clock is beyond the synthetic fact's expiry, so routing fails
-    # closed even though diagnostic last-known data remains available.
-    assert capability.status_for("image") == "unknown"
-    assert capability.supports("image") is False
+    assert retained.status == "known"
+    assert retained.stale is False
+    assert retained.expires_at is None
+    assert retained.source_revision == known.source_revision
+    assert retained.input_status("image") == expected_image_status
+    assert capability.status_for("image") == expected_image_status
+    assert capability.supports("image", "local_path") is (
+        expected_image_status == "supported"
+    )
+
+
+def test_forced_refresh_failure_cannot_erase_verified_model_capability(tmp_path):
+    cache = tmp_path / "capabilities.json"
+    model = "gpt-future-verified-model"
+    known = model_capability_sources.refresh_capability_fact(
+        "codex-cli",
+        model,
+        cache_path=cache,
+        fetcher=lambda _url: _evidence(
+            "openai/gpt-future-verified-model",
+            inputs=["text", "image"],
+        ),
+        now=NOW,
+    )
+
+    def timeout(_url):
+        raise TimeoutError("synthetic outage")
+
+    result = model_capability_sources.refresh_capability_fact(
+        "codex-cli",
+        model,
+        cache_path=cache,
+        fetcher=timeout,
+        now=NOW + timedelta(days=3),
+        force=True,
+    )
+    retained = model_capability_sources.get_cached_capability_fact(
+        "codex-cli",
+        model,
+        cache_path=cache,
+        now=NOW + timedelta(days=3),
+    )
+
+    assert result.status == retained.status == "known"
+    assert retained.source_revision == known.source_revision
+    assert retained.input_status("image") == "supported"
 
 
 def test_concurrent_capability_refreshes_coalesce_to_one_fetch(tmp_path):

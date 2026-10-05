@@ -81,6 +81,14 @@ Source, running Workers and delivery need separate proof. Agent tools cannot edi
 
 Configuration owns identity, ports, Workzones, endpoints and models. Ignore secrets/machine paths. Instance models use allowed_backends and runtime effort options; shared compatibility uses the qualified registry. Explicit choices persist; unknown capabilities/prices are neither unsupported nor zero cost.
 
+PAO exact-model capability facts, once verified, do not expire with time. This
+applies to supported and unsupported modalities of existing and future models;
+legacy 24-hour timestamps are not routing deadlines. Only unknown lookup
+failures use a short retry interval. A failed refresh cannot erase a verified
+fact; a new validated source revision or changed exact model/adapter identity
+can replace it. Pricing freshness is a separate rule. See [model capability
+discovery](HASHI_MODEL_CAPABILITY_DISCOVERY.md).
+
 Portable carries no credentials; PAO starts Workers. Private experiments stay private. Tool wildcard grants permission, not capability; naming a path grants nothing. Runs freeze enabled Workzone roots/revision; reload is idle-only. Exclude secrets/media bytes/remote paths from PCM, logs, chat and Git.
 
 Successful Agent stop projects `stopped`; Worker outage is `offline`, config deactivation `inactive`. Shared Functions retain the stop marker until restart. Frontends derive visibility without rewriting `is_active`.
