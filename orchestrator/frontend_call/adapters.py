@@ -11,17 +11,17 @@ import base64
 import asyncio
 import io
 import json
-import logging
 import os
 import re
 import wave
+import time
 import aiohttp
 from .config import OPENROUTER_API_BASE, OPENROUTER_GEMINI_TTS_MODELS
 from .contract import CallError, MAX_OUTPUT
+from .diagnostics import diagnostic_context, elapsed_ms, emit, error_facts, receipt_facts
 
 
 _GENERATION_ID = re.compile(r"gen-[A-Za-z0-9-]{1,120}\Z")
-logger = logging.getLogger(__name__)
 
 
 class MediaAdapters:
@@ -32,6 +32,33 @@ class MediaAdapters:
     async def _request(
         self, target, path, *, data=None, json_body=None, maximum=MAX_OUTPUT
     ):
+        # Follow the service task's correlation without changing requests or
+        # receipt lookups. Only bounded status/receipt metadata reaches logs.
+        kind = {"/audio/transcriptions": "stt", "/audio/speech": "tts", "/chat/completions": "vision"}.get(path)
+        started, facts = time.monotonic(), {}
+        with diagnostic_context(media_kind=kind):
+            emit("provider_request_started")
+            try:
+                result = await self._request_impl(
+                    target, path, data=data, json_body=json_body, maximum=maximum, diagnostic=facts
+                )
+            except asyncio.CancelledError:
+                emit("provider_request_cancelled", **facts, reason="task_cancelled",
+                     duration_ms=elapsed_ms(time.monotonic, started))
+                raise
+            except Exception as exc:
+                emit("provider_request_failed", **facts, duration_ms=elapsed_ms(time.monotonic, started),
+                     error_status=exc.status if isinstance(exc, CallError) else 500,
+                     **error_facts(exc, "call_provider_unavailable"))
+                raise
+            emit("provider_request_completed", **{**facts, **receipt_facts(result[2])},
+                 duration_ms=elapsed_ms(time.monotonic, started), response_bytes=len(result[0]))
+            return result
+
+    async def _request_impl(
+        self, target, path, *, data=None, json_body=None, maximum=MAX_OUTPUT, diagnostic
+    ):
+        started = time.monotonic()
         ref = target.get("credential_ref")
         env = target.get("credential_env")
         if ref and self.secret_resolver is None:
@@ -58,6 +85,11 @@ class MediaAdapters:
                     json=json_body,
                     allow_redirects=False,
                 ) as response:
+                    diagnostic.update(
+                        http_status=response.status,
+                        provider_request_id=response.headers.get("X-Request-Id"),
+                        provider_generation_id=response.headers.get("X-Generation-Id"),
+                    )
                     if response.status not in (200, 201):
                         raise CallError("call_provider_rejected", 502)
                     chunks, total = [], 0
@@ -71,6 +103,7 @@ class MediaAdapters:
                         "Content-Type", ""
                     ).split(";")[0]
                     generation_id = response.headers.get("X-Generation-Id", "")
+                    diagnostic["response_duration_ms"] = elapsed_ms(time.monotonic, started)
                 receipt = await self._openrouter_receipt(
                     session, target, headers, generation_id
                 )
@@ -84,6 +117,7 @@ class MediaAdapters:
     async def _openrouter_receipt(self, session, target, headers, generation_id):
         if target["base_url"].rstrip("/") != OPENROUTER_API_BASE:
             return None
+        started, lookups, lookup_status = time.monotonic(), 0, None
         valid_id = generation_id if _GENERATION_ID.fullmatch(generation_id) else None
         receipt = {
             "gateway": "OpenRouter",
@@ -97,6 +131,7 @@ class MediaAdapters:
                 if delay:
                     await asyncio.sleep(delay)
                 try:
+                    lookups += 1
                     async with session.get(
                         OPENROUTER_API_BASE + "/generation",
                         params={"id": valid_id},
@@ -104,6 +139,7 @@ class MediaAdapters:
                         allow_redirects=False,
                         timeout=aiohttp.ClientTimeout(total=4),
                     ) as response:
+                        lookup_status = response.status
                         if response.status == 404:
                             break
                         if response.status != 200:
@@ -132,10 +168,8 @@ class MediaAdapters:
                             break
                 except (aiohttp.ClientError, TimeoutError, OSError, ValueError, TypeError):
                     continue
-        logger.info(
-            "call media provider receipt %s",
-            json.dumps(receipt, ensure_ascii=True, sort_keys=True),
-        )
+        emit("provider_receipt", **receipt_facts(receipt), lookup_count=lookups,
+             http_status=lookup_status, duration_ms=elapsed_ms(time.monotonic, started))
         return receipt
 
     @staticmethod

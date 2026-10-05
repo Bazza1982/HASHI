@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from aiohttp import web
 from .adapters import MediaAdapters
@@ -11,6 +12,7 @@ from .config import CallConfig
 from .contract import CallError, MAX_BODY
 from .ports import HashiPorts
 from .service import CallService
+from .diagnostics import body_facts, elapsed_ms, emit, error_facts
 
 
 def register_call_api(api):
@@ -30,22 +32,30 @@ def register_call_api(api):
     }
 
     async def handle(request):
+        body = None  # Never inspect unauthed content for logging.
+        stage = "profile"
+        started = time.monotonic()
         try:
             if api._is_governed_profile():
                 raise CallError("call_profile_unsupported", 501)
+            stage = "auth"
             if not api.admin_token or not api._check_admin_auth(request):
                 raise CallError("call_auth_required", 403)
+            stage = "owner"
             owner = api._v1_owner_id(request)
             if not owner:
                 raise CallError("call_auth_required", 403)
+            stage = "content_type"
             if request.content_type != "application/json":
                 raise CallError("call_json_required", 415)
+            stage = "body_read"
             data, total = [], 0
             async for chunk in request.content.iter_chunked(16384):
                 total += len(chunk)
                 if total > MAX_BODY:
                     raise CallError("call_body_limit", 413)
                 data.append(chunk)
+            stage = "json"
             try:
                 body = json.loads(b"".join(data))
             except (ValueError, UnicodeError) as exc:
@@ -54,15 +64,32 @@ def register_call_api(api):
             if not isinstance(body, dict):
                 raise CallError("call_json_invalid")
             if body.get("operation") not in ("end", "route"):
+                stage = "config_read"
                 service.config.read()
-            return web.json_response(await service.invoke(owner, body), headers=headers)
+            stage = "invoke"
+            result = await service.invoke(owner, body)
+            stage = "response"
+            return web.json_response(result, headers=headers)
+        except asyncio.CancelledError:
+            if stage != "invoke":
+                emit("http_operation_cancelled", **body_facts(body), generation=service.generation,
+                     stage=stage, reason="task_cancelled", duration_ms=elapsed_ms(time.monotonic, started))
+            raise
         except CallError as exc:
+            if stage != "invoke":
+                emit("http_operation_failed", **body_facts(body), generation=service.generation,
+                     stage=stage, http_status=exc.status, duration_ms=elapsed_ms(time.monotonic, started),
+                     **error_facts(exc, "call_internal_error"))
             return web.json_response(
                 {"ok": False, "error_code": exc.code},
                 status=exc.status,
                 headers=headers,
             )
-        except Exception:
+        except Exception as exc:
+            if stage != "invoke":
+                emit("http_operation_failed", **body_facts(body), generation=service.generation,
+                     stage=stage, http_status=500, duration_ms=elapsed_ms(time.monotonic, started),
+                     **error_facts(exc, "call_internal_error"))
             return web.json_response(
                 {"ok": False, "error_code": "call_internal_error"},
                 status=500,
