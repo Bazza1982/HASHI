@@ -1,5 +1,19 @@
 # HASHI Agent FYI
 
+2026-10-05 the user approved the isolated HASHI2 call experiment moving to
+volume-based capture and one cloud speech-judgment/transcription request,
+without a language hint. Frontend Connector owns Functions and the external
+browser input; Core, Agent model/reasoning/PCM/tools and Phone are unchanged.
+Only a cloud-rejected sealed recording can confirm a background estimate;
+stale replies cannot replace live input. No-speech creates no Agent Run or
+TTS; malformed or contradictory results remain service failures. The proposed
+instance-local STT target is Gemini 2.5 Flash Lite. Actual gateway probes
+distinguished synthetic silence/tone from speech, but a quiet synthetic
+interjection was mistranscribed. Whisper instead invented ordinary words on
+both noise samples without usable no-speech evidence. Source, independent
+review, build, new hot adoption approval and physical accuracy/latency
+acceptance stay separate; see [the call decision](HASHI_CALL_INTERACTION_2026-10-04.md).
+
 2026-10-05 Remote idle-CPU repair is PAO-owned Functions plus Windows/WSL
 launcher and instance configuration; protected Core is unchanged. Historical
 receipt discovery is cached, but locked admission stays fresh. Known same-host
@@ -17,6 +31,55 @@ only explicit `available_models` narrows choices, including an empty denial.
 Model/effort views and Frontend controls derive from the Function owner; never
 write a projected list back as configuration. See [model availability](HASHI_MODEL_AVAILABILITY.md).
 Source qualification and running Worker adoption remain separate evidence.
+2026-10-05 call latency repair is user-approved for the isolated HASHI2
+experiment. Frontend Connector Functions remove all secondary provider
+metadata lookups, bypass Telegram ephemeral progress for PAO's trusted call
+Runs, and start first-segment synthesis when final text is ready. Client
+polling reuses the task/cache; synthesis failures preserve text and explicit
+retries never repeat Agent work. Scope/privacy and stale-turn delivery fences
+remain. Model, reasoning, PCM, tools, Core and Phone are unchanged. Source
+qualification, independent review, adoption and device speed acceptance remain
+distinct; see [the call decision](HASHI_CALL_INTERACTION_2026-10-04.md).
+
+2026-10-05 scoped call-logging adoption exposed a shared-process persistence
+gap. Call diagnostics now inherit the existing bridge file sink instead of
+filtered console output. The real file regression failed before the fix and
+the focused call component passed 53 cases afterwards. Core is unchanged;
+fresh hot adoption and ordinary-frontend persistence evidence remain separate
+from physical camera, recognition and latency acceptance. The corrected
+generation is now adopted on all five Workers; the ordinary frontend proxy and
+backend file contain the same rejected-call probe, numeric browser metrics
+persist, and health is ready with the original Core identity. Device acceptance
+and the historical camera interruption's cause remain open.
+
+2026-10-05 the user required HASHI2 call acceptance through their ordinary
+Workbench. Its normal Windows service now serves the reviewed call client, with
+the new path scoped to HASHI2 and existing connection/user state preserved.
+Focused checks (75), the production build and an actual frontend start/listening/
+confirmed-end handshake passed. That handshake sent no media/model turn;
+physical devices, conversation feel and responsiveness remain open. HASHI2 Core
+and shared Functions were unchanged. The call task now points to the ordinary
+frontend; old previews and evidence remain intact. See the
+[deployment update](HASHI_CALL_INTERACTION_2026-10-04.md).
+
+2026-10-04 call interaction correction is approved for the isolated HASHI2
+experiment, with Frontend Connector/PCM/PAO ownership and unchanged Core.
+The existing phone entrance selects a backend-saved route; settings remain
+backend command menus. Independent bounded camera observations and sealed,
+fresh current-call facts reach the same Agent PCM. Source, running adoption,
+independent review and user device acceptance remain separate. See
+[call interaction decision](HASHI_CALL_INTERACTION_2026-10-04.md).
+
+2026-10-04 HASHI2 /call remains on an isolated experiment branch. OpenRouter
+Whisper Large V3 is not a guaranteed Groq route because speech requests ignore
+provider pinning; the user accepts a non-Groq provider. Gemini 3.8 Flash-Lite
+TTS needs PCM output, with voice and separate provider speech style metadata.
+The Function validates its 24 kHz mono PCM and wraps it as browser-playable WAV.
+The user-approved HASHI1 key copy restored HASHI2 OpenRouter authentication;
+direct Function TTS and a TTS-to-Whisper transcription passed. OpenRouter's
+generation lookup returned 404 for both speech IDs, so actual serving providers
+remain unverified. Source tests, running adoption, and physical devices remain
+separate; no main merge or HASHI2 restart is implied.
 
 2026-10-03 non-voice repairs require separate source, instance-adoption and
 live evidence. Core is unchanged; no new API supervisor is added.
@@ -180,3 +243,10 @@ HASHI3 caps Tool text at Provider capacity. `/stop` blocks autonomous wakeups un
 Cancellation binds exact Session/Run, including capacity recovery; PAO settles
 queued/active Runs. Never fall back to Agent stop or report stopped early.
 Offline red/green passed; live acceptance is separate. See [PAO](HASHI_PAO_SYSTEM_DESIGN.md).
+
+Call diagnostics now correlate native input/camera/lifecycle failures with
+proxy, STT/PAO/TTS and safe provider timing facts. Red/green and focused checks
+passed; commits do not establish running adoption or physical acceptance.
+Earlier camera interruption and recognition root causes remain unverified.
+See [call decision](HASHI_CALL_INTERACTION_2026-10-04.md); the existing call task
+tracks browser/server/Function adoption separately. Core is unchanged.

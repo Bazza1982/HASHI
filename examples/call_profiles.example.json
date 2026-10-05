@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "enabled": false,
+  "targets": [
+    {
+      "adapter": "openai_compatible",
+      "location": "local",
+      "base_url": "http://127.0.0.1:19000/v1",
+      "model": "REPLACE_WITH_INSTALLED_MODEL_ID",
+      "id": "ears",
+      "kind": "stt",
+      "options": {
+        "language": {
+          "type": "string",
+          "max_length": 8
+        }
+      },
+      "label": "Local speech recognition"
+    },
+    {
+      "adapter": "openai_compatible",
+      "location": "local",
+      "base_url": "http://127.0.0.1:19000/v1",
+      "model": "REPLACE_WITH_INSTALLED_MODEL_ID",
+      "id": "mouth",
+      "kind": "tts",
+      "voices": [
+        "REPLACE_WITH_VOICE_ID"
+      ],
+      "audio_format": "wav",
+      "options": {
+        "speed": {
+          "type": "number",
+          "min": 0.5,
+          "max": 2
+        },
+        "instructions": {
+          "type": "string",
+          "max_length": 300
+        }
+      },
+      "label": "Local speech output"
+    },
+    {
+      "adapter": "openai_compatible",
+      "location": "local",
+      "base_url": "http://127.0.0.1:19000/v1",
+      "model": "REPLACE_WITH_INSTALLED_MODEL_ID",
+      "id": "eyes",
+      "kind": "vision",
+      "label": "Local vision observer"
+    }
+  ],
+  "default_profile": {
+    "stt": {
+      "target_id": "ears",
+      "options": {}
+    },
+    "tts": {
+      "target_id": "mouth",
+      "voice_id": "REPLACE_WITH_VOICE_ID",
+      "options": {}
+    },
+    "vision": null
+  },
+  "profiles": {}
+}

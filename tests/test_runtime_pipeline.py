@@ -425,6 +425,63 @@ def _set_stream_policy(runtime, **values):
         telegram_stream_policy.set_policy_value(runtime, name, enabled)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["codex-cli", "her-v2"])
+@pytest.mark.parametrize("trusted_call", [True, False])
+async def test_call_feedback_keeps_local_activity_without_telegram_progress(backend, trusted_call):
+    from orchestrator.message_context import (
+        MESSAGE_CONTEXT_METADATA_KEY, build_message_context_snapshot,
+    )
+    from orchestrator.request_activity import RequestActivityStore
+
+    runtime = _runtime()
+    runtime.config.active_backend = backend
+    runtime._verbose = runtime._think = True
+    runtime._commentary = True
+    runtime.request_activity = RequestActivityStore()
+    runtime.request_activity.start("req-1")
+    sent = []
+    async def flush_thinking(*args, **kwargs):
+        pass
+    runtime._flush_thinking = flush_thinking
+    async def send_text(*args, **kwargs):
+        sent.append((args, kwargs))
+    runtime._send_text = send_text
+    item = _item(source="session-api", session_surface="session-api")
+    snapshot = build_message_context_snapshot(runtime, source=item.source,
+        chat_id=item.chat_id, prompt=item.prompt,
+        metadata={"call_media": {"version": 2, "call_id": "call-1",
+            "turn_id": "turn-1", "mode": "voice"}})
+    item.request_metadata = (
+        {MESSAGE_CONTEXT_METADATA_KEY: snapshot} if trusted_call
+        else {"call_media": {"version": 2, "call_id": "call-1", "turn_id": "turn-1", "mode": "voice"}}
+    )
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime, item, audit_active=False, audit_collector=None)
+    try:
+        if not trusted_call:
+            assert feedback.placeholder is not None
+            assert feedback.typing_task is not None
+            return
+        assert feedback.placeholder is None
+        assert feedback.typing_task is None and feedback.escalation_task is None
+        assert feedback.think_flush_task is None and feedback.preference_event is None
+        await feedback.on_stream_event(StreamEvent(kind=KIND_COMMENTARY,
+            summary="Progress stays on the calling frontend.", event_id="req-1:c:1",
+            delivery_class=DELIVERY_USER_COMMENTARY, origin="her_v2", phase="execution"))
+        assert any(event.get("summary") == "Progress stays on the calling frontend."
+                   for event in runtime.request_activity.poll("req-1")["events"])
+        assert item.deliver_to_telegram is True  # Final delivery policy is unchanged.
+    finally:
+        await runtime_pipeline.cleanup_interactive_feedback(runtime, item,
+            stop_typing=feedback.stop_typing, typing_task=feedback.typing_task,
+            escalation_task=feedback.escalation_task,
+            think_flush_task=feedback.think_flush_task, placeholder=feedback.placeholder,
+            verbose_display_state=feedback.verbose_display_state,
+            preference_event=feedback.preference_event)
+    assert not sent and not runtime.app.bot.sent and not runtime.app.bot.edits and not runtime.app.bot.deleted
+
+
 def test_begin_queue_item_records_processing_metadata():
     runtime = _runtime()
     item = _item(source="bridge:api")

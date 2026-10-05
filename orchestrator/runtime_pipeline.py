@@ -2681,7 +2681,13 @@ async def setup_interactive_feedback(
     answer_stream_state = None
     verbose_display_state = None
     preference_event = None
-    delivery_requested = not item.silent and item.deliver_to_telegram
+    from orchestrator.frontend_call.context import is_call_request
+
+    # Call progress belongs to its calling frontend. Final mirror policy stays
+    # on the QueueItem; no Telegram presentation tasks join this call's path.
+    delivery_requested = (
+        not item.silent and item.deliver_to_telegram and not is_call_request(item)
+    )
     display_policy = telegram_stream_policy.get_display_policy(runtime)
     delivery_blocked = telegram_delivery_failover.is_delivery_blocked(runtime)
     typing_delivery_enabled = (

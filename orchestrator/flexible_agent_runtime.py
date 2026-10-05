@@ -2227,6 +2227,7 @@ class FlexibleAgentRuntime:
             "model": self.get_current_model(),
             "provider": self.get_current_provider(),
             "allowed_backends": public_allowed_backends,
+            "privacy_level": int(getattr(self.backend_manager, "privacy_level", 1)),
             "workspace_dir": str(self.workspace_dir),
             "transcript_path": str(self.transcript_log_path),
             "online": bool(self.backend_ready),
@@ -4468,6 +4469,10 @@ class FlexibleAgentRuntime:
                 preview_assets,
             )
 
+    async def callback_call(self, update: Update, context: Any):
+        from orchestrator.frontend_call.settings import callback
+        await callback(self, update, context)
+
     async def callback_phone(self, update: Update, context: Any):
         query = update.callback_query
         if not self._is_authorized_user(query.from_user.id):
@@ -5722,6 +5727,10 @@ class FlexibleAgentRuntime:
                 ui_language.tr("safevoice.confirmation_expired")
             )
             await query.answer(ui_language.tr("safevoice.expired"))
+
+    async def cmd_call(self, update: Update, context: Any):
+        from orchestrator.frontend_call.settings import command
+        await command(self, update, context)
 
     async def cmd_phone(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
