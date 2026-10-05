@@ -183,3 +183,10 @@ HASHI3 caps Tool text at Provider capacity. `/stop` blocks autonomous wakeups un
 Cancellation binds exact Session/Run, including capacity recovery; PAO settles
 queued/active Runs. Never fall back to Agent stop or report stopped early.
 Offline red/green passed; live acceptance is separate. See [PAO](HASHI_PAO_SYSTEM_DESIGN.md).
+
+Call diagnostics now correlate native input/camera/lifecycle failures with
+proxy, STT/PAO/TTS and safe provider timing facts. Red/green and focused checks
+passed; commits do not establish running adoption or physical acceptance.
+Earlier camera interruption and recognition root causes remain unverified.
+See [call decision](HASHI_CALL_INTERACTION_2026-10-04.md); the existing call task
+tracks browser/server/Function adoption separately. Core is unchanged.

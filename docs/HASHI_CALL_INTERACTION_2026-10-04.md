@@ -103,3 +103,30 @@ HASHI2 Core identity and its shared Function generation stayed unchanged during
 the frontend deployment. The ordinary frontend connection was restored after
 verification. The existing call task owns user feedback; the preview is retained
 as development evidence, not the user acceptance entrance.
+
+## 2026-10-05 correlated diagnostic repair
+
+The user reports interruption while changing cameras. HTTP success alone did
+not prove native-media readiness, continued microphone input or why the call
+ended. Frontend Connector adds content-free, correlated diagnostics in the
+Workbench browser/transport and replaceable call Functions. Core is unchanged.
+Camera-off microphone reacquisition and page-background suspension are
+observable candidates; the historical interruption's cause is not established.
+
+Evidence now distinguishes native track/AudioContext failures, camera
+requests/confirmation/cancellation, aggregate input quality and detector
+failures, terminal source, proxy rejections, STT/PAO/TTS stages and provider
+response versus existing receipt-lookup time. Late callbacks retain their
+original call identity. No media, transcript, credentials or native exception
+message is logged; diagnostic failures cannot fail the call. No extra provider
+request, configured delay, retry or state owner was introduced.
+
+Backend checkpoints `155890ca` and `da41ee3e` passed 52 focused cases; 15 new
+boundary cases failed against isolated original code. Independent parent review
+checked logging failure, safe provider facts and shared-endpoint modality.
+Frontend coverage/build and deployment receipts are recorded in the owning
+Workbench call logging decision and ignored `state/call-logging-20261005/`.
+Source validation, browser/server adoption and Function adoption are distinct;
+hot replacement still requires current scoped approval. Historical gaps cannot
+be recovered, and physical camera continuity, recognition and speed acceptance
+remain open under the existing call task.
