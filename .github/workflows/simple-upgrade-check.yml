@@ -19,7 +19,7 @@ jobs:
         with:
           python-version: '3.12.13'
       - name: Install focused test dependencies
-        run: python -m pip install pytest pytest-asyncio anyio pydantic requests Pillow
+        run: python -m pip install -r constraints/standard-py312.lock ".[test]"
       - name: Compile and run focused integration checks
         run: python scripts/check_embedded_browser.py
       - name: Record tested source revision
