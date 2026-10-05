@@ -332,6 +332,60 @@ async def test_standalone_registry_keeps_explicit_legacy_executor_for_diagnostic
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["embedded", "Embedded", " embedded ", "other"])
+async def test_standalone_browser_never_falls_back_from_explicit_other_provider(
+    tmp_path, monkeypatch, target
+):
+    from tools import browser
+
+    local_calls = []
+
+    async def local_browser(arguments):
+        local_calls.append(arguments)
+        return "extension browser result"
+
+    monkeypatch.setattr(browser, "execute_browser_get_text", local_browser)
+    registry = _registry(tmp_path, "browser_get_text", None)
+
+    result = await registry.execute(
+        "browser_get_text",
+        {"url": "https://example.test", "browser_target": target},
+    )
+
+    assert result.is_error is True
+    assert local_calls == []
+    assert (
+        "invalid browser_target" if target == "other" else "no browser fallback"
+    ) in result.output
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", [None, "extension"])
+async def test_standalone_browser_preserves_default_and_extension_execution(
+    tmp_path, monkeypatch, target
+):
+    from tools import browser
+
+    local_calls = []
+
+    async def local_browser(arguments):
+        local_calls.append(arguments)
+        return "extension browser result"
+
+    monkeypatch.setattr(browser, "execute_browser_get_text", local_browser)
+    registry = _registry(tmp_path, "browser_get_text", None)
+    arguments = {"url": "https://example.test"}
+    if target is not None:
+        arguments["browser_target"] = target
+
+    result = await registry.execute("browser_get_text", arguments)
+
+    assert result.is_error is False
+    assert result.output == "extension browser result"
+    assert len(local_calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_gateway_does_not_advertise_broker_browser_without_broker_executor(
     tmp_path, monkeypatch
 ):
