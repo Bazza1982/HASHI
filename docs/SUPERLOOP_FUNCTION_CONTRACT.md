@@ -551,3 +551,18 @@ wait hid the independent preview. The repaired scenarios also exercise persisted
 reviewed observations, evidence mutation, next-check coverage and report staleness.
 Source validation, running adoption and full live management acceptance are
 separate facts recorded in the instance's delivery board.
+
+## Receipt discovery cost and authority (2026-10-05)
+
+Owner: PAO; layer: Remote Functions. An unchanged historical receipt must not
+cause every loop's dispatch ledger and taskboard to be reparsed on each tick.
+The Remote manager retains one receipt service with a bounded metadata-revision
+cache for read-only discovery. Matching builds loop evidence once per pass and
+skips disabled/nonlocal controllers before history loading.
+
+Append, replacement, deletion and malformed evidence invalidate the snapshot or
+fail closed. This cache never grants admission: locked canonical reads still
+decide controller state, request/Session identity and dispatch authority. Retry
+deadlines, pause/stop linearization, single recovery and report reconciliation
+are unchanged. Regression and scoped live adoption are recorded separately in
+[the idle CPU repair](repairs/REMOTE_IDLE_CPU_REPAIR_2026-10-05.md).
