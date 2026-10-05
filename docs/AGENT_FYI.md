@@ -1,5 +1,14 @@
 # HASHI Agent FYI
 
+2026-10-05 HASHI1 Move cutover follow-up corrects a schema-5 false stale-source
+rejection: presentation-only progress notices change excluded-message diagnostics,
+not transferred conversation history. PAO / Functions uses the same durable
+conversation projection during packaging and cutover while retaining full capsule
+integrity, owner checks and genuine history/memory/configuration change fences.
+The real failed transaction was confirmed rolled back; retries remain operator
+actions. Red/green checks and adoption boundaries are recorded in
+[Agent Move](HASHI_AGENT_MOVE_V1.md).
+
 2026-10-05 HASHI1 Move repair separates SQLite reader bookkeeping from durable
 source freshness. Cold read-only snapshots may create an empty WAL and WAL-index;
 they no longer invalidate their own package. Complete workspace size/deletion

@@ -878,10 +878,18 @@ def test_lost_finalize_response_is_reconciled_as_completed_clone(
     assert "rollback" not in [call[0] for call in receiver.calls]
 
 
+@pytest.mark.parametrize("changed_kind", ["memory", "history"])
 def test_confirm_rejects_stale_source_snapshot_and_rolls_back_target(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, changed_kind
 ):
+    from orchestrator.session_store import SessionStore
+
     root = _source(tmp_path)
+    config = json.loads((root / "agents.json").read_text())
+    config["global"]["authorized_id"] = 7
+    _write_json(root / "agents.json", config)
+    store = SessionStore(root / "state" / "sessions.sqlite3", instance_id="HASHI1")
+    session = store.ensure_default_session(owner_id="user:7", agent_id="zelda")
     receiver = _Receiver()
     _install_receiver(monkeypatch, receiver)
     prepared = coordinator.prepare_outbound_move(
@@ -890,11 +898,18 @@ def test_confirm_rejects_stale_source_snapshot_and_rolls_back_target(
         "zelda",
         "hashi2",
         source_instance="HASHI1",
+        transfer_mode="workspace",
     )
-    (root / "workspaces" / "zelda" / "memory.md").write_text(
-        "newer durable memory",
-        encoding="utf-8",
-    )
+    if changed_kind == "memory":
+        (root / "workspaces" / "zelda" / "memory.md").write_text(
+            "newer durable memory", encoding="utf-8",
+        )
+    else:
+        store.append_presentation_message(
+            session_id=session["session_id"], owner_id="user:7", agent_id="zelda",
+            role="assistant", text="newer durable history", source="fixture",
+            idempotency_key="new-business-history", history_eligible=True,
+        )
 
     with pytest.raises(AgentMoveError, match="durable state changed"):
         coordinator.confirm_outbound_move(
@@ -914,7 +929,19 @@ def test_confirm_rejects_stale_source_snapshot_and_rolls_back_target(
 def test_confirm_ignores_append_only_slash_audit_written_by_callback(
     tmp_path, monkeypatch
 ):
+    from orchestrator.session_store import SessionStore
+
     root = _source(tmp_path)
+    config = json.loads((root / "agents.json").read_text())
+    config["global"]["authorized_id"] = 7
+    _write_json(root / "agents.json", config)
+    store = SessionStore(root / "state" / "sessions.sqlite3", instance_id="HASHI1")
+    session = store.ensure_default_session(owner_id="user:7", agent_id="zelda")
+    store.append_presentation_message(
+        session_id=session["session_id"], owner_id="user:7", agent_id="zelda",
+        role="assistant", text="Durable business response", source="fixture",
+        idempotency_key="business-response", history_eligible=True,
+    )
     audit = root / "workspaces" / "zelda" / "slash_command_audit.jsonl"
     audit.write_text('{"event":"command_started"}\n', encoding="utf-8")
     receiver = _Receiver()
@@ -925,10 +952,17 @@ def test_confirm_ignores_append_only_slash_audit_written_by_callback(
         "zelda",
         "hashi2",
         source_instance="HASHI1",
+        transfer_mode="workspace",
     )
 
     with audit.open("a", encoding="utf-8") as handle:
         handle.write('{"event":"confirmation_callback"}\n')
+    store.append_presentation_message(
+        session_id=session["session_id"], owner_id="user:7", agent_id="zelda",
+        role="assistant", text="Move is staged; awaiting confirmation",
+        source="telegram.send", idempotency_key="move-staged",
+        history_eligible=False,
+    )
 
     result = coordinator.confirm_outbound_move(
         root,

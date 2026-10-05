@@ -491,6 +491,12 @@ def test_conversation_history_is_in_freshness_fingerprint_and_tampering_is_rejec
         source_instance="HASHI1",
         transfer_mode="identity_memory",
     )
+    store.append_presentation_message(
+        session_id=session["session_id"], owner_id="user:7", agent_id="zelda",
+        role="assistant", text="Move is staged; awaiting confirmation",
+        source="telegram.send", idempotency_key="move-staged",
+        history_eligible=False,
+    )
     second = create_agent_move_package(
         root,
         "zelda",
@@ -498,6 +504,8 @@ def test_conversation_history_is_in_freshness_fingerprint_and_tampering_is_rejec
         source_instance="HASHI1",
         transfer_mode="identity_memory",
     )
+    assert first.conversation_continuity["summary"]["excluded_message_count"] == 0
+    assert second.conversation_continuity["summary"]["excluded_message_count"] == 1
     assert archive_snapshot_fingerprint(first) == archive_snapshot_fingerprint(second)
 
     accepted = store.accept_run(
@@ -525,20 +533,73 @@ def test_conversation_history_is_in_freshness_fingerprint_and_tampering_is_rejec
     )
     assert archive_snapshot_fingerprint(third) != archive_snapshot_fingerprint(first)
 
-    tampered_capsule = dict(third.conversation_continuity or {})
-    tampered_capsule["owner_id"] = "user:8"
-    tampered = tmp_path / "tampered-history.hashi-agent"
-    _rewrite_archive(
-        third.package_path,
-        tampered,
-        replacements={
-            CONVERSATION_CONTINUITY_ARCHIVE_PATH: json.dumps(
-                tampered_capsule
-            ).encode("utf-8")
-        },
+    capsule = third.conversation_continuity
+    for altered in (
+        {**capsule, "owner_id": "user:8"},
+        {**capsule, "summary": {
+            **capsule["summary"],
+            "excluded_message_count": capsule["summary"]["excluded_message_count"] + 1,
+        }},
+    ):
+        tampered = tmp_path / "tampered-history.hashi-agent"
+        _rewrite_archive(
+            third.package_path,
+            tampered,
+            replacements={
+                CONVERSATION_CONTINUITY_ARCHIVE_PATH: json.dumps(altered).encode("utf-8")
+            },
+        )
+        with pytest.raises(AgentMoveError, match="digest"):
+            read_agent_move_package(tampered)
+
+
+@pytest.mark.parametrize("history_eligible", [False, True])
+def test_packaging_fences_eligible_history_not_presentation_counts(
+    tmp_path, monkeypatch, history_eligible
+):
+    from orchestrator.agent_move import package as owner
+
+    root = _source_root(tmp_path)
+    store = SessionStore(root / "state" / "sessions.sqlite3", instance_id="HASHI1")
+    session = store.ensure_default_session(owner_id="user:7", agent_id="zelda")
+    store.append_presentation_message(
+        session_id=session["session_id"], owner_id="user:7", agent_id="zelda",
+        role="assistant", text="Durable business response", source="fixture",
+        idempotency_key="business-response", history_eligible=True,
     )
-    with pytest.raises(AgentMoveError, match="digest"):
-        read_agent_move_package(tampered)
+    write_bytes = owner._write_bytes
+
+    def write_then_deliver(archive, name, data, checksums):
+        write_bytes(archive, name, data, checksums)
+        if name == CONVERSATION_CONTINUITY_ARCHIVE_PATH:
+            store.append_presentation_message(
+                session_id=session["session_id"], owner_id="user:7", agent_id="zelda",
+                role="assistant", text="New message during packaging",
+                source="telegram.send", idempotency_key="concurrent-delivery",
+                history_eligible=history_eligible,
+            )
+
+    monkeypatch.setattr(owner, "_write_bytes", write_then_deliver)
+    output = tmp_path / "existing.hashi-agent"
+    output.write_bytes(b"previous caller output")
+    if history_eligible:
+        with pytest.raises(AgentMoveError, match="conversation history changed"):
+            create_agent_move_package(root, "zelda", output, transfer_mode="identity_memory")
+        assert output.read_bytes() == b"previous caller output"
+        assert not list(tmp_path.glob(f".{output.name}.*.tmp"))
+    else:
+        package = create_agent_move_package(root, "zelda", output, transfer_mode="identity_memory")
+        capsule = package.conversation_continuity
+        assert capsule["summary"]["eligible_message_count"] == 1
+        assert capsule["summary"]["excluded_message_count"] == 0
+        assert [message["text"] for row in capsule["sessions"] for message in row["messages"]] == [
+            "Durable business response",
+        ]
+        current = store.export_conversation_continuity(
+            owner_id="user:7", agent_id="zelda", source_instance="HASHI1",
+            transfer_id=package.package_id, history_mode="move",
+        )
+        assert current["summary"]["excluded_message_count"] == 1
 
 
 def test_package_rejects_inactive_retained_source_copy(tmp_path):

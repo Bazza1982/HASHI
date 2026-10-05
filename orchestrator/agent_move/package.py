@@ -790,9 +790,8 @@ def create_agent_move_package(
                     history_mode=str(conversation_continuity["history_mode"]),
                     explicit_owner_id=str(conversation_continuity["owner_id"]),
                 )
-                if not hmac.compare_digest(
-                    str(final_continuity["capsule_digest"]),
-                    str(conversation_continuity["capsule_digest"]),
+                if _durable_conversation_continuity(final_continuity) != (
+                    _durable_conversation_continuity(conversation_continuity)
                 ):
                     raise AgentMoveError(
                         "conversation history changed while packaging; prepare a fresh transfer"
@@ -1084,6 +1083,26 @@ def package_sha256(path: Path | str) -> str:
     return digest.hexdigest()
 
 
+def _durable_conversation_continuity(
+    capsule: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Compare transferred history, not counts of messages excluded from it.
+
+    Move progress/confirmation notices are presentation-only and increment the
+    exclusion diagnostic. The capsule retains that diagnostic under its full
+    integrity digest, but it cannot invalidate unchanged eligible history.
+    """
+    if capsule is None:
+        return None
+    stable = dict(capsule)
+    stable.pop("transfer_id", None)
+    stable.pop("capsule_digest", None)
+    summary = dict(stable["summary"])
+    summary.pop("excluded_message_count", None)
+    stable["summary"] = summary
+    return stable
+
+
 def archive_snapshot_fingerprint(
     package: AgentMoveArchive,
     *,
@@ -1092,9 +1111,10 @@ def archive_snapshot_fingerprint(
     """Return a stable digest of the durable source state in an archive.
 
     Creation timestamps, randomized encryption, exclusion diagnostics, and the
-    append-only slash-command audit are intentionally omitted.  The audit file
-    remains in the package; it alone is excluded from freshness because the
-    move confirmation callback appends its own record. File contents, portable
+    excluded-history count and append-only slash-command audit are intentionally
+    omitted. The audit remains packaged, but the confirmation callback's own
+    audit append and presentation notices cannot invalidate the staged source.
+    File contents, portable
     modes, Agent configuration, schedules, access requirements, and Agent-owned
     credential values remain covered so a staged move cannot silently cut over
     from a stale snapshot.
@@ -1135,11 +1155,6 @@ def archive_snapshot_fingerprint(
             }
         )
     credentials = decrypt_agent_secrets(package, secret_passphrase)
-    stable_continuity = None
-    if package.conversation_continuity is not None:
-        stable_continuity = dict(package.conversation_continuity)
-        stable_continuity.pop("transfer_id", None)
-        stable_continuity.pop("capsule_digest", None)
     payload = {
         "schema_version": int(package.manifest.get("schema_version") or 1),
         "file_checksums": dict(sorted(file_checksums.items())),
@@ -1147,7 +1162,9 @@ def archive_snapshot_fingerprint(
         "agent_credentials": credentials,
         "transfer_mode": package.manifest.get("transfer_mode"),
         "history_mode": package.manifest.get("history_mode"),
-        "conversation_continuity": stable_continuity,
+        "conversation_continuity": _durable_conversation_continuity(
+            package.conversation_continuity
+        ),
         "deletion_inventory": [
             item for item in _durable_workspace_inventory(
                 package.workspace_metadata.get("inventory", []),

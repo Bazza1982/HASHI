@@ -44,6 +44,42 @@ success requires the new source generation in shared Functions and every
 selected Worker, terminal `online` receipt and verified readiness. Offline
 tests alone do not establish production adoption or a real Move success.
 
+### Conversation cutover follow-up
+
+The user requested continued repair after a fresh HASHI1-to-HASHI4 Move passed
+packaging/staging but failed its final durable-state check. The source journal
+and receiver journal confirm complete rollback with the source retained.
+Comparing the actual staged archive with a fresh source snapshot found identical
+workspace contents, inventory, configuration and eligible conversation history;
+only the diagnostic excluded-message count differed. Telegram's presentation-only
+Move notices increment this count without entering transferred history.
+
+PAO / Functions now derives one durable conversation projection for both the
+end-of-packaging check and the final source fingerprint. Transfer identity,
+capsule integrity digest and excluded-message diagnostics do not represent new
+eligible history. The full archived capsule, diagnostic count, manifest summary
+and integrity validation are unchanged. Eligible content, provenance, session
+metadata, channel bindings and owner remain covered, as do memory/configuration.
+
+Strengthened existing fingerprint and schema-5 cutover scenarios, plus a
+concurrent-delivery packaging case, reproduced three false rejections before
+the fix. The six-case focused comparison passes after the fix and continues
+to reject genuine history/memory changes and capsule tampering. Component,
+committed-source qualification and operational adoption remain separate checks.
+The original rolled-back transaction is not retried; the operator starts a fresh
+Move after repair. No receiver activation or source cleanup is performed as a test.
+The six-module component run (`tests/test_agent_move_package.py`,
+`tests/test_agent_move_coordinator.py`, `tests/test_agent_move_manager.py`,
+`tests/test_agent_move_service.py`, `tests/test_remote_agent_move.py`,
+`tests/test_runtime_remote.py`) passes 156 tests with no skips and two
+third-party deprecation warnings. Protected Core and runtime-contract checks
+pass. A disposable rebuild of the actual failed archive now matches its 381
+eligible messages and all other durable source components despite the excluded
+count increasing from 1023 to 1024. No formal SessionStore row is altered.
+An in-memory mutation dropping all conversation freshness makes both genuine
+history-change fences fail, confirming the protection tests exercise that
+boundary; the mutation is never written to product files.
+
 ## Compatibility
 
 - An outbound instance must implement this protocol.
@@ -112,8 +148,10 @@ runs, queues, leases, approvals, backend threads, delivery claims/routes,
 temporary events, media attachments, and credentials. Export is taken through
 a disposable SQLite backup, so preview neither creates nor migrates the live
 source SessionStore. A second snapshot at packaging completion and the normal
-pre-cutover freshness fingerprint reject source history that changed after
-staging.
+pre-cutover freshness fingerprint reject eligible source history that changed
+after staging. Excluded-message counts are presentation diagnostics only: they
+remain inside the integrity-checked archive but cannot make unchanged eligible
+history stale when Move itself emits progress or confirmation notices.
 
 An Agent name is reusable, so delivery recovery state is not keyed by name
 alone. Preview remains read-only; actual preparation revision-safely assigns a
