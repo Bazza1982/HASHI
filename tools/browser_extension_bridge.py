@@ -64,8 +64,15 @@ def project_browser_audit_metadata(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         return {}
     projected: dict[str, Any] = {}
+    # HASHI's canonical Conversation Session is not an engine/browser thread.
+    # Runtime metadata is trusted here; caller-supplied tool arguments are not.
+    canonical_session = value.get("hashi_session_id")
+    if isinstance(canonical_session, str) and canonical_session:
+        projected["session_id"] = canonical_session
     for key in _BRIDGE_AUDIT_FIELDS:
         if key not in value:
+            continue
+        if key == "session_id" and "session_id" in projected:
             continue
         item = value[key]
         if isinstance(item, Path):

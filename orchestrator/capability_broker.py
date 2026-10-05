@@ -144,6 +144,7 @@ class CapabilityRegistration:
     expires_at: float
     browser_id: str = ""
     browser_name: str = ""
+    provider_id: str = ""
 
     @classmethod
     def from_mapping(
@@ -209,6 +210,7 @@ class CapabilityRegistration:
             expires_at=current + ttl,
             browser_id=str(value.get("browser_id") or "").strip().casefold()[:80],
             browser_name=str(value.get("browser_name") or "").strip()[:120],
+            provider_id=str(value.get("provider_id") or ("extension" if kind == "browser_control" else "")).strip().lower(),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -714,11 +716,13 @@ class CapabilityBroker(ManualDesktopBroker):
         }:
             raise CapabilityBrokerError("device-control authorization is missing")
         action_args = dict(args or {})
-        browser_target = str(action_args.pop("_browser_target", "") or "").strip()
+        browser_target = str(action_args.pop("_browser_target", "") or action_args.get("browser_target") or "").strip()
+        requested_provider = browser_target.casefold() if browser_target.casefold() in {"embedded", "extension"} else ""
         registration, worker_token = self._select(
             capability_kind,
             action=action,
-            browser_target=browser_target,
+            browser_target="" if requested_provider else browser_target,
+            provider_id=requested_provider,
             agent_id=agent_id,
             task_id=task_id,
         )
@@ -862,6 +866,7 @@ class CapabilityBroker(ManualDesktopBroker):
         browser_target: str = "",
         agent_id: str = "",
         task_id: str = "",
+        provider_id: str = "",
     ) -> tuple[CapabilityRegistration, str]:
         with self._lock:
             self._prune()
@@ -909,6 +914,10 @@ class CapabilityBroker(ManualDesktopBroker):
                         raise CapabilityBrokerError(
                             "browser target is fixed for this task; start a new task to switch"
                         )
+                    if provider_id and bound_registration is not None and bound_registration.provider_id != provider_id:
+                        raise CapabilityBrokerError(
+                            "browser target is fixed for this task; start a new task to switch"
+                        )
                     for item in candidates:
                         if item[0].capability_id == bound_id:
                             return item
@@ -916,6 +925,13 @@ class CapabilityBroker(ManualDesktopBroker):
                         kind, action=normalized_action or None,
                         reason="bound_browser_disconnected",
                     )
+                if provider_id:
+                    candidates = [item for item in candidates if item[0].provider_id == provider_id]
+                    if not candidates:
+                        raise CapabilityUnavailableError(kind, action=normalized_action or None)
+                elif not browser_target:
+                    external = [item for item in candidates if item[0].provider_id == "extension"]
+                    candidates = external or candidates
                 if browser_target:
                     matches = [
                         item for item in candidates
@@ -937,6 +953,15 @@ class CapabilityBroker(ManualDesktopBroker):
                     selected[0].capability_id, time.time()
                 )
                 return selected
+            if provider_id:
+                candidates = [item for item in candidates if item[0].provider_id == provider_id]
+                if not candidates:
+                    raise CapabilityUnavailableError(kind, action=normalized_action or None)
+            # Preserve existing extension-first behavior unless the task explicitly
+            # chooses its shared desktop browser. Never fall back across a target.
+            if kind == "browser_control" and not provider_id:
+                external = [item for item in candidates if item[0].provider_id == "extension"]
+                candidates = external or candidates
             return sorted(
                 candidates,
                 key=lambda item: item[0].registered_at,
