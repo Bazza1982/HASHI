@@ -145,3 +145,13 @@ start/end records and passed afterwards. The focused `tests/frontend_call`
 component passed 53 cases, including that persistence boundary; the existing
 aiohttp deprecation warning remains. Current-source hot adoption and a fresh
 ordinary-frontend journal probe are tracked separately in ignored receipts.
+
+The approved deployment is now verified through the ordinary frontend: its
+context route reaches HASHI2 and a deliberately nonexistent camera call returns
+the expected rejection without opening devices or invoking a model. That
+request appears with the same call identity and generation in the Workbench
+proxy journal and HASHI2's existing `logs/bridge.log`; browser numeric metrics
+also survive the durable default-content-off writer. The qualified corrected
+generation runs on all five Workers, service health is ready, and Core PID,
+runtime and protected source are unchanged. Actual camera continuity,
+recognition accuracy and conversation latency remain open user acceptance.
