@@ -1,5 +1,19 @@
 # HASHI Agent FYI
 
+2026-10-05 the user approved the isolated HASHI2 call experiment moving to
+volume-based capture and one cloud speech-judgment/transcription request,
+without a language hint. Frontend Connector owns Functions and the external
+browser input; Core, Agent model/reasoning/PCM/tools and Phone are unchanged.
+Only a cloud-rejected sealed recording can confirm a background estimate;
+stale replies cannot replace live input. No-speech creates no Agent Run or
+TTS; malformed or contradictory results remain service failures. The proposed
+instance-local STT target is Gemini 2.5 Flash Lite. Actual gateway probes
+distinguished synthetic silence/tone from speech, but a quiet synthetic
+interjection was mistranscribed. Whisper instead invented ordinary words on
+both noise samples without usable no-speech evidence. Source, independent
+review, build, new hot adoption approval and physical accuracy/latency
+acceptance stay separate; see [the call decision](HASHI_CALL_INTERACTION_2026-10-04.md).
+
 2026-10-05 Remote idle-CPU repair is PAO-owned Functions plus Windows/WSL
 launcher and instance configuration; protected Core is unchanged. Historical
 receipt discovery is cached, but locked admission stays fresh. Known same-host

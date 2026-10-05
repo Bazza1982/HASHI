@@ -78,6 +78,10 @@ def validate_target(target):
         or target.get("adapter") != "openai_compatible"
     ):
         raise CallError("call_adapter_unsupported", 503)
+    if target.get("stt_protocol", "audio_transcriptions") not in ("audio_transcriptions", "audio_chat") or (
+        "stt_protocol" in target and target["kind"] != "stt"
+    ):
+        raise CallError("call_adapter_unsupported", 503)
     parsed = urlsplit(str(target.get("base_url", "")))
     if (
         parsed.username

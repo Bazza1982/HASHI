@@ -84,13 +84,18 @@ class Adapters:
         self.wait = None
         self.stt_receipt = None
         self.tts_receipt = None
+        self.text = "Please check the task."
+        self.stt_segments = None
+        self.has_speech = None
 
     async def transcribe(self, *args):
         self.stt += 1
         if self.wait:
             await self.wait.wait()
         return {
-            "text": "Please check the task.",
+            "text": self.text,
+            "segments": self.stt_segments,
+            "has_speech": self.has_speech,
             "provider_receipt": self.stt_receipt,
         }
 
@@ -205,6 +210,167 @@ async def test_turn_enters_agent_once_and_duplicate_upload_is_idempotent(tmp_pat
         await service.invoke("owner", {**body, "turn_id": "different"})
     assert "audio_b64" not in json.dumps(final)
     await service.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("annotation", [
+    "*Loud sound*", " [noise] ", "*Music*", "**Loud sound**", "*Coughing* *Loud sound*",
+    "*Loud sound*.", "[noise], [music].", "*Loud sound.*",
+])
+async def test_non_speech_annotation_skips_agent_and_speech_then_accepts_next_turn(
+    tmp_path, annotation
+):
+    service, ports, adapters, base, _ = setup(tmp_path)
+    binding, _, _ = await start(service, base)
+    body = {
+        **binding,
+        "operation": "turn",
+        "turn_id": "noise-1",
+        "sequence": 1,
+        "audio_b64": wav(),
+    }
+    adapters.text = annotation
+    try:
+        await service.invoke("owner", body)
+        await service.invoke("owner", body)
+        await finish_task(service)
+        final = await service.invoke("owner", {**binding, "operation": "snapshot"})
+        assert final["phase"] == "active"
+        assert final["turn"]["phase"] == "ignored"
+        assert final["turn"]["ignore_reason"] == "non_speech_annotation"
+        assert final["rows"] == []
+        assert "text" not in final["turn"] and "run_id" not in final["turn"]
+        assert not ports.accepted and adapters.tts == 0
+        duplicate = await service.invoke("owner", body)
+        assert duplicate["turn"]["phase"] == "ignored" and adapters.stt == 1
+        with pytest.raises(CallError, match="idempotency_conflict"):
+            await service.invoke("owner", {**body, "turn_id": "different"})
+        with pytest.raises(CallError, match="speech_not_ready"):
+            await service.invoke(
+                "owner", {**binding, "operation": "speech", "turn_id": "noise-1", "segment": 0}
+            )
+
+        adapters.text = "停"
+        await service.invoke("owner", {**body, "turn_id": "speech-2", "sequence": 2})
+        await finish_task(service)
+        await service.calls["call-1"].speech_task
+        final = await service.invoke("owner", {**binding, "operation": "snapshot"})
+        assert final["turn"]["phase"] == "complete"
+        assert [row["speaker"] for row in final["rows"]] == ["user", "assistant"]
+        assert ports.accepted == [("speech-2", "停", "", None)]
+        assert adapters.stt == 2 and adapters.tts == 1
+    finally:
+        await service.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "spoken_text, expected",
+    [("Loud sound", "Loud sound"), ("嗯", "嗯"), ("停", "停"),
+     ("*Loud sound* 我说24", "我说24"), ("[noise] please stop", "please stop"),
+     ("*please stop*", "*please stop*")],
+)
+async def test_spoken_text_and_mixed_annotations_are_preserved(tmp_path, spoken_text, expected):
+    service, ports, adapters, base, _ = setup(tmp_path)
+    binding, _, _ = await start(service, base)
+    adapters.text = spoken_text
+    try:
+        await service.invoke(
+            "owner",
+            {**binding, "operation": "turn", "turn_id": "turn-1", "sequence": 1, "audio_b64": wav()},
+        )
+        await finish_task(service)
+        await service.calls["call-1"].speech_task
+        final = await service.invoke("owner", {**binding, "operation": "snapshot"})
+        assert final["turn"]["phase"] == "complete"
+        assert final["rows"][0]["text"] == expected
+        assert ports.accepted == [("turn-1", expected, "", None)]
+        assert adapters.tts == 1
+    finally:
+        await service.close()
+
+
+async def test_noise_completion_after_scope_change_remains_a_failure(tmp_path):
+    service, ports, adapters, base, _ = setup(tmp_path)
+    binding, _, _ = await start(service, base)
+    adapters.text = "*Loud sound*"
+    adapters.wait = asyncio.Event()
+    try:
+        await service.invoke(
+            "owner",
+            {**binding, "operation": "turn", "turn_id": "turn-1", "sequence": 1, "audio_b64": wav()},
+        )
+        await asyncio.sleep(0)
+        ports.valid = False
+        adapters.wait.set()
+        await finish_task(service)
+        turn = service.calls["call-1"].turn
+        assert turn["phase"] == "failed" and turn["error"] == "call_scope_changed"
+        assert not ports.accepted and adapters.tts == 0
+    finally:
+        await service.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("text, segments, has_speech", [
+    ("", None, None),
+    ("   ", None, None),
+    ("Thank you for watching.", [{"no_speech_prob": .96, "avg_logprob": -2.0}], None),
+    ("A noise description", None, False),
+])
+async def test_cloud_no_speech_skips_agent_and_tts_without_failing_the_call(tmp_path, text, segments, has_speech):
+    service, ports, adapters, base, _ = setup(tmp_path)
+    binding, _, _ = await start(service, base)
+    adapters.text, adapters.stt_segments = text, segments
+    adapters.has_speech = has_speech
+    try:
+        await service.invoke("owner", {
+            **binding, "operation": "turn", "turn_id": "noise-1",
+            "sequence": 1, "audio_b64": wav(),
+        })
+        await finish_task(service)
+        final = await service.invoke("owner", {**binding, "operation": "snapshot"})
+        assert final["phase"] == "active" and final["turn"]["phase"] == "ignored"
+        assert final["turn"]["ignore_reason"] == "no_speech"
+        assert final["rows"] == [] and "text" not in final["turn"]
+        assert not ports.accepted and adapters.tts == 0
+        adapters.text, adapters.stt_segments = "嗯", None
+        adapters.has_speech = True
+        await service.invoke("owner", {
+            **binding, "operation": "turn", "turn_id": "speech-2",
+            "sequence": 2, "audio_b64": wav(),
+        })
+        await finish_task(service)
+        await service.calls["call-1"].speech_task
+        assert ports.accepted == [("speech-2", "嗯", "", None)]
+    finally:
+        await service.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("segments", [
+    None,
+    [],
+    [{"no_speech_prob": .99}],
+    [{"no_speech_prob": .99, "avg_logprob": -.1}],
+    [{"no_speech_prob": .99, "avg_logprob": -2}, {"no_speech_prob": .1, "avg_logprob": -.1}],
+    [{"no_speech_prob": float("nan"), "avg_logprob": -2}],
+])
+async def test_uncertain_or_mixed_cloud_evidence_retains_a_short_spoken_word(tmp_path, segments):
+    service, ports, adapters, base, _ = setup(tmp_path)
+    binding, _, _ = await start(service, base)
+    adapters.text, adapters.stt_segments = "停", segments
+    try:
+        await service.invoke("owner", {
+            **binding, "operation": "turn", "turn_id": "speech-1",
+            "sequence": 1, "audio_b64": wav(),
+        })
+        await finish_task(service)
+        await service.calls["call-1"].speech_task
+        assert ports.accepted == [("speech-1", "停", "", None)]
+        assert adapters.tts == 1
+    finally:
+        await service.close()
 
 
 async def test_verified_media_providers_follow_the_turn_and_speech_result(tmp_path):
