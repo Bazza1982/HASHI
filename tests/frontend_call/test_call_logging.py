@@ -331,13 +331,12 @@ async def test_real_provider_success_keeps_task_correlation_and_run_polls_are_qu
 async def test_tts_failure_retry_and_cancellation_record_segment_without_repeating_admission(tmp_path, caplog):
     caplog.set_level(logging.INFO, logger=diagnostics.logger.name)
     service, ports, adapters, base, _ = setup(tmp_path)
+    adapters.fail_tts = True
     binding, _, _ = await start(service, base)
     turn = {**binding, "operation": "turn", "turn_id": "turn-1", "sequence": 1, "audio_b64": wav()}
     await service.invoke("owner", turn)
     await finish_task(service)
     speech = {**binding, "operation": "speech", "turn_id": "turn-1", "segment": 0}
-    adapters.fail_tts = True
-    await service.invoke("owner", speech)
     await service.calls["call-1"].speech_task
     failure = events(caplog, "tts_failed")[-1]
     assert failure["error_code"] == "call_provider_rejected" and failure["segment"] == 0
@@ -347,8 +346,6 @@ async def test_tts_failure_retry_and_cancellation_record_segment_without_repeati
     await service.calls["call-1"].speech_task
     assert adapters.tts == 2 and len(ports.accepted) == 1
     assert [row["attempt"] for row in events(caplog, "tts_started")] == [1, 2]
-    await service.invoke("owner", {**turn, "turn_id": "turn-2", "sequence": 2})
-    await finish_task(service)
     began, release = asyncio.Event(), asyncio.Event()
 
     async def synthesize(*_args):
@@ -356,7 +353,8 @@ async def test_tts_failure_retry_and_cancellation_record_segment_without_repeati
         await release.wait()
 
     adapters.synthesize = synthesize
-    await service.invoke("owner", {**speech, "turn_id": "turn-2"})
+    await service.invoke("owner", {**turn, "turn_id": "turn-2", "sequence": 2})
+    await finish_task(service)
     await asyncio.wait_for(began.wait(), 1)
     await service.invoke("owner", {**binding, "operation": "end"})
     await service.calls["call-1"].speech_task
@@ -460,7 +458,7 @@ async def test_http_parse_validation_and_response_failures_are_logged_once(tmp_p
         await runner.cleanup()
 
 
-async def test_receipt_logging_keeps_only_safe_ids_and_adds_no_lookups(monkeypatch, caplog):
+async def test_media_response_logging_keeps_safe_ids_without_provider_lookup(monkeypatch, caplog):
     caplog.set_level(logging.INFO, logger=diagnostics.logger.name)
     app, requests = web.Application(), []
 
@@ -478,15 +476,14 @@ async def test_receipt_logging_keeps_only_safe_ids_and_adds_no_lookups(monkeypat
     try:
         monkeypatch.setattr("orchestrator.frontend_call.adapters.OPENROUTER_API_BASE", url + "/v1")
         result = await MediaAdapters().transcribe({"base_url": url + "/v1", "model": "PRIVATE_MODEL https://private.example"}, {"options": {}}, base64.b64decode(wav()))
-        assert result["provider_receipt"]["actual_provider"] == "PRIVATE_PROVIDER_TEXT TOKEN=SECRET https://private.example"
-        assert requests == ["stt", "receipt"]
-        recorded = events(caplog, "provider_receipt")[-1]
-        assert recorded["provider_generation_id"] == "gen-stt-3" and recorded["verification"] == "verified"
-        assert recorded["lookup_count"] == 1 and recorded["http_status"] == 200
+        assert result["provider_receipt"] is None
+        assert requests == ["stt"]
+        assert not events(caplog, "provider_receipt")
         completed = events(caplog, "provider_request_completed")[-1]
+        assert completed["provider_generation_id"] == "gen-stt-3"
+        assert completed["http_status"] == 200
         assert "provider_request_id" not in completed
         assert "actual_provider" not in completed and "requested_model" not in completed
-        assert recorded["gateway"] == "OpenRouter"
         for private in ("PRIVATE_TRANSCRIPT", "PRIVATE_REQUEST", "PRIVATE_PROVIDER_TEXT", "PRIVATE_MODEL"):
             assert private not in caplog.text
     finally:

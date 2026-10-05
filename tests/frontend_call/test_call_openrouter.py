@@ -126,7 +126,7 @@ def test_whisper_transcription_uses_openrouter_multipart_and_secret_reference():
     )
     result = asyncio.run(adapter.transcribe(_target("stt", "openai/whisper-large-v3"), {"options": {}}, b"RIFFtest"))
     assert result["text"] == "你好"
-    assert result["provider_receipt"]["verification"] == "unverified"
+    assert result["provider_receipt"] is None
     url, request = calls[0]
     assert url.endswith("/audio/transcriptions")
     assert request["headers"]["Authorization"] == "Bearer test-key"

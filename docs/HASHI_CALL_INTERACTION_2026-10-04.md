@@ -155,3 +155,36 @@ also survive the durable default-content-off writer. The qualified corrected
 generation runs on all five Workers, service health is ready, and Core PID,
 runtime and protected source are unchanged. Actual camera continuity,
 recognition accuracy and conversation latency remain open user acceptance.
+
+## 2026-10-05 approved call latency repair
+
+The user approved eliminating unnecessary waits, preserving the selected
+Agent's model, reasoning setting, PCM, tools and execution path. Frontend
+Connector owns the repair in Functions; Core and the separate Phone route
+remain unchanged. Scope stays on the isolated HASHI2 call experiment.
+
+Media adapters now return the original STT/TTS/vision response immediately.
+The OpenRouter generation GET, retries and provider-name verification are
+removed entirely, including any background lookup. Existing response IDs and
+bounded timing diagnostics remain available directly from that response.
+The optional provider receipt stays null; no serving-provider claim is made.
+
+PAO's frozen, server-built call context suppresses Telegram ephemeral progress
+for call Runs. Placeholder, typing, thinking and verbose display tasks are not
+created, so their network setup and cleanup cannot delay the call. Original
+caller hints and normal Session API/text requests do not suppress progress.
+Local activity and canonical evidence remain available for both CLI and HER;
+the user's existing final mirror preference remains separately owned.
+
+When CallService observes a successfully completed Run and has speech-ready
+text, it immediately schedules the first TTS segment without waiting for a
+client speech request. Polling joins that same task or returns its cache;
+later segments retain bounded sequential admission. Synthesis rechecks scope
+and privacy, captures its exact originating turn, and cannot publish after
+hangup, a new turn or a scope change. TTS failure leaves the completed text
+answer available; only an explicit bounded speech retry repeats synthesis,
+and it never resubmits the Agent Run.
+
+Focused before/after proof, independent review, qualified Function adoption
+and device latency acceptance are recorded separately on the owning call
+task. This source decision alone is not evidence of live speed improvement.

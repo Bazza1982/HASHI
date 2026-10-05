@@ -521,11 +521,7 @@ class CallService:
             elif index != call.speech_index + 1:
                 raise CallError("call_speech_order_invalid", 409)
             self._privacy(call, "tts")
-            call.speech_index = index
-            call.speech_attempts[index] = call.speech_attempts.get(index, 0) + 1
-            call.speech_task = asyncio.create_task(
-                self._speak(call, index, parts[index])
-            )
+            self._start_speech(call, index, parts[index])
             return {"ok": True, "ready": False}
         raise CallError("call_invalid_operation")
 
@@ -641,6 +637,10 @@ class CallService:
                     emit("turn_completed", **self._facts(call, turn), run_state=run["state"],
                          duration_ms=elapsed_ms(self.clock, start), speech_segments=len(turn["speech_segments"]),
                          speech_truncated=turn["speech_truncated"], text_chars=len(answer))
+                    # Start the first segment while the client is discovering
+                    # the final answer. Speech polling joins this same task.
+                    if turn["speech_segments"]:
+                        self._start_speech(call, 0, turn["speech_segments"][0])
                     return
                 if self.clock() - start > 600:
                     raise CallError("call_agent_timeout_continues_in_chat", 504)
@@ -662,10 +662,20 @@ class CallService:
             audio = b""
             image = None
 
-    async def _speak(self, call, index, text):
-        turn = call.turn
+    def _start_speech(self, call, index, text):
+        call.speech_index = index
+        call.speech_attempts[index] = call.speech_attempts.get(index, 0) + 1
+        call.speech_task = asyncio.create_task(
+            self._speak(call, call.turn, index, text)
+        )
+
+    async def _speak(self, call, turn, index, text):
         started = self.clock()
         try:
+            if call.phase != "active" or call.turn is not turn:
+                return
+            self.ports.validate(call.owner, call.binding)
+            self._privacy(call, "tts")
             emit("tts_started", **self._facts(call, turn), stage="tts", segment=index,
                  attempt=call.speech_attempts.get(index), text_chars=len(text))
             with diagnostic_context(**self._facts(call, turn), stage="tts", segment=index):
@@ -675,6 +685,7 @@ class CallService:
             emit("tts_completed", **self._facts(call, turn), stage="tts", segment=index,
                  duration_ms=elapsed_ms(self.clock, started), **receipt_facts(result.get("provider_receipt")))
             if call.phase == "active" and call.turn is turn:
+                self.ports.validate(call.owner, call.binding)
                 if result.get("provider_receipt"):
                     turn.setdefault("provider_receipts", {}).setdefault("tts", {})[
                         str(index)
@@ -693,7 +704,7 @@ class CallService:
         except Exception as exc:
             emit("tts_failed", **self._facts(call, turn), stage="tts", segment=index,
                  duration_ms=elapsed_ms(self.clock, started), **error_facts(exc, "call_speech_failed"))
-            if call.turn is turn:
+            if call.phase == "active" and call.turn is turn:
                 call.speech_errors[index] = (
                     exc.code if isinstance(exc, CallError) else "call_speech_failed"
                 )

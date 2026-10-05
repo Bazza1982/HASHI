@@ -99,8 +99,9 @@ async def test_provider_errors_do_not_disclose_body_or_key(monkeypatch):
         await runner.cleanup()
 
 
-async def test_openrouter_receipts_report_actual_stt_and_tts_providers(monkeypatch):
+async def test_openrouter_media_returns_without_secondary_provider_queries(monkeypatch):
     app = web.Application()
+    lookups = []
 
     async def stt(request):
         assert request.headers["Authorization"] == "Bearer test-secret"
@@ -132,6 +133,7 @@ async def test_openrouter_receipts_report_actual_stt_and_tts_providers(monkeypat
 
     async def generation(request):
         generation_id = request.query["id"]
+        lookups.append(generation_id)
         provider = {"gen-stt-1": "Groq", "gen-tts-1": "Google AI Studio"}[
             generation_id
         ]
@@ -163,8 +165,7 @@ async def test_openrouter_receipts_report_actual_stt_and_tts_providers(monkeypat
             base64.b64decode(wav()),
         )
         assert transcript["text"] == "你好，测试成功。"
-        assert transcript["provider_receipt"]["actual_provider"] == "Groq"
-        assert transcript["provider_receipt"]["verification"] == "verified"
+        assert transcript["provider_receipt"] is None
         speech = await adapters.synthesize(
             {
                 **base,
@@ -174,65 +175,10 @@ async def test_openrouter_receipts_report_actual_stt_and_tts_providers(monkeypat
             {"voice_id": "Sulafat", "options": {"style": "warm and clear"}},
             transcript["text"],
         )
-        assert speech["provider_receipt"]["actual_provider"] == "Google AI Studio"
-        assert speech["provider_receipt"]["verification"] == "verified"
+        assert speech["provider_receipt"] is None
         assert speech["media_type"] == "audio/wav"
         assert base64.b64decode(speech["content_b64"]).startswith(b"RIFF")
-    finally:
-        await runner.cleanup()
-
-
-async def test_openrouter_receipt_remains_unverified_without_generation_id(monkeypatch):
-    app = web.Application()
-    app.router.add_post(
-        "/v1/audio/transcriptions",
-        lambda _request: web.json_response({"text": "Recognized speech."}),
-    )
-    runner, url = await serve(app)
-    try:
-        monkeypatch.setattr(
-            "orchestrator.frontend_call.adapters.OPENROUTER_API_BASE",
-            url + "/v1",
-        )
-        result = await MediaAdapters().transcribe(
-            {"base_url": url + "/v1", "model": "openai/whisper-large-v3"},
-            {"options": {}},
-            base64.b64decode(wav()),
-        )
-        assert result["provider_receipt"]["actual_provider"] is None
-        assert result["provider_receipt"]["verification"] == "unverified"
-    finally:
-        await runner.cleanup()
-
-
-async def test_openrouter_speech_receipt_404_is_unverified_without_retry(monkeypatch):
-    app = web.Application()
-    lookups = []
-
-    async def transcription(_request):
-        return web.json_response(
-            {"text": "Recognized speech."},
-            headers={"X-Generation-Id": "gen-stt-404"},
-        )
-
-    async def generation(request):
-        lookups.append(request.query["id"])
-        return web.Response(status=404)
-
-    app.router.add_post("/v1/audio/transcriptions", transcription)
-    app.router.add_get("/v1/generation", generation)
-    runner, url = await serve(app)
-    try:
-        monkeypatch.setattr(
-            "orchestrator.frontend_call.adapters.OPENROUTER_API_BASE", url + "/v1"
-        )
-        result = await MediaAdapters().transcribe(
-            {"base_url": url + "/v1", "model": "openai/whisper-large-v3"},
-            {"options": {}},
-            base64.b64decode(wav()),
-        )
-        assert result["provider_receipt"]["verification"] == "unverified"
-        assert lookups == ["gen-stt-404"]
+        assert lookups == []
     finally:
         await runner.cleanup()
 

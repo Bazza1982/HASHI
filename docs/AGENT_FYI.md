@@ -1,5 +1,15 @@
 # HASHI Agent FYI
 
+2026-10-05 call latency repair is user-approved for the isolated HASHI2
+experiment. Frontend Connector Functions remove all secondary provider
+metadata lookups, bypass Telegram ephemeral progress for PAO's trusted call
+Runs, and start first-segment synthesis when final text is ready. Client
+polling reuses the task/cache; synthesis failures preserve text and explicit
+retries never repeat Agent work. Scope/privacy and stale-turn delivery fences
+remain. Model, reasoning, PCM, tools, Core and Phone are unchanged. Source
+qualification, independent review, adoption and device speed acceptance remain
+distinct; see [the call decision](HASHI_CALL_INTERACTION_2026-10-04.md).
+
 2026-10-05 scoped call-logging adoption exposed a shared-process persistence
 gap. Call diagnostics now inherit the existing bridge file sink instead of
 filtered console output. The real file regression failed before the fix and

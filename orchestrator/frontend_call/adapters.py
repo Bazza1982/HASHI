@@ -12,16 +12,12 @@ import asyncio
 import io
 import json
 import os
-import re
 import wave
 import time
 import aiohttp
 from .config import OPENROUTER_API_BASE, OPENROUTER_GEMINI_TTS_MODELS
 from .contract import CallError, MAX_OUTPUT
 from .diagnostics import diagnostic_context, elapsed_ms, emit, error_facts, receipt_facts
-
-
-_GENERATION_ID = re.compile(r"gen-[A-Za-z0-9-]{1,120}\Z")
 
 
 class MediaAdapters:
@@ -32,8 +28,8 @@ class MediaAdapters:
     async def _request(
         self, target, path, *, data=None, json_body=None, maximum=MAX_OUTPUT
     ):
-        # Follow the service task's correlation without changing requests or
-        # receipt lookups. Only bounded status/receipt metadata reaches logs.
+        # Follow the service task's correlation using only the media response.
+        # No secondary provider lookup delays delivery of a finished result.
         # A shared provider endpoint may implement more than one modality.
         # Configured kind wins; methods supply context for standalone targets.
         facts_context = {"requested_model": target.get("model"), "target_location": target.get("location")}
@@ -106,75 +102,13 @@ class MediaAdapters:
                     mime = response.headers.get(
                         "Content-Type", ""
                     ).split(";")[0]
-                    generation_id = response.headers.get("X-Generation-Id", "")
                     diagnostic["response_duration_ms"] = elapsed_ms(time.monotonic, started)
-                receipt = await self._openrouter_receipt(
-                    session, target, headers, generation_id
-                )
-                return payload, mime, receipt
+                return payload, mime, None
         except CallError:
             raise
         except (aiohttp.ClientError, TimeoutError, OSError) as exc:
             # Never disclose provider messages, URLs, headers, or credentials.
             raise CallError("call_provider_unavailable", 502) from exc
-
-    async def _openrouter_receipt(self, session, target, headers, generation_id):
-        if target["base_url"].rstrip("/") != OPENROUTER_API_BASE:
-            return None
-        started, lookups, lookup_status = time.monotonic(), 0, None
-        valid_id = generation_id if _GENERATION_ID.fullmatch(generation_id) else None
-        receipt = {
-            "gateway": "OpenRouter",
-            "requested_model": target["model"],
-            "generation_id": valid_id,
-            "actual_provider": None,
-            "verification": "unverified",
-        }
-        if valid_id:
-            for delay in (0, 0.25, 0.5):
-                if delay:
-                    await asyncio.sleep(delay)
-                try:
-                    lookups += 1
-                    async with session.get(
-                        OPENROUTER_API_BASE + "/generation",
-                        params={"id": valid_id},
-                        headers=headers,
-                        allow_redirects=False,
-                        timeout=aiohttp.ClientTimeout(total=4),
-                    ) as response:
-                        lookup_status = response.status
-                        if response.status == 404:
-                            break
-                        if response.status != 200:
-                            continue
-                        parts = []
-                        total = 0
-                        async for part in response.content.iter_chunked(4096):
-                            total += len(part)
-                            if total > 8192:
-                                break
-                            parts.append(part)
-                        if total > 8192:
-                            continue
-                        raw = b"".join(parts)
-                        record = json.loads(raw).get("data")
-                        if not isinstance(record, dict) or record.get("id") != valid_id:
-                            continue
-                        provider = record.get("provider_name")
-                        if (
-                            isinstance(provider, str)
-                            and 1 <= len(provider) <= 100
-                            and provider.isprintable()
-                        ):
-                            receipt["actual_provider"] = provider
-                            receipt["verification"] = "verified"
-                            break
-                except (aiohttp.ClientError, TimeoutError, OSError, ValueError, TypeError):
-                    continue
-        emit("provider_receipt", **receipt_facts(receipt), lookup_count=lookups,
-             http_status=lookup_status, duration_ms=elapsed_ms(time.monotonic, started))
-        return receipt
 
     @staticmethod
     def _json(data):

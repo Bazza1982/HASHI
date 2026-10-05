@@ -300,6 +300,7 @@ async def test_cloud_requires_qualified_privacy_at_each_stage(tmp_path):
 
 async def test_speech_retry_never_repeats_agent_run(tmp_path):
     service, ports, adapters, base, _ = setup(tmp_path)
+    adapters.fail_tts = True
     binding, _, _ = await start(service, base)
     await service.invoke(
         "owner",
@@ -313,8 +314,7 @@ async def test_speech_retry_never_repeats_agent_run(tmp_path):
     )
     await finish_task(service)
     speech = {**binding, "operation": "speech", "turn_id": "turn-1", "segment": 0}
-    adapters.fail_tts = True
-    assert not (await service.invoke("owner", speech))["ready"]
+    assert service.calls["call-1"].speech_task is not None
     await service.calls["call-1"].speech_task
     with pytest.raises(CallError):
         await service.invoke("owner", speech)
@@ -325,6 +325,115 @@ async def test_speech_retry_never_repeats_agent_run(tmp_path):
     assert (await service.invoke("owner", speech))["ready"]
     assert adapters.tts == 2 and len(ports.accepted) == 1
     await service.close()
+
+
+async def test_answer_starts_speech_before_client_poll_and_reuses_it(tmp_path):
+    service, ports, adapters, base, _ = setup(tmp_path)
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def synthesize(*args):
+        adapters.tts += 1
+        started.set()
+        await release.wait()
+        return {"media_type": "audio/wav", "content_b64": wav()}
+
+    adapters.synthesize = synthesize
+    binding, _, _ = await start(service, base)
+    try:
+        await service.invoke("owner", {**binding, "operation": "turn",
+            "turn_id": "turn-1", "sequence": 1, "audio_b64": wav()})
+        await finish_task(service)
+        call = service.calls["call-1"]
+        assert call.speech_task is not None
+        await asyncio.wait_for(started.wait(), 1)
+        assert call.turn["phase"] == "complete"
+        speech = {**binding, "operation": "speech", "turn_id": "turn-1", "segment": 0}
+        assert not (await service.invoke("owner", speech))["ready"]
+        assert not (await service.invoke("owner", speech))["ready"]
+        release.set()
+        await call.speech_task
+        assert (await service.invoke("owner", speech))["ready"]
+        assert (await service.invoke("owner", speech))["ready"]
+        assert adapters.tts == 1 and len(ports.accepted) == 1
+    finally:
+        release.set()
+        await service.close()
+
+
+async def test_automatic_speech_never_publishes_after_call_changes(tmp_path):
+    for change in ("end", "turn", "scope"):
+        case_path = tmp_path / change
+        case_path.mkdir()
+        await _automatic_speech_after_change(case_path, change)
+
+
+async def _automatic_speech_after_change(tmp_path, change):
+    service, ports, adapters, base, _ = setup(tmp_path)
+    started, cancelled, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def synthesize(*args):
+        started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            # A provider may already have completed when cancellation arrives.
+            cancelled.set()
+            await release.wait()
+        return {"media_type": "audio/wav", "content_b64": wav()}
+
+    adapters.synthesize = synthesize
+    binding, _, _ = await start(service, base)
+    try:
+        turn = {**binding, "operation": "turn", "turn_id": "turn-1",
+                "sequence": 1, "audio_b64": wav()}
+        await service.invoke("owner", turn)
+        await finish_task(service)
+        call = service.calls["call-1"]
+        assert call.speech_task is not None
+        await asyncio.wait_for(started.wait(), 1)
+        old_speech = call.speech_task
+        if change == "end":
+            await service.invoke("owner", {**binding, "operation": "end"})
+        elif change == "turn":
+            adapters.wait = asyncio.Event()
+            await service.invoke("owner", {**turn, "turn_id": "turn-2", "sequence": 2})
+        else:
+            ports.valid = False
+        if change != "scope":
+            await asyncio.wait_for(cancelled.wait(), 1)
+        release.set()
+        await old_speech
+        assert not call.speech_cache
+        if change == "turn":
+            assert call.turn["turn_id"] == "turn-2" and not call.speech_errors
+    finally:
+        release.set()
+        await service.close()
+
+
+async def test_automatic_speech_checks_privacy_without_failing_text_answer(tmp_path):
+    service, ports, adapters, base, _ = setup(tmp_path, "cloud")
+    binding, _, _ = await start(service, base, True)
+    original_result = ports.result
+
+    def result(*args):
+        answer = original_result(*args)
+        ports.level = 2
+        return answer
+
+    ports.result = result
+    try:
+        await service.invoke("owner", {**binding, "operation": "turn",
+            "turn_id": "turn-1", "sequence": 1, "audio_b64": wav()})
+        await finish_task(service)
+        call = service.calls["call-1"]
+        assert call.speech_task is not None
+        await call.speech_task
+        assert call.turn["phase"] == "complete" and call.turn["answer"]
+        assert adapters.tts == 0 and not call.speech_cache
+        assert "privacy" in call.speech_errors[0]
+    finally:
+        await service.close()
 
 
 async def test_phone_busy_and_end_lease_are_separate_from_agent_lifecycle(tmp_path):

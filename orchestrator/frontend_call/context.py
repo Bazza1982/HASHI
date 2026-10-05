@@ -14,6 +14,31 @@ class CallMessageContextSection(tuple):
     __slots__ = ()
 
 
+def is_call_request(item):
+    """Derive presentation from PAO's frozen snapshot, never caller hints."""
+    from orchestrator.message_context import (
+        MESSAGE_CONTEXT_METADATA_KEY, MESSAGE_CONTEXT_TYPE, MESSAGE_CONTEXT_VERSION,
+    )
+
+    metadata = getattr(item, "request_metadata", None)
+    if not isinstance(metadata, Mapping):
+        return False
+    snapshot = metadata.get(MESSAGE_CONTEXT_METADATA_KEY)
+    if not isinstance(snapshot, Mapping):
+        return False
+    call = snapshot.get("call")
+    return (
+        snapshot.get("type") == MESSAGE_CONTEXT_TYPE
+        and snapshot.get("version") == MESSAGE_CONTEXT_VERSION
+        and snapshot.get("ingress_transport") == "session-api"
+        and isinstance(call, Mapping)
+        and call.get("type") == "hashi.call-context"
+        and call.get("version") == 1
+        and call.get("scope") == "current_input_only"
+        and call.get("mode") in ("voice", "video")
+    )
+
+
 def project_call_context(value):
     if not isinstance(value, Mapping) or value.get("version") != 2:
         return None
