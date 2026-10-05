@@ -131,3 +131,75 @@ def test_whisper_transcription_uses_openrouter_multipart_and_secret_reference():
     assert url.endswith("/audio/transcriptions")
     assert request["headers"]["Authorization"] == "Bearer test-key"
     assert request["data"]._fields[1][2] == "openai/whisper-large-v3"
+    fields = {field[0]["name"]: field[2] for field in request["data"]._fields}
+    assert fields["response_format"] == "verbose_json"
+    assert "language" not in fields
+
+
+@pytest.mark.parametrize("payload", [
+    {"text": ""},
+    {"text": "谢谢", "segments": [{"no_speech_prob": .97, "avg_logprob": -2.1}]},
+])
+def test_stt_preserves_empty_cloud_result_and_speech_evidence(payload):
+    adapter = MediaAdapters(
+        session_factory=lambda **_kw: _Session([], json.dumps(payload).encode(), "application/json"),
+    )
+    target = {**_target("stt", "openai/whisper-large-v3"), "credential_ref": None}
+    result = asyncio.run(adapter.transcribe(target, {"options": {}}, b"RIFFtest"))
+    assert result["text"] == payload["text"]
+    assert result.get("segments") == payload.get("segments")
+
+
+@pytest.mark.parametrize("payload", [{}, {"text": None}, {"text": []}, {"text": "x" * 12001}])
+def test_stt_malformed_cloud_result_remains_a_service_error(payload):
+    adapter = MediaAdapters(
+        session_factory=lambda **_kw: _Session([], json.dumps(payload).encode(), "application/json"),
+    )
+    target = {**_target("stt", "openai/whisper-large-v3"), "credential_ref": None}
+    with pytest.raises(CallError, match="call_transcription_empty_or_invalid"):
+        asyncio.run(adapter.transcribe(target, {"options": {}}, b"RIFFtest"))
+
+
+@pytest.mark.parametrize("verdict", [
+    {"has_speech": False, "text": ""},
+    {"has_speech": True, "text": "现在我说7"},
+])
+def test_audio_chat_transcribes_and_judges_speech_in_one_request(verdict):
+    calls = []
+    response = {"choices": [{"message": {"content": json.dumps(verdict)}}]}
+    adapter = MediaAdapters(session_factory=lambda **_kw: _Session(calls, json.dumps(response).encode(), "application/json"))
+    target = {**_target("stt", "google/gemini-2.5-flash-lite"),
+              "credential_ref": None, "stt_protocol": "audio_chat"}
+    target = validate_target(target)
+    result = asyncio.run(adapter.transcribe(target, {"options": {}}, b"RIFFtest"))
+    assert result["text"] == verdict["text"] and result["has_speech"] is verdict["has_speech"]
+    assert len(calls) == 1 and calls[0][0].endswith("/chat/completions")
+    body = calls[0][1]["json"]
+    audio = body["messages"][1]["content"][0]["input_audio"]
+    assert audio == {"data": base64.b64encode(b"RIFFtest").decode(), "format": "wav"}
+    schema = body["response_format"]["json_schema"]["schema"]
+    assert schema["properties"]["has_speech"]["type"] == "boolean"
+    assert set(schema["required"]) == {"has_speech", "text"}
+    assert "language" not in body and "tools" not in body
+
+
+@pytest.mark.parametrize("verdict", [
+    {"text": "hello"}, {"has_speech": "false", "text": ""},
+    {"has_speech": True, "text": None}, {"has_speech": True, "text": "x" * 12001},
+    {"has_speech": True, "text": ""}, {"has_speech": True, "text": "  \n "},
+    {"has_speech": False, "text": "hello"},
+])
+def test_audio_chat_missing_or_invalid_speech_judgment_is_a_service_error(verdict):
+    response = {"choices": [{"message": {"content": json.dumps(verdict)}}]}
+    adapter = MediaAdapters(session_factory=lambda **_kw: _Session([], json.dumps(response).encode(), "application/json"))
+    target = {**_target("stt", "google/gemini-2.5-flash-lite"),
+              "credential_ref": None, "stt_protocol": "audio_chat"}
+    with pytest.raises(CallError, match="call_transcription_empty_or_invalid"):
+        asyncio.run(adapter.transcribe(target, {"options": {}}, b"RIFFtest"))
+
+
+def test_speech_protocol_is_instance_owned_and_not_available_to_other_modalities():
+    with pytest.raises(CallError, match="call_adapter_unsupported"):
+        validate_target({**_target("stt", "other/model"), "stt_protocol": "unconfigured"})
+    with pytest.raises(CallError, match="call_adapter_unsupported"):
+        validate_target({**_target("tts", "google/gemini-3.8-flash-lite-tts"), "stt_protocol": "audio_chat"})

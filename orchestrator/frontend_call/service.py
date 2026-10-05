@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from uuid import uuid4
 from .diagnostics import body_facts, diagnostic_context, elapsed_ms, emit, error_facts, receipt_facts
+from .transcription import spoken_transcription
 from .contract import (
     CallError,
     PROTOCOL,
@@ -165,6 +166,7 @@ class CallService:
                 "latency_ms",
                 "run_state",
                 "provider_receipts",
+                "ignore_reason",
             }
         }
         return {
@@ -543,7 +545,7 @@ class CallService:
                 transcription = await self.adapters.transcribe(
                     call.targets["stt"], call.profile["stt"], audio
                 )
-            text = transcription["text"]
+            text, ignore_reason = spoken_transcription(transcription)
             emit("stt_completed", **self._facts(call, turn), stage=stage,
                  duration_ms=elapsed_ms(self.clock, stage_started), text_chars=len(text),
                  **receipt_facts(transcription.get("provider_receipt")))
@@ -552,6 +554,18 @@ class CallService:
                     "provider_receipt"
                 ]
             audio = b""
+            if ignore_reason:
+                self.expire()
+                if call.phase != "active":
+                    emit("turn_detached", **self._facts(call, turn), stage=stage,
+                         reason="call_ended", duration_ms=elapsed_ms(self.clock, start))
+                    return
+                self.ports.validate(call.owner, call.binding)
+                turn.update(phase="ignored", ignore_reason=ignore_reason)
+                emit("turn_ignored", **self._facts(call, turn), stage=stage,
+                     turn_phase="ignored", reason=ignore_reason,
+                     duration_ms=elapsed_ms(self.clock, start))
+                return
             turn["text"] = text
             observation = ""
             if image:
