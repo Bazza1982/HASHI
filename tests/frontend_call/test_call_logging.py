@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 from aiohttp import ClientSession, web
 
+from orchestrator.frontend_call import diagnostics
 from orchestrator.frontend_call.adapters import MediaAdapters
 from orchestrator.frontend_call.contract import CallError, MAX_BODY, MAX_CALL_SECONDS
 from orchestrator.frontend_call.routes import register_call_api
@@ -26,8 +27,42 @@ def events(caplog, event=None):
     return [row for row in rows if event is None or row["event"] == event]
 
 
+async def test_shared_call_diagnostics_reach_existing_durable_bridge_journal(tmp_path):
+    from orchestrator.bootstrap_logging import setup_bridge_file_logging
+
+    bridge = logging.getLogger("BridgeU.Bridge")
+    old_handlers, old_level, old_propagate = bridge.handlers[:], bridge.level, bridge.propagate
+    old_call_level = diagnostics.logger.level
+    handler = None
+    try:
+        handler = setup_bridge_file_logging(SimpleNamespace(base_logs_dir=tmp_path), bridge)
+        diagnostics.logger.setLevel(logging.INFO)
+        service, _, _, base, _ = setup(tmp_path)
+        binding, _, _ = await start(service, base)
+        await service.invoke("owner", {**binding, "operation": "camera", "enabled": False})
+        await service.invoke("owner", {**binding, "operation": "end"})
+        await service.close()
+        handler.flush()
+        lines = (tmp_path / "bridge.log").read_text().splitlines()
+        records = [json.loads(line.split("call diagnostic ", 1)[1])
+                   for line in lines if "call diagnostic " in line]
+        started = [row for row in records if row["event"] == "call_started"]
+        ended = [row for row in records if row["event"] == "call_ended"]
+        assert len(started) == len(ended) == 1
+        assert started[0]["call_id"] == ended[0]["call_id"] == "call-1"
+        assert ended[0]["reason"] == "explicit_end"
+        assert started[0]["generation"] == ended[0]["generation"] == binding["generation"]
+    finally:
+        if handler is not None:
+            handler.close()
+        bridge.handlers[:] = old_handlers
+        bridge.setLevel(old_level)
+        bridge.propagate = old_propagate
+        diagnostics.logger.setLevel(old_call_level)
+
+
 async def test_call_termination_reports_real_reason_without_repeated_poll_logs(tmp_path, caplog):
-    caplog.set_level(logging.INFO, logger="orchestrator.frontend_call")
+    caplog.set_level(logging.INFO, logger=diagnostics.logger.name)
     for end_kind in ("explicit_end", "lease_expired", "max_duration", "service_shutdown"):
         scenario = tmp_path / end_kind
         scenario.mkdir()
@@ -62,7 +97,7 @@ async def test_call_termination_reports_real_reason_without_repeated_poll_logs(t
 
 
 async def test_camera_switch_cancels_observation_with_epoch_and_keeps_call_active(tmp_path, caplog):
-    caplog.set_level(logging.INFO, logger="orchestrator.frontend_call")
+    caplog.set_level(logging.INFO, logger=diagnostics.logger.name)
     service, _, adapters, base, _ = setup(tmp_path)
     info = service.config.context("owner", "agent-a")
     info["profile"]["vision"] = {"target_id": "eyes", "options": {}}
@@ -99,7 +134,7 @@ async def test_camera_switch_cancels_observation_with_epoch_and_keeps_call_activ
 
 
 async def test_turn_timing_correlates_pao_and_tts_and_never_logs_speech(tmp_path, caplog):
-    caplog.set_level(logging.INFO, logger="orchestrator.frontend_call")
+    caplog.set_level(logging.INFO, logger=diagnostics.logger.name)
     service, ports, adapters, base, clock = setup(tmp_path)
 
     async def transcribe(*_args):
@@ -137,7 +172,7 @@ async def test_turn_timing_correlates_pao_and_tts_and_never_logs_speech(tmp_path
 
 
 async def test_ending_during_admission_preserves_uncertain_request_and_records_detach(tmp_path, caplog):
-    caplog.set_level(logging.INFO, logger="orchestrator.frontend_call")
+    caplog.set_level(logging.INFO, logger=diagnostics.logger.name)
     service, ports, _, base, _ = setup(tmp_path)
     began, release = asyncio.Event(), asyncio.Event()
     original = ports.admit
@@ -165,7 +200,7 @@ async def test_ending_during_admission_preserves_uncertain_request_and_records_d
 
 
 async def test_background_failure_and_operation_validation_have_safe_correlated_codes(tmp_path, caplog):
-    caplog.set_level(logging.INFO, logger="orchestrator.frontend_call")
+    caplog.set_level(logging.INFO, logger=diagnostics.logger.name)
     service, ports, adapters, base, _ = setup(tmp_path)
     binding, _, _ = await start(service, base)
 
@@ -190,7 +225,7 @@ async def test_background_failure_and_operation_validation_have_safe_correlated_
 
 
 async def test_http_pre_service_failures_record_stage_status_without_unauthenticated_body(tmp_path, caplog):
-    caplog.set_level(logging.INFO, logger="orchestrator.frontend_call")
+    caplog.set_level(logging.INFO, logger=diagnostics.logger.name)
     api = SimpleNamespace(
         app=web.Application(), config_path=tmp_path / "agents.json", admin_token="PRIVATE_TOKEN",
         live_voice_manager=SimpleNamespace(), _is_governed_profile=lambda: False,
@@ -215,7 +250,7 @@ async def test_http_pre_service_failures_record_stage_status_without_unauthentic
 
 
 async def test_provider_rejection_records_real_status_id_and_no_sensitive_payload(caplog):
-    caplog.set_level(logging.INFO, logger="orchestrator.frontend_call")
+    caplog.set_level(logging.INFO, logger=diagnostics.logger.name)
     app = web.Application()
 
     async def reject(_request):
@@ -235,7 +270,7 @@ async def test_provider_rejection_records_real_status_id_and_no_sensitive_payloa
 
 
 async def test_real_provider_success_keeps_task_correlation_and_run_polls_are_quiet(tmp_path, caplog):
-    caplog.set_level(logging.INFO, logger="orchestrator.frontend_call")
+    caplog.set_level(logging.INFO, logger=diagnostics.logger.name)
     app, requests = web.Application(), []
 
     async def stt(_request):
@@ -294,7 +329,7 @@ async def test_real_provider_success_keeps_task_correlation_and_run_polls_are_qu
 
 
 async def test_tts_failure_retry_and_cancellation_record_segment_without_repeating_admission(tmp_path, caplog):
-    caplog.set_level(logging.INFO, logger="orchestrator.frontend_call")
+    caplog.set_level(logging.INFO, logger=diagnostics.logger.name)
     service, ports, adapters, base, _ = setup(tmp_path)
     binding, _, _ = await start(service, base)
     turn = {**binding, "operation": "turn", "turn_id": "turn-1", "sequence": 1, "audio_b64": wav()}
@@ -332,7 +367,7 @@ async def test_tts_failure_retry_and_cancellation_record_segment_without_repeati
 
 
 async def test_vision_failure_and_late_result_are_logged_without_ending_call(tmp_path, caplog):
-    caplog.set_level(logging.INFO, logger="orchestrator.frontend_call")
+    caplog.set_level(logging.INFO, logger=diagnostics.logger.name)
     service, _, adapters, base, clock = setup(tmp_path)
     info = service.config.context("owner", "agent-a")
     info["profile"]["vision"] = {"target_id": "eyes", "options": {}}
@@ -383,7 +418,7 @@ async def test_vision_failure_and_late_result_are_logged_without_ending_call(tmp
 
 
 async def test_http_parse_validation_and_response_failures_are_logged_once(tmp_path, caplog):
-    caplog.set_level(logging.INFO, logger="orchestrator.frontend_call")
+    caplog.set_level(logging.INFO, logger=diagnostics.logger.name)
     api = SimpleNamespace(
         app=web.Application(), config_path=tmp_path / "agents.json", admin_token="test-token",
         live_voice_manager=SimpleNamespace(), _is_governed_profile=lambda: False,
@@ -426,7 +461,7 @@ async def test_http_parse_validation_and_response_failures_are_logged_once(tmp_p
 
 
 async def test_receipt_logging_keeps_only_safe_ids_and_adds_no_lookups(monkeypatch, caplog):
-    caplog.set_level(logging.INFO, logger="orchestrator.frontend_call")
+    caplog.set_level(logging.INFO, logger=diagnostics.logger.name)
     app, requests = web.Application(), []
 
     async def stt(_request):
@@ -459,7 +494,7 @@ async def test_receipt_logging_keeps_only_safe_ids_and_adds_no_lookups(monkeypat
 
 
 async def test_expiry_during_rejected_turn_never_associates_unaccepted_turn_ids(tmp_path, caplog):
-    caplog.set_level(logging.INFO, logger="orchestrator.frontend_call")
+    caplog.set_level(logging.INFO, logger=diagnostics.logger.name)
     service, _, _, base, clock = setup(tmp_path)
     binding, _, _ = await start(service, base)
     clock[0] += 46
@@ -536,7 +571,7 @@ async def test_failed_logging_sink_cannot_interrupt_camera_or_voice_effects(tmp_
 
 
 async def test_shared_provider_endpoint_uses_validated_media_kind_not_path(caplog):
-    caplog.set_level(logging.INFO, logger="orchestrator.frontend_call")
+    caplog.set_level(logging.INFO, logger=diagnostics.logger.name)
     app = web.Application()
     async def complete(_request):
         return web.json_response({"ok": True})

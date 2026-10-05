@@ -130,3 +130,18 @@ Source validation, browser/server adoption and Function adoption are distinct;
 hot replacement still requires current scoped approval. Historical gaps cannot
 be recovered, and physical camera continuity, recognition and speed acceptance
 remain open under the existing call task.
+
+## Shared diagnostic journal follow-up
+
+The scoped operational approval was received on 2026-10-05. Initial hot
+adoption kept the Core identity and qualified all five Workers, but an actual
+ordinary-frontend rejected-camera probe exposed a persistence gap: the call
+logger inherited filtered console output rather than the existing bridge file
+handler. Diagnostics now use a child of the existing bridge logger; no extra
+writer, provider request, media wait, retry or lifecycle policy is introduced.
+
+A real configured bridge-file regression failed before the fix with no call
+start/end records and passed afterwards. The focused `tests/frontend_call`
+component passed 53 cases, including that persistence boundary; the existing
+aiohttp deprecation warning remains. Current-source hot adoption and a fresh
+ordinary-frontend journal probe are tracked separately in ignored receipts.

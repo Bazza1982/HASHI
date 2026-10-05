@@ -1,5 +1,12 @@
 # HASHI Agent FYI
 
+2026-10-05 scoped call-logging adoption exposed a shared-process persistence
+gap. Call diagnostics now inherit the existing bridge file sink instead of
+filtered console output. The real file regression failed before the fix and
+the focused call component passed 53 cases afterwards. Core is unchanged;
+fresh hot adoption and ordinary-frontend persistence evidence remain separate
+from physical camera, recognition and latency acceptance.
+
 2026-10-05 the user required HASHI2 call acceptance through their ordinary
 Workbench. Its normal Windows service now serves the reviewed call client, with
 the new path scoped to HASHI2 and existing connection/user state preserved.

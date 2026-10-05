@@ -15,7 +15,9 @@ from contextvars import ContextVar
 from .contract import CallError, OPERATIONS
 
 
-logger = logging.getLogger("orchestrator.frontend_call")
+# Shared Functions' bridge logger owns the durable file sink. The root logger
+# is filtered console output and is not a diagnostic journal.
+logger = logging.getLogger("BridgeU.Bridge.frontend_call")
 _context = ContextVar("call_diagnostic_context", default={})
 _identifier = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}\Z")
 _generation = re.compile(r"gen-[A-Za-z0-9-]{1,120}\Z")
