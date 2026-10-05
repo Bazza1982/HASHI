@@ -83,6 +83,24 @@ fresh current-call facts reach the same Agent PCM. Source, running adoption,
 independent review and user device acceptance remain separate. See
 [call interaction decision](HASHI_CALL_INTERACTION_2026-10-04.md).
 
+Historical HASHI2 acceptance checkpoint (before subsequent latency work):
+
+2026-10-05 call interaction correction is independently reviewed and running
+in the isolated HASHI2 experiment, with Frontend Connector/PCM/PAO ownership
+and unchanged Core. The original voice/video buttons use the backend-saved
+route; all settings stay in backend command menus. Bounded independent camera
+facts enter sealed current-input PCM for the same Agent and Session, without
+identity or authorization authority. The HERV3 consumer presents only the
+existing trusted current-call guidance directly, with explicit ordinary-input
+revocation. Latest actual-model synthetic voice and video canaries passed,
+including non-silent playback, resumed listening, camera-off, minimize/mobile
+controls and confirmed end. This is a runnable user-test checkpoint. Measured
+preparing-to-speaking waits were 17.413/28.610 seconds, above the proposed
+3/6-second target. Default prose is still imperfect. Physical devices,
+conversation feel, interruption and independent `/phone` physical regression
+remain unaccepted; no main merge or other-instance adoption is implied. See
+[call interaction decision](HASHI_CALL_INTERACTION_2026-10-04.md).
+
 2026-10-04 HASHI2 /call remains on an isolated experiment branch. OpenRouter
 Whisper Large V3 is not a guaranteed Groq route because speech requests ignore
 provider pinning; the user accepts a non-Groq provider. Gemini 3.8 Flash-Lite

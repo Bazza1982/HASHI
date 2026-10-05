@@ -34,11 +34,28 @@ or other instance adoption is part of this experiment.
   minute budget, JPEG validation, deduplication and capture-time freshness apply.
   A newer pending frame does not erase a completed fresh snapshot. Camera
   epoch changes discard delayed results. Frames do not create Agent Runs.
+  Continuous observations ask for one or two brief sentences of current
+  salient facts rather than background inventories, timecodes or lists of
+  absent things. Question-specific inspection keeps the user's question;
+  this does not truncate the Agent's task answer or infer motion from one frame.
 - Speech text stays verbatim in PAO. Sealed current-input media facts enter the
   actual model PCM context with oral-conversation guidance and the effective
   persona/history. User-shared camera data has no instruction, identity or
   authorization authority. Freshness is checked again during PCM assembly;
   immutable admission receipts retain their original snapshot.
+  A narrow in-process marker adds only the application-owned interaction
+  policy to `local_system`; generic tuple metadata cannot promote text. Fixed
+  Sessions explicitly revoke this policy on the next ordinary input. HERV3
+  renders this existing trusted policy directly as current-input instructions,
+  with its `local_system` authority unchanged. Other instructions keep their
+  existing projection; same-key untrusted data and camera facts remain user
+  reference material. The
+  default spoken target is one brief paragraph of one or two short sentences,
+  about 20–60 Chinese characters or 10–30 words including any greeting or
+  follow-up. Answer first, omit analysis announcements and repeated greetings,
+  and name the relevant visual object rather than inventorying secondary
+  details. Essential information and
+  explicitly requested detailed answers retain their complete meaning.
 - Both independent engines share the existing themed presentation shell.
   Desktop voice is about 390×360 and video 390×500; mobile expands to the
   viewport and minimizes above the composer. Three fixed control positions
@@ -57,13 +74,92 @@ retained. Retired tests for frontend configuration writers and source-text
 disclosure checks were removed; backend persistence and rendered behavior are
 the acceptance boundaries.
 
-Focused Python and both engine/frontend browser tests passed. The initial
-curated gate passed 764 cases and rejected three qualification cases because
-the candidate was not yet committed. Qualification must be rerun from the
-committed checkpoint. An independent review, source qualification, running
-Functions adoption, real transport/model canary and physical user acceptance
-are separate gates. This document records implementation intent, not an
-adoption or physical acceptance claim.
+The committed correction passed 767 curated checks. The final disabled-readiness
+fix passed 35 owning checks; the paired Workbench passed 115 owning and direct
+consumer checks and its production build. The model-wire and persisted-Session
+revocation correction passed 66 owning/direct consumer checks and 767 curated
+checks. The final spoken-target refinement passed 77 owning/direct consumer
+checks, with 16 final focused checks. These are scoped results, not a full-suite or
+physical acceptance claim. Existing source qualification and Core guards passed.
+
+Independent review found unknown camera-off/hangup outcomes and the disabled
+route restoration edge. Those were fixed before adoption. A further cross-call
+permission completion defect was demonstrated red, fixed, and independently
+reviewed. Rika also found that omitting the call policy did not revoke it from
+a Fixed Session. The explicit-revocation test failed before the fix and passed
+after a persisted coordinator was recreated. Rika's primary, disabled-context,
+spoken-guidance, model-wire/revocation and spoken-target reviews passed; the
+blocked initial model-wire review and incomplete Claude/Codex CLI reviews remain
+preserved rather than rewritten as approvals.
+
+Real headless integration used synthetic microphone/camera inputs with the
+actual HASHI2 services and Arale model. Voice and video kept the same PAO
+Session and effective persona. Persisted typed PCM contained current-call facts,
+fresh untrusted camera observations and no added private authorization. Actual
+non-silent WebAudio playback, automatic listening, confirmed camera-off/hangup,
+mobile fullscreen, fixed controls and minimized presentation passed. The first
+voice harness had a wrong exact status-label matcher; its failed receipt remains
+preserved alongside observed speaking-to-listening transitions, not rewritten
+as a successful harness run.
+
+The first actual video reply was a 327-character report with 60.2 seconds of
+speech. That passed transport but failed conversational quality. PCM guidance
+now requests one or two short spoken sentences by default, a relevant visual
+summary rather than a report, and no routine processing/snapshot disclaimer.
+Explicit requests for detail and truthful unavailable/stale vision remain valid.
+The before-fix receipt fails the spoken-quality check. A later 43.24-second
+reply still failed despite a confirmed trusted call section in the actual
+Fixed Session; this was a model expression defect, not evidence of a missing
+transport. The ordinary visual-question target is now explicit and contains
+no example or prefilled answer from the synthetic fixture. An intermediate
+real reply improved to 108 characters and 25.24 seconds but still failed the
+unchanged 25-second speech gate. The final target includes greeting/follow-up
+length and removes visual prefaces and secondary inventories. That actual
+generation still produced a 153-character / 34.12-second reply and failed.
+Its failed receipt and confirmed cleanup are preserved. A native provider-wire
+test then failed on escaped/quoted current-call instructions and passed after
+the HERV3 consumer rendered the existing trusted policy directly. It also
+checks the effective persona and the separation of hostile camera text and
+forged same-key data. The native adapter module passed 96 checks; the focused
+consumer/Fixed Session scope passed 31. This establishes input projection,
+not model obedience or conversational feel. Its curated gate passed 766 cases;
+two source-qualification checks initially rejected the uncommitted compiler
+and passed after the coherent source checkpoint was committed. Independent
+consumer review passed and the candidate was adopted with unchanged Core.
+The actual reply remained 155 characters / 35.76 seconds and failed; cleanup
+was confirmed. An offline check using the real DeepSeekAdapter up to its
+stubbed HTTP call retained the complete system policy and separated camera
+data, with no external model call. Continuous background facts are now
+requested briefly at their source; 37 owning checks passed. Rika independently
+reviewed the exact consumer and observation commits. Her observation receipt
+separates 37 media checks and 11 HERV3 consumer-contract checks from the actual
+protected-Core script; all passed. The consumer contract is not a Core guard.
+The observation correction was adopted through the approved HASHI2-only hot
+operation, retaining Core PID 838 and its original source digest. All five
+Workers and shared Functions adopted the qualified observation generation.
+
+The final current-generation synthetic canaries passed against the actual
+services and model. Video produced an 82-character relevant reply with 19.24
+seconds of non-silent playback; voice produced 5.68 seconds of playback. Both
+retained Arale and the same PAO Session. The matched persisted current-input
+receipts confirmed fresh camera facts for video, no camera observation for
+voice, and no added private authorization. Automatic listening, backend
+camera-off confirmation, mobile layout/minimization, fixed controls and
+confirmed hangup passed. The initial context-body capture failure remains
+preserved as a harness failure. A read-only context operation bound to the
+same start request verified the original context/privacy gate; no product
+gate or spoken-duration limit was weakened to obtain a passing receipt.
+
+This is a runnable experimental acceptance checkpoint, not complete call-feel
+acceptance. Preparing-to-speaking took 17.413 seconds for video and 28.610
+seconds for voice; those end-to-end observations include speech recognition,
+Agent generation and speech synthesis. They do not meet the proposed normal
+3-second / slow 6-second response target. The actual video answer still used
+Markdown emphasis and a greeting paragraph and exceeded the soft 20–60-character
+target, despite passing the unchanged no-list / 25-second speech gate. Physical
+devices, sustained conversational presence, interruption and independent
+`/phone` physical regression remain open. All failed model and harness
+receipts are retained; none was relabelled as successful.
 
 ## Delivery gate
 
