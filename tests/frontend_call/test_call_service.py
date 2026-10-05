@@ -505,6 +505,85 @@ async def test_privacy_revocation_discards_inflight_and_cached_speech(tmp_path):
             await service.close()
 
 
+async def test_privacy_revocation_in_later_segment_invalidates_cached_audio(tmp_path):
+    service, ports, adapters, base, _ = setup(tmp_path, "cloud")
+    started, release = asyncio.Event(), asyncio.Event()
+    original_result = ports.result
+
+    def result(*args):
+        return {**original_result(*args), "text": "A" * 600 + "B" * 100}
+
+    async def synthesize(*args):
+        adapters.tts += 1
+        if adapters.tts == 2:
+            started.set()
+            await release.wait()
+        return {"media_type": "audio/wav", "content_b64": wav()}
+
+    ports.result = result
+    adapters.synthesize = synthesize
+    binding, _, _ = await start(service, base, True)
+    try:
+        await service.invoke("owner", {**binding, "operation": "turn",
+            "turn_id": "turn-1", "sequence": 1, "audio_b64": wav()})
+        await finish_task(service)
+        call = service.calls["call-1"]
+        await call.speech_task
+        speech = {**binding, "operation": "speech", "turn_id": "turn-1", "segment": 0}
+        assert len(call.turn["speech_segments"]) == 2
+        assert (await service.invoke("owner", speech))["ready"]
+        await service.invoke("owner", {**speech, "segment": 1})
+        await asyncio.wait_for(started.wait(), 1)
+        ports.level = 2
+        release.set()
+        await call.speech_task
+        assert not call.speech_cache
+        assert set(call.speech_errors) == {0, 1}
+        assert call.turn["phase"] == "complete" and call.turn["answer"]
+        ports.level = 1
+        with pytest.raises(CallError, match="privacy"):
+            await service.invoke("owner", speech)
+        await service.invoke("owner", {**speech, "retry": True})
+        await call.speech_task
+        assert (await service.invoke("owner", speech))["ready"]
+        assert adapters.tts == 3 and len(ports.accepted) == 1
+    finally:
+        release.set()
+        await service.close()
+
+
+async def test_rejected_speech_retry_preserves_recovery_after_privacy_returns(tmp_path):
+    service, ports, adapters, base, _ = setup(tmp_path, "cloud")
+    binding, _, _ = await start(service, base, True)
+    original_result = ports.result
+
+    def result(*args):
+        answer = original_result(*args)
+        ports.level = 2
+        return answer
+
+    ports.result = result
+    try:
+        await service.invoke("owner", {**binding, "operation": "turn",
+            "turn_id": "turn-1", "sequence": 1, "audio_b64": wav()})
+        await finish_task(service)
+        call = service.calls["call-1"]
+        await call.speech_task
+        speech = {**binding, "operation": "speech", "turn_id": "turn-1", "segment": 0}
+        with pytest.raises(CallError, match="privacy"):
+            await service.invoke("owner", {**speech, "retry": True})
+        assert call.speech_errors[0] == "call_cloud_privacy_unqualified"
+        assert call.speech_attempts[0] == 1 and adapters.tts == 0
+        ports.level = 1
+        await service.invoke("owner", {**speech, "retry": True})
+        await call.speech_task
+        assert (await service.invoke("owner", speech))["ready"]
+        assert call.turn["phase"] == "complete"
+        assert adapters.tts == 1 and len(ports.accepted) == 1
+    finally:
+        await service.close()
+
+
 async def test_phone_busy_and_end_lease_are_separate_from_agent_lifecycle(tmp_path):
     service, ports, adapters, base, clock = setup(tmp_path)
     ports.phone = True

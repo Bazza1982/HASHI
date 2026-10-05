@@ -183,7 +183,10 @@ later segments retain bounded sequential admission. Synthesis rechecks scope
 and privacy, captures its exact originating turn, and cannot publish after
 hangup, lease expiry, a new turn or a scope change. Privacy is checked again
 before caching and before returning cached audio; revoked audio is discarded
-and can be regenerated only through an explicit retry after permission returns.
+across all cached segments and can be regenerated only through an explicit
+retry after permission returns. A retry rejected by current privacy settings
+preserves its error and retry allowance, so restoring permission still permits
+that explicit retry.
 TTS failure leaves the completed text
 answer available; only an explicit bounded speech retry repeats synthesis,
 and it never resubmits the Agent Run.

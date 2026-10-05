@@ -298,7 +298,13 @@ class CallService:
         target = call.targets[kind]
         if target and target["location"] == "cloud":
             if self.ports.privacy_level(call.binding["agent_id"]) not in (0, 1):
-                raise CallError("call_cloud_privacy_unqualified", 403)
+                error = CallError("call_cloud_privacy_unqualified", 403)
+                if kind == "tts":
+                    # Every TTS privacy check invalidates already generated
+                    # segments, including earlier ones while a later one runs.
+                    call.speech_errors.update(dict.fromkeys(call.speech_cache, error.code))
+                    call.speech_cache.clear()
+                raise error
 
     async def invoke(self, owner, body):
         # Includes validation failures for direct consumers; the HTTP route logs
@@ -507,12 +513,7 @@ class CallService:
             if index >= len(parts):
                 raise CallError("call_speech_index_invalid")
             if index in call.speech_cache:
-                try:
-                    self._privacy(call, "tts")
-                except CallError as exc:
-                    call.speech_errors.update(dict.fromkeys(call.speech_cache, exc.code))
-                    call.speech_cache.clear()
-                    raise
+                self._privacy(call, "tts")
                 return {"ok": True, "ready": True, **call.speech_cache[index]}
             if call.speech_task and not call.speech_task.done():
                 if index != call.speech_index:
@@ -521,12 +522,12 @@ class CallService:
             if index in call.speech_errors:
                 if body.get("retry") is not True or call.speech_attempts[index] >= 2:
                     raise CallError(call.speech_errors[index], 502)
-                call.speech_errors.pop(index, None)
             elif index <= call.speech_index:
                 raise CallError("call_speech_evicted", 409)
             elif index != call.speech_index + 1:
                 raise CallError("call_speech_order_invalid", 409)
             self._privacy(call, "tts")
+            call.speech_errors.pop(index, None)
             self._start_speech(call, index, parts[index])
             return {"ok": True, "ready": False}
         raise CallError("call_invalid_operation")
