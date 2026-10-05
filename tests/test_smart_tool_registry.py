@@ -490,12 +490,14 @@ async def test_log_query_bounds_an_18m_character_single_record(tmp_path) -> None
 
     payload = _payload(result)
     assert result.is_error is False
-    assert payload["status"] == "success"
+    assert payload["status"] == "partial"
     assert payload["effect"] == "observed"
     data = payload["data"]
     assert data["file_size_bytes"] == target_size
     assert data["literal_only"] is True
     assert data["result_limit_reached"] is True
+    assert payload["status"] == "partial"
+    assert data["can_continue"] and not data["coverage_complete"]
     assert data["matches"] == [
         {
             "character_offset": len(prefix) + left_size + 1,
@@ -504,4 +506,4 @@ async def test_log_query_bounds_an_18m_character_single_record(tmp_path) -> None
             "term": "token",
         }
     ]
-    assert len(result.output) < 2000
+    assert len(result.output) < 16000

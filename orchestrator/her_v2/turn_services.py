@@ -205,6 +205,27 @@ class TurnServices(CommentaryPort):
                 )
             )
 
+    def observe_tool_activity(self, facts: Mapping[str, Any]) -> None:
+        """Counters can advance actual progress; heartbeat/liveness cannot."""
+        call_id = str(facts.get("tool_call_id") or "")
+        tool = self._active_tools.get(call_id)
+        if tool is None:
+            return
+        counters = facts.get("counters") or {}
+        old = tool.get("scan_counters") or {}
+        if any(isinstance(counters.get(key), (int, float)) and
+               counters[key] > (old.get(key) or 0) for key in (
+                   "files_enumerated", "directories_enumerated", "characters_read", "bytes_read")):
+            self.last_progress_at = self.clock()
+            self.progress_revision += 1
+        tool["scan_counters"] = dict(counters)
+        tool["activity"] = {key: facts.get(key) for key in (
+            "operation_type", "state", "liveness", "progress", "last_work_progress",
+            "last_output", "stop_reason", "coverage_complete")}
+        # Counts/provenance only: no query, hit excerpts or full path lists to AC.
+        tool["activity"]["root_count"] = len(facts.get("selected_roots") or [])
+        self.last_activity_at = self.clock()
+
     def snapshot(self) -> dict[str, Any]:
         now = self.clock()
         return {
@@ -218,6 +239,7 @@ class TurnServices(CommentaryPort):
                     "tool": value["tool"],
                     "arguments_sha256": value["arguments_sha256"],
                     "age_s": round(max(0.0, now - float(value["started_at"])), 3),
+                    "activity": dict(value.get("activity") or {}),
                 }
                 for key, value in self._active_tools.items()
             ],

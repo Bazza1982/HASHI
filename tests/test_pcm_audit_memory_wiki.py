@@ -630,31 +630,49 @@ async def test_wiki_core_command_reports_unconfigured_provider_as_information():
 
 
 @pytest.mark.asyncio
-async def test_wiki_core_command_binds_request_to_configured_capability_only():
-    runtime = SimpleNamespace(
-        global_config=SimpleNamespace(
-            wiki_provider={"id": "curated", "capability": "web_search"}
-        ),
-        _is_authorized_user=lambda _user_id: True,
-        _get_available_tool_catalogue=lambda: [
-            {"name": "web_search"},
-            {"name": "file_read"},
-        ],
-        enqueue_request=AsyncMock(return_value="req-wiki"),
-        _reply_text=AsyncMock(),
-    )
-    update = SimpleNamespace(
-        effective_user=SimpleNamespace(id=1),
-        effective_chat=SimpleNamespace(id=2),
-    )
-
-    await wiki_command(runtime, update, SimpleNamespace(args=["release", "decision"]))
-
-    kwargs = runtime.enqueue_request.await_args.kwargs
-    assert kwargs["request_metadata"] == {
-        "tool_allowlist": ["web_search"],
-        "wiki_provider_id": "curated",
-    }
+@pytest.mark.parametrize(("channel", "surface", "connector"), [
+    ("workbench_command_ui", "workbench", "backend_api"),
+    ("telegram_admin", "telegram", "telegram"),
+    ("tui_command", "tui", "tui"),
+])
+async def test_wiki_core_command_binds_request_to_configured_capability_only(tmp_path, monkeypatch, channel, surface, connector):
+    from orchestrator.admin_local_testing import execute_local_command
+    from orchestrator.frontend_delivery import telegram_delivery_for_admission
+    from orchestrator.frontend_connector_registry import canonical_connector_id
+    from orchestrator import runtime_session
+    from orchestrator.session_store import SessionStore
+    from orchestrator.commands.wiki import COMMANDS
+    runtime = SimpleNamespace(name="wiki-qa", workspace_dir=tmp_path,
+        global_config=SimpleNamespace(authorized_id=7, bridge_home=tmp_path, instance_id="QA",
+            wiki_provider={"id": "curated", "capability": "web_search"}),
+        _is_authorized_user=lambda actor: actor == 7,
+        _get_available_tool_catalogue=lambda: [{"name": "web_search"}, {"name": "file_read"}],
+        _reply_text=AsyncMock(), session_store=SessionStore(tmp_path / "sessions.sqlite3", instance_id="QA"))
+    owner = runtime_session.owner_id(runtime)
+    session = runtime.session_store.create_session(owner_id=owner, agent_id=runtime.name, is_default=True)
+    monkeypatch.setattr("orchestrator.admin_local_testing.runtime_command_map", lambda: {"wiki": COMMANDS[0]})
+    admitted = []
+    async def enqueue(**kwargs):
+        metadata = kwargs["request_metadata"]
+        telegram_delivery_for_admission(source=kwargs["source"], request_metadata=metadata, state_root=tmp_path)
+        assert canonical_connector_id(kwargs["source"], ingress_transport=metadata.get("ingress_transport", ""),
+                                      surface=metadata.get("session_surface", "")) == connector
+        accepted = runtime_session.accept_request(runtime, request_id="req-wiki-qa", chat_id=kwargs["chat_id"],
+            prompt=kwargs["prompt"], source=kwargs["source"], request_metadata=metadata,
+            request_content=None, idempotency_key=kwargs.get("idempotency_key"))
+        admitted.append((kwargs, accepted[0]))
+        return "req-wiki-qa"
+    runtime.enqueue_request = enqueue
+    result = await execute_local_command(runtime, "/wiki release decision", chat_id=7, source_channel=channel,
+        session_metadata={"session_id": session["session_id"], "owner_id": owner,
+            "session_surface": surface, "session_channel_key": "7" if surface == "telegram" else "default",
+            "context_generation": 1, "frontend_invocation_id": "cmd-wiki-qa"})
+    assert result["ok"] is True, result
+    assert len(admitted) == 1
+    kwargs, accepted = admitted[0]
+    assert accepted["session_id"] == session["session_id"]
+    assert kwargs["request_metadata"]["tool_allowlist"] == ["web_search"]
+    assert kwargs["request_metadata"]["wiki_provider_id"] == "curated"
     assert "file_read" not in kwargs["prompt"]
 
 
@@ -729,3 +747,34 @@ async def test_wiki_search_is_read_only_scoped_and_hides_configured_root(tmp_pat
     )
     assert denied.is_error is True
     assert "outside configured zones" in denied.output
+
+
+@pytest.mark.asyncio
+async def test_wiki_derived_request_rejects_missing_transport_and_stale_session_before_enqueue(tmp_path, monkeypatch):
+    from orchestrator.admin_local_testing import execute_local_command
+    from orchestrator.command_request_context import CommandDerivedRequestError
+    from orchestrator import runtime_session
+    from orchestrator.session_store import SessionStore
+    from orchestrator.commands.wiki import COMMANDS
+    runtime = SimpleNamespace(name="wiki-qa", workspace_dir=tmp_path,
+        global_config=SimpleNamespace(authorized_id=7, bridge_home=tmp_path, instance_id="QA",
+            wiki_provider={"id": "curated", "capability": "web_search"}),
+        _is_authorized_user=lambda actor: actor == 7,
+        _get_available_tool_catalogue=lambda: [{"name": "web_search"}],
+        _reply_text=AsyncMock(), enqueue_request=AsyncMock(return_value="must-not-be-admitted"),
+        session_store=SessionStore(tmp_path / "sessions.sqlite3", instance_id="QA"))
+    update = SimpleNamespace(effective_user=SimpleNamespace(id=7), effective_chat=SimpleNamespace(id=7))
+    with pytest.raises(CommandDerivedRequestError) as error:
+        await wiki_command(runtime, update, SimpleNamespace(args=["safe", "QA"]))
+    assert error.value.error_code == "command_derived_binding_missing"
+    runtime.enqueue_request.assert_not_awaited()
+    owner = runtime_session.owner_id(runtime)
+    session = runtime.session_store.create_session(owner_id=owner, agent_id=runtime.name, is_default=True)
+    monkeypatch.setattr("orchestrator.admin_local_testing.runtime_command_map", lambda: {"wiki": COMMANDS[0]})
+    result = await execute_local_command(runtime, "/wiki safe QA", chat_id=7, source_channel="workbench_command_ui",
+        session_metadata={"session_id": session["session_id"], "owner_id": owner,
+            "session_surface": "workbench", "session_channel_key": "default", "context_generation": 2})
+    assert result["ok"] is False
+    assert result["error_code"] == "command_derived_binding_invalid"
+    assert result["request_outcome"] == "not_admitted"
+    runtime.enqueue_request.assert_not_awaited()

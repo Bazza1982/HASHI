@@ -1,5 +1,18 @@
 # HASHI Agent FYI
 
+2026-10-06 the user authorized consolidating HASHI1/HASHI2 development into
+the local HASHI3 branch `development/hashi3-20261006`, based on production
+HASHI4 main. Frontend Connector, PAO, PCM and HERV3 retain their Function
+ownership. Call, Simple and existing HASHI3 fixes are included; HERV3 scoped
+search/activity, Run questions, creation templates, Phone context, Session
+attachments and Move repairs are being qualified together. Native Windows
+attachment consumption preserves exact-file authority, and creation templates
+retain production `available_models` restrictions. Original branches, stashes
+and uncommitted work are preserved locally. Source migration, offline
+qualification and running adoption remain separate; no runtime restart or
+production release is part of this request. See [the migration decision](
+HASHI3_DEVELOPMENT_MIGRATION_2026-10-06.md).
+
 2026-10-05 the user approved the isolated HASHI2 call experiment moving to
 volume-based capture and one cloud speech-judgment/transcription request,
 without a language hint. Frontend Connector owns Functions and the external
@@ -123,6 +136,49 @@ The user deferred native Codex process-kill prevention and the complete
 dual-browser live matrix. Installed CLI execution did not invoke the tested
 pre-tool hook; reverted experiments provide no protection. Do not report these
 items passed or touch another instance/browser to fill the evidence gap.
+2026-10-05 HASHI1 Move cutover follow-up corrects a schema-5 false stale-source
+rejection: presentation-only progress notices change excluded-message diagnostics,
+not transferred conversation history. PAO / Functions uses the same durable
+conversation projection during packaging and cutover while retaining full capsule
+integrity, owner checks and genuine history/memory/configuration change fences.
+The real failed transaction was confirmed rolled back; retries remain operator
+actions. Red/green checks and adoption boundaries are recorded in
+[Agent Move](HASHI_AGENT_MOVE_V1.md).
+
+2026-10-05 HASHI1 Move repair separates SQLite reader bookkeeping from durable
+source freshness. Cold read-only snapshots may create an empty WAL and WAL-index;
+they no longer invalidate their own package. Complete workspace size/deletion
+disclosure, nonempty WAL and real content-change checks remain enforced.
+Failed preparation records bounded metadata-only differences. PAO / Functions
+owns this change; no Core or other-instance edits. The user authorized HASHI1
+repair and broad Function reboot; offline validation and adoption are recorded
+separately in [Agent Move](HASHI_AGENT_MOVE_V1.md).
+
+2026-10-05 HASHI1 nightly repair source adds scoped same-Run questions, explicit
+sunny creation selection policy, trusted Wiki command continuations, compact
+Remote desktop identity preflight, durable Telegram ingress diagnostics and
+role-preserving Phone context synchronization. Question answers do not grant
+permissions. Phone action context is frozen at its authorization cutoff; unknown
+ownership, pending transcript or oversized required context rejects admission.
+Private Workbench changes use authenticated instance/Agent avatar persistence,
+unbounded roster selection and authority-owned model/Provider catalogues.
+Source/offline checks and runtime/UI adoption are recorded separately; only
+HASHI1 is authorized. Do not sync or restart other instances. See
+[questions](HASHI_RUN_QUESTIONS.md), [creation](HASHI_AGENT_CREATION_POLICY.md),
+[Phone handoff](HASHI_PHONE_CONTEXT_HANDOFF.md), and
+[Telegram diagnostics](HASHI_TELEGRAM_INGRESS_DIAGNOSTICS.md).
+
+2026-10-04 HASHI1 scoped-search source work adds `file_search`, own-Agent home
+read projection, bounded foreground scans/Shell drains and technical activity
+independent of commentary. Shell remains directly usable; wide scope is advisory,
+not a new denial. That source checkpoint did not authorize production adoption.
+The user subsequently approved HASHI1 reboot; broad Function adoption succeeded
+with the same Core/fingerprint and exact five-Agent set online/connected. sunny
+passed live scoped search/read, commentary-off activity, verbose live-toggle and
+cancel/cleanup checks through the authenticated API; original display settings
+were restored. External client screen rendering remains unverified because its
+browser was leased by another task. No external client/Core change or other
+instance reboot occurred. See [owning decision](HERV3_SCOPED_SEARCH.md).
 
 2026-10-03 Lily correction supersedes Windows automation: six Windows tasks and
 eleven old HASHI jobs were removed. Four Agent crons run import 01:00, offline

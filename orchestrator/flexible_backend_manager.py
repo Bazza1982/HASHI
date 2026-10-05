@@ -1941,6 +1941,11 @@ class FlexibleBackendManager:
                     getattr(self, "runtime", None), "canonical_audit", None
                 ),
                 access_roots=list(access_roots),
+                search_scope=workzone_module.build_search_scope(
+                    state, owner_id=str(getattr(self.global_config, "authorized_id", "") or ""),
+                    agent_id=str(adapter_cfg.name), agent_home=adapter_cfg.workspace_dir,
+                    execution_cwd=workspace_dir, access_roots=tuple(access_roots),
+                ),
             )
             target = backend if backend is not None else self.current_backend
             target.tool_registry = registry
@@ -2065,6 +2070,43 @@ class FlexibleBackendManager:
             self.current_backend = None
 
     async def generate_response(
+        self,
+        prompt: str,
+        request_id: str,
+        is_retry: bool = False,
+        silent: bool = False,
+        on_stream_event=None,
+        request_content: dict[str, Any] | None = None,
+    ):
+        from adapters.base import BackendResponse
+        from orchestrator.multimodal_contract import MultimodalContractError
+        from orchestrator.session_attachment_authorization import (
+            bind_backend_attachment_reads, current_run_attachment_grants,
+            released_codex_voice_input,
+        )
+        try:
+            grants = current_run_attachment_grants(self, request_id, request_content)
+            with bind_backend_attachment_reads(self.current_backend, grants):
+                prompt, request_content, transcript_routes = await released_codex_voice_input(
+                    self, request_id, prompt, request_content,
+                )
+                response = await self._generate_response_with_attachment_reads(
+                    prompt, request_id, is_retry=is_retry, silent=silent,
+                    on_stream_event=on_stream_event, request_content=request_content,
+                )
+                if transcript_routes:
+                    metadata = dict(getattr(response, "stream_metadata", None) or {})
+                    metadata["multimodal_routing"] = list(transcript_routes) + list(metadata.get("multimodal_routing") or [])
+                    response.stream_metadata = metadata
+                return response
+        except MultimodalContractError as exc:
+            return BackendResponse(
+                text="", duration_ms=0, error=str(exc), is_success=False,
+                error_code=exc.code, error_retryable=False,
+                stream_metadata={"attachment_id": exc.attachment_id or None},
+            )
+
+    async def _generate_response_with_attachment_reads(
         self,
         prompt: str,
         request_id: str,

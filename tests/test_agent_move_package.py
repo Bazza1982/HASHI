@@ -491,6 +491,12 @@ def test_conversation_history_is_in_freshness_fingerprint_and_tampering_is_rejec
         source_instance="HASHI1",
         transfer_mode="identity_memory",
     )
+    store.append_presentation_message(
+        session_id=session["session_id"], owner_id="user:7", agent_id="zelda",
+        role="assistant", text="Move is staged; awaiting confirmation",
+        source="telegram.send", idempotency_key="move-staged",
+        history_eligible=False,
+    )
     second = create_agent_move_package(
         root,
         "zelda",
@@ -498,6 +504,8 @@ def test_conversation_history_is_in_freshness_fingerprint_and_tampering_is_rejec
         source_instance="HASHI1",
         transfer_mode="identity_memory",
     )
+    assert first.conversation_continuity["summary"]["excluded_message_count"] == 0
+    assert second.conversation_continuity["summary"]["excluded_message_count"] == 1
     assert archive_snapshot_fingerprint(first) == archive_snapshot_fingerprint(second)
 
     accepted = store.accept_run(
@@ -525,20 +533,73 @@ def test_conversation_history_is_in_freshness_fingerprint_and_tampering_is_rejec
     )
     assert archive_snapshot_fingerprint(third) != archive_snapshot_fingerprint(first)
 
-    tampered_capsule = dict(third.conversation_continuity or {})
-    tampered_capsule["owner_id"] = "user:8"
-    tampered = tmp_path / "tampered-history.hashi-agent"
-    _rewrite_archive(
-        third.package_path,
-        tampered,
-        replacements={
-            CONVERSATION_CONTINUITY_ARCHIVE_PATH: json.dumps(
-                tampered_capsule
-            ).encode("utf-8")
-        },
+    capsule = third.conversation_continuity
+    for altered in (
+        {**capsule, "owner_id": "user:8"},
+        {**capsule, "summary": {
+            **capsule["summary"],
+            "excluded_message_count": capsule["summary"]["excluded_message_count"] + 1,
+        }},
+    ):
+        tampered = tmp_path / "tampered-history.hashi-agent"
+        _rewrite_archive(
+            third.package_path,
+            tampered,
+            replacements={
+                CONVERSATION_CONTINUITY_ARCHIVE_PATH: json.dumps(altered).encode("utf-8")
+            },
+        )
+        with pytest.raises(AgentMoveError, match="digest"):
+            read_agent_move_package(tampered)
+
+
+@pytest.mark.parametrize("history_eligible", [False, True])
+def test_packaging_fences_eligible_history_not_presentation_counts(
+    tmp_path, monkeypatch, history_eligible
+):
+    from orchestrator.agent_move import package as owner
+
+    root = _source_root(tmp_path)
+    store = SessionStore(root / "state" / "sessions.sqlite3", instance_id="HASHI1")
+    session = store.ensure_default_session(owner_id="user:7", agent_id="zelda")
+    store.append_presentation_message(
+        session_id=session["session_id"], owner_id="user:7", agent_id="zelda",
+        role="assistant", text="Durable business response", source="fixture",
+        idempotency_key="business-response", history_eligible=True,
     )
-    with pytest.raises(AgentMoveError, match="digest"):
-        read_agent_move_package(tampered)
+    write_bytes = owner._write_bytes
+
+    def write_then_deliver(archive, name, data, checksums):
+        write_bytes(archive, name, data, checksums)
+        if name == CONVERSATION_CONTINUITY_ARCHIVE_PATH:
+            store.append_presentation_message(
+                session_id=session["session_id"], owner_id="user:7", agent_id="zelda",
+                role="assistant", text="New message during packaging",
+                source="telegram.send", idempotency_key="concurrent-delivery",
+                history_eligible=history_eligible,
+            )
+
+    monkeypatch.setattr(owner, "_write_bytes", write_then_deliver)
+    output = tmp_path / "existing.hashi-agent"
+    output.write_bytes(b"previous caller output")
+    if history_eligible:
+        with pytest.raises(AgentMoveError, match="conversation history changed"):
+            create_agent_move_package(root, "zelda", output, transfer_mode="identity_memory")
+        assert output.read_bytes() == b"previous caller output"
+        assert not list(tmp_path.glob(f".{output.name}.*.tmp"))
+    else:
+        package = create_agent_move_package(root, "zelda", output, transfer_mode="identity_memory")
+        capsule = package.conversation_continuity
+        assert capsule["summary"]["eligible_message_count"] == 1
+        assert capsule["summary"]["excluded_message_count"] == 0
+        assert [message["text"] for row in capsule["sessions"] for message in row["messages"]] == [
+            "Durable business response",
+        ]
+        current = store.export_conversation_continuity(
+            owner_id="user:7", agent_id="zelda", source_instance="HASHI1",
+            transfer_id=package.package_id, history_mode="move",
+        )
+        assert current["summary"]["excluded_message_count"] == 1
 
 
 def test_package_rejects_inactive_retained_source_copy(tmp_path):
@@ -954,6 +1015,136 @@ def test_snapshot_fingerprint_excludes_append_only_slash_audit_but_packages_it(
         tmp_path / "audit-third.hashi-agent",
     )
     assert archive_snapshot_fingerprint(third) != first_fingerprint
+
+
+@pytest.mark.parametrize("transfer_mode", ["workspace", "identity_memory"])
+def test_cold_wal_snapshot_preserves_memory_and_stable_freshness(tmp_path, transfer_mode):
+    from contextlib import closing
+
+    root = _source_root(tmp_path)
+    workspace = root / "workspaces" / "zelda"
+    database = workspace / "bridge_memory.sqlite"
+    with closing(sqlite3.connect(database)) as db:
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("INSERT INTO memories VALUES ('cold durable memory')")
+        db.commit()
+    assert not Path(str(database) + "-shm").exists()
+    assert not Path(str(database) + "-wal").exists()
+    original_digest = hashlib.sha256(database.read_bytes()).hexdigest()
+
+    first = create_agent_move_package(
+        root, "zelda", tmp_path / "cold-first.hashi-agent", transfer_mode=transfer_mode
+    )
+    assert hashlib.sha256(database.read_bytes()).hexdigest() == original_digest
+    inventory = {row["path"]: row for row in first.workspace_metadata["inventory"]}
+    assert inventory["bridge_memory.sqlite-shm"]["size"] == 32768
+    assert inventory["bridge_memory.sqlite-wal"]["size"] == 0
+    assert first.workspace_metadata["total_workspace_bytes"] == sum(
+        row["size"] for row in inventory.values()
+    )
+    destination = tmp_path / "restored"
+    extract_agent_workspace(first, destination)
+    with closing(sqlite3.connect(destination / "bridge_memory.sqlite")) as db:
+        assert db.execute("SELECT text FROM memories ORDER BY rowid").fetchall() == [
+            ("hello",), ("cold durable memory",)
+        ]
+
+    # A normal last writable reader removes the sidecars again. Their lifetime
+    # must not make the same durable snapshot stale at confirmation.
+    with closing(sqlite3.connect(database)) as db:
+        db.execute("SELECT text FROM memories").fetchall()
+    assert not Path(str(database) + "-shm").exists()
+    assert not Path(str(database) + "-wal").exists()
+    second = create_agent_move_package(
+        root, "zelda", tmp_path / "cold-second.hashi-agent", transfer_mode=transfer_mode
+    )
+    assert archive_snapshot_fingerprint(second) == archive_snapshot_fingerprint(first)
+
+    with closing(sqlite3.connect(database)) as db:
+        db.execute("INSERT INTO memories VALUES ('genuinely newer memory')")
+        db.commit()
+    third = create_agent_move_package(
+        root, "zelda", tmp_path / "cold-third.hashi-agent", transfer_mode=transfer_mode
+    )
+    assert archive_snapshot_fingerprint(third) != archive_snapshot_fingerprint(first)
+
+
+@pytest.mark.parametrize("changed_kind", ["memory", "wal", "orphan_sidecar", "orphan_same_size"])
+def test_packaging_rejects_real_changes_and_keeps_existing_output(
+    tmp_path, monkeypatch, changed_kind
+):
+    from contextlib import closing
+    from orchestrator.agent_move import package as owner
+
+    root = _source_root(tmp_path)
+    workspace = root / "workspaces" / "zelda"
+    database = workspace / "bridge_memory.sqlite"
+    with closing(sqlite3.connect(database)) as db:
+        db.execute("PRAGMA journal_mode=WAL")
+        db.commit()
+    orphan = workspace / "ordinary.sqlite-shm"
+    orphan.write_bytes(b"ordinary discarded work")
+    output = tmp_path / "existing.hashi-agent"
+    output.write_bytes(b"existing caller output")
+    write_file = owner._write_file
+    live_writer = None
+    changed_path = {
+        "memory": "memory/continuity.md",
+        "wal": "bridge_memory.sqlite-wal",
+        "orphan_sidecar": "ordinary.sqlite-shm",
+        "orphan_same_size": "ordinary.sqlite-shm",
+    }[changed_kind]
+
+    def write_then_change(archive, name, source, checksums, *, mode):
+        nonlocal live_writer
+        write_file(archive, name, source, checksums, mode=mode)
+        if name != "workspace/memory/continuity.md":
+            return
+        if changed_kind == "wal":
+            live_writer = sqlite3.connect(database)
+            live_writer.execute("INSERT INTO memories VALUES ('new live WAL memory')")
+            live_writer.commit()
+            assert Path(str(database) + "-wal").stat().st_size > 0
+        elif changed_kind == "memory":
+            (workspace / changed_path).write_text("new durable memory")
+        elif changed_kind == "orphan_same_size":
+            stat = orphan.stat()
+            orphan.write_bytes(b"ORDINARY DISCARDED WORK")
+            os.utime(orphan, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+        else:
+            orphan.write_bytes(b"changed ordinary discarded work")
+
+    monkeypatch.setattr(owner, "_write_file", write_then_change)
+    try:
+        with pytest.raises(AgentMoveError, match="workspace changed while packaging") as failure:
+            create_agent_move_package(root, "zelda", output, transfer_mode="workspace")
+        assert changed_path in {
+            row["path"] for row in failure.value.workspace_changes["changes"]
+        }
+        assert output.read_bytes() == b"existing caller output"
+        assert not list(tmp_path.glob(f".{output.name}.*.tmp"))
+    finally:
+        if live_writer is not None:
+            live_writer.close()
+
+
+def test_cold_wal_reader_files_still_count_toward_whole_workspace_limit(
+    tmp_path, monkeypatch
+):
+    from contextlib import closing
+    from orchestrator.agent_move import package as owner
+
+    root = _source_root(tmp_path)
+    workspace = root / "workspaces" / "zelda"
+    with closing(sqlite3.connect(workspace / "bridge_memory.sqlite")) as db:
+        db.execute("PRAGMA journal_mode=WAL")
+        db.commit()
+    initial_bytes = sum(row["size"] for row in owner._workspace_inventory(workspace))
+    monkeypatch.setattr(owner, "WORKSPACE_LIMIT_BYTES", initial_bytes)
+    with pytest.raises(AgentMoveError, match="1 GB"):
+        create_agent_move_package(
+            root, "zelda", tmp_path / "too-large.hashi-agent", transfer_mode="workspace"
+        )
 
 
 def test_explicit_transfer_modes_preserve_memory_and_preflight_whole_workspace(tmp_path, monkeypatch):

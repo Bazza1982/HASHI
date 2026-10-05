@@ -2171,6 +2171,7 @@ class FlexibleAgentRuntime:
 
     def get_runtime_metadata(self) -> dict:
         from orchestrator.frontend_status import runtime_presentation_status
+        from orchestrator.agent_creation_policy import runtime_backend_catalogue
 
         delivery = telegram_delivery_failover.delivery_status_summary(self)
         display_policy = telegram_stream_policy.get_display_policy(self)
@@ -2228,6 +2229,8 @@ class FlexibleAgentRuntime:
             "provider": self.get_current_provider(),
             "allowed_backends": public_allowed_backends,
             "privacy_level": int(getattr(self.backend_manager, "privacy_level", 1)),
+            "backend_catalogue": runtime_backend_catalogue(self),
+            "active_provider": self.get_current_provider(),
             "workspace_dir": str(self.workspace_dir),
             "transcript_path": str(self.transcript_log_path),
             "online": bool(self.backend_ready),

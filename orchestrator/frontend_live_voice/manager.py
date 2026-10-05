@@ -2137,7 +2137,12 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                         detail={"schema": CALL_EVENT_SCHEMA, "scope": binding.public_scope(), "delegation_id": delegation_id},
                     )
                 raise LiveVoiceError("live_proposal_expired", 409)
+            handoff = connection.execute(
+                "SELECT handoff_id FROM phone_context_handoffs WHERE call_id=? AND call_epoch=? AND delegation_id=? AND proposal_digest=?",
+                (binding.call_id, binding.call_epoch, row["delegation_id"], row["proposal_digest"]),
+            ).fetchone()
             return Proposal(
+                phone_context_handoff_id=str(handoff[0]) if handoff else "",
                 delegation_id=row["delegation_id"], version=int(row["proposal_version"]),
                 text=row["proposal_text"], source_event_ids=tuple(json.loads(row["source_event_ids_json"] or "[]")),
                 digest=row["proposal_digest"], ambiguous=bool(row["ambiguous"]),
@@ -2225,11 +2230,17 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 + json.dumps({"spoken_request": proposal.text, "resolved_actions": tasks}, ensure_ascii=False)
             ))
         try:
+            from orchestrator.phone_context_handoff import freeze_action_handoff, PhoneContextError
+            try:
+                handoff_id = freeze_action_handoff(self.session_store, binding, proposal)
+            except PhoneContextError as exc:
+                raise LiveVoiceError(exc.code, 409) from None
+            proposal = replace(proposal, phone_context_handoff_id=handoff_id)
             accepted = await self._admit_run(  # type: ignore[misc]
                 binding, proposal, f"live-delegation-{idempotency_key}"
             )
         except LiveVoiceError as exc:
-            if first_attempt and exc.code == "live_admission_scope_changed":
+            if first_attempt and (exc.code == "live_admission_scope_changed" or exc.code.startswith("phone_context_")):
                 # Only this locally generated pre-Worker error proves no initial
                 # admission happened. Recovery after an earlier uncertain RPC
                 # remains unknown; a later scope error cannot undo prior effects.

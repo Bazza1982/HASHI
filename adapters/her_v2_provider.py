@@ -992,6 +992,7 @@ class _EvidenceRecordingToolRegistry:
         model: str = "",
         provider: str = "",
         audit_log: DurableAuditLog | None = None,
+        on_tool_activity: Any = None,
     ):
         self._base = base
         self._request = request
@@ -1000,6 +1001,13 @@ class _EvidenceRecordingToolRegistry:
             "stage": request.stage.value,
             "model": str(model or ""),
         }
+        if callable(on_tool_activity):
+            self._audit_context["tool_activity_observer"] = on_tool_activity
+        scope = getattr(base, "search_scope", None)
+        if isinstance(scope, dict):
+            self._audit_context["_search_scope_snapshot"] = copy.deepcopy(scope)
+            self._audit_context["_read_access_roots"] = tuple(getattr(base, "read_access_roots", ()))
+            self._audit_context["_execution_cwd"] = str(getattr(base, "workspace_dir", ""))
         self._receipts: list[ToolEvidenceReceipt] = []
         self._provider = str(provider or "")
         self._model = str(model or "")
@@ -1308,7 +1316,15 @@ class _EvidenceRecordingToolRegistry:
 
         details = dict(getattr(result, "details", None) or {})
         output = str(getattr(result, "output", "") or "")
-        if not details.get("smart_result"):
+        if receipt.tool_name == "file_search" and details.get("search_outcome"):
+            # Native scoped-search uses a structured envelope even when the
+            # optional Smart Registry is off. Preserve that JSON at HERV3's
+            # model boundary instead of appending an out-of-envelope footer.
+            envelope = json.loads(output)
+            if isinstance(envelope.get("data"), dict):
+                envelope["data"]["evidence_ref"] = receipt.evidence_ref
+            output = json.dumps(envelope, ensure_ascii=False, separators=(",", ":"))
+        elif not details.get("smart_result"):
             output += f"\n\nHASHI_EVIDENCE_RECEIPT: {receipt.evidence_ref}"
         details.update(
             {
@@ -3454,6 +3470,7 @@ class HashiStageProvider(StageProvider):
                 model=profile.model,
                 provider=profile.engine,
                 audit_log=self.audit_log,
+                on_tool_activity=lambda event: _capture(event),
             )
             selected_registry = evidence_registry
             if request.checkpoint_coordinator is not None:
@@ -3812,6 +3829,8 @@ class HashiStageProvider(StageProvider):
             nonlocal provider_replay_activity
             nonlocal provider_text_activity
             nonlocal provider_tool_activity
+            if event.kind == "tool_activity" and self._turn_services is not None:
+                self._turn_services.observe_tool_activity(event.metadata or {})
             content = str(event.raw_delta or event.summary or "")
             if content or event.tool_name:
                 provider_replay_activity = True

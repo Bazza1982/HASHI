@@ -55,6 +55,7 @@
     "onboard-cli.js",
     "postinstall.js",
     "privacy-runtime.js",
+    "transcription-runtime.js",
     "pyproject.toml",
     "runtime-entry.json",
     "BUILD_INFO.json",

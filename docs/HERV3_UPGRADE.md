@@ -1,5 +1,10 @@
 # HERV3 upgrade: JEV experiment and simplified routing
 
+The 2026-10-04 [scoped-search Function change](HERV3_SCOPED_SEARCH.md) retains
+the single model/tool loop and direct Shell use. Execution facts drive technical
+verbose activity independently of commentary; AC heartbeat is not actual progress.
+The owning decision separates source verification from live adoption.
+
 ## Decision and scope
 
 HERV3 is the current HASHI Engine Runtime upgrade and the canonical

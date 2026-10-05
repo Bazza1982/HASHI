@@ -1962,31 +1962,34 @@ def _validate_workbench_gateway_path(api_path: str) -> str:
     return f"/api/{value}"
 
 
-@lru_cache(maxsize=8)
-def _desktop_workbench_host(instance_id: str, port: int) -> str:
-    """Pick the local API before sending a desktop request that cannot be replayed."""
+class WorkbenchGatewayError(ConnectionError):
+    def __init__(self, code: str, *, accepted: bool | None, retryable: bool, status: int):
+        self.code, self.accepted, self.retryable, self.status = code, accepted, retryable, status
+        super().__init__(code)
 
+
+def _desktop_workbench_host(instance_id: str, port: int) -> str:
+    """Authenticate a bounded identity projection before non-replayable input."""
+    token = _workbench_admin_token()
+    if not token:
+        raise WorkbenchGatewayError("local_workbench_identity_unverified", accepted=False, retryable=True, status=503)
     for host in local_http_hosts():
-        health_url = local_http_url(port, "/api/health", host=host)
+        identity_url = local_http_url(port, "/api/v1/instance/identity", host=host)
         try:
-            request = urllib_request.Request(health_url, method="GET")
+            request = urllib_request.Request(identity_url, method="GET", headers={"X-Workbench-Token": token})
             with urllib_request.urlopen(request, timeout=1.0) as response:
-                if response.status != 200:
-                    continue
-                raw = response.read(8193)
-            if len(raw) > 8192:
-                continue
-            health = json.loads(raw)
+                if response.status != 200: continue
+                raw = response.read(1025)
+            if len(raw) > 1024: continue
+            identity = json.loads(raw)
         except (URLError, TimeoutError, OSError, ValueError):
             continue
-        if (
-            isinstance(health, dict)
-            and health.get("ok") is True
-            and health.get("instance_id") == instance_id
-            and health.get("workbench_port") == port
-        ):
+        if (isinstance(identity, dict) and identity.get("ok") is True
+            and identity.get("protocol") == "hashi-instance-identity-v1"
+            and identity.get("instance_id") == instance_id
+            and identity.get("workbench_port") == port):
             return host
-    raise ConnectionError("local Workbench API is unavailable")
+    raise WorkbenchGatewayError("local_workbench_identity_unverified", accepted=False, retryable=True, status=503)
 
 
 def _forward_workbench_gateway_request(
@@ -2058,9 +2061,10 @@ def _forward_workbench_gateway_request(
             if desktop_request:
                 # A later request may discover a replacement listener. Never
                 # replay this request when its outcome is uncertain.
-                _desktop_workbench_host.cache_clear()
                 break
             continue
+    if desktop_request:
+        raise WorkbenchGatewayError("request_outcome_unknown", accepted=None, retryable=False, status=502)
     raise ConnectionError(str(last_error or "local Workbench API is unavailable"))
 
 
@@ -2355,7 +2359,6 @@ def create_app(
     _protocol_manager = protocol_manager
     _exchange_transport = exchange_transport
     _workbench_port = workbench_port
-    _desktop_workbench_host.cache_clear()
     _hashi_root = hashi_root
     _control_hashi_root = control_hashi_root or hashi_root
     _attachment_store = AttachmentStore(
@@ -2550,6 +2553,11 @@ def create_app(
                 status_code=400,
                 content={"ok": False, "error": str(exc)},
             )
+        except WorkbenchGatewayError as exc:
+            return JSONResponse(status_code=exc.status, content={
+                "ok": False, "code": exc.code, "error": exc.code,
+                "accepted": exc.accepted, "retryable": exc.retryable,
+            })
         except ConnectionError as exc:
             logger.warning("Workbench gateway upstream unavailable: %s", exc)
             return JSONResponse(

@@ -4,6 +4,85 @@ HER v2 exposes the permitted subset through the HASHI Tool Gateway.
 """
 
 TOOL_SCHEMAS = [
+    {'function': {'description': 'Ask a clarification or preference question in this active Run. '
+                             'Returns immediately with question_id. Continue independent work, '
+                             'then get_user_answer in the same Run. Answers never authorize side '
+                             'effects. Do not assume an unanswered or default option is approval.',
+              'name': 'ask_user',
+              'parameters': {'additionalProperties': False,
+                             'properties': {'allow_free_text': {'type': 'boolean'},
+                                            'expires_seconds': {'maximum': 3600,
+                                                                'minimum': 30,
+                                                                'type': 'integer'},
+                                            'idempotency_key': {'maxLength': 160, 'type': 'string'},
+                                            'options': {'items': {'additionalProperties': False,
+                                                                  'properties': {'description': {'type': 'string'},
+                                                                                 'id': {'type': 'string'},
+                                                                                 'label': {'type': 'string'}},
+                                                                  'required': ['id', 'label'],
+                                                                  'type': 'object'},
+                                                        'maxItems': 8,
+                                                        'type': 'array'},
+                                            'purpose': {'enum': ['clarification', 'preference'],
+                                                        'type': 'string'},
+                                            'question': {'maxLength': 2000, 'type': 'string'}},
+                             'required': ['question', 'idempotency_key'],
+                             'type': 'object'}},
+ 'type': 'function'},
+    {'function': {'description': 'Read the authorized answer to this Run question. wait_seconds is '
+                             'bounded at 30; pending/expired/cancelled are not answers or '
+                             'approval. Keep doing independent work while pending. A returned '
+                             'answer belongs to this exact question and original Run.',
+              'name': 'get_user_answer',
+              'parameters': {'additionalProperties': False,
+                             'properties': {'question_id': {'type': 'string'},
+                                            'wait_seconds': {'maximum': 30,
+                                                             'minimum': 0,
+                                                             'type': 'number'}},
+                             'required': ['question_id'],
+                             'type': 'object'}},
+ 'type': 'function'},
+    {
+        "type": "function",
+        "function": {
+            "name": "file_search",
+            "description": (
+                "Discover local paths or search ordinary UTF-8 text within exact roots. "
+                "Default mode is path (no bodies read). Without roots, use this Run's "
+                "enabled Workzones and this Agent's own workspace; explicit roots replace "
+                "defaults. Permissions still apply. Content mode does not extract PDF, "
+                "Office, archive or media contents. Results report coverage and may be "
+                "partial with a cursor; partial/zero results do not prove absence. "
+                "Project profile skips dependencies/caches; expanded and include_hidden "
+                "can include them. Shell may be used directly when it is a better fit. "
+                "Regex is currently unavailable; use literal, path glob, or scoped Shell."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "minLength": 1, "maxLength": 1024},
+                    "mode": {"type": "string", "enum": ["path", "content"]},
+                    "roots": {"type": "array", "minItems": 1, "maxItems": 32,
+                              "items": {"type": "string"}},
+                    "match": {"type": "string", "enum": ["literal", "glob", "regex"],
+                              "description": "Literal by default. Path glob uses root-relative /, * per segment and ** across segments."},
+                    "case_sensitive": {"type": "boolean"},
+                    "include": {"type": "array", "items": {"type": "string"}},
+                    "exclude": {"type": "array", "items": {"type": "string"}},
+                    "profile": {"type": "string", "enum": ["project", "expanded"]},
+                    "include_hidden": {"type": "boolean"},
+                    "max_results": {"type": "integer", "minimum": 1, "maximum": 200},
+                    "context_chars": {"type": "integer", "minimum": 0, "maximum": 2000},
+                    "cursor": {"type": "string", "description": "Opaque continuation. Repeat the same query/options/roots in the same Run."},
+                    "scope_reason": {"type": "string", "maxLength": 500},
+                    "options": {"type": "object", "properties": {
+                        "follow_links": {"type": "boolean"},
+                        "cross_filesystems": {"type": "boolean"}}, "additionalProperties": False},
+                },
+                "required": ["query"], "additionalProperties": False,
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -15,11 +94,13 @@ TOOL_SCHEMAS = [
                 "Commands run in the foreground by default. background_job_start is "
                 "available only when the user explicitly starts this request with /bg. "
                 "Use verification_run for correctness checks."
-                " Do not run unbounded or full-filesystem recursive scans, and do not "
-                "run unbounded foreground commands; keep commands scoped and targeted. "
-                "If work cannot responsibly finish in the foreground, explain that the "
-                "user can choose /bg. Prefer file_list for directory listings and "
-                "log_query for literal searches."
+                " Shell is suitable for targeted searches, Git and native tools directly; "
+                "no prior failure of another tool is required. Prefer task-related "
+                "locations; do not default to whole-machine recursive searches unless "
+                "the user requests that scope. Long foreground work remains cancellable "
+                "and observable, without becoming a background job. Avoid uncontrolled "
+                "or indefinitely resident foreground commands. Use file_search for scoped "
+                "discovery, file_list for directory listings and log_query for known logs."
                 " Prefer log_query over grep, ripgrep, or shell pipelines for literal "
                 "searches in logs, JSONL, or other files that may contain very long "
                 "records. Smart Tool admission may return needs_replan instead of "
@@ -48,11 +129,13 @@ TOOL_SCHEMAS = [
                         "exclusiveMinimum": 0,
                         "description": (
                             "Optional timeout in seconds for this command only. "
-                            "When omitted, the instance safety deadline is the configured "
-                            "default (600 s); "
-                            "values above the hard cap (1800 s) are reduced to the cap."
+                            "When omitted, the effective instance/tool configuration sets "
+                            "the deadline, if any. A configured maximum caps explicit values."
                         ),
                     },
+                    "purpose": {"type": "string", "description": "Optional declared purpose, e.g. search; never grants authority."},
+                    "search_roots": {"type": "array", "items": {"type": "string"},
+                                     "description": "Optional declared roots for display; not verified coverage or a permission grant."},
                 },
                 "required": ["command"],
                 "additionalProperties": False,
@@ -67,9 +150,9 @@ TOOL_SCHEMAS = [
                 "Deprecated compatibility alias that always invokes a real Bash "
                 "executable. New calls must use shell, whose native Windows default is "
                 "PowerShell. This alias never means CMD."
-                " Same safety rules as shell: no unbounded/full-filesystem recursive "
-                "scans. Commands remain foreground unless the user explicitly chose "
-                "/bg; prefer file_list and log_query when they fit."
+                " Same safety rules as shell. Prefer task-related search locations; "
+                "whole-machine searches are not the default. Shell can be used directly. "
+                "Commands remain foreground unless the user explicitly chose /bg."
             ),
             "parameters": {
                 "type": "object",
@@ -83,9 +166,8 @@ TOOL_SCHEMAS = [
                         "exclusiveMinimum": 0,
                         "description": (
                             "Optional timeout in seconds for this command only. "
-                            "When omitted, the instance safety deadline is the configured "
-                            "default (600 s); "
-                            "values above the hard cap (1800 s) are reduced to the cap."
+                            "The effective instance/tool configuration sets the default "
+                            "and any cap; omitted timeout does not specify a new deadline."
                         ),
                     },
                 },
@@ -101,7 +183,9 @@ TOOL_SCHEMAS = [
                 "Safely search one UTF-8 text, log, JSONL, or NDJSON file for literal "
                 "terms. The implementation reads fixed-size chunks, escapes every term "
                 "instead of executing user regex, and returns bounded excerpts. Prefer "
-                "this over shell grep/ripgrep when records may be very long."
+                "this over shell grep/ripgrep when records may be very long. "
+                "Long scans report observed activity and remain cancellable. Partial "
+                "coverage is not absence; use the returned cursor to continue."
             ),
             "parameters": {
                 "type": "object",
@@ -129,6 +213,7 @@ TOOL_SCHEMAS = [
                         "maximum": 200,
                         "description": "Maximum returned matches. Default 30.",
                     },
+                    "cursor": {"type": "string", "description": "Opaque continuation; repeat the same path, terms and options in the same Run."},
                     "context_chars": {
                         "type": "integer",
                         "minimum": 0,
@@ -394,7 +479,9 @@ TOOL_SCHEMAS = [
             "name": "file_list",
             "description": (
                 "List files and directories at a given path. "
-                "Returns names, types (file/dir), and sizes."
+                "Returns names/types/sizes and truthful coverage, with a cursor for more. "
+                "Nonrecursive by default, including hidden entries for compatibility. "
+                "Use file_search for recursive discovery."
             ),
             "parameters": {
                 "type": "object",
@@ -411,6 +498,9 @@ TOOL_SCHEMAS = [
                         "type": "boolean",
                         "description": "If true, list recursively (default false).",
                     },
+                    "include_hidden": {"type": "boolean", "description": "Include hidden entries; default true for existing directory-listing compatibility."},
+                    "max_results": {"type": "integer", "minimum": 1, "maximum": 200},
+                    "cursor": {"type": "string", "description": "Continue with identical path/pattern/recursive settings."},
                 },
                 "required": ["path"],
             },

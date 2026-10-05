@@ -40,6 +40,7 @@ from orchestrator.function_worker_protocol import (
 )
 from orchestrator.runtime_contract import dependency_digest
 from orchestrator.telegram_ingress import CoreTelegramIngress
+from orchestrator.telegram_ingress_diagnostics import TelegramIngressDiagnostics, safe_error
 from orchestrator.telegram_delivery_errors import TelegramDeliveryError
 
 logger = logging.getLogger("BridgeU.Orchestrator")
@@ -1233,6 +1234,7 @@ class FunctionWorkerSupervisor:
         self._cached_generation: VerifiedFunctionGeneration | None = None
         self._cached_artifact: tuple[str, Path] | None = None
         self._telegram_ingress: dict[str, CoreTelegramIngress] = {}
+        self._telegram_ingress_diagnostics: dict[str, TelegramIngressDiagnostics] = {}
         self._telegram_status_failures: dict[str, tuple[str, str]] = {}
         self._telegram_status_warning_task: asyncio.Task[Any] | None = None
         self._last_telegram_status_warning: (
@@ -1467,18 +1469,27 @@ class FunctionWorkerSupervisor:
         if existing is not None:
             await existing.stop()
 
+        diagnostics = TelegramIngressDiagnostics(bridge_home=self.kernel.paths.bridge_home,
+            instance_id=str(getattr(self.kernel.global_cfg, "instance_id", "unknown")),
+            agent=name, generation_id=str(getattr(self.kernel, "shared_generation_id", "unknown")), token=str(token))
+        self._telegram_ingress_diagnostics[name] = diagnostics
         ingress = CoreTelegramIngress(
             agent_name=name,
             token=str(token),
             handle_lookup=lambda target: self.kernel._runtime_map().get(target),
             status_callback=lambda connected: self.set_worker_telegram_status(name, connected),
             checkpoint_callback=lambda offset: self._checkpoint_telegram_offset(name, offset),
+            diagnostics=diagnostics,
+            diagnostic_home=self.kernel.paths.bridge_home,
+            instance_id=str(getattr(self.kernel.global_cfg, "instance_id", "unknown")),
+            generation_id=str(getattr(self.kernel, "shared_generation_id", "unknown")),
         )
         offsets = getattr(self.kernel, "_handoff_offsets", {})
         if name in offsets:
             ingress.offset = offsets[name]
             drop_pending_updates = False
         ingress.drop_pending_on_start = drop_pending_updates
+        # Register before start so a failed initialization remains queryable.
         self._telegram_ingress[name] = ingress
         if not getattr(self.kernel, "_handoff_draining", False):
             await ingress.start(drop_pending_updates=drop_pending_updates)
@@ -1500,11 +1511,13 @@ class FunctionWorkerSupervisor:
 
     def telegram_ingress_snapshot(self, agent_name: str) -> dict[str, Any]:
         ingress = self._telegram_ingress.get(str(agent_name))
+        diagnostics = self._telegram_ingress_diagnostics.get(str(agent_name))
         return {
-            "configured": ingress is not None or bool(self._telegram_token(agent_name)),
+            "configured": ingress is not None or diagnostics is not None or bool(self._telegram_token(agent_name)),
             "running": bool(ingress is not None and ingress.is_running),
             "connected": bool(ingress is not None and ingress.connected),
             "offset": None if ingress is None else ingress.offset,
+            "diagnostics": None if diagnostics is None else diagnostics.snapshot(),
         }
 
     def _telegram_token(self, agent_name: str) -> str:
@@ -1512,15 +1525,24 @@ class FunctionWorkerSupervisor:
         config = getattr(handle, "config", None)
         key = getattr(config, "telegram_token_key", str(agent_name))
         return str(getattr(self.kernel, "secrets", {}).get(key) or "").strip()
+    def telegram_ingress_diagnostics(self, agent_name: str, *, limit: int = 20) -> dict[str, Any]:
+        diagnostics = self._telegram_ingress_diagnostics.get(str(agent_name))
+        if diagnostics is None:
+            return {"ok": False, "code": "telegram_ingress_not_configured"}
+        return diagnostics.read(limit=limit)
 
     def _queue_telegram_status_warning(self, agent_name: str, exc: Exception) -> None:
         name = str(agent_name)
-        self._telegram_status_failures[name] = (type(exc).__name__, str(exc))
+        error = safe_error(exc, stage="status_propagation")
+        diagnostics = self._telegram_ingress_diagnostics.get(name)
+        if diagnostics is not None:
+            diagnostics.failure(exc, stage="status_propagation", retry_seconds=None)
+        self._telegram_status_failures[name] = (error["type"], error["reason"])
         bridge_logger.debug(
             "Function Worker Telegram status propagation failed: agent=%s error=%s: %s",
             name,
-            type(exc).__name__,
-            exc,
+            error["type"],
+            error["reason"],
         )
         task = self._telegram_status_warning_task
         if task is None or task.done():
@@ -1592,6 +1614,7 @@ class FunctionWorkerSupervisor:
                 bool(connected),
             )
             return
+        failed = False
         try:
             client = handle.client
             result = await client.call(
@@ -1600,6 +1623,7 @@ class FunctionWorkerSupervisor:
                 timeout=30.0,
             )
         except Exception as exc:
+            failed = True
             self._queue_telegram_status_warning(name, exc)
         else:
             self._telegram_status_failures.pop(name, None)
@@ -1613,6 +1637,7 @@ class FunctionWorkerSupervisor:
                 and not getattr(self.kernel, "_handoff_draining", False)
                 and not getattr(self.kernel, "_connector_activation_pending", False)):
             reconcile()
+        return not failed
 
     async def prepare_worker(
         self,

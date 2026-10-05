@@ -166,6 +166,19 @@ def bind_flexible_runtime_handlers(runtime) -> None:
     runtime.app.add_handler(MessageHandler(filters.Sticker.ALL, runtime.handle_sticker))
 
 
+def get_flexible_picker_commands(runtime, *, locale: str | None = None) -> list[BotCommand]:
+    """Authorized client discovery; Telegram keeps its independent compact menu."""
+    commands = get_flexible_bot_commands(runtime, locale=locale)
+    dynamic = runtime_command_map()
+    for spec in COMMAND_SPECS:
+        visible = spec.menu_visible if spec.picker_visible is None else spec.picker_visible
+        if visible and not spec.menu_visible and spec.name not in dynamic:
+            commands.append(BotCommand(spec.name, ui_language.command_description(
+                spec.name, spec.description, locale=locale,
+            )))
+    return commands
+
+
 def get_flexible_bot_commands(runtime, *, locale: str | None = None) -> list[BotCommand]:
     selected = ui_language.normalize_locale(locale or ui_language.DEFAULT_LOCALE)
     commands = [

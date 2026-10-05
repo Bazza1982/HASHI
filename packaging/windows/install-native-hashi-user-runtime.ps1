@@ -27,6 +27,8 @@ param(
 
     [switch]$ApiGateway,
 
+    [switch]$SkipTranscription,
+
     [switch]$StartNow
 )
 
@@ -194,6 +196,32 @@ if (-not $PSCmdlet.ShouldProcess(
     "Install the shared native Windows launcher and register the $InstanceId logon task"
 )) {
     return
+}
+
+
+if (-not $SkipTranscription) {
+    $transcriptionProvisioner = Join-Path $HashiRoot 'scripts\provision_transcription_runtime.py'
+    if (-not (Test-Path -LiteralPath $transcriptionProvisioner -PathType Leaf)) {
+        throw 'Transcription runtime preparation failed: the isolated provisioner is missing.'
+    }
+    foreach ($checkOnly in @($false, $true)) {
+        $transcriptionArguments = @($transcriptionProvisioner, '--bridge-home', $HashiRoot)
+        if ($checkOnly) { $transcriptionArguments += '--check' }
+        $transcriptionExitCode = 1
+        $savedErrorActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            & $PythonExecutable @transcriptionArguments
+            if ($null -ne $LASTEXITCODE) { $transcriptionExitCode = [int]$LASTEXITCODE }
+        }
+        finally { $ErrorActionPreference = $savedErrorActionPreference }
+        if ($transcriptionExitCode -ne 0) {
+            throw 'Transcription runtime preparation failed; no runtime task was registered.'
+        }
+    }
+}
+else {
+    Write-Warning 'Local recording transcription was explicitly skipped for this deployment.'
 }
 
 New-Item -ItemType Directory -Path $sharedDirectory -Force | Out-Null

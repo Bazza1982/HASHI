@@ -392,6 +392,28 @@ python -m pip install -e ".[all]"
 The last command installs every declared optional integration and can be very
 large. See [Dependency profiles](DEPENDENCIES.md) before choosing it.
 
+The npm installer prepares the locked local transcription Function runtime by
+default, alongside the standard and privacy runtimes. It verifies native imports
+and versions before publishing `transcription-active.json`; `hashi` passes only
+that owned, version- and lock-matched helper to the selected instance. A failed
+speech dependency preparation reports that recording transcription is unavailable
+and preserves the previous helper selection. npm never installs speech packages
+into Core and does not create or modify an instance while preparing the helper.
+`HASHI_POSTINSTALL_NO_TRANSCRIPTION=1` is an explicit specialised-deployment opt-out.
+
+The native Windows and WSL user-runtime deployment templates also prepare and
+check the selected instance's sidecar before registering its task. `-WhatIf`
+does not provision anything. `-SkipTranscription` is an explicit opt-out and
+reports the missing local recording capability. These are installation operations;
+ordinary launch/reboot does not reinstall dependencies. A native import probe
+qualifies dependencies only: the first actual transcription may still need the
+configured Whisper model download and separate inference qualification.
+
+These defaults cover npm and checkout user-runtime deployments. They do not
+retroactively add transcription dependencies to existing instances, rebuild the
+separately capacity-limited offline portable artifact, or certify container
+images. Those deployment artifacts require their own isolated helper qualification.
+
 Local voice transcription is the exception to in-process feature installation:
 its native packages must not enter the Core environment. Provision and verify
 the instance-owned helper instead:

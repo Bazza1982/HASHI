@@ -419,7 +419,7 @@ async def test_add_agent_api_rejects_raw_config_and_publishes_public_intent(tmp_
         )
     )
 
-    assert created.status == 201
+    assert created.status == 201, created.text
     response = json.loads(created.text)
     assert response["ok"] is True
     assert response["agent"] == {

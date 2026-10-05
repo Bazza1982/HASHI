@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 import pytest
 
@@ -17,9 +18,12 @@ async def test_recursive_file_list_stops_after_bounded_entries(tmp_path: Path):
         {"path": str(tmp_path), "recursive": True}, tmp_path, tmp_path
     )
 
-    assert "1000 items shown" in output
-    assert "truncated" in output
-    assert len(output) < 100_000
+    assert "items shown" in output.output
+    coverage = json.loads(output.output.splitlines()[-1])
+    assert coverage["can_continue"] and coverage["next_cursor"]
+    assert not coverage["coverage_complete"]
+    assert 1 <= coverage["counters"]["files_enumerated"] <= 50
+    assert len(output.output) < 20_000
 
 
 @pytest.mark.asyncio

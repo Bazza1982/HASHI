@@ -929,6 +929,11 @@ class WorkbenchApiServer:
             "/api/device-capabilities/status",
             self.handle_device_capability_status,
         )
+        self.app.router.add_get('/api/v1/instance/identity', self.handle_instance_identity)
+        self.app.router.add_get('/api/v1/agents/{agent}/telegram/diagnostics', self.handle_telegram_diagnostics)
+        self.app.router.add_post('/api/v1/run-questions/tool', self.handle_question_tool)
+        self.app.router.add_get('/api/v1/sessions/{session_id}/questions', self.handle_session_questions)
+        self.app.router.add_post('/api/v1/sessions/{session_id}/questions/{question_id}/answer', self.handle_question_answer)
         self.app.router.add_get("/api/health", self.handle_health)
         self.app.router.add_get(
             "/api/runtime/reboot/operations/{operation_id}", self.handle_reboot_operation
@@ -942,6 +947,94 @@ class WorkbenchApiServer:
         self.runner = None
         self.site = None
         self.bind_host = None
+
+    def _strict_authenticated_owner(self, request):
+        if self._is_governed_profile():
+            return self._v1_owner_id(request)
+        if not self.admin_token or not self._check_admin_auth(request):
+            return None
+        return self._v1_owner_id(request)
+
+    async def handle_instance_identity(self, request):
+        if (not self._is_governed_profile() and not self.admin_token) or not self._check_admin_auth(request):
+            return web.json_response({'ok':False,'error_code':'not_authenticated'},status=401)
+        return web.json_response({'ok':True,'instance_id':str(self.global_config.instance_id),
+            'workbench_port':int(getattr(self,'bound_port',None) or self.global_config.workbench_port),
+            'protocol':'hashi-instance-identity-v1'},headers={'Cache-Control':'no-store'})
+
+    async def handle_telegram_diagnostics(self, request):
+        owner=self._strict_authenticated_owner(request)
+        if owner is None:
+            return web.json_response({'ok':False,'error_code':'not_authenticated'},status=401)
+        if self._is_governed_profile() and not self._check_admin_auth(request):
+            return web.json_response({'ok':False,'error_code':'diagnostics_forbidden'},status=403)
+        agent=str(request.match_info.get('agent') or '')
+        if agent not in self._runtime_map():
+            return web.json_response({'ok':False,'error_code':'agent_not_found'},status=404)
+        workers=getattr(self.orchestrator,'function_workers',None)
+        reader=getattr(workers,'telegram_ingress_diagnostics',None)
+        if not callable(reader):
+            return web.json_response({'ok':False,'error_code':'telegram_diagnostics_unavailable'},status=503)
+        try:
+            limit=int(request.query.get('limit','20'))
+            if not 1<=limit<=50:raise ValueError()
+            data=reader(agent,limit=limit)
+            return web.json_response(data,headers={'Cache-Control':'no-store'})
+        except (ValueError,TypeError):
+            return web.json_response({'ok':False,'error_code':'diagnostic_limit_invalid'},status=400)
+
+    def _questions(self):
+        if not hasattr(self,'_run_questions'):
+            from orchestrator.run_questions import RunQuestions
+            self._run_questions=RunQuestions(self.session_store)
+        return self._run_questions
+
+    @staticmethod
+    def _question_error(exc):
+        return web.json_response({'ok':False,'error_code':exc.code},status=exc.status)
+
+    async def handle_question_tool(self, request):
+        from orchestrator.run_questions import QuestionError,verify_tool_token
+        try:
+            claims=verify_tool_token(self.admin_token,request.headers.get('X-Hashi-Run-Question-Token',''),
+                instance_id=str(self.global_config.instance_id))
+            body=await request.json()
+            if not isinstance(body,dict):raise QuestionError('question_payload_invalid',400)
+            operation=body.pop('operation',None)
+            if operation=='create':
+                question=self._questions().create(request_id=claims['request_id'],agent_id=claims['agent_id'],payload=body)
+            elif operation=='get':
+                question=self._questions().get_answer(request_id=claims['request_id'],agent_id=claims['agent_id'],
+                    question_id=str(body.get('question_id') or ''))
+            else:raise QuestionError('question_operation_invalid',400)
+            return web.json_response({'ok':True,'question':question},headers={'Cache-Control':'no-store'})
+        except QuestionError as exc:return self._question_error(exc)
+        except (SessionNotFound,SessionConflict) as exc:return self._v1_error(exc)
+        except (ValueError,TypeError):return web.json_response({'ok':False,'error_code':'question_payload_invalid'},status=400)
+
+    async def handle_session_questions(self, request):
+        from orchestrator.run_questions import QuestionError
+        owner=self._strict_authenticated_owner(request)
+        if owner is None:return web.json_response({'ok':False,'error_code':'not_authenticated'},status=401)
+        try:
+            result=self._questions().list(session_id=str(request.match_info['session_id']),owner_id=owner)
+            return web.json_response({'ok':True,'questions':result},headers={'Cache-Control':'no-store'})
+        except QuestionError as exc:return self._question_error(exc)
+        except (SessionNotFound,SessionConflict) as exc:return self._v1_error(exc)
+
+    async def handle_question_answer(self, request):
+        from orchestrator.run_questions import QuestionError
+        owner=self._strict_authenticated_owner(request)
+        if owner is None:return web.json_response({'ok':False,'error_code':'not_authenticated'},status=401)
+        try:
+            body=await request.json()
+            if not isinstance(body,dict):raise QuestionError('question_payload_invalid',400)
+            question=self._questions().answer(session_id=str(request.match_info['session_id']),owner_id=owner,
+                question_id=str(request.match_info['question_id']),payload=body)
+            return web.json_response({'ok':True,'question':question,'receipt':'saved'},headers={'Cache-Control':'no-store'})
+        except QuestionError as exc:return self._question_error(exc)
+        except (SessionNotFound,SessionConflict) as exc:return self._v1_error(exc)
+        except (ValueError,TypeError):return web.json_response({'ok':False,'error_code':'question_payload_invalid'},status=400)
 
     def _learn_reply_route(self, text: str, reply_route: dict) -> None:
         """Auto-learn sender's routing info from reply_route metadata in hchat messages."""
@@ -4418,6 +4511,7 @@ class WorkbenchApiServer:
                 "schema_version": 2,
                 "source": "hashi_backend_registry",
                 "backends": backends,
+                "creation": self._agent_management_manager().creation_catalogue(),
             }
         )
 
@@ -4472,6 +4566,7 @@ class WorkbenchApiServer:
             "provider",
             "effort",
             "is_active",
+            "restricted",
         }
         unknown = set(payload) - allowed_keys
         if unknown:
@@ -4523,6 +4618,8 @@ class WorkbenchApiServer:
                 },
                 status=400,
             )
+        if not isinstance(payload.get("restricted", False), bool):
+            return web.json_response({"ok": False, "error": "restricted must be a boolean", "error_code": "invalid_request"}, status=400)
         for key in ("preset", "model", "effort", "provider"):
             value = payload.get(key)
             if value is not None and not isinstance(value, str):
@@ -4560,6 +4657,7 @@ class WorkbenchApiServer:
                     "provider": payload.get("provider"),
                     "effort": payload.get("effort"),
                     "is_active": is_active,
+                    "restricted": payload.get("restricted", False),
                 },
             )
             outcome = await self._agent_management_manager().dispatch(
@@ -5461,6 +5559,18 @@ class WorkbenchApiServer:
             # This check is strictly before invoking the Worker. Its code can
             # close an admission receipt as rejected, unlike an uncertain RPC.
             raise LiveVoiceError("live_admission_scope_changed", 409) from exc
+        from orchestrator.phone_context_handoff import PhoneContextError, load_handoff
+        try:
+            snapshot = load_handoff(self.session_store, str(proposal.phone_context_handoff_id or ""),
+                owner_id=binding.owner_id, agent_id=binding.agent_id,
+                session_id=binding.session_id, context_generation=binding.context_generation)
+            for key, value in (("call_id", binding.call_id), ("call_epoch", binding.call_epoch),
+                ("delegation_id", proposal.delegation_id), ("proposal_version", proposal.version),
+                ("proposal_digest", proposal.digest)):
+                if str(snapshot.get(key)) != str(value):
+                    raise PhoneContextError("phone_context_scope_changed", source=binding.session_id)
+        except PhoneContextError as exc:
+            raise LiveVoiceError(exc.code, 409) from exc
         runtime = self._runtime_map().get(binding.agent_id)
         if runtime is None:
             raise LiveVoiceError("live_agent_unavailable", 503)
@@ -5481,6 +5591,7 @@ class WorkbenchApiServer:
                     "session_message_display_text": proposal.text,
                     "session_context_generation": binding.context_generation,
                     "live_voice": {
+                        "phone_context_handoff_id": proposal.phone_context_handoff_id,
                         "call_id": binding.call_id,
                         "call_epoch": binding.call_epoch,
                         "delegation_id": proposal.delegation_id,

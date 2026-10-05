@@ -7,12 +7,14 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { preparedPrivacyPython } = require('./privacy-runtime');
+const { preparedTranscriptionPython, transcriptionLockDigest } = require('./transcription-runtime');
 
 const HASHI_ROOT = __dirname;
 const PACKAGE = require(path.join(HASHI_ROOT, 'package.json'));
 const LOCK = path.join(HASHI_ROOT, 'constraints', 'standard-py312.lock');
 const RUNTIME_CHECK = path.join(HASHI_ROOT, 'scripts', 'check_runtime_contract.py');
 const PRIVACY_SETUP = path.join(HASHI_ROOT, 'scripts', 'provision_privacy_runtime.py');
+const TRANSCRIPTION_SETUP = path.join(HASHI_ROOT, 'scripts', 'provision_transcription_runtime.py');
 
 function dataRoot() {
   if (process.env.HASHI_DATA_ROOT) return path.resolve(process.env.HASHI_DATA_ROOT);
@@ -103,6 +105,57 @@ function tryPreparePrivacy(base, versionRoot) {
     preparePrivacy(base, versionRoot);
   } catch (_) {
     process.stderr.write('Level 2 privacy detector setup is incomplete; Level 2 remains unavailable.\n');
+  }
+}
+
+
+function prepareTranscription(base, versionRoot) {
+  if (process.env.HASHI_POSTINSTALL_NO_TRANSCRIPTION === '1') {
+    process.stdout.write('Local transcription setup was skipped by request; recording transcription remains unavailable.\n');
+    return false;
+  }
+  const ready = (python) => {
+    const runtimeDir = path.dirname(path.dirname(python));
+    const result = spawnSync(base.command, [
+      ...base.prefix, TRANSCRIPTION_SETUP,
+      '--bridge-home', runtimeDir, '--runtime-dir', runtimeDir, '--check',
+    ], { stdio: 'ignore', windowsHide: true, timeout: 120_000 });
+    return result.status === 0;
+  };
+  let buildRoot = '';
+  try {
+    const active = preparedTranscriptionPython(versionRoot, PACKAGE.version);
+    if (active && ready(active)) {
+      process.stdout.write('HASHI local transcription dependency runtime is ready.\n');
+      return true;
+    }
+    buildRoot = path.join(versionRoot, `transcription-${Date.now()}-${crypto.randomUUID()}`);
+    fs.mkdirSync(buildRoot, { recursive: true, mode: 0o700 });
+    // The preparation home is this disposable Function artifact, never an
+    // instance or the approved Core virtual environment. The provisioner owns
+    // locked pip installation and native import/version validation.
+    const install = spawnSync(base.command, [
+      ...base.prefix, TRANSCRIPTION_SETUP,
+      '--bridge-home', buildRoot, '--runtime-dir', buildRoot,
+    ], { stdio: 'inherit', windowsHide: true, timeout: 960_000 });
+    const python = preparedPython(buildRoot);
+    if (install.status !== 0 || !ready(python)) throw new Error('transcription probe failed');
+    const receipt = JSON.parse(fs.readFileSync(
+      path.join(buildRoot, 'state', 'platform', 'transcription.json'), 'utf8'
+    ));
+    if (receipt.schema_version !== 1 || receipt.python !== python ||
+        receipt.runtime_dir !== buildRoot || receipt.lock_sha256 !== transcriptionLockDigest()) {
+      throw new Error('transcription receipt did not match this generation');
+    }
+    atomicJson(path.join(versionRoot, 'transcription-active.json'), {
+      ...receipt, program_version: PACKAGE.version, prepared_at: new Date().toISOString(),
+    });
+    process.stdout.write('HASHI local transcription dependency runtime is ready.\n');
+    return true;
+  } catch (_) {
+    if (buildRoot) safeRemoveBuild(versionRoot, buildRoot);
+    process.stderr.write('Local transcription setup is incomplete; recording transcription remains unavailable. Reinstall HASHI after fixing runtime prerequisites.\n');
+    return false;
   }
 }
 
@@ -204,6 +257,7 @@ function main() {
       if (checkRuntime(candidate, true)) {
         process.stdout.write(`✓ HASHI ${PACKAGE.version} isolated runtime is ready.\n`);
         tryPreparePrivacy(base, versionRoot);
+        prepareTranscription(base, versionRoot);
         process.stdout.write('No instance data was changed. Run `hashi` to create or select an instance.\n\n');
         return 0;
       }
@@ -244,11 +298,14 @@ function main() {
   });
   process.stdout.write(`✓ HASHI ${PACKAGE.version} isolated runtime is ready.\n`);
   tryPreparePrivacy(base, versionRoot);
+  prepareTranscription(base, versionRoot);
   process.stdout.write('No instance data was changed. Run `hashi` to create or select an instance.\n\n');
   return 0;
 }
 
 module.exports = {
+  main,
+  prepareTranscription,
   atomicJson,
   dataRoot,
   isInsideOrEqual,

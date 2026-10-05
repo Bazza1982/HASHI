@@ -19,7 +19,9 @@ from orchestrator.flexible_backend_registry import (
 )
 
 
-def get_available_models(engine: str, *, backend: Mapping | None = None) -> list[str]:
+def get_available_models(
+    engine: str, *, backend: Mapping | None = None, allowed_backends=()
+) -> list[str]:
     """Grant all known models by default; only an explicit allow-list narrows it.
 
     Selecting ``model`` or adding ``models`` is not a restriction. An optional
@@ -27,6 +29,14 @@ def get_available_models(engine: str, *, backend: Mapping | None = None) -> list
     including an empty list. Public projections are never written back to it.
     """
     engine = canonical_backend_engine(engine)
+    if backend is None and allowed_backends:
+        rows = [row for row in allowed_backends
+                if canonical_backend_engine(row.get("engine")) == engine]
+        if rows:
+            return list(dict.fromkeys(
+                model for row in rows
+                for model in get_available_models(engine, backend=row)
+            ))
     models = registry_models(engine)
     if engine == "codex-cli":
         models.extend(model for model in native_model_catalogue() if model not in models)

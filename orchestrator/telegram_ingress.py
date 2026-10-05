@@ -7,6 +7,9 @@ import inspect
 import logging
 from collections.abc import Callable
 from typing import Any
+from pathlib import Path
+
+from orchestrator.telegram_ingress_diagnostics import TelegramIngressDiagnostics
 
 from telegram import Bot, Update
 
@@ -17,6 +20,10 @@ TELEGRAM_LONG_POLL_SECONDS = 30
 TELEGRAM_READ_TIMEOUT_SECONDS = 40
 TELEGRAM_POLL_WATCHDOG_SECONDS = TELEGRAM_READ_TIMEOUT_SECONDS + 5
 TELEGRAM_RETRY_SECONDS = 2.0
+
+
+class TelegramIngressInitializationError(RuntimeError):
+    """Safe initialization failure; detailed facts stay in the private sink."""
 
 
 class CoreTelegramIngress:
@@ -37,13 +44,26 @@ class CoreTelegramIngress:
         status_callback: Callable[[bool], Any] | None = None,
         bot_factory: Callable[[str], Any] = Bot,
         checkpoint_callback: Callable[[int], Any] | None = None,
+        diagnostic_home: Path | None = None,
+        instance_id: str = "unknown",
+        generation_id: str = "unknown",
+        diagnostics: TelegramIngressDiagnostics | None = None,
     ) -> None:
         self.agent_name = str(agent_name)
         self.token = str(token)
         self.handle_lookup = handle_lookup
         self.status_callback = status_callback
         self.checkpoint_callback = checkpoint_callback
-        self.bot = bot_factory(self.token)
+        self._status_propagation_failed = False
+        self.diagnostics = diagnostics or TelegramIngressDiagnostics(bridge_home=diagnostic_home,
+            instance_id=instance_id, agent=self.agent_name,
+            generation_id=generation_id, token=self.token)
+        self.diagnostics.begin("bot_initialization")
+        try:
+            self.bot = bot_factory(self.token)
+        except Exception as exc:
+            self.diagnostics.failure(exc, stage="bot_initialization", retry_seconds=None)
+            raise TelegramIngressInitializationError(type(exc).__name__) from None
         self.offset: int | None = None
         self.task: asyncio.Task[None] | None = None
         self.connected = False
@@ -74,10 +94,15 @@ class CoreTelegramIngress:
 
     async def _run(self) -> None:
         while not self._stopping:
+            stage = "route_lookup"
             try:
                 if not self._initialized:
                     try:
+                        stage = "bot_initialization"
+                        self.diagnostics.begin(stage)
                         await self.bot.initialize()
+                        stage = "webhook_initialization"
+                        self.diagnostics.stage(stage)
                         drop_pending = self._drop_pending_on_connect
                         # A timeout may hide a successful server-side deletion.
                         # Never discard newly arrived updates on a retry.
@@ -92,10 +117,13 @@ class CoreTelegramIngress:
                         except Exception:
                             pass
                         raise
+                stage = "route_lookup"
                 handle = self.handle_lookup(self.agent_name)
                 if handle is not None and getattr(handle, "route_is_gated", False):
                     await asyncio.sleep(0.05)
                     continue
+                stage = "get_updates"
+                self.diagnostics.begin(stage, deadline=TELEGRAM_POLL_WATCHDOG_SECONDS)
                 poll = asyncio.create_task(
                     self.bot.get_updates(
                         offset=self.offset,
@@ -109,13 +137,17 @@ class CoreTelegramIngress:
                     updates = await asyncio.wait_for(
                         poll, timeout=TELEGRAM_POLL_WATCHDOG_SECONDS
                     )
+                except TimeoutError:
+                    stage = "watchdog"
+                    raise
                 except asyncio.CancelledError:
                     if self._stopping and poll.cancelled():
                         break
                     raise
                 finally:
                     self._poll_task = None
-                await self._set_connected(True)
+                self.diagnostics.poll_succeeded()
+                status_ok = await self._set_connected(True)
                 for update in updates:
                     if self._stopping:
                         break
@@ -126,20 +158,21 @@ class CoreTelegramIngress:
                         )
                     if getattr(handle, "route_is_gated", False):
                         break
+                    stage = "worker_delivery"
+                    self.diagnostics.stage(stage)
                     await handle.deliver_telegram_update(update.to_dict())
                     self.offset = int(update.update_id) + 1
                     if self.checkpoint_callback is not None:
+                        stage = "offset_checkpoint"
+                        self.diagnostics.stage(stage)
                         self.checkpoint_callback(self.offset)
+                if status_ok and not self._stopping:
+                    self.diagnostics.recovered()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                self.diagnostics.failure(exc, stage=stage, retry_seconds=TELEGRAM_RETRY_SECONDS)
                 await self._set_connected(False)
-                logger.warning(
-                    "Telegram ingress retry for %s after %s: %s",
-                    self.agent_name,
-                    type(exc).__name__,
-                    exc,
-                )
                 if not self._stopping:
                     await asyncio.sleep(TELEGRAM_RETRY_SECONDS)
 
@@ -167,15 +200,12 @@ class CoreTelegramIngress:
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        self.diagnostics.stopped()
         await self._set_connected(False, notify_status=notify_status)
         try:
             await self.bot.shutdown()
         except Exception as exc:
-            logger.warning(
-                "Telegram ingress shutdown warning for %s: %s",
-                self.agent_name,
-                exc,
-            )
+            self.diagnostics.failure(exc, stage="bot_shutdown", retry_seconds=None)
         self._initialized = False
         bridge_logger.info(
             "Core Telegram ingress stopped: agent=%s",
@@ -187,18 +217,27 @@ class CoreTelegramIngress:
         connected: bool,
         *,
         notify_status: bool = True,
-    ) -> None:
-        changed = self.connected != bool(connected)
+    ) -> bool:
+        changed = self.connected != bool(connected) or self._status_propagation_failed
         self.connected = bool(connected)
         if not changed or not notify_status or self.status_callback is None:
-            return
+            return not self._status_propagation_failed
         try:
             result = self.status_callback(self.connected)
             if inspect.isawaitable(result):
-                await result
+                result = await result
+            if result is False:
+                self._status_propagation_failed = True
+                return False
         except Exception as exc:
-            logger.warning(
-                "Telegram ingress status propagation failed for %s: %s",
-                self.agent_name,
-                exc,
-            )
+            self.diagnostics.failure(exc, stage="status_propagation", retry_seconds=None)
+            self._status_propagation_failed = True
+            return False
+        self._status_propagation_failed = False
+        return True
+
+    def diagnostic_snapshot(self) -> dict[str, Any]:
+        return self.diagnostics.snapshot()
+
+    def read_diagnostics(self, *, limit: int = 20) -> dict[str, Any]:
+        return self.diagnostics.read(limit=limit)

@@ -145,6 +145,7 @@ class AgentManagementAction:
                 "provider",
                 "effort",
                 "is_active",
+                "restricted",
             }:
                 raise ValueError("unknown Agent creation action field")
             if not isinstance(payload.get("backend"), str) or not str(
@@ -153,6 +154,8 @@ class AgentManagementAction:
                 raise ValueError("Agent creation backend is required")
             if not isinstance(payload.get("is_active", False), bool):
                 raise ValueError("Agent creation is_active must be boolean")
+            if not isinstance(payload.get("restricted", False), bool):
+                raise ValueError("Agent creation restricted must be boolean")
             for field in ("display_name", "model", "provider", "effort"):
                 value = payload.get(field)
                 if value is not None and not isinstance(value, str):
@@ -227,6 +230,16 @@ class AgentManagementManager:
             orchestrator=self.kernel,
             session_store=session_store,
         )
+
+    def _creation(self) -> AgentCreationService:
+        return AgentCreationService(
+            self.kernel.paths,
+            global_config=getattr(self.kernel, "global_cfg", None),
+            admin=self._admin,
+        )
+
+    def creation_catalogue(self) -> dict:
+        return self._creation().creation_catalogue()
 
     def _agent_row(self, agent_id: str) -> dict[str, Any] | None:
         raw = self._admin.load_raw_config()
@@ -649,13 +662,9 @@ class AgentManagementManager:
             provider=str(payload["provider"]) if payload.get("provider") is not None else None,
             effort=str(payload["effort"]) if payload.get("effort") is not None else None,
             is_active=bool(payload.get("is_active", False)),
+            restricted=bool(payload.get("restricted", False)),
         )
-        global_config = getattr(self.kernel, "global_cfg", None)
-        result = AgentCreationService(
-            self.kernel.paths,
-            global_config=global_config,
-            admin=self._admin,
-        ).create(spec)
+        result = self._creation().create(spec)
         lifecycle = {
             "ok": True,
             "status": "inactive",

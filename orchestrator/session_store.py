@@ -363,7 +363,7 @@ class SessionStore:
     per-Session working files are derived state used by Memory+ and Compact.
     """
 
-    SCHEMA_VERSION = 22
+    SCHEMA_VERSION = 23
 
     def __init__(
         self,
@@ -1214,6 +1214,8 @@ class SessionStore:
                     ON live_fragments(call_id, call_epoch, start_ms);
                 """
             )
+            from orchestrator.phone_context_handoff import initialize_schema as initialize_phone_context_schema
+            initialize_phone_context_schema(connection)
             # Upgrade older split inboxes into one sequence so transcript and
             # delegation replay keeps the Provider's per-call receive order.
             connection.execute(
@@ -2729,6 +2731,8 @@ class SessionStore:
                     run_ids,
                 )
             for table in (
+                "phone_context_handoffs",
+                "phone_context_consumption",
                 "voice_transcripts",
                 "runtime_event_correlations",
                 "run_approvals",

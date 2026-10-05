@@ -16,8 +16,8 @@ from tools.workbench_client import (
 )
 from orchestrator.file_permissions import tighten_fd_permissions
 
-CONTEXT_SCHEMA_VERSION = 5
-_COMPATIBLE_CONTEXT_SCHEMA_VERSIONS = frozenset({3, 4, CONTEXT_SCHEMA_VERSION})
+CONTEXT_SCHEMA_VERSION = 6
+_COMPATIBLE_CONTEXT_SCHEMA_VERSIONS = frozenset({3, 4, 5, CONTEXT_SCHEMA_VERSION})
 
 # LEGACY HER V1 ONLY. The subprocess Tool Gateway is not part of HERV3 or any
 # direct API backend. Its circuit breakers remain solely to contain a retired
@@ -93,6 +93,8 @@ class GatewayContext:
     enforce_legacy_limits: bool = False
     global_context: dict[str, Any] = field(default_factory=dict)
     canonical_audit: dict[str, Any] = field(default_factory=dict)
+    access_roots: list[str] = field(default_factory=list)
+    search_scope: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_registry(
@@ -132,6 +134,11 @@ class GatewayContext:
             .rstrip("/")
         )
         global_config = effective_audit.get("global_config")
+        if allowed_tools.intersection({"ask_user", "get_user_answer"}) and audit.get("request_id") and registry.secrets.get("workbench_admin_token"):
+            from orchestrator.run_questions import issue_tool_token
+            scoped_secrets["run_question_token"] = issue_tool_token(registry.secrets["workbench_admin_token"],
+                instance_id=str(getattr(global_config, "instance_id", None) or audit.get("instance_id") or ""),
+                agent_id=str(audit.get("agent_name") or ""), request_id=str(audit["request_id"]))
         canonical = getattr(registry, "canonical_audit", None)
         return cls(
             schema_version=CONTEXT_SCHEMA_VERSION,
@@ -139,6 +146,8 @@ class GatewayContext:
             backend=backend,
             workspace_dir=str(registry.workspace_dir.resolve()),
             access_root=str(registry.access_root.resolve()),
+            access_roots=[str(root) for root in registry.access_roots],
+            search_scope=_json_safe(registry.search_scope) or {},
             media_roots=[
                 str(Path(root).expanduser().resolve())
                 for root in (
@@ -178,6 +187,11 @@ class GatewayContext:
             global_context=(
                 {
                     "instance_id": str(getattr(global_config, "instance_id", "HASHI")),
+                    # Paths are authority facts, not secret contents. Preserve
+                    # the same read/execute protection through the CLI gateway.
+                    **{key: str(getattr(global_config, key)) for key in
+                       ("project_root", "bridge_home", "secrets_path")
+                       if getattr(global_config, key, None) is not None},
                     "central_memory": _json_safe(
                         getattr(global_config, "central_memory", None) or {}
                     ),
@@ -221,6 +235,8 @@ class GatewayContext:
         return ToolRegistry(
             allowed_tools=self.allowed_tools,
             access_root=Path(self.access_root),
+            access_roots=[Path(root) for root in self.access_roots],
+            search_scope=self.search_scope,
             workspace_dir=Path(self.workspace_dir),
             secrets=self.secrets,
             tool_options=self.tool_options,

@@ -115,7 +115,7 @@ def _catalogue(runtime, locale):
     from orchestrator import ui_language
     from orchestrator.command_specs import COMMAND_SPECS
     from orchestrator.command_registry import runtime_command_map
-    from orchestrator.runtime_command_binding import get_flexible_bot_commands
+    from orchestrator.runtime_command_binding import get_flexible_picker_commands
     from orchestrator.admin_local_testing import supported_commands
     specs = {s.name: s for s in COMMAND_SPECS}
     dynamic = runtime_command_map()
@@ -123,7 +123,7 @@ def _catalogue(runtime, locale):
     # Both Telegram and this projection derive from the same owner. Dynamic
     # overrides win, just as the runtime registry does, with no second list.
     records = {}
-    for cmd in get_flexible_bot_commands(runtime, locale=locale):
+    for cmd in get_flexible_picker_commands(runtime, locale=locale):
         name = cmd.command
         if name not in available:
             continue
@@ -282,17 +282,22 @@ async def dispatch_command_interaction(runtime, payload: Mapping, metadata: Mapp
                             menu.closed = True
                             menu.actions.clear()
                             capture._record(menu)
+                        code = result.get("error_code") or "command_menu_command_failed"
                         return {**capture.result(), "ok": False,
-                                "error_code": "command_menu_command_failed",
-                                "error": "command_menu_command_failed", "http_status": 400}
+                                "error_code": code, "error": code,
+                                "request_outcome": result.get("request_outcome", "unknown"),
+                                "http_status": 400}
                     extra = {}
                     if "result" in result:
                         extra["result"] = result["result"]
-                    return capture.result(
+                    response = capture.result(
                         refresh_required=before != _refresh_signature(runtime),
                         command_invocation=typed_invocations[0],
                         **extra,
                     )
+                    if result.get("derived_request_id"):
+                        response.update(derived_request_id=result["derived_request_id"], request_outcome="accepted")
+                    return response
                 if op == "close":
                     menu = store.require(payload.get("menu_id"), binding, payload.get("revision"))
                     typed_invocations.append(
