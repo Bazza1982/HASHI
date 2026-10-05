@@ -1510,6 +1510,38 @@ def test_trusted_peer_stays_accepted_while_periodic_revalidation_runs():
     assert recorded[-1][1]["state"] == "handshake_accepted"
 
 
+@pytest.mark.parametrize("hint_source", ["peer", "profile", "none"])
+def test_handshake_does_not_publish_known_same_host_loopback_as_new_discovery(hint_source):
+    manager = object.__new__(ProtocolManager)
+    peer = PeerInfo(
+        instance_id="HASHI2", display_name="HASHI2", host="192.0.2.2", port=8767,
+        workbench_port=18802, platform="wsl",
+        properties={"handshake_state": "handshake_pending", "preferred_backend": "lan",
+                    **({"same_host_loopback": "127.0.0.1"} if hint_source == "peer" else {})},
+    )
+    observed, accepted = [], []
+    manager._peer_registry = SimpleNamespace(
+        get_peers=lambda: [peer], on_peers_changed=lambda peers: observed.extend(peers),
+        mark_handshake_result=lambda _iid, **kwargs: accepted.append(kwargs),
+    )
+    manager._instance_info = {"instance_id": "HASHI1", "platform": "wsl"}
+    manager._handshake_timeout_seconds = 1
+    manager._candidate_hosts_for_peer = lambda _peer: ["127.0.0.1"]
+    manager._candidate_urls = lambda host, port, path: [f"http://{host}:{port}{path}"]
+    manager._local_network_profile = lambda: {}
+    manager._load_instances = lambda: {}
+    manager._same_machine_hint = lambda _entry: hint_source == "profile"
+    manager.get_local_agents_snapshot = lambda: []
+    manager.get_local_agent_directory_state = lambda: {}
+    manager._post_json = lambda *_args, **_kwargs: {
+        "status": "handshake_accept", "instance_id": "HASHI2", "agents": [],
+    }
+    asyncio.run(manager._handshake_once())
+    assert accepted[-1]["state"] == "handshake_accepted"
+    assert len(observed) == (1 if hint_source == "none" else 0)
+    assert peer.host == "192.0.2.2"
+
+
 def test_control_loop_retries_bootstrap_after_startup_window():
     manager = object.__new__(ProtocolManager)
     manager._running = True
