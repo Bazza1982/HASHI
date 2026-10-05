@@ -24,6 +24,8 @@ The paired Workbench branch supplies `tests/acceptance/simple_upgrade.test.mjs`.
 
 For repository tests clear unrelated inherited `PYTHONPATH` in the command's environment. Another checkout's package metadata can otherwise alter the parent dependency fingerprint while the isolated child correctly ignores that path. Do not disable runtime fingerprint checks or modify a live environment to hide the mismatch. The focused CI uses Python 3.12.13, matching the runtime policy.
 
+The curated gate's unrelated-dependency-drift probe initializes and stages the full Function contract even with an empty requested module list. Its compatibility test now uses the existing bounded product probe deadline (180 seconds), rather than a separate 20-second override that also timed out on canonical main. All fingerprint, locked-dependency and receipt assertions remain intact; no production deadline or protected Core source changed. This is a compatibility check, not a startup performance measurement. Cold preparation performance remains a separate concern.
+
 Logged-in website acceptance and installer signing remain release checks. Full remote desktop capability registration without accessible existing device bootstrap is not supplied by this change. Do not advertise it as working or bypass registration. Windows+WSL uses the existing per-user native Worker/shared bootstrap arrangement.
 
 Apply Functions through the supported instance-adoption flow. No protected Core source, user agents.json, credentials, running process, installed service, or browser extension installation is changed by this branch. Keep the other repository at the matching `simple-upgrade` branch for paired acceptance.
