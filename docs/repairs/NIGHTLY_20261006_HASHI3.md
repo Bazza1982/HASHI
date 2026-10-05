@@ -1,0 +1,71 @@
+# Nightly inbox repairs on HASHI3, 2026-10-06
+
+The user authorized reviewing every unresolved inbox item, repairing/testing on
+HASHI3, modifying/reloading Workbench and restarting HASHI3. This does not authorize
+production HASHI4 adoption or a Core major migration. The existing development
+consolidation contains prior PAO/PCM/HERV3/Frontend Connector repairs; historical
+inbox states are not evidence that those implementations are still absent.
+
+Owners: PAO owns transcript projection, capability facts and creation policy;
+PCM owns context; Frontend Connector owns Workbench presentation/transport.
+All code changes remain Functions or the independent Workbench repository.
+
+## Current changes
+
+- HN-20261006-001: canonical messages retain their source order; log-only rows
+  are interleaved between shared anchors by UTC instant before pagination.
+  The returned cursor acknowledges only visible canonical records. Combined
+  overflow correctly reports incomplete history. Eight scheduled results after
+  sixty old log rows are retained, deduplicated and not replayed by the next poll.
+- HN-20261004-011: reaching the top of the rendered window reveals already
+  retained history even when the server has no more pages. The viewport anchor
+  remains stable. History requests and rendering are fenced by connection,
+  Session/context and request lifetime; stale completion cannot mutate a new view.
+- HN-20261004-001: system/custom avatar preferences use the authenticated Remote
+  instance identity instead of a connection alias/address. Browser endpoint
+  headers still fence stale requests. Authentication failure supplies no fallback
+  identity; failure is not cached. The currently verified route carries its legacy
+  preferences once, retaining originals and never overriding a newer stable scope.
+- HN-20261004-003: saved selections, first-load selection, panel ordering and new
+  selections retain all Agents. There is no hidden nine-Agent truncation.
+- HN-20261004-002: Workbench renders PAO pending questions in their actual Session
+  and submits an authenticated answer to that question, without creating a Run.
+  Choices are not preselected. A lost response preserves the exact answer/key for
+  explicit retry; foreign/stale questions are excluded. Four UI locales derive
+  from one renderer catalogue. Backend scope/expiry/idempotency remain PAO-owned.
+- HN-20261003-001: voice preflight reads the chosen Agent's actual native-audio
+  readiness before requesting microphone access. Unsupported voice displays a
+  clear notice, disables capture and offers no ineffective recording retry.
+- HN-20261004-005/006: the already implemented PAO template contract is enabled
+  explicitly in ignored HASHI3 configuration using configured `agent1` as the
+  general-purpose policy source. This grants no template identity, tools, secrets
+  or workspace permissions. Restricted creation remains supported. Native audio
+  is enabled on HASHI3 only; a declaration alone is not a transcription pass.
+- An additional reproduced PCM reference defect truncated the shipped FYI at
+  12,000 characters, hiding later guidance. Historical approvals/receipts are
+  archived intact; the active reference retains all owner/security rules and
+  fits the existing budget without changing the loader or widening context.
+
+## Evidence
+
+The ignored `.tmp/nightly-20261006/evidence` directory records actual commands,
+exit codes, output and red mutation receipts. The history regression failed on
+the initial source and the complete owner module passed after repair. Avatar,
+selection and chronology regressions failed before repair. Reversible actual
+renderer/owner mutations independently rejected frozen-history, foreign-question,
+premature microphone and address-bound avatar behavior; bytes were restored.
+
+Focused backend history: 33 passed. Existing creation/Phone/questions/wiki/Telegram
+component baseline: 113 passed. External question HTTP/card checks preserve the
+exact idempotent payload and confirm no Run submission. Active FYI: red truncation
+reproduced, then 3 passed after documentation repair. Full offline and frontend
+checks, committed source qualification, runtime adoption and native frontend
+observations are recorded separately below when complete.
+
+## Boundaries still requiring evidence
+
+External credentials/provider retirement cannot be repaired by replaying old
+business requests. Current CLI hooks need a harmless real-CLI denial probe;
+historical reverted experiments are not protection. Physical phone/audio and
+the dual-browser matrix cannot be inferred from synthetic/component checks.
+Other-instance adoption and main merges stay outside this turn's HASHI3 scope.

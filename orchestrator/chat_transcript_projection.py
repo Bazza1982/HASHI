@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import deque
+from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -63,16 +64,22 @@ def build_chat_projection(
             )
             for item in canonical
         ]
-        payload["messages"] = _merge_snapshot_rows(
+        merged_rows = _merge_snapshot_rows(
             canonical_rows,
             payload["messages"],
-            limit=limit,
+            limit=len(canonical_rows) + len(payload["messages"]),
         )
+        payload["messages"] = merged_rows[-limit:]
         payload["history_complete"] = bool(
             payload.get("history_complete") and not canonical_overflow
+            and len(merged_rows) <= limit
         )
-        if canonical_rows:
-            message_cursor = int(canonical_rows[-1].get("source_sequence") or 0)
+        # A snapshot may trim rows that are available only from SessionStore.
+        # Never acknowledge a newer canonical row that the client did not get.
+        message_cursor = max(
+            (int(row.get("source_sequence") or 0) for row in payload["messages"]
+             if row.get("canonical")), default=0,
+        )
     elif after_message_ordinal is not None:
         canonical = store.visible_messages_after(
             session["session_id"],
@@ -389,38 +396,63 @@ def _merge_snapshot_rows(
     *,
     limit: int,
 ) -> list[dict]:
-    """Prepend imported canonical rows without displacing transcript-only events."""
+    """Weave log-only events into canonical order before taking a page.
 
-    by_ref = {str(item["message_ref"]): item for item in canonical_rows}
-    if not any(str(item.get("message_ref") or "") in by_ref for item in transcript_rows):
-        return (canonical_rows + transcript_rows)[-limit:]
+    SessionStore ordinals and JSONL byte offsets are different domains. Shared
+    message identities anchor log events; explicit instants locate disjoint
+    batches. Missing timestamps retain the order between the nearest anchors.
+    """
+    if not canonical_rows:
+        return transcript_rows[-limit:] if limit else []
 
-    merged: list[dict] = []
-    emitted: set[str] = set()
-    canonical_index = 0
-    for transcript_row in transcript_rows:
-        message_ref = str(transcript_row.get("message_ref") or "")
-        matched = by_ref.get(message_ref)
-        if matched is None:
-            merged.append(transcript_row)
+    def instant(row: dict) -> datetime | None:
+        value = row.get("created_at") or row.get("ts")
+        if not isinstance(value, str):
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return parsed.astimezone(timezone.utc) if parsed.tzinfo else None
+        except ValueError:
+            return None
+
+    indices = {str(row["message_ref"]): index for index, row in enumerate(canonical_rows)}
+    anchors = [indices.get(str(row.get("message_ref") or "")) for row in transcript_rows]
+    next_anchor = len(canonical_rows)
+    upper_bounds = [next_anchor] * len(transcript_rows)
+    for index in range(len(transcript_rows) - 1, -1, -1):
+        if anchors[index] is not None:
+            next_anchor = anchors[index]
+        upper_bounds[index] = next_anchor
+    times = [instant(row) for row in canonical_rows]
+    slots: list[list[dict]] = [[] for _ in range(len(canonical_rows) + 1)]
+    lower = 0
+    previous_anchor: int | None = None
+    emitted = set(indices)
+    for index, row in enumerate(transcript_rows):
+        anchor = anchors[index]
+        if anchor is not None:
+            previous_anchor = anchor
+            lower = anchor + 1
             continue
-        target_ordinal = int(matched.get("source_sequence") or 0)
-        while canonical_index < len(canonical_rows):
-            candidate = canonical_rows[canonical_index]
-            candidate_ordinal = int(candidate.get("source_sequence") or 0)
-            if candidate_ordinal > target_ordinal:
-                break
-            candidate_ref = str(candidate["message_ref"])
-            if candidate_ref not in emitted:
-                merged.append(candidate)
-                emitted.add(candidate_ref)
-            canonical_index += 1
-    for candidate in canonical_rows[canonical_index:]:
-        candidate_ref = str(candidate["message_ref"])
-        if candidate_ref not in emitted:
-            merged.append(candidate)
-            emitted.add(candidate_ref)
-    return merged[-limit:]
+        ref = str(row.get("message_ref") or "")
+        if ref and ref in emitted:
+            continue
+        upper = max(lower, upper_bounds[index])
+        at = instant(row)
+        slot = upper if previous_anchor is None else lower
+        if at is not None:
+            slot = next((candidate for candidate in range(lower, upper)
+                         if times[candidate] is not None and at <= times[candidate]), upper)
+        slots[slot].append(row)
+        lower = slot
+        if ref:
+            emitted.add(ref)
+    merged = []
+    for index, row in enumerate(canonical_rows):
+        merged.extend(slots[index])
+        merged.append(row)
+    merged.extend(slots[-1])
+    return merged[-limit:] if limit else []
 
 
 def _cursor_at_record_boundary(stream, offset: int, size: int) -> bool:
