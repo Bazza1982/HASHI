@@ -1,5 +1,15 @@
 # HASHI Agent FYI
 
+2026-10-05 the user required HASHI2 call acceptance through their ordinary
+Workbench. Its normal Windows service now serves the reviewed call client, with
+the new path scoped to HASHI2 and existing connection/user state preserved.
+Focused checks (75), the production build and an actual frontend start/listening/
+confirmed-end handshake passed. That handshake sent no media/model turn;
+physical devices, conversation feel and responsiveness remain open. HASHI2 Core
+and shared Functions were unchanged. The call task now points to the ordinary
+frontend; old previews and evidence remain intact. See the
+[deployment update](HASHI_CALL_INTERACTION_2026-10-04.md).
+
 2026-10-04 call interaction correction is approved for the isolated HASHI2
 experiment, with Frontend Connector/PCM/PAO ownership and unchanged Core.
 The existing phone entrance selects a backend-saved route; settings remain
