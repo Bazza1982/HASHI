@@ -507,6 +507,12 @@ class CallService:
             if index >= len(parts):
                 raise CallError("call_speech_index_invalid")
             if index in call.speech_cache:
+                try:
+                    self._privacy(call, "tts")
+                except CallError as exc:
+                    call.speech_errors.update(dict.fromkeys(call.speech_cache, exc.code))
+                    call.speech_cache.clear()
+                    raise
                 return {"ok": True, "ready": True, **call.speech_cache[index]}
             if call.speech_task and not call.speech_task.done():
                 if index != call.speech_index:
@@ -663,6 +669,9 @@ class CallService:
             image = None
 
     def _start_speech(self, call, index, text):
+        self.expire()
+        if call.phase != "active":
+            return
         call.speech_index = index
         call.speech_attempts[index] = call.speech_attempts.get(index, 0) + 1
         call.speech_task = asyncio.create_task(
@@ -684,8 +693,10 @@ class CallService:
                 )
             emit("tts_completed", **self._facts(call, turn), stage="tts", segment=index,
                  duration_ms=elapsed_ms(self.clock, started), **receipt_facts(result.get("provider_receipt")))
+            self.expire()
             if call.phase == "active" and call.turn is turn:
                 self.ports.validate(call.owner, call.binding)
+                self._privacy(call, "tts")
                 if result.get("provider_receipt"):
                     turn.setdefault("provider_receipts", {}).setdefault("tts", {})[
                         str(index)

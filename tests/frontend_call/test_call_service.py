@@ -436,6 +436,75 @@ async def test_automatic_speech_checks_privacy_without_failing_text_answer(tmp_p
         await service.close()
 
 
+async def test_expired_call_does_not_start_automatic_speech_after_agent_finishes(tmp_path):
+    service, ports, adapters, base, clock = setup(tmp_path)
+    binding, _, _ = await start(service, base)
+    original_result = ports.result
+
+    def result(*args):
+        answer = original_result(*args)
+        clock[0] += 46  # The frontend stopped renewing this call's lease.
+        return answer
+
+    ports.result = result
+    try:
+        await service.invoke("owner", {**binding, "operation": "turn",
+            "turn_id": "turn-1", "sequence": 1, "audio_b64": wav()})
+        call = service.calls["call-1"]
+        await asyncio.gather(call.task, return_exceptions=True)
+        if call.speech_task:
+            await asyncio.gather(call.speech_task, return_exceptions=True)
+        assert call.phase == "ended"
+        assert adapters.tts == 0 and not call.speech_cache
+        assert len(ports.accepted) == 1
+    finally:
+        await service.close()
+
+
+async def test_privacy_revocation_discards_inflight_and_cached_speech(tmp_path):
+    for moment in ("inflight", "cached"):
+        case_path = tmp_path / moment
+        case_path.mkdir()
+        service, ports, adapters, base, _ = setup(case_path, "cloud")
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def synthesize(*args):
+            adapters.tts += 1
+            started.set()
+            await release.wait()
+            return {"media_type": "audio/wav", "content_b64": wav()}
+
+        adapters.synthesize = synthesize
+        binding, _, _ = await start(service, base, True)
+        try:
+            await service.invoke("owner", {**binding, "operation": "turn",
+                "turn_id": "turn-1", "sequence": 1, "audio_b64": wav()})
+            await finish_task(service)
+            call = service.calls["call-1"]
+            await asyncio.wait_for(started.wait(), 1)
+            if moment == "inflight":
+                ports.level = 2
+            release.set()
+            await call.speech_task
+            if moment == "cached":
+                assert call.speech_cache
+                ports.level = 2
+            speech = {**binding, "operation": "speech", "turn_id": "turn-1", "segment": 0}
+            with pytest.raises(CallError, match="privacy"):
+                await service.invoke("owner", speech)
+            assert not call.speech_cache and call.turn["phase"] == "complete"
+            ports.level = 1
+            with pytest.raises(CallError, match="privacy"):
+                await service.invoke("owner", speech)
+            await service.invoke("owner", {**speech, "retry": True})
+            await call.speech_task
+            assert (await service.invoke("owner", speech))["ready"]
+            assert adapters.tts == 2 and len(ports.accepted) == 1
+        finally:
+            release.set()
+            await service.close()
+
+
 async def test_phone_busy_and_end_lease_are_separate_from_agent_lifecycle(tmp_path):
     service, ports, adapters, base, clock = setup(tmp_path)
     ports.phone = True
