@@ -34,9 +34,13 @@ class MediaAdapters:
     ):
         # Follow the service task's correlation without changing requests or
         # receipt lookups. Only bounded status/receipt metadata reaches logs.
-        kind = {"/audio/transcriptions": "stt", "/audio/speech": "tts", "/chat/completions": "vision"}.get(path)
+        # A shared provider endpoint may implement more than one modality.
+        # Configured kind wins; methods supply context for standalone targets.
+        facts_context = {"requested_model": target.get("model"), "target_location": target.get("location")}
+        if target.get("kind") in ("stt", "tts", "vision"):
+            facts_context["media_kind"] = target["kind"]
         started, facts = time.monotonic(), {}
-        with diagnostic_context(media_kind=kind):
+        with diagnostic_context(**facts_context):
             emit("provider_request_started")
             try:
                 result = await self._request_impl(
@@ -191,9 +195,10 @@ class MediaAdapters:
         form.add_field("response_format", "json")
         for k, v in slot.get("options", {}).items():
             form.add_field(k, str(v))
-        data, _, receipt = await self._request(
-            target, "/audio/transcriptions", data=form, maximum=65536
-        )
+        with diagnostic_context(media_kind="stt"):
+            data, _, receipt = await self._request(
+                target, "/audio/transcriptions", data=form, maximum=65536
+            )
         text = self._json(data).get("text")
         if not isinstance(text, str) or not text.strip() or len(text) > 12000:
             raise CallError("call_transcription_empty_or_invalid", 502)
@@ -227,9 +232,10 @@ class MediaAdapters:
             ],
             **slot.get("options", {}),
         }
-        data, _, _ = await self._request(
-            target, "/chat/completions", json_body=body, maximum=32768
-        )
+        with diagnostic_context(media_kind="vision"):
+            data, _, _ = await self._request(
+                target, "/chat/completions", json_body=body, maximum=32768
+            )
         try:
             text = self._json(data)["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
@@ -258,9 +264,10 @@ class MediaAdapters:
             "response_format": fmt,
             **options,
         }
-        data, mime, receipt = await self._request(
-            target, "/audio/speech", json_body=body
-        )
+        with diagnostic_context(media_kind="tts"):
+            data, mime, receipt = await self._request(
+                target, "/audio/speech", json_body=body
+            )
         if not data:
             raise CallError("call_speech_response_empty", 502)
         if fmt == "pcm":

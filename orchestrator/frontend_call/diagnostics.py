@@ -22,6 +22,8 @@ _generation = re.compile(r"gen-[A-Za-z0-9-]{1,120}\Z")
 _code = re.compile(r"call_[a-z][a-z0-9_]{0,119}\Z")
 _name = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,79}\Z")
 _state = re.compile(r"[a-z][a-z0-9_]{0,39}\Z")
+_model = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{0,159}\Z")
+_provider = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,99}\Z")
 _identifiers = {
     "generation", "requested_generation", "call_id", "turn_id", "client_id",
     "agent_id", "session_id", "run_id", "request_id", "message_id", "provider_request_id",
@@ -42,6 +44,8 @@ _choices = {
         "auth", "owner", "content_type", "body_read", "json", "invoke", "response", "shutdown",
     },
     "media_kind": {"stt", "tts", "vision"},
+    "target_location": {"cloud", "local"},
+    "gateway": {"OpenRouter"},
     "reason": {
         "explicit_end", "lease_expired", "max_duration", "service_shutdown", "camera_enabled",
         "camera_disabled", "call_ended", "task_cancelled", "turn_changed", "stale_frame",
@@ -86,10 +90,25 @@ def error_facts(exc, fallback):
 def receipt_facts(receipt):
     if not isinstance(receipt, dict):
         return {}
-    return {"provider_generation_id": receipt.get("generation_id"), "verification": receipt.get("verification")}
+    return {
+        "provider_generation_id": receipt.get("generation_id"),
+        "verification": receipt.get("verification"),
+        "gateway": receipt.get("gateway"),
+        "requested_model": receipt.get("requested_model"),
+        "actual_provider": receipt.get("actual_provider"),
+    }
 
 
 def emit(event, **facts):
+    # A full disk or broken logging handler must never become a call failure.
+    # There is deliberately no recursive logging fallback.
+    try:
+        _emit(event, **facts)
+    except Exception:
+        return
+
+
+def _emit(event, **facts):
     if not logger.isEnabledFor(logging.INFO):
         return
     record = {"event": event}
@@ -104,6 +123,10 @@ def emit(event, **facts):
             record[key] = value
         elif key in ("phase", "turn_phase", "run_state") and isinstance(value, str) and _state.fullmatch(value):
             # These are PAO/service-owned tokens, not a copied state catalogue.
+            record[key] = value
+        elif key == "requested_model" and isinstance(value, str) and _model.fullmatch(value) and "://" not in value and "//" not in value:
+            record[key] = value
+        elif key == "actual_provider" and isinstance(value, str) and _provider.fullmatch(value):
             record[key] = value
         elif key in _numbers and type(value) is int and -3000 <= value <= 2**53:
             record[key] = value

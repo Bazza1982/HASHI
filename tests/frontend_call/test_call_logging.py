@@ -104,7 +104,11 @@ async def test_turn_timing_correlates_pao_and_tts_and_never_logs_speech(tmp_path
 
     async def transcribe(*_args):
         clock[0] += .012
-        return {"text": "PRIVATE_TRANSCRIPT", "provider_receipt": {"generation_id": "gen-stt-1"}}
+        return {"text": "PRIVATE_TRANSCRIPT", "provider_receipt": {
+            "generation_id": "gen-stt-1", "gateway": "OpenRouter",
+            "requested_model": "openai/whisper-large-v3", "actual_provider": "Groq",
+            "verification": "verified",
+        }}
 
     def result(*_args):
         clock[0] += .02
@@ -116,8 +120,10 @@ async def test_turn_timing_correlates_pao_and_tts_and_never_logs_speech(tmp_path
     await finish_task(service)
     await service.invoke("owner", {**binding, "operation": "speech", "turn_id": "turn-1", "segment": 0})
     await service.calls["call-1"].speech_task
-    assert events(caplog, "stt_completed")[-1]["provider_generation_id"] == "gen-stt-1"
-    assert events(caplog, "stt_completed")[-1]["duration_ms"] >= 11
+    transcribed = events(caplog, "stt_completed")[-1]
+    assert transcribed["provider_generation_id"] == "gen-stt-1" and transcribed["duration_ms"] >= 11
+    assert transcribed["gateway"] == "OpenRouter" and transcribed["actual_provider"] == "Groq"
+    assert transcribed["requested_model"] == "openai/whisper-large-v3"
     admitted = events(caplog, "admission_completed")[-1]
     assert admitted["run_id"] == "run-1" and admitted["request_id"] == "req-1"
     completed = events(caplog, "turn_completed")[-1]
@@ -219,7 +225,7 @@ async def test_provider_rejection_records_real_status_id_and_no_sensitive_payloa
     runner, url = await serve(app)
     try:
         with pytest.raises(CallError, match="call_provider_rejected"):
-            await MediaAdapters().transcribe({"base_url": url, "model": "PRIVATE_MODEL"}, {"options": {}}, base64.b64decode(wav()))
+            await MediaAdapters().transcribe({"base_url": url, "model": "PRIVATE_MODEL https://private.example"}, {"options": {}}, base64.b64decode(wav()))
         failed = events(caplog, "provider_request_failed")[-1]
         assert failed["http_status"] == 429 and failed["provider_request_id"] == "req-provider-1"
         assert failed["provider_generation_id"] == "gen-provider-1" and failed["media_kind"] == "stt"
@@ -278,6 +284,7 @@ async def test_real_provider_success_keeps_task_correlation_and_run_polls_are_qu
         for row in received:
             assert row["call_id"] == "call-1" and row["turn_id"] == "turn-1"
             assert row["generation"] == binding["generation"] and row["http_status"] == 200
+            assert row["requested_model"] == "fixture-model"
         assert received[0]["provider_generation_id"] == "gen-stt-2"
         assert received[1]["run_id"] == "run-1" and received[1]["segment"] == 0
         assert "PRIVATE_TRANSCRIPT" not in caplog.text and "PRIVATE_ANSWER" not in caplog.text
@@ -428,21 +435,23 @@ async def test_receipt_logging_keeps_only_safe_ids_and_adds_no_lookups(monkeypat
 
     async def receipt(_request):
         requests.append("receipt")
-        return web.json_response({"data": {"id": "gen-stt-3", "provider_name": "PRIVATE_PROVIDER_TEXT"}})
+        return web.json_response({"data": {"id": "gen-stt-3", "provider_name": "PRIVATE_PROVIDER_TEXT TOKEN=SECRET https://private.example"}})
 
     app.router.add_post("/v1/audio/transcriptions", stt)
     app.router.add_get("/v1/generation", receipt)
     runner, url = await serve(app)
     try:
         monkeypatch.setattr("orchestrator.frontend_call.adapters.OPENROUTER_API_BASE", url + "/v1")
-        result = await MediaAdapters().transcribe({"base_url": url + "/v1", "model": "PRIVATE_MODEL"}, {"options": {}}, base64.b64decode(wav()))
-        assert result["provider_receipt"]["actual_provider"] == "PRIVATE_PROVIDER_TEXT"
+        result = await MediaAdapters().transcribe({"base_url": url + "/v1", "model": "PRIVATE_MODEL https://private.example"}, {"options": {}}, base64.b64decode(wav()))
+        assert result["provider_receipt"]["actual_provider"] == "PRIVATE_PROVIDER_TEXT TOKEN=SECRET https://private.example"
         assert requests == ["stt", "receipt"]
         recorded = events(caplog, "provider_receipt")[-1]
         assert recorded["provider_generation_id"] == "gen-stt-3" and recorded["verification"] == "verified"
         assert recorded["lookup_count"] == 1 and recorded["http_status"] == 200
         completed = events(caplog, "provider_request_completed")[-1]
         assert "provider_request_id" not in completed
+        assert "actual_provider" not in completed and "requested_model" not in completed
+        assert recorded["gateway"] == "OpenRouter"
         for private in ("PRIVATE_TRANSCRIPT", "PRIVATE_REQUEST", "PRIVATE_PROVIDER_TEXT", "PRIVATE_MODEL"):
             assert private not in caplog.text
     finally:
@@ -461,3 +470,84 @@ async def test_expiry_during_rejected_turn_never_associates_unaccepted_turn_ids(
     rejected = events(caplog, "operation_failed")[-1]
     assert rejected["turn_id"] == "unaccepted-turn" and rejected["error_code"] == "call_ended"
     await service.close()
+
+
+async def test_failed_logging_sink_cannot_interrupt_camera_or_voice_effects(tmp_path, monkeypatch):
+    app, requests, sink_calls = web.Application(), [], []
+
+    async def stt(_request):
+        requests.append("stt")
+        return web.json_response({"text": "Recognized speech."})
+
+    async def tts(_request):
+        requests.append("tts")
+        return web.Response(body=base64.b64decode(wav()), content_type="audio/wav")
+
+    async def vision(_request):
+        requests.append("vision")
+        return web.json_response({"choices": [{"message": {"content": "A cup is visible."}}]})
+
+    def broken_sink(*_args, **_kwargs):
+        sink_calls.append(1)
+        raise RuntimeError("PRIVATE_LOG_HANDLER_ERROR")
+
+    app.router.add_post("/v1/audio/transcriptions", stt)
+    app.router.add_post("/v1/audio/speech", tts)
+    app.router.add_post("/v1/chat/completions", vision)
+    runner, url = await serve(app)
+    monkeypatch.setattr("orchestrator.frontend_call.diagnostics.logger.info", broken_sink)
+    monkeypatch.setattr("orchestrator.frontend_call.diagnostics.logger.isEnabledFor", lambda _level: True)
+    service = None
+    try:
+        service, ports, _, base, _ = setup(tmp_path)
+        document = json.loads(service.config.path.read_text())
+        for target in document["targets"]:
+            target["base_url"] = url + "/v1"
+            target.pop("credential_env", None)
+        document["default_profile"]["vision"] = {"target_id": "eyes", "options": {}}
+        service.config.path.write_text(json.dumps(document))
+        service.adapters = MediaAdapters()
+        binding, _, started = await start(service, base)
+        assert started["phase"] == "active"
+        await service.invoke("owner", {**binding, "operation": "camera", "enabled": True})
+        await service.invoke("owner", {
+            **binding, "operation": "observe", "frame_sequence": 1,
+            "image_b64": base64.b64encode(bytes.fromhex("ffd8ffc00008080010001000ffd9")).decode(),
+            "captured_at": datetime.now(timezone.utc).isoformat(),
+        })
+        call = service.calls["call-1"]
+        await call.vision_task
+        assert call.observation["text"] == "A cup is visible."
+        await service.invoke("owner", {**binding, "operation": "turn", "turn_id": "turn-1", "sequence": 1, "audio_b64": wav()})
+        await finish_task(service)
+        assert call.turn["phase"] == "complete" and len(ports.accepted) == 1
+        speech = {**binding, "operation": "speech", "turn_id": "turn-1", "segment": 0}
+        await service.invoke("owner", speech)
+        await call.speech_task
+        assert (await service.invoke("owner", speech))["ready"]
+        await service.invoke("owner", {**binding, "operation": "camera", "enabled": False})
+        assert call.phase == "active" and not call.observation
+        assert (await service.invoke("owner", {**binding, "operation": "end"}))["phase"] == "ended"
+        assert requests == ["vision", "stt", "tts"] and sink_calls
+    finally:
+        if service:
+            await service.close()
+        await runner.cleanup()
+
+
+async def test_shared_provider_endpoint_uses_validated_media_kind_not_path(caplog):
+    caplog.set_level(logging.INFO, logger="orchestrator.frontend_call")
+    app = web.Application()
+    async def complete(_request):
+        return web.json_response({"ok": True})
+
+    app.router.add_post("/chat/completions", complete)
+    runner, url = await serve(app)
+    try:
+        await MediaAdapters()._request({"base_url": url, "model": "fixture/model", "kind": "tts"}, "/chat/completions", json_body={"input": "PRIVATE_TTS_TEXT"})
+        request = events(caplog, "provider_request_started")[-1]
+        assert request["media_kind"] == "tts"
+        assert request["requested_model"] == "fixture/model"
+        assert "PRIVATE_TTS_TEXT" not in caplog.text
+    finally:
+        await runner.cleanup()
