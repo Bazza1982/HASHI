@@ -389,11 +389,12 @@ def test_isolated_probe_allows_unrelated_dependency_environment_drift():
         dependency_digest="sha256:" + "0" * 64,
     )
 
+    # An empty module list still validates and stages the full Function contract.
+    # Use the product's bounded preparation deadline for this compatibility check.
     receipt = run_candidate_probe(
         code_root=ROOT,
         module_names=(),
         expected_runtime=incompatible,
-        timeout_seconds=20,
     )
 
     assert receipt.runtime.dependency_digest != incompatible.dependency_digest

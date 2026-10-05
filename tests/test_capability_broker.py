@@ -466,3 +466,29 @@ def test_heartbeat_revalidates_health_and_removes_unhealthy_capability(tmp_path)
     audit = broker.audit_path.read_text(encoding="utf-8")
     assert lease.lease_id in audit
     assert "capability_unhealthy" in audit
+
+@pytest.mark.asyncio
+async def test_explicit_browser_provider_never_falls_back(tmp_path):
+    broker,bootstrap=_started_broker(tmp_path)
+    for provider in ['extension','embedded']:
+        value=_payload(provider[0]*64,kind='browser_control',capability_id=f'cap-{provider}',actions=('get_text',))
+        value['provider_id']=provider
+        broker.register(value,bootstrap_token=bootstrap)
+    selected=[]
+    async def transport(record,token,payload,timeout):
+        selected.append(record.provider_id)
+        return {'ok':True,'identity':_health(record)['identity'],'result':record.provider_id}
+    broker.set_transport_for_testing(transport)
+    for target in ['embedded','extension','']:
+        result=await broker.invoke('browser_control','get_text',{'browser_target':target},agent_id='a',task_id='t',request_id=f'r-{target}')
+        assert result==(target or 'extension')
+    assert selected==['embedded','extension','extension']
+    with pytest.raises(CapabilityBrokerError):
+        await broker.invoke('browser_control','get_text',{'browser_target':'other'},agent_id='a',task_id='t')
+
+
+def test_requested_browser_provider_must_exist(tmp_path):
+    broker,bootstrap=_started_broker(tmp_path)
+    broker.register(_payload('x'*64,kind='browser_control',actions=('get_text',)),bootstrap_token=bootstrap)
+    with pytest.raises(CapabilityBrokerError):
+        broker._select('browser_control',action='get_text',provider_id='embedded')

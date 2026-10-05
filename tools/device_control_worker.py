@@ -367,6 +367,9 @@ class DeviceWorkerState:
     wsl_distro: str | None
     logger: logging.Logger
     auto_bind: bool = False
+    browser_provider: str = "extension"
+    browser_descriptor: str = ""
+    launch_id: str = ""
     executor: Callable[[str, dict[str, Any]], Any] | None = None
     bound_port: int = 0
     stopping: threading.Event = field(default_factory=threading.Event)
@@ -387,6 +390,9 @@ class DeviceWorkerState:
 
     @property
     def supported_actions(self) -> frozenset[str]:
+        if self.capability_kind == "browser_control" and self.browser_provider == "embedded":
+            from tools.embedded_browser_bridge import SUPPORTED_ACTIONS
+            return SUPPORTED_ACTIONS
         return BROWSER_ACTIONS if self.capability_kind == "browser_control" else COMPUTER_ACTIONS
 
     @property
@@ -396,7 +402,7 @@ class DeviceWorkerState:
             self.device_id,
             self.user_session_id,
             self.capability_kind,
-        )
+        ) + (":embedded" if self.capability_kind == "browser_control" and self.browser_provider == "embedded" else "")
 
     @property
     def identity(self) -> dict[str, str]:
@@ -429,7 +435,7 @@ class DeviceWorkerState:
             self.bridge_home
             / "state"
             / "device_control"
-            / f"{self.capability_kind}.json"
+            / f"{self.capability_kind}{"-embedded" if self.browser_provider == "embedded" else ""}.json"
         )
 
     def mark_request(self, request_id: str) -> None:
@@ -521,7 +527,11 @@ class DeviceWorkerState:
             try:
                 from tools.browser_extension_bridge import healthcheck
 
-                bridge = healthcheck(timeout_s=1.0)
+                if self.browser_provider == "embedded":
+                    from tools.embedded_browser_bridge import EmbeddedBrowserBridge
+                    bridge = EmbeddedBrowserBridge(self.browser_descriptor, self.instance_id, timeout=1.0).health()
+                else:
+                    bridge = healthcheck(timeout_s=1.0)
                 healthy = bool(bridge.get("connected"))
                 detail = {
                     "bridge_connected": healthy,
@@ -552,6 +562,10 @@ class DeviceWorkerState:
         action = str(action or "").strip().casefold()
         if action not in self.supported_actions:
             raise DeviceWorkerError(f"unsupported {self.capability_kind} action: {action}")
+        if self.capability_kind == "browser_control" and self.browser_provider == "embedded":
+            from tools.embedded_browser_bridge import EmbeddedBrowserBridge
+            bridge = EmbeddedBrowserBridge(self.browser_descriptor, self.instance_id)
+            return await asyncio.to_thread(bridge.execute, action, arguments)
         args = resolve_device_path_arguments(
             arguments,
             target_platform=("windows" if os.name == "nt" else "linux"),
@@ -810,7 +824,12 @@ class DeviceWorkerRequestHandler(BaseHTTPRequestHandler):
             if not isinstance(args, Mapping):
                 raise DeviceWorkerError("capability action args must be an object")
             with _optional_device_lock(state, action):
-                result = asyncio.run(state.execute(action, dict(args)))
+                admitted_args = dict(args)
+                if state.capability_kind == "browser_control":
+                    audit = dict(admitted_args.get("_audit") or {})
+                    audit.update(agent_name=str(payload["agent_id"]), task_id=str(payload["task_id"]), instance_id=state.instance_id)
+                    admitted_args["_audit"] = audit
+                result = asyncio.run(state.execute(action, admitted_args))
             elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
             _event(
                 state.logger,
@@ -935,6 +954,7 @@ def _registration_payload(state: DeviceWorkerState) -> dict[str, Any]:
         "negotiated_endpoint": state.endpoint,
         "protocol_version": CAPABILITY_PROTOCOL_VERSION,
         "supported_actions": sorted(state.supported_actions),
+        "provider_id": state.browser_provider if state.capability_kind == "browser_control" else "",
         "worker_pid_and_generation": {
             "pid": os.getpid(),
             "generation": _generation_id(state.capability_kind),
@@ -977,6 +997,8 @@ def _register(state: DeviceWorkerState, bootstrap: Mapping[str, Any]) -> None:
             "pid": os.getpid(),
             "generation": _generation_id(state.capability_kind),
             "registered_at": time.time(),
+            "provider_id": state.browser_provider if state.capability_kind == "browser_control" else "",
+            "launch_id": state.launch_id,
         },
     )
 
@@ -1093,6 +1115,8 @@ def build_state(args: argparse.Namespace) -> DeviceWorkerState:
     user_session_id = str(args.user_session_id or _default_session_id()).strip()
     if not device_id or not user_session_id:
         raise DeviceWorkerError("worker device and user-session identities are required")
+    if getattr(args, "browser_provider", "extension") == "embedded" and not getattr(args, "browser_descriptor", ""):
+        raise DeviceWorkerError("--browser-descriptor is required for the embedded provider")
     return DeviceWorkerState(
         bridge_home=bridge_home,
         capability_kind=capability_kind,
@@ -1105,6 +1129,9 @@ def build_state(args: argparse.Namespace) -> DeviceWorkerState:
         wsl_distro=str(args.wsl_distro or "").strip() or None,
         logger=_logger(log_dir / f"{capability_kind}.jsonl"),
         auto_bind=str(args.host).strip().casefold() == "auto",
+        browser_provider=getattr(args, "browser_provider", "extension"),
+        browser_descriptor=str(getattr(args, "browser_descriptor", "") or ""),
+        launch_id=str(getattr(args, "launch_id", "") or ""),
     )
 
 
@@ -1119,6 +1146,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--advertise-host")
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--wsl-distro")
+    parser.add_argument("--browser-provider", choices=["extension", "embedded"], default="extension")
+    parser.add_argument("--browser-descriptor")
+    parser.add_argument("--launch-id", default="", help="Local launcher receipt correlation; grants no capability authority")
     parser.add_argument("--browser-endpoint")
     parser.add_argument("--browser-auth-file")
     parser.add_argument(
@@ -1171,6 +1201,8 @@ def main(argv: list[str] | None = None) -> int:
                 "pid": os.getpid(),
                 "generation": _generation_id(state.capability_kind),
                 "started_at": time.time(),
+                "provider_id": state.browser_provider if state.capability_kind == "browser_control" else "",
+                "launch_id": state.launch_id,
             },
         )
         _event(
