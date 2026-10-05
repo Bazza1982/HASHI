@@ -65,6 +65,26 @@ def test_wsl_launcher_uses_exit_code_authority_and_separate_stream_logs():
     assert launcher.count("Invoke-WslNative -Arguments") == 2
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="requires Windows PowerShell")
+def test_background_wsl_launcher_rejects_nonempty_stdin_without_overwriting(tmp_path):
+    runtime_base = tmp_path / "runtime"
+    directory = runtime_base / "TEST1"
+    directory.mkdir(parents=True)
+    stdin = directory / "user-runtime.stdin.empty"
+    stdin.write_bytes(b"Do not feed or overwrite this input")
+    identity = subprocess.check_output(["whoami"], text=True).strip()
+    completed = subprocess.run(
+        ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+         "-File", str(LAUNCHER), "-InstanceId", "TEST1", "-ExpectedIdentity", identity,
+         "-Distro", "Test-Distro", "-LinuxRoot", "/tmp/test", "-LinuxPython", "/tmp/python",
+         "-RuntimeBase", str(runtime_base), "-WslExecutable", str(FIXTURES / "fake-wsl-success.cmd")],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert completed.returncode == 1
+    assert stdin.read_bytes() == b"Do not feed or overwrite this input"
+    assert not (directory / "logs" / "user-runtime.stdout.log").exists()
+
+
 def test_wsl_task_installer_is_parameterized_and_hardens_task_lifetime():
     installer = _read(INSTALLER)
 
@@ -160,7 +180,7 @@ def test_native_windows_remote_supervisor_has_no_task_time_limit():
 @pytest.mark.skipif(sys.platform != "win32", reason="requires Windows PowerShell")
 @pytest.mark.parametrize(
     ("fixture_name", "expected_exit"),
-    (("fake-wsl-success.cmd", 0), ("fake-wsl-main-failure.cmd", 23)),
+    (("fake-wsl-success.cmd", 0), ("fake-wsl-main-failure.cmd", 23), ("fake-wsl-stdin-eof.cmd", 0)),
 )
 def test_windows_powershell_launcher_tolerates_stderr_and_propagates_exit_code(
     tmp_path: Path,

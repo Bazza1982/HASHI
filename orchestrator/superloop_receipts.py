@@ -9,8 +9,10 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
+import threading
 import time
 from collections.abc import Callable, Iterable
+from pathlib import Path
 from typing import Any
 
 from orchestrator.superloop_dispatch import SuperloopDispatchLedger
@@ -33,6 +35,60 @@ class SuperloopReceiptService:
         self.store = store
         self.local_instance = _identity(local_instance)
         self.ledger = SuperloopDispatchLedger(store)
+        self._read_cache: dict[Path, tuple[tuple | None, Any]] = {}
+        self._cache_lock = threading.Lock()
+
+    @staticmethod
+    def _revision(path: Path) -> tuple | None:
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            return None
+        return stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size, stat.st_ino
+
+    def _read_cached(self, path: Path, read: Callable[[], Any]) -> Any:
+        """Cache read-only discovery, never the locked admission authority.
+
+        Atomic replacement, in-place append, deletion and recreation all
+        invalidate the snapshot. An unreadable or changing file fails closed.
+        Keep a bounded cache shared by concurrent Remote executor ticks.
+        """
+        with self._cache_lock:
+            revision = self._revision(path)
+            previous = self._read_cache.get(path)
+            if previous is not None and previous[0] == revision:
+                return previous[1]
+            self._read_cache.pop(path, None)
+            value = read()
+            if self._revision(path) != revision:
+                raise OSError("Superloop receipt evidence changed during read")
+            if len(self._read_cache) >= 512:
+                self._read_cache.pop(next(iter(self._read_cache)))
+            self._read_cache[path] = revision, value
+            return value
+
+    def _matching_evidence(self, loop_id: str, *, cached: bool = False) -> tuple:
+        def read(path, loader):
+            return self._read_cached(path, loader) if cached else loader()
+
+        root = self.store.loop_dir(loop_id)
+        state = read(root / "state.json", lambda: self.store.load_loop_state(loop_id))
+        controller = state.get("controller")
+        if (state.get("receipt_continuation_enabled") is not True
+                or not isinstance(controller, dict)
+                or _identity(controller.get("instance")) != self.local_instance):
+            return state, {}, []
+        latest = {}
+        for row in read(root / "dispatches.jsonl", lambda: self.ledger.load_rows(loop_id)):
+            if row.get("schema_version") == 2:
+                latest[str(row.get("dispatch_instance_id") or "")] = row
+        board = self.store.resolve_loop_path(loop_id, state.get("taskboard_path"), "taskboard.json")
+        tasks = read(board, lambda: self.store.load_loop_json_list(board)) if latest else []
+        return state, latest, tasks
+
+    def _review_key(self, loop_id: str, receipt: dict) -> str:
+        material = "\0".join((self.local_instance, loop_id, str(receipt["in_reply_to"])))
+        return "superloop:receipt:" + hashlib.sha256(material.encode()).hexdigest()
 
     def process(
         self, receipts: Iterable[dict[str, Any]], enqueue: Callable[[dict], str | None],
@@ -41,26 +97,42 @@ class SuperloopReceiptService:
     ) -> None:
         if activity is not None:
             self.reconcile(enqueue, activity)
-        for receipt in receipts:
-            if receipt.get("state") != "reply_delivered_locally" or not receipt.get("request_id"):
-                continue
-            if not all(receipt.get(key) for key in (
+        receipts = [receipt for receipt in receipts
+            if receipt.get("state") == "reply_delivered_locally" and receipt.get("request_id")
+            and all(receipt.get(key) for key in (
                 "message_id", "in_reply_to", "conversation_id", "from_agent", "from_instance", "to_agent", "to_instance",
-            )):
-                continue
+            ))]
+        if not receipts:
+            return
+        # Read each loop once, not once per retained historical receipt. The
+        # next tick reuses unchanged files; pending retries remain time-driven.
+        evidence = {}
+        for path in sorted(self.store.loops_dir.glob("*/state.json")):
+            try:
+                snapshot = self._matching_evidence(path.parent.name, cached=True)
+                if snapshot[1]:
+                    evidence[path.parent.name] = snapshot
+            except (OSError, ValueError, TypeError):
+                logger.warning("Superloop receipt evidence unavailable for %s", path.parent.name)
+        for receipt in receipts:
             matches = []
-            for path in sorted(self.store.loops_dir.glob("*/state.json")):
+            for loop_id, snapshot in evidence.items():
                 try:
-                    task_id = self._match(path.parent.name, receipt)
+                    task_id = self._match(loop_id, receipt, evidence=snapshot)
                     if task_id:
-                        matches.append((path.parent.name, task_id))
+                        matches.append((loop_id, task_id))
                 except (OSError, ValueError, TypeError):
-                    logger.warning("Superloop receipt evidence unavailable for %s", path.parent.name)
+                    logger.warning("Superloop receipt evidence unavailable for %s", loop_id)
             # Ambiguous ownership must be reconciled explicitly, never fan out.
             if len(matches) != 1:
                 continue
             loop_id, task_id = matches[0]
             try:
+                path = self.store.loop_dir(loop_id) / "receipt_reviews.json"
+                rows = self._read_cached(path, lambda: self.store.load_loop_json_list(path))
+                row = next((r for r in rows if r.get("idempotency_key") == self._review_key(loop_id, receipt)), None)
+                if row is not None and (row.get("status") == "queued" or float(row.get("retry_at") or 0) > time.time()):
+                    continue
                 self._admit(loop_id, task_id, receipt, enqueue, resolve_session)
             except (OSError, ValueError, TypeError):
                 logger.exception("Superloop receipt admission deferred for %s", loop_id)
@@ -174,11 +246,11 @@ class SuperloopReceiptService:
         for path in sorted(self.store.loops_dir.glob("*/receipt_reviews.json")):
             loop_id = path.parent.name
             try:
-                state = self.store.load_loop_state(loop_id)
+                state = self._read_cached(path.parent / "state.json", lambda: self.store.load_loop_state(loop_id))
                 controller = state.get("controller") or {}
                 if not isinstance(controller, dict) or _identity(controller.get("instance")) != self.local_instance:
                     continue
-                snapshots = self.store.load_loop_json_list(path)
+                snapshots = self._read_cached(path, lambda: self.store.load_loop_json_list(path))
                 latest_review = next((item for item in reversed(snapshots)
                     if isinstance(item, dict) and item.get("status") == "queued"), {})
                 for snapshot in snapshots:
@@ -326,8 +398,8 @@ class SuperloopReceiptService:
             "needs_attention; that status is not itself a delivered user notification."
         )
 
-    def _match(self, loop_id: str, receipt: dict) -> str | None:
-        state = self.store.load_loop_state(loop_id)
+    def _match(self, loop_id: str, receipt: dict, *, evidence: tuple | None = None) -> str | None:
+        state, latest, tasks = evidence if evidence is not None else self._matching_evidence(loop_id)
         if state.get("receipt_continuation_enabled") is not True:
             return None
         controller = state.get("controller")
@@ -338,14 +410,9 @@ class SuperloopReceiptService:
             and _identity(controller.get("agent")) == _identity(receipt["to_agent"])
         ):
             return None
-        latest = {}
-        for row in self.ledger.load_rows(loop_id):
-            if row.get("schema_version") == 2:
-                latest[str(row.get("dispatch_instance_id") or "")] = row
         row = latest.get(str(receipt["in_reply_to"]))
         if not row or row.get("status") != "accepted" or row.get("terminal") is not False:
             return None
-        tasks = self.store.load_loop_json_list(self.store.resolve_loop_path(loop_id, state.get("taskboard_path"), "taskboard.json"))
         matching = [task for task in tasks if task.get("task_id") == row.get("task_id")]
         if len(matching) != 1:
             return None
@@ -371,8 +438,7 @@ class SuperloopReceiptService:
             if not evaluate_dispatch_interlock(self.store, loop_id, check_work_blockers=False).allowed:
                 return
             state = self.store.load_loop_state(loop_id)
-            material = "\0".join((self.local_instance, loop_id, str(receipt["in_reply_to"])))
-            key = "superloop:receipt:" + hashlib.sha256(material.encode()).hexdigest()
+            key = self._review_key(loop_id, receipt)
             path = self.store.loop_dir(loop_id) / "receipt_reviews.json"
             rows = self.store.load_loop_json_list(path)
             row = next((item for item in rows if item.get("idempotency_key") == key), None)
