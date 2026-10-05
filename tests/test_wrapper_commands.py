@@ -265,6 +265,58 @@ def test_agent_specific_openrouter_models_extend_shared_catalog(tmp_path):
     assert "✓ deepseek/deepseek-v3.2-exp" in str(keyboard)
 
 
+@pytest.mark.asyncio
+async def test_native_codex_models_are_inherited_and_selection_survives_reload(
+    tmp_path, monkeypatch,
+):
+    codex_home = tmp_path / "codex"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    (codex_home / "models_cache.json").write_text(json.dumps({
+        "models": [
+            {"slug": "gpt-6.1-sol", "visibility": "list",
+             "supported_reasoning_levels": [{"effort": "max"}, {"effort": "ultra"}]},
+            {"slug": "internal-review", "visibility": "hide"},
+        ],
+    }), encoding="utf-8")
+    manager = _make_manager(tmp_path / "agent")
+    manager.current_backend = SimpleNamespace(
+        config=SimpleNamespace(engine="codex-cli", model="gpt-5.4"), effort="max",
+    )
+    runtime, _messages = _make_runtime(manager)
+
+    await runtime.cmd_model(*_update())
+    keyboard = runtime._reply_payloads[-1]["reply_markup"]
+    assert "gpt-6.1-sol" in str(keyboard)
+    assert "internal-review" not in str(keyboard)
+    assert runtime._get_available_efforts_for("codex-cli", "gpt-6.1-sol") == ["max", "ultra"]
+
+    await runtime.cmd_model(*_update(["gpt-6.1-sol"]))
+    assert manager.current_backend.config.model == "gpt-6.1-sol"
+    assert manager.current_backend.effort == "max"
+    assert _read_state(manager.config.workspace_dir)["active_model"] == "gpt-6.1-sol"
+    restored = _make_manager(manager.config.workspace_dir)
+    assert restored._active_model_override == "gpt-6.1-sol"
+    assert "gpt-6.1-sol" in _make_runtime(restored)[0]._get_available_models()
+
+    # An explicit per-Agent effort override remains authoritative.
+    manager.config.allowed_backends[0]["model_efforts"] = {"gpt-6.1-sol": ["high"]}
+    assert runtime._get_available_efforts_for("codex-cli", "gpt-6.1-sol") == ["high"]
+
+    # Explicit restrictions are different from a selected model or opt-in.
+    backend = manager.config.allowed_backends[0]
+    backend["available_models"] = ["gpt-6-sol"]
+    assert runtime._get_available_models() == ["gpt-6-sol"]
+    await runtime.cmd_model(*_update(["gpt-6.1-sol"]))
+    assert _read_state(manager.config.workspace_dir)["active_model"] == "gpt-6.1-sol"
+    with pytest.raises(ValueError):
+        manager._build_adapter_config("codex-cli", backend, target_model="gpt-6.1-sol")
+
+    backend["available_models"] = []
+    await runtime.cmd_model(*_update(["gpt-6.1-sol"]))
+    assert _read_state(manager.config.workspace_dir)["active_model"] == "gpt-6.1-sol"
+
+
 def _update(args: list[str] | None = None, text: str | None = None):
     return (
         SimpleNamespace(

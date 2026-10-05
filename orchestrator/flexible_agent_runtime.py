@@ -126,7 +126,12 @@ from orchestrator.flexible_backend_registry import (
     normalize_model,
     public_backend_engine,
 )
-from orchestrator.runtime_effort_options import get_available_efforts, normalize_effort
+from orchestrator.runtime_effort_options import (
+    backend_model_view,
+    get_available_models as runtime_available_models,
+    get_available_efforts,
+    normalize_effort,
+)
 from orchestrator.memory_index import MemoryIndex
 from orchestrator.memory_search_mode import apply_memory_injection_preferences
 from orchestrator.handoff_builder import HandoffBuilder
@@ -2209,6 +2214,8 @@ class FlexibleAgentRuntime:
                         ),
                     }
                 )
+            else:
+                row = backend_model_view(configured)
             public_allowed_backends.append(row)
         return {
             "id": self.name,
@@ -8288,26 +8295,8 @@ class FlexibleAgentRuntime:
             selected = self.backend_manager.get_her_v3_target()
             option = self.backend_manager._her_v3_provider_option(selected.provider)
             return list(option["models"]) if option and option["available"] else []
-        models = get_available_models(engine)
         backend_cfg = self._get_backend_cfg(engine)
-        if not backend_cfg:
-            return models
-
-        # Agent-local model rows extend the shared catalog. This lets one Agent
-        # opt into an OpenRouter model without exposing it to every Agent or
-        # removing any globally registered choices.
-        configured_models: list[object] = []
-        raw_models = backend_cfg.get("models")
-        if isinstance(raw_models, list):
-            configured_models.extend(raw_models)
-        configured_models.extend(
-            [backend_cfg.get("model"), backend_cfg.get("default_model")]
-        )
-        for configured_model in configured_models:
-            model = str(configured_model or "").strip()
-            if model and model not in models:
-                models.append(model)
-        return models
+        return runtime_available_models(engine, backend=backend_cfg)
 
     def _get_configured_model_for(self, engine: str) -> str | None:
         configured = str(
@@ -8315,7 +8304,9 @@ class FlexibleAgentRuntime:
         ).strip()
         if configured and configured in self._get_available_models_for(engine):
             return configured
-        return normalize_model(engine, configured)
+        choices = self._get_available_models_for(engine)
+        default = normalize_model(engine, configured)
+        return default if default in choices else next(iter(choices), None)
 
     def _get_available_efforts(self) -> list[str]:
         return self._get_available_efforts_for(self.config.active_backend, self.get_current_model())

@@ -32,13 +32,11 @@ from orchestrator.flexible_backend_registry import (
     REMOVED_ENGINE_IDS,
     apply_backend_policy_defaults,
     canonical_backend_engine,
-    get_available_efforts,
     get_available_models,
     get_backend_entry,
     get_default_model,
     get_provider_reasoning_efforts,
     is_selectable_backend,
-    normalize_effort,
     public_backend_engine,
 )
 from orchestrator.her_v2.v3_config import (
@@ -46,6 +44,11 @@ from orchestrator.her_v2.v3_config import (
     build_v3_provider_options,
 )
 from orchestrator.pathing import BridgePaths
+from orchestrator.runtime_effort_options import (
+    get_available_models as runtime_available_models,
+    get_available_efforts,
+    normalize_effort,
+)
 
 logger = logging.getLogger("BridgeU.AgentCreation")
 
@@ -283,9 +286,9 @@ def build_her_backend_row(
 
 
 def build_ordinary_backend_row(backend: str, model: str | None, effort: str | None) -> dict:
-    """Build an ordinary backend row validated against the registry."""
+    """Build a backend row validated against the effective model catalogue."""
     entry = get_backend_entry(backend)
-    models = list(entry.get("models") or [])
+    models = runtime_available_models(backend)
     custom_allowed = bool(entry.get("allow_custom_models"))
 
     resolved_model: str | None = None

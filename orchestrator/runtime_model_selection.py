@@ -23,7 +23,9 @@ from orchestrator.her_v2.v3_callback_contract import (
     HER_V3_CALLBACK_PROVIDER_MENU,
     her_v3_callback_data,
 )
-from orchestrator.runtime_effort_options import get_available_efforts, normalize_effort
+from orchestrator.runtime_effort_options import (
+    get_available_efforts, model_is_allowed, normalize_effort,
+)
 from orchestrator.her_v2.models import Route
 
 HER_V2_STAGE_ROUTE_ORDER = (
@@ -1269,13 +1271,17 @@ def save_her_v2_candidate(runtime, selected) -> str | None:
 
 
 def set_backend_model(runtime, engine: str, requested: str) -> None:
+    backend_cfg = runtime._get_backend_cfg(engine)
+    if backend_cfg is not None and "available_models" in backend_cfg and not model_is_allowed(
+        engine, requested, backend=backend_cfg,
+    ):
+        raise ValueError(f"model {requested!r} is not available for backend {engine!r}")
     normalized = (
         requested if requested in runtime._get_available_models_for(engine)
         else normalize_model(engine, requested)
     )
     if not normalized:
         return
-    backend_cfg = runtime._get_backend_cfg(engine)
     if backend_cfg is not None:
         backend_cfg["model"] = normalized
     if (
@@ -1743,7 +1749,10 @@ async def cmd_model(runtime, update, context: Any) -> None:
         if runtime.config.active_backend == "claude-cli":
             requested = CLAUDE_MODEL_ALIASES.get(requested.lower(), requested)
         available = runtime._get_available_models()
-        if available and requested not in available:
+        if requested not in available and not model_is_allowed(
+            runtime.config.active_backend, requested,
+            backend=runtime._get_backend_cfg(runtime.config.active_backend),
+        ):
             await runtime._reply_text(
                 update,
                 ui_language.tr("model.unknown", model=requested),
@@ -2587,7 +2596,10 @@ async def callback_model(runtime, update, context: Any) -> None:
                 return
             model = data.split(":", 1)[1]
             available = runtime._get_available_models()
-            if not available or model in available:
+            if model in available or model_is_allowed(
+                runtime.config.active_backend, model,
+                backend=runtime._get_backend_cfg(runtime.config.active_backend),
+            ):
                 runtime._set_backend_model(runtime.config.active_backend, model)
                 text, reply_markup = runtime._configuration_followup("model")
                 await query.edit_message_text(

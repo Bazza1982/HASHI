@@ -77,7 +77,9 @@ from orchestrator.privacy_levels import (
     require_herv3_provider_compatibility,
     require_level_available,
 )
-from orchestrator.runtime_effort_options import get_available_efforts as runtime_available_efforts
+from orchestrator.runtime_effort_options import (
+    get_available_efforts as runtime_available_efforts, model_is_allowed,
+)
 from orchestrator.workspace_state import WorkspaceStateStore
 from orchestrator import workzone as workzone_module
 
@@ -1331,6 +1333,7 @@ class FlexibleBackendManager:
         backend_extra.pop("model", None)
         backend_extra.pop("models", None)
         backend_extra.pop("default_model", None)
+        backend_extra.pop("available_models", None)
         backend_scope = backend_cfg_raw.get("access_scope", self.config.access_scope)
         backend_extra.pop("access_scope", None)
         extra = {**agent_extra, **backend_extra}
@@ -1364,6 +1367,9 @@ class FlexibleBackendManager:
         resolved_model = target_model or backend_cfg_raw.get("default_model") or backend_cfg_raw.get("model")
         if not resolved_model and isinstance(backend_cfg_raw.get("models"), list):
             resolved_model = next(iter(backend_cfg_raw["models"]), None)
+        if engine != HER_V2_ENGINE and "available_models" in backend_cfg_raw:
+            if not model_is_allowed(engine, resolved_model, backend=backend_cfg_raw):
+                raise ValueError(f"model {resolved_model!r} is not available for backend {engine!r}")
         return AgentConfig(
             name=self.config.name,
             engine=engine,
@@ -1737,12 +1743,16 @@ class FlexibleBackendManager:
             self.logger.error(f"Active backend {engine} not found in allowed_backends.")
             return None
 
-        adapter_cfg = self._build_adapter_config(
-            engine,
-            backend_cfg_raw,
-            target_model=resolved_model,
-            target_provider=resolved_provider,
-        )
+        try:
+            adapter_cfg = self._build_adapter_config(
+                engine,
+                backend_cfg_raw,
+                target_model=resolved_model,
+                target_provider=resolved_provider,
+            )
+        except ValueError as exc:
+            self.logger.error("Backend configuration rejected: %s", exc)
+            return None
 
         backend = None
         initialized = False

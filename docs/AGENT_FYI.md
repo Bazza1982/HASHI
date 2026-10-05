@@ -1,5 +1,12 @@
 # HASHI Agent FYI
 
+Enabled backends default to all qualified models plus native catalogue choices
+and Agent opt-ins. A selected `model` and additive `models` are not restrictions;
+only explicit `available_models` narrows choices, including an empty denial.
+Model/effort views and Frontend controls derive from the Function owner; never
+write a projected list back as configuration. See [model availability](HASHI_MODEL_AVAILABILITY.md).
+Source qualification and running Worker adoption remain separate evidence.
+
 2026-10-03 non-voice repairs require separate source, instance-adoption and
 live evidence. Core is unchanged; no new API supervisor is added.
 Canonical Session API user messages and ordinary attachment staging now honor

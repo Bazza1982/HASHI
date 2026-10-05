@@ -120,6 +120,11 @@ from orchestrator.frontend_compatibility import (
     normalize_compatibility_operation,
 )
 from orchestrator.her_v2.v3_config import resolve_v3_target
+from orchestrator.runtime_effort_options import (
+    backend_model_view,
+    get_available_models as runtime_available_models,
+    get_available_efforts as runtime_available_efforts,
+)
 from orchestrator.hchat_attachment_contract import (
     HCHAT_ATTACHMENT_CLAIM_KEY,
     canonical_hchat_attachment_manifest,
@@ -1725,6 +1730,8 @@ class WorkbenchApiServer:
                             agent_row.get("active_backend")
                         ) == HER_V2_ENGINE and target is not None:
                             model = target.model
+                    else:
+                        public_row = backend_model_view(backend)
                     public_backends.append(public_row)
                     if canonical_backend_engine(
                         backend.get("engine")
@@ -4396,6 +4403,11 @@ class WorkbenchApiServer:
             # Creation support is explicit. Older schema-v1 catalogues do not
             # advertise this capability, so clients can fail closed instead of
             # exposing a button that reaches a missing route.
+            models = runtime_available_models(engine)
+            entry["models"] = models
+            entry["model_efforts"] = {
+                model: runtime_available_efforts(engine, model) for model in models
+            }
             entry["creation"] = {"mode": "model"}
             backends[public_engine] = entry
         return web.json_response(
