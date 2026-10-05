@@ -956,6 +956,136 @@ def test_snapshot_fingerprint_excludes_append_only_slash_audit_but_packages_it(
     assert archive_snapshot_fingerprint(third) != first_fingerprint
 
 
+@pytest.mark.parametrize("transfer_mode", ["workspace", "identity_memory"])
+def test_cold_wal_snapshot_preserves_memory_and_stable_freshness(tmp_path, transfer_mode):
+    from contextlib import closing
+
+    root = _source_root(tmp_path)
+    workspace = root / "workspaces" / "zelda"
+    database = workspace / "bridge_memory.sqlite"
+    with closing(sqlite3.connect(database)) as db:
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("INSERT INTO memories VALUES ('cold durable memory')")
+        db.commit()
+    assert not Path(str(database) + "-shm").exists()
+    assert not Path(str(database) + "-wal").exists()
+    original_digest = hashlib.sha256(database.read_bytes()).hexdigest()
+
+    first = create_agent_move_package(
+        root, "zelda", tmp_path / "cold-first.hashi-agent", transfer_mode=transfer_mode
+    )
+    assert hashlib.sha256(database.read_bytes()).hexdigest() == original_digest
+    inventory = {row["path"]: row for row in first.workspace_metadata["inventory"]}
+    assert inventory["bridge_memory.sqlite-shm"]["size"] == 32768
+    assert inventory["bridge_memory.sqlite-wal"]["size"] == 0
+    assert first.workspace_metadata["total_workspace_bytes"] == sum(
+        row["size"] for row in inventory.values()
+    )
+    destination = tmp_path / "restored"
+    extract_agent_workspace(first, destination)
+    with closing(sqlite3.connect(destination / "bridge_memory.sqlite")) as db:
+        assert db.execute("SELECT text FROM memories ORDER BY rowid").fetchall() == [
+            ("hello",), ("cold durable memory",)
+        ]
+
+    # A normal last writable reader removes the sidecars again. Their lifetime
+    # must not make the same durable snapshot stale at confirmation.
+    with closing(sqlite3.connect(database)) as db:
+        db.execute("SELECT text FROM memories").fetchall()
+    assert not Path(str(database) + "-shm").exists()
+    assert not Path(str(database) + "-wal").exists()
+    second = create_agent_move_package(
+        root, "zelda", tmp_path / "cold-second.hashi-agent", transfer_mode=transfer_mode
+    )
+    assert archive_snapshot_fingerprint(second) == archive_snapshot_fingerprint(first)
+
+    with closing(sqlite3.connect(database)) as db:
+        db.execute("INSERT INTO memories VALUES ('genuinely newer memory')")
+        db.commit()
+    third = create_agent_move_package(
+        root, "zelda", tmp_path / "cold-third.hashi-agent", transfer_mode=transfer_mode
+    )
+    assert archive_snapshot_fingerprint(third) != archive_snapshot_fingerprint(first)
+
+
+@pytest.mark.parametrize("changed_kind", ["memory", "wal", "orphan_sidecar", "orphan_same_size"])
+def test_packaging_rejects_real_changes_and_keeps_existing_output(
+    tmp_path, monkeypatch, changed_kind
+):
+    from contextlib import closing
+    from orchestrator.agent_move import package as owner
+
+    root = _source_root(tmp_path)
+    workspace = root / "workspaces" / "zelda"
+    database = workspace / "bridge_memory.sqlite"
+    with closing(sqlite3.connect(database)) as db:
+        db.execute("PRAGMA journal_mode=WAL")
+        db.commit()
+    orphan = workspace / "ordinary.sqlite-shm"
+    orphan.write_bytes(b"ordinary discarded work")
+    output = tmp_path / "existing.hashi-agent"
+    output.write_bytes(b"existing caller output")
+    write_file = owner._write_file
+    live_writer = None
+    changed_path = {
+        "memory": "memory/continuity.md",
+        "wal": "bridge_memory.sqlite-wal",
+        "orphan_sidecar": "ordinary.sqlite-shm",
+        "orphan_same_size": "ordinary.sqlite-shm",
+    }[changed_kind]
+
+    def write_then_change(archive, name, source, checksums, *, mode):
+        nonlocal live_writer
+        write_file(archive, name, source, checksums, mode=mode)
+        if name != "workspace/memory/continuity.md":
+            return
+        if changed_kind == "wal":
+            live_writer = sqlite3.connect(database)
+            live_writer.execute("INSERT INTO memories VALUES ('new live WAL memory')")
+            live_writer.commit()
+            assert Path(str(database) + "-wal").stat().st_size > 0
+        elif changed_kind == "memory":
+            (workspace / changed_path).write_text("new durable memory")
+        elif changed_kind == "orphan_same_size":
+            stat = orphan.stat()
+            orphan.write_bytes(b"ORDINARY DISCARDED WORK")
+            os.utime(orphan, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+        else:
+            orphan.write_bytes(b"changed ordinary discarded work")
+
+    monkeypatch.setattr(owner, "_write_file", write_then_change)
+    try:
+        with pytest.raises(AgentMoveError, match="workspace changed while packaging") as failure:
+            create_agent_move_package(root, "zelda", output, transfer_mode="workspace")
+        assert changed_path in {
+            row["path"] for row in failure.value.workspace_changes["changes"]
+        }
+        assert output.read_bytes() == b"existing caller output"
+        assert not list(tmp_path.glob(f".{output.name}.*.tmp"))
+    finally:
+        if live_writer is not None:
+            live_writer.close()
+
+
+def test_cold_wal_reader_files_still_count_toward_whole_workspace_limit(
+    tmp_path, monkeypatch
+):
+    from contextlib import closing
+    from orchestrator.agent_move import package as owner
+
+    root = _source_root(tmp_path)
+    workspace = root / "workspaces" / "zelda"
+    with closing(sqlite3.connect(workspace / "bridge_memory.sqlite")) as db:
+        db.execute("PRAGMA journal_mode=WAL")
+        db.commit()
+    initial_bytes = sum(row["size"] for row in owner._workspace_inventory(workspace))
+    monkeypatch.setattr(owner, "WORKSPACE_LIMIT_BYTES", initial_bytes)
+    with pytest.raises(AgentMoveError, match="1 GB"):
+        create_agent_move_package(
+            root, "zelda", tmp_path / "too-large.hashi-agent", transfer_mode="workspace"
+        )
+
+
 def test_explicit_transfer_modes_preserve_memory_and_preflight_whole_workspace(tmp_path, monkeypatch):
     from orchestrator.agent_move import package as owner
     root = _source_root(tmp_path)

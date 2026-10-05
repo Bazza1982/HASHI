@@ -217,6 +217,46 @@ def test_preview_is_disposable_and_does_not_create_outbound_state(
     assert not (root / "state" / "agent_moves" / "outbound").exists()
 
 
+def test_prepare_records_changed_workspace_metadata_without_staging(
+    tmp_path, monkeypatch
+):
+    from orchestrator.agent_move import package as owner
+
+    root = _source(tmp_path)
+    config = json.loads((root / "agents.json").read_text())
+    config["global"]["authorized_id"] = 7
+    _write_json(root / "agents.json", config)
+    receiver = _Receiver()
+    _install_receiver(monkeypatch, receiver)
+    workspace = root / "workspaces" / "zelda"
+    write_file = owner._write_file
+
+    def write_then_change(archive, name, source, checksums, *, mode):
+        write_file(archive, name, source, checksums, mode=mode)
+        if name == "workspace/memory.md":
+            (workspace / "memory.md").write_text("new private memory content")
+
+    monkeypatch.setattr(owner, "_write_file", write_then_change)
+    with pytest.raises(AgentMoveError, match="workspace changed while packaging"):
+        coordinator.prepare_outbound_move(
+            root, {"hashi2": {}}, "zelda", "hashi2",
+            source_instance="HASHI1", transfer_mode="workspace",
+        )
+    states = list((root / "state" / "agent_moves" / "outbound").glob("*/state.json"))
+    assert len(states) == 1
+    state = json.loads(states[0].read_text())
+    assert state["status"] == "prepare_failed"
+    assert state["transfer_mode"] == "workspace"
+    assert state["workspace_changes"]["changed_count"] == 1
+    assert state["workspace_changes"]["changes"][0]["path"] == "memory.md"
+    assert state["workspace_changes"]["changes"][0]["before"]["size"] == len("durable")
+    assert "new private memory content" not in json.dumps(state)
+    assert receiver.calls == []
+    assert (workspace / "memory.md").is_file()
+    assert json.loads((root / "agents.json").read_text())["agents"][0]["is_active"] is True
+    assert not list(states[0].parent.glob("*.hashi-agent"))
+
+
 @pytest.mark.skipif(
     os.name == "nt",
     reason="agent.md and AGENT.md cannot coexist on a case-insensitive Windows tree",

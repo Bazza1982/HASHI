@@ -161,6 +161,17 @@ class AgentMoveError(ValueError):
     """Raised when a move package or migration operation is invalid."""
 
 
+class _WorkspaceChangedError(AgentMoveError):
+    def __init__(self, changes: list[dict[str, Any]]) -> None:
+        self.workspace_changes = {
+            "changed_count": len(changes),
+            "changes": changes[:20],
+        }
+        super().__init__(
+            "workspace changed while packaging; prepare a fresh transfer"
+        )
+
+
 @dataclass(frozen=True)
 class WorkspaceEntry:
     source: Path
@@ -641,8 +652,20 @@ def create_agent_move_package(
     with tempfile.TemporaryDirectory(prefix="hashi-agent-move-") as temp_name:
         temp_dir = Path(temp_name)
         prepared_entries = _prepare_workspace_entries(entries, temp_dir)
+        sqlite_snapshot_paths = {
+            item.relative_path for item in prepared_entries if item.sqlite_snapshot
+        }
+        # Only a successfully backed-up database owns disposable reader
+        # bookkeeping. A work file merely named *.db does not.
+        for item in workspace_metadata["files"]:
+            item["sqlite_snapshot"] = item["path"] in sqlite_snapshot_paths
         prepared_bytes = sum(item.size for item in prepared_entries)
         snapshot_growth = prepared_bytes - sum(item.size for item in entries)
+        inventory_limit = (
+            WORKSPACE_LIMIT_BYTES - snapshot_growth
+            if transfer_mode == "workspace"
+            else None
+        )
         if transfer_mode == "workspace" and total_workspace_bytes + snapshot_growth > WORKSPACE_LIMIT_BYTES:
             raise AgentMoveError("consistent workspace snapshots exceed the 1 GB full move limit")
         if prepared_bytes > (WORKSPACE_LIMIT_BYTES if transfer_mode else MAX_WORKSPACE_BYTES):
@@ -697,12 +720,6 @@ def create_agent_move_package(
                 _write_bytes(
                     archive, "schedules/tasks.json", _json_bytes(schedules), checksums
                 )
-                _write_bytes(
-                    archive,
-                    "metadata/workspace.json",
-                    _json_bytes(workspace_metadata),
-                    checksums,
-                )
                 if encrypted_secrets is not None:
                     _write_bytes(
                         archive, "secrets/agent.enc", encrypted_secrets, checksums
@@ -715,6 +732,30 @@ def create_agent_move_package(
                         checksums,
                         mode=item.mode,
                     )
+                if transfer_mode:
+                    final_inventory = _workspace_inventory(workspace)
+                    _assert_packaging_inventory_current(
+                        inventory, final_inventory, sqlite_snapshot_paths,
+                        max_workspace_bytes=inventory_limit,
+                    )
+                    # Retain the complete observed inventory for deletion
+                    # disclosure and limits, including reader-created sidecars.
+                    workspace_metadata.update({
+                        "inventory": final_inventory,
+                        "total_workspace_bytes": sum(
+                            item["size"] for item in final_inventory
+                        ),
+                        "discarded": [
+                            item for item in final_inventory
+                            if item["path"] not in selected
+                        ],
+                    })
+                _write_bytes(
+                    archive,
+                    "metadata/workspace.json",
+                    _json_bytes(workspace_metadata),
+                    checksums,
+                )
                 archive.writestr(
                     "checksums.json",
                     _json_bytes(
@@ -736,8 +777,10 @@ def create_agent_move_package(
             read_agent_move_package(temporary, verify=True)
             if transfer_mode:
                 final_inventory = _workspace_inventory(workspace)
-                if final_inventory != inventory:
-                    raise AgentMoveError("workspace changed while packaging; prepare a fresh transfer")
+                _assert_packaging_inventory_current(
+                    inventory, final_inventory, sqlite_snapshot_paths,
+                    max_workspace_bytes=inventory_limit,
+                )
             if conversation_continuity is not None:
                 final_continuity = _export_conversation_continuity_snapshot(
                     root,
@@ -1105,8 +1148,18 @@ def archive_snapshot_fingerprint(
         "transfer_mode": package.manifest.get("transfer_mode"),
         "history_mode": package.manifest.get("history_mode"),
         "conversation_continuity": stable_continuity,
-        "deletion_inventory": [item for item in package.workspace_metadata.get("inventory", [])
-                               if str(item.get("path", "")).casefold() not in _FRESHNESS_EXCLUDED_WORKSPACE_PATHS],
+        "deletion_inventory": [
+            item for item in _durable_workspace_inventory(
+                package.workspace_metadata.get("inventory", []),
+                {
+                    str(item.get("path") or "")
+                    for item in package.workspace_metadata.get("files", [])
+                    if item.get("sqlite_snapshot")
+                },
+            )
+            if str(item.get("path", "")).casefold()
+            not in _FRESHNESS_EXCLUDED_WORKSPACE_PATHS
+        ],
     }
     return hashlib.sha256(_json_bytes(payload)).hexdigest()
 
@@ -1362,18 +1415,68 @@ def _workspace_inventory(workspace: Path) -> list[dict[str, Any]]:
             path = parent / name
             info = path.lstat()
             link = path.is_symlink() or _is_windows_junction(path)
-            # SQLite readers update WAL-index (-shm) bookkeeping on Windows.
-            # That timestamp is not durable content. Keep its existence/size in
-            # the deletion/limit inventory; main database and WAL remain fenced.
-            sqlite_shm = not link and path.name.casefold().endswith(
-                tuple(suffix + "-shm" for suffix in _SQLITE_SUFFIXES)
-            )
             entries.append({"path": path.relative_to(workspace).as_posix(),
                             "size": 0 if link else info.st_size,
-                            "mtime_ns": 0 if sqlite_shm else info.st_mtime_ns, "link": link})
+                            "mtime_ns": info.st_mtime_ns, "link": link})
             if len(entries) > MAX_ARCHIVE_MEMBERS:
                 raise AgentMoveError("workspace inventory exceeds the file-count limit")
     return sorted(entries, key=lambda item: item["path"])
+
+
+def _durable_workspace_inventory(
+    inventory: Iterable[dict[str, Any]], sqlite_snapshot_paths: set[str],
+) -> list[dict[str, Any]]:
+    """Derive freshness without discarding the complete limit/deletion view.
+
+    SQLite read-only backups can create, resize or remove a WAL-index (-shm)
+    and an empty WAL. Neither contains durable edits. Never ignore a nonempty
+    WAL, a link, or a similarly named file without a backed-up database.
+    """
+    durable = []
+    for item in inventory:
+        path = str(item.get("path") or "")
+        reader_file = (
+            not item.get("link")
+            and path[:-4] in sqlite_snapshot_paths
+            and (
+                path.endswith("-shm")
+                or (path.endswith("-wal") and item.get("size") == 0)
+            )
+        )
+        if not reader_file:
+            durable.append(item)
+    return durable
+
+
+def _assert_packaging_inventory_current(
+    before: list[dict[str, Any]],
+    after: list[dict[str, Any]],
+    sqlite_snapshot_paths: set[str],
+    *,
+    max_workspace_bytes: int | None,
+) -> None:
+    old = {
+        item["path"]: item
+        for item in _durable_workspace_inventory(before, sqlite_snapshot_paths)
+    }
+    new = {
+        item["path"]: item
+        for item in _durable_workspace_inventory(after, sqlite_snapshot_paths)
+    }
+    changes = [
+        {"path": path, "before": old.get(path), "after": new.get(path)}
+        for path in sorted(old.keys() | new.keys())
+        if old.get(path) != new.get(path)
+    ]
+    if changes:
+        raise _WorkspaceChangedError(changes)
+    if (
+        max_workspace_bytes is not None
+        and sum(item["size"] for item in after) > max_workspace_bytes
+    ):
+        raise AgentMoveError(
+            "consistent workspace snapshots exceed the 1 GB full move limit"
+        )
 
 
 def _scan_workspace(

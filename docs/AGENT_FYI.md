@@ -1,5 +1,14 @@
 # HASHI Agent FYI
 
+2026-10-05 HASHI1 Move repair separates SQLite reader bookkeeping from durable
+source freshness. Cold read-only snapshots may create an empty WAL and WAL-index;
+they no longer invalidate their own package. Complete workspace size/deletion
+disclosure, nonempty WAL and real content-change checks remain enforced.
+Failed preparation records bounded metadata-only differences. PAO / Functions
+owns this change; no Core or other-instance edits. The user authorized HASHI1
+repair and broad Function reboot; offline validation and adoption are recorded
+separately in [Agent Move](HASHI_AGENT_MOVE_V1.md).
+
 2026-10-05 HASHI1 nightly repair source adds scoped same-Run questions, explicit
 sunny creation selection policy, trusted Wiki command continuations, compact
 Remote desktop identity preflight, durable Telegram ingress diagnostics and

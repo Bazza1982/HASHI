@@ -11,6 +11,39 @@ authentication, transaction journal, and registry-writing implementation.
 The source sends a platform-neutral `agent-move-v1` archive to a target-owned
 receiver. The source never writes a target filesystem path directly.
 
+## HASHI1 repair decision (2026-10-05)
+
+The user authorized immediate repair on HASHI1 and Function reboot to apply it,
+leaving the actual Move retry to the user. PAO owns the source packaging and
+preparation journal; this is a Functions change, not a Core or model change.
+No other instance is modified or restarted.
+
+Cold WAL-mode memory databases reproduce the failure without a concurrent
+writer: the read-only SQLite backup itself creates a WAL-index and empty WAL,
+so comparing the complete raw file list invalidates its own preparation.
+Only disposable reader files of successfully backed-up databases are excluded
+from derived freshness. Complete inventory, size, deletion disclosure, durable
+snapshot checksums and real-change rejection remain in force.
+
+Regression checks cover both transfer modes, extraction of real SQLite memory,
+reader-file creation/removal across preparation and confirmation, durable edits,
+nonempty live WALs, similarly named ordinary files (including same-size edits),
+the whole-workspace size limit, unpublished output on failure and bounded
+metadata-only preparation diagnostics. The cold-WAL cases failed before the
+repair; the same-size ordinary-file and preparation-diagnostic checks also
+demonstrated their failures before the corresponding corrections.
+The five-file focused matrix (package, coordinator, service, Remote receiver and
+runtime Remote consumer) passes 140 tests. Protected Core and runtime-contract
+checks pass. Generation qualification and the Core gate require committed
+Function source and are checked separately before operational adoption.
+
+Adoption uses `/reboot max` after committed-source qualification, not a
+Core cold restart. The authoritative operational evidence is
+`state/instance/reboot-receipts.json` plus `/api/version` and `/api/health`:
+success requires the new source generation in shared Functions and every
+selected Worker, terminal `online` receipt and verified readiness. Offline
+tests alone do not establish production adoption or a real Move success.
+
 ## Compatibility
 
 - An outbound instance must implement this protocol.
@@ -35,10 +68,12 @@ receiver. The source never writes a target filesystem path directly.
 - canonical `agent.md`;
 - durable workspace files, including transcripts and memory databases;
 - consistent SQLite snapshots rather than live WAL sidecars;
-  Windows reader bookkeeping can change a SQLite `-shm` timestamp during
-  backup, so that timestamp is normalized in freshness inventories. Its path
-  and size still count toward deletion/size checks; database and WAL changes
-  remain fenced, and the snapshot checksum detects durable memory edits;
+  read-only backup can create, resize or remove a SQLite `-shm` file and an
+  empty `-wal`. For successfully backed-up databases only, those reader files
+  are omitted from the derived freshness comparison, not from the complete
+  deletion disclosure or 1 GB size inventory. Nonempty WALs, database edits,
+  links and unrelated similarly named files remain fenced; snapshot checksums
+  detect durable memory edits across preparation and confirmation;
 - the Agent's schedules, imported disabled for review;
 - Agent-owned secret keys, encrypted with the paired HASHI Remote shared
   secret. A move includes its Telegram credential for a single-consumer
@@ -120,6 +155,9 @@ Source freshness covers the selected content and deletion inventory, retaining
 the existing exclusion for the command audit. Files changing during packaging
 cause preparation to fail without publishing a new package. SQLite snapshots
 and receiver payload validation retain bounded expansion checks.
+Preparation failures retain the selected transfer mode and, for changed
+workspaces, a bounded metadata-only difference (count and first 20 relative
+paths, sizes, timestamps and link flags). File contents are never recorded.
 
 Lifecycle HTTP calls use the PAO Worker-readiness budget with transport headroom,
 including the Remote-to-local API hop. A Windows Worker taking longer than a
