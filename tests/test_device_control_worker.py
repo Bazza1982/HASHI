@@ -152,6 +152,35 @@ def test_non_loopback_worker_reports_authenticated_host_gateway_transport(tmp_pa
     assert payload["transport_kind"] == "authenticated_http_host_gateway"
 
 
+def test_embedded_launch_receipt_is_published_only_after_authenticated_registration(tmp_path, monkeypatch):
+    state = _state(tmp_path)
+    state.browser_provider = "embedded"
+    state.launch_id = "7c14ee98-373c-45a0-b243-eb7f08217f43"
+    state.bound_port = 49123
+    responses = {"ok": True, "registration": {"instance_id": "OTHER"}}
+    calls = []
+
+    def register(_url, **kwargs):
+        calls.append(kwargs)
+        return responses
+
+    monkeypatch.setattr(device_worker, "_http_json", register)
+    bootstrap = {"registration_url": "http://127.0.0.1/register", "bootstrap_token": "b" * 64}
+    with pytest.raises(DeviceWorkerError, match="identity mismatch"):
+        device_worker._register(state, bootstrap)
+    assert not state.status_path.exists()
+    responses["registration"]["instance_id"] = state.instance_id
+    device_worker._register(state, bootstrap)
+    receipt = json.loads(state.status_path.read_text(encoding="utf-8"))
+    assert receipt["launch_id"] == state.launch_id
+    assert receipt["provider_id"] == "embedded"
+    assert receipt["pid"] == os.getpid()
+    assert receipt["registered_at"] > 0
+    assert calls[-1]["headers"]["X-HASHI-Capability-Bootstrap"] == bootstrap["bootstrap_token"]
+    # A launch receipt correlates a local process; it is not a capability grant.
+    assert "launch_id" not in calls[-1]["payload"]
+
+
 @contextmanager
 def _running_server(tmp_path: Path):
     state = _state(tmp_path)

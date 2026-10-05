@@ -369,6 +369,7 @@ class DeviceWorkerState:
     auto_bind: bool = False
     browser_provider: str = "extension"
     browser_descriptor: str = ""
+    launch_id: str = ""
     executor: Callable[[str, dict[str, Any]], Any] | None = None
     bound_port: int = 0
     stopping: threading.Event = field(default_factory=threading.Event)
@@ -996,6 +997,8 @@ def _register(state: DeviceWorkerState, bootstrap: Mapping[str, Any]) -> None:
             "pid": os.getpid(),
             "generation": _generation_id(state.capability_kind),
             "registered_at": time.time(),
+            "provider_id": state.browser_provider if state.capability_kind == "browser_control" else "",
+            "launch_id": state.launch_id,
         },
     )
 
@@ -1128,6 +1131,7 @@ def build_state(args: argparse.Namespace) -> DeviceWorkerState:
         auto_bind=str(args.host).strip().casefold() == "auto",
         browser_provider=getattr(args, "browser_provider", "extension"),
         browser_descriptor=str(getattr(args, "browser_descriptor", "") or ""),
+        launch_id=str(getattr(args, "launch_id", "") or ""),
     )
 
 
@@ -1144,6 +1148,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--wsl-distro")
     parser.add_argument("--browser-provider", choices=["extension", "embedded"], default="extension")
     parser.add_argument("--browser-descriptor")
+    parser.add_argument("--launch-id", default="", help="Local launcher receipt correlation; grants no capability authority")
     parser.add_argument("--browser-endpoint")
     parser.add_argument("--browser-auth-file")
     parser.add_argument(
@@ -1196,6 +1201,8 @@ def main(argv: list[str] | None = None) -> int:
                 "pid": os.getpid(),
                 "generation": _generation_id(state.capability_kind),
                 "started_at": time.time(),
+                "provider_id": state.browser_provider if state.capability_kind == "browser_control" else "",
+                "launch_id": state.launch_id,
             },
         )
         _event(
