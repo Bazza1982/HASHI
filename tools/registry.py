@@ -1678,7 +1678,12 @@ class ToolRegistry:
                     browser_args,
                     tool_call_id=tool_call_id,
                 )
-            if browser_args.get("browser_target") == "embedded":
+            requested_provider = str(
+                browser_args.get("browser_target") or ""
+            ).strip().lower()
+            if requested_provider not in {"", "extension", "embedded"}:
+                return "Error: invalid browser_target; no browser fallback was attempted"
+            if requested_provider == "embedded":
                 return "Error: embedded browser requires an authenticated HASHI capability Worker; no browser fallback was attempted"
             browser_options = opts.get("browser", {})
             if isinstance(browser_options, dict):
