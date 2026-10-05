@@ -1,5 +1,16 @@
 # HASHI Agent FYI
 
+2026-10-05 Remote idle-CPU repair is PAO-owned Functions plus Windows/WSL
+launcher and instance configuration; protected Core is unchanged. Historical
+receipt discovery is cached, but locked admission stays fresh. Known same-host
+loopback success no longer repeatedly overwrites discovery. WSL background
+launchers use validated empty stdin instead of inheriting console input.
+User-approved WSL/four-Remote restarts adopted the scoped implementation and
+reduced measured idle CPU. HASHI2 Exchange alone was disabled; HASHI3/HASHI4
+Exchange connection failures and HASHI3 main-runtime availability are not
+reported repaired. Tests, code adoption and live observations remain separate;
+see [repair evidence and boundaries](repairs/REMOTE_IDLE_CPU_REPAIR_2026-10-05.md).
+
 2026-10-05 HASHI1 Move cutover follow-up corrects a schema-5 false stale-source
 rejection: presentation-only progress notices change excluded-message diagnostics,
 not transferred conversation history. PAO / Functions uses the same durable
