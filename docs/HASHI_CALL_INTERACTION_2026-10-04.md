@@ -1,6 +1,10 @@
 # Call interaction correction — HASHI2 experiment
 
-## 2026-10-05 local input and audio follow-up
+## Historical 2026-10-05 local input and audio follow-up
+
+This checkpoint predates the later approved volume-based capture plus cloud
+speech-judgment trial recorded below. Preserve it as experiment history;
+the consolidated development client uses the later cloud-judgment path.
 
 The user approved implementing Aptenra-inspired local acoustic admission and
 restoring call system sounds, while preserving call responsiveness. Frontend

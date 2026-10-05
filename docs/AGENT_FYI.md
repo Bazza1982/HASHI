@@ -264,6 +264,12 @@ Public HERV3 is her-v3; her-v2 names are compatibility only. JEV defaults off. /
 Level 2: HERV3/DeepSeek only. Local PII detection can miss values;
 `/privacy 2` needs risk acceptance and blocks on detector failure.
 
+Level 2 deployment uses `requirements-privacy.txt` in a separate interpreter.
+Source installs run `scripts/provision_privacy_runtime.py`; npm and enterprise
+builds prepare it automatically; the 957 MB Portable Windows image supplies a
+separate on-target installer. Readiness checks use synthetic PII, and setup
+does not activate `/privacy 2` or prove running Worker adoption.
+
 Model/provider cards share one contract; chat-only models disclose that they have no tools. /style rephrases completed answers without changing facts and meters separately. Fallback is opt-in: warn before switching and block uncertain effect replay. Reject malformed Tool batches before effects; never replay committed effects. /stop, /retry, /resend and /steer differ; recovery grants no revoked authority. Show typed progress, not private reasoning.
 
 ## UI, media, and Phone
