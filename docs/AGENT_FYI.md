@@ -290,6 +290,13 @@ Commands follow the [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md), retain Session 
 
 `/say` reads the latest final reply, `/say 2`–`/say 4` that many, `/say 1-3` the latest three oldest first. Skip cost/command/progress. Telegram needs confirmed chat delivery; Workbench/TUI play locally. Reboot receipts never prove playback.
 
+Historical 2026-10-05 checkpoint, superseded by the later cloud-judgment trial:
+Call input gated microphone WAVs locally with warmed acoustic speech evidence;
+rejected noise did not become an STT turn. It reused Phone sounds, kept the
+800 ms endpoint, and paused on detector failure. Source/tests, normal frontend
+deployment and physical latency/listening acceptance were separate evidence.
+See [Call interaction](HASHI_CALL_INTERACTION_2026-10-04.md).
+
 ## Move, Scheduler, and HCC
 
 /move and /clone share package, registry, workspace, Scheduler, secret, and lifecycle owners. Move removes verified source only after activation. Clone preserves it, excludes Telegram credentials, and disables imported jobs. Accepted is not completed. See [Agent Move](HASHI_AGENT_MOVE_V1.md).

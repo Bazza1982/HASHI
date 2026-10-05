@@ -1,5 +1,29 @@
 # Call interaction correction — HASHI2 experiment
 
+## 2026-10-05 local input and audio follow-up
+
+The user approved implementing Aptenra-inspired local acoustic admission and
+restoring call system sounds, while preserving call responsiveness. Frontend
+Connector owns this browser media change; the existing Functions call contract,
+PAO admission and Core remain unchanged. Speech probability now gates WAV
+production before STT, with browser suppression/echo cancellation, local warmed
+Silero processing, onset audio and the existing 800 ms silence wait. Failure
+pauses capture instead of falling back to amplitude-only admission. Speech in
+television/other voices remains an acoustic limitation, not caller identity.
+
+The existing Phone sound catalogue supplies dial/ringback, connected, busy,
+failure and confirmed hangup cues. Connected feedback waits for actual input
+readiness, and cancellation fences obsolete sound and detector completions.
+Implementation and focused offline/browser acoustic checks are complete;
+ordinary Workbench deployment and physical acceptance are recorded separately
+on the original call task. Normal/short samples add 32–96 ms at the endpoint in
+the bounded audio comparison; quiet syllables retained by the new detector are
+not judged against the old prematurely cut endpoint. Full call latency and the
+proposed <=100 ms incremental physical target remain user-device acceptance.
+The detailed client decision is `docs/call/CALL_INPUT_REPAIR_2026-10-05.md` in
+the authorized external frontend checkout. No HASHI restart is part of this
+frontend-only repair.
+
 ## Ownership and approved scope
 
 On 2026-10-04 the user approved the combined voice/video correction and the
