@@ -59,6 +59,7 @@ $logDirectory = Join-Path $runtimeDirectory 'logs'
 $launcherLogPath = Join-Path $logDirectory 'user-runtime.log'
 $stdoutLogPath = Join-Path $logDirectory 'user-runtime.stdout.log'
 $stderrLogPath = Join-Path $logDirectory 'user-runtime.stderr.log'
+$closedInputPath = Join-Path $runtimeDirectory 'user-runtime.stdin.empty'
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
 New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
@@ -169,6 +170,7 @@ function Invoke-WslNative {
         -FilePath $WslExecutable `
         -ArgumentList $argumentLine `
         -WindowStyle Hidden `
+        -RedirectStandardInput $closedInputPath `
         -RedirectStandardOutput $stdoutLogPath `
         -RedirectStandardError $stderrLogPath `
         -PassThru `
@@ -192,6 +194,18 @@ try {
     }
     if (-not (Test-Path -LiteralPath $WslExecutable -PathType Leaf)) {
         throw "$InstanceId user runtime cannot find wsl.exe at $WslExecutable."
+    }
+
+    # A background runtime has no interactive input. Give WSL a pipe at EOF,
+    # not an inherited CONIN$ handle: a signaled-but-empty console input handle
+    # can busy-loop in WSL's ReadConsoleInputExW relay and its Windows conhost.
+    if (-not (Test-Path -LiteralPath $closedInputPath)) {
+        New-Item -ItemType File -Path $closedInputPath | Out-Null
+    }
+    $inputItem = Get-Item -LiteralPath $closedInputPath
+    if ($inputItem.PSIsContainer -or $inputItem.Length -ne 0 -or
+        ($inputItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "$InstanceId background stdin must be an empty regular file."
     }
 
     $runtimeCheckArguments = @(
