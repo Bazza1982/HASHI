@@ -165,6 +165,8 @@ def test_verified_manifest_rejects_any_generation_byte_change(tmp_path, changed)
 
     with pytest.raises(FunctionGenerationError, match="source or asset changed"):
         verify_source_manifest(manifest, code_root=tmp_path)
+    with pytest.raises(FunctionGenerationError, match="source or asset changed"):
+        function_generation.verify_qualified_manifest_bytes(manifest, code_root=tmp_path)
 
 
 def test_serialized_manifest_requires_current_schema(tmp_path):
