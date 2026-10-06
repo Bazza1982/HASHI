@@ -1,13 +1,13 @@
 # HASHI Agent FYI
 
-2026-10-06: the user authorized reviewing all outstanding nightly inbox issues,
-repairing/testing on HASHI3, and reloading Workbench/restarting HASHI3. PAO, PCM,
-HERV3 and Frontend Connector retain their Function ownership. HASHI4 production
-is outside this repair/adoption scope. Core remains immutable. Current repairs
-cover history, avatars, Agent selection, voice and Run questions, durable HERV3
-continuation checkpoints and common persistent failure results. Codex 0.160+
-native shell termination uses the owned guard; managed process tools protect
-runtime ancestry. Hooks are guardrails, not an OS enforcement boundary.
+2026-10-06: the user authorized all outstanding inbox repairs/tests on HASHI3,
+Workbench reloads and HASHI3 restarts. HASHI4 is outside scope; Core is immutable.
+Functions retain PAO/PCM/HERV3/Connector ownership. Repairs cover history, avatars,
+selection, voice, questions, durable checkpoints and persistent failures.
+Codex 0.160+ uses the owned termination guard; managed tools protect runtime
+ancestry. Hooks are guardrails, not OS enforcement.
+Voice-message transcription and Safe Voice gating apply to HERV3's active
+Execution loop; retired Triage is not the owner of ordinary recording input.
 Source, offline validation, runtime adoption and actual frontend evidence remain
 separate. See [batch evidence](repairs/NIGHTLY_20261006_HASHI3.md).
 

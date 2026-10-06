@@ -5,6 +5,13 @@ the single model/tool loop and direct Shell use. Execution facts drive technical
 verbose activity independently of commentary; AC heartbeat is not actual progress.
 The owning decision separates source verification from live adoption.
 
+Voice-message uploads use the Worker-owned local transcript in the current
+Execution loop and text-only Direct route, rather than relying on retired
+Triage to consume it. Safe Voice confirmation precedes the model call; an
+unavailable or discarded transcript starts no model action. The explicitly
+selected native-audio route retains raw audio. Other attachments remain bound
+to their original identity and media route.
+
 ## Decision and scope
 
 HERV3 is the current HASHI Engine Runtime upgrade and the canonical

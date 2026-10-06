@@ -109,3 +109,14 @@ of arbitrary programs. The old Core outage's cause is still a separate question.
 The pre-extension whole HASHI3 offline suite passed **6,156 tests, 33 skips,
 199 deselections**. Current final-source qualification and adoption are recorded
 separately below; the earlier pass does not cover code written afterward.
+
+### Voice live boundary, 2026-10-06
+
+The first recording after final-source adoption was still rejected in HERV3
+Execution while its isolated STT finished afterward. This exposed a real
+remaining boundary: only retired Triage awaited the transcript. The current
+Execution and text Direct routes now consume the confirmed transcript before
+the model call, keep sibling attachments, and refuse discarded/unavailable STT.
+The original regression failed for Execution and Direct and passed for Triage;
+all three are covered. This recording was terminally failed, not blindly replayed.
+Subsequent independent voice acceptance and source adoption are recorded separately.

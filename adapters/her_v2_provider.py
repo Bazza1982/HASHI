@@ -3535,14 +3535,14 @@ class HashiStageProvider(StageProvider):
             if request.allow_tools
             else frozenset()
         )
-        if request.stage is Stage.TRIAGE and request_content_is_voice_origin(
+        if not native_audio_stage and request_content_is_voice_origin(
             request.request_content
         ):
             triage_input_policy = (
                 str(profile.options.get("_voice_triage_input_policy") or "auto")
                 .strip()
                 .casefold()
-            )
+            ) if request.stage is Stage.TRIAGE else "transcript"
             capability_resolver = getattr(backend, "resolve_input_capability", None)
             triage_capability = (
                 capability_resolver()
@@ -3601,6 +3601,17 @@ class HashiStageProvider(StageProvider):
                     )
                     self._untrack_active_backend(backend)
                     await backend.shutdown()
+                    if request.stage is not Stage.TRIAGE:
+                        raise StageInvocationError(
+                            f"Voice transcript was not released: {transcript_state}",
+                            retryable=False,
+                            code=ProviderFailureCode.INPUT_MODALITY_CONVERSION_FAILED,
+                            human_description=(
+                                "The recording could not be transcribed or its transcript "
+                                "was not confirmed; no model action was started."
+                            ),
+                            details={"transcript_state": transcript_state},
+                        )
                     return StageResponse(
                         data={
                             "classification": "DIRECT_RESPONSE",
@@ -3627,16 +3638,26 @@ class HashiStageProvider(StageProvider):
                     )
             if needs_text_transcript:
                 original_manifest = tuple(request.attachment_manifest)
+                remaining_ids = {
+                    str(item.get("attachment_id") or "")
+                    for item in original_manifest
+                    if str(item.get("semantic_role") or "") != "voice_message"
+                }
+                remaining_content = (
+                    subset_request_content(request.request_content, remaining_ids)
+                    if remaining_ids else None
+                )
                 media_routing = tuple(
                     {
                         "attachment_id": str(item.get("attachment_id") or ""),
                         "item_index": item.get("item_index"),
                         "modality": str(item.get("modality") or "audio"),
                         "route": "local_transcript",
-                        "reason": "text_triage_uses_released_local_stt",
+                        "reason": "text_stage_uses_released_local_stt",
                         "transport": None,
                     }
                     for item in original_manifest
+                    if str(item.get("semantic_role") or "") == "voice_message"
                 )
                 request = replace(
                     request,
@@ -3644,10 +3665,10 @@ class HashiStageProvider(StageProvider):
                         f"[Local voice transcription]\n{transcript}\n\n"
                         f"[Original user caption/request]\n{request.goal}"
                     ),
-                    request_content=None,
-                    attachment_manifest=(),
+                    request_content=remaining_content,
+                    attachment_manifest=attachment_manifest(remaining_content),
                 )
-                provider_request_content = None
+                provider_request_content = remaining_content
         if request.attachment_manifest:
             try:
                 canonical_manifest = attachment_manifest(request.request_content)
@@ -3715,7 +3736,7 @@ class HashiStageProvider(StageProvider):
                     capability,
                     fallback_modalities=local_fallback_modalities,
                 )
-                media_routing = routing_decisions_payload(decisions)
+                media_routing = (*media_routing, *routing_decisions_payload(decisions))
                 force_local_unavailable = False
                 if request.force_local_media_fallback:
                     can_force_local = (
