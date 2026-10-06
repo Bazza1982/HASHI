@@ -257,6 +257,8 @@ def _send_inputs(inputs: list[INPUT]) -> None:
     if not inputs:
         return
     array = (INPUT * len(inputs))(*inputs)
+    # Desktop-name size queries leave error 122 even after their successful read.
+    ctypes.set_last_error(0)
     sent = user32.SendInput(len(inputs), array, ctypes.sizeof(INPUT))
     if sent != len(inputs):
         raise ctypes.WinError(ctypes.get_last_error())

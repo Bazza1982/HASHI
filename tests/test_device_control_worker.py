@@ -300,6 +300,38 @@ def test_health_requires_worker_token_and_returns_full_identity(tmp_path):
     assert health["protocol_version"] == CAPABILITY_PROTOCOL_VERSION
 
 
+def test_desktop_failure_preserves_safe_rpc_and_bounded_diagnostics(tmp_path, caplog):
+    from orchestrator.desktop_contract import DesktopError
+    from types import SimpleNamespace
+
+    with _running_server(tmp_path) as state:
+        state.capability_kind = "computer_control"
+        caplog.set_level(logging.INFO, logger=state.logger.name)
+        def denied(*_args):
+            native = OSError("private-input-text-and-window-title")
+            native.winerror = 0
+            native.desktop_diagnostics = {"input_desktop_interactive": True,
+                "thread_on_input_desktop": True, "window_station_visible": True,
+                "cursor_at_requested_position": False, "input_text": "private-input-text"}
+            raise DesktopError("desktop_input_failed", 503) from native
+        state.manual_desktop = lambda: SimpleNamespace(handle=denied)
+        payload = _action_payload(state, request_id="desktop-safe-failure", action="desktop_input")
+        payload.update(worker_generation=device_worker._generation_id("computer_control"),
+            actor={"type": "user", "id": "owner-safe"}, desktop_session_id="session-safe")
+        status, result = _request(state, "/action", method="POST", payload=payload)
+    assert status == 200 and result["status"] == 503
+    assert result["error_code"] == "desktop_input_failed"
+    assert "private-input" not in json.dumps(result)
+    rows = [json.loads(record.message) for record in caplog.records
+            if '"event": "desktop_action_failed"' in record.message]
+    assert len(rows) == 1
+    assert rows[0]["request_id"] == "desktop-safe-failure"
+    assert rows[0]["os_error"] == 0
+    assert rows[0]["input_desktop_interactive"] is True
+    assert rows[0]["cursor_at_requested_position"] is False
+    assert "private-input" not in json.dumps(rows[0])
+
+
 def test_observation_executes_without_write_lease_and_replay_is_rejected(tmp_path):
     with _running_server(tmp_path) as state:
         state.capability_kind = "computer_control"

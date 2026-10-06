@@ -52,16 +52,18 @@ focused validation, running adoption and real frontend evidence are separate.
 
 ## Candidate source checks
 
-First qualification measurements (three independent probes per version):
-baseline 64.829/69.026/61.470 s; optimized 23.613/24.044/24.418 s. Median
-qualification reduction is 62.9%. This is qualification only, not end-to-end
-reboot or disconnect duration; a same-source comparison is still required.
+Three paired, independent qualification probes against exactly the same source
+produced medians of 47.152 s with the original algorithm and 24.772 s with the
+optimized algorithm: a 47.5% reduction. All six receipts identify the same
+generation. Earlier 62.9% figures compared different source snapshots and are
+superseded. Qualification, complete reboot and disconnect duration are separate.
 
 Focused checks cover durable fenced projection, lifecycle discovery/acknowledgment,
 remote upload destination changes, trusted filesystem identity, desktop
 installation binding/opt-out, native frontend components, Session view selection,
 queue overlap/FIFO/capacity, native adapter isolation, control-thread targeting
-and HERV3 shared-service ownership. Curated gate and live acceptance are pending.
+and HERV3 shared-service ownership. The curated gate passed 801 checks, with one
+existing skip. Live acceptance and its remaining hardware boundaries are below.
 
 ## Live findings during this batch
 
@@ -120,3 +122,47 @@ Safe mutations failed for lost filesystem exclusion, missing engine/global
 capacity, partial bound-batch cleanup and invalid budget acceptance. Queue
 cancellation also has a pre-fix timeout proof. Running adoption and final
 frontend/desktop/performance evidence remain separate.
+
+## Completed frontend and execution observations
+
+The same Codex model ran in two native Sessions with B finishing while A was
+inside a real tool call. HERV3 through HASHI API and direct API calls using the
+same model independently showed overlapping execution. Actual Simple queue
+acceptance proved two occupied lanes, a third lane waiting for capacity, and
+Session A2 waiting behind A1. Stopping B left A running, admitted C, and A2 read
+A1's committed marker after its completion. Text/file drafts and user questions
+retained their original Session during switching. These are persisted Run and
+provider observations, not concurrent mocks.
+
+All 12 ordinary themes and three Simple themes were captured in real Electron.
+The final Simple test showed the stored start message in the source Agent's chat
+before cutover after 1.129 s, completed max in 55.188 s and dismissed confirmed
+success after 3.818 visible seconds, keeping Core PID 40696. Later performance
+comparisons are recorded separately. Two ordered text files, including a Chinese
+filename, were uploaded as actual bytes and admitted in one selected-Session turn.
+
+The hardened Windows package was built with qualified Node 22.23.2 and Electron
+43.1.1. Its bundled service/UI and native browser started against real HASHI3
+three times, including a new deployment directory and return to the first.
+Installation desktop binding and preferences persisted, the browser came from
+app.asar, settings had no unrelated error, and each app quit normally. This is
+relocation/return testing of the candidate; it does not claim a production upgrade.
+
+## Native desktop diagnostic boundary
+
+Real captures matched all three currently connected monitors and the installation
+binding's physical host and Windows session. Actual pointer input remains NOT
+VERIFIED: SetCursorPos returned false while Windows reported an active, visible,
+unlocked input desktop, without a valid last-error code. Clearing a stale 122 left
+error 0. A separate SendInput experiment was accepted by Windows but did not move
+the observed cursor; that attempted replacement was discarded. No optimistic
+input workaround is retained and view/control leases were released.
+
+DesktopController now preserves typed DesktopError failures and releases its own
+control before propagation. The device sidecar logs a bounded private failure
+event keyed by request: type/code, genuine Win32 error and desktop-state booleans.
+It never includes frames, input text, coordinates, titles or raw exception prose.
+The HASHI3-only scheduled device task uses the existing --log-dir option to keep
+future diagnostics in instance-owned logs. Historical inaccessible/missing logs
+have not been reconstructed or counted as verified. Focused desktop/sidecar
+checks passed 56 tests; real mouse/key control remains an explicit open boundary.

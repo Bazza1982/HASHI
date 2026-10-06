@@ -881,6 +881,16 @@ class DeviceWorkerRequestHandler(BaseHTTPRequestHandler):
             if action in DESKTOP_ACTIONS:
                 # Typed errors are RPC envelopes; HTTP ingress maps the status.
                 # Never leak frame/text/OS exception detail or globally reset input.
+                cause = exc.__cause__ or exc
+                os_error = getattr(cause, "winerror", None)
+                diagnostics = getattr(cause, "desktop_diagnostics", {})
+                private_facts = {key: diagnostics[key] for key in (
+                    "input_desktop_interactive", "thread_on_input_desktop", "window_station_visible", "cursor_at_requested_position")
+                    if isinstance(diagnostics, dict) and isinstance(diagnostics.get(key), bool)}
+                _event(state.logger, "desktop_action_failed", request_id=request_id,
+                    action=action, error_code=getattr(exc, "code", "desktop_worker_failed"),
+                    error_type=type(exc).__name__, cause_type=type(cause).__name__,
+                    os_error=os_error if isinstance(os_error, int) else None, **private_facts)
                 self._write(HTTPStatus.OK, {"ok": False, "identity": state.identity,
                     "worker_generation": _generation_id(state.capability_kind),
                     "error_code": getattr(exc, "code", "desktop_worker_failed"),

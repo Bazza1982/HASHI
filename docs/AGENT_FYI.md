@@ -180,3 +180,12 @@ leases across Function processes. Failed known attachment batches can be
 discarded through Session API only while wholly unbound; uncertain acceptance
 retains the original send identity. Source checks and live adoption are recorded
 separately in the nightly repair record.
+# Nightly 2026-10-06: desktop failure evidence
+
+Frontend Connector's native desktop sidecar retains typed control failures and
+releases only its own input lease. Private diagnostics contain request identity,
+error type/code and bounded desktop-state facts, never raw inputs or frames.
+Actual HASHI3 screenshots and deployment persistence passed, but Windows pointer
+injection currently has no successful physical observation. Do not infer input
+success from capture, registration or SendInput's accepted-count result. See
+`docs/repairs/NIGHTLY_20261006_RESTART_AND_SESSIONS.md` for the verified boundary.

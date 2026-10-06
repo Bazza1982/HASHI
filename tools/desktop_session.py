@@ -311,6 +311,9 @@ class DesktopController:
                     event["py"] = r["y"] + round(event["y"]*(r["height"]-1))
             try:
                 self.native.inject(event)
+            except DesktopError:
+                self._release()
+                raise
             except Exception as exc:
                 self._release()
                 raise DesktopError("desktop_input_failed", 503) from exc

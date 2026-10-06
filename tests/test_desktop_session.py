@@ -192,6 +192,21 @@ def test_human_control_holds_real_cross_process_lock(desktop,tmp_path):
     other.acquire(); other.release()
 
 
+def test_input_retains_typed_native_failure_and_releases_its_control(desktop):
+    controller, native, _ = desktop
+    controller.frame('', 'session-a')
+    control(controller)
+    original = DesktopError('desktop_locked', 423)
+    def denied(_event):
+        raise original
+    native.inject = denied
+    with pytest.raises(DesktopError) as caught:
+        controller.input(event(controller), 'owner-a', 'session-a', 'lease-a')
+    assert caught.value is original
+    assert caught.value.status == 423
+    assert controller.owner is None
+
+
 def test_wrong_actor_and_display_change_cannot_inject(desktop):
     c,n,t=desktop;c.frame('', 'session-a');control(c)
     with pytest.raises(DesktopError,match='expired'): c.input(event(c),'other-owner','session-a','lease-a')
