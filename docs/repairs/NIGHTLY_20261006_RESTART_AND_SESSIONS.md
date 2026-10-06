@@ -79,3 +79,44 @@ check for `surface=workbench`. Authenticated Session API admission now resolves
 the already selected, owner/Agent-validated Session without rebinding primary;
 legacy shared-primary ingress retains its stale-pointer protection. Foreign
 Agent Sessions remain rejected. Fresh-context/Session execution checks: 32 passed.
+
+## Resource and failed-intake boundaries
+
+PAO execution opt-ins are validated before Worker READY. Agent Session capacity
+defaults to 2 (1..8); instance execution capacity defaults to 8 and each engine
+to 4 (1..64). `global.execution_limits.instance_sessions` and `.engines` refine
+the instance budget. OS-owned lease handles span separate Function processes,
+include detached completion and release on cancellation/process exit. Queue
+reasons derive from that queue and its execution owners: prior Session turn,
+Agent capacity, instance capacity or engine capacity. Workbench renders them
+only for the selected request. Earliest eligible Session turns preserve FIFO
+without a long queue in one Session blocking another Session's available slot.
+
+API invocation capacity is a separate bounded layer, avoiding a Run waiting for
+its own nested quota. Defaults: 2 per model (1..8), 4 per engine and 8 total
+(1..64), configurable by the corresponding API gateway limits. Distinct model
+keys no longer bypass engine/global quotas. Cancellation returns every slot.
+HERV3's auxiliary phases remain inside their Run lease and gateway calls also
+use invocation leases.
+
+Tool mutation leases use canonical filesystem resources and shared ancestor
+intent. Known file writes exclude writes to the same path; independent files
+and reads remain parallel. Shell/patch actions exclude their authorized scope,
+including nested Workzones in another Worker. Device leases, config revisions
+and native Git protection continue to use their existing owners. A failed
+multi-resource pass releases all partial leases before waiting; OS failures
+remain errors instead of appearing as permanent contention.
+
+The owner-checked Session attachment discard endpoint reuses the existing
+atomic unbound-asset cleanup. Any bound asset rejects the entire batch. A known
+pre-admission failure may clean its staged identities on the original frozen
+authenticated route even after chat selection changes. Changed credentials,
+endpoint or instance defer cleanup to retention. Uncertain/malformed Run
+receipts retain staged assets and the original send identity; never replay or
+discard a possibly accepted turn automatically.
+
+Focused resource, intake, runtime dispatch and gateway checks: 94 passed.
+Safe mutations failed for lost filesystem exclusion, missing engine/global
+capacity, partial bound-batch cleanup and invalid budget acceptance. Queue
+cancellation also has a pre-fix timeout proof. Running adoption and final
+frontend/desktop/performance evidence remain separate.

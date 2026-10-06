@@ -725,6 +725,11 @@ class WorkbenchApiServer:
             ),
             (
                 "POST",
+                "/api/v1/sessions/{session_id}/attachments/discard",
+                self.handle_v1_attachment_discard,
+            ),
+            (
+                "POST",
                 "/api/v1/sessions/{session_id}/attachments/from-workzone",
                 self.handle_v1_workzone_attachment_stage,
             ),
@@ -5939,6 +5944,7 @@ class WorkbenchApiServer:
                         "assistant_attachment_delivery": "terminal-message-projection",
                         "atomic_run_admission": True,
                         "attachment_stage_idempotency": True,
+                        "unbound_attachment_discard": True,
                         "preserves_attachment_order": True,
                         "content_types": ["text", "attachment", "audio"],
                         "attachment_modalities": [
@@ -7587,6 +7593,27 @@ class WorkbenchApiServer:
                 attachment_id=attachment_id,
             )
             return web.json_response({"ok": True, "attachment": committed}, status=201)
+        except Exception as exc:
+            return self._v1_error(exc)
+
+    async def handle_v1_attachment_discard(self, request):
+        """Discard a known failed batch only before any asset is bound."""
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        try:
+            session_id = request.match_info["session_id"]
+            self.session_store.get_session(session_id, owner_id=owner, include_deleted=False)
+            payload = await request.json()
+            ids = payload.get("attachment_ids") if isinstance(payload, Mapping) else None
+            if (not isinstance(ids, list) or not ids or len(ids) > MAX_SESSION_ATTACHMENTS_PER_MESSAGE
+                    or any(not isinstance(value, str) or not value.strip() for value in ids)):
+                raise ValueError("attachment_ids must be a bounded, nonempty list of attachment identities")
+            discarded = await asyncio.to_thread(
+                self.session_store.discard_unbound_attachments,
+                session_id=session_id, owner_id=owner, attachment_ids=ids,
+            )
+            return web.json_response({"ok": True, "attachment_ids": discarded})
         except Exception as exc:
             return self._v1_error(exc)
 

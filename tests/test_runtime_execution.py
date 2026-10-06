@@ -9,10 +9,11 @@ from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 
 
 @pytest.mark.asyncio
-async def test_session_dispatch_overlaps_and_preserves_same_session_order(monkeypatch):
+async def test_session_dispatch_overlaps_and_preserves_same_session_order(monkeypatch, tmp_path):
     runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
     runtime.name = "one-agent"
-    runtime.config = SimpleNamespace(extra={})
+    runtime.config = SimpleNamespace(extra={}, active_backend="codex-cli", project_root=tmp_path)
+    runtime.global_config = SimpleNamespace(project_root=tmp_path)
     runtime.queue = execution.SessionQueue()
     runtime._execution_admissions = {}
     runtime.error_logger = SimpleNamespace(exception=lambda *args: None)
@@ -31,7 +32,7 @@ async def test_session_dispatch_overlaps_and_preserves_same_session_order(monkey
         runtime._session_executions[session] = handles[session]
         return handles[session]
     monkeypatch.setattr(execution, "create_execution", create)
-    monkeypatch.setattr(execution, "snapshot", lambda runtime: {})
+    monkeypatch.setattr(execution, "snapshot", lambda runtime: {"config":runtime.config,"settings":{}})
     entered = {key: asyncio.Event() for key in ("A1", "A2", "B1", "C1")}
     release = {key: asyncio.Event() for key in entered}
     observed = []
@@ -56,6 +57,7 @@ async def test_session_dispatch_overlaps_and_preserves_same_session_order(monkey
         await asyncio.wait_for(entered["A1"].wait(), 1)
         await asyncio.wait_for(entered["B1"].wait(), 1)
         assert not entered["A2"].is_set() and not entered["C1"].is_set()
+        assert execution.queue_reasons(runtime) == {'A2':'session_order', 'C1':'agent_capacity'}
         assert observed[0][1] is not observed[1][1]
         assert runtime.is_generating
         release["B1"].set()
@@ -150,3 +152,32 @@ async def test_control_thread_interrupts_only_the_selected_session_adapter():
         assert calls==[('B','USER_STOP'),('A','USER_STEER')]
     finally:
         await asyncio.to_thread(lane.close)
+
+
+@pytest.mark.asyncio
+async def test_cancel_while_waiting_instance_budget_cleans_queue_without_starting_backend(tmp_path):
+    from orchestrator.execution_resources import instance_state, leases
+    runtime=FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
+    runtime.name='one-agent';runtime.config=SimpleNamespace(extra={},active_backend='codex-cli',project_root=tmp_path)
+    runtime.global_config=SimpleNamespace(project_root=tmp_path)
+    runtime.backend_manager=SimpleNamespace(current_backend=None)
+    runtime.queue=execution.SessionQueue();runtime.current_request_meta=None;runtime.is_generating=False
+    runtime._publish_worker_metadata=AsyncMock();runtime.error_logger=SimpleNamespace(exception=lambda *a:None)
+    runtime._notify_request_listeners=AsyncMock()
+    runtime._execution_admissions={'waiting':{'config':runtime.config,'settings':{'_agents_json_global':{'execution_limits':{'instance_sessions':1}}}}}
+    process=AsyncMock()
+    async with leases(instance_state(runtime),[('instance-sessions',1,False)]):
+        await runtime.queue.put(SimpleNamespace(request_id='waiting',session_id='A',source='session-api',summary='queued'))
+        dispatcher=asyncio.create_task(execution.process_sessions(runtime,process))
+        try:
+            for _ in range(100):
+                if getattr(runtime,'_execution_queue_reasons',{}).get('waiting')=='instance_capacity':break
+                await asyncio.sleep(.01)
+            assert runtime._execution_queue_reasons['waiting']=='instance_capacity'
+            waiting=runtime._session_execution_tasks['waiting']
+            waiting.cancel();await asyncio.gather(waiting,return_exceptions=True)
+            await asyncio.wait_for(runtime.queue.join(),.3)
+            process.assert_not_awaited()
+            assert not runtime._session_execution_tasks and not runtime._execution_queue_reasons
+        finally:
+            dispatcher.cancel();await asyncio.gather(dispatcher,return_exceptions=True)

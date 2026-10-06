@@ -872,6 +872,8 @@ class FunctionWorkerHost:
             secrets,
             skill_manager,
         )
+        from orchestrator.execution_resources import execution_configuration
+        execution_configuration(getattr(runtime.backend_manager, '_agents_json_global', None), agent_cfg.extra)
         facade = WorkerKernelFacade(
             peer=self.peer,
             paths=self.paths,
@@ -948,6 +950,7 @@ class FunctionWorkerHost:
         from orchestrator.agent_incarnation import lifecycle_id_from_config
         from orchestrator.runtime_transfer import transfer_redirect_snapshot
         from orchestrator.telegram_delivery_failover import telegram_bot_fingerprint
+        from orchestrator.runtime_execution import queue_reasons
 
         result = dict(runtime.get_runtime_metadata())
         agent_mode = str(
@@ -1035,7 +1038,8 @@ class FunctionWorkerHost:
                 "active_transfer": bool(runtime.has_active_transfer()),
                 "transfer_redirect": transfer_redirect_snapshot(runtime),
                 "is_generating": bool(runtime.is_generating),
-                "queue_depth": int(runtime.queue.qsize()),
+                "queue_depth": len(queue_reasons(runtime)),
+                "execution_queue_reasons": queue_reasons(runtime),
                 "current_request_meta": self._current_request_metadata(runtime),
                 "org_id": getattr(runtime, "org_id", None),
                 "agent_lifecycle_id": lifecycle_id_from_config(runtime.config),

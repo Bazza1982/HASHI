@@ -14,6 +14,7 @@ from functools import wraps
 import hashlib
 import json
 from typing import Any
+from orchestrator.execution_resources import execution_budget, limit
 
 _CURRENT = ContextVar("hashi_session_execution", default=None)
 LOCAL_FIELDS = frozenset({
@@ -116,6 +117,16 @@ class SessionQueue(asyncio.Queue):
         return None
 
 
+def queue_reasons(runtime):
+    """Derive waiting reasons from the same PAO queue and execution owners."""
+    reasons = dict(getattr(runtime, '_execution_queue_reasons', {}))
+    busy = getattr(runtime, '_executing_sessions', set())
+    for item in getattr(getattr(runtime, 'queue', None), '_queue', ()):
+        session = str(getattr(item, 'session_id', '') or 'legacy')
+        reasons[item.request_id] = 'session_order' if session in busy else 'agent_capacity'
+    return reasons
+
+
 def snapshot(runtime):
     """Freeze execution choices at admission, never create another state writer."""
     manager = runtime.backend_manager
@@ -178,39 +189,47 @@ async def create_execution(runtime, item, frozen):
 
 async def process_sessions(runtime, process_item):
     queue = runtime.queue
-    capacity = int((runtime.config.extra or {}).get("max_concurrent_sessions", 2))
-    if not 1 <= capacity <= 8:
-        raise ValueError("max_concurrent_sessions must be between 1 and 8")
+    capacity = limit((runtime.config.extra or {}).get("max_concurrent_sessions"), "max_concurrent_sessions", 2, 8)
     runtime._session_executions = {}
     runtime._session_execution_tasks = {}
     busy = set()
+    runtime._executing_sessions = busy
     tasks = set()
 
     async def execute(item, session):
         execution = None
+        pipeline_owns_queue = False
         try:
             frozen = runtime._execution_admissions.pop(item.request_id, None) or snapshot(runtime)
             from orchestrator import runtime_cancel
             async with runtime_cancel.transition_lock(runtime):
                 if item.request_id in runtime_cancel.requested_ids(runtime) or runtime_cancel.queued_run_is_terminal(runtime,item):
                     await runtime_cancel.finish_queued_request(runtime,item)
-                    queue.task_done()
                     return
-            execution = await create_execution(runtime, item, frozen)
-            execution.active_request = item.request_id
-            with bind(execution):
-                await process_item(runtime, item)
-                # Detachment must not release a Session/order or execution slot.
-                completion = getattr(runtime, "_background_completion_tasks_by_request", {}).get(item.request_id)
-                if isinstance(completion, asyncio.Task):
-                    await asyncio.shield(completion)
-                elif item.request_id in getattr(runtime, "_background_request_ids", set()):
-                    generation = getattr(runtime, "_generation_tasks_by_request", {}).get(item.request_id)
-                    if isinstance(generation, asyncio.Task):
-                        await asyncio.shield(generation)
-                    while item.request_id in getattr(runtime, "_background_request_ids", set()):
-                        await asyncio.sleep(0.05)
+            async with execution_budget(runtime, item, frozen):
+                async with runtime_cancel.transition_lock(runtime):
+                    if item.request_id in runtime_cancel.requested_ids(runtime) or runtime_cancel.queued_run_is_terminal(runtime,item):
+                        await runtime_cancel.finish_queued_request(runtime,item)
+                        return
+                execution = await create_execution(runtime, item, frozen)
+                execution.active_request = item.request_id
+                with bind(execution):
+                    pipeline_owns_queue = True
+                    await process_item(runtime, item)
+                    # Detachment must not release a Session/order or execution slot.
+                    completion = getattr(runtime, "_background_completion_tasks_by_request", {}).get(item.request_id)
+                    if isinstance(completion, asyncio.Task):
+                        await asyncio.shield(completion)
+                    elif item.request_id in getattr(runtime, "_background_request_ids", set()):
+                        generation = getattr(runtime, "_generation_tasks_by_request", {}).get(item.request_id)
+                        if isinstance(generation, asyncio.Task):
+                            await asyncio.shield(generation)
+                        while item.request_id in getattr(runtime, "_background_request_ids", set()):
+                            await asyncio.sleep(0.05)
         except asyncio.CancelledError:
+            if not pipeline_owns_queue:
+                from orchestrator import runtime_cancel
+                await runtime_cancel.finish_queued_request(runtime,item)
             raise
         except Exception as exc:
             runtime.error_logger.exception("Session execution failed: %s", exc)
@@ -220,8 +239,9 @@ async def process_sessions(runtime, process_item):
                     "error": str(exc), "error_code": "session_execution_unavailable",
                     "error_retryable": False, "source": item.source, "summary": item.summary,
                 })
-                queue.task_done()
         finally:
+            if not pipeline_owns_queue:
+                queue.task_done()
             if execution is not None:
                 execution.active_request = ""
             busy.discard(session)

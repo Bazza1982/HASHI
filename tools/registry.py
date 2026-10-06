@@ -1010,11 +1010,13 @@ class ToolRegistry:
             return admission_denial
 
         try:
-            dispatched = await self._dispatch_observed(
-                tool_name,
-                arguments,
-                tool_call_id=effective_call_id,
-            )
+            from orchestrator.execution_resources import tool_resource
+            async with tool_resource(self, tool_name, arguments) as resource_wait_ms:
+                dispatched = await self._dispatch_observed(
+                    tool_name,
+                    arguments,
+                    tool_call_id=effective_call_id,
+                )
         except asyncio.CancelledError as exc:
             details = dict(getattr(exc, "hashi_tool_details", {}) or {})
             cleanup = dict(details.get("foreground_cleanup") or {})
@@ -1154,6 +1156,8 @@ class ToolRegistry:
             output = dispatched
             content = None
         content, content_truncated = _bound_structured_text(content)
+        if resource_wait_ms >= 50:
+            details = {**(details or {}), "resource_wait_ms":resource_wait_ms}
         if content_truncated:
             details = {**(details or {}), "content_text_truncated": True}
         if (

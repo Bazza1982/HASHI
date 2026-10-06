@@ -908,14 +908,19 @@ class _AdapterPool:
     by a request lock.
     """
 
-    def __init__(self, global_config, secrets: dict, workspace_root: Path, *, capacity: int = 2):
+    def __init__(self, global_config, secrets: dict, workspace_root: Path, *, capacity: int = 2,
+                 total_capacity: int = 8, engine_capacity: int = 4):
         self._global_config = global_config
         self._secrets = secrets
         self._workspace_root = workspace_root
         self._adapters: dict[tuple[str, str], Any] = {}
         self._init_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._request_locks: dict[tuple[str, str], asyncio.Lock] = {}
-        self._capacity = max(1, min(8, int(capacity)))
+        from orchestrator.execution_resources import limit
+        self._capacity = limit(capacity,"max_parallel_per_model",2,8)
+        self._total_quota = asyncio.Semaphore(limit(total_capacity,"max_parallel_requests",8))
+        self._engine_capacity = limit(engine_capacity,"max_parallel_per_engine",4)
+        self._engine_quotas: dict[str, asyncio.Semaphore] = {}
         self._quotas: dict[tuple[str, str], asyncio.Semaphore] = {}
         self._slots: dict[tuple[tuple[str, str], int], Any] = {}
         self._busy: set[tuple[tuple[str, str], int]] = set()
@@ -949,7 +954,7 @@ class _AdapterPool:
         """Own an independent CLI process/thread slot until dispatch finishes."""
         key = self._key(engine, model)
         quota = self._quotas.setdefault(key, asyncio.Semaphore(self._capacity))
-        async with quota:
+        async with quota, self._engine_quotas.setdefault(engine,asyncio.Semaphore(self._engine_capacity)), self._total_quota:
             slot_key = None
             try:
                 lock = self._init_locks.setdefault(key, asyncio.Lock())
@@ -1133,7 +1138,9 @@ class APIGatewayServer:
             else None
         )
         self._pool = _AdapterPool(global_config, secrets, workspace_root,
-                                  capacity=gateway_config.get("max_parallel_per_model", 2))
+                                  capacity=gateway_config.get("max_parallel_per_model", 2),
+                                  total_capacity=gateway_config.get("max_parallel_requests",8),
+                                  engine_capacity=gateway_config.get("max_parallel_per_engine",4))
         self.gateway_instance_id = f"gateway-{uuid.uuid4().hex[:12]}"
         logs_root = Path(
             getattr(global_config, "base_logs_dir", workspace_root / "logs")

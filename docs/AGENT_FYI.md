@@ -172,3 +172,11 @@ Command transports also carry the selected Session/generation and the Worker
 verifies them against PAO. A persisted reboot start message can be projected
 in the global banner while another conversation is selected; its message ID
 remains the presentation ACK identity. Further live acceptance is in progress.
+
+HASHI3 source now bounds execution by Agent, instance and engine and separately
+bounds API invocations. Pending reasons come from PAO's actual queue; cancelling
+a capacity waiter releases its item exactly once. Filesystem actions use OS
+leases across Function processes. Failed known attachment batches can be
+discarded through Session API only while wholly unbound; uncertain acceptance
+retains the original send identity. Source checks and live adoption are recorded
+separately in the nightly repair record.

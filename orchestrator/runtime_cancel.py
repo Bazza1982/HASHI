@@ -144,6 +144,10 @@ async def cancel_session_run(
         # later-arriving item without starting the provider.
         if run["state"] == "queued":
             stopped = store.cancel_run(run_id, owner_id=owner_id, reason=reason)
+            # A quota waiter has left the ready queue but still owns no backend.
+            task = getattr(runtime,"_session_execution_tasks",{}).get(request_id)
+            if isinstance(task,asyncio.Task) and not task.done():
+                task.cancel()
             return {"ok": True, "request_id": request_id, "run_id": run_id,
                     "session_id": session_id, "status": stopped["state"],
                     "terminal": stopped["state"] in TERMINAL_RUN_STATES}

@@ -266,6 +266,44 @@ async def test_shared_chat_projection_reads_start_notice_without_fenced_worker(t
 
 
 @pytest.mark.asyncio
+async def test_attachment_discard_is_owner_scoped_atomic_and_refuses_message_bound_assets(tmp_path):
+    server, runtime = _server(tmp_path)
+    store = server.session_store
+    session = store.create_session(owner_id='user:7', agent_id='lily')
+    session_id = session['session_id']
+    ids = []
+    for name in ('first.txt','second.txt'):
+        staged = store.stage_attachment(session_id=session_id,owner_id='user:7',filename=name,
+            media_type='text/plain',size_bytes=3,sha256=hashlib.sha256(b'one').hexdigest(),upload_required=True)
+        ids.append(staged['attachment_id'])
+        store.upload_attachment_bytes(session_id=session_id,owner_id='user:7',attachment_id=ids[-1],payload=b'one')
+        store.commit_attachment(session_id=session_id,owner_id='user:7',attachment_id=ids[-1])
+    admitted = await server.handle_v1_session_runs_create(_Request(
+        {'idempotency_key':'bound-intake','message':{'content':[{'type':'attachment','attachment_id':ids[0]}]}},
+        match_info={'session_id':session_id}))
+    assert admitted.status == 202, admitted.text
+    rejected = await server.handle_v1_attachment_discard(_Request(
+        {'attachment_ids':ids},match_info={'session_id':session_id}))
+    assert rejected.status == 409
+    for attachment_id in ids:
+        assert store.attachment_bytes(session_id=session_id,owner_id='user:7',attachment_id=attachment_id)[1] == b'one'
+    removed = await server.handle_v1_attachment_discard(_Request(
+        {'attachment_ids':[ids[1]]},match_info={'session_id':session_id}))
+    assert removed.status == 200
+    assert json.loads(removed.text)['attachment_ids'] == [ids[1]]
+    repeated = await server.handle_v1_attachment_discard(_Request(
+        {'attachment_ids':[ids[1]]},match_info={'session_id':session_id}))
+    assert json.loads(repeated.text)['attachment_ids'] == []
+    other = store.create_session(owner_id='user:8',agent_id='lily')
+    denied = await server.handle_v1_attachment_discard(_Request(
+        {'attachment_ids':ids},match_info={'session_id':other['session_id']}))
+    assert denied.status == 404
+    invalid = await server.handle_v1_attachment_discard(_Request(
+        {'attachment_ids':[]},match_info={'session_id':session_id}))
+    assert invalid.status == 400
+
+
+@pytest.mark.asyncio
 async def test_reboot_discovery_includes_telegram_and_recent_completion_only_for_owner(tmp_path):
     from orchestrator.reboot_manager import RebootManager
     import time

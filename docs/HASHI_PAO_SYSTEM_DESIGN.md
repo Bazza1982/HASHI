@@ -875,3 +875,14 @@ are bounded and retired without closing durable conversation epochs.
 Approved: nightly implementation/testing in HASHI3 and test Workbench. Focused
 queue overlap/FIFO/capacity, native-object isolation, cross-thread control, and
 HERV3 lifecycle checks pass. Provider and frontend live adoption remain pending.
+
+2026-10-07 HASHI3 live checks demonstrated same-model overlapping native Codex,
+HERV3 through HASHI API and direct API calls. PAO's candidate resource layer adds
+process-safe instance/engine Run quotas plus a separately bounded API invocation
+pool. No auxiliary call reacquires its owning Run's quota. The same queue derives
+selected-request wait reasons; cancellation releases a capacity waiter and
+settles its queue item once. Canonical filesystem intent leases protect nested
+workspace mutations without serializing independent file writes or model work.
+Failed attachment intake uses owner-scoped atomic unbound discard; uncertain
+admission keeps the existing idempotency identity and assets. See the nightly
+repair record for limits, focused red/green and separate adoption evidence.
