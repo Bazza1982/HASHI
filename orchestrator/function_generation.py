@@ -746,10 +746,10 @@ def verify_manifest_source_commit(
     changed = _nul_paths(
         _git_output(root, "diff", "--name-only", "-z", "HEAD", "--")
     )
-    untracked = _nul_paths(
-        _git_output(root, "ls-files", "--others", "--exclude-standard", "-z")
-    )
-    invalid = sorted((qualified - tracked) | (qualified & (changed | untracked)))
+    # HEAD membership already rejects every unpublished qualified path, including
+    # untracked or ignored source. Enumerating unrelated local trees adds no
+    # evidence and can time out in checkouts holding large test fixtures.
+    invalid = sorted((qualified - tracked) | (qualified & changed))
     if invalid:
         raise UncommittedFunctionSourceError(
             "Function generation manifest contains files that are not committed: "

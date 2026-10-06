@@ -236,6 +236,31 @@ def test_manifest_commit_gate_blocks_required_source_not_optional_files(tmp_path
     ) == expected_commit
 
 
+def test_manifest_commit_gate_uses_head_without_enumerating_unrelated_local_trees(tmp_path, monkeypatch):
+    package = tmp_path / "orchestrator"
+    package.mkdir()
+    source = package / "generation_demo.py"
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    expected = _commit_all(tmp_path)
+    manifest = build_source_manifest(["orchestrator.generation_demo"], code_root=tmp_path)
+    (tmp_path / "unrelated-local-fixture").mkdir()
+    (tmp_path / "unrelated-local-fixture" / "notes.txt").write_text("local material", encoding="utf-8")
+    original = function_generation._git_output
+
+    def bounded_git(root, *args):
+        if "--others" in args:
+            raise FunctionGenerationError("unrelated local tree enumeration timed out")
+        return original(root, *args)
+
+    monkeypatch.setattr(function_generation, "_git_output", bounded_git)
+    assert function_generation.verify_manifest_source_commit(manifest, code_root=tmp_path) == expected
+    new_source = package / "unpublished.py"
+    new_source.write_text("VALUE = 2\n", encoding="utf-8")
+    expanded = build_source_manifest(["orchestrator.unpublished"], code_root=tmp_path)
+    with pytest.raises(FunctionGenerationError, match="not committed"):
+        function_generation.verify_manifest_source_commit(expanded, code_root=tmp_path)
+
+
 def test_manifest_skips_optional_assets_inside_ignored_nested_repository(tmp_path):
     package = tmp_path / "orchestrator"
     package.mkdir()

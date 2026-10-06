@@ -154,3 +154,18 @@ regression failed in both Direct cases before repair. Native voice, admission,
 confirmation, multimodal and adapter consumers: **165 passed, 1 skip** afterward.
 The complete committed-source qualification preceding this repair passed
 **791 tests, 1 skip**; the final generation is qualified and adopted separately.
+
+### Qualification scanning boundary
+
+Committed-source rechecks exposed a separate reproducible timeout: the commit
+gate enumerated all untracked checkout files, including unrelated retained test
+trees. HEAD membership already rejects every unpublished manifest path; staged
+or working-tree changes remain independently rejected. The redundant scan is
+removed without increasing timeouts or weakening that gate. A real temporary
+Git repository accepts unchanged published source when that irrelevant scan is
+unavailable, and still rejects a newly added uncommitted Function module.
+
+The max reboot with operation f04394b2d2c24dd8b50c2c41a576e9fa replaced Workers
+successfully but retained the previous bd525f9f generation after qualification
+fell back. It is not counted as adoption of the subsequent transcript projection.
+The final accepted generation must match the intended committed Function bytes.
