@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ import pytest
 
 from orchestrator.capability_broker import CapabilityUnavailableError
 from tools.registry import ToolRegistry
+from tools.device_control_worker import DeviceWorkerState
 
 
 class _CapabilityFacade:
@@ -32,6 +34,29 @@ class _CapabilityFacade:
         if isinstance(self.result, Exception):
             raise self.result
         return self.result
+
+
+class _ReplayCheckingFacade(_CapabilityFacade):
+    """Exercise the sender against the Device Worker's real replay boundary."""
+
+    def __init__(self, tmp_path):
+        super().__init__(capabilities=[_browser_registration(actions=("active_tab",))])
+        self.worker = DeviceWorkerState(
+            bridge_home=tmp_path,
+            capability_kind="browser_control",
+            instance_id="HASHI1",
+            device_id="test-device",
+            user_session_id="test-session",
+            worker_token="x" * 64,
+            bind_host="127.0.0.1",
+            advertise_host="127.0.0.1",
+            wsl_distro=None,
+            logger=logging.getLogger(__name__),
+        )
+
+    async def invoke_capability(self, kind, action, args, **kwargs):
+        self.worker.mark_request(kwargs["request_id"])
+        return await super().invoke_capability(kind, action, args, **kwargs)
 
 
 def _registry(
@@ -83,6 +108,49 @@ def _definition_names(registry):
         item["function"]["name"]
         for item in registry.get_tool_definitions()
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "second_scope", [{"request_id": "request-8"}, {"agent_name": "agent2"}]
+)
+async def test_device_call_counter_is_scoped_but_same_call_replay_still_rejected(
+    tmp_path, second_scope
+):
+    facade = _ReplayCheckingFacade(tmp_path)
+    registry = _registry(tmp_path, "browser_active_tab", facade)
+    shared_task = {"task_id": "long-running-task"}
+    first = await registry.execute_with_audit_context(
+        "browser_active_tab", {}, "2", audit_context=shared_task
+    )
+    scope = {**shared_task, **second_scope}
+    second = await registry.execute_with_audit_context(
+        "browser_active_tab", {}, "2", audit_context=scope
+    )
+    # Changing arguments must not disguise a repeat of the same scoped call.
+    replay = await registry.execute_with_audit_context(
+        "browser_active_tab", {"url": "https://changed.test"}, "2", audit_context=scope
+    )
+
+    assert not first.is_error and not second.is_error
+    assert len(facade.calls) == 2
+    assert facade.calls[0][3]["task_id"] == facade.calls[1][3]["task_id"]
+    assert replay.is_error and "replayed capability request rejected" in replay.output
+    assert first.tool_call_id == second.tool_call_id == replay.tool_call_id == "2"
+
+
+@pytest.mark.asyncio
+async def test_unscoped_registries_do_not_share_low_device_call_counters(tmp_path):
+    facade = _ReplayCheckingFacade(tmp_path)
+    registries = [_registry(tmp_path, "browser_active_tab", facade) for _ in range(2)]
+    for registry in registries:
+        registry.audit_context.pop("request_id")
+        registry.audit_context.pop("agent_name")
+        result = await registry.execute("browser_active_tab", {}, "2")
+        assert not result.is_error
+    replay = await registries[-1].execute("browser_active_tab", {}, "2")
+    assert replay.is_error and "replayed capability request rejected" in replay.output
+    assert len(facade.calls) == 2
 
 
 def test_catalogue_hides_unregistered_browser_and_explains_web_replacement(tmp_path):
@@ -271,9 +339,10 @@ async def test_windows_tools_route_through_core_capability_facade(tmp_path):
     kind, action, args, kwargs = facade.calls[0]
     assert (kind, action) == ("computer_control", "click")
     assert args["_authorized_roots"] == [str(tmp_path)]
+    assert kwargs["request_id"] != "call-7"
     assert kwargs == {
         "task_id": "request-7",
-        "request_id": "call-7",
+        "request_id": kwargs["request_id"],
         "authorization": "tool_registry",
     }
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
 import logging
 import time
@@ -281,6 +282,7 @@ class ToolRegistry:
         self.max_loops = None
         self.agents_config = agents_config or []
         self.audit_context = audit_context or {}
+        self._device_request_scope = uuid4().hex
         self.set_search_scope(search_scope)
         from tools.file_search import Continuations
         self.search_continuations = Continuations()
@@ -1544,6 +1546,22 @@ class ToolRegistry:
             or tool_call_id
             or f"tool-{uuid4().hex}"
         )
+        # CLI MCP counters restart for each request. Preserve replay detection
+        # within a call, while separating calls from different request/Agent
+        # scopes. Arguments/actions deliberately do not create a new identity.
+        request_id = None
+        if tool_call_id:
+            scope = [
+                "hashi.device-tool-call.v1",
+                str(context.get("agent_name") or ""),
+                str(context.get("request_id") or context.get("task_id")
+                    or self._device_request_scope),
+                task_id,
+                str(tool_call_id),
+            ]
+            request_id = "tool-" + hashlib.sha256(
+                json.dumps(scope, ensure_ascii=False).encode("utf-8")
+            ).hexdigest()
         payload = dict(arguments)
         if capability_kind == "browser_control":
             target = str(payload.pop("browser_target", "") or "").strip()
@@ -1555,7 +1573,7 @@ class ToolRegistry:
             action,
             payload,
             task_id=task_id,
-            request_id=tool_call_id or None,
+            request_id=request_id,
             authorization="tool_registry",
         )
         if isinstance(result, str):

@@ -9,6 +9,14 @@
 
 ## 1. Definition
 
+Device Tool request IDs are deterministically scoped to the canonical request,
+Agent and tool call. CLI-local counters are never sent as globally unique Worker
+request IDs. Within one scope, changing arguments/action does not disguise a
+replay; the Device Worker's replay guard stays unchanged. A registry-local nonce
+separates diagnostic registries that lack a canonical request scope, without
+deriving Agent identity from workspace paths. Original call IDs remain in Tool
+audit records and task/browser binding is unchanged.
+
 Codex MCP isolation inventories standalone servers with plugins disabled, matching
 both CLI execution and the app-server bridge. Plugin-provided transports must
 not become enabled-only top-level MCP overrides after their plugin is disabled.

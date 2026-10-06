@@ -296,3 +296,22 @@ reproduced the missing-transport error without model execution; a deliberately
 unknown provider then proves valid config decoding before any model/tool call.
 User-wide Codex configuration is unchanged. Consumer checks, final committed
 qualification and fresh actual frontend acceptance are recorded separately.
+
+### CLI Device request counter collisions
+
+After native-hook adoption, a fresh Fixed Codex Chrome read completed and the
+new Engine consumed all 309 exact Phone fragments once. Later requests included
+zero duplicates. A separate Edge task then failed with the Device Worker's
+replay rejection: two different canonical requests each supplied CLI call "2"
+within the replay window. The earlier tool had already reached that Worker.
+Raw CLI counters are request-local, so this was a sender identity defect.
+
+PAO Tool Registry now namespaces wire IDs by canonical request, Agent, task and
+call. Missing diagnostic scope uses a registry-local nonce. The hash deliberately
+excludes arguments and action, so changed parameters cannot disguise a replay.
+Device identity, Worker replay guard, leases, task/browser binding and original
+tool audit IDs remain unchanged. Three focused cases failed before repair;
+58 owning Registry/Broker/Device Worker checks passed afterward. New-request,
+cross-Agent and unscoped-registry counter reuse pass, while same-call repeats
+are rejected before execution. Committed qualification and actual frontend
+acceptance follow separately; no rejected request is replayed automatically.

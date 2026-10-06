@@ -6,6 +6,9 @@ Functions retain PAO/PCM/HERV3/Connector ownership. Repairs cover history, avata
 selection, voice, questions, durable checkpoints and persistent failures.
 Codex 0.160+ uses the owned termination guard; managed tools protect runtime
 ancestry. Hooks are guardrails, not OS enforcement.
+Device calls scope CLI-local counters to the canonical request and Agent. Same
+call repeats still fail even with changed arguments; replay protection and task
+browser binding are retained. This fixes counter reuse across fresh CLI requests.
 Fixed Codex hook isolation keeps inventoried external MCP entries disabled and
 schema-valid even when user config is ignored; the enabled-only override must
 not recreate a transport-less server. Project transport type, required HASHI
