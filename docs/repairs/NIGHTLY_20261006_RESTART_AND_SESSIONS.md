@@ -292,3 +292,26 @@ Historical missing exit/authentication/Telegram logs cannot be reconstructed.
 Raw red/green, live receipts and screenshots remain separate under the ignored
 HASHI3 .tmp/nightly-20261006 directory. The nightly inbox is the per-item status
 record; no all-items-closed claim follows from component or curated gate counts.
+
+## Fixed Phone/Call entry correction, 2026-10-07 08:13 AEDT
+
+The separately implemented fixed-entry frontend was omitted from the paired
+nightly Workbench checkout. HASHI3 includes backend 4074df0 and the adopted
+artifact matches that backend, but Workbench 0df7d2e still uses the old
+route-selecting launcher and startVideo callback. The fixed frontend exists
+at 88ac18e in the separate development checkout. Earlier inbox wording that
+certified fixed dual-entry frontend adoption and ordinary/Simple controls
+was incorrect and has been replaced with an explicit correction.
+
+The production Workbench reports source 328e4f2, active HASHI4 connection and
+Call availability disabled. Neither HASHI3 nor HASHI4 has call_profiles.json
+beside its active Agent configuration. These are additional preparation gaps;
+device permission alone cannot qualify a Call entry. The intended camera-shaped
+entry starts Call voice with camera off; vision is optional, unconfigured
+entries are hidden and capture starts only through an explicit in-call action.
+
+Remaining work is to integrate the fixed frontend without losing the nightly
+repairs, configure actual approved STT/TTS targets and optional vision on HASHI3,
+and verify the four configuration combinations plus real fixed entry/media
+behavior. This confirmation changes records only. No profiles, credentials,
+production processes or Core have been modified or restarted.

@@ -1,5 +1,13 @@
 # HASHI Agent FYI
 
+2026-10-07 08:13 correction: the fixed Phone/Call frontend at 88ac18e was not
+included in the paired nightly Workbench 0df7d2e. HASHI3 backend adoption remains
+valid; dual-entry frontend adoption and media acceptance remain pending.
+Production Workbench Call is disabled and both H3/H4 lack the Call profile.
+The nightly inbox and repair decision now separate these facts. Do not repeat
+the earlier fixed-entry adoption claim or enable production media from this
+read-only confirmation.
+
 2026-10-07 final HASHI3 batch: executable Functions 80166eb4 is adopted; the
 following commit only records evidence. All eleven Agents are ready, Core PID
 40696 and qualified dependency/source fingerprints stay unchanged. Workbench
