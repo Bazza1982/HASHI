@@ -73,3 +73,9 @@ the qualified provider/model effort view for both reload and target changes,
 persists target plus repaired effort atomically, and updates only future-turn
 configuration after the write succeeds. Compatible effort remains unchanged.
 Focused configuration/state checks: 42 passed; live adoption/recheck remains separate.
+
+Real Electron attachment delivery exposed a remaining primary-only admission
+check for `surface=workbench`. Authenticated Session API admission now resolves
+the already selected, owner/Agent-validated Session without rebinding primary;
+legacy shared-primary ingress retains its stale-pointer protection. Foreign
+Agent Sessions remain rejected. Fresh-context/Session execution checks: 32 passed.

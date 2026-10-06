@@ -648,6 +648,22 @@ def test_stale_workbench_request_cannot_replace_shared_primary_conversation(tmp_
     )["session_id"] == current["session_id"]
 
 
+def test_session_api_workbench_send_selects_owned_conversation_without_rebinding_primary(tmp_path):
+    runtime, primary, _replies, _resets = _session_command_runtime(tmp_path)
+    selected = runtime.session_store.create_session(owner_id="user:123", agent_id="arale", title="Selected")
+    metadata = {"owner_id":"user:123", "session_id":selected["session_id"],
+                "session_surface":"workbench", "session_channel_key":"window-a"}
+    result, owner, surface, _channel = runtime_session.resolve_request_session(
+        runtime, source="session-api", chat_id=456, metadata=metadata)
+    assert result["session_id"] == selected["session_id"]
+    assert owner == "user:123" and surface == "workbench"
+    assert runtime.session_store.resolve_primary_session(owner_id=owner, agent_id="arale")["session_id"] == primary["session_id"]
+    foreign = runtime.session_store.create_session(owner_id="user:123", agent_id="another-agent", title="Foreign")
+    with pytest.raises(runtime_session.SessionNotFound):
+        runtime_session.resolve_request_session(runtime, source="session-api", chat_id=456,
+            metadata={**metadata,"session_id":foreign["session_id"]})
+
+
 @pytest.mark.asyncio
 async def test_queue_commands_only_show_and_clear_the_current_session(tmp_path):
     runtime, default, _replies, _resets = _session_command_runtime(tmp_path)
