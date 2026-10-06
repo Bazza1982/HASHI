@@ -204,3 +204,39 @@ committed-source qualification and fresh-call adoption follow separately.
 Physical desktop/microphone evidence does not establish mobile handset or
 human listening acceptance. The earlier unexpected Core exit remains a
 separate historical investigation.
+
+### Fresh Phone and recording adoption
+
+Committed-source qualification passed **793 tests, 1 skip**. Max operation
+16b258d978bb40d7b598b94b3b7ae3a9 adopted generation e4d1747d from e6b2f41f
+in all eleven Agent Workers; shared Functions became ready and Core PID 39952
+remained live. The two pre-fix stuck Phone Runs were separately cancelled through
+their exact public Run scopes, with execution_missing=true; neither was replayed.
+
+A fresh physical LifeCam/cloud call admitted one real Get-Date request, completed
+it, returned Phone speech, confirmed provider close and retained its final detail
+for the next text request. Actual Provider-input audit preserves snapshot/cutoff
+and source-event identities. The generic read tool still correctly carries
+unknown effect verification; this is not proof of a verified write.
+
+The separate physical recording survived an actual page reload, recovered its
+same confirmation/Run, and completed with Violet Harbor 92 and zero tools. Native
+microphone tracks ended. Stimulus used generated Windows speech through physical
+speaker/microphone, not a synthetic replacement track. It does not prove handset
+or human listening acceptance. A later Phone browser query completed its tools
+and returned audio, but the model selected prompt text instead of the newly
+inserted test marker; that semantic check is recorded as not passed.
+
+### Streaming Phone representation
+
+A new Codex lane in the same QA Session was rejected before Provider work:
+309 real word fragments held 1,447 speech bytes but repeated metadata occupied
+67,052 bytes. The newly repaired terminal handler correctly settled that Run as
+failed. The Phone serializer now shares adjacent call/source scope and declares
+event columns once, retaining every exact fragment, role, source ID, sequence and
+time range. Old durable snapshots remain readable; the byte/fragment bounds,
+frozen authorization cutoff, consumption ledger and source transcript are unchanged.
+
+The two word-stream regressions failed before this representation repair and
+passed afterward (**18 owning checks**). Direct consumers, committed-source
+qualification and live new-Engine acceptance follow separately.

@@ -12,6 +12,8 @@ from typing import Any
 
 MAX_CONTEXT_BYTES = 65_536
 MAX_FRAGMENTS = 10_000
+FRAGMENT_ENCODING = "hashi.phone-fragments.grouped.v1"
+EVENT_COLUMNS = ("provider_event_id", "sequence", "start_ms", "end_ms")
 
 
 class PhoneContextError(RuntimeError):
@@ -99,8 +101,45 @@ def _pending(connection, *, owner_id: str, session_id: str,
     return False
 
 
+def _packed_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Remove repeated labels, never transcript content or event boundaries."""
+    groups: list[dict[str, Any]] = []
+    for fragment in payload["fragments"]:
+        scope = {key: fragment[key] for key in ("call_id", "call_epoch", "source")}
+        if not groups or any(groups[-1][key] != value for key, value in scope.items()):
+            groups.append({**scope, "fragments": []})
+        groups[-1]["fragments"].append({"role": fragment["role"], "text": fragment["text"],
+                                     "event": [fragment[key] for key in EVENT_COLUMNS]})
+    return {**{key: value for key, value in payload.items() if key != "fragments"},
+            "fragment_encoding": FRAGMENT_ENCODING, "event_columns": list(EVENT_COLUMNS),
+            "fragment_groups": groups}
+
+
+def _expanded_payload(payload: dict[str, Any], *, source: str) -> dict[str, Any]:
+    if "fragment_encoding" not in payload:
+        return payload  # Existing durable snapshots keep their original shape.
+    if (payload.get("fragment_encoding") != FRAGMENT_ENCODING
+            or payload.get("event_columns") != list(EVENT_COLUMNS)):
+        raise PhoneContextError("phone_context_invalid_fragment", source=source)
+    try:
+        fragments = []
+        for group in payload["fragment_groups"]:
+            scope = {key: group[key] for key in ("call_id", "call_epoch", "source")}
+            for fragment in group["fragments"]:
+                event = fragment["event"]
+                if len(event) != len(EVENT_COLUMNS):
+                    raise ValueError("invalid event columns")
+                fragments.append({**scope, "role": fragment["role"], "text": fragment["text"],
+                                  **dict(zip(EVENT_COLUMNS, event))})
+        return {**{key: value for key, value in payload.items()
+                   if key not in {"fragment_encoding", "event_columns", "fragment_groups"}},
+                "fragments": fragments}
+    except (KeyError, TypeError, ValueError):
+        raise PhoneContextError("phone_context_invalid_fragment", source=source) from None
+
+
 def _bounded(payload: dict[str, Any], *, source: str) -> str:
-    encoded=json.dumps(payload,ensure_ascii=False,separators=(",",":"))
+    encoded=json.dumps(_packed_payload(payload),ensure_ascii=False,separators=(",",":"))
     if len(encoded.encode("utf-8"))>MAX_CONTEXT_BYTES:
         raise PhoneContextError("phone_context_budget_exceeded",source=source)
     return encoded
@@ -145,7 +184,7 @@ def load_handoff(store, handoff_id: str, *, owner_id: str, agent_id: str,
             WHERE handoff_id=? AND owner_id=? AND agent_id=? AND session_id=? AND context_generation=?""",
             (handoff_id,owner_id,agent_id,session_id,int(context_generation))).fetchone()
     if row is None: raise PhoneContextError("phone_context_handoff_unavailable",source=session_id)
-    payload=json.loads(row[0])
+    payload=_expanded_payload(json.loads(row[0]),source=handoff_id)
     _bounded(payload,source=handoff_id)
     return payload
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+import json
 from dataclasses import replace
 from types import SimpleNamespace
 import pytest
@@ -186,6 +187,64 @@ async def test_long_context_failclosed_without_silent_tail_or_source_mutation(ph
     assert phone.session_id in str(rejected.value)
     assert runtime.backend_manager.calls==[]
     assert phone.store.live_transcript_segments(phone.session_id)[0]["text"]=="X"*6000
+
+
+@pytest.mark.asyncio
+async def test_word_stream_full_phone_context_fits_on_new_engine_without_losing_events(phone):
+    from orchestrator.phone_context_handoff import MAX_CONTEXT_BYTES, prepare_turn
+    fragments = [Fragment(f"event_stream_{i:020d}", "user" if i % 2 else "assistant",
+                          " word" if i % 2 else "原话", i * 200, i * 200 + 100)
+                 for i in range(320)]
+    for fragment in fragments:
+        await phone.manager.append_fragment_once(phone.binding, fragment)
+    with phone.store._lock, phone.store._connection() as connection:
+        connection.execute("UPDATE live_calls SET phase='ended',ended_at='2026-10-04T12:00:00Z' WHERE call_id=?", (phone.call_id,))
+    runtime = turn_runtime(phone)
+    runtime.config.active_backend = "codex-cli"
+    sections, audit = prepare_turn(runtime, turn_item(phone), incremental=True)
+    wire = json.loads(sections[0][1].split("\n", 1)[1])
+    assert len(json.dumps(wire, ensure_ascii=False, separators=(",", ":")).encode()) <= MAX_CONTEXT_BYTES
+    records = [f for group in wire["fragment_groups"] for f in group["fragments"]]
+    assert [(f["role"], f["text"], f["event"][0], f["event"][2], f["event"][3]) for f in records] == [
+        (f.speaker, f.text, f.provider_event_id, f.start_ms, f.end_ms) for f in fragments]
+    assert wire["fragment_groups"][0]["call_id"] == phone.call_id
+    assert wire["fragment_groups"][0]["source"] == "durable_phone_transcript"
+    assert audit["source_event_ids"] == [f.provider_event_id for f in fragments]
+    assert audit["included_fragments"] == len(fragments)
+    assert sections[0][2]["authority"] == "history"
+    assert runtime.backend_manager.calls == []
+    with phone.store._lock, phone.store._connection() as connection:
+        durable = connection.execute("SELECT provider_event_id,sequence FROM live_fragments WHERE call_id=? ORDER BY start_ms",
+                                     (phone.call_id,)).fetchall()
+    assert [(f["event"][0], f["event"][1]) for f in records] == [(r[0], r[1]) for r in durable]
+    assert len(durable) == len(fragments)
+
+
+@pytest.mark.asyncio
+async def test_word_stream_action_snapshot_roundtrip_and_legacy_storage_compatibility(phone):
+    from orchestrator.phone_context_handoff import MAX_CONTEXT_BYTES, load_handoff
+    for i in range(320):
+        await phone.manager.append_fragment_once(phone.binding, Fragment(
+            f"event_stream_{i:020d}", "assistant", "原话", i * 200, i * 200 + 100))
+    phone.judgments = [decision(action("query", "Read the scoped file"))]
+    await speak(phone, "Read the scoped file", start=65000, end=65200, source="instruction")
+    proposal = phone.admitted_proposals[-1]
+    scope = {"owner_id": phone.owner_id, "agent_id": phone.agent_id,
+             "session_id": phone.session_id, "context_generation": 1}
+    frozen = load_handoff(phone.store, proposal.phone_context_handoff_id, **scope)
+    assert len(frozen["fragments"]) == 321
+    assert frozen["fragments"][0]["text"] == "原话"
+    assert frozen["fragments"][-1]["text"] == "Read the scoped file"
+    assert frozen["cutoff_ms"] == 65201
+    assert len(json.dumps(frozen, ensure_ascii=False).encode()) > MAX_CONTEXT_BYTES
+    with phone.store._lock, phone.store._connection() as connection:
+        stored = connection.execute("SELECT payload_json FROM phone_context_handoffs WHERE handoff_id=?",
+                                    (proposal.phone_context_handoff_id,)).fetchone()[0]
+        assert len(stored.encode()) <= MAX_CONTEXT_BYTES
+        # Old Functions persisted the ungrouped representation; it remains readable.
+        connection.execute("UPDATE phone_context_handoffs SET payload_json=? WHERE handoff_id=?",
+                           (json.dumps(frozen, ensure_ascii=False), proposal.phone_context_handoff_id))
+    assert load_handoff(phone.store, proposal.phone_context_handoff_id, **scope) == frozen
 
 
 @pytest.mark.asyncio

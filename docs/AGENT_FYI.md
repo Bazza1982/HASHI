@@ -91,6 +91,11 @@ and delegation validation. Pre-model queue errors must settle the durable Run
 and visible activity through the existing result owner; a caught exception is
 not successful execution. See [handoff](HASHI_PHONE_CONTEXT_HANDOFF.md).
 
+Phone handoff byte limits apply to lossless grouped serialization, not a full
+copy of call/source labels for every streamed word. Preserve all roles, exact
+text, event IDs, sequences and timestamps; accept old durable snapshots.
+Grouping is representation only and grants no new authority or retry.
+
 Qualified Function adapters own Phone settings. Changes apply next call; recovery retains its provider. One Persona/language opening follows readiness and yields to user speech. Window movement cannot hang up. Failed PCM refresh permits stop/inspection only. Sideband follows the primary Session fence; explicit hang-up wins stale faults. Source, runtime adoption and device acceptance stay distinct.
 
 Commands follow the [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md), retain Session and remain owner-admitted during active Runs. /new creates a fresh Session without deleting history; PAO owns Agent deletion/cleanup receipts.

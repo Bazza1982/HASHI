@@ -62,7 +62,15 @@ proving that SessionStore contains a transcript.
 ## Bounded failure behavior
 
 Each full frozen snapshot or turn projection is limited to 65,536 UTF-8 bytes
-and 10,000 fragments. There is no silent tail truncation or invented summary.
+and 10,000 fragments. The byte bound applies to the lossless serialized form.
+`hashi.phone-fragments.grouped.v1` declares event columns once and groups only
+adjacent fragments with the same call, epoch and source. Every fragment retains
+its exact role, text, source event ID, sequence and time range. Neither speech
+nor event boundaries are merged or omitted. Snapshot loading expands this form
+for existing owners and also accepts previously persisted ungrouped snapshots.
+This representation avoids repeating long call IDs and field labels for every
+word received from a streaming provider. There is no silent tail truncation or
+invented summary.
 If complete necessary context cannot fit, `phone_context_budget_exceeded`
 keeps the complete durable source and explicitly names its Session/handoff.
 No retrieval tool has been added by this change. Long-context failures remain
@@ -113,3 +121,21 @@ qualification, Worker adoption and a fresh physical call are recorded in the
 HASHI3 repair journal separately; the earlier call is evidence of the defect,
 not successful Agent action execution. This change does not authorize replay
 of either failed historical action.
+
+The committed-source gate subsequently passed 793 tests with one skip, and all
+eleven HASHI3 Workers adopted that generation without replacing Core. A fresh
+physical LifeCam/OpenAI call admitted a single real Get-Date tool request,
+returned its result through Phone, confirmed provider shutdown and carried the
+remaining Phone history into a subsequent text reply. Separate native recording
+acceptance survived a real page reload and confirmed the same original Run,
+which completed without tools. Speaker-to-microphone stimulus was generated;
+this does not establish human listening or mobile handset acceptance.
+
+Switching that same QA Session to Codex exposed a further representation defect:
+309 genuine word fragments contained 1,447 bytes of speech but the repeated
+metadata occupied 67,052 bytes, exceeding the unchanged bound before Provider
+work. The new lossless representation addresses both action snapshots and
+post-call projections. Focused regressions cover full new-Engine input, exact
+event provenance, immutable cutoff, unchanged durable source and old snapshot
+compatibility. Actual new-Engine adoption is recorded separately; the failed
+request is not automatically replayed.
