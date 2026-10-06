@@ -1,5 +1,16 @@
 # HASHI Agent FYI
 
+2026-10-07 final HASHI3 batch: executable Functions 80166eb4 is adopted; the
+following commit only records evidence. All eleven Agents are ready, Core PID
+40696 and qualified dependency/source fingerprints stay unchanged. Workbench
+0df7d2e fixes UTF-8 uploads and preserves canonical Run questions against
+completion-time compatibility echoes. Sustained native mixed-file acceptance,
+same-model Session overlap, selected-Session native browser, outside-Workbench
+reboot discovery and two-build packaged upgrade/rollback passed. Actual Windows
+input, Phone source/hearing/mobile/camera, cross-machine and production adoption
+remain explicit open boundaries. See the final section of the nightly repair
+decision and the updated desktop inbox; older stage statements are historical.
+
 2026-10-07: inline-media HASHI API tool rounds bypass Gateway Session caching.
 They must therefore send the complete accumulated conversation, including
 assistant call/result pairs and original media. Text-only cached rounds keep

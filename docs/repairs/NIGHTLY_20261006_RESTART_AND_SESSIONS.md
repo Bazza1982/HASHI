@@ -219,3 +219,76 @@ Offline red: one HTTP-boundary test failed because request two began with a
 tool result rather than the original system/user messages. Green: 109 adapter,
 backend catalogue and selection transaction checks passed. Text-only deltas,
 reasoning settings, media fallback, failure audit and cancellation remain covered.
+
+## Final adopted and native evidence, 2026-10-07
+
+The executable Functions source is 80166eb4; the adopted generation is
+6c2de62e37f5e0b88f151829a9defa14d9f2f9be36849ebe3ec807c7a757cd5c.
+All 645 source/artifact/manifest files matched. Core PID 40696 stayed fixed,
+Core source and the qualified Python 3.12 environment fingerprints matched,
+and all eleven Agents were ACTIVE, accepting and online with health ready.
+This final section is a documentation-only follow-up, not another adoption.
+
+After the immediate Telegram first-poll repair, two source-adoption observations
+reached complete authenticated readiness in 64.732 and 62.659 seconds. A further
+external Backend API command, with Workbench only observing, reached it in
+56.866 seconds using the already qualified generation. Its stored start and
+pinned source-Agent notice were visible in 1.383 seconds. The durable presentation
+acknowledgment preceded shared replacement, and confirmed success disappeared
+after 3.942 visible seconds. These observations are distinct from the earlier
+three-pair 28.1% controlled full-recovery result. No validation was removed.
+
+The external command uses the authenticated Backend API's existing Workbench
+compatibility ingress; it proves unsolicited lifecycle discovery, not a live
+Telegram user send. Telegram-origin routing/mirroring has focused contract
+coverage, but an actual Telegram-initiated frontend canary remains unverified.
+Ordinary twelve-theme and Simple three-theme captures passed text contrast 4.5.
+
+Actual same-model execution overlap passed native Codex, HERV3 through HASHI API
+and direct API. Native Simple additionally proved Session FIFO, question retention,
+targeted cancel, queued third-Session capacity release, and original Session text
+and file drafts. The selected nonprimary Session's embedded-browser handoff used
+a real registered Worker/tool call and painted its unique page value in that
+Session; primary binding stayed unchanged. Cleanup used the managed process tool
+only after the synthetic Run ended, then the owned app quit normally.
+
+Native mixed-file delivery uncovered two Workbench follow-ups: Multer's default
+Latin-1 filename parameters corrupted bare UTF-8 names, and a late compatibility
+JSONL echo overwrote a canonical user turn using a completion-time timestamp.
+The upload parser uses Multer's supported UTF-8 parameter option; explicit
+RFC 5987 encodings and size/count limits remain authoritative. The canonical
+merger now orders sequenced deltas and preserves canonical Run questions against
+compatibility echoes. Multipart/merger/controller checks passed 86 before the
+second-ordering repair; its 48 focused merger/feed/controller checks then passed.
+The live red has sixty wrong post-completion observations. The final live green
+has sixty correct sustained observations, ordered TXT/PDF/PNG/TXT bytes, intact
+Chinese filenames and attachments, one user turn and Run, and actual file-tool
+reads of two TXT strings, a plain-text PDF heading and the 31 by 17 PNG dimensions.
+A single earlier DOM sample passed while its screenshot later showed reversed
+order; it is superseded and is not used to certify final presentation.
+
+The built, served and hardened Workbench candidate is 0df7d2e. Three real packaged
+launches used distinct source builds 5e6d033 -> 0df7d2e -> 5e6d033 with one stable
+installation profile. The authenticated local desktop binding and notification
+preference survived candidate upgrade/rollback and directory changes; bundled
+UI/API/native browser assets and physical JPEG views worked, settings had no
+unrelated error, and all three apps quit normally. The existing production
+launcher/service was not replaced. This is a two-build candidate transition,
+not a production installer migration.
+
+Remaining boundaries are explicit: real Windows pointer/keyboard input still
+fails despite visible unlocked Default desktop, unrestricted cursor clip and
+no observed job UI restrictions; its cause is not established. Three physical
+monitor views passed. No optimistic SendInput replacement or privilege change
+is retained. Phone's earlier generic browser_session/evaluate query has no
+deterministic read receipt: arbitrary browser scripts are intentionally outside
+the verified-read allowlist, so its unknown status cannot be upgraded from
+model prose. Dedicated read tools are supported but a new actual Phone query
+canary, mobile/hearing/other configured modes and camera interaction remain
+unverified. Cross-machine INTEL/MSI attachment acceptance and HASHI1/2/4/main or
+installed production Workbench publication are outside this HASHI3 batch.
+Historical missing exit/authentication/Telegram logs cannot be reconstructed.
+
+Raw red/green, live receipts and screenshots remain separate under the ignored
+HASHI3 .tmp/nightly-20261006 directory. The nightly inbox is the per-item status
+record; no all-items-closed claim follows from component or curated gate counts.
