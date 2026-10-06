@@ -166,3 +166,22 @@ The HASHI3-only scheduled device task uses the existing --log-dir option to keep
 future diagnostics in instance-owned logs. Historical inaccessible/missing logs
 have not been reconstructed or counted as verified. Focused desktop/sidecar
 checks passed 56 tests; real mouse/key control remains an explicit open boundary.
+
+## Controlled complete-recovery comparison
+
+Three old/optimized pairs used the same HASHI3 checkout, the same 11 Agents and
+the same Core PID 40696. Only the qualification implementation changed; equal
+no-op source markers forced fresh qualification, warm transitions were excluded,
+and all qualified files were committed. The optimized source was restored after
+the experiment. Full authenticated health ready plus all accepting Workers took
+114.885 / 114.551 / 115.604 seconds before, and 82.378 / 82.639 / 82.760 seconds
+after. Medians 114.885 to 82.639 seconds give a 28.1% complete-recovery reduction.
+The same-source qualification median separately fell 47.5%; it is not the total
+restart reduction. No test or validation gate was disabled.
+
+The previous 55-second frontend result measured cutover, not full startup health:
+connector readiness lagged the durable successful receipt by about 27 seconds.
+Workbench now keeps a recovering state until authenticated health on that same
+connection is ready, then shows success and starts its visible-time dismissal.
+This fixes early presentation without rewriting the durable cutover result.
+Actual final source adoption and connector observations follow this comparison.

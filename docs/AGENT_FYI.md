@@ -1,5 +1,13 @@
 # HASHI Agent FYI
 
+2026-10-07: controlled HASHI3 max comparison (three runs each, same 11 Agents and
+unchanged Core) reduced complete recovery median 114.885 to 82.639 seconds, 28.1%.
+Qualification alone improved 47.5%. Optimized qualification remains the adopted
+implementation; temporary old-implementation measurements were restored. A
+successful cutover receipt preceded complete connection readiness by about 27
+seconds. Workbench now derives that separate readiness observation from signed
+health before showing success. See the nightly restart/Session repair decision.
+
 2026-10-07: HASHI3 nightly live checks found unsupported HERV3 reasoning retained
 after changing provider/model. PAO Functions repair resolves the same qualified
 effort view used during reload, stores the target and compatible effort together,
