@@ -237,3 +237,8 @@ Owner/Agent/context and writable-conversation fences remain required. Source,
 hot Function adoption, synthetic media checks and physical acceptance stay
 separate in the [call decision](HASHI_CALL_INTERACTION_2026-10-04.md) and nightly
 repair record.
+
+The HASHI3 Phone/Call repair is now hot-adopted with Core unchanged. The scoped
+Workbench 5179 candidate has native ordinary/Simple dialing and current-Session
+result evidence, plus unobstructed themed call controls. Synthetic device and
+external provider success are not physical hearing or real-phone acceptance.

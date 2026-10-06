@@ -345,3 +345,38 @@ Workbench Call/composer/Simple components passed 77. The rendered busy-label
 assertion failed against the previous component and passed against the repair.
 Core source protection and whitespace checks passed. Hot adoption and native
 Simple media acceptance remain separate until the following live receipt.
+
+## Phone/Call ready for user testing, 2026-10-07
+
+The complete runtime gate passed 803 checks with one existing POSIX-mode skip
+on Windows. Its first run inherited HASHI4 through PYTHONPATH and saw the other
+checkout's package metadata; a scoped HASHI3 path fixed the test environment.
+No dependency change, Core edit or relaxed runtime comparison was used.
+
+Hot `/reboot max` committed Functions source 6774c175 and generation
+281789c6faa4982e7b5ac4b1e2a9e754f7ea4d9d1c797698c317f00f2ca6afb3.
+Core PID 40696 and Core/dependency digests stayed fixed; shared Functions changed
+to PID 30856, all eleven Agents returned online and accepting, authenticated
+health is ready and all 645 source/artifact/manifest files match. The observer
+saw a durable start in 277 ms, full readiness in 57.015 seconds, and automatic
+success dismissal after 3.944 seconds. This is an adoption observation, not a
+controlled speed comparison.
+
+Native testing exposed one additional Simple layout defect: its absolute
+attachment button covered the Phone entry. The shared pair now occupies a
+separate normal-flow row above the composer. Direct consumers passed 38 checks;
+the live failure is retained. Built/served Workbench source 5801ff7 passed the
+final native run: both ordinary entries, real Phone WebRTC, synthetic speech
+through actual Call STT/PAO/TTS, explicit camera sharing/stop and hangup. Simple
+started both engines in its fresh nonprimary Session. The real Call Run and
+transcript remained in that selected Session; primary was unchanged. Three
+Simple themes at desktop, 390 and 320 widths passed hit tests, input separation
+and minimum 44px targets. No media error or unexpected HTTP error was observed.
+
+The scoped test entry is http://127.0.0.1:5179. Provider authentication, actual
+media responses, source adoption and renderer receipts are separate evidence.
+Browser test devices and synthetic audio do not establish physical microphone,
+hearing, camera content, real mobile or noise/latency acceptance. Those remain
+for the user's test, along with other historical Phone-specific open items.
+Production HASHI4 and the original Workbench were not changed. This final
+documentation follow-up does not require replacing the adopted Function bytes.

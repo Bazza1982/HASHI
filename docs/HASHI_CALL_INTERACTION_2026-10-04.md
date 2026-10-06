@@ -427,3 +427,13 @@ Two fresh-conversation checks failed before the change; the negative ownership
 and stale-state checks passed. Focused red/green and live adoption are recorded
 in the nightly repair record. Provider selection is ignored instance
 configuration with existing secret references, not shared catalogue metadata.
+
+HASHI3 live adoption now proves those Function fences and selected-conversation
+results. The paired Workbench is built/served at 5801ff7 on the scoped test
+entry 5179. Simple's fixed pair uses its own flow row above the composer because
+the former absolute attachment control obscured Phone. Actual native hit tests
+passed three Simple themes and desktop/narrow sizes; both engines were started
+and ended in the fresh Session without moving primary. Real external media
+responses and fixture microphone/camera checks passed. Physical hearing,
+microphone, camera content and real mobile remain user acceptance, not inferred
+from the synthetic device evidence. See the nightly repair record for receipts.
