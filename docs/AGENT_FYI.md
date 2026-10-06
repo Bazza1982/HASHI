@@ -229,3 +229,11 @@ Actual HASHI3 screenshots and deployment persistence passed, but Windows pointer
 injection currently has no successful physical observation. Do not infer input
 success from capture, registration or SendInput's accepted-count result. See
 `docs/repairs/NIGHTLY_20261006_RESTART_AND_SESSIONS.md` for the verified boundary.
+
+HASHI3 Phone/Call fixed entries select independent engines and preserve camera
+off until explicit in-call sharing. Both use the selected owned active
+conversation, including Simple's fresh Session, without changing primary.
+Owner/Agent/context and writable-conversation fences remain required. Source,
+hot Function adoption, synthetic media checks and physical acceptance stay
+separate in the [call decision](HASHI_CALL_INTERACTION_2026-10-04.md) and nightly
+repair record.

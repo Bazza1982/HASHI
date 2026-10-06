@@ -315,3 +315,33 @@ repairs, configure actual approved STT/TTS targets and optional vision on HASHI3
 and verify the four configuration combinations plus real fixed entry/media
 behavior. This confirmation changes records only. No profiles, credentials,
 production processes or Core have been modified or restarted.
+
+## Phone/Call completion work, 2026-10-07
+
+The user now authorizes immediate completion on HASHI3 and the scoped test
+Workbench. Fixed-entry frontend 88ac18e has been integrated into the nightly
+checkout without replacing other batch repairs. The attachment-only optimistic
+row repair is included. Busy controls keep their configuration visibility and
+show the existing localized busy label.
+
+Actual provider probes using HASHI3's existing secret reference passed STT,
+TTS and optional vision. The ignored instance profile selects gpt-transcribe,
+gpt-4o-mini-tts with coral/WAV, and gpt-4.1-mini for vision. Existing Phone
+configuration remains independently owned. No provider credential is stored
+in source or browser configuration.
+
+Native ordinary mode passed fixed controls, camera off at start, reciprocal
+busy admission, browser microphone readiness, a real PAO Run and TTS response,
+explicit camera sharing/stop, hangup, and real Phone WebRTC connection.
+Synthetic media verifies the software path, not physical hearing or microphone
+quality. The same run exposed Simple's primary-only backend scope fence.
+The Function adapters now accept the owned active conversation and preserve
+its canonical result binding. Fresh Session admission failed twice before
+the repair; negative owner/Agent/stale/deleted/archived/activity cases passed.
+Final offline checks, hot adoption and live Simple verification follow separately.
+
+The final Call/Session/Phone context components passed 247 checks; the paired
+Workbench Call/composer/Simple components passed 77. The rendered busy-label
+assertion failed against the previous component and passed against the repair.
+Core source protection and whitespace checks passed. Hot adoption and native
+Simple media acceptance remain separate until the following live receipt.

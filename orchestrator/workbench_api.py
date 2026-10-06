@@ -157,6 +157,7 @@ from orchestrator.session_store import (
     MAX_SESSION_ATTACHMENTS_PER_MESSAGE,
     MAX_SESSION_ATTACHMENT_TOTAL_BYTES,
     MAX_SESSION_MESSAGE_CHARS,
+    SESSION_KIND_CONVERSATION,
     TERMINAL_RUN_STATES,
     IdempotencyConflict,
     SessionConflict,
@@ -1174,16 +1175,15 @@ class WorkbenchApiServer:
     def _require_live_voice_session_scope(
         self, *, owner_id: str, agent_id: str, session_id: str, context_generation: int
     ) -> dict:
-        """Use the same primary Session fence as interactive PAO admission."""
+        """Fence an owned, writable conversation and its current context."""
         from orchestrator.frontend_live_voice.protocol import LiveVoiceError
 
         try:
             session = self.session_store.get_session(
                 session_id, owner_id=owner_id, agent_id=agent_id, include_deleted=False)
-            primary = self.session_store.resolve_primary_session(owner_id=owner_id, agent_id=agent_id)
         except (SessionNotFound, SessionConflict) as exc:
             raise LiveVoiceError("live_scope_changed", 409) from exc
-        if (session["session_id"] != primary["session_id"]
+        if (session["session_kind"] != SESSION_KIND_CONVERSATION or session["status"] != "active"
                 or int(session["context_generation"]) != int(context_generation)):
             raise LiveVoiceError("live_scope_changed", 409)
         return session

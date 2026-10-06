@@ -406,3 +406,24 @@ original call task. New HASHI2 hot adoption requires its own scoped approval;
 the previous generation's reboot approval is not carried forward. Source
 qualification alone does not make this experiment available in the running
 ordinary Workbench.
+
+## 2026-10-07 HASHI3 fixed entries and current conversation
+
+The user authorized completing Phone/Call on HASHI3 and the associated test
+Workbench, including hot Function adoption. Frontend Connector owns this
+Function-layer repair; protected Core and production Workbench are excluded.
+Phone and camera-shaped Call entries have fixed independent engines. Call
+requires STT/TTS, with optional vision, and starts with camera off. Busy entries
+remain visible and say the line is busy; unconfigured entries are hidden.
+
+Both engines accept the selected owned active conversation, including Simple's
+fresh nonprimary conversation. The primary binding is not mutated. Canonical
+SessionStore ownership, Agent, conversation kind, active state and context
+generation remain admission fences. Completed Call questions and answers stay
+in that exact conversation. Archived/deleted/activity Sessions remain rejected.
+
+The native Simple failure was a 409 primary-only fence in both media adapters.
+Two fresh-conversation checks failed before the change; the negative ownership
+and stale-state checks passed. Focused red/green and live adoption are recorded
+in the nightly repair record. Provider selection is ignored instance
+configuration with existing secret references, not shared catalogue metadata.

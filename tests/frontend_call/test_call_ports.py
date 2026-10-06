@@ -7,10 +7,14 @@ from orchestrator.frontend_live_voice.manager import LiveVoiceManager
 from orchestrator.frontend_live_voice.protocol import LiveVoiceError
 
 
-async def test_real_session_store_is_the_only_message_and_result_owner(tmp_path, monkeypatch):
+@pytest.mark.anyio
+@pytest.mark.parametrize('fresh_conversation', [False, True])
+async def test_real_session_store_is_the_only_message_and_result_owner(tmp_path, monkeypatch, fresh_conversation):
     monkeypatch.setattr('orchestrator.message_context._network_secret', lambda root: 'test-secret')
     store = SessionStore(tmp_path / "sessions.db", instance_id="TEST")
     session = store.ensure_default_session(owner_id="owner", agent_id="lily")
+    if fresh_conversation:
+        session = store.create_session(owner_id="owner", agent_id="lily", title="Simple conversation")
     captured = []
 
     class Runtime:

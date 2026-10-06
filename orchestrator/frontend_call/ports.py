@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from orchestrator.session_store import SESSION_KIND_CONVERSATION
 from .contract import CallError
 
 
@@ -19,11 +20,9 @@ class HashiPorts:
             session = store.get_session(
                 binding["session_id"], owner_id=owner, agent_id=binding["agent_id"]
             )
-            primary = store.resolve_primary_session(
-                owner_id=owner, agent_id=binding["agent_id"]
-            )
             if (
-                session["session_id"] != primary["session_id"]
+                session["session_kind"] != SESSION_KIND_CONVERSATION
+                or session["status"] != "active"
                 or session["context_generation"] != binding["context_generation"]
             ):
                 raise CallError("call_scope_changed", 409)
