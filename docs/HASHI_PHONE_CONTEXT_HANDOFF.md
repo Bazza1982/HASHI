@@ -90,3 +90,26 @@ microphone, real user authorization or business action. Shared implementation
 and Engine-contract tests do not establish live acceptance for every configured
 Phone model/provider. The HASHI1 rollout owner records source/artifact/live
 adoption separately; other instances are outside this scope.
+
+## HASHI3 ingress and failure settlement, 2026-10-06
+
+A physical microphone/cloud Phone call exposed a gap after snapshot creation:
+SessionStore's trusted origin normalization retained the delegation markers but
+dropped `phone_context_handoff_id`. The Worker therefore refused its prompt
+before any Provider or tool call. Normalization now carries that ID only after
+loading the immutable snapshot under the same owner/Agent/Session/context and
+matching its call, epoch, delegation, version and digest. An unrelated snapshot
+is rejected; later speech cannot change the admitted action's input.
+
+The queue's generic exception path also left those rejected Runs visibly
+running. It now settles them through the existing request notification owner,
+which persists the terminal Session result before publishing activity or listener
+results. It does not replay the action or overwrite an already terminal Run.
+
+Two focused regressions failed before these repairs and passed afterward
+(22 owning checks); 234 direct-consumer checks passed. The first qualification
+run rejected uncommitted Function source as designed. Committed-source
+qualification, Worker adoption and a fresh physical call are recorded in the
+HASHI3 repair journal separately; the earlier call is evidence of the defect,
+not successful Agent action execution. This change does not authorize replay
+of either failed historical action.

@@ -33,12 +33,19 @@ if (-not $PythonExe) {
 $PythonExe = (Resolve-Path -LiteralPath $PythonExe).Path
 
 $PreviousPythonPath = $env:PYTHONPATH
+$PreviousInstanceId = $env:HASHI_INSTANCE_ID
+$PreviousBridgeHome = $env:BRIDGE_HOME
 try {
     $env:PYTHONPATH = $RepoRoot
+    # The explicit installation target owns identity, regardless of the caller's instance.
+    $env:HASHI_INSTANCE_ID = ""
+    $env:BRIDGE_HOME = $RepoRoot
     $DefaultsJson = & $PythonExe -c "import json; from tools.browser_bridge_transport import BRIDGE_NAMESPACE, DEFAULT_WINDOWS_AUTH_FILE, DEFAULT_WINDOWS_PIPE; from tools.browser_native_host import DEFAULT_LOG_PATH; print(json.dumps({'namespace': BRIDGE_NAMESPACE, 'endpoint': str(DEFAULT_WINDOWS_PIPE), 'auth_file': str(DEFAULT_WINDOWS_AUTH_FILE), 'log_file': str(DEFAULT_LOG_PATH)}))"
 }
 finally {
     $env:PYTHONPATH = $PreviousPythonPath
+    $env:HASHI_INSTANCE_ID = $PreviousInstanceId
+    $env:BRIDGE_HOME = $PreviousBridgeHome
 }
 $BridgeDefaults = $DefaultsJson | ConvertFrom-Json
 $BridgeEndpoint = [string]$BridgeDefaults.endpoint
@@ -57,6 +64,7 @@ if ([string]::IsNullOrWhiteSpace($BridgeNamespace)) {
 $HostSuffix = ($BridgeNamespace.ToLowerInvariant() -replace "[^a-z0-9_]", "_")
 $HostName = "com.hashi.browser_bridge.$HostSuffix"
 $InstallRoot = Join-Path $InstallBase $BridgeNamespace
+$BridgeLogFile = Join-Path $InstallRoot "logs\native-host.log"
 $ExtensionInstallDir = Join-Path $InstallRoot "extension"
 $LauncherPath = Join-Path $InstallRoot "hashi_browser_bridge_host.exe"
 $ManifestPath = Join-Path $InstallRoot "$HostName.json"
@@ -146,8 +154,15 @@ internal static class HashiBrowserBridgeLauncher
     {
         try
         {
-            source.CopyTo(destination);
-            destination.Flush();
+            // Native messaging keeps stdin/stdout open between requests.
+            // Flush every available chunk instead of waiting for stream EOF.
+            var buffer = new byte[81920];
+            int count;
+            while ((count = source.Read(buffer, 0, buffer.Length)) > 0)
+            {
+                destination.Write(buffer, 0, count);
+                destination.Flush();
+            }
         }
         catch { }
         finally

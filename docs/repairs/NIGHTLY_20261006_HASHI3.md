@@ -169,3 +169,38 @@ The max reboot with operation f04394b2d2c24dd8b50c2c41a576e9fa replaced Workers
 successfully but retained the previous bd525f9f generation after qualification
 fell back. It is not counted as adoption of the subsequent transcript projection.
 The final accepted generation must match the intended committed Function bytes.
+
+### After-work adoption and real device checks
+
+The authorized max reboot with operation 9cadf64488814cdf838ef2af1632cadf adopted
+committed generation 15a06d974894c9d55bd86e2e03830a1c6808190f93775d35f121c248acddfe46
+from 42b58ce9. All eleven Agent Workers matched; Core PID 39952 remained live.
+The real Antigravity replacement returned a fresh marker through the temporary
+QA Agent. A separate LocalSystem task launched the qualified Antigravity route
+under the active interactive user's identity and returned a fresh marker;
+the task was removed after completion. This proves that route's H3 identity
+boundary, not the health of the retired Gemini client or every Google account.
+
+Independent public Desktop control acquired its lease, typed Unicode, dragged
+the test element and released control. The earlier busy result was the test's
+own nested desktop-lock conflict. Chrome and Edge then performed real H3
+HERV3 browser actions against their separate registered Workers. Native host
+startup had exposed a new buffering defect: small frames were flushed only at
+EOF. The Windows installer now generates a launcher that flushes each chunk;
+the compiled real-process regression failed before repair and passed afterward
+(4 owning checks), with 60 consumer checks passed and 7 platform skips.
+
+A real LifeCam microphone/OpenAI Phone call transcribed an acoustic test phrase,
+returned it in cloud speech, and confirmed provider shutdown after UI hang-up.
+Its two delegated Agent actions failed before Provider work because trusted
+origin normalization dropped their frozen context IDs. They also remained
+visibly running after the queue caught the prompt exception. Both defects have
+focused red/green proof (2 failed / 20 passed before, 22 passed after), and all
+234 direct-consumer checks passed. No action is automatically replayed.
+
+The initial expanded qualification recorded 790 passed, 1 skipped and three
+expected unpublished-source refusals. The Function commit guard remains intact;
+committed-source qualification and fresh-call adoption follow separately.
+Physical desktop/microphone evidence does not establish mobile handset or
+human listening acceptance. The earlier unexpected Core exit remains a
+separate historical investigation.

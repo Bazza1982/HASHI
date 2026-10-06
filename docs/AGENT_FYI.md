@@ -11,6 +11,12 @@ Execution loop; retired Triage is not the owner of ordinary recording input.
 Source, offline validation, runtime adoption and actual frontend evidence remain
 separate. See [batch evidence](repairs/NIGHTLY_20261006_HASHI3.md).
 
+2026-10-06 after-work browser acceptance found native Windows launcher buffering
+until EOF. Frontend Connector/Functions now flushes live native-message chunks;
+the compiled-launcher regression failed before and passes after repair. Explicit
+installer targets own identity and logs. H3 Chrome/Edge launcher adoption and
+actual Agent browser actions are recorded separately from this source fix.
+
 The prior HASHI1/HASHI2 development was consolidated on the HASHI3 development
 branch, preserving Call, Simple, scoped search, creation, questions, Phone and
 Move. Consolidation alone does not prove adoption. Past approvals and receipts
@@ -79,6 +85,11 @@ Media bind one draft/instance/Agent/Run; Remote sends managed bytes. HERV3 gains
 Phone uses the owner's foreground Conversation until hang-up. Actions get bounded original PCM/Conversation/job evidence, excluding scheduled prompts; lookups create no Run. Context fitting fails when mandatory content cannot fit. See [PCM](HASHI_PCM_SYSTEM_DESIGN.md) and [PAO](HASHI_PAO_SYSTEM_DESIGN.md).
 
 Phone fragments remain ordered durable Session speech. Acceptance, execution, playback and listening need separate evidence. Validate action origin/order, deliver final results and never auto-retry uncertain writes.
+
+Trusted Phone ingress retains its frozen handoff ID only after scoped snapshot
+and delegation validation. Pre-model queue errors must settle the durable Run
+and visible activity through the existing result owner; a caught exception is
+not successful execution. See [handoff](HASHI_PHONE_CONTEXT_HANDOFF.md).
 
 Qualified Function adapters own Phone settings. Changes apply next call; recovery retains its provider. One Persona/language opening follows readiness and yields to user speech. Window movement cannot hang up. Failed PCM refresh permits stop/inspection only. Sideband follows the primary Session fence; explicit hang-up wins stale faults. Source, runtime adoption and device acceptance stay distinct.
 

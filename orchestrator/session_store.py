@@ -1824,13 +1824,30 @@ class SessionStore:
             ).fetchone()
         if row is None:
             raise SessionConflict("live_voice_origin_invalid")
-        return {
+        normalized = {
             "call_id": call_id,
             "call_epoch": call_epoch,
             "delegation_id": delegation_id,
             "proposal_version": proposal_version,
             "proposal_digest": proposal_digest,
         }
+        handoff_id = value.get("phone_context_handoff_id")
+        if handoff_id is not None:
+            from orchestrator.phone_context_handoff import PhoneContextError, load_handoff
+
+            if not isinstance(handoff_id, str) or not handoff_id:
+                raise SessionConflict("live_voice_origin_invalid")
+            try:
+                snapshot = load_handoff(self, handoff_id, owner_id=owner_id,
+                    agent_id=agent_id, session_id=session_id,
+                    context_generation=context_generation)
+            except PhoneContextError as exc:
+                raise SessionConflict("live_voice_origin_invalid") from exc
+            if any(str(snapshot.get(key)) != str(expected)
+                   for key, expected in normalized.items()):
+                raise SessionConflict("live_voice_origin_invalid")
+            normalized["phone_context_handoff_id"] = handoff_id
+        return normalized
 
     def stage_live_provider_fragment(
         self, *, owner_id: str, provider_event_id: str, call_id: str,

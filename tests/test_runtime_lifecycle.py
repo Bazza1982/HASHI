@@ -8,6 +8,57 @@ import pytest
 from orchestrator import runtime_lifecycle
 
 
+@pytest.mark.asyncio
+async def test_prompt_failure_finishes_durable_run_and_visible_activity(tmp_path,monkeypatch):
+    from types import MethodType
+    from unittest.mock import AsyncMock
+    from tests.test_runtime_pipeline import _runtime, _item
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+    from orchestrator.phone_context_handoff import PhoneContextError
+    from orchestrator.request_activity import RequestActivityStore
+    from orchestrator.session_store import SessionStore
+    runtime=_runtime()
+    runtime.session_store=SessionStore(tmp_path/"sessions.sqlite3",instance_id="HASHI1")
+    session=runtime.session_store.create_session(owner_id="owner",agent_id=runtime.name,title="test")
+    accepted=runtime.session_store.accept_run(session_id=session["session_id"],owner_id="owner",
+        agent_id=runtime.name,request_id="req-context-error",text="Read the test status",
+        source="session-api",idempotency_key="context-error")
+    item=_item(request_id=accepted.request_id,session_id=session["session_id"],run_id=accepted.run_id,
+        context_generation=1,owner_id="owner",source="session-api",session_surface="workbench",
+        session_channel_key="default")
+    runtime.request_activity=RequestActivityStore()
+    runtime.request_activity.start(item.request_id)
+    runtime.queue=asyncio.Queue()
+    runtime._request_listeners={}
+    runtime._pending_request_results={}
+    runtime._notify_request_listeners=MethodType(FlexibleAgentRuntime._notify_request_listeners,runtime)
+    runtime._remote_backend_block_reason=lambda source: None
+    runtime._notify_right_brain_interrupted=lambda *args,**kwargs: None
+    runtime.error_logger.exception=lambda message: None
+    monkeypatch.setattr(runtime_lifecycle.runtime_workzone,"activate_backend_state",AsyncMock())
+    async def fail_prompt(*args,**kwargs):
+        raise PhoneContextError("phone_context_handoff_unavailable",source=session["session_id"])
+    monkeypatch.setattr(runtime_lifecycle.runtime_pipeline,"build_turn_prompt",fail_prompt)
+    monkeypatch.setattr("orchestrator.runtime_media.finish_native_voice_transcript_path",AsyncMock())
+    monkeypatch.setattr("orchestrator.frontend_whatsapp_mirror.deliver_whatsapp_mirror",AsyncMock())
+    monkeypatch.setattr("orchestrator.runtime_debug_reporting.schedule_terminal_diagnostic",lambda *a,**k: None)
+    monkeypatch.setattr("orchestrator.runtime_debug_reporting.schedule_failure_report",lambda *a,**k: None)
+    await runtime.queue.put(item)
+    task=asyncio.create_task(runtime_lifecycle.process_queue(runtime))
+    try:
+        await asyncio.wait_for(runtime.queue.join(),timeout=2)
+    finally:
+        task.cancel()
+        await task
+    run=runtime.session_store.get_run(accepted.run_id)
+    assert run["state"]=="failed"
+    activity=runtime.request_activity.poll(item.request_id)
+    assert activity["terminal"] is True and activity["state"]=="failed"
+    assert runtime.backend_manager.calls==[]
+    restored=SessionStore(tmp_path/"sessions.sqlite3",instance_id="HASHI1")
+    assert restored.get_run(accepted.run_id)["state"]=="failed"
+
+
 class _Logger:
     def __init__(self):
         self.messages = []

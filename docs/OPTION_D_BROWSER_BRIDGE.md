@@ -42,6 +42,17 @@ The installer uses `.venv\Scripts\python.exe` when present, otherwise the `pytho
 It derives an instance-scoped namespace, extension identity, named pipe,
 authentication file, native-host registration, and installation directory.
 Loading one instance's unpacked extension does not authorize another instance.
+An explicit `-RepoRoot` determines the installation's instance identity; an
+inherited caller instance cannot change it. Native-host logs are kept under
+that same installation namespace.
+
+The native Windows launcher forwards and flushes each available chunk in both
+directions while the connection remains open. Waiting for EOF strands the
+extension's initial handshake and hides the browser tools despite successful
+installation. The Windows transport regression compiles the actual launcher
+and observes two replies before closing its input. Reinstall only the affected
+instance's launcher and reload its extension to adopt this fix; Core and other
+instances do not require a restart.
 
 For Edge on the same HASHI instance, install a second isolated bridge:
 

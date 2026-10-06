@@ -73,6 +73,32 @@ async def test_actual_action_freezes_both_sides_before_real_run_admission(phone)
 
 
 @pytest.mark.asyncio
+async def test_pao_ingress_keeps_verified_phone_handoff_for_worker_prompt(phone):
+    from orchestrator.session_store import SessionConflict
+    await phone.manager.append_fragment_once(phone.binding,Fragment("prior","assistant","Use only the test copy",0,50))
+    phone.judgments=[decision(action("query","Read the test status"))]
+    await speak(phone,"Read the test status",start=100,end=200,source="instruction")
+    proposal=phone.admitted_proposals[-1]
+    candidate={"call_id":phone.call_id,"call_epoch":1,"delegation_id":proposal.delegation_id,
+        "proposal_version":proposal.version,"proposal_digest":proposal.digest,
+        "phone_context_handoff_id":proposal.phone_context_handoff_id}
+    scope={"owner_id":phone.owner_id,"agent_id":phone.agent_id,"session_id":phone.session_id,
+        "context_generation":1}
+    normalized=phone.store.resolve_live_voice_origin(**scope,candidate=candidate)
+    assert normalized["phone_context_handoff_id"]==proposal.phone_context_handoff_id
+    await phone.manager.append_fragment_once(phone.binding,Fragment("later","user","Delete the real record",220,300))
+    runtime=turn_runtime(phone)
+    item=turn_item(phone,metadata={"owner_id":phone.owner_id,"live_voice":normalized})
+    prompt=await runtime_pipeline.build_turn_prompt(runtime,item,is_bridge_request=False)
+    assert "Use only the test copy" in prompt.final_prompt
+    assert "Read the test status" in prompt.final_prompt
+    assert "Delete the real record" not in prompt.final_prompt
+    with pytest.raises(SessionConflict,match="live_voice_origin_invalid"):
+        phone.store.resolve_live_voice_origin(**scope,candidate={**candidate,
+            "phone_context_handoff_id":"phone-handoff-unrelated"})
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("fixed",[True,False])
 async def test_second_action_phone_tail_then_hangup_preserves_provider_continuity(phone,fixed):
     runtime=turn_runtime(phone,fixed=fixed)

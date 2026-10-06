@@ -663,6 +663,22 @@ async def process_queue(runtime: Any) -> None:
                     )
                 except Exception:
                     pass
+                try:
+                    await runtime._notify_request_listeners(item.request_id, {
+                        "request_id": item.request_id,
+                        "success": False,
+                        "text": None,
+                        "error": str(exc),
+                        "error_code": str(getattr(exc, "code", "") or "RUNTIME_EXCEPTION"),
+                        "error_retryable": False,
+                        "source": item.source,
+                        "summary": item.summary,
+                    })
+                except Exception as terminal_exc:
+                    runtime.error_logger.exception(
+                        "Runtime exception terminal persistence failed: "
+                        f"{type(terminal_exc).__name__}: {terminal_exc}"
+                    )
             runtime.error_logger.exception(f"Error in flex queue processing: {exc}")
             runtime.is_generating = False
         finally:
