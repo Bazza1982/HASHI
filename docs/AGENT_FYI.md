@@ -1,5 +1,11 @@
 # HASHI Agent FYI
 
+2026-10-07: HASHI3 nightly live checks found unsupported HERV3 reasoning retained
+after changing provider/model. PAO Functions repair resolves the same qualified
+effort view used during reload, stores the target and compatible effort together,
+and preserves valid choices and in-flight snapshots. Native Codex Session overlap
+is proven; HERV3/API live follow-up is tracked in the nightly repair decision.
+
 2026-10-06: user-approved HASHI3 development call entries are independent:
 phone icon uses /phone; camera-shaped icon uses /call with camera off until
 explicitly enabled inside the panel. Unconfigured entries are hidden.

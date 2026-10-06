@@ -62,3 +62,14 @@ remote upload destination changes, trusted filesystem identity, desktop
 installation binding/opt-out, native frontend components, Session view selection,
 queue overlap/FIFO/capacity, native adapter isolation, control-thread targeting
 and HERV3 shared-service ownership. Curated gate and live acceptance are pending.
+
+## Live findings during this batch
+
+Native Codex CLI with gpt-5.6-luna completed Session B while Session A was
+waiting in a real tool call (13:47:19Z versus A completion at 13:48:41Z).
+HERV3 via HASHI API exposed a separate model-switch bug: unsupported retained
+reasoning `off` was sent as `none`, rejected by the GPT gateway. PAO now uses
+the qualified provider/model effort view for both reload and target changes,
+persists target plus repaired effort atomically, and updates only future-turn
+configuration after the write succeeds. Compatible effort remains unchanged.
+Focused configuration/state checks: 42 passed; live adoption/recheck remains separate.

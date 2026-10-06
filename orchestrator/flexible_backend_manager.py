@@ -379,20 +379,9 @@ class FlexibleBackendManager:
                             )
                             if canonical_engine == HER_V2_ENGINE:
                                 target = self.get_her_v3_target()
-                                choices = runtime_available_efforts(
-                                    target.provider,
-                                    target.model,
-                                    allowed_backends=self.config.allowed_backends,
-                                    provider=True,
-                                )
-                                if normalized not in choices:
-                                    main = self._her_v3_base_config().get("main") or {}
-                                    configured = str(main.get("reasoning") or "").strip().lower()
-                                    normalized = (
-                                        configured if configured in choices
-                                        else "high" if "high" in choices
-                                        else next(iter(choices), "")
-                                    )
+                                repaired = self._supported_her_v3_effort(target, normalized)
+                                if repaired != normalized:
+                                    normalized = repaired
                                     self.logger.warning(
                                         "Repaired unsupported HERV3 effort %r for %s/%s to %r",
                                         raw_effort, target.provider, target.model, normalized,
@@ -752,6 +741,19 @@ class FlexibleBackendManager:
         self._validate_her_v3_target(target)
         return target
 
+    def _supported_her_v3_effort(self, target: HERv3ModelTarget, raw: str | None) -> str:
+        normalized = str(raw or "").strip().casefold()
+        normalized = {"none": "off", "zero": "off"}.get(normalized, normalized)
+        choices = runtime_available_efforts(
+            target.provider, target.model,
+            allowed_backends=self.config.allowed_backends, provider=True,
+        )
+        if normalized in choices:
+            return normalized
+        main = self._her_v3_base_config().get("main") or {}
+        configured = str(main.get("reasoning") or "").strip().casefold()
+        return configured if configured in choices else "high" if "high" in choices else next(iter(choices), "")
+
     def apply_her_v3_target(self, target: HERv3ModelTarget) -> None:
         """Persist one main target and refresh future turns immediately."""
 
@@ -784,6 +786,9 @@ class FlexibleBackendManager:
                     "Run /compact after the active Turn settles, then retry."
                 )
         serialized = target.to_dict()
+        backend_config = next((row for row in self.config.allowed_backends
+                               if canonical_backend_engine(row.get("engine")) == HER_V2_ENGINE), {})
+        effort = self._supported_her_v3_effort(target, backend_config.get("effort"))
 
         def update_state(state: dict[str, Any]) -> dict[str, Any]:
             state[HER_V3_CONFIGURATION_STATE_KEY] = serialized
@@ -795,6 +800,7 @@ class FlexibleBackendManager:
             ):
                 state.pop(key, None)
             self._apply_managed_state_fields(state)
+            state.setdefault("backend_efforts", {})[HER_V2_ENGINE] = effort
             return state
 
         try:
@@ -804,7 +810,12 @@ class FlexibleBackendManager:
         self._her_v3_configuration_override = serialized
         self._her_v2_configuration_override = None
         self._her_v2_configuration_draft = None
+        if effort:
+            backend_config["effort"] = effort
         self._refresh_live_her_v2_configuration(effective, parsed)
+        if self.current_backend is not None and effort:
+            self.current_backend.effort = "zero" if effort == "off" else effort
+            self.current_backend.config.extra["effort"] = effort
 
     def get_her_v2_provider_options(self) -> list[dict[str, Any]]:
         options = build_her_v2_provider_options(
