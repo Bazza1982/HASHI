@@ -336,7 +336,6 @@ def _declared_function_imports(
     *,
     code_root: Path,
     source_index: Mapping[str, Path],
-    tree: ast.AST | None = None,
 ) -> set[str]:
     """Return function imports anywhere in the AST, including lazy branches."""
 
@@ -346,8 +345,7 @@ def _declared_function_imports(
         if relative.endswith("/__init__.py")
         else module_name.rpartition(".")[0]
     )
-    if tree is None:
-        tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+    tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
     candidates: list[str] = []
 
     class AllImportVisitor(ast.NodeVisitor):
@@ -412,11 +410,9 @@ def _module_scope_dependencies(
     *,
     code_root: Path,
     available: set[str],
-    tree: ast.AST | None = None,
 ) -> set[str]:
     source = code_root / entry.relative_path
-    if tree is None:
-        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+    tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
     package = (
         entry.module
         if entry.relative_path.endswith("/__init__.py")
@@ -470,12 +466,10 @@ def _module_scope_dependencies(
 def _order_source_entries(
     entries: list[SourceEntry],
     code_root: Path,
-    *,
-    dependencies: Mapping[str, set[str]] | None = None,
 ) -> list[SourceEntry]:
     by_name = {entry.module: entry for entry in entries}
     available = set(by_name)
-    dependencies = {name: set(values) & available for name, values in dependencies.items()} if dependencies is not None else {
+    dependencies = {
         name: _module_scope_dependencies(
             entry,
             code_root=code_root,
@@ -587,7 +581,6 @@ def build_source_manifest(
     root = Path(code_root).resolve()
     source_index = _function_source_index(root)
     entries: list[SourceEntry] = []
-    dependencies: dict[str, set[str]] = {}
     missing: list[str] = []
     pending = sorted(set(module_names), key=function_module_order_key)
     visited: set[str] = set()
@@ -604,8 +597,7 @@ def build_source_manifest(
             continue
         data = path.read_bytes()
         try:
-            tree = ast.parse(data, filename=str(path))
-            compile(tree, str(path), "exec", dont_inherit=True)
+            compile(data, str(path), "exec", dont_inherit=True)
         except SyntaxError as exc:
             raise FunctionGenerationError(
                 f"Candidate source does not compile: {name}: {exc.msg} "
@@ -623,10 +615,6 @@ def build_source_manifest(
             path,
             code_root=root,
             source_index=source_index,
-            tree=tree,
-        )
-        dependencies[name] = _module_scope_dependencies(
-            entries[-1], code_root=root, available=set(source_index), tree=tree,
         )
         pending.extend(
             sorted(
@@ -639,7 +627,7 @@ def build_source_manifest(
             f"Candidate function modules have no project source: {sorted(missing)}"
         )
     return build_source_manifest_from_entries(
-        _order_source_entries(entries, root, dependencies=dependencies),
+        _order_source_entries(entries, root),
         # A legacy shared generation can only qualify an Agent Worker closure.
         # Keep that closure compatible with its historical asset rules so the
         # new Worker can request the one-time Core handoff. The Core-qualified
@@ -977,17 +965,9 @@ def probe_function_generation(
     if timing_callback is not None:
         for name, elapsed_ms in receipt.stage_timings_ms:
             timing_callback(f"isolated_probe.{name}", elapsed_ms)
-    if set(receipt.module_names) == set(initial_manifest.module_names):
-        # The independent interpreter accepted this exact closure. Re-hash all
-        # its bytes and rediscover assets rather than parse the same graph again.
-        timed("final_manifest", verify_qualified_manifest_bytes,
-              initial_manifest, code_root=code_root)
-        manifest = initial_manifest
-    else:
-        # A dynamic import expanded the closure: qualify its graph normally.
-        manifest = timed(
-            "final_manifest", build_source_manifest, receipt.module_names, code_root=code_root
-        )
+    manifest = timed(
+        "final_manifest", build_source_manifest, receipt.module_names, code_root=code_root
+    )
     if manifest.generation_id != receipt.generation_id:
         raise FunctionGenerationError(
             "Candidate source/assets differ between Core and staging Worker"
@@ -1008,7 +988,7 @@ def probe_function_generation(
         manifest=manifest,
         receipt=receipt,
     )
-    timed("generation_verify", generation.verify_qualified_source, expected_runtime)
+    timed("generation_verify", generation.verify, expected_runtime)
     return generation
 
 
