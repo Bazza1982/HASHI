@@ -12,6 +12,12 @@
 Codex MCP isolation inventories standalone servers with plugins disabled, matching
 both CLI execution and the app-server bridge. Plugin-provided transports must
 not become enabled-only top-level MCP overrides after their plugin is disabled.
+Fixed CLI's owned native hook ignores user configuration. Its disabled MCP
+entries therefore retain a valid, same-type transport skeleton derived from
+the current inventory; neither credentials nor executable arguments are copied.
+Unknown transport types fail before launch. Disabled entries are never started
+or contacted, and the request-scoped HASHI gateway remains required. The
+app-server bridge retains its separate configuration/disabled-server policy.
 
 On qualified Codex CLI 0.160+, an owned command-scoped native shell hook routes
 process termination to HASHI's managed process tools. It ignores user config,

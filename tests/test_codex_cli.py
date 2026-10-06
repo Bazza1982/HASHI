@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import os
+import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -1487,6 +1488,64 @@ def test_native_process_hook_is_owned_command_scoped_and_available_on_resume(tmp
         assert '--dangerously-bypass-hook-trust' in cmd
         assert any(value.startswith('hooks.PreToolUse=') for value in cmd)
         assert not any(cmd[index:index+2] == ['--disable','hooks'] for index in range(len(cmd)))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport_type", ["stdio", "streamable_http"])
+@pytest.mark.parametrize("resume", [False, True])
+async def test_native_hook_fixed_gateway_keeps_disabled_mcp_transport_valid(
+    tmp_path, monkeypatch, transport_type, resume
+):
+    adapter = _build_adapter(tmp_path)
+    adapter._hashi_mcp_enabled = True
+    adapter._session_mode = resume
+    adapter._session_id = "thread-owned" if resume else None
+    transport = (
+        {"type": "stdio", "command": "external-server", "env": {"PRIVATE_TOKEN": "private-secret"}}
+        if transport_type == "stdio"
+        else {"type": "streamable_http", "url": "https://external.invalid/mcp", "http_headers": {"Authorization": "private-secret"}}
+    )
+
+    async def inventory(*_argv, **_kwargs):
+        return _CompletedProc(stdout=json.dumps([{"name": "external", "transport": transport}]).encode())
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", inventory)
+    adapter._external_mcp_server_names = await adapter._discover_mcp_servers()
+    monkeypatch.setattr(
+        "adapters.codex_cli.current_hashi_mcp_invocation",
+        lambda _adapter: {"name": "hashi_tools", "command": "owned-gateway", "args": [], "cwd": str(tmp_path)},
+    )
+    command = adapter._build_cmd(
+        "owned prompt", tmp_path / "out.txt", native_hook_receipt=tmp_path / "guard.json"
+    )
+    assert "--ignore-user-config" in command
+    overrides = [command[i + 1] for i, item in enumerate(command[:-1]) if item == "-c"]
+    assert "private-secret" not in " ".join(command)
+
+    # Ignored user configuration must not leave a transport-less disabled entry.
+    # A same-type project entry that remains loaded must not acquire the other
+    # transport (stdio command + HTTP URL is invalid in Codex).
+    for project_config in ({}, {"command": "project-server"} if transport_type == "stdio" else {"url": "https://project.invalid/mcp"}):
+        server = dict(project_config)
+        for override in overrides:
+            parsed = tomllib.loads(override).get("mcp_servers", {}).get("external")
+            if parsed:
+                server.update(parsed)
+        assert server.get("enabled") is False
+        assert bool(server.get("command")) != bool(server.get("url"))
+        assert ("command" in server) == (transport_type == "stdio")
+
+
+def test_native_hook_fixed_gateway_refuses_an_unqualified_mcp_transport(tmp_path, monkeypatch):
+    adapter = _build_adapter(tmp_path)
+    adapter._hashi_mcp_enabled = True
+    adapter._external_mcp_server_names = ("external",)
+    monkeypatch.setattr(
+        "adapters.codex_cli.current_hashi_mcp_invocation",
+        lambda _adapter: {"name": "hashi_tools", "command": "owned-gateway", "args": [], "cwd": str(tmp_path)},
+    )
+    with pytest.raises(RuntimeError, match="MCP transport"):
+        adapter._build_cmd("owned prompt", tmp_path / "out.txt", native_hook_receipt=tmp_path / "guard.json")
 
 
 def test_codex_resume_is_used_only_in_explicit_session_mode(tmp_path):

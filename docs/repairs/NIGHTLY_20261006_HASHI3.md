@@ -272,3 +272,27 @@ had no future trigger or active runner, and were confirmed against their exact
 H3 executable/arguments before cleanup. Their definitions and original files
 were archived, and those five tasks were unregistered. No user program was
 terminated, and unrelated task registrations were retained.
+
+### Codex native-hook configuration isolation
+
+The endpoint repair's committed gate passed **797 tests, 1 skip**. Max operation
+6a793510dca4437c8b9999646173bbed adopted f83d7e46 in all eleven Workers; Core
+PID 39952 stayed live and health returned ready with no issues. A fresh Fixed
+Codex acceptance then failed before reporting a Provider turn: ignored user
+config plus the inventory-derived enabled-only node_repl override recreated a
+server without a transport. This is a PAO adapter composition defect, not an
+account restriction. The conservative unconfirmed-exit receipt is retained and
+the failed Run is never replayed automatically.
+
+Disabled overrides for the owned-hook path now carry only a same-type transport
+skeleton. No external credential/argument is copied; unknown types fail before
+launch, and the request-local HASHI gateway remains required. Both new/resumed
+CLI paths are covered, including surviving same-type project config. HERV3's
+app-server continues to retain its normal user config and enabled-only isolation.
+
+Five focused checks failed before the fix. The full owning CLI/app-server/native
+hook set passed **76 tests, 2 platform skips** afterward. Native Codex 0.160
+reproduced the missing-transport error without model execution; a deliberately
+unknown provider then proves valid config decoding before any model/tool call.
+User-wide Codex configuration is unchanged. Consumer checks, final committed
+qualification and fresh actual frontend acceptance are recorded separately.

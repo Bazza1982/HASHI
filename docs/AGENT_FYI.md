@@ -6,6 +6,10 @@ Functions retain PAO/PCM/HERV3/Connector ownership. Repairs cover history, avata
 selection, voice, questions, durable checkpoints and persistent failures.
 Codex 0.160+ uses the owned termination guard; managed tools protect runtime
 ancestry. Hooks are guardrails, not OS enforcement.
+Fixed Codex hook isolation keeps inventoried external MCP entries disabled and
+schema-valid even when user config is ignored; the enabled-only override must
+not recreate a transport-less server. Project transport type, required HASHI
+gateway and the separate HERV3 app-server policy are preserved.
 Voice-message transcription and Safe Voice gating apply to HERV3's active
 Execution loop; retired Triage is not the owner of ordinary recording input.
 Source, offline validation, runtime adoption and actual frontend evidence remain

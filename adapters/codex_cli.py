@@ -108,6 +108,7 @@ class CodexCLIAdapter(BaseBackend):
         self._active_read_tasks: list[asyncio.Task] = []
         self._external_tool_processes: set[object] = set()
         self._external_mcp_server_names: tuple[str, ...] | None = None
+        self._external_mcp_server_transport_types: dict[str, str] = {}
         self.effort = ((self.config.extra or {}).get("effort") or "medium").lower()
         self.cmd_base = self.global_config.codex_cmd
         self.access_root = str(self.config.resolve_access_root())
@@ -281,6 +282,13 @@ class CodexCLIAdapter(BaseBackend):
             str(item.get("name") or "").strip()
             for item in payload
             if isinstance(item, dict) and str(item.get("name") or "").strip()
+        }
+        self._external_mcp_server_transport_types = {
+            str(item.get("name") or "").strip(): str(item["transport"].get("type") or "")
+            for item in payload
+            if isinstance(item, dict)
+            and str(item.get("name") or "").strip()
+            and isinstance(item.get("transport"), dict)
         }
         return tuple(sorted(names))
 
@@ -780,7 +788,12 @@ class CodexCLIAdapter(BaseBackend):
                 base_flags += ["--disable", feature]
             base_flags += ["-c", 'web_search="disabled"']
             for server_name in self._external_mcp_server_names or ():
-                base_flags += ["-c", disabled_mcp_override(server_name)]
+                transport_type = None
+                if native_hook_receipt is not None:
+                    transport_type = self._external_mcp_server_transport_types.get(server_name)
+                    if transport_type not in {"stdio", "streamable_http"}:
+                        raise RuntimeError("configured MCP transport cannot be safely isolated")
+                base_flags += ["-c", disabled_mcp_override(server_name, transport_type=transport_type)]
             command_value = json.dumps(str(descriptor["command"]), ensure_ascii=False)
             args_value = json.dumps(list(descriptor["args"]), ensure_ascii=False)
             cwd_value = json.dumps(str(descriptor["cwd"]), ensure_ascii=False)
