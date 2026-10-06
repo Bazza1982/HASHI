@@ -324,4 +324,4 @@ class DesktopController:
             while len(self.results) > 64: self.results.popitem(last=False)
             return receipt
 
-# Nightly controlled qualification timing: O2
+# Nightly controlled qualification timing: O3
