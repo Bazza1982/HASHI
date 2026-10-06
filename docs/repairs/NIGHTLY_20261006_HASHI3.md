@@ -120,3 +120,20 @@ the model call, keep sibling attachments, and refuse discarded/unavailable STT.
 The original regression failed for Execution and Direct and passed for Triage;
 all three are covered. This recording was terminally failed, not blindly replayed.
 Subsequent independent voice acceptance and source adoption are recorded separately.
+
+### Final public failure and qualification checks
+
+Public error codes accept bounded typed identifiers, never arbitrary exception
+text. A regression with a malformed secret-bearing code reproduced its inclusion
+in the human-readable failure; the shared normalizer now runs before formatting
+as well as metadata projection. Public failure, delivery and reboot consumers:
+**76 passed**. The missing start-notice acknowledgement reason now has English
+and Chinese renderer text.
+
+The expanded whole offline run recorded **6,184 passed, 33 skipped, 199 deselected,
+11 subtests passed and two failures**. One was the old error-code whitelist
+expectation, covered by the corrected conformance check above. The other correctly
+rejected a generation while its source was being edited during the long run;
+the configured-observer module is rerun against committed, unchanged source.
+The voice-source qualification gate independently passed **791 tests, 1 skip**.
+Full, focused, committed-source and running-generation results remain separate.

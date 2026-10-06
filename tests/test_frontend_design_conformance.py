@@ -259,7 +259,8 @@ def test_telegram_html_is_projected_as_transport_neutral_text():
     ]
 
 
-def test_public_failure_projection_carries_only_whitelisted_typed_error_code():
+def test_public_failure_projection_preserves_codes_without_private_provider_fields():
+    import json
     from orchestrator.frontend_projection import project_frontend_event
 
     projected = project_frontend_event(
@@ -296,11 +297,20 @@ def test_public_failure_projection_carries_only_whitelisted_typed_error_code():
             "sequence": 5,
             "kind": "run.failed",
             "summary": "Provider request failed",
-            "detail": {"error_context": {"error_code": "PROVIDER_RAW_SECRET_FAILURE"}},
+            "detail": {"error_context": {"error_code": "PROVIDER_CONNECTION_FAILED"}},
             "created_at": "2026-10-03T03:56:09Z",
         }
     )
-    assert "error_code" not in unlisted
+    assert unlisted["error_code"] == "PROVIDER_CONNECTION_FAILED"
+    malformed = project_frontend_event({
+        "event_id": "evt_malformed_failure", "session_id": "ses_1", "run_id": "run_3",
+        "request_id": "req_3", "sequence": 6, "kind": "run.failed", "summary": "Request failed",
+        "detail": {"error_context": {"error_code": "token=secret-canary",
+                                     "diagnostic_log": "secret-canary"}},
+        "created_at": "2026-10-03T03:56:10Z",
+    })
+    assert "error_code" not in malformed
+    assert "secret-canary" not in json.dumps(malformed)
 
 
 def test_registered_compatibility_routes_are_thin_fc_adapters():

@@ -538,10 +538,11 @@ def format_backend_error_for_user(
         )
     ]
 
-    error_code = str(context.get("error_code") or "").strip()
+    from orchestrator.frontend_contracts import normalize_public_error_code
+    error_code = normalize_public_error_code(context.get("error_code"))
     if not error_code:
         code_match = re.match(r"^\[([A-Z][A-Z0-9_]+)\]", exact)
-        error_code = code_match.group(1) if code_match else ""
+        error_code = normalize_public_error_code(code_match.group(1)) if code_match else ""
     if error_code and error_code not in exact:
         lines.append(ui_language.tr("error.code", locale=selected, code=error_code))
 

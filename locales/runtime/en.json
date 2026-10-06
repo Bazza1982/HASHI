@@ -2492,6 +2492,7 @@
     "reboot.reason.unexpected": "An unexpected problem means the result cannot yet be confirmed.",
     "reboot.reason.readiness": "The change completed, but HASHI cannot yet confirm that the agents are online.",
     "reboot.reason.shared_replacement_unconfirmed": "Core did not publish a valid shared Function replacement receipt in time.",
+    "reboot.reason.start_presentation_unconfirmed": "The restart notice was not visible in the frontend. Bring the conversation to the foreground before starting again.",
     "reboot.reason.shared_replacement_failed": "Shared Function replacement failed and the previous generation remained authoritative.",
     "reboot.reason.shared_generation_mismatch": "The active shared Function generation does not match Core's replacement receipt.",
     "reboot.reason.target_busy": "The agent has active or queued work; finish or stop it before retrying.",

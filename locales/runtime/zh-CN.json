@@ -2492,6 +2492,7 @@
     "reboot.reason.unexpected": "出现意外问题，暂时无法确认结果。",
     "reboot.reason.readiness": "切换已完成，但暂时无法确认代理是否在线。",
     "reboot.reason.shared_replacement_unconfirmed": "Core 未能及时发布有效的共享 Functions 替换回执。",
+    "reboot.reason.start_presentation_unconfirmed": "前端未显示重启开始通知，请将会话切到前台后重新发起。",
     "reboot.reason.shared_replacement_failed": "共享 Functions 替换失败，上一代际仍然有效。",
     "reboot.reason.shared_generation_mismatch": "当前共享 Functions 代际与 Core 的替换回执不一致。",
     "reboot.reason.target_busy": "代理仍有任务或排队消息，请完成或停止后重试。",

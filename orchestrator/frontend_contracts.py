@@ -40,6 +40,11 @@ MAX_CONTENT_BLOCKS = 128
 _PUBLIC_ERROR_CODE = re.compile(r'^[A-Z][A-Z0-9_]{0,79}$')
 
 
+def normalize_public_error_code(value: Any) -> str:
+    """A public classification is a bounded code, never free-form diagnostics."""
+    return value if isinstance(value, str) and _PUBLIC_ERROR_CODE.fullmatch(value) else ""
+
+
 def normalize_public_failure(value: Any) -> dict[str, Any]:
     raw = _object(value, 'public failure')
     if raw.get('type') != 'hashi.public-failure' or raw.get('version') != 1:
@@ -54,8 +59,8 @@ def normalize_public_failure(value: Any) -> dict[str, Any]:
     backend = str(raw.get('backend') or '')
     if backend and _CONNECTOR.fullmatch(backend):
         result['backend'] = backend
-    code = str(raw.get('error_code') or '')
-    if _PUBLIC_ERROR_CODE.fullmatch(code):
+    code = normalize_public_error_code(raw.get('error_code'))
+    if code:
         result['error_code'] = code
     for key in ('error_retryable', 'side_effects_possible'):
         if isinstance(raw.get(key), bool):
@@ -833,8 +838,7 @@ def normalize_frontend_event(value: Any) -> dict[str, Any]:
         and interface_kind == "display"
         and audience == "user"
         and visibility == "public"
-        and isinstance(candidate_error_code, str)
-        and _PUBLIC_ERROR_CODE.fullmatch(candidate_error_code)
+        and normalize_public_error_code(candidate_error_code)
     ):
         error_code = candidate_error_code
 
