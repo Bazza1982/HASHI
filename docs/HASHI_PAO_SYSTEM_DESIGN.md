@@ -854,3 +854,24 @@ failure. After startup, health reads reconcile through StartupManager: removed
 successful Worker entries leave the projection, while failed/pending startup
 entries and unrelated service failures remain visible. Reads must not reconcile
 across startup or a shared Functions handoff. This does not alter Core lifecycle.
+
+
+### 2026-10-06 Session execution leases (HASHI3 candidate)
+
+PAO retains one Agent queue, admission sequence, configuration writer, Run fences
+and canonical delivery owners. The default execution budget is two persistent
+Sessions (Agent extra `max_concurrent_sessions`, integer 1..8). SessionQueue keeps
+waiting turns in the existing visible queue, selects the earliest eligible turn,
+and holds a Session slot through detached completion. One Session remains FIFO.
+
+Execution ContextVars isolate turn metadata, native adapter, frozen configuration,
+Workzone state and prompt/stream buffers. SessionBackendManager reads an admitted
+snapshot; it cannot write Agent configuration or run state migration. Control
+threads receive the exact caller-bound adapter instead of reading it later.
+HERV3 handles share the Worker's durable/recovery/learning services without
+reconciling or shutting them down on every Session initialization. Idle handles
+are bounded and retired without closing durable conversation epochs.
+
+Approved: nightly implementation/testing in HASHI3 and test Workbench. Focused
+queue overlap/FIFO/capacity, native-object isolation, cross-thread control, and
+HERV3 lifecycle checks pass. Provider and frontend live adoption remain pending.

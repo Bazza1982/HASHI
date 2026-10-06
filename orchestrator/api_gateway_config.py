@@ -158,6 +158,10 @@ def _validate_gateway_config_for_update(data: dict[str, Any]) -> None:
         raise ValueError("API Gateway enabled must be a boolean")
     if "default_model" in data and not isinstance(data["default_model"], str):
         raise ValueError("API Gateway default_model must be a string")
+    if "max_parallel_per_model" in data:
+        value = data["max_parallel_per_model"]
+        if type(value) is not int or not 1 <= value <= 8:
+            raise ValueError("API Gateway max_parallel_per_model must be between 1 and 8")
 
 
 def _gateway_config_view(data: dict[str, Any], global_config: Any) -> dict[str, Any]:
@@ -169,6 +173,7 @@ def _gateway_config_view(data: dict[str, Any], global_config: Any) -> dict[str, 
     return {
         "enabled": enabled,
         "default_model": model,
+        "max_parallel_per_model": data.get("max_parallel_per_model", 2),
         "updated_at": str(data.get("updated_at") or ""),
         "updated_by": str(data.get("updated_by") or ""),
     }
@@ -229,6 +234,7 @@ def save_api_gateway_config(
     *,
     enabled: bool | None = None,
     default_model: str | None = None,
+    max_parallel_per_model: int | None = None,
     updated_by: str = "",
 ) -> dict[str, Any]:
     # Validate the requested model before any migration/publication. In
@@ -252,10 +258,14 @@ def save_api_gateway_config(
     _validate_gateway_config_for_update(current)
     current.setdefault("enabled", False)
     current.setdefault("default_model", default_api_model())
+    current.setdefault("max_parallel_per_model", 2)
     if enabled is not None:
         current["enabled"] = bool(enabled)
     if normalized is not None:
         current["default_model"] = normalized
+    if max_parallel_per_model is not None:
+        _validate_gateway_config_for_update({"max_parallel_per_model": max_parallel_per_model})
+        current["max_parallel_per_model"] = max_parallel_per_model
     current["updated_at"] = datetime.now(timezone.utc).isoformat()
     current["updated_by"] = updated_by
 

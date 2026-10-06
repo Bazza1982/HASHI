@@ -211,6 +211,7 @@ async def take_ready_exact(
 
 
 async def complete_removed_turn(runtime: Any, request_id: str) -> None:
+    getattr(runtime, "_execution_admissions", {}).pop(request_id, None)
     await runtime_delivery_order.complete_turn(runtime, request_id)
 
 

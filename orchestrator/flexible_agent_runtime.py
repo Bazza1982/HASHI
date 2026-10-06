@@ -198,6 +198,20 @@ def _parse_key_values(args: list[str]) -> dict[str, str]:
 
 class FlexibleAgentRuntime:
 
+    def __getattribute__(self, name):
+        from orchestrator import runtime_execution
+        if name in runtime_execution.LOCAL_FIELDS:
+            found, value = runtime_execution.read_field(self, name)
+            if found:
+                return value
+        return object.__getattribute__(self, name)
+
+    def __setattr__(self, name, value):
+        from orchestrator import runtime_execution
+        if name in runtime_execution.LOCAL_FIELDS and runtime_execution.write_field(self, name, value):
+            return
+        object.__setattr__(self, name, value)
+
     CODEX_CHUNK_LIMIT_ERROR = "Separator is not found, and chunk exceed the limit"
     CODEX_SCHEDULER_RETRY_DELAY_S = 120
 
@@ -236,7 +250,9 @@ class FlexibleAgentRuntime:
         self.backend_ready = False
         self.telegram_connected = False
         self.process_task = None
-        self.queue = asyncio.Queue()
+        from orchestrator.runtime_execution import SessionQueue
+        self.queue = SessionQueue()
+        self._execution_admissions = {}
         self.request_seq = 0
         self.is_generating = False
         self.last_prompt = None
@@ -1463,6 +1479,8 @@ class FlexibleAgentRuntime:
                 source=item.source,
                 created_at=datetime.fromisoformat(item.created_at).timestamp(),
             )
+            from orchestrator import runtime_execution
+            self._execution_admissions[item.request_id] = runtime_execution.snapshot(self)
             await self.queue.put(item)
         self.message_logger.info(f"Queued {item.request_id} from {source} (summary={summary!r})")
         return item.request_id

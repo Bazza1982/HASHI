@@ -961,6 +961,7 @@ def _load_bootstrap(state: DeviceWorkerState) -> dict[str, Any]:
 
 
 def _registration_payload(state: DeviceWorkerState) -> dict[str, Any]:
+    from orchestrator.host_identity import physical_host_id, interactive_session_id
     try:
         host_gateway = not ipaddress.ip_address(state.advertise_host).is_loopback
     except ValueError:
@@ -975,6 +976,8 @@ def _registration_payload(state: DeviceWorkerState) -> dict[str, Any]:
         "device_id": state.device_id,
         "user_session_id": state.user_session_id,
         "platform": platform.system().lower(),
+        "physical_host_id": physical_host_id(),
+        "interactive_session_id": interactive_session_id(),
         "transport_kind": (
             "authenticated_http_host_gateway"
             if host_gateway

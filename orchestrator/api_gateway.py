@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -68,6 +69,7 @@ from adapters.stream_events import (
 )
 
 logger = logging.getLogger("BridgeU.APIGateway")
+_ADAPTER_SLOT = ContextVar("hashi_api_adapter_slot", default=0)
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -906,13 +908,17 @@ class _AdapterPool:
     by a request lock.
     """
 
-    def __init__(self, global_config, secrets: dict, workspace_root: Path):
+    def __init__(self, global_config, secrets: dict, workspace_root: Path, *, capacity: int = 2):
         self._global_config = global_config
         self._secrets = secrets
         self._workspace_root = workspace_root
         self._adapters: dict[tuple[str, str], Any] = {}
         self._init_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._request_locks: dict[tuple[str, str], asyncio.Lock] = {}
+        self._capacity = max(1, min(8, int(capacity)))
+        self._quotas: dict[tuple[str, str], asyncio.Semaphore] = {}
+        self._slots: dict[tuple[tuple[str, str], int], Any] = {}
+        self._busy: set[tuple[tuple[str, str], int]] = set()
 
     @staticmethod
     def _key(engine: str, model: str) -> tuple[str, str]:
@@ -938,11 +944,51 @@ class _AdapterPool:
         key = self._key(engine, model)
         return self._request_locks.setdefault(key, asyncio.Lock())
 
+    @asynccontextmanager
+    async def lease(self, engine: str, model: str):
+        """Own an independent CLI process/thread slot until dispatch finishes."""
+        key = self._key(engine, model)
+        quota = self._quotas.setdefault(key, asyncio.Semaphore(self._capacity))
+        async with quota:
+            slot_key = None
+            try:
+                lock = self._init_locks.setdefault(key, asyncio.Lock())
+                async with lock:
+                    index = next(i for i in range(self._capacity) if (key, i) not in self._busy)
+                    slot_key = (key, index)
+                    self._busy.add(slot_key)
+                    adapter = self._adapters.get(key) if index == 0 else self._slots.get(slot_key)
+                    if adapter is None:
+                        token = _ADAPTER_SLOT.set(index)
+                        try:
+                            try:
+                                adapter = await self._create(engine, model)
+                            except Exception as exc:
+                                raise _AdapterInitializationError(str(exc)) from exc
+                        finally:
+                            _ADAPTER_SLOT.reset(token)
+                        if index == 0:
+                            self._adapters[key] = adapter
+                        else:
+                            self._slots[slot_key] = adapter
+                request_lock = (self.request_lock(engine, model) if index == 0 else
+                                getattr(adapter, "_hashi_gateway_request_lock", None))
+                if request_lock is None:
+                    request_lock = asyncio.Lock()
+                    setattr(adapter, "_hashi_gateway_request_lock", request_lock)
+                async with request_lock:
+                    yield adapter
+            finally:
+                if slot_key is not None:
+                    self._busy.discard(slot_key)
+
     async def _create(self, engine: str, model: str) -> Any:
         from orchestrator.config import AgentConfig
 
         safe_model = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(model))[:100] or "default"
         workspace = self._workspace_root / "api-gateway" / engine / safe_model
+        if _ADAPTER_SLOT.get():
+            workspace = workspace / "execution-slots" / str(_ADAPTER_SLOT.get())
         workspace.mkdir(parents=True, exist_ok=True)
 
         cfg = AgentConfig(
@@ -984,7 +1030,8 @@ class _AdapterPool:
                 )
 
     async def shutdown(self):
-        for (engine, model), adapter in self._adapters.items():
+        entries = list(self._adapters.items()) + [(key, value) for (key, _slot), value in self._slots.items()]
+        for (engine, model), adapter in entries:
             try:
                 await adapter.shutdown()
                 logger.info(f"API adapter shut down: {engine} (model={model})")
@@ -995,9 +1042,15 @@ class _AdapterPool:
         self._adapters.clear()
         self._init_locks.clear()
         self._request_locks.clear()
+        self._slots.clear()
+        self._busy.clear()
+        self._quotas.clear()
 
 
 # ── Gateway server ────────────────────────────────────────────────────────────
+
+class _AdapterInitializationError(RuntimeError):
+    pass
 
 class APIGatewayServer:
     def __init__(
@@ -1079,7 +1132,8 @@ class APIGatewayServer:
             if capability_root
             else None
         )
-        self._pool = _AdapterPool(global_config, secrets, workspace_root)
+        self._pool = _AdapterPool(global_config, secrets, workspace_root,
+                                  capacity=gateway_config.get("max_parallel_per_model", 2))
         self.gateway_instance_id = f"gateway-{uuid.uuid4().hex[:12]}"
         logs_root = Path(
             getattr(global_config, "base_logs_dir", workspace_root / "logs")
@@ -1948,54 +2002,50 @@ class APIGatewayServer:
             ),
         )
 
+        lease_started = time.perf_counter()
+        self._set_validation_stage(request, "adapter_lease")
+        try:
+            async with self._lease_adapter(engine, model) as adapter:
+                self._observe("adapter_lease_acquired", gateway_request_id=request_id,
+                              engine=engine, model=model,
+                              wait_ms=round((time.perf_counter() - lease_started) * 1000, 2))
+                # The assembled messages own history. A pooled native CLI thread
+                # must never carry a previous client's context into this call.
+                if hasattr(adapter, "_session_id"):
+                    adapter._session_id = None
+                self._set_validation_stage(request, "backend_dispatch")
+                return await self._dispatch_chat_request(
+                    adapter=adapter, prompt=prompt, request_id=request_id,
+                    model=model, session_id=session_id, messages=messages,
+                    body=body, external_tools=external_tools,
+                    external_tool_mode=external_tool_mode,
+                    structured_conversation_mode=structured_conversation_mode,
+                    stream=stream, t_start=t_start, request=request,
+                    reasoning_effort=reasoning_effort,
+                )
+        except _AdapterInitializationError as exc:
+            logger.error("Adapter init failed for %s: %s", engine, exc)
+            return web.json_response({"error": f"backend unavailable: {exc}"}, status=503)
+
+    @asynccontextmanager
+    async def _lease_adapter(self, engine: str, model: str):
+        lease = getattr(self._pool, "lease", None)
+        if callable(lease):
+            async with lease(engine, model) as adapter:
+                yield adapter
+            return
+        # Third-party test/integration pools retain their exclusive old contract.
         try:
             adapter = await self._pool.get(engine, model)
         except Exception as exc:
-            logger.error("Adapter init failed for %s: %s", engine, exc)
-            return web.json_response(
-                {"error": f"backend unavailable: {exc}"},
-                status=503,
-            )
-
-        lock_factory = getattr(self._pool, "request_lock", None)
-        if callable(lock_factory):
-            request_lock = lock_factory(engine, model)
-        else:
-            request_lock = getattr(adapter, "_hashi_gateway_request_lock", None)
-            if request_lock is None:
-                request_lock = asyncio.Lock()
-                setattr(adapter, "_hashi_gateway_request_lock", request_lock)
-        lease_started = time.perf_counter()
-        self._set_validation_stage(request, "adapter_lease")
-        async with request_lock:
-            lease_wait_ms = round(
-                (time.perf_counter() - lease_started) * 1000,
-                2,
-            )
-            self._observe(
-                "adapter_lease_acquired",
-                gateway_request_id=request_id,
-                engine=engine,
-                model=model,
-                wait_ms=lease_wait_ms,
-            )
-            self._set_validation_stage(request, "backend_dispatch")
-            return await self._dispatch_chat_request(
-                adapter=adapter,
-                prompt=prompt,
-                request_id=request_id,
-                model=model,
-                session_id=session_id,
-                messages=messages,
-                body=body,
-                external_tools=external_tools,
-                external_tool_mode=external_tool_mode,
-                structured_conversation_mode=structured_conversation_mode,
-                stream=stream,
-                t_start=t_start,
-                request=request,
-                reasoning_effort=reasoning_effort,
-            )
+            raise _AdapterInitializationError(str(exc)) from exc
+        factory = getattr(self._pool, "request_lock", None)
+        lock = factory(engine, model) if callable(factory) else getattr(adapter, "_hashi_gateway_request_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            adapter._hashi_gateway_request_lock = lock
+        async with lock:
+            yield adapter
 
     async def _dispatch_chat_request(
         self,

@@ -236,6 +236,59 @@ def _server(
     return server, runtime
 
 
+@pytest.mark.asyncio
+async def test_shared_chat_projection_reads_start_notice_without_fenced_worker(tmp_path):
+    server, runtime = _server(tmp_path)
+    owner = "user:7"
+    session = server.session_store.resolve_primary_session(owner_id=owner, agent_id="lily", establish=True)
+    notice = server.session_store.append_presentation_message(
+        session_id=session["session_id"], owner_id=owner, agent_id="lily",
+        role="assistant", text="Starting hot restart", source="telegram.runtime_notice",
+        idempotency_key="restart-start", history_eligible=False,
+    )
+    # A fenced worker must not be consulted to read already-durable messages.
+    def worker_unavailable(*_args, **_kwargs):
+        raise AssertionError("chat projection crossed the fenced Worker")
+    runtime.command = worker_unavailable
+    response = await server.handle_chat_projection(_Request(match_info={"name": "lily"}))
+    assert response.status == 200
+    assert response.headers["Cache-Control"] == "no-store"
+    projection = json.loads(response.text)["projection"]
+    assert any(row["message_id"] == notice["message_id"] and row["text"] == "Starting hot restart"
+               for row in projection["messages"])
+    assert runtime.enqueue_request_calls == 0
+    other = server.session_store.create_session(owner_id="user:8", agent_id="lily")
+    denied = await server.handle_chat_projection(_Request(
+        match_info={"name": "lily"}, query={"session_id": other["session_id"]}))
+    assert denied.status == 404
+    malformed = await server.handle_chat_projection(_Request(match_info={"name": "lily"}, query={"offset": "-1"}))
+    assert malformed.status == 400
+
+
+@pytest.mark.asyncio
+async def test_reboot_discovery_includes_telegram_and_recent_completion_only_for_owner(tmp_path):
+    from orchestrator.reboot_manager import RebootManager
+    import time
+
+    server, _runtime = _server(tmp_path)
+    manager = RebootManager(SimpleNamespace(paths=SimpleNamespace(bridge_home=tmp_path)), None)
+    server.orchestrator = SimpleNamespace(reboot_manager=manager)
+    def create(owner, surface):
+        return manager.receipts.create(source="lily", targets=["lily"], display_names={}, mode="max",
+            origin={"owner_id": owner, "actor_id": owner.split(":")[-1], "chat_id": 123, "surface": surface})
+    visible = create("user:7", "telegram")
+    create("user:8", "workbench")
+    old = create("user:7", "telegram")
+    manager.receipts.update(old["id"], status="succeeded", progress=[{
+        "sequence": 1, "phase": "online", "status": "succeeded", "created_at": time.time()-120}])
+    response = await server.handle_reboot_operations(_Request())
+    assert response.status == 200
+    assert [item["operation_id"] for item in json.loads(response.text)["operations"]] == [visible["id"]]
+    manager.receipts.update(visible["id"], status="succeeded")
+    recovered = await server.handle_reboot_operations(_Request())
+    assert json.loads(recovered.text)["operations"][0]["status"] == "completed"
+
+
 def test_live_phone_resolver_uses_authoritative_pcm_and_same_session_history(tmp_path):
     from orchestrator.bridge_memory import BridgeContextAssembler, BridgeMemoryStore
     from orchestrator.hcc import set_hcc_enabled

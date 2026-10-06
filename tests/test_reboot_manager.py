@@ -469,10 +469,14 @@ async def test_workbench_max_waits_for_presented_ack_before_shared_handoff(
     )
     assert not request_path.exists()
     assert manager.acknowledge_start_presentation(
+        operation_id, owner_id="owner:operator", agent_id="zelda", sequence=1,
+    ) == {"acknowledged": False, "reason": "message_mismatch"}
+    assert manager.acknowledge_start_presentation(
         operation_id,
         owner_id="owner:operator",
         agent_id="zelda",
         sequence=1,
+        message_id="reboot-progress-1",
     )["acknowledged"] is True
 
     assert await operation is True

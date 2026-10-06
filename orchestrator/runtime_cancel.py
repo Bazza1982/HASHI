@@ -109,6 +109,10 @@ async def cancel_session_run(
                     "session_id": session_id, "status": "stopped", "terminal": True}
 
         active = getattr(runtime, "current_request_meta", None)
+        execution = next((value for value in getattr(runtime, "_session_executions", {}).values()
+                          if value.active_request == request_id and value.session_id == session_id), None)
+        if execution is not None:
+            active = execution.values.get("current_request_meta")
         active_matches = (isinstance(active, dict)
                           and str(active.get("request_id") or "") == request_id
                           and runtime_control._meta_session_id(active) == session_id
@@ -123,7 +127,9 @@ async def cancel_session_run(
                 or isinstance(completion, asyncio.Task) or request_id in background_ids):
             requested_ids(runtime).add(request_id)
             if active_matches:
-                runtime_control.mark_user_interrupt(runtime, "user_stop", request_meta=active)
+                from orchestrator.runtime_execution import bind
+                with bind(execution):
+                    runtime_control.mark_user_interrupt(runtime, "user_stop", request_meta=active)
             if isinstance(task, asyncio.Task) and not task.done():
                 task.cancel()
             elif (isinstance(completion, asyncio.Task) and not completion.done()

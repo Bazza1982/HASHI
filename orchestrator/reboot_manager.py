@@ -247,6 +247,8 @@ class RebootManager:
             "latest_sequence": latest_sequence,
             "progress": progress,
             "targets": list(record.get("targets") or ()),
+            "source_agent": record.get("source_agent"),
+            "start_message": dict((record.get("start_delivery") or {}).get("presentation_message") or {}),
             "lifecycle_state": record.get("lifecycle_state"),
             "reason": record.get("reason") or "",
             "presentation_ack": {
@@ -256,6 +258,23 @@ class RebootManager:
                 "sequence": presentation_ack.get("sequence"),
             },
         }
+
+    def visible_operations(self, *, owner_id: str):
+        """Discover owner-scoped lifecycle changes, including Telegram origins."""
+        result = []
+        for record in reversed(self.receipts.records()):
+            origin = record.get("origin") or {}
+            recorded_owner = str(origin.get("owner_id") or "")
+            if not recorded_owner and str(origin.get("actor_id") or "").isdigit():
+                recorded_owner = "user:" + str(origin["actor_id"])
+            if recorded_owner != str(owner_id or ""):
+                continue
+            # Existing sessions can recover a recent completion after disconnect.
+            timestamps = [float(event.get("created_at") or 0) for event in record.get("progress") or ()]
+            if record.get("status") not in ACTIVE and max(timestamps, default=0) < time.time() - 60:
+                continue
+            result.append(self._operation_projection(record))
+        return result
 
     def operation(
         self,
@@ -327,6 +346,9 @@ class RebootManager:
         ):
             return {"acknowledged": False, "reason": "invalid_message_id"}
         record = self.receipts.get(operation_id)
+        notice = (record.get("start_delivery") or {}).get("presentation_message") or {}
+        if notice.get("message_id") and message_id != notice["message_id"]:
+            return {"acknowledged": False, "reason": "message_mismatch"}
         ack = dict(record.get("presentation_ack") or {})
         status = ack.get("status") or "not_required"
         if status == "not_required":
@@ -441,12 +463,16 @@ class RebootManager:
                 render_text=render,
             )
             if result.get("sent") and rendered.get("text"):
-                runtime_session.record_kernel_presentation_notice(
+                message = runtime_session.record_kernel_presentation_notice(
                     self.kernel,
                     agent_id=record["source_agent"],
                     text=rendered["text"],
                     idempotency_key=idempotency_key,
                 )
+                if message and starting:
+                    result["presentation_message"] = {
+                        "message_id": message.get("message_id"), "session_id": message.get("session_id"),
+                    }
             return result
 
         # Workbench (and other shared-primary frontends) are delivered through
@@ -463,6 +489,7 @@ class RebootManager:
                 "sent": True,
                 "sender": "workbench",
                 "message_id": message.get("message_id"),
+                **({"presentation_message": {"message_id": message.get("message_id"), "session_id": message.get("session_id")}} if starting else {}),
             }
         return {"sent": False}
 
@@ -477,6 +504,7 @@ class RebootManager:
                 sender=result.get("sender"),
                 message_id=result.get("message_id"),
                 sent_at=time.time(),
+                presentation_message=result.get("presentation_message") or {},
             )
             return self.receipts.update(
                 record["id"],

@@ -23,6 +23,14 @@ class DesktopError(ValueError):
         super().__init__(code)
         self.code, self.status = code, status
 
+    def projection(self):
+        windows = {"desktop_locked", "desktop_input_failed", "desktop_displays_unavailable", "desktop_platform_unsupported"}
+        transport = {"desktop_outcome_unknown", "desktop_worker_unavailable"}
+        return {"error_code": self.code, "reason": self.code,
+                "layer": "windows" if self.code in windows else "transport" if self.code in transport else "hashi",
+                "retryable": self.code in {"desktop_locked", "desktop_worker_unavailable", "desktop_capture_busy",
+                                           "desktop_session_expired", "desktop_display_changed", "desktop_target_changed"}}
+
 
 def identifier(value, field="id") -> str:
     if not isinstance(value, str) or not ID.fullmatch(value):

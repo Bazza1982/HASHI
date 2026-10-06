@@ -935,6 +935,8 @@ class WorkbenchApiServer:
         self.app.router.add_get('/api/v1/sessions/{session_id}/questions', self.handle_session_questions)
         self.app.router.add_post('/api/v1/sessions/{session_id}/questions/{question_id}/answer', self.handle_question_answer)
         self.app.router.add_get("/api/health", self.handle_health)
+        self.app.router.add_get("/api/chat-projection/{name}", self.handle_chat_projection)
+        self.app.router.add_get("/api/runtime/reboot/operations", self.handle_reboot_operations)
         self.app.router.add_get(
             "/api/runtime/reboot/operations/{operation_id}", self.handle_reboot_operation
         )
@@ -5829,8 +5831,10 @@ class WorkbenchApiServer:
         owner = self._v1_owner_id(request)
         if owner is None:
             return self._v1_error(ValueError("not authenticated"), status=401)
+        from orchestrator.host_identity import storage_identity
         capabilities: dict[str, Any] = {
             "ok": True,
+            "storage_identity": storage_identity(),
             "message_source": public_source_capabilities(),
             "private_authorization": public_private_authorization_capabilities(),
             "private_authorization_proof_version": 1,
@@ -11410,6 +11414,44 @@ class WorkbenchApiServer:
         reason = result.get("reason") or "not_pending"
         status = 404 if reason == "not_found" else 400 if reason.startswith("invalid_") else 409
         return web.json_response({"ok": False, "error_code": reason}, status=status)
+
+    async def handle_reboot_operations(self, request):
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        manager = getattr(self.orchestrator, "reboot_manager", None)
+        if manager is None:
+            return web.json_response({"ok": False, "error_code": "reboot_unavailable"}, status=503)
+        response = web.json_response({"ok": True, "operations": manager.visible_operations(owner_id=owner)})
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    async def handle_chat_projection(self, request):
+        """Read durable chat without crossing a fenced Agent command route."""
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        try:
+            agent = str(request.match_info["name"])
+            explicit = str(request.query.get("session_id") or "")
+            session = self.session_store.get_session(explicit, owner_id=owner, agent_id=agent, include_deleted=False) if explicit else self.session_store.resolve_primary_session(owner_id=owner, agent_id=agent)
+            limit = int(request.query.get("limit", 50))
+            if not 1 <= limit <= 200:
+                raise ValueError("invalid projection limit")
+            offset = int(request.query["offset"]) if "offset" in request.query else None
+            cursor = int(request.query["message_cursor"]) if "message_cursor" in request.query else None
+            history_generation = int(request.query["history_generation"]) if "history_generation" in request.query else None
+            if any(value is not None and not 0 <= value <= 9007199254740991 for value in (offset, cursor)):
+                raise ValueError("invalid projection cursor")
+            if history_generation is not None and history_generation < 1:
+                raise ValueError("invalid history generation")
+            projection = build_chat_projection(self.session_store, session=session, owner_id=owner, limit=limit,
+                offset=offset, after_message_ordinal=cursor, known_history_generation=history_generation, include_command_ui=True)
+            response = web.json_response({"ok": True, "chat_projection_version": 2, "projection": projection})
+            response.headers["Cache-Control"] = "no-store"
+            return response
+        except Exception as exc:
+            return self._v1_error(exc)
 
     async def handle_reboot_operation(self, request):
         owner = self._v1_owner_id(request)

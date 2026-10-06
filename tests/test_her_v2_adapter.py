@@ -94,6 +94,35 @@ def _profiles():
 
 
 @pytest.mark.asyncio
+async def test_session_handle_reuses_worker_services_without_recovery_or_learning_shutdown(tmp_path,monkeypatch):
+    from unittest.mock import AsyncMock
+    owner_config=_agent_config(tmp_path)
+    owner_config._her_v2_stage_provider=_DirectProvider()
+    owner=HERv2Adapter(owner_config,_global_config(tmp_path))
+    assert await owner.initialize()
+    def unexpected_recovery(*args,**kwargs):
+        raise AssertionError('A Session handle cannot reconcile the live Worker')
+    monkeypatch.setattr(owner._session_coordinator,'reconcile_interrupted_turns',unexpected_recovery)
+    monkeypatch.setattr(owner._learning,'recover',unexpected_recovery)
+    shutdown=AsyncMock()
+    monkeypatch.setattr(owner._learning,'shutdown',shutdown)
+    child_config=_agent_config(tmp_path)
+    child_config._her_v2_stage_provider=_DirectProvider()
+    child_config._her_v3_session_services=owner
+    child=HERv2Adapter(child_config,_global_config(tmp_path))
+    assert await child.initialize()
+    assert child._session_coordinator is owner._session_coordinator
+    assert child._learning is owner._learning
+    assert child._active_runtimes is not owner._active_runtimes
+    child._session_id='native-child'
+    assert owner._session_id is None
+    await child.shutdown()
+    shutdown.assert_not_awaited()
+    await owner.shutdown()
+    shutdown.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_execution_compaction_wrapper_preserves_optional_provider_contracts():
     class _Provider:
         async def resolve_stage_modalities(self, profile):

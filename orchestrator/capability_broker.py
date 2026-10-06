@@ -17,6 +17,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 from urllib import request as urllib_request
+import re
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -145,6 +146,8 @@ class CapabilityRegistration:
     browser_id: str = ""
     browser_name: str = ""
     provider_id: str = ""
+    physical_host_id: str = ""
+    interactive_session_id: str = ""
 
     @classmethod
     def from_mapping(
@@ -211,6 +214,8 @@ class CapabilityRegistration:
             browser_id=str(value.get("browser_id") or "").strip().casefold()[:80],
             browser_name=str(value.get("browser_name") or "").strip()[:120],
             provider_id=str(value.get("provider_id") or ("extension" if kind == "browser_control" else "")).strip().lower(),
+            physical_host_id=str(value.get("physical_host_id") or "") if re.fullmatch(r"[a-f0-9]{64}", str(value.get("physical_host_id") or "")) else "",
+            interactive_session_id=str(value.get("interactive_session_id") or "") if re.fullmatch(r"[1-9][0-9]{0,9}", str(value.get("interactive_session_id") or "")) else "",
         )
 
     def to_dict(self) -> dict[str, Any]:

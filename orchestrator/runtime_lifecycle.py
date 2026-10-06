@@ -60,7 +60,9 @@ async def _publish_worker_metadata(runtime: Any, *, transition: str) -> None:
     if not callable(publisher):
         return
     try:
-        await publisher()
+        from orchestrator.runtime_execution import bind
+        with bind(None):
+            await publisher()
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -352,390 +354,402 @@ async def shutdown(runtime: Any) -> None:
 
 
 async def process_queue(runtime: Any) -> None:
-    from orchestrator import runtime_cancel
-
+    from orchestrator.runtime_execution import SessionQueue, process_sessions
     runtime.logger.info("Flex queue processor started.")
-    while True:
-        item = None
-        feedback = None
-        feedback_cleaned = False
-        try:
-            item = await runtime.queue.get()
-            async with runtime_cancel.transition_lock(runtime):
-                if (item.request_id in runtime_cancel.requested_ids(runtime)
-                        or runtime_cancel.queued_run_is_terminal(runtime, item)):
-                    runtime_cancel.requested_ids(runtime).discard(item.request_id)
-                    await runtime_cancel.finish_queued_request(runtime, item)
-                    continue
-                if not item.prompt or not item.prompt.strip():
-                    runtime.logger.debug(f"Skipping empty prompt in queue (source={item.source}, id={item.request_id})")
-                    continue
-                queue_start = runtime_pipeline.begin_queue_item(runtime, item)
-            await _publish_worker_metadata(
-                runtime,
-                transition="request start",
-            )
-            is_bridge_request = queue_start.is_bridge_request
-            queued_at = queue_start.queued_at
-            queued_monotonic = queue_start.queued_monotonic
-            queue_wait_s = queue_start.queue_wait_s
-            remote_backend_block = runtime._remote_backend_block_reason(item.source)
-            if remote_backend_block:
-                runtime.error_logger.warning(remote_backend_block)
-                if item.deliver_to_telegram:
-                    await runtime.send_long_message(
-                        item.chat_id,
-                        f"⚠️ {remote_backend_block}",
-                        request_id=item.request_id,
-                        purpose="remote-backend-policy",
-                    )
-                terminal_console.finish_request(
-                    runtime.name,
-                    item.request_id,
-                    success=False,
-                    error="[REMOTE_BACKEND_BLOCKED]",
+    try:
+        if isinstance(runtime.queue, SessionQueue):
+            await process_sessions(runtime, _process_single_item)
+        else:
+            while True:
+                item = await runtime.queue.get()
+                await _process_single_item(runtime, item)
+    except asyncio.CancelledError:
+        return
+
+
+async def _process_single_item(runtime: Any, item: Any) -> None:
+    from orchestrator import runtime_cancel
+    feedback = None
+    feedback_cleaned = False
+    try:
+        async with runtime_cancel.transition_lock(runtime):
+            if (item.request_id in runtime_cancel.requested_ids(runtime)
+                    or runtime_cancel.queued_run_is_terminal(runtime, item)):
+                runtime_cancel.requested_ids(runtime).discard(item.request_id)
+                await runtime_cancel.finish_queued_request(runtime, item)
+                return
+            if not item.prompt or not item.prompt.strip():
+                runtime.logger.debug(f"Skipping empty prompt in queue (source={item.source}, id={item.request_id})")
+                return
+            queue_start = runtime_pipeline.begin_queue_item(runtime, item)
+        await _publish_worker_metadata(
+            runtime,
+            transition="request start",
+        )
+        is_bridge_request = queue_start.is_bridge_request
+        queued_at = queue_start.queued_at
+        queued_monotonic = queue_start.queued_monotonic
+        queue_wait_s = queue_start.queue_wait_s
+        remote_backend_block = runtime._remote_backend_block_reason(item.source)
+        if remote_backend_block:
+            runtime.error_logger.warning(remote_backend_block)
+            if item.deliver_to_telegram:
+                await runtime.send_long_message(
+                    item.chat_id,
+                    f"⚠️ {remote_backend_block}",
+                    request_id=item.request_id,
+                    purpose="remote-backend-policy",
                 )
-                continue
-            await runtime_workzone.activate_backend_state(runtime)
-            turn_prompt = await runtime_pipeline.build_turn_prompt(
+            terminal_console.finish_request(
+                runtime.name,
+                item.request_id,
+                success=False,
+                error="[REMOTE_BACKEND_BLOCKED]",
+            )
+            return
+        await runtime_workzone.activate_backend_state(runtime)
+        turn_prompt = await runtime_pipeline.build_turn_prompt(
+            runtime,
+            item,
+            is_bridge_request=is_bridge_request,
+        )
+        effective_prompt = turn_prompt.effective_prompt
+        final_prompt = turn_prompt.final_prompt
+        incremental = turn_prompt.incremental
+        if item.request_id in runtime_cancel.requested_ids(runtime):
+            await runtime_cancel.finish_queued_request(runtime, item)
+            return
+        runtime_pipeline.surface_context_compaction_warnings(
+            runtime,
+            item,
+            turn_prompt.context_warnings,
+        )
+        runtime._notify_right_brain_started(
+            item,
+            effective_prompt,
+            final_prompt=final_prompt,
+            is_bridge_request=is_bridge_request,
+        )
+
+        audit_active = runtime._audit_enabled() and should_audit_source(item.source)
+        audit_collector = AuditTelemetryCollector() if audit_active else None
+        feedback = await runtime_pipeline.setup_interactive_feedback(
+            runtime,
+            item,
+            audit_active=audit_active,
+            audit_collector=audit_collector,
+        )
+        runtime_background_status.prepare(runtime, item)
+
+        generation = await runtime_pipeline.run_backend_generation(
+            runtime,
+            item,
+            final_prompt,
+            on_stream_event=feedback.on_stream_event,
+            audit_active=audit_active,
+        )
+        await _publish_worker_metadata(
+            runtime,
+            transition="generation end",
+        )
+        response = generation.response
+        backend_started_monotonic = generation.backend_started_monotonic
+
+        if generation.detached:
+            if feedback.stop_typing:
+                feedback.stop_typing.set()
+            await runtime_pipeline.settle_interactive_feedback_task(
+                runtime,
+                feedback.typing_task,
+                label="typing-detach",
+            )
+            await runtime_pipeline.settle_interactive_feedback_task(
+                runtime,
+                feedback.escalation_task,
+                label="escalation-detach",
+            )
+            await runtime_pipeline.settle_interactive_feedback_task(
+                runtime,
+                feedback.answer_preview_task,
+                label="answer-preview-detach",
+            )
+            await runtime_pipeline.settle_interactive_feedback_task(
+                runtime,
+                feedback.think_flush_task,
+                label="thinking-flush-detach",
+                cancel_first=True,
+            )
+            runtime_pipeline.release_display_preference_event(
+                runtime,
+                feedback.preference_event,
+            )
+            setattr(item, "_audit_collector", audit_collector)
+            setattr(item, "_her_message_router", feedback.her_message_router)
+            status_placeholder = feedback.placeholder
+            if feedback.verbose_display_state is not None:
+                if feedback.verbose_display_state.current_message is not None:
+                    status_placeholder = feedback.verbose_display_state.current_message
+                elif feedback.verbose_display_state.ever_activated:
+                    status_placeholder = None
+            if (
+                feedback.answer_stream_state is not None
+                and feedback.answer_stream_state.has_text
+            ):
+                # Never overwrite a real streamed answer preview with status.
+                status_placeholder = None
+            runtime_background_status.schedule_delivery(
                 runtime,
                 item,
-                is_bridge_request=is_bridge_request,
+                generation.generation_task,
+                status_placeholder,
             )
-            effective_prompt = turn_prompt.effective_prompt
-            final_prompt = turn_prompt.final_prompt
-            incremental = turn_prompt.incremental
-            runtime_pipeline.surface_context_compaction_warnings(
-                runtime,
-                item,
-                turn_prompt.context_warnings,
+            runtime._register_background_task(generation.generation_task, item)
+            runtime.logger.info(
+                f"Detached {item.request_id} to background "
+                f"(threshold={generation.detach_after_s}s, backend={runtime.config.active_backend})"
             )
-            runtime._notify_right_brain_started(
+            runtime._log_maintenance(item, "bg_detached", detach_after_s=generation.detach_after_s)
+            feedback_cleaned = True
+            feedback = None
+            return
+
+        recovered = await runtime_pipeline.recover_typed_context_capacity_rejection(
+            runtime,
+            item,
+            response,
+            on_stream_event=feedback.on_stream_event,
+        )
+        if recovered is not None:
+            response, final_prompt = recovered
+        if item.request_id in runtime_cancel.requested_ids(runtime):
+            response = runtime_pipeline._cancelled_generation_response()
+
+        backend_elapsed = max(
+            0.0, time.monotonic() - backend_started_monotonic
+        )
+        runtime_pipeline.log_backend_finished(
+            runtime,
+            item,
+            response,
+            backend_elapsed_s=backend_elapsed,
+            final_prompt=final_prompt,
+        )
+
+        await runtime_pipeline.cleanup_interactive_feedback(
+            runtime,
+            item,
+            stop_typing=feedback.stop_typing,
+            typing_task=feedback.typing_task,
+            escalation_task=feedback.escalation_task,
+            answer_preview_task=feedback.answer_preview_task,
+            think_flush_task=feedback.think_flush_task,
+            placeholder=feedback.placeholder,
+            verbose_display_state=feedback.verbose_display_state,
+            preference_event=feedback.preference_event,
+            delete_placeholder=not (
+                response.is_success
+                and bool(response.text)
+                and feedback.answer_stream_state is not None
+            ),
+        )
+        feedback_cleaned = True
+
+        has_deliverable_content = runtime_pipeline.response_has_deliverable_content(
+            response
+        )
+        if response.is_success and not has_deliverable_content:
+            runtime._notify_right_brain_interrupted(
                 item,
                 effective_prompt,
-                final_prompt=final_prompt,
                 is_bridge_request=is_bridge_request,
+                reason="empty_success",
+                error="backend returned success with empty text",
             )
-
-            audit_active = runtime._audit_enabled() and should_audit_source(item.source)
-            audit_collector = AuditTelemetryCollector() if audit_active else None
-            feedback = await runtime_pipeline.setup_interactive_feedback(
+            await runtime_pipeline.handle_empty_success_response(runtime, item)
+        elif response.is_success and has_deliverable_content:
+            success_result = await runtime_pipeline.prepare_successful_response(
                 runtime,
                 item,
-                audit_active=audit_active,
-                audit_collector=audit_collector,
+                completion_path="foreground",
+                response=response,
             )
-            runtime_background_status.prepare(runtime, item)
-
-            generation = await runtime_pipeline.run_backend_generation(
-                runtime,
-                item,
-                final_prompt,
-                on_stream_event=feedback.on_stream_event,
-                audit_active=audit_active,
-            )
-            await _publish_worker_metadata(
-                runtime,
-                transition="generation end",
-            )
-            response = generation.response
-            backend_started_monotonic = generation.backend_started_monotonic
-
-            if generation.detached:
-                if feedback.stop_typing:
-                    feedback.stop_typing.set()
-                await runtime_pipeline.settle_interactive_feedback_task(
-                    runtime,
-                    feedback.typing_task,
-                    label="typing-detach",
-                )
-                await runtime_pipeline.settle_interactive_feedback_task(
-                    runtime,
-                    feedback.escalation_task,
-                    label="escalation-detach",
-                )
-                await runtime_pipeline.settle_interactive_feedback_task(
-                    runtime,
-                    feedback.answer_preview_task,
-                    label="answer-preview-detach",
-                )
-                await runtime_pipeline.settle_interactive_feedback_task(
-                    runtime,
-                    feedback.think_flush_task,
-                    label="thinking-flush-detach",
-                    cancel_first=True,
-                )
-                runtime_pipeline.release_display_preference_event(
-                    runtime,
-                    feedback.preference_event,
-                )
-                setattr(item, "_audit_collector", audit_collector)
-                setattr(item, "_her_message_router", feedback.her_message_router)
-                status_placeholder = feedback.placeholder
-                if feedback.verbose_display_state is not None:
-                    if feedback.verbose_display_state.current_message is not None:
-                        status_placeholder = feedback.verbose_display_state.current_message
-                    elif feedback.verbose_display_state.ever_activated:
-                        status_placeholder = None
-                if (
-                    feedback.answer_stream_state is not None
-                    and feedback.answer_stream_state.has_text
-                ):
-                    # Never overwrite a real streamed answer preview with status.
-                    status_placeholder = None
-                runtime_background_status.schedule_delivery(
-                    runtime,
-                    item,
-                    generation.generation_task,
-                    status_placeholder,
-                )
-                runtime._register_background_task(generation.generation_task, item)
-                runtime.logger.info(
-                    f"Detached {item.request_id} to background "
-                    f"(threshold={generation.detach_after_s}s, backend={runtime.config.active_backend})"
-                )
-                runtime._log_maintenance(item, "bg_detached", detach_after_s=generation.detach_after_s)
-                feedback_cleaned = True
-                feedback = None
-                continue
-
-            recovered = await runtime_pipeline.recover_typed_context_capacity_rejection(
-                runtime,
-                item,
-                response,
-                on_stream_event=feedback.on_stream_event,
-            )
-            if recovered is not None:
-                response, final_prompt = recovered
-            if item.request_id in runtime_cancel.requested_ids(runtime):
-                response = runtime_pipeline._cancelled_generation_response()
-
-            backend_elapsed = max(
-                0.0, time.monotonic() - backend_started_monotonic
-            )
-            runtime_pipeline.log_backend_finished(
-                runtime,
-                item,
-                response,
-                backend_elapsed_s=backend_elapsed,
-                final_prompt=final_prompt,
-            )
-
-            await runtime_pipeline.cleanup_interactive_feedback(
-                runtime,
-                item,
-                stop_typing=feedback.stop_typing,
-                typing_task=feedback.typing_task,
-                escalation_task=feedback.escalation_task,
-                answer_preview_task=feedback.answer_preview_task,
-                think_flush_task=feedback.think_flush_task,
-                placeholder=feedback.placeholder,
-                verbose_display_state=feedback.verbose_display_state,
-                preference_event=feedback.preference_event,
-                delete_placeholder=not (
-                    response.is_success
-                    and bool(response.text)
-                    and feedback.answer_stream_state is not None
-                ),
-            )
-            feedback_cleaned = True
-
-            has_deliverable_content = runtime_pipeline.response_has_deliverable_content(
-                response
-            )
-            if response.is_success and not has_deliverable_content:
+            if success_result.cancelled:
+                return
+            visible_text = success_result.visible_text
+            wrapper_result = success_result.wrapper_result
+            if (
+                not visible_text.strip()
+                and not runtime_pipeline.response_has_deliverable_content(response)
+            ):
                 runtime._notify_right_brain_interrupted(
                     item,
                     effective_prompt,
                     is_bridge_request=is_bridge_request,
-                    reason="empty_success",
-                    error="backend returned success with empty text",
+                    reason="empty_visible_success",
+                    error="backend returned only hidden control content",
                 )
                 await runtime_pipeline.handle_empty_success_response(runtime, item)
-            elif response.is_success and has_deliverable_content:
-                success_result = await runtime_pipeline.prepare_successful_response(
-                    runtime,
-                    item,
-                    completion_path="foreground",
-                    response=response,
-                )
-                if success_result.cancelled:
-                    continue
-                visible_text = success_result.visible_text
-                wrapper_result = success_result.wrapper_result
-                if (
-                    not visible_text.strip()
-                    and not runtime_pipeline.response_has_deliverable_content(response)
-                ):
-                    runtime._notify_right_brain_interrupted(
-                        item,
-                        effective_prompt,
-                        is_bridge_request=is_bridge_request,
-                        reason="empty_visible_success",
-                        error="backend returned only hidden control content",
-                    )
-                    await runtime_pipeline.handle_empty_success_response(runtime, item)
-                    continue
-                runtime._notify_right_brain_completed(
-                    item,
-                    effective_prompt,
-                    visible_text,
-                    is_bridge_request=is_bridge_request,
-                    completion_path="foreground",
-                )
-                runtime_pipeline.record_foreground_usage_audit(
+                return
+            runtime._notify_right_brain_completed(
+                item,
+                effective_prompt,
+                visible_text,
+                is_bridge_request=is_bridge_request,
+                completion_path="foreground",
+            )
+            runtime_pipeline.record_foreground_usage_audit(
+                runtime,
+                item,
+                response,
+                visible_text=visible_text,
+                wrapper_result=wrapper_result,
+                final_prompt=final_prompt,
+                effective_prompt=effective_prompt,
+                incremental=incremental,
+            )
+            if not item.silent:
+                await runtime_pipeline.handle_success_delivery(
                     runtime,
                     item,
                     response,
                     visible_text=visible_text,
                     wrapper_result=wrapper_result,
-                    final_prompt=final_prompt,
-                    effective_prompt=effective_prompt,
-                    incremental=incremental,
-                )
-                if not item.silent:
-                    await runtime_pipeline.handle_success_delivery(
-                        runtime,
-                        item,
-                        response,
-                        visible_text=visible_text,
-                        wrapper_result=wrapper_result,
-                        is_bridge_request=is_bridge_request,
-                        session_reset_source=SESSION_RESET_SOURCE,
-                        queued_at=queued_at,
-                        queue_wait_s=queue_wait_s,
-                        backend_elapsed_s=backend_elapsed,
-                        audit_collector=audit_collector,
-                        answer_stream_state=feedback.answer_stream_state,
-                        her_message_router=feedback.her_message_router,
-                        queued_monotonic=queued_monotonic,
-                    )
-            else:
-                from orchestrator.runtime_control import consume_user_interrupt
-
-                # /stop, /steer, and /retry already notified with user_* reason; do not
-                # re-label the intentional kill as backend_error or show ❌.
-                interrupt_reason = consume_user_interrupt(
-                    runtime, getattr(item, "request_id", None)
-                )
-                if not interrupt_reason:
-                    runtime._notify_right_brain_interrupted(
-                        item,
-                        effective_prompt,
-                        is_bridge_request=is_bridge_request,
-                        reason="backend_error",
-                        error=response.error or "Unknown error",
-                    )
-                await runtime_pipeline.handle_backend_error(
-                    runtime,
-                    item,
-                    response,
+                    is_bridge_request=is_bridge_request,
+                    session_reset_source=SESSION_RESET_SOURCE,
                     queued_at=queued_at,
                     queue_wait_s=queue_wait_s,
                     backend_elapsed_s=backend_elapsed,
-                    user_interrupt_reason=interrupt_reason,
+                    audit_collector=audit_collector,
+                    answer_stream_state=feedback.answer_stream_state,
+                    her_message_router=feedback.her_message_router,
                     queued_monotonic=queued_monotonic,
                 )
+        else:
+            from orchestrator.runtime_control import consume_user_interrupt
 
-        except asyncio.CancelledError:
-            runtime.is_generating = False
-            break
-        except Exception as exc:
-            runtime._mark_error(str(exc))
-            if item is not None:
-                terminal_console.observe_exception(
-                    runtime.name, item.request_id, exc
+            # /stop, /steer, and /retry already notified with user_* reason; do not
+            # re-label the intentional kill as backend_error or show ❌.
+            interrupt_reason = consume_user_interrupt(
+                runtime, getattr(item, "request_id", None)
+            )
+            if not interrupt_reason:
+                runtime._notify_right_brain_interrupted(
+                    item,
+                    effective_prompt,
+                    is_bridge_request=is_bridge_request,
+                    reason="backend_error",
+                    error=response.error or "Unknown error",
                 )
-                terminal_console.finish_request(
-                    runtime.name,
-                    item.request_id,
-                    success=False,
-                    error="[RUNTIME_EXCEPTION]",
-                )
-                try:
-                    is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
-                    runtime._notify_right_brain_interrupted(
-                        item,
-                        item.prompt,
-                        is_bridge_request=is_bridge_request,
-                        reason="runtime_exception",
-                        error=str(exc),
-                    )
-                except Exception:
-                    pass
-                try:
-                    await runtime._notify_request_listeners(item.request_id, {
-                        "request_id": item.request_id,
-                        "success": False,
-                        "text": None,
-                        "error": str(exc),
-                        "error_code": str(getattr(exc, "code", "") or "RUNTIME_EXCEPTION"),
-                        "error_retryable": False,
-                        "source": item.source,
-                        "summary": item.summary,
-                    })
-                except Exception as terminal_exc:
-                    runtime.error_logger.exception(
-                        "Runtime exception terminal persistence failed: "
-                        f"{type(terminal_exc).__name__}: {terminal_exc}"
-                    )
-            runtime.error_logger.exception(f"Error in flex queue processing: {exc}")
-            runtime.is_generating = False
-        finally:
-            if item is not None:
-                runtime.is_generating = False
-            if (
-                feedback is not None
-                and not feedback_cleaned
-                and item is not None
-            ):
-                try:
-                    await runtime_pipeline.cleanup_interactive_feedback(
-                        runtime,
-                        item,
-                        stop_typing=feedback.stop_typing,
-                        typing_task=feedback.typing_task,
-                        escalation_task=feedback.escalation_task,
-                        answer_preview_task=feedback.answer_preview_task,
-                        think_flush_task=feedback.think_flush_task,
-                        placeholder=feedback.placeholder,
-                        verbose_display_state=feedback.verbose_display_state,
-                        preference_event=feedback.preference_event,
-                    )
-                except Exception as cleanup_exc:
-                    runtime.error_logger.warning(
-                        "Interactive feedback emergency cleanup failed: "
-                        f"{type(cleanup_exc).__name__}: {cleanup_exc}"
-                    )
-            if item is not None:
-                background_ids = getattr(runtime, "_background_request_ids", set())
-                if item.request_id not in background_ids:
-                    from orchestrator.runtime_control import consume_user_interrupt
+            await runtime_pipeline.handle_backend_error(
+                runtime,
+                item,
+                response,
+                queued_at=queued_at,
+                queue_wait_s=queue_wait_s,
+                backend_elapsed_s=backend_elapsed,
+                user_interrupt_reason=interrupt_reason,
+                queued_monotonic=queued_monotonic,
+            )
 
-                    consume_user_interrupt(runtime, item.request_id)
-                    runtime_cancel.requested_ids(runtime).discard(item.request_id)
-                    runtime_cancel.finalizing_ids(runtime).discard(item.request_id)
-                    registry = getattr(runtime, "_request_meta_by_id", None)
-                    if isinstance(registry, dict):
-                        registry.pop(item.request_id, None)
-                current_meta = getattr(runtime, "current_request_meta", None)
-                if isinstance(current_meta, dict) and current_meta.get("request_id") == item.request_id:
-                    runtime.current_request_meta = None
-                if item.request_id not in background_ids:
-                    await release_capability_task(runtime, item.request_id)
-                    await runtime_delivery_order.complete_turn(runtime, item.request_id)
-                    runtime_pipeline.clear_context_compaction_request_state(
-                        runtime,
-                        item.request_id,
-                    )
-                runtime.queue.task_done()
-            else:
-                runtime.current_request_meta = None
-            if item is not None:
-                await _publish_worker_metadata(
+    except asyncio.CancelledError:
+        runtime.is_generating = False
+        raise
+    except Exception as exc:
+        runtime._mark_error(str(exc))
+        if item is not None:
+            terminal_console.observe_exception(
+                runtime.name, item.request_id, exc
+            )
+            terminal_console.finish_request(
+                runtime.name,
+                item.request_id,
+                success=False,
+                error="[RUNTIME_EXCEPTION]",
+            )
+            try:
+                is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
+                runtime._notify_right_brain_interrupted(
+                    item,
+                    item.prompt,
+                    is_bridge_request=is_bridge_request,
+                    reason="runtime_exception",
+                    error=str(exc),
+                )
+            except Exception:
+                pass
+            try:
+                await runtime._notify_request_listeners(item.request_id, {
+                    "request_id": item.request_id,
+                    "success": False,
+                    "text": None,
+                    "error": str(exc),
+                    "error_code": str(getattr(exc, "code", "") or "RUNTIME_EXCEPTION"),
+                    "error_retryable": False,
+                    "source": item.source,
+                    "summary": item.summary,
+                })
+            except Exception as terminal_exc:
+                runtime.error_logger.exception(
+                    "Runtime exception terminal persistence failed: "
+                    f"{type(terminal_exc).__name__}: {terminal_exc}"
+                )
+        runtime.error_logger.exception(f"Error in flex queue processing: {exc}")
+        runtime.is_generating = False
+    finally:
+        if item is not None:
+            runtime.is_generating = False
+        if (
+            feedback is not None
+            and not feedback_cleaned
+            and item is not None
+        ):
+            try:
+                await runtime_pipeline.cleanup_interactive_feedback(
                     runtime,
-                    transition="request cleanup",
+                    item,
+                    stop_typing=feedback.stop_typing,
+                    typing_task=feedback.typing_task,
+                    escalation_task=feedback.escalation_task,
+                    answer_preview_task=feedback.answer_preview_task,
+                    think_flush_task=feedback.think_flush_task,
+                    placeholder=feedback.placeholder,
+                    verbose_display_state=feedback.verbose_display_state,
+                    preference_event=feedback.preference_event,
                 )
+            except Exception as cleanup_exc:
+                runtime.error_logger.warning(
+                    "Interactive feedback emergency cleanup failed: "
+                    f"{type(cleanup_exc).__name__}: {cleanup_exc}"
+                )
+        if item is not None:
+            background_ids = getattr(runtime, "_background_request_ids", set())
+            if item.request_id not in background_ids:
+                from orchestrator.runtime_control import consume_user_interrupt
+
+                consume_user_interrupt(runtime, item.request_id)
+                runtime_cancel.requested_ids(runtime).discard(item.request_id)
+                runtime_cancel.finalizing_ids(runtime).discard(item.request_id)
+                registry = getattr(runtime, "_request_meta_by_id", None)
+                if isinstance(registry, dict):
+                    registry.pop(item.request_id, None)
+            current_meta = getattr(runtime, "current_request_meta", None)
+            if isinstance(current_meta, dict) and current_meta.get("request_id") == item.request_id:
+                runtime.current_request_meta = None
+            if item.request_id not in background_ids:
+                await release_capability_task(runtime, item.request_id)
+                await runtime_delivery_order.complete_turn(runtime, item.request_id)
+                runtime_pipeline.clear_context_compaction_request_state(
+                    runtime,
+                    item.request_id,
+                )
+            runtime.queue.task_done()
+        else:
+            runtime.current_request_meta = None
+        if item is not None:
+            await _publish_worker_metadata(
+                runtime,
+                transition="request cleanup",
+            )
 
 
 async def _cancel_tasks(

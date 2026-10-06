@@ -1,4 +1,6 @@
 from __future__ import annotations
+from orchestrator.runtime_execution import session_control
+
 
 import asyncio
 import re
@@ -392,6 +394,7 @@ def _capture_original_prompt(
     return ""
 
 
+@session_control
 async def cmd_stop(runtime: Any, update: Any, context: Any) -> None:
     if not runtime._is_authorized_user(update.effective_user.id):
         return
@@ -550,6 +553,7 @@ def _agent_is_busy(runtime: Any) -> bool:
     return False
 
 
+@session_control
 async def cmd_steer(
     runtime: Any,
     update: Any,
@@ -757,11 +761,13 @@ async def cmd_steer(
         )
 
 
+@session_control
 async def cmd_focus(runtime: Any, update: Any, context: Any) -> None:
     """Apply a predefined one-off scope correction using the /steer control path."""
     await cmd_steer(runtime, update, context, command_name="focus")
 
 
+@session_control
 async def cmd_recall(runtime: Any, update: Any, context: Any) -> None:
     """Remove waiting requests without interrupting the active task."""
     if not _user_is_authorized(runtime, update):
@@ -830,6 +836,7 @@ async def cmd_recall(runtime: Any, update: Any, context: Any) -> None:
     )
 
 
+@session_control
 async def cmd_retry(runtime: Any, update: Any, context: Any) -> None:
     if not _user_is_authorized(runtime, update):
         return
@@ -1036,6 +1043,7 @@ async def cmd_retry(runtime: Any, update: Any, context: Any) -> None:
         )
 
 
+@session_control
 async def cmd_resend(runtime: Any, update: Any, context: Any) -> None:
     if not _user_is_authorized(runtime, update):
         return

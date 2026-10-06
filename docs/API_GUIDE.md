@@ -693,3 +693,14 @@ tool locally and include the assistant `tool_calls` plus matching
 - **Session cache** is in-memory only; it resets when HASHI restarts.
 - **Request timeout** is 300 seconds per request.
 - Each backend adapter is lazily initialized on first request.
+
+
+### Same-model execution capacity (HASHI3 nightly candidate)
+
+`api_gateway_config.json` supports `max_parallel_per_model` (default 2, range
+1..8), published through its existing revision-aware writer. Each engine/model
+pair leases independent adapter/process slots; each slot is exclusively held
+through streaming completion. Slot workspaces are isolated. API Session cache
+leases still cover history read/append/write, so one cached Session is FIFO.
+Native CLI thread context is cleared between API calls; assembled messages own
+API history and cannot inherit a previous pooled client's thread.

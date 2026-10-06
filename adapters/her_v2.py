@@ -921,6 +921,23 @@ class HERv2Adapter(BaseBackend):
                             f"profile {profile.name!r} provider/model is not configured on this HASHI instance"
                         )
 
+            services = getattr(self.config, "_her_v3_session_services", None)
+            if services is not None:
+                # A Session handle is an execution owner, not a Worker startup.
+                # Reconciliation and learning lifecycle remain with the owner.
+                for name in (
+                    "_session_coordinator", "_ledger_store", "_wip_journal", "_audit_log", "_learning",
+                    "_habit_execution_lock", "_habit_meditation_execution_lock",
+                    "_habit_dream_execution_lock", "_habit_dream_run_lock",
+                    "_habit_meditation_tasks", "_habit_notification_tasks",
+                    "_meter_notification_tasks", "_habit_dream_tasks",
+                ):
+                    setattr(self, name, getattr(services, name))
+                self._owns_session_services = False
+                self._wip_journal_cache[str(self._wip_journal.path.resolve())] = self._wip_journal
+                self._initialized = True
+                return True
+
             state_root = Path(self.config.workspace_dir) / "backend_state" / "her_v2"
             self._session_coordinator = HerBackendSessionCoordinator(
                 state_root,
@@ -2699,7 +2716,7 @@ class HERv2Adapter(BaseBackend):
                 *(runtime.shutdown(reason=reason) for runtime in active),
                 return_exceptions=True,
             )
-        if self._learning is not None:
+        if self._learning is not None and getattr(self, "_owns_session_services", True):
             await self._learning.shutdown()
 
     async def handle_new_session(self) -> bool:

@@ -131,7 +131,7 @@ def register_desktop_api(api):
                 return web.Response(body=data, content_type="image/jpeg", headers=headers)
             return web.json_response({"ok": True, **result}, headers=headers)
         except DesktopError as exc:
-            return web.json_response({"ok": False, "error_code": exc.code}, status=exc.status, headers=headers)
+            return web.json_response({"ok": False, **exc.projection()}, status=exc.status, headers=headers)
         except (ValueError, TypeError, KeyError):
             return web.json_response({"ok": False, "error_code": "desktop_invalid_request"}, status=400, headers=headers)
         except Exception:

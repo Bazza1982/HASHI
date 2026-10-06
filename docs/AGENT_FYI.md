@@ -150,3 +150,12 @@ queued/active Runs. Never fall back to Agent stop or report stopped early.
 Offline red/green passed; live acceptance is separate. See [PAO](HASHI_PAO_SYSTEM_DESIGN.md).
 
 Call diagnostics preserve safe browser/proxy/Function correlation. Historical interruption causes and physical acceptance remain separately tracked in the [call decision](HASHI_CALL_INTERACTION_2026-10-04.md).
+
+
+2026-10-06 nightly candidate in HASHI3: PAO Session execution leases and explicit
+Workbench Session views are implemented with focused checks; live adoption is
+pending. Reboot start visibility uses shared durable projection and lifecycle
+discovery. Same-model API execution defaults to two isolated slots. Desktop
+installation binds an authenticated physical host/session independently of chat
+selection; remote/unconfirmed paths require byte upload. See the [repair record]
+(repairs/NIGHTLY_20261006_RESTART_AND_SESSIONS.md). Production adoption is separate.

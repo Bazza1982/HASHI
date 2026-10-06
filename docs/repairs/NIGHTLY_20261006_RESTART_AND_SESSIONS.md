@@ -48,3 +48,17 @@ the selected chat. Initialization grants no control lease or background capture.
 Same-Agent concurrency means overlapping actual execution in two persistent
 Sessions using the same engine/model, with FIFO inside each Session. Source,
 focused validation, running adoption and real frontend evidence are separate.
+
+
+## Candidate source checks
+
+First qualification measurements (three independent probes per version):
+baseline 64.829/69.026/61.470 s; optimized 23.613/24.044/24.418 s. Median
+qualification reduction is 62.9%. This is qualification only, not end-to-end
+reboot or disconnect duration; a same-source comparison is still required.
+
+Focused checks cover durable fenced projection, lifecycle discovery/acknowledgment,
+remote upload destination changes, trusted filesystem identity, desktop
+installation binding/opt-out, native frontend components, Session view selection,
+queue overlap/FIFO/capacity, native adapter isolation, control-thread targeting
+and HERV3 shared-service ownership. Curated gate and live acceptance are pending.
