@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -21,6 +23,87 @@ def _registry(tmp_path, instance_id="HASHI3"):
         paths=SimpleNamespace(bridge_home=tmp_path, instance_id=instance_id),
     )
     return ServiceEndpointRegistry(kernel)
+
+
+def _hold_windows_read_lock(path):
+    import ctypes
+    from ctypes import wintypes
+    win = ctypes.WinDLL("kernel32", use_last_error=True)
+    win.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                               wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    win.CreateFileW.restype = wintypes.HANDLE
+    win.CloseHandle.argtypes = [wintypes.HANDLE]
+    win.CloseHandle.restype = wintypes.BOOL
+    # A genuine reader shares reads/writes, but not rename/delete.
+    handle = win.CreateFileW(str(path), 0x80000000, 3, None, 3, 0, None)
+    assert handle != wintypes.HANDLE(-1).value
+    closed = False
+    lock = threading.Lock()
+    def release():
+        nonlocal closed
+        with lock:
+            if not closed:
+                assert win.CloseHandle(handle)
+                closed = True
+    return release
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows file sharing contract")
+def test_live_endpoint_publication_survives_real_temporary_windows_read_lock(tmp_path):
+    registry = _registry(tmp_path)
+    old = registry.publish("workbench", instance_id="HASHI3", host="127.0.0.1", port=32117)
+    release = _hold_windows_read_lock(registry.state_path)
+    timer = threading.Timer(.12, release)
+    timer.start()
+    try:
+        new = registry.publish("workbench", instance_id="HASHI3", host="127.0.0.1", port=43129)
+    finally:
+        timer.cancel()
+        timer.join(timeout=1)
+        release()
+    assert new.revision == old.revision + 1
+    assert registry.resolve("workbench") == new
+    assert load_service_endpoint(registry.state_path, "workbench", expected_instance="HASHI3") == new
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows file sharing contract")
+def test_persistent_windows_read_lock_refuses_without_publishing_a_phantom_route(tmp_path):
+    registry = _registry(tmp_path)
+    old = registry.publish("workbench", instance_id="HASHI3", host="127.0.0.1", port=32117)
+    before = registry.snapshot()
+    raw = registry.state_path.read_bytes()
+    release = _hold_windows_read_lock(registry.state_path)
+    try:
+        with pytest.raises(PermissionError):
+            registry.publish("workbench", instance_id="HASHI3", host="127.0.0.1", port=43129)
+    finally:
+        release()
+    assert registry.snapshot() == before
+    assert registry.resolve("workbench") == old
+    assert registry.state_path.read_bytes() == raw
+
+
+@pytest.mark.parametrize("operation", ["publish", "unpublish"])
+def test_failed_endpoint_publication_preserves_durable_and_live_snapshot(tmp_path, monkeypatch, operation):
+    registry = _registry(tmp_path)
+    old = registry.publish("workbench", instance_id="HASHI3", host="127.0.0.1", port=32117)
+    before = registry.snapshot()
+    raw = registry.state_path.read_bytes()
+    replacements = []
+    def reject(source, destination):
+        replacements.append((source, destination))
+        raise OSError("permanent write failure")
+    monkeypatch.setattr("orchestrator.service_endpoints.os.replace", reject)
+    with pytest.raises(OSError, match="permanent write failure"):
+        if operation == "publish":
+            registry.publish("workbench", instance_id="HASHI3", host="127.0.0.1", port=43129)
+        else:
+            registry.unpublish("workbench")
+    assert len(replacements) == 1
+    assert registry.snapshot() == before
+    assert registry.resolve("workbench") == old
+    assert registry.state_path.read_bytes() == raw
+    assert not list(registry.state_path.parent.glob(".service_endpoints.json.*"))
 
 
 def test_wsl_bind_host_is_discovered_without_a_machine_address_constant():

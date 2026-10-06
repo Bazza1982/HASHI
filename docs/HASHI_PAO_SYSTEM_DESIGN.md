@@ -394,6 +394,14 @@ Live topology takes precedence over compatibility snapshots; configured ports,
 wildcard hosts, stale snapshots, and endpoints published by another instance
 must never be guessed or accepted as substitutes.
 
+Shared Functions publish live endpoint state atomically. On Windows, a reader
+that temporarily denies rename/delete sharing may block that pre-commit rename;
+only the same closed, fsynced candidate is retried, within a bounded half-second
+window. This does not replay service startup, a Run or an action. Permanent
+write errors preserve both the previous durable receipt and the previous
+in-memory services/revision, and remain visible to startup. No stale address,
+cross-instance endpoint or guessed port becomes a fallback.
+
 ### 2.4 Skills, Tools, permissions, and execution
 
 PAO owns the HASHI-level capability registry and execution authority:

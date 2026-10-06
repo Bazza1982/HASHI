@@ -240,3 +240,35 @@ frozen authorization cutoff, consumption ledger and source transcript are unchan
 The two word-stream regressions failed before this representation repair and
 passed afterward (**18 owning checks**). Direct consumers, committed-source
 qualification and live new-Engine acceptance follow separately.
+
+The committed Phone representation gate passed **793 tests, 1 skip** and the
+real artifact probe accepted 5f2830f2 from f19eb2ce. Max operation
+c10eccc3c2d447b8b31037c445d5d618 then failed adoption and restored e4d1747d;
+it is not counted as activation of the Phone repair. Core stayed PID 39952.
+
+### Windows live endpoint publication
+
+The failed adoption has a concrete cause distinct from the old Core outage:
+at 19:02:54, atomically publishing service_endpoints.json returned Windows
+access-denied while replacing the destination. The Backend API owner closed
+its unpublished service, so all eight Codex Workers rejected initialization
+with "live service endpoint is unavailable: workbench". HERV3 initialization
+alone did not qualify that generation; the replacement correctly rolled back.
+
+PAO's shared-Function publisher now retries only that pre-commit Windows rename
+for a bounded interval, with the exact same closed/fsynced candidate. Publication
+or removal failure restores the previous in-memory route and revision along
+with the unchanged durable file. Instance/port validation is retained, and no
+startup, Run, model call or tool action is replayed by the write retry.
+
+Three focused regressions failed before repair and passed afterward. They
+include a real native Windows read handle that forbids rename until released,
+and publication/removal failures preserving prior state. A persistent native
+lock also refuses without inventing a live route (**10 owning checks passed**).
+Direct consumers, final qualification and adoption are recorded separately.
+
+Five exact obsolete HASHI3 AGY launcher tasks from September 16/17 were Ready,
+had no future trigger or active runner, and were confirmed against their exact
+H3 executable/arguments before cleanup. Their definitions and original files
+were archived, and those five tasks were unregistered. No user program was
+terminated, and unrelated task registrations were retained.

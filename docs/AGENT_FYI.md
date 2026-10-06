@@ -41,6 +41,11 @@ Successful Agent stop projects `stopped`; Worker outage is `offline`, config dea
 
 JSON writers validate private candidates under locks, revisions, and atomic replacement. Display fallback is read-only. On conflict, read fresh state and request a fresh action; never blindly retry or restore stale bytes. See [configuration persistence](HASHI_CONFIGURATION_PERSISTENCE.md).
 
+Live endpoint publication retries only a Windows sharing-blocked pre-commit
+rename, using the same fsynced candidate for a bounded interval. Permanent
+failure preserves the previous durable and in-memory route/revision. It must
+not advertise an unwritten address, weaken identity, or replay startup/actions.
+
 ## Sessions, trust, and delivery
 
 PAO owns Conversations/Messages/Runs; Engines own Sessions/Turns. Provider context and frontend history are rebuildable. Preserve replies/order. Stage attachments atomically per Message/Run; failed/cancelled assets never leak.
