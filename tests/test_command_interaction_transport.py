@@ -47,6 +47,36 @@ def _runtime():
 
 
 @pytest.mark.asyncio
+async def test_command_transport_targets_selected_session_and_rejects_stale_generation(monkeypatch):
+    observed = []
+    resolved = []
+
+    def current(runtime, **kwargs):
+        resolved.append(kwargs)
+        return {"session_id": "session-selected-b", "context_generation": 4}
+
+    async def dispatch(runtime, payload, metadata):
+        observed.append(metadata)
+        return {"ok": True, "command_ui_version": 2, "messages": []}
+
+    monkeypatch.setattr("orchestrator.runtime_session.current_session", current)
+    monkeypatch.setattr("orchestrator.command_interaction_bridge.dispatch_command_interaction", dispatch)
+    result = await try_execute_slash_command_text(
+        _runtime(), _wire("open", command="/stop", session_id="session-selected-b", context_generation=4),
+        source_channel="workbench_api",
+    )
+    assert result["ok"] is True
+    assert resolved[0]["explicit_session_id"] == "session-selected-b"
+    assert observed[0]["session_id"] == "session-selected-b"
+    result = await try_execute_slash_command_text(
+        _runtime(), _wire("open", command="/stop", session_id="session-selected-b", context_generation=3),
+        source_channel="workbench_api",
+    )
+    assert result["ok"] is False
+    assert len(observed) == 1
+
+
+@pytest.mark.asyncio
 async def test_existing_runtime_slash_entry_dispatches_menu_inside_worker(monkeypatch):
     observed = []
 

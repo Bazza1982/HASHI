@@ -33,6 +33,8 @@ _FIELDS = frozenset(
         "menu_id",
         "revision",
         "button_id",
+        "session_id",
+        "context_generation",
     }
 )
 
@@ -53,6 +55,12 @@ def _decode_transport(text: str) -> dict[str, Any]:
         raise InteractionError("command_menu_request_invalid", 400)
     payload = dict(value)
     validate_operation(payload)
+    if "session_id" in payload or "context_generation" in payload:
+        if (not isinstance(payload.get("session_id"), str) or not payload["session_id"]
+                or len(payload["session_id"]) > 128
+                or type(payload.get("context_generation")) is not int
+                or payload["context_generation"] < 1):
+            raise InteractionError("command_menu_binding_missing", 400)
     connection = payload.get("connection_binding")
     if not isinstance(connection, str) or not 16 <= len(connection) <= 256:
         raise InteractionError("command_menu_binding_missing", 400)
@@ -88,11 +96,16 @@ async def try_dispatch_command_interaction_transport(
         }
         if payload["op"] != "catalogue":
             try:
+                selected = payload.pop("session_id", None)
+                expected_generation = payload.pop("context_generation", None)
                 session = runtime_session.current_session(
                     runtime,
                     surface="workbench",
                     channel_key="default",
+                    **({"explicit_session_id": selected} if selected else {}),
                 )
+                if expected_generation is not None and int(session["context_generation"]) != expected_generation:
+                    raise InteractionError("command_menu_session_changed", 409)
                 metadata.update(
                     owner_id=runtime_session.owner_id(runtime),
                     session_id=str(session["session_id"]),
@@ -101,6 +114,8 @@ async def try_dispatch_command_interaction_transport(
                     connector_id="workbench",
                     ingress_transport="workbench-command-ui",
                 )
+            except InteractionError:
+                raise
             except Exception:
                 raise InteractionError("command_menu_session_unavailable", 503) from None
         try:
