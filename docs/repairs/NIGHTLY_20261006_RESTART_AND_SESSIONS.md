@@ -195,3 +195,27 @@ unchanged. A red/green check verifies first timeout 0, following timeout 30 and
 delivery/offset persistence. This file is outside CORE_SOURCE_PATHS. The earlier
 28.1% result predates this second optimization; final live timing is recorded
 separately rather than retroactively changing that controlled comparison.
+
+## Mixed attachment continuation repair
+
+Native Simple sent one ordered TXT/PDF/PNG/TXT batch to a nonprimary Session.
+All four retrieved bytes matched the selected files, but the real HASHI API
+Agent answered that no function-call results were supplied. Transport inspection
+showed the first request contained the image and original user message; the next
+request contained only three tool outputs without a Gateway Session or their
+assistant call pairs. Inline media intentionally excludes Gateway caching, so
+that delta could not reconstruct a conversation.
+
+HERV3/engine transport Functions now sends complete accumulated messages for
+stateless tool rounds. Text-only request-local Gateway Sessions retain their
+delta protocol. Transport observations mark a call incremental only when that
+cache is actually available. No Core, Gateway cache or attachment writer changes
+are required. A real HTTP-boundary test exercises two tool rounds with inline
+image bytes and validates the original content plus each assistant/result pair;
+it failed on the missing second-round history before the repair. Focused checks
+and actual mixed-batch adoption are recorded separately below.
+
+Offline red: one HTTP-boundary test failed because request two began with a
+tool result rather than the original system/user messages. Green: 109 adapter,
+backend catalogue and selection transaction checks passed. Text-only deltas,
+reasoning settings, media fallback, failure audit and cancellation remain covered.

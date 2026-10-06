@@ -1028,7 +1028,9 @@ class HashiApiAdapter(OpenRouterAdapter):
                     gateway_transport_calls.append(
                         {
                             "provider_attempt": provider_attempt_count,
-                            "incremental": bool(tool_loop_count > 0),
+                            "incremental": bool(
+                                gateway_session_id is not None and tool_loop_count > 0
+                            ),
                             "message_count": len(outbound_messages),
                             "message_chars": len(
                                 json.dumps(
@@ -1432,7 +1434,15 @@ class HashiApiAdapter(OpenRouterAdapter):
                         ),
                     },
                 )
-                outbound_messages = messages[tool_result_start:]
+                # Only the request-local Gateway cache can reconstruct a tool
+                # delta. Inline media deliberately bypasses that cache, so
+                # stateless rounds must retain the user content, assistant
+                # calls and every preceding tool result.
+                outbound_messages = (
+                    messages[tool_result_start:]
+                    if gateway_session_id is not None
+                    else messages
+                )
                 completed_tool_calls.extend(
                     {
                         "id": str(call.get("id") or ""),

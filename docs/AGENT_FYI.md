@@ -1,5 +1,12 @@
 # HASHI Agent FYI
 
+2026-10-07: inline-media HASHI API tool rounds bypass Gateway Session caching.
+They must therefore send the complete accumulated conversation, including
+assistant call/result pairs and original media. Text-only cached rounds keep
+their existing deltas. Native mixed-batch byte delivery alone did not prove the
+Agent could use those files; the failed live observation and separate repair
+verification are retained in the nightly restart/Session decision.
+
 2026-10-07: Functions Telegram ingress now validates startup/recovery with an
 immediate real getUpdates poll before resuming its normal 30-second long poll.
 Connectivity still requires poll success; pending updates/offsets and bounded

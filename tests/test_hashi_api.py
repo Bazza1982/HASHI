@@ -669,6 +669,108 @@ async def test_hashi_api_tool_loop_sends_full_prompt_once_then_only_tool_delta(
 
 
 @pytest.mark.asyncio
+async def test_hashi_api_inline_image_tool_rounds_keep_complete_conversation(
+    tmp_path,
+):
+    image = tmp_path / "photo.png"
+    image_bytes = b"\x89PNG\r\n\x1a\nmultiround"
+    image.write_bytes(image_bytes)
+    content = canonical_request_content(
+        [
+            {"type": "text", "item_index": 1, "text": "Inspect these files."},
+            {
+                "type": "media",
+                "item_index": 2,
+                "attachment_id": "image-1",
+                "modality": "image",
+                "kind": "photo",
+                "mime_type": "image/png",
+                "filename": image.name,
+                "local_ref": str(image),
+                "size_bytes": len(image_bytes),
+                "sha256": hashlib.sha256(image_bytes).hexdigest(),
+                "transport": {},
+            },
+        ]
+    )
+    adapter = _adapter(tmp_path)
+    adapter.tool_registry = SimpleNamespace(
+        get_tool_definitions=lambda tiers=None: []
+    )
+    calls = [
+        {
+            "id": f"read-{number}",
+            "type": "function",
+            "function": {
+                "name": "file_read",
+                "arguments": json.dumps({"path": f"file-{number}.txt"}),
+            },
+        }
+        for number in (1, 2)
+    ]
+    requests = []
+
+    async def handler(request):
+        body = json.loads(request.content)
+        requests.append((body, dict(request.headers)))
+        index = len(requests) - 1
+        message = {"role": "assistant", "content": "files inspected"}
+        if index < 2:
+            message["tool_calls"] = [calls[index]]
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": message,
+                        "finish_reason": "tool_calls" if index < 2 else "stop",
+                    }
+                ],
+            },
+        )
+
+    async def run_tool_calls(tool_calls, messages, _callback, **_kwargs):
+        for call in tool_calls:
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call["id"],
+                    "content": f"contents for {call['id']}",
+                }
+            )
+
+    adapter.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    adapter._run_tool_calls = run_tool_calls
+    try:
+        response = await adapter.generate_response(
+            "Inspect these files.", "request-image-tools", request_content=content
+        )
+        assert response.is_success is True
+        assert len(requests) == 3
+        initial_messages = requests[0][0]["messages"]
+        for index, (body, headers) in enumerate(requests):
+            assert "session_id" not in body
+            assert "x-hashi-external-tool-session" not in headers
+            assert body["messages"][:2] == initial_messages
+            assert [message["role"] for message in body["messages"]] == (
+                ["system", "user"] + ["assistant", "tool"] * index
+            )
+            for round_index in range(index):
+                assistant, result = body["messages"][2 + round_index * 2 :][:2]
+                assert assistant["tool_calls"] == [calls[round_index]]
+                assert result["tool_call_id"] == calls[round_index]["id"]
+                assert result["content"] == f"contents for read-{round_index + 1}"
+        image_url = initial_messages[1]["content"][1]["image_url"]["url"]
+        assert base64.b64decode(image_url.partition(",")[2]) == image_bytes
+        continuation = response.stream_metadata["gateway_continuation"]
+        assert continuation["enabled"] is False
+        assert continuation["full_prompt_send_count"] == 3
+        assert all(not call["incremental"] for call in continuation["transport_calls"])
+    finally:
+        await adapter.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_hashi_api_repairs_bad_tool_json_inside_gateway_continuation(tmp_path):
     adapter = _adapter(tmp_path)
     adapter.tool_registry = SimpleNamespace(
