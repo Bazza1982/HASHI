@@ -376,8 +376,6 @@ class CallService:
             context = self.config.context(owner, body["agent_id"])
             if context["revision"] != body.get("revision"):
                 raise CallError("call_configuration_changed", 409)
-            if context["route"] != "call":
-                raise CallError("call_route_changed", 409)
             profile, targets = self.config.freeze(
                 owner, body["agent_id"], body.get("revision")
             )

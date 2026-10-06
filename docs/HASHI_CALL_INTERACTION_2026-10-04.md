@@ -1,5 +1,44 @@
 # Call interaction correction — HASHI2 experiment
 
+## Current 2026-10-06 decision — independent entries on HASHI3
+
+The user approved replacing the shared next-call selector with two fixed
+entries. Frontend Connector owns the Functions readiness/start/settings change
+and the matching external frontend presentation on `development/hashi3-20261006`.
+
+- The phone icon always starts or returns to `/phone`; the camera-shaped icon
+  always starts or returns to `/call`. Neither entry writes a route selection.
+- `/call` starts with its camera off, including when vision is configured.
+  Returning to an existing call does not enable its camera. The user enables
+  camera sharing explicitly inside the call panel.
+- Unconfigured entries are absent. Readiness comes from the existing Phone
+  capability and Call readiness projections; camera support is independent of
+  Call availability. Configured entries remain visible during a temporary busy
+  condition, with start disabled while the other engine is active.
+- The settings menu has no activate/restore switch. Old route callbacks and
+  `/call activate|deactivate` refresh settings without writing configuration;
+  revision checks remain mandatory. Legacy saved route data is preserved for
+  older clients and does not gate direct Call startup or camera capability.
+- An active call retains its bound Agent/Session. Existing mutual exclusion,
+  privacy, revision checks, media leases and connection/session fencing remain
+  enforced by their current owners.
+
+Focused failure evidence covers legacy routing, camera readiness, direct start,
+unchanged configuration bytes, retired menu switches, hidden entry buttons,
+actual Simple panel rendering, remote busy state and missing-session binding
+invalidation. Real Phone startup now succeeds even with a saved Call selection.
+Both Phone registration and startup no longer consume that selection; their
+shared busy interlock remains. A rejected/missing Call context clears the prior
+binding, and obsolete context cannot start another Agent's call.
+
+Functions/Phone integration checks passed (166); frontend call/media/Phone and
+Simple composer checks passed (128, Node 22). Production client build and
+independent review passed. Commands, failure receipts and build facts are saved
+separately in the HASHI3 ignored `state/call-entries-20261006` receipts.
+HASHI3's Backend API was unreachable and its active Call configuration was
+absent at closeout. Running adoption and physical-device acceptance remain open.
+Earlier decisions below remain experiment history.
+
 ## Historical 2026-10-05 local input and audio follow-up
 
 This checkpoint predates the later approved volume-based capture plus cloud
@@ -38,7 +77,7 @@ sealed current-input call facts. PAO retains the existing Session/Run admission
 and the same Agent, persona, history and work. Core is unchanged. No main merge
 or other instance adoption is part of this experiment.
 
-## Decisions
+## Historical 2026-10-04 decisions
 
 - The original call button reads the backend-owned route for its owner/Agent.
   Default is the independent `/phone` engine. `/call activate` and deactivate

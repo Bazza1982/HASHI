@@ -161,7 +161,7 @@ class CallConfig:
         self.path = path
 
     def route(self, owner, agent, doc=None, targets=None):
-        """The backend owns the next-call choice, including legacy defaults."""
+        """Project independent /call readiness and the legacy client choice."""
         if doc is None:
             try:
                 doc = read_config_json(self.path)
@@ -180,7 +180,7 @@ class CallConfig:
             if targets is None:
                 targets = {row["id"]: row for row in map(validate_target, doc.get("targets", []))}
             camera = self.profile(owner, agent, doc, targets).get("vision") is not None
-        return {"route": route, "camera_available": route == "call" and camera,
+        return {"route": route, "camera_available": camera,
                 "call_ready": ready, "revision": doc.revision}
 
     def select_route(self, owner, agent, revision, route):

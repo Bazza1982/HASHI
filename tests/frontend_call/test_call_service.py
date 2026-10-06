@@ -134,9 +134,6 @@ def setup(tmp_path, location="local"):
 
 async def start(service, base, cloud=False):
     info = await service.invoke("owner", {**base, "operation": "context"})
-    if info.get("route") != "call":
-        service.config.select_route("owner", base["agent_id"], info["revision"], "call")
-        info = await service.invoke("owner", {**base, "operation": "context"})
     body = {
         **base,
         "operation": "start",

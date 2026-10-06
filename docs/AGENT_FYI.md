@@ -1,5 +1,18 @@
 # HASHI Agent FYI
 
+2026-10-06: user-approved HASHI3 development call entries are independent:
+phone icon uses /phone; camera-shaped icon uses /call with camera off until
+explicitly enabled inside the panel. Unconfigured entries are hidden.
+Frontend Connector/Functions owns readiness and direct startup; the external
+frontend derives visibility and keeps both configured entries during busy
+states. Legacy route data is preserved; old selector controls no longer write
+it. Simple uses the shared fixed entries in its composer. Missing Call session
+state clears the prior binding and rejects late context instead of redialling
+another Agent. Independent review, 166 Functions/Phone checks, 128 frontend
+checks and the client build passed. HASHI3 running adoption and physical
+acceptance remain open because Backend API is unavailable and Call configuration
+is absent. See [current call decision](HASHI_CALL_INTERACTION_2026-10-04.md).
+
 2026-10-06: the user authorized all outstanding inbox repairs/tests on HASHI3,
 Workbench reloads and HASHI3 restarts. HASHI4 is outside scope; Core is immutable.
 Functions retain PAO/PCM/HERV3/Connector ownership. Repairs cover history, avatars,

@@ -8,6 +8,7 @@ import shutil
 import sqlite3
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -1907,6 +1908,24 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
             )
         provider_calls = []
 
+        # Register the real Call consumer with a previously saved /call choice.
+        # /phone must still use its own provider and never rewrite this file.
+        from orchestrator.frontend_call.routes import register_call_api
+        root = Path(self.temp_dir)
+        common = {"adapter": "openai_compatible", "location": "local",
+                  "base_url": "http://127.0.0.1:19000/v1", "model": "fixture"}
+        config_path = root / "call_profiles.json"
+        config_path.write_text(json.dumps({"version": 1, "enabled": True,
+            "targets": [{**common, "id": "ears", "kind": "stt"},
+                        {**common, "id": "mouth", "kind": "tts", "voices": ["warm"]}],
+            "default_profile": {"stt": {"target_id": "ears", "options": {}},
+                "tts": {"target_id": "mouth", "voice_id": "warm", "options": {}}, "vision": None}}))
+        service = register_call_api(SimpleNamespace(app=web.Application(),
+            config_path=root / "agents.json", live_voice_manager=self.manager))
+        context = service.config.context(self.owner_id, self.agent_id)
+        service.config.select_route(self.owner_id, self.agent_id, context["revision"], "call")
+        config_before = config_path.read_bytes()
+
         class FakeContent:
             async def iter_chunked(self, _size):
                 yield b'{"input_tokens":42}'
@@ -1957,6 +1976,7 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         self.assertEqual(first["sdp_answer"], "v=0\r\nanswer")
         self.assertEqual(first["binding"]["call_id"], first["call_id"])
         self.assertEqual(replay["call_id"], first["call_id"])
+        self.assertEqual(config_path.read_bytes(), config_before)
         with self.store._lock, self.store._connection() as conn:
             attempt = conn.execute(
                 """SELECT outcome_json, phone_config_json

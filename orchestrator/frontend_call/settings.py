@@ -33,18 +33,16 @@ class CallSettings:
         def selected(kind):
             slot = profile[kind]
             return next((t for t in targets if slot and t["id"] == slot["target_id"]), None)
-        current = "/call" if ctx["route"] == "call" else "/phone"
+        current = "/call" if ctx["call_ready"] else tr("call.off")
         facts = [f"<b>{escape(tr('call.' + kind))}</b> · {escape(str((selected(kind) or {}).get('label') or (selected(kind) or {}).get('model') or tr('call.off')))}"
                  for kind in ("stt", "tts", "vision")]
         rows = []
         title = tr("call.title")
         if page == "home":
-            rows = [[button(selected_label(tr("call.activate"), ctx["route"] == "call"), "route", "call")],
-                    [button(tr("call.stt"), "view", "stt"), button(tr("call.tts"), "view", "tts")],
-                    [button(tr("call.vision"), "view", "vision"), button(tr("call.advanced"), "view", "advanced")],
-                    [button(selected_label(tr("call.deactivate"), ctx["route"] == "phone"), "route", "phone")]]
+            rows = [[button(tr("call.stt"), "view", "stt"), button(tr("call.tts"), "view", "tts")],
+                    [button(tr("call.vision"), "view", "vision"), button(tr("call.advanced"), "view", "advanced")]]
             if not ctx["call_ready"]:
-                rows = [[button(tr("call.deactivate"), "route", "phone")]]
+                rows = []
         elif page in ("stt", "tts", "vision"):
             title = tr("call." + page)
             choices = [t for t in targets if t["kind"] == page]
@@ -94,7 +92,9 @@ class CallSettings:
         if action == "view":
             return value or "home"
         if action == "route":
-            self.config.select_route(self.owner, self.agent, ctx["revision"], value)
+            # Old buttons refresh the independent settings without changing either entrance.
+            if value not in ("phone", "call"):
+                raise CallError("call_menu_invalid")
             return "home"
         profile = copy.deepcopy(ctx["profile"])
         if action == "target":

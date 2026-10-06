@@ -23,7 +23,6 @@ def register_call_api(api):
     )
     api.call_service = service
     api.live_voice_manager.external_call_busy = service.busy
-    api.live_voice_manager.external_route_allowed = lambda owner, agent: service.config.route(owner, agent)["route"] == "phone"
     reaper = None
     headers = {
         "Cache-Control": "no-store, private",

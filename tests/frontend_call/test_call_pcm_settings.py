@@ -105,17 +105,19 @@ def test_sealed_call_facts_reach_actual_pcm_and_ordinary_input_clears_them(tmp_p
     assert 'red cup' not in section and snapshot['call']['camera']['observation']=='A hand holds a red cup.'
 
 
-def test_backend_menu_persists_selection_and_rejects_stale_callbacks(tmp_path):
+def test_backend_menu_has_independent_settings_and_rejects_stale_callbacks(tmp_path):
     (tmp_path/'call_profiles.json').write_text(json.dumps(document()))
     runtime=SimpleNamespace(name='arale',global_config=SimpleNamespace(bridge_home=tmp_path,authorized_id=7))
     settings=CallSettings(runtime)
     text, keyboard=settings.render()
-    activate=next(b.callback_data for row in keyboard.inline_keyboard for b in row if b.callback_data.startswith('call:route:call:'))
-    _,action,value,rev=activate.split(':')
+    assert all(not b.callback_data.startswith('call:route:') for row in keyboard.inline_keyboard for b in row)
+    page=settings.command(['voice']);text,keyboard=settings.render(page)
+    choose=next(b.callback_data for row in keyboard.inline_keyboard for b in row if b.callback_data.startswith('call:voice:1:'))
+    _,action,value,rev=choose.split(':')
     settings.apply(action,value,rev)
-    assert CallSettings(runtime).config.route(settings.owner,'arale')['route']=='call'
+    assert CallSettings(runtime).config.context(settings.owner,'arale')['profile']['tts']['voice_id']=='clear'
     with pytest.raises(CallError,match='configuration_changed'):
-        settings.apply('route','phone',rev)
+        settings.apply('voice','0',rev)
     page=settings.command(['tts']);text,keyboard=settings.render(page)
     assert page=='tts' and all(len(b.callback_data.encode())<=64 for row in keyboard.inline_keyboard for b in row)
     rev=settings.config.context(settings.owner,'arale')['revision'][:12]
@@ -123,15 +125,21 @@ def test_backend_menu_persists_selection_and_rejects_stale_callbacks(tmp_path):
         settings.apply('target','tts.-1',rev)
 
 
-def test_disabled_call_restores_phone_and_backend_deactivation_still_persists(tmp_path):
+def test_retired_route_commands_and_callbacks_leave_configuration_untouched(tmp_path):
     path=tmp_path/'call_profiles.json';path.write_text(json.dumps(document()))
     runtime=SimpleNamespace(name='arale',global_config=SimpleNamespace(bridge_home=tmp_path,authorized_id=7))
     settings=CallSettings(runtime)
-    settings.command(['activate'])
+    before=path.read_bytes()
+    assert settings.command(['activate'])=='home'
+    assert settings.command(['deactivate'])=='home'
+    rev=settings.config.context(settings.owner,'arale')['revision'][:12]
+    assert settings.apply('route','call',rev)=='home'
+    assert path.read_bytes()==before
     doc=json.loads(path.read_text());doc['enabled']=False;path.write_text(json.dumps(doc))
     assert settings.config.route(settings.owner,'arale')['route']=='phone'
     assert settings.command(['deactivate'])=='home'
     text,keyboard=settings.render()
     assert keyboard.inline_keyboard
+    assert all(not b.callback_data.startswith('call:route:') for row in keyboard.inline_keyboard for b in row)
     doc=json.loads(path.read_text());doc['enabled']=True;path.write_text(json.dumps(doc))
     assert settings.config.route(settings.owner,'arale')['route']=='phone'

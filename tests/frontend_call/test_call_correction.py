@@ -8,7 +8,7 @@ from test_call_service import setup, start, wav, finish_task
 from orchestrator.frontend_call.contract import CallError
 
 
-def test_selected_route_is_persistent_and_configuration_does_not_activate(tmp_path):
+def test_call_readiness_and_camera_do_not_depend_on_legacy_selection(tmp_path):
     service, *_ = setup(tmp_path)
     config = service.config
     assert config.route('owner', 'agent-a')['route'] == 'phone'
@@ -16,11 +16,38 @@ def test_selected_route_is_persistent_and_configuration_does_not_activate(tmp_pa
     config.save('owner', 'agent-a', context['revision'], context['profile'])
     assert config.route('owner', 'agent-a')['route'] == 'phone'
     context = config.context('owner', 'agent-a')
+    context['profile']['vision'] = {'target_id': 'eyes', 'options': {}}
+    config.save('owner', 'agent-a', context['revision'], context['profile'])
+    readiness = config.route('owner', 'agent-a')
+    assert readiness['call_ready'] is True and readiness['camera_available'] is True
+    context = config.context('owner', 'agent-a')
     config.select_route('owner', 'agent-a', context['revision'], 'call')
     assert type(config)(config.path).route('owner', 'agent-a')['route'] == 'call'
     assert config.route('owner', 'other')['route'] == 'phone'
     with pytest.raises(CallError, match='configuration_changed'):
         config.select_route('owner', 'agent-a', context['revision'], 'phone')
+
+
+async def test_direct_call_starts_without_switching_configuration_and_camera_is_manual(tmp_path):
+    service, _, _, base, _ = setup(tmp_path)
+    context = service.config.context('owner', base['agent_id'])
+    context['profile']['vision'] = {'target_id': 'eyes', 'options': {}}
+    service.config.save('owner', base['agent_id'], context['revision'], context['profile'])
+    before = service.config.path.read_bytes()
+    info = await service.invoke('owner', {**base, 'operation': 'context'})
+    assert info['route'] == 'phone' and info['call_ready'] is True
+    body = {**base, 'operation': 'start', 'call_id': 'call-1',
+            'generation': info['generation'], 'revision': info['revision']}
+    try:
+        result = await service.invoke('owner', body)
+        assert result['phase'] == 'active' and result['camera']['enabled'] is False
+        assert service.config.path.read_bytes() == before
+        camera = await service.invoke('owner', {**base, 'operation': 'camera',
+            'call_id': 'call-1', 'generation': info['generation'], 'enabled': True})
+        assert camera['camera']['enabled'] is True
+        assert service.config.path.read_bytes() == before
+    finally:
+        await service.close()
 
 
 async def test_disabled_call_context_keeps_minimal_phone_readiness(tmp_path):
