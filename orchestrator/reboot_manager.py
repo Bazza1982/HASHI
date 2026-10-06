@@ -470,8 +470,10 @@ class RebootManager:
                     idempotency_key=idempotency_key,
                 )
                 if message and starting:
+                    from orchestrator.frontend_projection import transport_text_component
                     result["presentation_message"] = {
                         "message_id": message.get("message_id"), "session_id": message.get("session_id"),
+                        "text": transport_text_component(rendered["text"], "telegram-html")["text"],
                     }
             return result
 
@@ -485,11 +487,13 @@ class RebootManager:
             idempotency_key=idempotency_key,
         )
         if message:
+            from orchestrator.frontend_projection import transport_text_component
             return {
                 "sent": True,
                 "sender": "workbench",
                 "message_id": message.get("message_id"),
-                **({"presentation_message": {"message_id": message.get("message_id"), "session_id": message.get("session_id")}} if starting else {}),
+                **({"presentation_message": {"message_id": message.get("message_id"), "session_id": message.get("session_id"),
+                    "text": transport_text_component(text, "telegram-html")["text"]}} if starting else {}),
             }
         return {"sent": False}
 

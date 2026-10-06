@@ -157,5 +157,12 @@ Workbench Session views are implemented with focused checks; live adoption is
 pending. Reboot start visibility uses shared durable projection and lifecycle
 discovery. Same-model API execution defaults to two isolated slots. Desktop
 installation binds an authenticated physical host/session independently of chat
-selection; remote/unconfirmed paths require byte upload. See the [repair record]
-(repairs/NIGHTLY_20261006_RESTART_AND_SESSIONS.md). Production adoption is separate.
+selection; remote/unconfirmed paths require byte upload. See the
+[repair record](repairs/NIGHTLY_20261006_RESTART_AND_SESSIONS.md). Production adoption is separate.
+
+The 2026-10-07 HASHI3 live candidate demonstrated overlapping native Codex
+Runs in two persistent Sessions of one Agent, with B completing before A.
+Command transports also carry the selected Session/generation and the Worker
+verifies them against PAO. A persisted reboot start message can be projected
+in the global banner while another conversation is selected; its message ID
+remains the presentation ACK identity. Further live acceptance is in progress.
