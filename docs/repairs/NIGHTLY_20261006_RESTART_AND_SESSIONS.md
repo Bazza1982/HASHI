@@ -185,3 +185,13 @@ Workbench now keeps a recovering state until authenticated health on that same
 connection is ready, then shows success and starts its visible-time dismissal.
 This fixes early presentation without rewriting the durable cutover result.
 Actual final source adoption and connector observations follow this comparison.
+
+Final observations located the remaining delay in the replaceable Functions
+Telegram ingress: its first empty getUpdates used timeout=30, and connectivity
+was reported only after that real poll returned. It now uses timeout=0 until a
+poll succeeds, then resumes the normal 30-second long polling. Offsets, accepted
+update delivery, webhook drop policy, bounded retries and failure readiness are
+unchanged. A red/green check verifies first timeout 0, following timeout 30 and
+delivery/offset persistence. This file is outside CORE_SOURCE_PATHS. The earlier
+28.1% result predates this second optimization; final live timing is recorded
+separately rather than retroactively changing that controlled comparison.

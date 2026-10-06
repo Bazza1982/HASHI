@@ -42,6 +42,43 @@ class _Bot:
         self.calls.append("shutdown")
 
 
+@pytest.mark.asyncio
+async def test_first_validated_poll_is_immediate_then_normal_long_poll_resumes():
+    bot = _Bot("token")
+    observed = []
+    normal_poll = asyncio.Event()
+
+    async def poll(**kwargs):
+        observed.append(kwargs)
+        if len(observed) == 1:
+            return [bot.update]
+        normal_poll.set()
+        await bot.release.wait()
+        return []
+
+    delivered = []
+    async def deliver(payload):
+        delivered.append(payload)
+
+    bot.get_updates = poll
+    ingress = CoreTelegramIngress(agent_name="alpha", token="token",
+        handle_lookup=lambda _: SimpleNamespace(deliver_telegram_update=deliver),
+        bot_factory=lambda _: bot)
+    try:
+        await ingress.start(drop_pending_updates=False)
+        assert not ingress.connected
+        await asyncio.wait_for(normal_poll.wait(), timeout=1)
+        assert observed[0]["timeout"] == 0
+        assert observed[1]["timeout"] == 30
+        assert observed[0]["offset"] is None
+        assert observed[1]["offset"] == 8
+        assert delivered == [bot.update.to_dict()]
+        assert ingress.connected
+        assert ("delete_webhook", True) not in bot.calls
+    finally:
+        await ingress.stop()
+
+
 def test_missing_ingress_with_configured_token_is_not_tokenless_local_mode():
     supervisor = object.__new__(FunctionWorkerSupervisor)
     supervisor._telegram_ingress = {}

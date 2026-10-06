@@ -127,7 +127,10 @@ class CoreTelegramIngress:
                 poll = asyncio.create_task(
                     self.bot.get_updates(
                         offset=self.offset,
-                        timeout=TELEGRAM_LONG_POLL_SECONDS,
+                        # Establish readiness with an actual successful poll,
+                        # without waiting a full empty long-poll interval on
+                        # startup/recovery. Subsequent polls keep normal pacing.
+                        timeout=TELEGRAM_LONG_POLL_SECONDS if self.connected else 0,
                         read_timeout=TELEGRAM_READ_TIMEOUT_SECONDS,
                         allowed_updates=Update.ALL_TYPES,
                     )

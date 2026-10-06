@@ -1,5 +1,11 @@
 # HASHI Agent FYI
 
+2026-10-07: Functions Telegram ingress now validates startup/recovery with an
+immediate real getUpdates poll before resuming its normal 30-second long poll.
+Connectivity still requires poll success; pending updates/offsets and bounded
+failure retries retain their existing owner. The previous complete-recovery
+measurement preceded this additional change. Final adoption is measured separately.
+
 2026-10-07: controlled HASHI3 max comparison (three runs each, same 11 Agents and
 unchanged Core) reduced complete recovery median 114.885 to 82.639 seconds, 28.1%.
 Qualification alone improved 47.5%. Optimized qualification remains the adopted
