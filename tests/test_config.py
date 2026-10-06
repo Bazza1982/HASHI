@@ -84,8 +84,8 @@ def _minimal_flex_agent():
         "type": "flex",
         "workspace_dir": "workspaces/flexy",
         "system_md": "workspaces/flexy/agent.md",
-        "allowed_backends": ["gemini-cli"],
-        "active_backend": "gemini-cli",
+        "allowed_backends": ["ollama-api"],
+        "active_backend": "ollama-api",
     }
 
 
@@ -142,10 +142,10 @@ def test_missing_agent_type_is_rejected(tmp_path):
         tmp_path,
         {
             "name": "legacy",
-            "engine": "gemini-cli",
+            "engine": "ollama-api",
             "workspace_dir": "workspaces/legacy",
             "system_md": "workspaces/legacy/agent.md",
-            "model": "gemini-3-flash",
+            "model": "gemma4:26b",
         },
     )
 
@@ -159,10 +159,10 @@ def test_explicit_fixed_stateless_agent_is_migrated_to_flex(tmp_path, caplog):
         {
             "name": "legacy",
             "type": "fixed",
-            "engine": "gemini-cli",
+            "engine": "ollama-api",
             "workspace_dir": "workspaces/legacy",
             "system_md": "workspaces/legacy/agent.md",
-            "model": "gemini-3-flash",
+            "model": "gemma4:26b",
         },
     )
 
@@ -171,9 +171,9 @@ def test_explicit_fixed_stateless_agent_is_migrated_to_flex(tmp_path, caplog):
         _, agents, _ = ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
 
     assert agents[0].type == "flex"
-    assert agents[0].active_backend == "gemini-cli"
+    assert agents[0].active_backend == "ollama-api"
     assert agents[0].allowed_backends == [
-        {"engine": "gemini-cli", "model": "gemini-3-flash"}
+        {"engine": "ollama-api", "model": "gemma4:26b"}
     ]
     assert agents[0].default_mode == "flex"
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
@@ -318,8 +318,8 @@ def test_explicit_flex_agent_type_does_not_warn(tmp_path, caplog):
             "type": "flex",
             "workspace_dir": "workspaces/flexy",
             "system_md": "workspaces/flexy/agent.md",
-            "allowed_backends": ["gemini-cli", "codex-cli"],
-            "active_backend": "gemini-cli",
+            "allowed_backends": ["ollama-api", "codex-cli"],
+            "active_backend": "ollama-api",
         },
     )
 
@@ -357,14 +357,14 @@ def test_fixed_default_mode_is_rejected_for_stateless_backend(tmp_path):
             "type": "flex",
             "workspace_dir": "workspaces/stateless-fixed",
             "allowed_backends": [
-                {"engine": "gemini-cli", "model": "gemini-3.1-pro-preview"}
+                {"engine": "ollama-api", "model": "gemma4:26b"}
             ],
-            "active_backend": "gemini-cli",
+            "active_backend": "ollama-api",
             "default_mode": "fixed",
         },
     )
 
-    with pytest.raises(ValueError, match="stateless backend 'gemini-cli'"):
+    with pytest.raises(ValueError, match="stateless backend 'ollama-api'"):
         ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
 
 
@@ -587,8 +587,8 @@ def test_flex_agent_does_not_receive_an_implicit_her_backend(tmp_path):
                         "type": "flex",
                         "workspace_dir": "workspaces/flexy",
                         "system_md": "workspaces/flexy/agent.md",
-                        "allowed_backends": [{"engine": "gemini-cli"}],
-                        "active_backend": "gemini-cli",
+                        "allowed_backends": [{"engine": "ollama-api"}],
+                        "active_backend": "ollama-api",
                     }
                 ],
             }
@@ -600,7 +600,7 @@ def test_flex_agent_does_not_receive_an_implicit_her_backend(tmp_path):
 
     _, agents, _ = ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
 
-    assert agents[0].allowed_backends == [{"engine": "gemini-cli"}]
+    assert agents[0].allowed_backends == [{"engine": "ollama-api"}]
 
 
 def test_enterprise_scheduler_lease_config_is_loaded(tmp_path):
@@ -632,8 +632,8 @@ def test_enterprise_scheduler_lease_config_is_loaded(tmp_path):
                         "type": "flex",
                         "workspace_dir": "workspaces/flexy",
                         "system_md": "workspaces/flexy/agent.md",
-                        "allowed_backends": ["gemini-cli"],
-                        "active_backend": "gemini-cli",
+                        "allowed_backends": ["ollama-api"],
+                        "active_backend": "ollama-api",
                     }
                 ],
             }
@@ -679,8 +679,8 @@ def test_enterprise_scheduler_lease_env_overrides_config(tmp_path, monkeypatch):
             "type": "flex",
             "workspace_dir": "workspaces/flexy",
             "system_md": "workspaces/flexy/agent.md",
-            "allowed_backends": ["gemini-cli"],
-            "active_backend": "gemini-cli",
+            "allowed_backends": ["ollama-api"],
+            "active_backend": "ollama-api",
         },
     )
 

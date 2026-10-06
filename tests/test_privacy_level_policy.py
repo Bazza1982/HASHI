@@ -47,7 +47,7 @@ def test_only_qualified_deepseek_provider_runs_inside_herv3_level_two() -> None:
 
 @pytest.mark.parametrize(
     "engine",
-    ("gemini-cli", "claude-cli", "codex-cli", "grok-cli"),
+    ("antigravity-cli", "claude-cli", "codex-cli", "grok-cli"),
 )
 def test_cli_harnesses_are_level_one_only(engine: str) -> None:
     assert get_supported_privacy_levels(engine) == (0, 1)

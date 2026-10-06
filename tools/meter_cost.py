@@ -544,7 +544,8 @@ _PROVIDER_DISPLAY_NAMES = {
     "openrouter": "OpenRouter",
     "codex-cli": "Codex CLI",
     "claude-cli": "Claude CLI",
-    "gemini-cli": "Gemini CLI",
+    "gemini-cli": "Gemini CLI",  # Historical usage is not rewritten.
+    "antigravity-cli": "Antigravity CLI",
     "grok-cli": "Grok CLI",
     "ollama-api": "Ollama",
     "xai-api": "xAI API",

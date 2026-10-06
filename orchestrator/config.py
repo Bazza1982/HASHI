@@ -56,8 +56,8 @@ def default_global_tools_config() -> dict[str, list[str]]:
 
 
 def _backend_registry():
-    # Shared compatibility defaults are protected Core. Instance model and
-    # effort opt-ins are resolved by the Function layer from configuration.
+    # Shared compatibility belongs to the qualified Function catalogue.
+    # Instance model/effort opt-ins resolve from local configuration.
     return importlib.import_module("orchestrator.flexible_backend_registry")
 
 
@@ -135,7 +135,6 @@ class GlobalConfig:
     secrets_path: Path = None
     workbench_port: int = DEFAULT_WORKBENCH_PORT
     api_gateway_port: int = DEFAULT_API_GATEWAY_PORT
-    gemini_cmd: str = "gemini"
     claude_cmd: str = "claude"
     codex_cmd: str = "codex"
     agy_cmd: str = "agy"
@@ -255,11 +254,8 @@ class ConfigManager:
                 raise ValueError(
                     f"Agent '{name}' uses legacy type='fixed' but has no engine to migrate."
                 )
-            if engine == "claw-cli":
-                raise ValueError(
-                    f"Agent '{name}' uses removed backend 'claw-cli'; "
-                    "configure 'her-v2' explicitly before migrating the agent."
-                )
+            if reason := _backend_registry().removed_backend_reason(engine):
+                raise ValueError(reason)
             model = row.pop("model", "default")
             row.pop("resume_policy", None)
             row["type"] = "flex"
@@ -362,10 +358,6 @@ class ConfigManager:
             active = registry.migrate_provider_only_active_backend(
                 row.get("active_backend"), allowed
             )
-            if active == "claw-cli" or any(
-                item.get("engine") == "claw-cli" for item in allowed
-            ):
-                raise ValueError(f"Agent '{name}' uses removed backend 'claw-cli'.")
             if active not in {item.get("engine") for item in allowed}:
                 raise ValueError(
                     f"Agent '{name}' active_backend '{active}' is not allowed."
@@ -678,11 +670,6 @@ class ConfigManager:
             secrets_path=self.secrets_path,
             workbench_port=workbench_port,
             api_gateway_port=api_gateway_port,
-            gemini_cmd=resolve_command_value(
-                g_raw.get("gemini_cmd", "gemini"),
-                config_dir=config_dir,
-                bridge_home=bridge_home,
-            ),
             claude_cmd=resolve_command_value(
                 g_raw.get("claude_cmd", "claude"),
                 config_dir=config_dir,
@@ -782,11 +769,6 @@ class ConfigManager:
             active_backend = registry.migrate_provider_only_active_backend(
                 a_raw.pop("active_backend"), allowed_backends
             )
-            if active_backend == "claw-cli":
-                raise ValueError(
-                    f"Agent '{name}' uses removed active backend 'claw-cli'; "
-                    "configure 'her-v2' instead."
-                )
             is_active = a_raw.pop("is_active", True)
             configured_default = a_raw.pop("default_mode", None)
             default_mode = (

@@ -8863,8 +8863,6 @@ class FlexibleAgentRuntime:
         return [
             ("claude_haiku", "Claude Haiku", "claude-cli", "claude-haiku-4-5"),
             ("claude_sonnet", "Claude Sonnet", "claude-cli", "claude-sonnet-4-6"),
-            ("gemini_flash", "Gemini Flash", "gemini-cli", "gemini-2.5-flash"),
-            ("gemini_lite", "Gemini Lite", "gemini-cli", "gemini-2.5-flash-lite"),
             ("deepseek_flash", "DeepSeek Flash", "deepseek-api", "deepseek-flash"),
             ("deepseek_pro", "DeepSeek Pro", "deepseek-api", "deepseek-v4-pro"),
             ("or_v32", "OR DeepSeek V3.2 Exp", "openrouter-api", "deepseek/deepseek-v3.2-exp"),
@@ -8881,7 +8879,6 @@ class FlexibleAgentRuntime:
         choices = {choice_id: (label, backend, model) for choice_id, label, backend, model in self._wrapper_model_choices()}
         grouped_rows = [
             ["claude_haiku", "claude_sonnet"],
-            ["gemini_flash", "gemini_lite"],
             ["deepseek_flash", "deepseek_pro"],
             ["or_v32", "or_v4_flash"],
             ["or_v4_pro", "or_gemini"],

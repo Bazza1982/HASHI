@@ -117,7 +117,7 @@ def creation_availability(global_config, rows, profiles, secrets, *, agent_name=
     """Reuse installation/OAuth preflight; validate API credential references."""
     from orchestrator.backend_preflight import BackendPreflight
     attrs = dict(global_config) if isinstance(global_config, Mapping) else vars(global_config or SimpleNamespace())
-    cfg = SimpleNamespace(gemini_cmd="gemini", claude_cmd="claude", codex_cmd="codex")
+    cfg = SimpleNamespace(claude_cmd="claude", codex_cmd="codex")
     cfg.__dict__.update(attrs)
     candidate = SimpleNamespace(name=agent_name, active_backend="", allowed_backends=rows)
     preflight = BackendPreflight().check_backend_availability(cfg, [candidate], secrets)

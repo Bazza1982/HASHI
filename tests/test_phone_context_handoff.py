@@ -177,7 +177,7 @@ async def test_pending_durable_fragment_blocks_hangup_text_before_any_provider_c
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("engine",["codex-cli","claude-code","gemini-cli","her-v2","openrouter-api"])
+@pytest.mark.parametrize("engine",["codex-cli","claude-code","antigravity-cli","her-v2","openrouter-api"])
 async def test_shared_phone_projection_contract_independent_of_engine(phone,engine):
     from orchestrator.phone_context_handoff import prepare_turn
     await phone.manager.append_fragment_once(phone.binding,Fragment("user","user","User role",0,100))

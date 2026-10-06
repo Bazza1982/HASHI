@@ -5,7 +5,11 @@ HER_V3_ENGINE = "her-v3"
 # ``her-v2`` remains the storage/adapter identifier until that compatibility
 # boundary is removed.  Public commands and projections use ``her-v3``.
 RETIRED_HER_ENGINE_ALIASES = frozenset({"her", HER_V3_ENGINE})
-REMOVED_ENGINE_IDS = frozenset({"claw-cli"})
+REMOVED_ENGINE_REPLACEMENTS = {
+    "claw-cli": HER_V2_ENGINE,
+    "gemini-cli": "antigravity-cli",
+}
+REMOVED_ENGINE_IDS = frozenset(REMOVED_ENGINE_REPLACEMENTS)
 PROVIDER_ONLY_ENGINE_IDS = frozenset(
     {"openrouter-api", "deepseek-api", "openai-compatible-api"}
 )
@@ -14,7 +18,6 @@ HER_V2_DEFAULT_ACCESS_SCOPE = "drive"
 HER_V2_DEFAULT_ALLOWED_TOOLS = ("*",)
 CLI_ENGINES = frozenset(
     {
-        "gemini-cli",
         "antigravity-cli",
         "claude-cli",
         "codex-cli",
@@ -23,22 +26,6 @@ CLI_ENGINES = frozenset(
 )
 
 BACKEND_REGISTRY: dict[str, dict] = {
-    "gemini-cli": {
-        "label": "gemini",
-        "gateway_enabled": True,
-        "privacy_levels": [0, 1],
-        "models": [
-            "gemini-3.1-pro-preview",
-            "gemini-3-flash-preview",
-            "gemini-2.5-pro",
-            "gemini-2.5-flash",
-            "gemini-2.5-flash-lite",
-        ],
-        "default_model": "gemini-2.5-flash",
-        "efforts": [],
-        "default_effort": None,
-        "secret_keys": ["gemini-cli_key"],
-    },
     "antigravity-cli": {
         "label": "antigravity",
         "gateway_enabled": True,
@@ -292,6 +279,16 @@ def public_backend_engine(engine: str | None) -> str:
     return HER_V3_ENGINE if canonical == HER_V2_ENGINE else canonical
 
 
+def removed_backend_reason(engine: str | None) -> str | None:
+    """Keep historical IDs intact, but reject their executable configuration."""
+
+    canonical = canonical_backend_engine(engine)
+    replacement = REMOVED_ENGINE_REPLACEMENTS.get(canonical)
+    if replacement is None:
+        return None
+    return f"Backend '{canonical}' has been removed; configure '{replacement}' instead."
+
+
 def apply_backend_policy_defaults(backend: dict) -> dict:
     """Apply backend-owned defaults without overriding explicit authority.
 
@@ -337,10 +334,8 @@ def normalize_allowed_backends(backends: list) -> list[dict]:
     for raw in backends or []:
         item = {"engine": raw} if isinstance(raw, str) else dict(raw)
         source_engine = str(item.get("engine") or "").strip()
-        if source_engine in REMOVED_ENGINE_IDS:
-            raise ValueError(
-                "Backend 'claw-cli' has been removed; configure 'her-v2' instead."
-            )
+        if reason := removed_backend_reason(source_engine):
+            raise ValueError(reason)
         if explicit_v2 and source_engine in RETIRED_HER_ENGINE_ALIASES:
             continue
         engine = canonical_backend_engine(source_engine)
@@ -364,7 +359,11 @@ def is_selectable_backend(engine: str | None) -> bool:
     """
 
     canonical = canonical_backend_engine(engine)
-    return bool(canonical and canonical not in PROVIDER_ONLY_ENGINE_IDS)
+    return bool(
+        canonical
+        and canonical not in REMOVED_ENGINE_IDS
+        and canonical not in PROVIDER_ONLY_ENGINE_IDS
+    )
 
 
 def migrate_provider_only_active_backend(
@@ -377,6 +376,8 @@ def migrate_provider_only_active_backend(
     HER v2; otherwise startup fails with an actionable configuration error.
     """
 
+    if reason := removed_backend_reason(engine):
+        raise ValueError(reason)
     canonical = canonical_backend_engine(engine)
     if canonical not in PROVIDER_ONLY_ENGINE_IDS:
         return canonical

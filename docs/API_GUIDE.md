@@ -359,7 +359,7 @@ Current boundaries:
   including `gpt-6-astra`, `gpt-6-sol`, and `gpt-6-luna`.
 - Also supported by `xai-api` models using `/chat/completions`, such as
   `grok-4.3`.
-- Gemini CLI, Claude CLI, and Grok CLI models are rejected instead of silently
+- Antigravity CLI, Claude CLI, and Grok CLI models are rejected instead of silently
   dropping tools.
 - xAI Responses API models, including `grok-4.5` and `grok-build-*`, are rejected
   until their separate function-call protocol is implemented.

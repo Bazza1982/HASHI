@@ -1139,7 +1139,7 @@ async def test_external_tools_still_reject_unsupported_cli_models_before_init(tm
     response = await server.handle_chat_completions(
         _Request(
             {
-                "model": "gemini-2.5-flash",
+                "model": "gemini-3.8-flash-high",
                 "messages": [{"role": "user", "content": "Use the tool"}],
                 "tools": [TOOL_SCHEMA],
             }

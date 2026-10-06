@@ -131,7 +131,7 @@ these controls are separate from Workzone.
 
 | **Engine Provider**  | **Current mechanism**                                                                       |
 | ------------ | ------------------------------------------------------------------------------------------- |
-| Gemini CLI   | \--approval-mode yolo                                                                       |
+| Antigravity CLI | \--dangerously-skip-permissions                                                          |
 | Codex CLI    | \--dangerously-bypass-approvals-and-sandbox                                                 |
 | Claude CLI   | \--dangerously-skip-permissions                                                             |
 | Grok CLI     | Uses bypassPermissions and --always-approve by default, subject to configuration            |

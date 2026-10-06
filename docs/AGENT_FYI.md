@@ -51,6 +51,12 @@ HASHI3 Telegram intake reports healthy only after a successful bounded poll; ord
 
 ## Engine, tools, and recovery
 
+Gemini CLI is retired; use the explicitly configured Antigravity CLI and its
+own model IDs. Reject legacy `gemini-cli` execution instead of aliasing it.
+Preserve historical messages/usage and Gemini models supplied by other
+qualified routes. The observed rejection concerned the old client, not the
+whole Google account. See [retirement](HASHI_GEMINI_CLI_RETIREMENT.md).
+
 Public HERV3 is her-v3; her-v2 names are compatibility only. JEV defaults off. /backend selects Engine, /provider Model Provider, /model model, /effort reasoning; Fixed/Flex and Memory+ are independent. /meter uses all physical calls/cost. Codex cumulative counters need a persisted turn baseline; estimate if unknown. USD estimates are not subscription bills.
 
 Level 2: HERV3/DeepSeek only. Local PII detection can miss values;

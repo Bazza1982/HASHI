@@ -2321,7 +2321,7 @@ async def test_wrapper_config_status_commands_include_clickable_buttons(tmp_path
     assert runtime._reply_payloads[-1]["reply_markup"] is not None
     wrap_markup = str(runtime._reply_payloads[-1]["reply_markup"])
     assert "wcfg:wrapid:claude_haiku" in wrap_markup
-    assert "wcfg:wrapid:gemini_flash" in wrap_markup
+    assert "wcfg:wrapid:gemini_flash" not in wrap_markup
     assert "wcfg:wrapid:deepseek_pro" in wrap_markup
     assert "wcfg:wrapid:or_v4_pro" in wrap_markup
     assert "wcfg:wrapctx:3" in wrap_markup
@@ -2630,7 +2630,7 @@ async def test_wrapper_config_buttons_update_wrapper_model_across_backends(tmp_p
     manager = _make_manager(tmp_path / "agent")
     manager.config.allowed_backends.extend(
         [
-            {"engine": "gemini-cli", "model": "gemini-2.5-flash"},
+            {"engine": "antigravity-cli", "model": "gemini-3.8-flash-high"},
             {"engine": "deepseek-api", "model": "deepseek-v4-pro"},
             {"engine": "openrouter-api", "model": "deepseek/deepseek-v4-flash"},
         ]

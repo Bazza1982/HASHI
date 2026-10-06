@@ -88,7 +88,7 @@ ambiguous:
 
 - An **Engine Provider** or **Harness Provider** supplies an agentic runtime
   that turns model capability into agentic work. Examples include Codex CLI,
-  Claude Code, Gemini CLI, Grok CLI, and HERV3.
+  Claude Code, Antigravity CLI, Grok CLI, and HERV3.
 - A **Model Provider** supplies model inference. Examples include HASHI API,
   DeepSeek, OpenRouter, xAI, or another capability-conformant inference
   service.

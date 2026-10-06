@@ -1330,7 +1330,6 @@ class BridgeContextAssembler:
     DEFAULT_PROMPT_TOKEN_BUDGET: ClassVar[int] = 64_000
     PROMPT_TOKEN_BUDGETS: ClassVar[dict[str, int]] = {
         "codex-cli": DEFAULT_PROMPT_TOKEN_BUDGET,
-        "gemini-cli": DEFAULT_PROMPT_TOKEN_BUDGET,
         "claude-cli": DEFAULT_PROMPT_TOKEN_BUDGET,
         "grok-cli": DEFAULT_PROMPT_TOKEN_BUDGET,
         "openrouter-api": DEFAULT_PROMPT_TOKEN_BUDGET,

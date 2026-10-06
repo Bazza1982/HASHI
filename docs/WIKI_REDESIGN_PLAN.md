@@ -237,7 +237,7 @@ result = subprocess.run(
 Benefits:
 - **No extra API key** — uses Lily's existing claude authentication
 - **Backend policy is safe by default** — if Lily's active backend is a remote API backend such as `openrouter-api` or `deepseek-api`, the wiki pipeline must stop and report instead of running.
-- **CLI backend is switchable** — if Lily's active CLI backend changes to another approved CLI route such as `gemini-cli`, the wiki pipeline can follow after explicit config approval.
+- **CLI backend is switchable** — if Lily's active CLI backend changes to another approved CLI route such as `antigravity-cli`, the wiki pipeline can follow after explicit config approval.
 - **Token tracking** — claude-cli's native token output is parsed and logged to `wiki_tokens.jsonl`
 - **No separate API billing route** — the job uses Lily's existing CLI authentication path, not a new API account or key
 
@@ -789,7 +789,7 @@ result = subprocess.run(
 This means:
 - **No extra API key** required — uses Lily's existing Anthropic authentication
 - **Same model, same quality** as Lily's normal conversations
-- **CLI/local only** — `claude-cli`, approved `gemini-cli`, or explicitly approved local backend; never OpenRouter/DeepSeek for automated wiki work
+- **CLI/local only** — `claude-cli`, approved `antigravity-cli`, or explicitly approved local backend; never OpenRouter/DeepSeek for automated wiki work
 - **Lily-owned automation** — the HASHI cron prompt is owned by Lily and she must read the run report before summarising
 
 ### 12.2 Daily steady-state token budget

@@ -7,7 +7,7 @@ import pytest
 from adapters.claude_cli import ClaudeCLIAdapter
 from adapters.codex_cli import CodexCLIAdapter
 from adapters.deepseek_api import DeepSeekAdapter
-from adapters.gemini_cli import GeminiCLIAdapter
+from adapters.antigravity_cli import AntigravityCLIAdapter
 from adapters.grok_cli import GrokCLIAdapter
 from adapters.ollama_api import OllamaAdapter
 from adapters.openrouter_api import OpenRouterAdapter
@@ -42,11 +42,11 @@ def test_stream_json_cli_backends_advertise_answer_stream(tmp_path):
     cfg = _agent_config(tmp_path)
 
     claude = ClaudeCLIAdapter(cfg, SimpleNamespace(claude_cmd="claude"), api_key="test-key")
-    gemini = GeminiCLIAdapter(cfg, SimpleNamespace(gemini_cmd="gemini"), api_key="test-key")
+    antigravity = AntigravityCLIAdapter(cfg, SimpleNamespace(agy_cmd="agy"))
     grok = GrokCLIAdapter(cfg, SimpleNamespace(grok_cmd="grok"), api_key="test-key")
 
     assert getattr(claude.capabilities, "supports_answer_stream", False) is True
-    assert getattr(gemini.capabilities, "supports_answer_stream", False) is True
+    assert getattr(antigravity.capabilities, "supports_answer_stream", False) is True
     assert getattr(grok.capabilities, "supports_answer_stream", False) is True
 
 
@@ -63,7 +63,7 @@ def test_backend_presentation_capabilities_have_explicit_meaning(tmp_path):
     backends = {
         "codex": CodexCLIAdapter(cfg, SimpleNamespace(codex_cmd="codex"), api_key="test-key"),
         "claude": ClaudeCLIAdapter(cfg, SimpleNamespace(claude_cmd="claude"), api_key="test-key"),
-        "gemini": GeminiCLIAdapter(cfg, SimpleNamespace(gemini_cmd="gemini"), api_key="test-key"),
+        "antigravity": AntigravityCLIAdapter(cfg, SimpleNamespace(agy_cmd="agy")),
         "grok": GrokCLIAdapter(cfg, SimpleNamespace(grok_cmd="grok"), api_key="test-key"),
         "openrouter": OpenRouterAdapter(cfg, SimpleNamespace(), api_key="test-key"),
         "deepseek": DeepSeekAdapter(cfg, SimpleNamespace(), api_key="test-key"),
@@ -77,10 +77,10 @@ def test_backend_presentation_capabilities_have_explicit_meaning(tmp_path):
 
     assert backends["codex"].capabilities.supports_thinking_stream is False
     assert backends["codex"].capabilities.supports_commentary_stream is True
-    assert backends["gemini"].capabilities.supports_thinking_stream is False
+    assert backends["antigravity"].capabilities.supports_thinking_stream is False
     for name in ("claude", "grok", "openrouter", "deepseek", "xai", "ollama"):
         assert backends[name].capabilities.supports_thinking_stream is True
-    for name in ("claude", "gemini", "grok", "openrouter", "deepseek", "xai", "ollama"):
+    for name in ("claude", "antigravity", "grok", "openrouter", "deepseek", "xai", "ollama"):
         assert backends[name].capabilities.supports_commentary_stream is False
 
 
@@ -106,9 +106,9 @@ async def test_claude_text_delta_preserves_full_answer_chunk(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_gemini_text_delta_preserves_full_answer_chunk(tmp_path):
+async def test_antigravity_text_delta_preserves_full_answer_chunk(tmp_path):
     cfg = _agent_config(tmp_path)
-    adapter = GeminiCLIAdapter(cfg, SimpleNamespace(gemini_cmd="gemini"), api_key="test-key")
+    adapter = AntigravityCLIAdapter(cfg, SimpleNamespace(agy_cmd="agy"))
     events = []
     fragments = []
 
@@ -117,13 +117,13 @@ async def test_gemini_text_delta_preserves_full_answer_chunk(tmp_path):
 
     long_delta = "y" * 250
     completed = adapter._parse_stream_json_line(
-        json.dumps({"type": "message", "role": "assistant", "content": long_delta, "delta": True}),
+        json.dumps({"event": "step_update", "step_update": {"step_type": "agent_response", "text_delta": long_delta}}),
         collect,
         fragments,
     )
     await asyncio.sleep(0)
 
-    assert completed is False
+    assert completed == (False, "")
     assert fragments == [long_delta]
     assert len(events) == 1
     assert events[0].kind == KIND_TEXT_DELTA

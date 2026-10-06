@@ -1,5 +1,10 @@
 # HASHI Real Streaming Output Plan
 
+> 2026-10-06: Gemini CLI and its adapter are retired. Its implementation and
+> validation notes below are historical, not pending work for the removed
+> client. Antigravity has its own stream-json adapter and validation. See
+> [retirement](HASHI_GEMINI_CLI_RETIREMENT.md).
+
 > Superseded for Telegram presentation on 2026-08-11. Live answer preview was
 > retired in favor of final-only answer delivery plus the independent
 > `/typing`, `/verbose`, and `/think` controls. Backend answer deltas remain

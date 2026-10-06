@@ -1,5 +1,11 @@
 # HASHI Integrations
 
+Gemini CLI is retired. Use the separately authenticated Antigravity CLI engine
+(`antigravity-cli`) and its own model catalogue. Historical Gemini CLI messages
+remain readable; retirement does not disable Gemini models served by
+Antigravity or a configured Model Provider. See
+[retirement and migration](HASHI_GEMINI_CLI_RETIREMENT.md).
+
 [Install](INSTALL.md) · [User guide](USER_GUIDE.md) ·
 [Configuration](CONFIGURATION.md) · [Troubleshooting](TROUBLESHOOTING.md)
 

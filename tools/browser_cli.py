@@ -2,7 +2,7 @@
 """
 browser_cli.py — Command-line wrapper for HASHI browser tools.
 
-Allows any agent with bash access (Claude CLI, Gemini CLI, Codex CLI, etc.)
+Allows any agent with shell access (Claude CLI, Antigravity CLI, Codex CLI, etc.)
 to use browser capabilities without needing the OpenRouter tool framework.
 
 Usage:

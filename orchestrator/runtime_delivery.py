@@ -98,7 +98,8 @@ def _backend_runtime_name(engine: str) -> str:
     names = {
         "codex-cli": "Codex",
         "claude-cli": "Claude CLI",
-        "gemini-cli": "Gemini CLI",
+        "gemini-cli": "Gemini CLI",  # Historical failures remain readable.
+        "antigravity-cli": "Antigravity CLI",
         "grok-cli": "Grok CLI",
         "her": "HASHI Engine Runtime (HER)",
         "her-v2": "HASHI Engine Runtime (HER)",

@@ -79,11 +79,6 @@ def test_registry_entry_and_cli_engines():
     assert "gemini-3.8-flash-high" in entry["models"]
     assert "gpt-oss-120b-medium" in entry["models"]
     assert "antigravity-cli" in CLI_ENGINES
-    # gemini-cli dual-track entry must stay untouched
-    gemini = BACKEND_REGISTRY["gemini-cli"]
-    assert gemini["label"] == "gemini"
-    assert gemini["default_model"] == "gemini-2.5-flash"
-    assert gemini["secret_keys"] == ["gemini-cli_key"]
 
 
 def test_adapter_class_registered():
@@ -535,7 +530,6 @@ def test_backend_preflight_antigravity_available(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "no-such-dir"))
     preflight = BackendPreflight()
     global_cfg = SimpleNamespace(
-        gemini_cmd="gemini",
         claude_cmd="claude",
         codex_cmd="codex",
         grok_cmd="grok",

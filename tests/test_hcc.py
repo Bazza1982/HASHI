@@ -248,7 +248,7 @@ def test_preference_is_opt_in_persistent_strict_and_preserves_other_state(tmp_pa
     assert state_path.read_text() == "{broken"
 
 
-@pytest.mark.parametrize("engine", ["her-v2", "codex-cli", "claude-cli", "gemini-cli"])
+@pytest.mark.parametrize("engine", ["her-v2", "codex-cli", "claude-cli", "antigravity-cli"])
 @pytest.mark.parametrize("incremental", [False, True])
 def test_every_turn_loads_full_hcc_without_memory_or_query_filter(tmp_path, engine, incremental):
     path = write_pcm(tmp_path, "weather V1\nnews V1\nUSER_PRIVATE_CACHE")

@@ -10,7 +10,7 @@ import pytest
 from adapters.base import BaseBackend, BackendCapabilities, BackendResponse
 from adapters.claude_cli import ClaudeCLIAdapter
 from adapters.codex_cli import CodexCLIAdapter
-from adapters.gemini_cli import GeminiCLIAdapter
+from adapters.antigravity_cli import AntigravityCLIAdapter
 from adapters.grok_cli import GrokCLIAdapter
 from adapters.timeout_policy import (
     IDLE_TIMEOUT_KEY,
@@ -66,7 +66,7 @@ def test_active_cli_defaults_use_one_hour_idle_liveness_only():
     for adapter_class in (
         CodexCLIAdapter,
         ClaudeCLIAdapter,
-        GeminiCLIAdapter,
+        AntigravityCLIAdapter,
         GrokCLIAdapter,
     ):
         assert adapter_class.DEFAULT_IDLE_TIMEOUT_SEC == 60 * 60

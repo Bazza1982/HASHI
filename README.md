@@ -8,7 +8,7 @@ infrastructure you control. Work through a terminal, Telegram, WhatsApp, or
 an authenticated client API.
 
 Use HASHI's native **HERV3** engine or connect engines such as Claude Code,
-Codex CLI, Gemini CLI, and Grok CLI. HERV3 keeps one durable Engine Session
+Codex CLI, Antigravity CLI, and Grok CLI. HERV3 keeps one durable Engine Session
 while one selected model reasons, uses tools, adapts, and verifies in a
 continuous loop.
 

@@ -2,6 +2,10 @@
 
 This document describes known issues and their workarounds in HASHI.
 
+Gemini CLI references below are historical examples. That client and its
+adapter are retired; current Engine selection uses Antigravity CLI. See
+[retirement](HASHI_GEMINI_CLI_RETIREMENT.md).
+
 ---
 
 ## Memory Contamination from CLI Integration
@@ -12,7 +16,7 @@ This document describes known issues and their workarounds in HASHI.
 
 ### Description
 
-HASHI integrates directly with CLI-based AI coding agents (Claude Code, Gemini CLI, Codex CLI) by design. This tight integration enables powerful development workflows but has a side effect: **CLI memory systems may leak into HASHI agent conversations**.
+HASHI integrates directly with CLI-based AI coding agents (Claude Code, Antigravity CLI, Codex CLI) by design. This tight integration enables powerful development workflows but has a side effect: **CLI memory systems may leak into HASHI agent conversations**.
 
 ### How It Happens
 

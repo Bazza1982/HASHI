@@ -67,7 +67,7 @@ ENGINE_VENDOR_NAMESPACES: dict[str, str] = {
     "openai-api": "openai",
     "claude-cli": "anthropic",
     "anthropic-api": "anthropic",
-    "gemini-cli": "google",
+    "gemini-cli": "google",  # Retained for historical usage receipts only.
     "google-api": "google",
     "deepseek-api": "deepseek",
     "xai-api": "x-ai",
