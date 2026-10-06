@@ -165,6 +165,7 @@ class CodexCLIAdapter(BaseBackend):
         self._last_cumulative_usage: TokenUsage | None = None
         self.tool_registry = None
         self._hashi_mcp_enabled = False
+        self._native_hook_supported = False
 
     def _should_use_stdin_transport(self, prompt: str) -> bool:
         if (
@@ -203,6 +204,11 @@ class CodexCLIAdapter(BaseBackend):
                 return False
             version = stdout.decode(errors="replace").strip()
             self.logger.info(f"Codex CLI version: {version}")
+            import re
+            match = re.search(r"\b(\d+)\.(\d+)\.(\d+)\b", version)
+            self._native_hook_supported = bool(match and tuple(map(int, match.groups())) >= (0, 160, 0))
+            if not self._native_hook_supported:
+                self.logger.warning("Codex native process guard requires the qualified CLI 0.160.0 or newer; unavailable for %s", version)
             descriptor = prepare_hashi_mcp(self, backend="codex-cli")
             if descriptor is not None:
                 descriptor.close()
@@ -728,6 +734,7 @@ class CodexCLIAdapter(BaseBackend):
         *,
         reasoning_effort: str | None = None,
         image_paths: tuple[Path, ...] = (),
+        native_hook_receipt: Path | None = None,
     ) -> list[str]:
         """Build the codex exec command. Uses 'resume' sub-command if a session exists.
 
@@ -769,7 +776,6 @@ class CodexCLIAdapter(BaseBackend):
                 "browser_use",
                 "computer_use",
                 "image_generation",
-                "hooks",
             ):
                 base_flags += ["--disable", feature]
             base_flags += ["-c", 'web_search="disabled"']
@@ -787,6 +793,12 @@ class CodexCLIAdapter(BaseBackend):
                 "-c",
                 mcp_value,
             ]
+
+        if native_hook_receipt is not None:
+            from orchestrator.codex_native_hooks import hook_overrides
+            base_flags += hook_overrides(receipt_path=native_hook_receipt)
+        else:
+            base_flags += ["--disable", "hooks"]
 
         if self._session_mode and self._session_id:
             # Resume existing session — access root already set in session, no --add-dir needed
@@ -1156,11 +1168,17 @@ class CodexCLIAdapter(BaseBackend):
                     )
                 )
 
+        native_hook_receipt = None
+        if self._native_hook_supported:
+            from orchestrator.request_diagnostics import safe_request_id
+            native_hook_receipt = self.config.workspace_dir / "backend_state" / "native_shell_guard" / (safe_request_id(request_id) + ".json")
+            native_hook_receipt.unlink(missing_ok=True)
         cmd = self._build_cmd(
             prompt_arg,
             output_path,
             reasoning_effort=reasoning_effort,
             image_paths=native_image_paths,
+            native_hook_receipt=native_hook_receipt,
         )
         session_mode = "resume" if self._session_id else "new"
         resumed_thread_id = self._session_id if self._session_mode else None
@@ -1596,6 +1614,21 @@ class CodexCLIAdapter(BaseBackend):
                         "using estimated usage instead of charging prior turns",
                         request_id,
                     )
+
+            if native_hook_receipt is not None and terminal_event_type == "turn.completed":
+                try:
+                    loaded = json.loads(native_hook_receipt.read_text(encoding="utf-8"))
+                    guard_loaded = loaded.get("type") == "hashi.native-shell-guard" and loaded.get("version") == 1 and loaded.get("loaded") is True
+                except (OSError, ValueError, AttributeError):
+                    guard_loaded = False
+                if not guard_loaded:
+                    return with_media_metadata(BackendResponse(
+                        text="", duration_ms=round((time.perf_counter() - started) * 1000, 2), is_success=False,
+                        error="Codex native process protection did not load; the result cannot be accepted. Check completed operations before repeating this request.",
+                        error_code="CODEX_NATIVE_GUARD_UNAVAILABLE", error_retryable=False,
+                        tool_call_count=len(tool_item_ids), side_effects_possible=bool(side_effect_item_ids),
+                        stream_metadata={"native_process_guard":{"loaded":False}, "provider_activity_observed":provider_activity_observed},
+                    ))
 
             if terminal_failure is not None:
                 if (

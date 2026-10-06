@@ -1078,6 +1078,8 @@ async def test_adapter_direct_response_uses_final_lane_once(tmp_path):
     assert response.stop_reason == "completed"
     assert response.stream_metadata["her_v2"]["classification"] is None
     assert [request.stage for _profile, request in provider.requests] == [Stage.DIRECT]
+    assert adapter._v2_config.fallback_enabled is False
+    assert provider.requests[0][1].provider_stream_inactivity_timeout_s == 300.0
     final_events = [event for event in events if event.delivery_class == DELIVERY_FINAL]
     assert len(final_events) == 1
     assert final_events[0].summary == response.text

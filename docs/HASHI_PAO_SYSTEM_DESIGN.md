@@ -13,6 +13,21 @@ Codex MCP isolation inventories standalone servers with plugins disabled, matchi
 both CLI execution and the app-server bridge. Plugin-provided transports must
 not become enabled-only top-level MCP overrides after their plugin is disabled.
 
+On qualified Codex CLI 0.160+, an owned command-scoped native shell hook routes
+process termination to HASHI's managed process tools. It ignores user config,
+installs no persistent profile and preserves ordinary coding/inspection commands.
+Managed termination protects the current Function and all runtime ancestors.
+The hook is a guardrail; specialized native programs and vendor hook failure
+behavior do not constitute an OS enforcement boundary. HASHI3 qualification
+includes an actual denied native termination with a surviving canary process.
+
+Terminal errors carry one bounded versioned public failure result through Session
+persistence and Frontend Connector projection. It carries the canonical Engine,
+observable effect counts and the owner's recovery decision. Completed tool calls
+and verified effects remain separate. Unknown effects never suggest replay;
+unknown future public error codes remain visible. See the [2026-10-06 repair](repairs/NIGHTLY_20261006_HASHI3.md)
+for source, offline checks and runtime adoption recorded separately.
+
 Provider-Agnostic Orchestration (PAO) is HASHI's outer control plane. It turns
 an authenticated user or system request into a governed HASHI Run, selects an
 Engine (Harness) Provider, supplies that Engine with authoritative PCM and

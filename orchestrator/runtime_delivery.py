@@ -565,11 +565,13 @@ def format_backend_error_for_user(
         )
 
     reconciliation = context.get("effect_reconciliation")
+    replay_blocked = bool(context.get('side_effects_possible'))
     if isinstance(reconciliation, Mapping):
         confirmed_reads = max(0, int(reconciliation.get("confirmed_read_count") or 0))
         confirmed = max(0, int(reconciliation.get("confirmed_write_count") or 0))
         unverified = max(0, int(reconciliation.get("unverified_action_count") or 0))
         completed_jobs = max(0, int(reconciliation.get("completed_background_job_count") or 0))
+        no_change = max(0, int(reconciliation.get('no_change_count') or 0))
         if confirmed_reads:
             lines.append(
                 ui_language.tr(
@@ -584,13 +586,16 @@ def format_backend_error_for_user(
             lines.append(
                 ui_language.tr("error.completed_background_jobs", locale=selected, count=completed_jobs)
             )
+        if no_change:
+            lines.append(ui_language.tr('error.no_change_actions', locale=selected, count=no_change))
         if unverified:
             lines.append(
                 ui_language.tr("error.unverified_actions", locale=selected, count=unverified)
             )
         if reconciliation.get("evidence_limited") is True:
             lines.append(ui_language.tr("error.audit_incomplete", locale=selected))
-        if confirmed_reads or confirmed or completed_jobs or unverified:
+        replay_blocked = replay_blocked or bool(confirmed or completed_jobs or unverified or reconciliation.get('evidence_limited'))
+        if replay_blocked:
             lines.append(ui_language.tr("error.no_blind_retry", locale=selected))
     elif bool(context.get("side_effects_possible")):
         lines.append(
@@ -618,13 +623,38 @@ def format_backend_error_for_user(
         )
     elif error_code == "PROVIDER_BAD_REQUEST":
         lines.append(ui_language.tr("error.action_bad_request", locale=selected))
-    elif context.get("error_retryable") is True:
+    elif context.get("error_retryable") is True and not replay_blocked:
         lines.append(ui_language.tr("error.action_retryable", locale=selected))
 
     if exact != raw:
         lines.append("")
         lines.append(ui_language.tr("error.raw", locale=selected, error=raw))
     return "\n".join(lines).strip()
+
+
+def build_public_failure(engine: str, error_text: str, *, locale: str | None = None,
+                         error_context: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Build the one owner-defined terminal meaning consumed by every frontend."""
+    from orchestrator.bootstrap_logging import redact_log_text
+    from orchestrator.flexible_backend_registry import public_backend_engine
+    from orchestrator.frontend_contracts import normalize_public_failure
+    context = dict(error_context or {})
+    backend = public_backend_engine(context.get('backend') or engine)
+    effects = context.get('effect_reconciliation') or {}
+    effects = dict(effects) if isinstance(effects, Mapping) else {}
+    blocked = bool(context.get('side_effects_possible') or effects.get('confirmed_write_count')
+        or effects.get('unverified_action_count') or effects.get('pending_action_count')
+        or effects.get('completed_background_job_count') or effects.get('evidence_limited'))
+    action = 'verify_results' if blocked else 'retry' if context.get('error_retryable') is True else 'inspect_failure'
+    body = format_backend_error_for_user(backend, redact_log_text(str(error_text or '')),
+                                        locale=locale, error_context=context)
+    if len(body) > 12000:
+        body = body[:12000] + '\n' + ui_language.tr('error.truncated', locale=locale)
+    header = '❌ ' + ui_language.tr('error.backend_header', locale=locale, backend=backend)
+    return normalize_public_failure({'type':'hashi.public-failure', 'version':1,
+        'backend':backend, 'error_code':context.get('error_code'), 'error_retryable':context.get('error_retryable'),
+        'side_effects_possible':bool(context.get('side_effects_possible')), 'effects':effects,
+        'retry_action':action, 'text':header + '\n\n' + body})
 
 
 async def _send_long_message_transport(
@@ -868,21 +898,12 @@ async def _send_long_message_transport(
     if purpose == "error":
         locale = ui_language.preferred_locale(runtime, actor_id=chat_id)
         errors_path = str(getattr(runtime, "session_dir", runtime.workspace_dir) / "errors.log")
-        header = "❌ " + ui_language.tr(
-            "error.backend_header",
-            locale=locale,
-            backend=runtime.config.active_backend,
-        )
-        if request_id:
-            header += f" | {request_id}"
-
         max_excerpt = 2400
-        s = format_backend_error_for_user(
-            runtime.config.active_backend,
-            text,
-            locale=locale,
-            error_context=error_context,
-        )
+        public_failure = error_context.get('public_failure') if isinstance(error_context, Mapping) else None
+        if not isinstance(public_failure, Mapping):
+            public_failure = build_public_failure(runtime.config.active_backend, text,
+                                                  locale=locale, error_context=error_context)
+        s = public_failure['text']
         if len(s) > max_excerpt:
             head = s[:1200]
             tail = s[-800:]
@@ -902,7 +923,7 @@ async def _send_long_message_transport(
                     request_id=request_id,
                 )
             )
-        msg = f"{header}\n\n{excerpt}\n\n" + "\n".join(log_lines)
+        msg = f"{excerpt}\n\n" + "\n".join(log_lines)
         if len(msg) > tg_max_len:
             truncated = ui_language.tr("error.truncated", locale=locale)
             msg = msg[: tg_max_len - len(truncated) - 9] + f"\n... ({truncated})"

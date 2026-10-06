@@ -6,10 +6,19 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import tempfile
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture
+def installed_data_root():
+    # The installer deliberately rejects data inside the program checkout.
+    # --basetemp may live in that checkout; use an actual external directory.
+    with tempfile.TemporaryDirectory(prefix="hashi-install-contract-") as directory:
+        yield Path(directory)
 
 
 def _node(script, *args, environment=None):
@@ -111,9 +120,9 @@ def test_explicit_transcription_optout_never_installs_or_publishes(tmp_path):
     assert data["pointer"] is None and not root.exists()
 
 
-def test_npm_default_main_calls_sidecar_for_already_prepared_core(tmp_path):
+def test_npm_default_main_calls_sidecar_for_already_prepared_core(installed_data_root):
     version = json.loads((ROOT / "package.json").read_text())["version"]
-    data_root = tmp_path / "data"
+    data_root = installed_data_root
     version_root = data_root / "runtimes" / version
     python = version_root / "build-ready" / "bin" / "python"
     python.parent.mkdir(parents=True)
@@ -244,9 +253,9 @@ def test_already_prepared_sidecar_is_probed_without_a_second_install(tmp_path):
     assert "--check" in second["calls"][0]["args"]
 
 
-def test_fresh_npm_core_generation_also_prepares_sidecar(tmp_path):
+def test_fresh_npm_core_generation_also_prepares_sidecar(installed_data_root):
     version = json.loads((ROOT / "package.json").read_text())["version"]
-    data_root = tmp_path / "data"
+    data_root = installed_data_root
     version_root = data_root / "runtimes" / version
     script = _PREPARATION[:_PREPARATION.index("const setup =")] + r"""
 const previousSpawn = cp.spawnSync;

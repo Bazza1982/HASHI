@@ -106,7 +106,9 @@ async def test_xai_chat_adapter_uses_shared_bad_tool_json_repair(tmp_path):
     adapter.sys_prompt = "system"
     adapter._bearer_token = "static"
     adapter._base_url = "https://api.x.ai/v1"
-    adapter.tool_registry = SimpleNamespace(get_tool_definitions=lambda tiers=None: [])
+    from tools.registry import ToolRegistry
+    (tmp_path / "a.txt").write_text("repair-verified-file-content", encoding="utf-8")
+    adapter.tool_registry = ToolRegistry(["file_read"], tmp_path, tmp_path, {})
     from adapters.openrouter_api import _APIResult
 
     bad_call = {
@@ -128,11 +130,11 @@ async def test_xai_chat_adapter_uses_shared_bad_tool_json_repair(tmp_path):
     )
     executed = []
 
-    async def run_tool_calls(calls, messages, _callback, **_kwargs):
+    actual_run_tools = adapter._run_tool_calls
+
+    async def run_tool_calls(calls, messages, callback, **kwargs):
         executed.extend(calls)
-        messages.append(
-            {"role": "tool", "tool_call_id": "call-xai", "content": "contents"}
-        )
+        return await actual_run_tools(calls, messages, callback, **kwargs)
 
     adapter._run_tool_calls = run_tool_calls
     with patch.object(adapter, "_resolve_bearer", new=AsyncMock()), patch.object(
@@ -143,6 +145,10 @@ async def test_xai_chat_adapter_uses_shared_bad_tool_json_repair(tmp_path):
     assert response.is_success is True
     assert executed == [good_call]
     assert call_api.await_count == 3
+    tool_results = [message for message in call_api.await_args.args[0]["messages"]
+                    if message.get("role") == "tool"]
+    assert len(tool_results) == 1
+    assert "repair-verified-file-content" in tool_results[0]["content"]
     assert response.stream_metadata["provider_tool_repair_count"] == 1
     assert Path(
         response.stream_metadata["provider_protocol_forensic_path"]

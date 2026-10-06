@@ -68,17 +68,23 @@ def _read_recent_jsonl(path: Path) -> tuple[list[dict[str, Any]], bool]:
             if offset:
                 handle.readline()  # discard a partial record
             content = handle.read(_MAX_LOG_BYTES)
+    except FileNotFoundError:
+        return [], False  # Individual ledgers are optional; coverage is checked below.
     except OSError:
-        return [], False
+        return [], True
     rows: list[dict[str, Any]] = []
+    incomplete = bool(offset)
     for raw_line in content.splitlines():
         try:
             row = json.loads(raw_line.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
+            incomplete = True
             continue
         if isinstance(row, Mapping):
             rows.append(dict(row))
-    return rows, bool(offset)
+        else:
+            incomplete = True
+    return rows, incomplete
 
 
 def _tool_action(row: Mapping[str, Any], *, source: str) -> dict[str, Any]:
@@ -180,6 +186,7 @@ def build_request_diagnostics(
         for row in smart_rows
         if str(row.get("request_id") or row.get("task_id") or "") == request
     )
+    actions_truncated = len(actions) > _MAX_ACTIONS
     actions = actions[-_MAX_ACTIONS:]
     file_writes = [
         {
@@ -226,6 +233,9 @@ def build_request_diagnostics(
             "smart_tool_ledger": str(workspace / "tool_ledger.jsonl"),
             "tool_log_suffix_truncated": tool_truncated,
             "smart_log_suffix_truncated": smart_truncated,
+            "actions_truncated": actions_truncated,
+            "tool_log_missing": not (workspace / "tool_action_audit.jsonl").is_file(),
+            "smart_log_missing": not (workspace / "tool_ledger.jsonl").is_file(),
         },
     }
 
@@ -261,16 +271,23 @@ def build_user_effect_reconciliation(
         evidence_limited = evidence_limited or bool(
             evidence["tool_log_suffix_truncated"]
             or evidence["smart_log_suffix_truncated"]
+            or evidence["actions_truncated"]
         )
         for index, action in enumerate(report["tool_actions"]):
             call_id = str(action.get("tool_call_id") or "")
             key = call_id or f"{location}:{action.get('source')}:{index}"
             previous = by_call.get(key)
-            if previous is None or (
-                not isinstance(previous.get("effect_receipt"), Mapping)
+            terminal_statuses = {"success", "failed", "blocked"}
+            previous_terminal = previous is not None and previous.get("status") in terminal_statuses
+            current_terminal = action.get("status") in terminal_statuses
+            if previous is None or (current_terminal and not previous_terminal) or (
+                current_terminal == previous_terminal
+                and not isinstance(previous.get("effect_receipt"), Mapping)
                 and isinstance(action.get("effect_receipt"), Mapping)
             ):
                 by_call[key] = action
+            elif current_terminal and previous_terminal and action.get("effect") == "no_change" and previous.get("effect") == "unknown":
+                by_call[key] = {**previous, "effect":"no_change"}
         for job in report["background_jobs"]:
             jobs_by_id[str(job.get("job_id") or "")] = job
     confirmed_reads = sum(1 for action in by_call.values() if _confirmed_read(action))
@@ -278,12 +295,23 @@ def build_user_effect_reconciliation(
         1
         for action in by_call.values()
         if action.get("tool_name") in _FILE_WRITE_TOOLS
+        and action.get("status") == "success"
         and isinstance(action.get("effect_receipt"), Mapping)
         and action["effect_receipt"].get("kind") == "write"
         and action["effect_receipt"].get("readback") is True
     )
     observed = max(max(0, int(tool_call_count)), len(by_call))
-    unverified = max(0, observed - confirmed_reads - confirmed_writes)
+    terminal_statuses = {"success", "failed", "blocked"}
+    no_change = sum(
+        1 for action in by_call.values()
+        if action.get("effect") == "no_change" and action.get("status") in terminal_statuses
+    )
+    completed = sum(1 for action in by_call.values() if action.get("status") in terminal_statuses)
+    pending = len(by_call) - completed
+    evidence_limited = evidence_limited or len(by_call) < max(0, int(tool_call_count))
+    if side_effects_possible and not by_call:
+        evidence_limited = True
+    unverified = max(0, observed - confirmed_reads - confirmed_writes - no_change)
     if (
         side_effects_possible
         and not confirmed_reads
@@ -294,6 +322,9 @@ def build_user_effect_reconciliation(
     return {
         "confirmed_read_count": confirmed_reads,
         "confirmed_write_count": confirmed_writes,
+        "no_change_count": no_change,
+        "completed_action_count": completed,
+        "pending_action_count": pending,
         "observed_tool_count": observed,
         "unverified_action_count": unverified,
         "completed_background_job_count": sum(

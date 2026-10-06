@@ -4,8 +4,10 @@
 repairing/testing on HASHI3, and reloading Workbench/restarting HASHI3. PAO, PCM,
 HERV3 and Frontend Connector retain their Function ownership. HASHI4 production
 is outside this repair/adoption scope. Core remains immutable. Current repairs
-cover transcript chronology/cursors, reachable retained history, verified-instance
-avatars, unlimited Agent selection, voice preflight and external Run question cards.
+cover history, avatars, Agent selection, voice and Run questions, durable HERV3
+continuation checkpoints and common persistent failure results. Codex 0.160+
+native shell termination uses the owned guard; managed process tools protect
+runtime ancestry. Hooks are guardrails, not an OS enforcement boundary.
 Source, offline validation, runtime adoption and actual frontend evidence remain
 separate. See [batch evidence](repairs/NIGHTLY_20261006_HASHI3.md).
 

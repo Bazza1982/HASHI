@@ -3756,6 +3756,10 @@ def backend_diagnostic_fields(response: Any) -> dict[str, Any]:
                 details = primary.get("details")
                 if isinstance(details, Mapping):
                     remember(response_ids, details.get("provider_response_id"))
+                    ids = details.get('provider_response_ids')
+                    if isinstance(ids, (list, tuple)):
+                        for value in ids:
+                            remember(response_ids, value)
                     refs = details.get("provider_wire_evidence_refs")
                     if isinstance(refs, (list, tuple)):
                         for ref in refs:
@@ -3851,7 +3855,23 @@ async def reconcile_backend_effects(
         manager = getattr(runtime, "background_job_manager", None) or getattr(
             getattr(runtime, "orchestrator", None), "background_job_manager", None
         )
-        jobs = await asyncio.to_thread(manager.list, limit=50) if manager is not None else ()
+        jobs = ()
+        job_query_failed = False
+        if manager is not None:
+            try:
+                import inspect
+                if inspect.iscoroutinefunction(manager.list):
+                    jobs = await manager.list(limit=50)
+                else:
+                    jobs = await asyncio.to_thread(manager.list, limit=50)
+                    if inspect.isawaitable(jobs):
+                        jobs = await jobs
+            except Exception as exc:
+                job_query_failed = True
+                runtime.logger.warning(
+                    'Effect reconciliation background_jobs.list unavailable for %s (%s): %s',
+                    item.request_id, type(exc).__name__, str(exc)[:500],
+                )
         reconciliation = await asyncio.to_thread(
             build_user_effect_reconciliation,
             workspace_dir=runtime.workspace_dir,
@@ -3863,6 +3883,8 @@ async def reconcile_backend_effects(
             additional_workspaces=((tool_workspace,) if tool_workspace else ()),
             background_jobs=jobs,
         )
+        if job_query_failed:
+            reconciliation['evidence_limited'] = True
         if any(
             (
                 reconciliation["confirmed_read_count"],
@@ -3877,15 +3899,19 @@ async def reconcile_backend_effects(
         return None
     except Exception as exc:
         runtime.logger.warning(
-            "Effect reconciliation unavailable for %s (%s)",
+            "Effect reconciliation unavailable for %s (%s): %s",
             item.request_id,
             type(exc).__name__,
+            str(exc)[:500],
         )
         tool_call_count = int(diagnostic_fields.get("tool_call_count") or 0)
         if diagnostic_fields.get("side_effects_possible") or tool_call_count:
             return {
                 "confirmed_read_count": 0,
                 "confirmed_write_count": 0,
+                "no_change_count": 0,
+                "completed_action_count": 0,
+                "pending_action_count": tool_call_count,
                 "observed_tool_count": tool_call_count,
                 "unverified_action_count": max(1, tool_call_count),
                 "completed_background_job_count": 0,
@@ -4181,6 +4207,14 @@ async def handle_backend_error(
     effect_reconciliation = await reconcile_backend_effects(runtime, item, response)
     if runtime._should_buffer_during_transfer(item.request_id):
         runtime._record_suppressed_transfer_result(item, success=False, error=err_msg)
+    from orchestrator.runtime_delivery import build_public_failure
+    from orchestrator.flexible_backend_registry import public_backend_engine
+    failure_context = {**failure_fields, **diagnostic_fields,
+        'backend':public_backend_engine(runtime.config.active_backend),
+        **({'effect_reconciliation':effect_reconciliation} if effect_reconciliation else {})}
+    failure_context['public_failure'] = build_public_failure(runtime.config.active_backend, err_msg,
+        locale=ui_language.preferred_locale(runtime, actor_id=getattr(item, 'owner_id', None) or item.chat_id),
+        error_context=failure_context)
     await runtime._notify_request_listeners(
         item.request_id,
         {
@@ -4193,6 +4227,7 @@ async def handle_backend_error(
             **failure_fields,
             **({"effect_reconciliation": effect_reconciliation} if effect_reconciliation else {}),
             **diagnostic_fields,
+            'public_failure':failure_context['public_failure'],
             **request_context_warning_fields(runtime, item.request_id),
         },
     )
@@ -4237,10 +4272,7 @@ async def handle_backend_error(
         text=err_msg,
         request_id=item.request_id,
         purpose="error",
-        error_context={
-            **failure_fields,
-            **({"effect_reconciliation": effect_reconciliation} if effect_reconciliation else {}),
-        },
+        error_context=failure_context,
         frontend_outbox=True,
     )
     total_elapsed_s = (

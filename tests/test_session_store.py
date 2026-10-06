@@ -61,6 +61,32 @@ def test_terminal_failure_exposes_bounded_effect_reconciliation(tmp_path):
     assert "untrusted" not in failure["effect_reconciliation"]
 
 
+def test_public_failure_survives_database_reopen_and_frontend_projection(tmp_path):
+    from orchestrator.frontend_projection import project_frontend_event
+    from orchestrator.runtime_delivery import build_public_failure
+    store = _store(tmp_path)
+    session = store.ensure_default_session(owner_id='user:7', agent_id='lily')
+    accepted = store.accept_run(session_id=session['session_id'], owner_id='user:7', agent_id='lily',
+        request_id='req-public-failure', text='perform operations', source='test', idempotency_key='failure-canary')
+    context = {'backend':'her-v2', 'error_code':'PROVIDER_CONNECTION_FAILED', 'error_retryable':True,
+        'side_effects_possible':True, 'effect_reconciliation':{'confirmed_write_count':9, 'no_change_count':2,
+        'completed_action_count':48, 'pending_action_count':0, 'observed_tool_count':48,
+        'unverified_action_count':23, 'evidence_limited':False}}
+    public = build_public_failure('her-v2', 'connection interrupted', locale='en', error_context=context)
+    store.finish_request(accepted.request_id, success=False, error_text='connection interrupted',
+        error_context={**context, 'public_failure':public})
+    reopened = _store(tmp_path)
+    event = next(row for row in reopened.events(session['session_id'], owner_id='user:7') if row['kind'] == 'run.failed')
+    projected = project_frontend_event(event)
+    assert projected['public_failure'] == public
+    assert projected['public_failure']['backend'] == 'her-v3'
+    assert projected['public_failure']['retry_action'] == 'verify_results'
+    assert projected['public_failure']['effects']['no_change_count'] == 2
+    assert projected['content_blocks'][0]['text'] == public['text']
+    assert projected['error_code'] == 'PROVIDER_CONNECTION_FAILED'
+    assert projected['semantic_kind'] == 'error'
+
+
 def test_schema_12_sessions_migrate_to_conversations_and_hide_activity(tmp_path):
     store = _store(tmp_path)
     conversation = store.ensure_default_session(owner_id="user:7", agent_id="lily")

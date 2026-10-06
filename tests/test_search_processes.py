@@ -13,7 +13,6 @@ import pytest
 @pytest.mark.asyncio
 async def test_real_mcp_progress_precedes_result_and_cancel_remains_responsive(tmp_path):
     from tools.gateway.context import write_gateway_context
-    from tests.test_scoped_search import pause_command
     from tools.registry import ToolRegistry
     context = tmp_path / 'gateway.json'
     registry = ToolRegistry(['shell', 'file_search'], tmp_path, tmp_path, {},
@@ -21,6 +20,11 @@ async def test_real_mcp_progress_precedes_result_and_cancel_remains_responsive(t
                                       'snapshot_interval_seconds': .01}},
         audit_context={'agent_name': 'fixture', 'request_id': 'fixture-run'})
     write_gateway_context(registry, context, backend='codex-cli')
+    started_marker = tmp_path / 'child-started.txt'
+    script = tmp_path / 'wait-for-cancel.py'
+    script.write_text('from pathlib import Path\nimport time\n'
+                      f'Path({str(started_marker)!r}).write_text("started")\n'
+                      'time.sleep(30)\n', encoding='utf-8')
     proc = await asyncio.create_subprocess_exec(sys.executable, '-B', '-m',
         'tools.gateway.mcp_stdio', '--context', str(context),
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
@@ -31,11 +35,16 @@ async def test_real_mcp_progress_precedes_result_and_cancel_remains_responsive(t
         await proc.stdin.drain()
     try:
         await send({'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call', 'params': {
-            'name': 'shell', 'arguments': {'command': pause_command(30)},
+            'name': 'shell', 'arguments': {'command': script_command(script)},
             '_meta': {'progressToken': 'progress'}}})
         first = json.loads(await asyncio.wait_for(proc.stdout.readline(), 5))
         assert first['method'] == 'notifications/progress' and 'id' not in first
-        assert first['params']['_meta']['tool_activity']['state'] == 'running'
+        assert first['params']['_meta']['tool_activity']['state'] in {'started', 'running'}
+        # Progress state can describe admission. A real child-created marker
+        # proves cancellation exercises an in-flight process, not queued work.
+        async with asyncio.timeout(5):
+            while not started_marker.exists():
+                await asyncio.sleep(.01)
         await send({'jsonrpc': '2.0', 'method': 'notifications/cancelled',
                     'params': {'requestId': 1}})
         received = []

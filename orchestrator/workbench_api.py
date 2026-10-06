@@ -6513,6 +6513,9 @@ class WorkbenchApiServer:
                 raise SessionConflict("native audio Session Turns are not enabled")
             if audio_blocks and not self._runtime_native_audio_ready(
                 runtime, terminal=surface
+            ) and any(
+                str(block.get('semantic_role') or 'audio_attachment') != 'voice_message'
+                for block in audio_blocks
             ):
                 raise SessionConflict(
                     "native audio is not enabled or qualified for this Agent"

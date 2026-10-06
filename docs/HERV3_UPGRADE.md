@@ -64,14 +64,16 @@ native-media accounting still depend on Provider rejection; the preflight
 does not promise that every request will fit. A capacity rejection after tool
 activity remains non-replayable without user reconciliation.
 
-### Verified read-only provider-call continuation
+### Completed-tool checkpoint provider-call continuation
 
 HERV3 may make a bounded transport retry of only the unfinished physical Model
-Provider call after tool activity when every tool that actually executed has a
-completed successful execution receipt and an exact Tool-owner observation
-receipt typed as `read`. The receipt must bind the Tool name and call ID to a
-valid SHA-256 revision. A registry `read_only` declaration, Smart Tool effect,
-successful shell exit, or interpretation of command text is not effect proof.
+Provider call after tool activity. Every executed tool must have either an exact
+verified read receipt, or a completed durable HERV3 operation checkpoint binding
+the invocation/attempt, Tool name, call ID, terminal status and returned output
+digest. A completed write or shell checkpoint permits continuing the model call;
+it neither verifies the business effect nor authorizes re-executing that tool.
+An unrecorded, pending or mismatched result blocks continuation. A registry
+`read_only` declaration, successful shell exit or model prose is not proof.
 The effect-receipt owner maintains the observational-tool allowlist;
 `verification_run` is excluded because even a successful verification argv or
 recipe may execute subprocesses and modify the workspace.
@@ -84,12 +86,23 @@ incomplete draft may be discarded before this same-call continuation. The
 existing no-Tool rule remains stricter: once an answer preview may have become
 user-visible, an incomplete call is not retried in place.
 
-Any write receipt, shell execution, background action, failed or incomplete
-receipt, mismatched identity, unknown effect, or limited evidence blocks this
-continuation. The terminal failure retains the observed read, write,
-background, and unknown-effect counts for reconciliation. Provider-call
+Missing or incomplete checkpoints, mismatched identity/output or an uncertain
+in-flight tool block this continuation. Terminal failures distinguish completed
+operations from verified business effects, retaining reads, readback writes,
+proved no-change failures and unverified effects. Async Worker queries are
+awaited; a failed background query does not erase existing write receipts. Missing,
+corrupt or bounded-away evidence is explicitly incomplete. Provider-call
 continuations share the existing bounded local recovery budget; they never
 authorize replay of a prior Tool call or user request.
+
+The meaningful-output stream inactivity limit is 300 seconds regardless of
+whether fallback models are configured. It counts provider read wait, excluding
+local tools. Transport diagnostics retain bounded exception causes, actual
+httpcore phase timings and private wire references through the stage boundary.
+One versioned PAO/public failure supplies the Engine name, counts and recovery
+decision to every frontend; Workbench preserves it across transcript refreshes.
+These 2026-10-06 changes are scoped to the HASHI3 development repair; qualification
+and adoption receipts are recorded in [the batch journal](repairs/NIGHTLY_20261006_HASHI3.md).
 
 ### Terminal commentary fence
 

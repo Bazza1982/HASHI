@@ -937,11 +937,29 @@ async def test_send_long_message_error_uses_plain_summary(tmp_path):
     assert message["chat_id"] == 123
     assert message["disable_notification"] is True
     assert "parse_mode" not in message
-    assert "Backend error (codex-cli) | req-err" in message["text"]
+    assert "Backend error (codex-cli)" in message["text"]
     assert "Diagnostic log (local):" in message["text"]
     assert "search the log for HASHI request ID req-err" in message["text"]
     assert "/verbose off" not in message["text"]
     assert "... (truncated) ..." in message["text"]
+
+
+@pytest.mark.asyncio
+async def test_telegram_uses_owner_public_backend_and_recovery_text(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime.config.active_backend = 'her-v2'
+    context = {'backend':'her-v3', 'error_code':'PROVIDER_CONNECTION_FAILED', 'error_retryable':True,
+        'side_effects_possible':True, 'effect_reconciliation':{'confirmed_write_count':9, 'no_change_count':2,
+        'unverified_action_count':23, 'evidence_limited':False}}
+    public = runtime_delivery.build_public_failure('her-v2', 'connection interrupted', locale='en', error_context=context)
+    await runtime_delivery.send_long_message(runtime, chat_id=123, text='connection interrupted', request_id='req-owner',
+        purpose='error', error_context={**context, 'public_failure':public})
+    text = runtime.app.bot.messages[0]['text']
+    assert public['text'] in text
+    assert '(her-v3)' in text
+    assert '(her-v2)' not in text
+    assert 'retry the request' not in text.lower()
+    assert public['retry_action'] == 'verify_results'
 
 
 def test_format_backend_error_for_user_adds_upgrade_action_for_version_gated_model():

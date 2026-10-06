@@ -387,7 +387,28 @@ def test_frontend_event_exposes_only_public_typed_error_codes():
     unlisted = normalize_frontend_event(
         {**base, "event_id": "evt-private", "error_code": "RAW_PROVIDER_FAILURE"}
     )
-    assert "error_code" not in unlisted
+    assert unlisted['error_code'] == 'RAW_PROVIDER_FAILURE'
+    malformed = normalize_frontend_event({**base, 'error_code':'token=secret-canary'})
+    assert 'error_code' not in malformed
+
+
+def test_frontend_error_preserves_owner_recovery_decision_and_connection_code():
+    import json
+    from orchestrator.frontend_contracts import normalize_frontend_event
+    failure = {'type':'hashi.public-failure', 'version':1, 'backend':'her-v3',
+               'error_code':'PROVIDER_CONNECTION_FAILED', 'retry_action':'verify_results',
+               'error_retryable':False, 'side_effects_possible':True,
+               'text':'已保存完成的操作，请先核实成果。',
+               'effects':{'confirmed_write_count':9, 'no_change_count':2, 'unverified_action_count':23}}
+    event = normalize_frontend_event({'type':'hashi.frontend-event','version':2, 'event_id':'evt-connection',
+        'session_id':'ses-1','run_id':'run-1','request_id':'req-1','sequence':6,'durability':'durable',
+        'audience':'user','visibility':'public','interface_kind':'display','semantic_kind':'error',
+        'presentation_channel':'error','error_code':'PROVIDER_CONNECTION_FAILED',
+        'content_blocks':[{'type':'text','text':failure['text']}], 'public_failure':{**failure, 'api_key':'secret-canary'},
+        'created_at':'2026-10-06T01:00:00Z'})
+    assert event['error_code'] == 'PROVIDER_CONNECTION_FAILED'
+    assert event['public_failure'] == failure
+    assert 'secret-canary' not in json.dumps(event)
 
 
 def test_content_component_normalization_supports_standard_components():

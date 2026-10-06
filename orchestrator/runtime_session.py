@@ -1215,6 +1215,7 @@ def finish_request_from_listener(runtime: Any, request_id: str, payload: Mapping
                 "error_code", "error_retryable", "http_status",
                 "provider_request_id", "retry_after_s", "side_effects_possible",
                 "effect_reconciliation",
+                'public_failure',
             )
             if key in payload
         }

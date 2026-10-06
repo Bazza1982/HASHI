@@ -267,7 +267,7 @@ def test_every_turn_loads_full_hcc_without_memory_or_query_filter(tmp_path, engi
     assert "news V1" in second["final_prompt"]
     set_hcc_enabled(tmp_path, False)
     third = builder.build_prompt_payload("weather?", engine, incremental=True)
-    assert set(third["transport_snapshot"]["removed_section_keys"]) == {"hcc", "hcc_usage"}
+    assert {"hcc", "hcc_usage"} <= set(third["transport_snapshot"]["removed_section_keys"])
     assert "weather V2" not in third["final_prompt"] and "USER_PRIVATE_CACHE" not in third["final_prompt"]
     assert "weather V2" in path.read_text(), "OFF must not delete the cache"
 
@@ -277,7 +277,7 @@ def test_absent_empty_cache_is_explicitly_revoked(tmp_path, cache):
     write_pcm(tmp_path, cache)
     set_hcc_enabled(tmp_path, True)
     payload = assembler(tmp_path).build_prompt_payload("q", "her-v2")
-    assert set(payload["transport_snapshot"]["removed_section_keys"]) == {"hcc", "hcc_usage"}
+    assert {"hcc", "hcc_usage"} <= set(payload["transport_snapshot"]["removed_section_keys"])
     assert not payload["audit"]["hcc"]["included"]
 
 

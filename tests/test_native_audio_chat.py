@@ -1350,15 +1350,18 @@ async def test_native_audio_direct_completion_releases_ready_stt_without_prompt(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('native_model_ready', [True, False])
 async def test_generic_turn_transcribes_each_voice_asset_once_and_keeps_order(
     tmp_path,
     monkeypatch,
+    native_model_ready,
 ):
     server, runtime = _server(tmp_path)
     monkeypatch.setattr(workbench_api, "PERSISTENT_SESSION_V1_QUALIFIED", True)
     server.global_config.persistent_session_v1 = True
     server.global_config.native_audio_chat_v1 = True
     runtime._safevoice_enabled = False
+    monkeypatch.setattr(server, '_runtime_native_audio_ready', lambda *args, **kwargs: native_model_ready)
     calls = []
 
     class _Transcriber:
@@ -1420,6 +1423,7 @@ async def test_generic_turn_transcribes_each_voice_asset_once_and_keeps_order(
             )
         ).text
     )
+    assert run.get('ok') is True, run
     for _attempt in range(100):
         events = server.session_store.events(
             session["session_id"], owner_id="user:7"

@@ -1301,12 +1301,18 @@ async def execute_apply_patch(
         return f"Error applying patch: {e}"
 
 
+def _protected_runtime_pids() -> set[int]:
+    import psutil
+    return {os.getpid(), os.getppid(), *(parent.pid for parent in psutil.Process(os.getpid()).parents())}
+
+
 async def execute_process_list(args: dict) -> str:
     filter_str = args.get("filter", "").lower()
     limit = int(args.get("limit", 30))
 
     try:
         import psutil
+        protected = _protected_runtime_pids()
         procs = []
         for p in psutil.process_iter(["pid", "name", "cpu_percent", "memory_percent", "cmdline"]):
             try:
@@ -1314,6 +1320,8 @@ async def execute_process_list(args: dict) -> str:
                 name = info.get("name") or ""
                 if filter_str and filter_str not in name.lower():
                     continue
+                if info["pid"] in protected:
+                    name += " [runtime protected]"
                 cmd = " ".join(info.get("cmdline") or [])[:80]
                 cpu = info.get("cpu_percent") or 0.0
                 mem = info.get("memory_percent") or 0.0
@@ -1348,6 +1356,13 @@ async def execute_process_kill(args: dict) -> str:
 
     try:
         import psutil
+
+        try:
+            protected = _protected_runtime_pids()
+        except psutil.Error:
+            return "Error: runtime process ancestry could not be verified; refusing process termination"
+        if pid in protected:
+            return f"Error: refusing to terminate HASHI process PID {pid}"
 
         try:
             proc = psutil.Process(pid)

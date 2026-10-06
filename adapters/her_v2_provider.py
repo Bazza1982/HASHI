@@ -349,6 +349,17 @@ def _backend_response_error(
         "attachment_id": metadata.get("attachment_id"),
         "media_routing": list(metadata.get("multimodal_routing") or []),
     }
+    meter = metadata.get('meter')
+    calls = meter.get('provider_calls', []) if isinstance(meter, Mapping) else []
+    calls = calls if isinstance(calls, (list, tuple)) else []
+    details['provider_wire_evidence_refs'] = list(dict.fromkeys(
+        str(ref) for call in calls if isinstance(call, Mapping)
+        for ref in call.get('provider_wire_evidence_refs', []) if ref
+    ))[-64:]
+    details['provider_response_ids'] = list(dict.fromkeys(
+        str(call['provider_response_id']) for call in calls
+        if isinstance(call, Mapping) and call.get('provider_response_id')
+    ))[-64:]
     for key in (
         "provider_http_failure",
         "provider_protocol",
@@ -356,6 +367,7 @@ def _backend_response_error(
         "provider_local_recovery_count",
         "provider_local_recovery_limit",
         "provider_local_recovery_exhausted",
+        "provider_stream_inactivity",
         "transport_audit_path",
         "gateway_continuation",
     ):
@@ -1186,12 +1198,13 @@ class _EvidenceRecordingToolRegistry:
             attachment_ids=matched_attachment_ids,
         )
         self._receipts.append(receipt)
-        self._record_recovery_receipt(receipt)
-        return self._attach_receipt(result, receipt, fallback_call_id=tool_call_id)
+        checkpoint_ref = self._record_recovery_receipt(receipt)
+        return self._attach_receipt(result, receipt, fallback_call_id=tool_call_id,
+                                    checkpoint_ref=checkpoint_ref)
 
-    def _record_recovery_receipt(self, receipt: ToolEvidenceReceipt) -> None:
+    def _record_recovery_receipt(self, receipt: ToolEvidenceReceipt) -> str | None:
         if self._audit_log is None:
-            return
+            return None
         payload = {
             "evidence_ref": receipt.evidence_ref,
             "stage": receipt.stage.value,
@@ -1210,7 +1223,7 @@ class _EvidenceRecordingToolRegistry:
             f"tool:{receipt.tool_call_id}"
         )
         payload["operation_id"] = operation_id
-        self._audit_log.append(
+        return self._audit_log.append(
             event_id=(
                 f"{self._request.invocation_id or self._request.turn_id}:"
                 f"attempt:{self._request.attempt}:"
@@ -1310,7 +1323,8 @@ class _EvidenceRecordingToolRegistry:
 
     @staticmethod
     def _attach_receipt(
-        result: Any, receipt: ToolEvidenceReceipt, *, fallback_call_id: str
+        result: Any, receipt: ToolEvidenceReceipt, *, fallback_call_id: str,
+        checkpoint_ref: str | None = None,
     ):
         from tools.registry import ToolResult
 
@@ -1333,6 +1347,16 @@ class _EvidenceRecordingToolRegistry:
                 "receipt_completed": receipt.completed,
             }
         )
+        if checkpoint_ref and receipt.completed:
+            details['continuation_checkpoint'] = {
+                'type': 'hashi.tool-checkpoint', 'version': 1,
+                'evidence_ref': checkpoint_ref,
+                'operation_id': f'{receipt.invocation_id}:attempt:{receipt.attempt}:tool:{receipt.tool_call_id}',
+                'tool_call_id': receipt.tool_call_id,
+                'tool_name': receipt.tool_name,
+                'status': receipt.status.value,
+                'output_sha256': hashlib.sha256(output.encode('utf-8')).hexdigest(),
+            }
         return ToolResult(
             tool_call_id=str(getattr(result, "tool_call_id", "") or fallback_call_id),
             output=output,

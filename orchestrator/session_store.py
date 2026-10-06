@@ -3995,6 +3995,9 @@ class SessionStore:
         now = _utc_now()
         public_error_context: dict[str, Any] = {}
         if isinstance(error_context, Mapping):
+            if isinstance(error_context.get('public_failure'), Mapping):
+                from orchestrator.frontend_contracts import normalize_public_failure
+                public_error_context['public_failure'] = normalize_public_failure(error_context['public_failure'])
             for key in ("error_code", "provider_request_id", "backend", "diagnostic_log"):
                 value = error_context.get(key)
                 if isinstance(value, str) and value.strip():
@@ -4016,6 +4019,7 @@ class SessionStore:
                     "observed_tool_count",
                     "unverified_action_count",
                     "completed_background_job_count",
+                    'no_change_count', 'completed_action_count', 'pending_action_count',
                 ):
                     value = reconciliation.get(key)
                     if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 100_000:

@@ -2626,6 +2626,90 @@ async def test_deepseek_retries_only_the_unfinished_call_after_completed_tool_lo
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('proof', ['valid', 'missing', 'changed-output', 'pending', 'foreign-tool'])
+async def test_current_call_checkpoint_continues_without_repeating_a_real_write(monkeypatch, tmp_path, proof):
+    from orchestrator.her_v2.audit import DurableAuditLog
+    adapter = _adapter(tmp_path)
+    adapter.TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S = 0
+    registry = ToolRegistry(['file_write'], tmp_path, tmp_path, {}, audit_context={'request_id':'req-write-checkpoint'})
+    evidence = _EvidenceRecordingToolRegistry(registry, StageRequest(turn_id='turn-write', request_ref='req-write-checkpoint',
+        invocation_id='invocation-write', stage=Stage.EXECUTION, role='primary', attempt=1,
+        goal='Write one canary', classification=None, effort=Effort.HIGH, allow_tools=True),
+        audit_log=DurableAuditLog(tmp_path/'recovery.jsonl', tmp_path/'fallback.jsonl'))
+    adapter.tool_registry = evidence
+    actual_execute = registry.execute
+    writes = []
+    async def execute_once(name, arguments, tool_call_id='', **kwargs):
+        writes.append(tool_call_id)
+        return await actual_execute(name, arguments, tool_call_id, **kwargs)
+    monkeypatch.setattr(registry, 'execute', execute_once)
+    actual_evidence_execute = evidence.execute
+    async def execute_with_proof(name, arguments, tool_call_id='', **kwargs):
+        result = await actual_evidence_execute(name, arguments, tool_call_id, **kwargs)
+        if proof == 'missing':
+            result.details.pop('continuation_checkpoint', None)
+        elif proof == 'changed-output':
+            result.output += ' altered after checkpoint'
+        elif proof == 'pending':
+            result.details['receipt_completed'] = False
+        elif proof == 'foreign-tool':
+            result.details['continuation_checkpoint']['tool_name'] = 'other-tool'
+        return result
+    monkeypatch.setattr(evidence, 'execute', execute_with_proof)
+    seen = []
+    async def provider(payload, headers, callback):
+        seen.append(json.dumps(payload['messages'], sort_keys=True))
+        if len(seen) == 1:
+            return _APIResult('', [{'id':'write-once', 'type':'function', 'function':{'name':'file_write',
+                'arguments':json.dumps({'path':'checkpoint.txt','content':'saved exactly once'})}}], 'tool_calls')
+        if len(seen) == 2:
+            raise httpx.ReadError('') from ConnectionResetError(10054, 'connection reset')
+        return _APIResult('saved', None, 'stop')
+    monkeypatch.setattr(adapter, '_stream_api_once', provider)
+    response = await adapter.generate_response('Write once', 'req-write-checkpoint', on_stream_event=lambda event: asyncio.sleep(0))
+    if proof == 'valid':
+        assert response.is_success, response.error
+        assert seen[1] == seen[2], 'Only the unfinished model request is repeated'
+        assert response.stream_metadata['provider_transport_retry_count'] == 1
+    else:
+        assert not response.is_success
+        assert len(seen) == 2, 'Unproven or mismatched results prohibit automatic continuation'
+        assert response.error_code == 'PROVIDER_CONNECTION_FAILED'
+    assert writes == ['write-once']
+    assert (tmp_path/'checkpoint.txt').read_text(encoding='utf-8') == 'saved exactly once'
+    rows = [json.loads(line) for line in (tmp_path/'recovery.jsonl').read_text(encoding='utf-8').splitlines()]
+    completed = [row for row in rows if row.get('event') == 'tool_receipt' and row.get('payload',{}).get('receipt',{}).get('completed')]
+    assert len(completed) == 1
+    assert completed[0]['payload']['operation_id'] == 'invocation-write:attempt:1:tool:write-once'
+
+
+@pytest.mark.asyncio
+async def test_network_failure_records_actual_phase_and_sanitised_cause_chain(tmp_path):
+    from adapters.openrouter_api import _trace_provider_request, _trace_provider_response
+    async def transport(request):
+        trace = request.extensions['trace']
+        await trace('connection.connect_tcp.started', {})
+        await trace('connection.connect_tcp.failed', {})
+        try:
+            raise ConnectionResetError(10054, 'connection reset')
+        except ConnectionResetError as cause:
+            raise httpx.ReadError('', request=request) from cause
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport),
+            event_hooks={'request':[_trace_provider_request], 'response':[_trace_provider_response]}) as client:
+        with pytest.raises(httpx.ReadError) as raised:
+            await client.post('https://provider.invalid', headers={'Authorization':'Bearer secret-canary'}, json={})
+    failure = _backend_failure_response(raised.value, duration_ms=1)
+    assert failure.error, 'A blank transport exception still needs a meaningful public failure'
+    detail = failure.stream_metadata['provider_http_failure']
+    assert [row['type'] for row in detail['exception_chain']] == ['ReadError', 'ConnectionResetError']
+    assert detail['exception_chain'][1]['errno'] == 10054
+    assert detail['network_trace']['phase'] == 'connection.connect_tcp.failed'
+    assert len(detail['network_trace']['events']) == 2
+    assert detail['network_trace']['events'][1]['elapsed_ms'] >= 0
+    assert 'secret-canary' not in json.dumps(detail)
+
+
+@pytest.mark.asyncio
 async def test_deepseek_discards_internal_partial_draft_only_after_verified_reads(
     monkeypatch,
     tmp_path,

@@ -458,6 +458,7 @@
     "error.warning_partial_execution": "注意：已记录到工具活动，任务可能已部分执行。重试前请先检查生成的文件和其他更改。",
     "error.confirmed_reads": "已确认：{count} 次只读工具调用成功完成。",
     "error.confirmed_writes": "已确认：{count} 次文件写入在执行时通过读回核对。",
+    "error.no_change_actions": "已确认：{count} 次操作未改动资料。",
     "error.completed_background_jobs": "已确认：{count} 个后台任务已结束；其外部效果尚未核实。",
     "error.unverified_actions": "未确认：另有 {count} 项动作可能产生效果。",
     "error.audit_incomplete": "效果记录不完整；没有记录不等于没有发生。",

@@ -13,6 +13,84 @@ from orchestrator.background_jobs import BackgroundJobManager
 from tools.tool_audit import record_tool_action
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('job_query_fails', [False, True])
+async def test_effect_reconciliation_awaits_real_worker_facade_and_preserves_writes(tmp_path, job_query_fails):
+    from orchestrator.function_worker_host import WorkerBackgroundJobManagerFacade
+    from unittest.mock import AsyncMock
+    runtime = _runtime(tmp_path)
+    peer = SimpleNamespace(request=AsyncMock(side_effect=OSError('job service unavailable') if job_query_fails else None,
+                                           return_value=[]))
+    runtime.background_job_manager = WorkerBackgroundJobManagerFacade(peer)
+    record_tool_action(workspace_dir=tmp_path, tool_name='file_write', tool_call_id='write-1', arguments={},
+                       output='committed', is_error=False, duration_ms=1, audit_context={'request_id':'req-facade'},
+                       details={'effect_receipt': {'kind':'write', 'readback':True}})
+    summary = await runtime_pipeline.reconcile_backend_effects(runtime, SimpleNamespace(request_id='req-facade'),
+              BackendResponse(text='', duration_ms=1, tool_call_count=1, side_effects_possible=True))
+    peer.request.assert_awaited_once()
+    assert summary['confirmed_write_count'] == 1
+    assert summary['unverified_action_count'] == 0
+    assert summary['evidence_limited'] is job_query_fails
+
+
+def test_no_change_and_missing_or_corrupt_evidence_are_distinct(tmp_path):
+    (tmp_path/'tool_action_audit.jsonl').write_text(json.dumps({'request_id':'req-no-change',
+        'tool_name':'apply_patch', 'tool_call_id':'patch-1', 'status':'started'}) + '\n', encoding='utf-8')
+    record_tool_action(workspace_dir=tmp_path, tool_name='apply_patch', tool_call_id='patch-1', arguments={},
+                       output='dry run rejected', is_error=True, duration_ms=1, audit_context={'request_id':'req-no-change'},
+                       details={'smart_effect':'no_change'})
+    summary = request_diagnostics.build_user_effect_reconciliation(workspace_dir=tmp_path, request_id='req-no-change',
+              tool_call_count=1, side_effects_possible=False)
+    assert summary['no_change_count'] == 1
+    assert summary['unverified_action_count'] == 0
+    assert summary['completed_action_count'] == 1
+    assert summary['pending_action_count'] == 0
+    missing = request_diagnostics.build_user_effect_reconciliation(workspace_dir=tmp_path/'wrong-session', request_id='req-no-change',
+              tool_call_count=1, side_effects_possible=True)
+    assert missing['evidence_limited'] is True
+    with (tmp_path/'tool_action_audit.jsonl').open('a', encoding='utf-8') as stream:
+        stream.write('{bad record\n')
+    corrupt = request_diagnostics.build_user_effect_reconciliation(workspace_dir=tmp_path, request_id='req-no-change',
+              tool_call_count=1, side_effects_possible=False)
+    assert corrupt['no_change_count'] == 1
+    assert corrupt['evidence_limited'] is True
+
+
+def test_evidence_cap_preserves_confirmed_results_and_marks_incomplete(tmp_path, monkeypatch):
+    monkeypatch.setattr(request_diagnostics, '_MAX_ACTIONS', 2)
+    for index in range(3):
+        record_tool_action(workspace_dir=tmp_path, tool_name='file_write', tool_call_id=f'write-{index}',
+            arguments={}, output='saved', is_error=False, duration_ms=1, audit_context={'request_id':'req-cap'},
+            details={'effect_receipt':{'kind':'write', 'readback':True}})
+    summary = request_diagnostics.build_user_effect_reconciliation(workspace_dir=tmp_path,
+        request_id='req-cap', tool_call_count=3, side_effects_possible=True)
+    assert summary['confirmed_write_count'] == 2
+    assert summary['completed_action_count'] == 2
+    assert summary['unverified_action_count'] == 1
+    assert summary['evidence_limited'] is True
+
+
+def test_stage_invocation_preserves_private_wire_refs_for_terminal_diagnostics(tmp_path):
+    from adapters.her_v2_provider import _backend_response_error
+    response = BackendResponse(text='', duration_ms=1, error='connection interrupted',
+        error_code='PROVIDER_CONNECTION_FAILED', side_effects_possible=True,
+        stream_metadata={'meter':{'provider_calls':[
+            {'provider_response_id':'response-before-interruption', 'provider_wire_evidence_refs':['wire:request:1', 'wire:partial:1']},
+            {'provider_wire_evidence_refs':['wire:request:2', 'wire:failure:2']},
+        ]}})
+    failure = _backend_response_error(response, fallback='provider failed')
+    assert failure.details['provider_response_ids'] == ['response-before-interruption']
+    assert failure.details['provider_wire_evidence_refs'] == ['wire:request:1', 'wire:partial:1', 'wire:request:2', 'wire:failure:2']
+    terminal = BackendResponse(text='', duration_ms=1, error='stage failed',
+        stream_metadata={'her_v2':{'failure_chain':{'primary_failure':{'details':failure.details}}}})
+    fields = runtime_pipeline.backend_diagnostic_fields(terminal)
+    assert fields['provider_response_ids'] == ['response-before-interruption']
+    assert fields['wire_evidence_refs'] == failure.details['provider_wire_evidence_refs']
+    runtime_debug_reporting.persist_terminal_diagnostic(_runtime(tmp_path), 'req-wire-forwarded', {'success':False, **fields})
+    saved = json.loads(request_diagnostics.projection_path(tmp_path, 'req-wire-forwarded').read_text(encoding='utf-8'))
+    assert saved['provider']['wire_evidence_refs'] == fields['wire_evidence_refs']
+
+
 class _Logger:
     def __init__(self) -> None:
         self.warnings: list[str] = []
@@ -168,6 +246,7 @@ def test_user_reconciliation_counts_only_strict_completed_read_receipts(tmp_path
         "unverified_action_count": 2,
         "completed_background_job_count": 0,
         "evidence_limited": False,
+        'no_change_count':0, 'completed_action_count':3, 'pending_action_count':0,
     }
     assert runtime_debug_reporting.safe_retry_evidence({
         "success": False,

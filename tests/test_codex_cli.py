@@ -1477,6 +1477,18 @@ def test_codex_long_prompt_is_preserved_and_switched_to_stdin(tmp_path):
     assert adapter._sanitize_for_codex(prompt) == prompt
 
 
+def test_native_process_hook_is_owned_command_scoped_and_available_on_resume(tmp_path):
+    adapter = _build_adapter(tmp_path)
+    for resume in (False, True):
+        adapter._session_mode = resume
+        adapter._session_id = 'thread-owned' if resume else None
+        cmd = adapter._build_cmd('owned prompt', tmp_path/'out.txt', native_hook_receipt=tmp_path/'guard.json')
+        assert '--ignore-user-config' in cmd
+        assert '--dangerously-bypass-hook-trust' in cmd
+        assert any(value.startswith('hooks.PreToolUse=') for value in cmd)
+        assert not any(cmd[index:index+2] == ['--disable','hooks'] for index in range(len(cmd)))
+
+
 def test_codex_resume_is_used_only_in_explicit_session_mode(tmp_path):
     adapter = _build_adapter(tmp_path)
     adapter._session_id = "thread-existing"

@@ -3584,6 +3584,9 @@ async def test_prepare_successful_response_projects_one_verified_read_without_do
     assert payload["effect_reconciliation"] == {
         "confirmed_read_count": 1,
         "confirmed_write_count": 0,
+        "no_change_count": 0,
+        "completed_action_count": 1,
+        "pending_action_count": 0,
         "observed_tool_count": 1,
         "unverified_action_count": 0,
         "completed_background_job_count": 0,
@@ -4037,7 +4040,11 @@ async def test_handle_backend_error_exposes_typed_failure_metadata_to_listeners(
     assert payload["side_effects_possible"] is True
     assert payload["effect_reconciliation"]["unverified_action_count"] == 3
     assert runtime.sent_message["text"] == response.error
-    assert runtime.sent_message["error_context"] == {
+    context = runtime.sent_message["error_context"]
+    assert {key: context[key] for key in (
+        "error_code", "error_retryable", "http_status", "provider_request_id",
+        "retry_after_s", "tool_call_count", "side_effects_possible", "effect_reconciliation",
+    )} == {
         "error_code": "PROVIDER_CAPACITY_UNAVAILABLE",
         "error_retryable": True,
         "http_status": 503,
@@ -4048,12 +4055,21 @@ async def test_handle_backend_error_exposes_typed_failure_metadata_to_listeners(
         "effect_reconciliation": {
             "confirmed_read_count": 0,
             "confirmed_write_count": 0,
+            "no_change_count": 0,
+            "completed_action_count": 0,
+            "pending_action_count": 0,
             "observed_tool_count": 3,
             "unverified_action_count": 3,
             "completed_background_job_count": 0,
-            "evidence_limited": False,
+            "evidence_limited": True,
         },
     }
+    assert context["backend"] == "codex-cli"
+    assert context["provider_request_ids"] == ["req_provider_1"]
+    assert context["public_failure"] == payload["public_failure"]
+    assert context["public_failure"]["retry_action"] == "verify_results"
+    assert context["public_failure"]["effects"]["unverified_action_count"] == 3
+    assert "retry the request" not in context["public_failure"]["text"].lower()
     diagnostic_log = next(
         message
         for message in runtime.error_logger.messages
