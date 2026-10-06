@@ -137,3 +137,20 @@ rejected a generation while its source was being edited during the long run;
 the configured-observer module is rerun against committed, unchanged source.
 The voice-source qualification gate independently passed **791 tests, 1 skip**.
 Full, focused, committed-source and running-generation results remain separate.
+
+### HERV3 confirmed voice projection
+
+Workbench recovers a pending transcript from the exact existing Run after refresh;
+slow STT retains its accepted receipt, and confirmation remains available while
+that native Run is waiting. Real q4 recovered its original recording, confirmed
+the same Run and returned Blue River 7. It also exposed another HERV3 boundary:
+the compiler preferred PCM's old current request over the transcript-bearing
+fallback goal, causing redundant transcription tools. This is not counted as
+proof of the repaired model input.
+
+The provider now derives PCM's current user request from the released transcript,
+preserving trusted sections, history, and sibling media. The actual HERV3 compiler
+regression failed in both Direct cases before repair. Native voice, admission,
+confirmation, multimodal and adapter consumers: **165 passed, 1 skip** afterward.
+The complete committed-source qualification preceding this repair passed
+**791 tests, 1 skip**; the final generation is qualified and adopted separately.

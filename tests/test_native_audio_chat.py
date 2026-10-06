@@ -812,8 +812,9 @@ async def test_audio_only_immediate_crosses_adapter_delivery_boundary():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stage", [Stage.TRIAGE, Stage.EXECUTION, Stage.DIRECT])
 @pytest.mark.parametrize("sibling_image", [False, True])
+@pytest.mark.parametrize("her_v3", [False, True])
 async def test_text_voice_stage_waits_for_and_uses_released_local_transcript(
-    tmp_path, stage, sibling_image,
+    tmp_path, stage, sibling_image, her_v3,
 ):
     source = tmp_path / "voice.wav"
     _wav_bytes(source)
@@ -896,7 +897,11 @@ async def test_text_voice_stage_waits_for_and_uses_released_local_transcript(
         goal="Respond to the attached voice message.",
         classification=None,
         effort=Effort.LOW,
-        context={},
+        context=({"her_v3": True, "pcm_input": {
+            "current_request": "Respond to the attached voice message.",
+            "sections": [{"key": "permanent_system", "authority": "permanent_system",
+                          "text": "CANARY_KEEP_TRUSTED_BOUNDARIES", "order": 0}],
+        }} if her_v3 else {}),
         request_content=content,
         attachment_manifest=attachment_manifest(content),
         allow_tools=False,
@@ -918,6 +923,8 @@ async def test_text_voice_stage_waits_for_and_uses_released_local_transcript(
     )] == (["att-sibling"] if sibling_image else [])
     assert "Please check tomorrow's weather." in triage.calls[0]["prompt"]
     assert "Respond to the attached voice message." in triage.calls[0]["prompt"]
+    if her_v3 and stage is Stage.DIRECT:
+        assert "CANARY_KEEP_TRUSTED_BOUNDARIES" in triage.sys_prompt
     assert response.media_routing[0]["route"] == "local_transcript"
     assert confirmation_requests == ["triage"]
 

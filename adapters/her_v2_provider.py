@@ -3659,12 +3659,23 @@ class HashiStageProvider(StageProvider):
                     for item in original_manifest
                     if str(item.get("semantic_role") or "") == "voice_message"
                 )
+                projected_goal = (
+                    f"[Local voice transcription]\n{transcript}\n\n"
+                    f"[Original user caption/request]\n{request.goal}"
+                )
+                projected_context = dict(request.context)
+                pcm_input = projected_context.get("pcm_input")
+                if projected_context.get("her_v3") and isinstance(pcm_input, Mapping):
+                    # HERV3 compiles the typed current request instead of the
+                    # fallback goal. Project the authorized transcript into that
+                    # same user layer; leave trusted sections/history untouched.
+                    projected_context["pcm_input"] = {
+                        **dict(pcm_input), "current_request": projected_goal,
+                    }
                 request = replace(
                     request,
-                    goal=(
-                        f"[Local voice transcription]\n{transcript}\n\n"
-                        f"[Original user caption/request]\n{request.goal}"
-                    ),
+                    goal=projected_goal,
+                    context=projected_context,
                     request_content=remaining_content,
                     attachment_manifest=attachment_manifest(remaining_content),
                 )
