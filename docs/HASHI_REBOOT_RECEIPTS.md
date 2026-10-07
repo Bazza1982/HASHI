@@ -158,9 +158,9 @@ Quiesce cancels optional Persona wording, invalidates late model responses and
 still drains actual Runs, queues and background work. See the
 [scoped verification record](repairs/REBOOT_NONBLOCKING_NOTICES_20261008.md).
 
-Source implementation and offline verification are scoped to HASHI2. Production
-reboot, cold start, real Telegram delivery and live generation adoption have not
-been performed for this change.
+The original 2026-09-07 acceptance below was offline in HASHI2 and did not claim
+production reboot, cold start, real Telegram delivery or live adoption. The
+dated HASHI3 repair record above carries the later live verification scope.
 
 Focused checks exercise the real RebootManager and atomic route transaction,
 with process/transport boundaries replaced by deterministic test fixtures. They

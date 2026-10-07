@@ -5,7 +5,9 @@ optional notifications. No browser ACK, start-delivery failure, optional Persona
 wording or terminal notice backlog may reject a valid reboot. Real work drain,
 scope/authorization, qualified source, READY, rollback and storage integrity
 remain required. Eight defect cases failed before the repair; the initial
-owning suite passed 81 cases. Live adoption is recorded separately in the
+owning suite passed 81 cases; the Core gate passed 807 (one POSIX-only skip).
+HASHI3 hot-adopted the fix, then completed a second full hot reboot without
+a browser/ACK, with all eleven Workers online and Core unchanged. Evidence is in the
 [repair record](repairs/REBOOT_NONBLOCKING_NOTICES_20261008.md). HASHI4 is outside
 this repair scope.
 
