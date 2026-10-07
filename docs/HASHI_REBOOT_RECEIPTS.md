@@ -31,7 +31,7 @@ See [Function Adoption and Remote Restart](HASHI3_FUNCTION_ADOPTION_AND_REMOTE_R
    during a pending/active reboot or shared handoff is rejected as busy. The
    pending request is never overwritten. A group button submits one explicit
    target set; if any target is unavailable, the whole group request is rejected.
-3. Runtime sends one concise start notice and one final outcome; the command
+3. Runtime attempts one concise start notice and delivers one final outcome; the command
    path does not add a redundant acceptance reply. Multi-Agent success notices
    show counts instead of name lists, while failures retain actionable target
    names and success includes elapsed seconds. Admission closes only selected
@@ -112,9 +112,11 @@ The bounded instance store is `state/instance/reboot-receipts.json` under the
 canonical instance home: at most 50 records and 128 KiB. It contains identifiers,
 display names, destination metadata, stable reason codes and delivery status;
 never Bot tokens, prompts or raw exception bodies. Writes replace the record
-file atomically. Old completed delivery records may be pruned. Pending records
-are never discarded to admit a new request; full or invalid storage rejects a
-new reboot without interrupting healthy services.
+file atomically. Old terminal records may be pruned even when their notices
+remain undelivered; retention expiration is logged and never claimed as sent.
+Active accepted/running operations are never discarded to admit a new request.
+Storage filled by active operations, or invalid/unwritable storage, still rejects
+a new reboot without interrupting healthy services.
 
 On shared-process recovery, an inherited broad receipt with a published handoff
 request remains active so the successor can reconcile Core and Worker evidence.
@@ -140,10 +142,21 @@ terminal receipt as the previous reboot result. It shows the immutable target
 scope and the receipt's UTC `created_at` or `finished_at` time, so an earlier
 whole-instance success cannot be mistaken for a newly selected operation. This
 menu context does not alter the concise proactive start and final notices.
-No final message means **unconfirmed**: the runtime, network or Telegram channel
-may be unavailable. The saved status is the recovery/query path when available.
+No final message leaves delivery unconfirmed; the saved operation outcome may
+already be verified. Runtime, network or Telegram delivery can be unavailable.
+The saved status is the recovery/query path when available.
 
 ## Implementation and validation status
+
+The 2026-10-08 HASHI3 repair supersedes browser-display/start-delivery prerequisites
+and terminal-notice retention blocking. Start delivery has a two-second head
+start budget and failure is recorded without cancelling the reboot. New browser
+projections require no presentation ACK; legacy ACKs remain scoped observations
+and never move lifecycle progress backwards. Final delivery runs through the
+independent persisted retry watcher rather than inside the reboot lifecycle.
+Quiesce cancels optional Persona wording, invalidates late model responses and
+still drains actual Runs, queues and background work. See the
+[scoped verification record](repairs/REBOOT_NONBLOCKING_NOTICES_20261008.md).
 
 Source implementation and offline verification are scoped to HASHI2. Production
 reboot, cold start, real Telegram delivery and live generation adoption have not

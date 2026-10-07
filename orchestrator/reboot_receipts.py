@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import logging
 import math
 from pathlib import Path
 import time
@@ -29,6 +30,7 @@ LIFECYCLE_STATES = frozenset(
 )
 RECEIPT_SCHEMA_VERSION = 5
 MAX_PROGRESS_EVENTS = 32
+logger = logging.getLogger("BridgeU.RebootReceipts")
 
 
 def _default_shared_replacement():
@@ -359,6 +361,7 @@ class RebootReceipts:
             _normalize_record(record)
             validate_record(record)
         payload = {"schema": RECEIPT_SCHEMA_VERSION, "records": records}
+        expired_notices = []
         while (
             len(records) > MAX_RECORDS
             or len(json.dumps(payload, ensure_ascii=False).encode()) > MAX_BYTES
@@ -368,16 +371,24 @@ class RebootReceipts:
                     i
                     for i, r in enumerate(records[:-1])
                     if r["status"] not in ACTIVE
-                    and r["delivery"]["status"] != "pending"
                 ),
                 None,
             )
             if disposable is None:
                 raise ValueError("Reboot receipt storage is full of pending operations")
-            records.pop(disposable)
+            expired = records.pop(disposable)
+            if expired["delivery"]["status"] == "pending":
+                # Notification retries share bounded receipt retention, never
+                # operation capacity. Expiration is not a delivery success.
+                expired_notices.append(expired["id"])
         if self.path is not None:
             write_record(self.path, payload)
         self._records = deepcopy(records)
+        for operation_id in expired_notices:
+            logger.warning(
+                "Reboot receipt retention expired an undelivered notice: operation=%s",
+                operation_id,
+            )
 
     def get(self, operation_id):
         return next((r for r in self.records() if r["id"] == operation_id), None)
@@ -411,9 +422,6 @@ class RebootReceipts:
         ):
             raise ValueError("Invalid reboot request key")
         now = time.time()
-        presentation_ack_required = (
-            origin.get("surface") == "workbench" and str(mode) == "max"
-        )
         record = {
             "id": uuid4().hex,
             "request_key": request_key,
@@ -437,9 +445,7 @@ class RebootReceipts:
             "start_delivery": _default_delivery(
                 requested=origin_delivery_requested(origin)
             ),
-            "presentation_ack": _default_presentation_ack(
-                required=presentation_ack_required
-            ),
+            "presentation_ack": _default_presentation_ack(),
             "delivery": _default_delivery(requested=origin_delivery_requested(origin)),
             "progress": [
                 {

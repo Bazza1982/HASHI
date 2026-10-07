@@ -73,6 +73,15 @@ PAO owns the following product domains.
 - Fixed/Flex working-mode policy, retired outer-composition migration, and any
   future runtime composition that spans Engines.
 
+Reboot admission and outcome belong to PAO Functions. Persisted operation
+progress, exact target scope, qualified source, Worker readiness and transaction
+recovery remain authoritative. Chat delivery and browser-render acknowledgements
+are observations, never reboot permissions. Optional Persona status rendering
+is cancelled on quiesce and cannot hold the real Run drain boundary. Terminal
+receipt retention also bounds notification retries; stale undelivered notices
+cannot consume active-operation capacity. See [reboot receipts](HASHI_REBOOT_RECEIPTS.md)
+and the [HASHI3 repair](repairs/REBOOT_NONBLOCKING_NOTICES_20261008.md).
+
 Agent deletion is a PAO-owned lifecycle operation in shared Functions. A
 Function generation that implements the preview, confirmation, cleanup, and
 receipt contract advertises `agent_deletion` as supported by default; there is

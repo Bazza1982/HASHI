@@ -399,7 +399,7 @@ async def test_workbench_start_notice_is_durable_before_target_route_is_gated(
 
 
 @pytest.mark.asyncio
-async def test_workbench_start_notice_failure_rejects_before_candidate_or_cutover(
+async def test_workbench_start_notice_failure_does_not_block_worker_replacement(
     tmp_path,
     monkeypatch,
 ):
@@ -415,20 +415,25 @@ async def test_workbench_start_notice_failure_rejects_before_candidate_or_cutove
         "orchestrator.reboot_manager.runtime_session.record_kernel_presentation_notice",
         lambda *_args, **_kwargs: None,
     )
+    old = kernel._runtime_map()["zelda"].client
+    candidate = kernel.queue_generation("a", names=("zelda",))["zelda"]
 
     accepted = manager.submit(request)
 
     assert accepted["accepted"]
-    assert not await manager.hot_restart(kernel._restart_request)
+    assert await manager.hot_restart(kernel._restart_request)
     assert kernel._runtime_map()["zelda"]._cutover is False
-    assert "qualify" not in kernel.events
+    assert kernel._runtime_map()["zelda"].client is candidate
+    assert old.shutdown_calls == 1
     record = manager.receipts.get(accepted["record"]["id"])
-    assert record["status"] == "rejected"
-    assert record["reason"] == "start_notice_unavailable"
+    assert record["status"] == "succeeded"
+    assert record["reason"] == ""
+    assert record["start_delivery"]["status"] == "exhausted"
+    assert record["delivery"]["status"] == "pending"
 
 
 @pytest.mark.asyncio
-async def test_workbench_max_waits_for_presented_ack_before_shared_handoff(
+async def test_workbench_max_publishes_shared_handoff_without_browser_ack(
     tmp_path,
     monkeypatch,
 ):
@@ -449,17 +454,14 @@ async def test_workbench_max_waits_for_presented_ack_before_shared_handoff(
     )
     accepted = manager.submit(request)
     operation_id = accepted["record"]["id"]
-    operation = asyncio.create_task(manager.hot_restart(kernel._restart_request))
-
-    for _ in range(100):
-        record = manager.receipts.get(operation_id)
-        if record["start_delivery"]["status"] == "sent":
-            break
-        await asyncio.sleep(0)
-    else:
-        pytest.fail("start notice was not recorded")
-
-    assert record["presentation_ack"]["status"] == "pending"
+    projection = manager.operation(
+        operation_id, owner_id="owner:operator", agent_id="zelda"
+    )
+    assert projection["presentation_ack"]["required"] is False
+    assert await asyncio.wait_for(manager.hot_restart(kernel._restart_request), 1)
+    record = manager.receipts.get(operation_id)
+    assert record["start_delivery"]["status"] == "sent"
+    assert record["presentation_ack"]["status"] == "not_required"
     request_path = (
         tmp_path
         / "state"
@@ -467,33 +469,19 @@ async def test_workbench_max_waits_for_presented_ack_before_shared_handoff(
         / "kernel-requests"
         / f"{operation_id}.json"
     )
-    assert not request_path.exists()
-    assert manager.acknowledge_start_presentation(
-        operation_id, owner_id="owner:operator", agent_id="zelda", sequence=1,
-    ) == {"acknowledged": False, "reason": "message_mismatch"}
+    assert request_path.exists()
     assert manager.acknowledge_start_presentation(
         operation_id,
         owner_id="owner:operator",
         agent_id="zelda",
         sequence=1,
         message_id="reboot-progress-1",
-    )["acknowledged"] is True
-
-    assert await operation is True
-    assert request_path.exists()
-    record = manager.receipts.get(operation_id)
-    assert record["presentation_ack"]["status"] == "confirmed"
-    assert record["presentation_ack"]["sequence"] == 1
-    assert record["presentation_ack"]["confirmed_at"] > 0
-    assert [event["phase"] for event in record["progress"]].index(
-        "start_presented"
-    ) < [event["phase"] for event in record["progress"]].index(
-        "shared_replacement_requested"
-    )
+    ) == {"acknowledged": False, "reason": "not_required"}
+    assert manager.receipts.get(operation_id)["phase"] == "shared_replacement_requested"
 
 
 @pytest.mark.asyncio
-async def test_workbench_max_rejects_unconfirmed_start_without_handoff(
+async def test_legacy_pending_presentation_does_not_block_shared_handoff(
     tmp_path,
     monkeypatch,
 ):
@@ -509,24 +497,32 @@ async def test_workbench_max_rejects_unconfirmed_start_without_handoff(
         },
     )
     monkeypatch.setattr(
-        "orchestrator.reboot_manager.START_PRESENTATION_ACK_TIMEOUT_SECONDS",
-        0.01,
-    )
-    monkeypatch.setattr(
         "orchestrator.reboot_manager.runtime_session.record_kernel_presentation_notice",
         lambda *_args, **_kwargs: {"message_id": "reboot-progress-1"},
     )
     accepted = manager.submit(request)
-
-    assert not await manager.hot_restart(kernel._restart_request)
+    manager.receipts.update(
+        accepted["record"]["id"],
+        presentation_ack={
+            "status": "pending", "expected_sequence": 1, "sequence": None,
+            "message_id": None, "confirmed_at": None,
+        },
+    )
+    assert await asyncio.wait_for(manager.hot_restart(kernel._restart_request), 1)
     record = manager.receipts.get(accepted["record"]["id"])
-    assert record["status"] == "rejected"
-    assert record["reason"] == "start_presentation_unconfirmed"
-    assert record["presentation_ack"]["status"] == "expired"
-    assert not (
-        tmp_path / "state" / "instance" / "kernel-requests"
+    assert record["phase"] == "shared_replacement_requested"
+    assert record["reason"] == ""
+    assert record["presentation_ack"]["status"] == "pending"
+    assert manager._operation_projection(record)["presentation_ack"]["required"] is False
+    assert (
+        tmp_path / "state" / "instance" / "kernel-requests" / f"{record['id']}.json"
     ).exists()
-    assert all(not handle._cutover for handle in kernel.runtimes)
+    # A late observation must not move lifecycle progress backwards.
+    assert manager.acknowledge_start_presentation(
+        record["id"], owner_id="owner:operator", agent_id="zelda", sequence=1,
+        message_id="reboot-progress-1",
+    )["acknowledged"] is True
+    assert manager.receipts.get(record["id"])["phase"] == "shared_replacement_requested"
 
 
 def test_workbench_max_presentation_ack_is_owner_agent_operation_and_sequence_scoped(
@@ -545,6 +541,15 @@ def test_workbench_max_presentation_ack_is_owner_agent_operation_and_sequence_sc
     )
     accepted = manager.submit(request)
     operation_id = accepted["record"]["id"]
+
+    # Legacy pending observations remain authenticated and idempotent.
+    manager.receipts.update(
+        operation_id,
+        presentation_ack={
+            "status": "pending", "expected_sequence": 1, "sequence": None,
+            "message_id": None, "confirmed_at": None,
+        },
+    )
 
     assert manager.acknowledge_start_presentation(
         operation_id,
@@ -712,6 +717,7 @@ async def test_failed_restore_is_reported_as_unavailable_not_restored(
     kernel._runtime_map()["zelda"].client.resume_error = RuntimeError("cannot resume")
     manager.submit(request)
     assert not await manager.hot_restart(kernel._restart_request)
+    await manager.send_pending()
     record = manager.receipts.records()[-1]
     assert record["status"] == "failed" and record["restored"] is False
     assert record["online"] == {"zelda": False}
@@ -752,6 +758,7 @@ async def test_receipt_delivery_survives_origin_worker_loss_and_does_not_repeat_
     kernel.queue_generation("a", names=("zelda",))
     manager.submit(request)
     assert await manager.hot_restart(kernel._restart_request)
+    await manager.send_pending()
     assert calls[-1][0] == "succeeded"  # persisted before sending
     assert "显示&lt;&amp;&gt;名称" in calls[-1][1]
     assert "备用名称" in calls[-1][1] and calls[-1][2:] == (42, 7)
@@ -1415,6 +1422,87 @@ async def test_pending_capacity_recovery_and_bounded_delivery_never_rerun(
     assert not kernel.events
     assert recovered.submit({**request, "request_key": "three"})["accepted"]
     assert [r["request_key"] for r in recovered.receipts.records()] == ["two", "three"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("notice_failure", ["exception", "stalled"])
+async def test_start_notice_transport_is_optional_and_bounded(
+    tmp_path, monkeypatch, notice_failure
+):
+    kernel, manager, request = _notice_manager(tmp_path)
+    request.update(mode="max", origin={"surface": "workbench", "owner_id": "owner:operator"})
+    monkeypatch.setattr(
+        "orchestrator.reboot_manager.REBOOT_START_NOTICE_TIMEOUT_SECONDS", 0.01,
+        raising=False,
+    )
+    cancelled = asyncio.Event()
+
+    async def broken_notice(_record, *, starting=False):
+        assert starting
+        if notice_failure == "exception":
+            raise OSError("frontend unavailable")
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    monkeypatch.setattr(manager, "_deliver", broken_notice)
+    admitted = manager.submit(request)
+    assert await asyncio.wait_for(manager.hot_restart(kernel._restart_request), 0.3)
+    record = manager.receipts.get(admitted["record"]["id"])
+    assert record["phase"] == "shared_replacement_requested"
+    assert record["start_delivery"]["status"] == "exhausted"
+    assert record["start_delivery"]["attempts"] == 1
+    assert record["reason"] == ""
+    if notice_failure == "stalled":
+        assert cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_terminal_notice_backlog_does_not_hold_reboot_execution(tmp_path, monkeypatch):
+    kernel, manager, request = _notice_manager(tmp_path)
+    request["origin"] = {"surface": "workbench", "owner_id": "owner:operator"}
+    kernel.queue_generation("a", names=("zelda",))
+    monkeypatch.setattr(
+        "orchestrator.reboot_manager.runtime_session.record_kernel_presentation_notice",
+        lambda *_args, **_kwargs: {"message_id": "start-1"},
+    )
+    delivery_entered = asyncio.Event()
+
+    async def blocked_outbox(**_kwargs):
+        delivery_entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(manager, "send_pending", blocked_outbox)
+    admitted = manager.submit(request)
+    assert await asyncio.wait_for(manager.hot_restart(kernel._restart_request), 0.3)
+    record = RebootReceipts(tmp_path).get(admitted["record"]["id"])
+    assert record["status"] == "succeeded"
+    assert record["delivery"]["status"] == "pending"
+    assert not delivery_entered.is_set()
+
+
+def test_terminal_pending_notices_cannot_exhaust_operation_capacity(tmp_path, monkeypatch):
+    from orchestrator import reboot_receipts
+
+    monkeypatch.setattr(reboot_receipts, "MAX_RECORDS", 2)
+    kernel, manager, request = _notice_manager(tmp_path)
+    old_records = []
+    for key in ("completed-one", "completed-two"):
+        record = manager.receipts.create(
+            source="zelda", targets=["zelda"], display_names={"zelda": "Zelda"},
+            mode="min", origin=request["origin"], request_key=key,
+        )
+        old_records.append(manager.receipts.update(record["id"], status="succeeded", committed=True))
+    assert all(r["delivery"]["status"] == "pending" for r in old_records)
+    admitted = manager.submit({**request, "request_key": "next-reboot"})
+    assert admitted["accepted"]
+    saved = RebootReceipts(tmp_path).records()
+    assert [r["request_key"] for r in saved] == ["completed-two", "next-reboot"]
+    assert saved[0]["status"] == "succeeded"
+    assert saved[0]["delivery"]["status"] == "pending"
+    assert manager.submit({**request, "request_key": "completed-two"})["duplicate"]
+    assert not kernel.events
 
 
 @pytest.mark.asyncio

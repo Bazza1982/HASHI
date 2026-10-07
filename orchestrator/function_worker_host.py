@@ -34,6 +34,7 @@ from orchestrator.function_worker_protocol import (
 from orchestrator.function_contract import validate_function_contract
 from orchestrator.pathing import build_bridge_paths
 from orchestrator.reboot_adoption_bridge import bridge_legacy_broad_reboot
+from orchestrator import runtime_background_status
 from orchestrator.runtime_contract import (
     RuntimeFingerprint,
     compare_runtime_fingerprints,
@@ -1284,14 +1285,14 @@ class FunctionWorkerHost:
         self.accepting = False
         self.was_telegram_connected = bool(runtime.telegram_connected)
         runtime.telegram_connected = False
+        runtime_background_status.cancel_for_quiesce(runtime)
+        # Let cooperative optional tasks settle without waiting for a Provider.
+        await asyncio.sleep(0)
         deadline = time.monotonic() + max(0.1, float(timeout))
         while True:
             active_background = any(
                 not task.done()
-                for task in (
-                    list(getattr(runtime, "_background_tasks", ()))
-                    + list(getattr(runtime, "_persona_background_status_tasks", ()))
-                )
+                for task in getattr(runtime, "_background_tasks", ())
             )
             if (
                 runtime.queue.empty()
@@ -1318,6 +1319,7 @@ class FunctionWorkerHost:
                 f"resume requires DRAINING or QUIESCED, current phase={self.phase}"
             )
         runtime = self._require_runtime()
+        runtime._persona_background_status_paused = False
         if self.was_telegram_connected:
             runtime.telegram_connected = True
         self.accepting = True

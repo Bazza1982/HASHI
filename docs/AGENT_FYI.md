@@ -1,5 +1,14 @@
 # HASHI Agent FYI
 
+2026-10-08 HASHI3 reboot repair: PAO Functions separates durable lifecycle from
+optional notifications. No browser ACK, start-delivery failure, optional Persona
+wording or terminal notice backlog may reject a valid reboot. Real work drain,
+scope/authorization, qualified source, READY, rollback and storage integrity
+remain required. Eight defect cases failed before the repair; the initial
+owning suite passed 81 cases. Live adoption is recorded separately in the
+[repair record](repairs/REBOOT_NONBLOCKING_NOTICES_20261008.md). HASHI4 is outside
+this repair scope.
+
 2026-10-07 08:13 correction: the fixed Phone/Call frontend at 88ac18e was not
 included in the paired nightly Workbench 0df7d2e. HASHI3 backend adoption remains
 valid; dual-entry frontend adoption and media acceptance remain pending.
