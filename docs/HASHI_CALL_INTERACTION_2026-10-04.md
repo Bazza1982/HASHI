@@ -1,4 +1,4 @@
-# Call interaction correction — HASHI2 experiment
+# Phone and Call interaction decision
 
 ## Current 2026-10-06 decision — independent entries on HASHI3
 
@@ -35,8 +35,10 @@ Functions/Phone integration checks passed (166); frontend call/media/Phone and
 Simple composer checks passed (128, Node 22). Production client build and
 independent review passed. Commands, failure receipts and build facts are saved
 separately in the HASHI3 ignored `state/call-entries-20261006` receipts.
-HASHI3's Backend API was unreachable and its active Call configuration was
-absent at closeout. Running adoption and physical-device acceptance remain open.
+At the initial 2026-10-06 closeout, HASHI3's Backend API was unreachable and its
+active Call configuration was absent. The 2026-10-07 adoption and design
+acceptance below supersede that readiness checkpoint; physical-device
+acceptance remains separate.
 Earlier decisions below remain experiment history.
 
 ## Historical 2026-10-05 local input and audio follow-up
@@ -437,3 +439,39 @@ and ended in the fresh Session without moving primary. Real external media
 responses and fixture microphone/camera checks passed. Physical hearing,
 microphone, camera content and real mobile remain user acceptance, not inferred
 from the synthetic device evidence. See the nightly repair record for receipts.
+
+## Current 2026-10-07 follow-up — HASHI3 ready for user testing
+
+The user's continuation limits construction and testing to HASHI3 and its
+existing isolated frontend. Frontend Connector owns the replaceable Functions
+and external client; the current Function bytes are unchanged by this follow-up.
+The scoped client is built and served at 9edaa03. Its fixed entries retain the
+2026-10-06 design, including independently derived readiness and optional vision.
+
+Switching the selected conversation or Agent is background reading: it must
+not hang up or retarget an active Call. The same bound Session's observed
+generation reset, connection replacement, read-only state and competing engine
+still invalidate it. The controller defect failed both an actual React hook
+check and native Simple navigation before 9fd254e; the repaired native call
+remained bound and returning did not redial.
+
+Camera permission refusal preserves a listening Call after confirmed
+camera-off, with localized guidance. Unknown confirmation cannot reopen input.
+The initial recovery repair passed its owning checks but its notice was clipped
+below the scrollable body. Native geometry and screenshot evidence failed on
+that rendered defect. Permission/recovery notices now occupy a fixed area above
+the controls, outside the scrollable body. The final native check proves resumed
+microphone capture, visible guidance, actual permission grant and manual retry,
+fresh vision, confirmed camera-off, refresh without redial and final hangup.
+All twelve themes at desktop, 390 and 320 widths keep the notice and three
+controls visible and hit-testable.
+
+Separate native canaries now prove browser microphone capture through actual
+Call STT/PAO/TTS and completed WebAudio playback, and Phone's microphone through
+real WebRTC, provider transcripts and advancing non-silent remote playback.
+The configuration matrix, vision-free Call and other-client busy presentation
+also passed with configuration restored. These fixtures qualify the software
+path, not physical hearing, camera content, real mobile or acoustic/latency
+quality. The older generic-script query's unknown receipt is not reclassified.
+The design-to-evidence map is
+[Phone/Call design acceptance](repairs/PHONE_CALL_DESIGN_ACCEPTANCE_20261007.md).

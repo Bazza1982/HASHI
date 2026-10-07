@@ -380,3 +380,39 @@ hearing, camera content, real mobile or noise/latency acceptance. Those remain
 for the user's test, along with other historical Phone-specific open items.
 Production HASHI4 and the original Workbench were not changed. This final
 documentation follow-up does not require replacing the adopted Function bytes.
+
+## Phone/Call design follow-up, 2026-10-07 evening
+
+The user limited this continuation to HASHI3. Its existing isolated client is
+now built and served at 9edaa03. This replaces the earlier frontend checkpoint,
+not the Function generation: source 6774c175, Core PID 40696 and its dependency
+digest remain unchanged; all 645 source/artifact/manifest files and all eleven
+online Agents were checked again.
+
+Design review exposed and repaired active Call hangup on conversation selection,
+camera-refusal cleanup stopping voice/erasing guidance, and a permission notice
+clipped out of view. Genuine red/green checks cover the actual hook, native
+selection, controller and rendered clipping boundary. The final owning/direct
+consumers passed 79 checks and the complete client build passed. Native rendered
+acceptance passed all twelve themes and thirty-six notice/control layouts,
+camera denied with microphone resumed, manual retry after actual browser grant,
+fresh vision, camera-off, refresh without redial and confirmed hangup. The
+separate other-client busy check passed and released its reservation.
+
+The actual native Call microphone/worklet/segment path completed a real
+STT/PAO/TTS turn, WebAudio playback and resumed listening. Phone's native
+microphone reached the real provider over WebRTC; its answer, advancing audio
+element and non-zero inbound audio energy were observed. Four real configuration
+combinations and Call without vision passed; instance/Agent configuration was
+restored through the revision-aware owner. Current QA and agent1 contexts have
+both routes available and Call is not busy. No alternative provider or
+physical-device quality follows from these scoped canaries. The earlier generic
+browser-script read remains an unknown historical outcome, not a verified read.
+
+Detailed requirements, source/adoption facts and evidence names are in
+[design acceptance](PHONE_CALL_DESIGN_ACCEPTANCE_20261007.md). The private
+follow-up evidence is retained under
+`state/call-entries-20261006/readiness-20261007/followup-20261007-evening/`.
+Only the owned test frontend was restarted for its new client bytes; production
+and unrelated programs were not operated. This documentation does not request
+another Function replacement or declare the whole nightly batch closed.

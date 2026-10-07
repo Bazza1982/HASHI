@@ -242,3 +242,13 @@ The HASHI3 Phone/Call repair is now hot-adopted with Core unchanged. The scoped
 Workbench 5179 candidate has native ordinary/Simple dialing and current-Session
 result evidence, plus unobstructed themed call controls. Synthetic device and
 external provider success are not physical hearing or real-phone acceptance.
+
+The 2026-10-07 HASHI3 follow-up retains the active Call's Agent/Session while
+reading another conversation. Camera refusal keeps voice available after
+confirmed camera-off; permission/recovery guidance stays above the fixed
+controls rather than inside a clipped body. Twelve themes at three widths,
+native permission refusal/retry, refresh, configuration combinations, remote
+busy, Call microphone/STT/PAO/TTS and Phone microphone/WebRTC/playback passed.
+The client is built/served at 9edaa03; Function source 6774c175 and Core remain
+unchanged. See [design acceptance](repairs/PHONE_CALL_DESIGN_ACCEPTANCE_20261007.md)
+for scoped evidence and physical-device limits.
