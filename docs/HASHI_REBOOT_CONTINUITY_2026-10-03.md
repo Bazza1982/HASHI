@@ -1,8 +1,14 @@
 # HASHI Reboot Presentation Decision
 
-Status: approved current behavior; Workbench-origin max presentation barrier
-and frontend integration implemented offline; instance adoption and live
-acceptance remain pending.
+Status: historical 2026-10-03 design. The browser presentation barrier below
+was superseded by the user-approved [2026-10-08 PAO repair](repairs/REBOOT_NONBLOCKING_NOTICES_20261008.md),
+implemented and live-verified in HASHI3. Durable lifecycle progress remains
+authoritative; notice delivery and browser-render ACKs never authorize or block
+reboot execution. Legacy ACKs are authenticated observations only.
+
+The remainder records the earlier design and its historical evidence, not the
+current reboot prerequisites. HASHI4 source publication and manual adoption are
+separate from the HASHI3 live verification.
 
 Decision date: 2026-10-03
 
@@ -11,7 +17,7 @@ Frontend Connector (rendering and the authenticated presentation ACK). This
 work stays in replaceable Functions. It does not change or add a protected Core
 file and it does not introduce another listener or supervisor process.
 
-## Current command boundary
+## Historical command boundary
 
 `/reboot min` replaces only the selected Agent Worker through the existing
 prepare, drain, commit and rollback transaction. It does not update or restart
