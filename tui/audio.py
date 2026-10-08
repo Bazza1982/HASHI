@@ -12,6 +12,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from orchestrator.media_runtime import configured_media_executable
+
 TUI_SPEECH_MAX_BYTES = 3 * 1024 * 1024
 
 
@@ -59,15 +61,24 @@ def _windows_path(path: Path) -> str:
     return value
 
 
-def _player_command(path: Path) -> list[str]:
+def _player_command(path: Path, *, bridge_home: Path | None = None) -> list[str]:
+    try:
+        configured_player = configured_media_executable("ffplay", bridge_home=bridge_home)
+    except (OSError, ValueError) as exc:
+        raise TuiAudioError(str(exc)) from exc
+    if configured_player:
+        return [configured_player, "-nodisp", "-autoexit", "-loglevel", "error", str(path)]
     powershell = shutil.which("powershell.exe") or shutil.which("powershell")
     if sys.platform == "win32" or (os.environ.get("WSL_DISTRO_NAME") and powershell):
         if not powershell:
             raise TuiAudioError("Windows MediaPlayer is unavailable")
+        # -Command appends extra arguments to source text, not to $args. Bind
+        # the filename as a literal inside an encoded script instead.
+        literal_path = _windows_path(path).replace("'", "''")
         script = (
             "Add-Type -AssemblyName PresentationCore;"
             "$p=New-Object System.Windows.Media.MediaPlayer;"
-            "$p.Open([Uri]::new($args[0]));$p.Play();"
+            f"$p.Open([Uri]::new('{literal_path}'));$p.Play();"
             "$end=(Get-Date).AddSeconds(10);"
             "while((-not $p.NaturalDuration.HasTimeSpan)-and((Get-Date)-lt $end))"
             "{Start-Sleep -Milliseconds 50};"
@@ -75,7 +86,8 @@ def _player_command(path: Path) -> list[str]:
             "$ms=[Math]::Ceiling($p.NaturalDuration.TimeSpan.TotalMilliseconds)+100;"
             "Start-Sleep -Milliseconds $ms;$p.Close()"
         )
-        return [powershell, "-NoProfile", "-NonInteractive", "-Command", script, _windows_path(path)]
+        encoded_script = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+        return [powershell, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded_script]
     if sys.platform == "darwin":
         player = shutil.which("afplay")
         if player:
@@ -91,7 +103,7 @@ def _player_command(path: Path) -> list[str]:
     raise TuiAudioError("no supported local audio player is available")
 
 
-async def play_ogg_bytes(content: bytes) -> None:
+async def play_ogg_bytes(content: bytes, *, bridge_home: Path | None = None) -> None:
     """Play one Ogg asset to completion and stop the process if cancelled."""
 
     payload = bytes(content)
@@ -107,7 +119,7 @@ async def play_ogg_bytes(content: bytes) -> None:
             os.fsync(stream.fileno())
         if os.name != "nt":
             path.chmod(0o600)
-        command = await asyncio.to_thread(_player_command, path)
+        command = await asyncio.to_thread(_player_command, path, bridge_home=bridge_home)
         process = await asyncio.create_subprocess_exec(
             *command,
             stdin=asyncio.subprocess.DEVNULL,

@@ -55,3 +55,42 @@ newer desktop input/mobile recovery and idle-polling repairs. Existing source
 checkouts and user/connection/installation state are preserved. Client release,
 service adoption, native acceptance and remaining physical-device evidence are
 recorded independently below when observed.
+
+HASHI3 adopted the commentary source through hot `/reboot max`; all 11 Workers
+are ready on one qualified Function generation. Core PID and Core/dependency
+digests were retained; 645 artifact/source entries matched. No Core cold restart
+was used.
+
+The actual Workbench service (5176) now uses the clean paired source. The open
+user Electron process was retained. The signed-HMAC HASHI3 selection and Call
+availability pass. Actual hardened-package UI checks using a file microphone
+pass both full Call capture/STT/PAO/TTS/playback/resume/end and Phone
+WebRTC/input/output transcript/playback/end. These are synthetic microphone
+inputs through real transports/providers, not human ears or physical phones.
+
+## HN-20260910-014: real local speech dependencies
+
+The real TUI speech request failed because `ffmpeg` was absent. An independent
+real Ogg playback probe also failed in the Windows `-Command` argument binding.
+The private instance platform configuration now selects a checksummed portable
+FFmpeg/FFplay distribution outside the Core interpreter. Functions resolve
+conversion through that configuration; TUI passes its explicit launch home to
+playback, so another instance's inherited environment cannot choose its player.
+The Windows fallback binds filenames as literals in an encoded script.
+
+No dependency is installed in a running interpreter. Configuration publication
+uses the absent-file revision from `orchestrator.config_json`, without a blind
+retry. Existing voice profiles are retained. Focused TUI checks pass 55/56; the
+one command-preview timing failure passes its unchanged focused rerun. Voice
+provider/isolation/configuration checks pass 24/24. Real generation/playback and
+human listening are recorded separately after the new source is adopted.
+
+## HN-20260913-001: current Remote discovery
+
+The HASHI3 Remote reports actual LAN advertising and browsing ready, three
+trusted peers and no static-seed fallback. Authenticated health, peer/protocol
+status and Backend API readiness were read from HASHI3. Its discovery source
+matches the current checkout; no Remote source change is needed. There is no
+`instances.json` seed file in HASHI3, so there is no temporary seed to remove.
+The two skipped focused discovery checks are POSIX permission-mode contracts,
+not native Windows acceptance. Cross-machine user interaction is separate.

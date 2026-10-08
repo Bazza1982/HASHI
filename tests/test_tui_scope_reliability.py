@@ -297,7 +297,8 @@ async def test_say_plays_last_visible_reply_locally_without_chat_or_telegram_sen
 ):
     played = []
 
-    async def play(content):
+    async def play(content, *, bridge_home):
+        assert bridge_home == tmp_path
         played.append(content)
 
     monkeypatch.setattr("tui.app.play_ogg_bytes", play)
@@ -326,7 +327,7 @@ async def test_say_plays_last_visible_reply_locally_without_chat_or_telegram_sen
 async def test_say_range_skips_meter_and_plays_three_replies_in_order(tmp_path, monkeypatch):
     played = []
 
-    async def play(content):
+    async def play(content, *, bridge_home):
         played.append(content)
 
     monkeypatch.setattr("tui.app.play_ogg_bytes", play)
@@ -360,7 +361,7 @@ async def test_voice_auto_read_is_target_scoped_persistent_and_deduplicated(
 ):
     played = []
 
-    async def play(content):
+    async def play(content, *, bridge_home):
         played.append(content)
 
     monkeypatch.setattr("tui.app.play_ogg_bytes", play)
@@ -427,7 +428,7 @@ async def test_agent_switch_discards_late_speech_before_local_player(
                 "media_type": "audio/ogg",
             }
 
-    async def play(content):
+    async def play(content, *, bridge_home):
         played.append(content)
 
     monkeypatch.setattr("tui.app.play_ogg_bytes", play)

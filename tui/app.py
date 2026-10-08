@@ -3114,7 +3114,7 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
                             style="hashi.muted",
                         )
                     )
-                await play_ogg_bytes(content)
+                await play_ogg_bytes(content, bridge_home=self.bridge_home)
                 if dedupe_ref is not None:
                     self._auto_spoken_refs[dedupe_ref] = None
                     while len(self._auto_spoken_refs) > 1000:

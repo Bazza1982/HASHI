@@ -269,3 +269,9 @@ Tool output and failures only update technical activity. Rate-limited findings
 are combined, exact repetitions suppressed, and queued progress cancelled before
 Final. Preserve Persona/transport fences. Source, adoption and physical-device
 acceptance remain separate; see [nightly repair](repairs/NIGHTLY_20261008_HASHI3.md).
+
+Frontend Connector local speech resolves private platform media executables;
+TUI playback uses its explicit launch instance home. Keep portable media tools
+outside Core and preserve uncertain configuration-publication errors. Actual
+daily Workbench service/package Phone and Call adoption is scoped to HASHI3;
+leave existing user applications open. See [nightly repair](repairs/NIGHTLY_20261008_HASHI3.md).

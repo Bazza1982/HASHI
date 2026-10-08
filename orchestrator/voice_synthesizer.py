@@ -3,6 +3,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from orchestrator.media_runtime import configured_media_executable
+
 
 @dataclass
 class VoiceAsset:
@@ -36,8 +38,9 @@ def prepare_spoken_text(text: str, max_chars: int = 1200) -> str:
 
 
 async def convert_audio_to_ogg(ffmpeg_cmd: str, input_path: Path, ogg_path: Path):
+    converter = configured_media_executable("ffmpeg") or ffmpeg_cmd
     proc = await asyncio.create_subprocess_exec(
-        ffmpeg_cmd,
+        converter,
         "-y",
         "-i",
         str(input_path),
