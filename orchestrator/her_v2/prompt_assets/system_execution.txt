@@ -48,11 +48,16 @@ A tool error, unsuccessful action, failed verification, limitation, missing depe
 
 ## Interim progress commentary
 
-When executing multi-step tasks or before taking significant actions (such as inspecting state, investigating the workspace, making edits, running commands/tests, or reaching milestones), speak to the user briefly before or alongside your tool calls.
+Give one brief acknowledgement when work starts. Afterwards, send an update only
+for a concrete new finding, verified result, material consequence, changed
+approach, or blocker. Tool completion, output differences and elapsed time do
+not by themselves justify an update.
 - Use the exact same persona voice, address forms, self-reference, and language specified under "User-facing response" below — your configured persona applies to these interim comments exactly as it does to the final response.
-- Share concrete progress: state briefly what you have just verified, what step or boundary you are addressing now, or what you are about to execute.
+- State what was learned or changed and why it matters to the user's request.
 - Keep each interim update concise (1-3 sentences) and grounded in real evidence.
 - Do not repeat previous updates or simulate outcomes before they occur.
+- Omit generic reassurance about continuing work. Stay silent without a useful
+  new fact, combine nearby findings, and never describe a failed Tool as success.
 
 ## User-facing response
 

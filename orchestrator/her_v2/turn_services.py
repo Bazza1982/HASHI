@@ -15,7 +15,12 @@ from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
-from .commentary import CommentaryPort, DraftResponseCommentary, NeutralCommentary
+from .commentary import (
+    MAX_NEUTRAL_COMMENTARY_CHARS,
+    CommentaryPort,
+    DraftResponseCommentary,
+    NeutralCommentary,
+)
 from .models import Stage
 
 HEALTH_QUESTION = {
@@ -81,6 +86,7 @@ class TurnServices(CommentaryPort):
         companion_interval_s: float = 300.0,
         companion_judge: Callable[[Mapping[str, Any]], Awaitable[Mapping[str, Any]]] | None = None,
         clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self.turn_id = str(turn_id)
         self.downstream = downstream
@@ -89,9 +95,10 @@ class TurnServices(CommentaryPort):
         self.companion_interval_s = max(1.0, float(companion_interval_s))
         self.companion_judge = companion_judge
         self.clock = clock
+        self.sleep = sleep
         self.started_at = clock()
         self.last_activity_at = self.started_at
-        self.last_commentary_at = 0.0
+        self.last_commentary_at: float | None = None
         self.last_progress_at = self.started_at
         self.progress_revision = 0
         self._event_serial = 0
@@ -103,6 +110,10 @@ class TurnServices(CommentaryPort):
         self._tasks: set[asyncio.Task] = set()
         self._companion_task: asyncio.Task | None = None
         self._forward_lock = asyncio.Lock()
+        self._pending_commentary: deque[NeutralCommentary] = deque()
+        self._commentary_fingerprints: deque[str] = deque(maxlen=128)
+        self._commentary_event_ids: deque[str] = deque(maxlen=128)
+        self._pending_commentary_task: asyncio.Task | None = None
         self._closed = False
         self._initial_ack_sent = False
 
@@ -127,16 +138,19 @@ class TurnServices(CommentaryPort):
             await asyncio.gather(*pending, return_exceptions=True)
         self._tasks.clear()
         self._companion_task = None
+        self._pending_commentary.clear()
+        self._pending_commentary_task = None
         close_downstream = getattr(self.downstream, "close", None)
         if callable(close_downstream):
             await close_downstream()
 
-    def _spawn(self, coroutine: Awaitable[Any]) -> None:
+    def _spawn(self, coroutine: Awaitable[Any]) -> asyncio.Task | None:
         if self._closed:
             return
         task = asyncio.create_task(coroutine)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+        return task
 
     def _record(self, kind: str, **payload: Any) -> None:
         self._event_serial += 1
@@ -197,13 +211,9 @@ class TurnServices(CommentaryPort):
             result_sha256=fingerprint,
             cognitive_interrupt=bool(cognitive_interrupt),
         )
-        if novel and self.clock() - self.last_commentary_at >= self.commentary_interval_s:
-            self._spawn(
-                self._emit(
-                    f"Completed {str(tool_name or 'the current operation')}; new task evidence was observed. Work is continuing.",
-                    required=False,
-                )
-            )
+        # A different Tool result is activity evidence for AC/diagnostics, not
+        # an authored finding or a successful task outcome. Only the foreground
+        # model has the task context needed to write a meaningful update.
 
     def observe_tool_activity(self, facts: Mapping[str, Any]) -> None:
         """Counters can advance actual progress; heartbeat/liveness cannot."""
@@ -262,7 +272,7 @@ class TurnServices(CommentaryPort):
         text = str(commentary.text or "").strip()
         if self._closed or not text:
             return False
-        accepted = await self._forward(commentary)
+        accepted = await self._forward(commentary, queue_if_limited=True)
         if accepted:
             self._initial_ack_sent = True
         return accepted
@@ -298,26 +308,84 @@ class TurnServices(CommentaryPort):
         commentary: NeutralCommentary,
         *,
         bypass_interval: bool = False,
+        queue_if_limited: bool = False,
     ) -> bool:
         async with self._forward_lock:
             if self._closed or self.downstream is None:
                 return False
+            if queue_if_limited:
+                fingerprint = _digest(" ".join(commentary.text.split()).casefold())
+                if (
+                    commentary.event_id in self._commentary_event_ids
+                    or fingerprint in self._commentary_fingerprints
+                ):
+                    return False
+                self._commentary_event_ids.append(commentary.event_id)
+                self._commentary_fingerprints.append(fingerprint)
+                self._pending_commentary.append(commentary)
+                # Keep the newest complete updates, never cut a fact mid-text.
+                while len("\n\n".join(item.text for item in self._pending_commentary)) > MAX_NEUTRAL_COMMENTARY_CHARS:
+                    self._pending_commentary.popleft()
+                self._initial_ack_sent = True
             now = self.clock()
             if (
                 not bypass_interval
+                and self.last_commentary_at is not None
                 and now - self.last_commentary_at < self.commentary_interval_s
             ):
-                return False
-            previous_commentary_at = self.last_commentary_at
-            self.last_commentary_at = now
-            try:
-                accepted = bool(await self.downstream.publish(commentary))
-            except BaseException:
-                self.last_commentary_at = previous_commentary_at
-                raise
-            if not accepted:
-                self.last_commentary_at = previous_commentary_at
-            return accepted
+                if queue_if_limited and self._pending_commentary_task is None:
+                    self._pending_commentary_task = self._spawn(self._flush_commentary())
+                return queue_if_limited
+            if queue_if_limited:
+                commentary = self._take_pending_commentary()
+            return await self._deliver_commentary(commentary)
+
+    def _take_pending_commentary(self) -> NeutralCommentary:
+        items = tuple(self._pending_commentary)
+        self._pending_commentary.clear()
+        if len(items) == 1:
+            return items[0]
+        latest = items[-1]
+        return NeutralCommentary(
+            event_id=latest.event_id,
+            turn_id=latest.turn_id,
+            stage=latest.stage,
+            attempt=latest.attempt,
+            text="\n\n".join(item.text for item in items),
+            required_facts=tuple(dict.fromkeys(
+                fact for item in items for fact in item.required_facts
+            )),
+        )
+
+    async def _deliver_commentary(self, commentary: NeutralCommentary) -> bool:
+        # Called under the forward lock. Reserve before packaging/transport;
+        # the downstream pipeline owns the one-attempt delivery fence.
+        previous_commentary_at = self.last_commentary_at
+        self.last_commentary_at = self.clock()
+        try:
+            accepted = bool(await self.downstream.publish(commentary))
+        except BaseException:
+            self.last_commentary_at = previous_commentary_at
+            raise
+        if not accepted:
+            self.last_commentary_at = previous_commentary_at
+        return accepted
+
+    async def _flush_commentary(self) -> None:
+        try:
+            while not self._closed:
+                async with self._forward_lock:
+                    if not self._pending_commentary or self._closed:
+                        return
+                    delay = max(0.0, self.commentary_interval_s - (
+                        self.clock() - self.last_commentary_at
+                    )) if self.last_commentary_at is not None else 0.0
+                    if delay == 0:
+                        await self._deliver_commentary(self._take_pending_commentary())
+                        continue
+                await self.sleep(delay)
+        finally:
+            self._pending_commentary_task = None
 
     async def _companion_loop(self) -> None:
         while not self._closed:

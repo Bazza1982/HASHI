@@ -247,6 +247,22 @@ to roughly 2-3 minutes and only forwards substantive progress. On the first real
 operation HASHI may emit one initial acknowledgement. Commentary never becomes task
 instructions and never counts as task progress.
 
+The 2026-10-08 HASHI3 repair removes Tool-completion-authored updates. Raw
+output differences, timestamps and errors still inform activity/AC observations,
+but cannot claim that new task evidence or successful progress was found. The
+foreground model authors findings, consequences, changed approaches, results
+and blockers; its prompt explicitly excludes generic reassurance and repetition.
+
+Request-local delivery deduplicates event IDs and normalized exact wording over
+the latest 128 updates. Updates within the rate-limit window are queued and
+combined at the next available window, rather than discarded. The queue retains
+the newest complete updates within the existing 4,000-character bound. Persona
+packaging and its one-attempt transport fence remain unchanged. Closing the
+request cancels the timer and discards pending optional progress before Final
+or Clarification; it never retries an ambiguous delivery. Source/offline and
+running Worker/client verification are recorded separately in
+[the nightly repair journal](repairs/NIGHTLY_20261008_HASHI3.md).
+
 ## Optional final style check — HASHI1 pilot, 2026-09-28
 
 HASHI1 adds a workspace-scoped `/style on|off|status` pilot. With Style off,

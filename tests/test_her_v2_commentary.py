@@ -14,6 +14,7 @@ from orchestrator.her_v2.commentary import (
     NeutralCommentary,
     PackagedCommentary,
     PersonaCommentaryPipeline,
+    RecordingCommentaryPort,
     commentary_from_stage_response,
 )
 from orchestrator.her_v2.config import ProviderProfile
@@ -150,12 +151,8 @@ async def test_turn_services_serializes_commentary_in_source_order():
     services.tool_started("file_read", {"path": "a.txt"}, "call-read")
     await packager.first_started.wait()
     now[0] += 121
-    services.tool_completed(
-        "file_read",
-        tool_call_id="call-read",
-        output="observed",
-    )
-    pending = tuple(services._tasks)
+    finding = asyncio.create_task(services.publish(_neutral("turn:finding")))
+    pending = (*tuple(services._tasks), finding)
     await asyncio.sleep(0)
     await asyncio.sleep(0)
 
@@ -165,12 +162,115 @@ async def test_turn_services_serializes_commentary_in_source_order():
 
     assert [item.text for item in delivery.calls] == [
         "Packaged: Work has started. The current operation is file_read.",
-        (
-            "Packaged: Completed file_read; new task evidence was observed. "
-            "Work is continuing."
-        ),
+        "Packaged: Three checks passed; the final verification is running.",
     ]
     await services.close()
+
+
+@pytest.mark.asyncio
+async def test_tool_result_changes_never_author_user_progress_or_block_a_finding():
+    now = [1_000.0]
+    downstream = RecordingCommentaryPort()
+    services = TurnServices(
+        turn_id="turn", downstream=downstream, clock=lambda: now[0]
+    )
+    services.tool_started("shell", {}, "call-1")
+    await asyncio.gather(*tuple(services._tasks))
+    for number in range(3):
+        now[0] += 151
+        services.tool_completed(
+            "shell", tool_call_id=f"call-{number + 1}",
+            output=f"timestamp={now[0]}", is_error=number == 2,
+        )
+        await asyncio.gather(*tuple(services._tasks))
+
+    assert len(downstream.records) == 1
+    assert services.snapshot()["recent_events"][-1]["error"] is True
+    assert services.snapshot()["progress_revision"] == 3
+    assert await services.publish(_neutral("turn:finding")) is True
+    assert downstream.records[-1].text == _neutral().text
+    await services.close()
+
+
+@pytest.mark.asyncio
+async def test_model_findings_are_merged_at_the_next_window_without_repetition():
+    now = [1_000.0]
+    sleeping = asyncio.Event()
+    release = asyncio.Event()
+    delivered = asyncio.Event()
+
+    async def sleep(delay):
+        assert delay > 0
+        sleeping.set()
+        await release.wait()
+
+    class Delivery(RecordingCommentaryPort):
+        async def publish(self, commentary):
+            accepted = await super().publish(commentary)
+            if len(self.records) == 2:
+                delivered.set()
+            return accepted
+
+    downstream = Delivery()
+    services = TurnServices(
+        turn_id="turn", downstream=downstream, clock=lambda: now[0], sleep=sleep
+    )
+    assert await services.publish(_neutral("turn:first")) is True
+    now[0] = 1_010
+    second = NeutralCommentary(
+        event_id="turn:second", turn_id="turn", stage=Stage.DIRECT, attempt=1,
+        text="The daily entry rejects calls because its feature switch is disabled.",
+    )
+    third = NeutralCommentary(
+        event_id="turn:third", turn_id="turn", stage=Stage.DIRECT, attempt=1,
+        text="The test entry is ready; the daily deployment still needs adoption.",
+    )
+    assert await services.publish(second) is True
+    assert await services.publish(third) is True
+    assert await services.publish(second) is False
+    await sleeping.wait()
+    assert downstream.records == [_neutral("turn:first")]
+    now[0] = 1_151
+    release.set()
+    await asyncio.wait_for(delivered.wait(), 2)
+    assert downstream.records[1].text == second.text + "\n\n" + third.text
+    now[0] = 1_400
+    assert await services.publish(NeutralCommentary(
+        event_id="turn:repeated", turn_id="turn", stage=Stage.DIRECT, attempt=1,
+        text=second.text,
+    )) is False
+    assert len(downstream.records) == 2
+    await services.close()
+
+
+@pytest.mark.asyncio
+async def test_terminal_close_discards_queued_findings_and_rejects_late_progress():
+    now = [1_000.0]
+    sleeping = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def sleep(_delay):
+        sleeping.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    downstream = RecordingCommentaryPort()
+    services = TurnServices(
+        turn_id="turn", downstream=downstream, clock=lambda: now[0], sleep=sleep
+    )
+    assert await services.publish(_neutral("turn:first")) is True
+    assert await services.publish(NeutralCommentary(
+        event_id="turn:pending", turn_id="turn", stage=Stage.DIRECT, attempt=1,
+        text="The final service readiness check passed.",
+    )) is True
+    await sleeping.wait()
+    await services.close()
+    assert cancelled.is_set()
+    assert len(downstream.records) == 1
+    assert await services.publish(_neutral("turn:late")) is False
 
 
 @pytest.mark.asyncio
