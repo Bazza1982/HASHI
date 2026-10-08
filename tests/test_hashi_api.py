@@ -179,6 +179,7 @@ def test_hashi_api_rejects_cross_instance_topology(tmp_path):
         ("gpt-5.6-luna", "high", "high"),
         ("gpt-5.6-sol", "max", "max"),
         ("gpt-5.6-luna", "off", "none"),
+        ("gpt-5.6-luna", "default", "low"),
     ],
 )
 def test_hashi_api_sends_gateway_reasoning_effort_not_openrouter_reasoning(

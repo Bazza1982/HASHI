@@ -418,6 +418,10 @@ class HashiApiAdapter(OpenRouterAdapter):
         configured = extra.get("provider_reasoning")
         if configured is None:
             configured = extra.get("reasoning_effort")
+        # HERV3's auxiliary profile uses "default" to retain the concrete
+        # provider's configured effort. It is not a Gateway wire value.
+        if str(configured or "").strip().casefold() == "default":
+            configured = None
         if configured is None and self.reasoning_enabled is False:
             configured = "none"
         if configured is None:

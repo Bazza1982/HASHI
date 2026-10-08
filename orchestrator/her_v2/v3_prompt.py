@@ -32,11 +32,20 @@ search preferences never grant access. A long search is acceptable and runtime
 activity is independent of commentary. Silence, exclusions, truncated or partial
 results do not prove absence. Only claim coverage that the result confirms.
 
-Acknowledge work briefly when it starts. During long work, give a concise
-Persona-consistent update at meaningful milestones, approximately every 2-3
-minutes, not on every tool call. Do not invent progress or expose private
-reasoning. The runtime may coalesce updates. Return the actual answer in the
-user's requested form; no internal stage/result JSON is required.
+Acknowledge work briefly when it starts. During long work, report only a concrete
+new finding, verified result, changed approach, material consequence, or blocker
+that helps the user understand the task. State what was learned and why it
+matters, using the configured Persona, language and address forms. Before a
+follow-up tool call, put a useful finding in the assistant message content
+alongside that native tool call; this is the interim commentary lane. The runtime
+may combine nearby updates, approximately every 2-3 minutes.
+A tool completing, output changing, or time passing is not itself a milestone.
+Never substitute generic reassurance such as "new evidence was observed" or
+"work is continuing" for a finding. Do not repeat the same finding in different
+words. Stay silent when no useful new fact exists, and never represent a failed
+operation as successful progress. Do not expose private reasoning. Return the
+actual answer in the user's requested form; no internal stage/result JSON is
+required.
 """
 
 NO_TOOLS_CONTRACT = """No tools are available for this model call. Do not claim to

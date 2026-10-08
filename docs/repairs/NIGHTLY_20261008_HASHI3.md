@@ -38,6 +38,21 @@ delivery, source ordering, coalescing, repetition, cancellation before Final,
 provider commentary ingress and independent technical activity. Runtime
 qualification/adoption and the actual external client canary follow separately.
 
+The actual daily-entry canary exposed two additional boundaries. HERV3 uses
+`v3_prompt.compile_main_prompt`, so the main-model finding guidance is now also
+in that actual prompt instead of relying on the legacy Direct prompt. The
+HASHI API auxiliary profile's `default` effort now resolves to the concrete
+provider's configured effort instead of being sent as an invalid wire value.
+Its focused red reproduced the real Persona failure; the 74-check provider,
+HERV3 contract/commentary/runtime matrix is green after the repair.
+
+Both canary shell operations have durable `SUCCESS` receipts and exit code 0.
+The client had counted `"error": null` in output previews as a failure, ahead of
+the receipt-derived status. Explicit success/failure status now takes priority;
+two focused red cases turn green in the ten-check presentation suite. The
+temporary QA Agent's invalid Telegram token remains a separate mirror failure;
+no other Agent token or identity is copied to repair that test fixture.
+
 Private evidence is retained in `.tmp/nightly-20261008/`. Earlier files and
 uncommitted changes were snapshotted before editing and are not attributed to
 this repair.
