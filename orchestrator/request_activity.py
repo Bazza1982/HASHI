@@ -307,6 +307,7 @@ class RequestActivityStore:
                     "route_status": route_status,
                     "attempt": attempt,
                 }
+            tool_outcome = "unknown"
             status = {
                 "tool_end": "completed",
                 "error": "failed",
@@ -317,8 +318,10 @@ class RequestActivityStore:
                     outcome = str(metadata.get("outcome") or "").casefold()
                     if metadata.get("is_error") is True or outcome == "failed":
                         status = "failed"
+                        tool_outcome = "failed"
                     elif metadata.get("is_error") is False or outcome == "success":
                         status = "completed"
+                        tool_outcome = "success"
                     elif outcome == "unknown":
                         status = "unknown"
             with self._lock:
@@ -353,6 +356,7 @@ class RequestActivityStore:
                     details = (getattr(event, "metadata", None) or {}).get("tool_result_details") or {}
                     if details.get("search_outcome") in {"partial", "failed", "unavailable"}:
                         status = str(details["search_outcome"])
+                        tool_outcome = status
                 event_id = _safe_text(getattr(event, "event_id", ""), limit=240)
                 if event_id and any(
                     existing.get("event_id") == event_id
@@ -425,6 +429,10 @@ class RequestActivityStore:
                 projected = record["events"][-1]
                 projected.update(delivery_class=owner, presentation_channel=channel or "internal",
                                  presentation_enabled=enabled)
+                if kind == "tool_end":
+                    # Public, receipt-derived fact; no private Tool result
+                    # metadata or interpretation of its output prose.
+                    projected["outcome"] = tool_outcome
                 if model_route_fields:
                     projected.update(model_route_fields)
                 if activity is not None:

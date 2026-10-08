@@ -53,6 +53,14 @@ two focused red cases turn green in the ten-check presentation suite. The
 temporary QA Agent's invalid Telegram token remains a separate mirror failure;
 no other Agent token or identity is copied to repair that test fixture.
 
+The existing public activity `completed` status describes termination, not an
+unambiguous Tool outcome. PAO now adds a bounded receipt-derived `outcome` field
+while retaining that compatibility status. Missing evidence stays `unknown`,
+and partial/unavailable search remains partial/unavailable. The client consumes
+that field ahead of prose. Three focused projection cases fail before the change;
+all 29 request-activity, search and HERV3 frontend checks pass after it. Both
+actual client outcome cases also pass. Private result metadata is not published.
+
 Private evidence is retained in `.tmp/nightly-20261008/`. Earlier files and
 uncommitted changes were snapshotted before editing and are not attributed to
 this repair.
