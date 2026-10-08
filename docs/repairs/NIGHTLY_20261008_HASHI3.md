@@ -117,3 +117,18 @@ matches the current checkout; no Remote source change is needed. There is no
 `instances.json` seed file in HASHI3, so there is no temporary seed to remove.
 The two skipped focused discovery checks are POSIX permission-mode contracts,
 not native Windows acceptance. Cross-machine user interaction is separate.
+
+## HN-20261006-005: actual native read-only handoff
+
+The installed qualified client opens its shared browser at the actual daily
+service. An actual model/Worker handoff exposed that URL-bearing `get_text` and
+`screenshot` calls asked the live browser to navigate before reading, which the
+read-only grant correctly denied. Functions' embedded browser adapter now checks
+the supplied URL against the same authenticated tab and removes that navigation
+instruction for those two observations. A different URL is refused; mutating
+and unbound calls retain their existing permission checks. No proprietary
+component or Core permission gate is changed.
+
+Focused red reproduces three failures: two live reads attempted navigation,
+and a mismatched page was not refused. Focused green and actual installed-client
+read-only handoff verification are recorded separately in the nightly receipts.

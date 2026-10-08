@@ -142,6 +142,25 @@ class EmbeddedBrowserBridge:
         audit = dict(args.get("_audit") or {})
         audit["instance_id"] = self.instance_id
         args["_audit"] = audit
+        if (
+            action in {"get_text", "screenshot"}
+            and str(args.get("handoff_id") or "").strip()
+            and str(args.get("tab_id") or "").strip()
+            and str(args.get("url") or "").strip()
+        ):
+            # Ordinary URL-bearing actions navigate before reading. A live-tab
+            # read must preserve the existing document and its in-page state.
+            # Check the requested URL against that exact authenticated handoff,
+            # then read it without sending the navigation instruction.
+            requested_url = str(args.pop("url")).strip()
+            current = self.call("active_tab", {**args, "maximize": False})
+            if isinstance(current, str):
+                try:
+                    current = json.loads(current)
+                except json.JSONDecodeError:
+                    current = None
+            if not isinstance(current, dict) or current.get("url") != requested_url:
+                raise EmbeddedBrowserError("browser_handoff_url_mismatch")
         result = self.call(action, args)
         if action == "screenshot" and isinstance(result, str) and result.startswith("data:image/"):
             return "screenshot:" + result.partition(",")[2]

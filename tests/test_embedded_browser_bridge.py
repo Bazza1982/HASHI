@@ -52,3 +52,51 @@ def test_canonical_session_projects_without_runtime_objects():
 
 def test_unimplemented_and_privileged_actions_not_advertised():
     assert not {'evaluate','get_html','session','password_fill','extension_load','upload'} & SUPPORTED_ACTIONS
+
+
+@pytest.mark.parametrize('action', ['get_text', 'screenshot'])
+def test_live_read_checks_current_url_without_navigating(tmp_path, monkeypatch, action):
+    bridge = EmbeddedBrowserBridge(tmp_path / 'descriptor.json', 'HASHI3')
+    calls = []
+
+    def call(name, args):
+        calls.append((name, args))
+        if name == 'active_tab':
+            return json.dumps({'url': 'https://example.test/form', 'title': 'Form'})
+        assert 'url' not in args, 'A read grant must not reload a live form'
+        return 'owned visible page'
+
+    monkeypatch.setattr(bridge, 'call', call)
+    arguments = {'handoff_id': 'h', 'tab_id': 't', 'url': 'https://example.test/form',
+                 '_audit': {'session_id': 's', 'request_id': 'r'}, 'maximize': True}
+    assert bridge.execute(action, arguments) == 'owned visible page'
+    assert [name for name, _ in calls] == ['active_tab', action]
+    assert calls[0][1]['maximize'] is False
+    assert calls[1][1]['handoff_id'] == 'h'
+    assert calls[1][1]['_audit']['request_id'] == 'r'
+    assert arguments['url'] == 'https://example.test/form'
+
+
+def test_live_read_refuses_different_page_without_content_read(tmp_path, monkeypatch):
+    bridge = EmbeddedBrowserBridge(tmp_path / 'descriptor.json', 'HASHI3')
+    calls = []
+
+    def call(name, args):
+        calls.append(name)
+        return {'url': 'https://example.test/other'}
+
+    monkeypatch.setattr(bridge, 'call', call)
+    with pytest.raises(EmbeddedBrowserError, match='browser_handoff_url_mismatch'):
+        bridge.execute('get_text', {'handoff_id': 'h', 'tab_id': 't',
+                                   'url': 'https://example.test/form'})
+    assert calls == ['active_tab']
+
+
+def test_url_normalisation_does_not_relax_mutating_or_unbound_calls(tmp_path, monkeypatch):
+    bridge = EmbeddedBrowserBridge(tmp_path / 'descriptor.json', 'HASHI3')
+    calls = []
+    monkeypatch.setattr(bridge, 'call', lambda name, args: calls.append((name, args)) or 'ok')
+    bridge.execute('fill', {'handoff_id': 'h', 'tab_id': 't', 'url': 'https://example.test/form'})
+    bridge.execute('get_text', {'url': 'https://example.test/form'})
+    assert len(calls) == 2
+    assert all(args['url'] == 'https://example.test/form' for _, args in calls)

@@ -275,3 +275,9 @@ TUI playback uses its explicit launch instance home. Keep portable media tools
 outside Core and preserve uncertain configuration-publication errors. Actual
 daily Workbench service/package Phone and Call adoption is scoped to HASHI3;
 leave existing user applications open. See [nightly repair](repairs/NIGHTLY_20261008_HASHI3.md).
+
+Frontend Connector embedded live-tab reads check URL identity before reading
+without navigation. Preserve read grants, in-page form state and canonical
+Session/Run fences; arbitrary script evaluation stays unavailable. See
+[nightly repair](repairs/NIGHTLY_20261008_HASHI3.md) for focused red/green and
+actual installed-client acceptance, scoped to HASHI3.
