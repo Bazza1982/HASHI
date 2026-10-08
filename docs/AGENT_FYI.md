@@ -263,3 +263,9 @@ busy, Call microphone/STT/PAO/TTS and Phone microphone/WebRTC/playback passed.
 The client is built/served at 9edaa03; Function source 6774c175 and Core remain
 unchanged. See [design acceptance](repairs/PHONE_CALL_DESIGN_ACCEPTANCE_20261007.md)
 for scoped evidence and physical-device limits.
+
+HERV3 commentary on HASHI3 now comes from the main model's findings; changed
+Tool output and failures only update technical activity. Rate-limited findings
+are combined, exact repetitions suppressed, and queued progress cancelled before
+Final. Preserve Persona/transport fences. Source, adoption and physical-device
+acceptance remain separate; see [nightly repair](repairs/NIGHTLY_20261008_HASHI3.md).
