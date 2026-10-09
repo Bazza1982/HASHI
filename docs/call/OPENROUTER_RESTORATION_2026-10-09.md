@@ -51,3 +51,34 @@ succeeded; the speech contains 4 seconds of nonempty audio. HASHI4's existing
 OpenRouter key was rejected with HTTP 401, `User not found.` No different
 provider, model or credential was silently substituted. Further live results
 and any user-approved credential update are added after verification.
+
+Final verified source and live scope:
+
+- HASHI3 curated Core gate: 812 passed, 1 skipped. The first pre-commit gate
+  correctly rejected the two unpublished Function files; after committing the
+  repair, the complete gate passed without changing that protection or tests.
+- HASHI3 was already stopped. Its authorized managed startup adopted the new
+  immutable generation; all 11 configured Agents and local services are ready.
+  No running Core was cold-restarted to adopt these Function changes.
+- All three original OpenRouter models succeeded using HASHI3's existing key.
+  Chinese synthesis returned nonempty 24 kHz WAV; vision recognized the probe.
+- The actual deployed frontend captured a native Chromium microphone fixture,
+  transcribed the request for seven, obtained the main Agent's answer `7`,
+  synthesized it with the approved Gemini target and automatically played it.
+  The decoded speech has nonzero audio energy through a running AudioContext.
+  Playback completed, listening resumed and hangup ended local tracks.
+- Correlated backend events confirm HTTP 200 from the approved Whisper and
+  Gemini TTS requests. The committed main reply is text; no ordinary voice file
+  was generated for this Run. Test inputs are explicit fixtures, not physical
+  microphone or human-hearing acceptance.
+- HASHI4's promoted source passed the same 258 focused checks using HASHI3's
+  isolated test interpreter; no dependency was installed in production Core.
+  The source and both instance profiles now contain the approved targets.
+- Both instances' protected Core files match the before-repair snapshots.
+  HASHI4's live Core/shared processes remain unchanged. Its previous known
+  unauthorized Call was already absent (`call_not_found`); a new Call reads the
+  restored configuration. Adopting the attachment suppression remains the
+  user's HASHI4 reboot.
+- HASHI4's OpenRouter credential remains blocked by HTTP 401. The user was
+  offered reuse of HASHI3's working credential or self-replacement. No secret
+  value was changed or copied while that decision remains unanswered.
