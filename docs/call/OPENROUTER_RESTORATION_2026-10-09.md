@@ -79,6 +79,23 @@ Final verified source and live scope:
   unauthorized Call was already absent (`call_not_found`); a new Call reads the
   restored configuration. Adopting the attachment suppression remains the
   user's HASHI4 reboot.
-- HASHI4's OpenRouter credential remains blocked by HTTP 401. The user was
-  offered reuse of HASHI3's working credential or self-replacement. No secret
-  value was changed or copied while that decision remains unanswered.
+- At the pre-update checkpoint, HASHI4's OpenRouter credential was blocked by
+  HTTP 401. Reuse of HASHI3's working credential or self-replacement was offered;
+  no credential was copied before the user's decision.
+
+## Authorized credential update, 23:10 AEDT
+
+On October 9 at 23:10:15 AEDT, the user explicitly authorized using the API key
+from HASHI3. The Frontend Connector instance configuration was updated through
+the revision-checked configuration primitive: HASHI3's `openrouter_key` was
+copied into HASHI4's existing `openrouter-api_key` field. The source and all
+unrelated destination fields were verified unchanged. Secret values are absent
+from receipts, source and this report.
+
+Fresh HASHI4 configuration probes returned HTTP 200 from all three approved
+OpenRouter targets: Whisper transcribed the audio fixture, Gemini TTS produced
+3.84 seconds of nonempty 24 kHz WAV, and Gemini vision recognized the red image.
+The ignored credential-update and provider receipts record these results.
+These probes verify credentials and provider responses, not adoption by the
+running production Worker. HASHI4's live service retains its prior credential
+snapshot; production adoption remains the user's HASHI4 reboot.

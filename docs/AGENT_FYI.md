@@ -4,8 +4,9 @@ October 9 correction: the user revoked the unauthorized direct-OpenAI Call
 configuration. Call uses only the originally approved OpenRouter Whisper,
 Gemini Flash-Lite TTS and Gemini Flash vision targets. Call audio belongs in
 the call window; ordinary voice attachments are suppressed for sealed Call
-inputs. See [restoration](call/OPENROUTER_RESTORATION_2026-10-09.md). HASHI4
-adoption remains reserved to the user.
+inputs. The user approved copying HASHI3's OpenRouter key to HASHI4; fresh
+HASHI4 configuration passed all three provider probes. HASHI4 adoption remains
+the user's reboot. See [restoration](call/OPENROUTER_RESTORATION_2026-10-09.md).
 
 October 9: media defaults cover recording, TTS and Call/video. Complete installs prepare isolated helpers and model weights. Explicit off/permissions remain binding. HASHI4 adoption is reserved to the user. See [decision](HASHI_MEDIA_DEFAULTS_2026-10-09.md) and [repair](repairs/MEDIA_DEFAULTS_REPAIR_20261009.md).
 
