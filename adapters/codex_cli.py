@@ -837,6 +837,25 @@ class CodexCLIAdapter(BaseBackend):
             return response
         return str(fallback or "").strip()
 
+    def _run_question_service(self, request_id):
+        """Interactive transport is only meaningful for a canonical, active PAO Run.
+
+        Provider-only callers retain exec semantics. Questions cannot be attached
+        to an invented Session or to a different Agent's task.
+        """
+        if not self._hashi_mcp_enabled:
+            return None
+        from orchestrator.session_store import SessionStore, SessionNotFound
+        from orchestrator.run_questions import RunQuestions
+        store = SessionStore.from_global_config(self.global_config)
+        try:
+            run = store.get_run_by_request(request_id)
+        except SessionNotFound:
+            return None
+        if run['agent_id'] != str(self.config.name).lower() or run['state'] != 'running':
+            raise ValueError('Codex question Run scope is not active')
+        return RunQuestions(store)
+
     def _event_log_writer(self) -> CodexEventLogWriter:
         return CodexEventLogWriter(
             self.events_log_path,
@@ -970,6 +989,7 @@ class CodexCLIAdapter(BaseBackend):
         # Reset per-request usage tracking
         self._last_usage = None
         self._last_cumulative_usage = None
+        interactive = None
 
         try:
             normalized_request_content = normalize_request_content(request_content)
@@ -989,6 +1009,9 @@ class CodexCLIAdapter(BaseBackend):
         local_fallback_descriptors: tuple[str, ...] = ()
 
         def with_media_metadata(response: BackendResponse) -> BackendResponse:
+            if interactive is not None:
+                response.stream_metadata = {**dict(response.stream_metadata or {}),
+                    'codex_transport': 'app-server', 'native_shell': 'disabled_managed_gateway_only'}
             if media_routing:
                 metadata = dict(response.stream_metadata or {})
                 metadata["multimodal_routing"] = list(media_routing)
@@ -1193,6 +1216,15 @@ class CodexCLIAdapter(BaseBackend):
             image_paths=native_image_paths,
             native_hook_receipt=native_hook_receipt,
         )
+        question_service = self._run_question_service(request_id)
+        if question_service is not None:
+            from adapters.codex_interactive import InteractiveTurn, app_server_command
+            interactive = InteractiveTurn(self, question_service, request_id, built_prompt, native_image_paths)
+            cmd = app_server_command(cmd)
+            # app-server has no invocation-scoped hook trust. Native shell is
+            # disabled there; the managed Gateway enforces process protection.
+            native_hook_receipt = None
+            stdin_data = None
         session_mode = "resume" if self._session_id else "new"
         resumed_thread_id = self._session_id if self._session_mode else None
         logged_usage_baseline = None
@@ -1264,7 +1296,7 @@ class CodexCLIAdapter(BaseBackend):
             invocation = resolve_argv_invocation(cmd)
             self.current_proc = await asyncio.create_subprocess_exec(
                 *invocation.argv,
-                stdin=asyncio.subprocess.PIPE if stdin_data is not None else None,
+                stdin=asyncio.subprocess.PIPE if stdin_data is not None or interactive is not None else None,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(effective_workdir),
@@ -1292,7 +1324,9 @@ class CodexCLIAdapter(BaseBackend):
                 nonlocal terminal_event_type
                 nonlocal terminal_failure
                 nonlocal last_tool_receipt
-                async for line in iter_stream_lines(proc.stdout):
+                lines = (interactive.lines(proc, self._request_reasoning_effort(reasoning_effort=reasoning_effort))
+                         if interactive is not None else iter_stream_lines(proc.stdout))
+                async for line in lines:
                     self._touch_activity()
                     decoded = line.decode(errors="replace")
                     stdout_line_count += 1

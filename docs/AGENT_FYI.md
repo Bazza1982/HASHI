@@ -1,5 +1,13 @@
 # HASHI Agent FYI
 
+October 10 in-run questions: native Codex now bridges its bidirectional question
+RPC to the PAO question owner; HERV3 uses ask_user/get_user_answer. Telegram
+delivery carries real answer buttons and scoped free-text replies. Workbench
+cards remain above the composer. Answers continue the original Run and grant no
+permissions. In Codex app-server mode native shell is disabled; use the managed
+HASHI Gateway. HASHI3 adoption is authorized; HASHI4 reboot and real Telegram
+clicks remain the user's steps. See [contract](HASHI_RUN_QUESTIONS.md).
+
 October 10 Edge correction: HASHI4's configured Agent preferences explicitly use
 Edge Xiaoxiao/Xiaoyi; automatic narration remains opt-in. The Edge helper now
 decodes its UTF-8 pipe explicitly on Windows. Real synthesis and decoding pass

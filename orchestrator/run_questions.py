@@ -111,7 +111,57 @@ class RunQuestions:
 
     def _event(self, c, row, kind):
         self.store._append_event(c, session_id=row['session_id'], run_id=row['run_id'],
-            kind='run.question.' + kind, status=row['state'], summary='', detail=self._public(row))
+            kind='run.question.' + kind, status=row['state'], summary='', detail=self._public(row),
+            outbox=kind == 'created')
+
+    def cancel(self, *, request_id, agent_id, question_id):
+        """Withdraw a native request resolved/interrupted by its owning Engine."""
+        with self._transaction() as c:
+            run = self._run(c, request_id, agent_id)
+            row = c.execute('SELECT * FROM run_questions WHERE question_id=? AND run_id=?',
+                            (question_id, run['run_id'])).fetchone()
+            if row is None:
+                raise QuestionError('question_not_found', 404)
+            if row['state'] in ('pending', 'answered'):
+                c.execute("UPDATE run_questions SET state='cancelled',updated_at=? WHERE question_id=?",
+                          (_stamp(self.clock()), question_id))
+                row = c.execute('SELECT * FROM run_questions WHERE question_id=?', (question_id,)).fetchone()
+                self._event(c, row, 'cancelled')
+            return self._public(row)
+
+    def telegram_question(self, *, question_id, owner_id, agent_id, chat_id):
+        """Bind an authenticated Telegram reply to the original frozen Run route."""
+        from orchestrator.frontend_delivery import route_destination
+        with self._transaction() as c:
+            row = c.execute('SELECT * FROM run_questions WHERE question_id=? AND owner_id=? AND agent_id=? AND instance_id=?',
+                            (question_id, owner_id, str(agent_id).lower(), self.store.instance_id)).fetchone()
+            if row is None:
+                raise QuestionError('question_not_found', 404)
+            row = self._scoped(c, question_id, session_id=row['session_id'], owner_id=owner_id)
+            run = self._run(c, row['request_id'], agent_id)
+            destination = route_destination(json.loads(run['delivery_route_json']), 'telegram')
+            if destination is None or str(destination['channel_key']) != str(chat_id):
+                raise QuestionError('question_not_found', 404)
+            return self._public(row)
+
+    def pending_telegram_deliveries(self, *, agent_id, limit=20):
+        """Derived view of existing FC tasks; question creation/outbox is atomic."""
+        with self._transaction() as c:
+            rows = c.execute('''SELECT q.*, e.event_id FROM run_questions q
+                JOIN run_events e ON e.run_id=q.run_id AND e.kind='run.question.created'
+                    AND json_extract(e.detail_json,'$.question_id')=q.question_id
+                JOIN connector_delivery_tasks d ON d.event_id=e.event_id
+                WHERE q.instance_id=? AND q.agent_id=? AND q.state='pending'
+                    AND d.connector_id='telegram' AND (d.state IN ('pending','retry')
+                        OR (d.state='claimed' AND d.lease_expires_at<=?))
+                ORDER BY q.created_at LIMIT ?''', (self.store.instance_id, str(agent_id).lower(),
+                    datetime.now(timezone.utc).isoformat(), max(1, min(100, limit)))).fetchall()
+            result = []
+            for row in rows:
+                refreshed = self._refresh(c, row)
+                if refreshed['state'] == 'pending':
+                    result.append({**self._public(refreshed), 'owner_id': row['owner_id'], 'event_id': row['event_id']})
+            return result
 
     def _refresh(self, c, row):
         run = c.execute('''SELECT r.state,s.context_generation AS current_generation,s.status AS session_status

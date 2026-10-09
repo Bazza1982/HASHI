@@ -11,6 +11,7 @@ from orchestrator.command_registry import bind_runtime_commands, runtime_bot_com
 from orchestrator.command_specs import COMMAND_SPECS
 from orchestrator.her_v2.v3_callback_contract import HER_V3_MODEL_CALLBACK_PATTERN
 from orchestrator.private_wol import private_wol_available
+from orchestrator.runtime_run_questions import CALLBACK_PATTERN as QUESTION_CALLBACK_PATTERN
 from orchestrator.slash_command_audit import split_slash_command_words
 from orchestrator import ui_language
 
@@ -27,6 +28,7 @@ class CommandBinding:
 class CallbackBinding:
     pattern: str
     method_name: str
+    command: bool = True
 
 
 @dataclass(frozen=True)
@@ -72,6 +74,8 @@ BOT_COMMAND_BINDINGS: tuple[BotCommandBinding, ...] = tuple(
 
 
 CALLBACK_BINDINGS: tuple[CallbackBinding, ...] = (
+    # Questions use their PAO answer transaction, not command admission/new Runs.
+    CallbackBinding(QUESTION_CALLBACK_PATTERN, 'callback_run_question', command=False),
     CallbackBinding(r"^fallback:", "callback_fallback"),
     CallbackBinding(
         r"^(model|backend|bmodel|effort|backend_menu|her_adv|her_execution|her_model|her_route|her_routes|her_reasoning|her_target)",
@@ -147,7 +151,7 @@ def bind_flexible_runtime_handlers(runtime) -> None:
         runtime.app.add_handler(CommandHandler(binding.name, runtime._wrap_cmd(binding.name, callback)))
     for binding in CALLBACK_BINDINGS:
         callback = getattr(runtime, binding.method_name)
-        if hasattr(runtime, "_wrap_callback"):
+        if binding.command and hasattr(runtime, "_wrap_callback"):
             callback = runtime._wrap_callback(binding.method_name, callback)
         runtime.app.add_handler(CallbackQueryHandler(callback, pattern=binding.pattern))
 

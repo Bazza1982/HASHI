@@ -1,5 +1,44 @@
 # Asynchronous questions within a Run
 
+## October 10: complete Engine and frontend round trip
+
+Approved scope: implement in HASHI3 and Workbench, then deploy to HASHI4.
+HASHI3 adoption is authorized; HASHI4 reboot and real Telegram button acceptance
+are reserved to the user. Approval, source delivery and live adoption are separate.
+
+Canonical active Codex Runs use the bidirectional app-server protocol. Native
+`item/tool/requestUserInput` batches become PAO questions; explicit answers are
+returned to the same native RPC, original question IDs and original Turn. A
+cancelled/expired question is an error, never an empty or default answer. Native
+secret-input requests are rejected. Provider-only callers retain exec transport.
+The request-scoped HASHI MCP inventory is retained. App-server lacks exec's
+invocation-scoped hook trust, so its native shell and hooks are disabled: execution
+and process control remain with the managed HASHI Gateway. Permission RPCs are
+not clarification questions and are not granted by this bridge.
+
+HERV3's main prompt requires the existing ask_user/get_user_answer contract when
+clarification is needed, independent work while waiting, and no premature final
+answer while required information is pending.
+
+Creation atomically publishes the question event into the existing FC outbox.
+The Agent delivery sweep derives pending Telegram work from that outbox. Telegram
+renders option buttons and a localized free-text action. Clicking an option, or
+replying to that bot's question message, enters PAO after actor, Agent, instance
+and frozen Run destination checks. It never enters the ordinary new-Run queue.
+Duplicate deliveries use existing FC claims; duplicate answers preserve one
+durable result. Closed cards retain their question identity for late text replies.
+The text action asks the user to reply to the question message; it is not a new
+conversation prompt. Telegram client interaction remains a separate acceptance.
+
+Workbench displays pending cards above the composer, outside the scrollable
+transcript, with their own bounded scroll area. Session, context generation and
+connection scope fence both rendering and submission. No option is auto-selected.
+
+Evidence: focused PAO/HTTP/Telegram transport/native RPC tests cover scope,
+expiry, cancellation, idempotency, Unicode and continuation. A real installed
+Codex model received a question answer and completed the same native Turn.
+Full deployment/adoption receipts are recorded separately in the dated repair.
+
 Owner: PAO owns question identity, durable state and scope. Frontend Connectors
 project question cards and collect authenticated answers. Engineering layer:
 Functions. Parent: `HASHI_PAO_SYSTEM_DESIGN.md`. This changes no Protected Core.

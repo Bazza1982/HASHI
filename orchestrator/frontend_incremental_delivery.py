@@ -80,6 +80,8 @@ async def dispatch_pending_telegram_deliverables(
     candidates = store.pending_incremental_telegram_deliveries(
         agent_id=runtime.name, limit=limit
     )
+    from orchestrator.run_questions import RunQuestions
+    candidates = [*RunQuestions(store).pending_telegram_deliveries(agent_id=runtime.name, limit=limit), *candidates]
     dispatched = 0
     for candidate in candidates:
         if await dispatch_incremental_telegram_event(
