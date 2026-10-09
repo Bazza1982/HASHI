@@ -64,6 +64,8 @@ acceptance boundaries; this source sync does not close them.
   passed **812**, with **0 failed**, **1 skipped** and **0 deselected**.
   Both exact argv lists and full outputs are retained in `offline-results.json`,
   `focused.log` and `curated-core.log`; neither is a physical-device live test.
+  The Windows skip is the existing AF_UNIX browser stub, whose native pipe
+  boundary has separate local acceptance evidence.
 - The initial focused run passed 201 but failed the existing shipped-FYI
   contract: the accumulated reference exceeded its 12,000-character read limit.
   `focused-red.log` preserves that failure. The complete original reference is
@@ -77,7 +79,12 @@ acceptance boundaries; this source sync does not close them.
 - The optional desktop installer passed the native PowerShell parser and the
   host passed the actual .NET compiler. Neither was installed or launched.
 
-The remaining final delivery check is a clean-source isolated qualification
-using HASHI4's approved interpreter and existing runtime fingerprint. Its
-receipt belongs to the ignored evidence directory, not the active generation
-file. The production user still owns all operational adoption.
+Clean-source isolated qualification passed with HASHI4's approved interpreter
+and its existing runtime/dependency/Core fingerprint, accepting 527 executable
+modules and 132 assets. Its receipt belongs to the ignored evidence directory,
+not the active generation file; the active generation remains unchanged and no
+Worker was replaced. The source-protection gate passes both the working tree
+and the complete promoted branch. Production Core PID is retained. Existing
+Agent/secret declarations and desktop opt-ins retain their original bytes;
+the live peer registry continues its normal discovery refresh and is not
+overwritten by this sync. The production user owns all operational adoption.
