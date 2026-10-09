@@ -728,6 +728,24 @@ async def _finish_batch(runtime: Any, batch_id: str) -> None:
     discarded_voice = int(getattr(runtime, "_long_finalize_discarded_voice", 0) or 0)
     try:
         submission = consume_batch(runtime, int(chat_id))
+        if submission is not None:
+            prompt = submission.prompt
+            content = submission.request_content
+            metadata = {
+                **(submission.request_metadata if submission.media_count else {}),
+                "ingress_transport": "telegram",
+            }
+            if submission.attachment_manifest and getattr(runtime, "session_store", None) is not None:
+                from orchestrator.telegram_media_admission import admit_telegram_media
+
+                prompt, content, metadata = await asyncio.to_thread(
+                    admit_telegram_media,
+                    runtime,
+                    chat_id=submission.chat_id,
+                    prompt=prompt,
+                    request_content=content,
+                    request_metadata=metadata,
+                )
     except MultimodalContractError as exc:
         attachment = (
             ui_language.tr("long.attachment", attachment_id=exc.attachment_id)
@@ -817,19 +835,13 @@ async def _finish_batch(runtime: Any, batch_id: str) -> None:
             f"(text_count={submission.text_count}, media_count={submission.media_count}, "
             f"receipt_count={len(submission.attachment_receipts)})"
         )
-    enqueue_kwargs = {
-        "request_metadata": {
-            **(submission.request_metadata if submission.media_count else {}),
-            "ingress_transport": "telegram",
-        }
-    }
     await runtime.enqueue_request(
         submission.chat_id,
-        submission.prompt,
+        prompt,
         submission.source,
         submission.summary,
-        request_content=submission.request_content,
-        **enqueue_kwargs,
+        request_content=content,
+        request_metadata=metadata,
     )
 
 

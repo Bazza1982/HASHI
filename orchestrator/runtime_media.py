@@ -471,15 +471,25 @@ async def handle_media_message(
             transport=transport,
             attachment_id=reservation_id,
         )
+        from orchestrator.telegram_media_admission import admit_telegram_media
+
+        rendered_prompt, request_content, request_metadata = await asyncio.to_thread(
+            admit_telegram_media,
+            runtime,
+            chat_id=chat_id,
+            prompt=rendered_prompt,
+            request_content=request_content,
+            request_metadata={
+                **_single_attachment_metadata(request_content, manifest),
+                "ingress_transport": "telegram",
+            },
+        )
         await runtime.enqueue_request(
             chat_id,
             rendered_prompt,
             media_kind.lower(),
             summary,
-            request_metadata={
-                **_single_attachment_metadata(request_content, manifest),
-                "ingress_transport": "telegram",
-            },
+            request_metadata=request_metadata,
             request_content=request_content,
         )
     except Exception as e:
