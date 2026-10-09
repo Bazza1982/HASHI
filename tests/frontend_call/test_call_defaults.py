@@ -14,6 +14,17 @@ def test_fresh_install_has_audio_and_camera_and_keeps_saved_opt_out(tmp_path):
     assert context["camera_available"] is True
     assert {t["kind"] for t in context["targets"]} == {"stt", "tts", "vision"}
     doc = read_config_json(path)
+    # The approved Call provider is OpenRouter for all three modalities.
+    assert {(t["kind"], t["base_url"], t["model"], t["credential_ref"])
+            for t in doc["targets"]} == {
+        ("stt", "https://openrouter.ai/api/v1", "openai/whisper-large-v3",
+         "secrets://openrouter-api_key"),
+        ("tts", "https://openrouter.ai/api/v1", "google/gemini-3.8-flash-lite-tts",
+         "secrets://openrouter-api_key"),
+        ("vision", "https://openrouter.ai/api/v1", "google/gemini-3.8-flash",
+         "secrets://openrouter-api_key"),
+    }
+    assert doc["default_profile"]["tts"]["voice_id"] == "Achernar"
     doc["enabled"] = False
     doc["extension"] = {"retained": True}
     write_config_json(path, doc)

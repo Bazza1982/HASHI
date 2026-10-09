@@ -1,5 +1,11 @@
 # Media defaults repair — October 9, 2026
 
+Correction at 22:32: the user revoked the direct-OpenAI Call defaults and
+instance profile substitution used in the earlier tests below. Those historical
+receipts do not validate the approved OpenRouter design. The provider and Call
+playback correction is recorded separately in
+[Call restoration](../call/OPENROUTER_RESTORATION_2026-10-09.md).
+
 Approval: repair and reboot/adopt HASHI3; synchronize qualified changes and
 dependencies/configuration to HASHI4; user alone adopts HASHI4. Frontend
 Connector, Functions/deployment; protected Core remains unchanged.

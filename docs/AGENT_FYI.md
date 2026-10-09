@@ -1,5 +1,11 @@
 # HASHI Agent FYI
 
+October 9 correction: restore only the user's approved OpenRouter Whisper,
+Gemini Flash-Lite TTS and Gemini Flash vision targets. The verified HASHI3
+repair is synchronized. Call audio plays in the call window, without ordinary
+voice attachments. HASHI4's key returned HTTP 401; credentials and the user's
+reboot remain pending. See [restoration](call/OPENROUTER_RESTORATION_2026-10-09.md).
+
 October 9 media repair: all voice/Phone/Call/video/TTS availability defaults on. Full installers prepare isolated helpers, model weights and converter. HASHI3 adopted and verified; HASHI4 source/config/dependencies prepared, adoption reserved to the user. No Core changes. See [decision](HASHI_MEDIA_DEFAULTS_2026-10-09.md) and [repair](repairs/MEDIA_DEFAULTS_REPAIR_20261009.md).
 
 2026-10-09: confirmed HASHI3 Function fixes are promoted to HASHI4 source.

@@ -1,29 +1,47 @@
-"""Qualified default media targets; credentials stay in instance configuration."""
+"""Approved OpenRouter Call defaults; credentials stay in instance configuration."""
+
+from .config import OPENROUTER_API_BASE
+
+
+_VOICE_STYLES = {
+    "Achernar": "Soft", "Achird": "Friendly", "Algenib": "Gravelly",
+    "Algieba": "Smooth", "Alnilam": "Firm", "Aoede": "Breezy",
+    "Autonoe": "Bright", "Callirrhoe": "Easy-going", "Charon": "Informative",
+    "Despina": "Smooth", "Enceladus": "Breathy", "Erinome": "Clear",
+    "Fenrir": "Excitable", "Gacrux": "Mature", "Iapetus": "Clear",
+    "Kore": "Firm", "Laomedeia": "Upbeat", "Leda": "Youthful", "Orus": "Firm",
+    "Pulcherrima": "Forward", "Puck": "Upbeat", "Rasalgethi": "Informative",
+    "Sadachbia": "Lively", "Sadaltager": "Knowledgeable", "Schedar": "Even",
+    "Sulafat": "Warm", "Umbriel": "Easy-going", "Vindemiatrix": "Gentle",
+    "Zephyr": "Bright", "Zubenelgenubi": "Casual",
+}
 
 
 def default_call_configuration():
     common = {
         "adapter": "openai_compatible", "location": "cloud",
-        "base_url": "https://api.openai.com/v1",
-        "credential_ref": "secrets://openai_api_key", "options": {},
+        "base_url": OPENROUTER_API_BASE,
+        "credential_ref": "secrets://openrouter-api_key", "options": {},
     }
     return {
         "version": 1, "enabled": True,
         "targets": [
-            {**common, "id": "openai-stt", "kind": "stt",
-             "label": "OpenAI STT", "model": "gpt-transcribe"},
-            {**common, "id": "openai-tts", "kind": "tts",
-             "label": "OpenAI TTS", "model": "gpt-4o-mini-tts",
-             "audio_format": "wav", "voices": ["coral"],
-             "options": {"instructions": {"type": "string", "max_length": 300},
-                         "speed": {"type": "number", "min": 0.5, "max": 2.0}}},
-            {**common, "id": "openai-vision", "kind": "vision",
-             "label": "OpenAI Vision", "model": "gpt-4.1-mini"},
+            {**common, "id": "openrouter-whisper", "kind": "stt",
+             "label": "Whisper Large V3 (OpenRouter)", "model": "openai/whisper-large-v3"},
+            {**common, "id": "openrouter-gemini-tts", "kind": "tts",
+             "label": "Gemini 3.8 Flash-Lite TTS (OpenRouter)",
+             "model": "google/gemini-3.8-flash-lite-tts",
+             "audio_format": "pcm", "voices": list(_VOICE_STYLES),
+             "voice_styles": dict(_VOICE_STYLES),
+             "options": {"style": {"type": "string", "max_length": 160}}},
+            {**common, "id": "openrouter-gemini-vision", "kind": "vision",
+             "label": "Gemini 3.8 Flash visual snapshot (OpenRouter)",
+             "model": "google/gemini-3.8-flash"},
         ],
         "default_profile": {
-            "stt": {"target_id": "openai-stt", "options": {}},
-            "tts": {"target_id": "openai-tts", "voice_id": "coral", "options": {}},
-            "vision": {"target_id": "openai-vision", "options": {}},
+            "stt": {"target_id": "openrouter-whisper", "options": {}},
+            "tts": {"target_id": "openrouter-gemini-tts", "voice_id": "Achernar", "options": {}},
+            "vision": {"target_id": "openrouter-gemini-vision", "options": {}},
         },
         "profiles": {},
     }
