@@ -55,7 +55,28 @@ claim of human Telegram-client or real-model image acceptance.
 
 ## Deployment
 
-Implementation and checks are complete on HASHI3. Running adoption and HASHI4
-source deployment are recorded separately after qualification. HASHI4 manual
-reboot and the user's Telegram screenshot resend remain the production live
-acceptance step; no HASHI4 reboot is authorized or performed.
+Implementation checkpoint: HASHI3 ab3cc244; HASHI4 cherry-pick 33232569.
+The three production modules and regression test have identical source (one
+new file has only the normal checkout line-ending difference).
+
+HASHI3's existing idle Codex canary Agent adopted the committed Function
+generation through a targeted hot reboot. The live generation manifest names
+ab3cc244 and includes telegram_media_admission. An isolated Session then
+uploaded a two-colour PNG through the real Session API. The actual Codex
+app-server image turn completed with "MEDIA-ACK: red, blue", with no backend
+error. This proves the deployed Worker can consume a real registered image;
+the Telegram handler-to-Run binding is covered by the focused regression.
+It does not claim a physical Telegram client resend. Other HASHI3 Agents were
+not rebooted by this narrow canary.
+
+The same focused scope on HASHI4 source passes: 119 passed, 2 skipped. It used
+the HASHI3 test interpreter, without modifying the live HASHI4 environment.
+Both checkouts pass the protected-Core check. HASHI4 source is deployed; its
+running Workers were not rebooted. The user must manually adopt the source
+before resending the failed Telegram screenshot. A whole-instance hot reboot
+adopts it for all Agents; a targeted reboot adopts it only for that Agent.
+
+Ignored operational receipts: state/telegram-media-repair-20261010 contains the
+adoption receipt, generation operation receipt, actual PNG, completed model
+Run receipt and HASHI4 focused JUnit result. No tokens are stored in these
+receipts. The original failed Run remains unchanged.
