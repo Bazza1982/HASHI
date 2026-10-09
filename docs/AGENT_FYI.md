@@ -6,7 +6,11 @@ delivery carries real answer buttons and scoped free-text replies. Workbench
 cards remain above the composer. Answers continue the original Run and grant no
 permissions. In Codex app-server mode native shell is disabled; use the managed
 HASHI Gateway. HASHI3 adoption is authorized; HASHI4 reboot and real Telegram
-clicks remain the user's steps. See [contract](HASHI_RUN_QUESTIONS.md).
+clicks remain the user's steps. HASHI3 real Codex and HERV3 Runs both consumed
+browser-submitted answers and completed. Code and the frontend bundle are
+delivered for HASHI4; user `/reboot max` is needed for shared and Agent adoption.
+See [contract](HASHI_RUN_QUESTIONS.md) and
+[validation/adoption](repairs/RUN_QUESTIONS_COMPLETION_20261010.md).
 
 October 10 Edge correction: HASHI4's configured Agent preferences explicitly use
 Edge Xiaoxiao/Xiaoyi; automatic narration remains opt-in. The Edge helper now
