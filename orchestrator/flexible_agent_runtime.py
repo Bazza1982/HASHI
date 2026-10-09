@@ -11096,6 +11096,10 @@ class FlexibleAgentRuntime:
         """Safety timeout: auto-submit the collected batch after 5 minutes."""
         await runtime_long.long_buffer_timeout(self)
 
+    async def callback_run_question(self, update: Update, context: Any):
+        from orchestrator.runtime_run_questions import handle_callback
+        await handle_callback(self, update, context)
+
     async def handle_message(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             self.logger.warning(f"Ignored message from unauthorized user ID: {update.effective_user.id}")
@@ -11107,6 +11111,9 @@ class FlexibleAgentRuntime:
             await self._reply_text(update, self._transfer_redirect_text())
             return
         text = update.message.text
+        from orchestrator.runtime_run_questions import handle_text_reply
+        if await handle_text_reply(self, update):
+            return
         if await runtime_workzone.handle_pending_path_reply(self, update):
             return
         # /long is scoped to the chat that started it.

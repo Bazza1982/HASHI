@@ -286,6 +286,10 @@ def telegram_reply_markup_for_event(
             button_data = dict(raw_button)
             button_data["text"] = str(block.get("label") or button_data.get("text") or "Action")
             button = InlineKeyboardButton.de_json(button_data, runtime.app.bot)
+        elif payload.get('kind') in {'run_question_answer', 'run_question_text'}:
+            from orchestrator.frontend_run_questions import telegram_button
+            button = telegram_button(block, ui_language.preferred_locale(runtime))
+            payload = {**payload, 'row': len(rows), 'column': 0}
         elif payload.get("url"):
             button = InlineKeyboardButton(
                 str(block.get("label") or "Action"),
@@ -674,6 +678,7 @@ async def _send_long_message_transport(
     frontend_owner_id: str | None = None,
     skip_local_capture: bool = False,
     outbox_outcome: dict[str, Any] | None = None,
+    reply_markup: Any = None,
 ):
     """Send Markdown or pre-rendered Telegram HTML with safe chunking."""
     from orchestrator.admin_local_testing import capture_local_command_output
@@ -964,6 +969,7 @@ async def _send_long_message_transport(
     async def _send_chunk(
         chunk_raw: str, chunk_html: str, chunk_index: int, *, final_chunk: bool
     ):
+        buttons = {'reply_markup': reply_markup} if final_chunk and reply_markup is not None else {}
         notification_disabled = _safe_disable_notification(
             runtime,
             purpose=purpose,
@@ -976,6 +982,7 @@ async def _send_long_message_transport(
                 text=chunk_html,
                 parse_mode=constants.ParseMode.HTML,
                 disable_notification=notification_disabled,
+                **buttons,
             )
             if not sent:
                 return False
@@ -994,6 +1001,7 @@ async def _send_long_message_transport(
                     chat_id=chat_id,
                     text=chunk_raw,
                     disable_notification=notification_disabled,
+                    **buttons,
                 )
                 if not sent:
                     return False
@@ -1005,6 +1013,7 @@ async def _send_long_message_transport(
                             chat_id=chat_id,
                             text=remain,
                             disable_notification=notification_disabled,
+                            **buttons,
                         )
                         return sent
                     split_at = remain.rfind("\n", 0, tg_max_len)
@@ -1105,6 +1114,7 @@ async def dispatch_claimed_telegram_event(
     canonical_text, canonical_parse_mode = _render_standard_event_for_telegram(
         standard_event
     )
+    canonical_markup = telegram_reply_markup_for_event(runtime, standard_event)
     if not include_text:
         canonical_text = ""
     media_refs = _standard_event_media_refs(standard_event)
@@ -1136,6 +1146,7 @@ async def dispatch_claimed_telegram_event(
                 frontend_owner_id=str(frontend_owner_id),
                 skip_local_capture=True,
                 outbox_outcome=outcome,
+                reply_markup=canonical_markup,
             )
             status = str(
                 outcome.get("status") or ("completed" if chunks else "failed")

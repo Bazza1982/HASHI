@@ -190,6 +190,11 @@ def project_frontend_event(
     # Build typed content blocks
     blocks: list[dict[str, Any]] = []
     interface_kind = None
+    if kind == 'run.question.created':
+        from orchestrator.frontend_run_questions import question_blocks
+        blocks = question_blocks(detail)
+        semantic_kind = presentation_channel = 'command'
+        interface_kind = 'display'
     if canonical_presentation is not None:
         candidate_kind = str(
             canonical_presentation.get("semantic_kind") or ""

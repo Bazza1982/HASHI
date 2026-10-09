@@ -53,6 +53,17 @@ have inspected files, browsed, run commands, or changed external state. If the
 request needs those actions, explain this limit and suggest a tool-capable model.
 """
 
+QUESTION_CONTRACT = """When you need a clarification or preference from the user,
+use ask_user to publish an answerable question card, with concise options and
+allow_free_text when useful. Do not put the question only in commentary or end
+the Run before collecting the answer. Continue independent work, then use
+get_user_answer with the returned question_id in this same Run (wait_seconds
+up to 30). If dependent work must wait, keep collecting while pending. Respect
+expired/cancelled state; silence or a suggested/default option is not an answer.
+Answers supply information only, never permission to perform side effects.
+Do not request secrets through question cards.
+"""
+
 
 def compile_main_prompt(
     *,
@@ -66,6 +77,8 @@ def compile_main_prompt(
     system = [MAIN_CONTRACT]
     if not tools_available:
         system.append(NO_TOOLS_CONTRACT)
+    else:
+        system.append(QUESTION_CONTRACT)
     sections = sorted(
         (row for row in (pcm_input.get("sections") or []) if isinstance(row, Mapping)),
         key=lambda row: (int(row.get("order", 0)), str(row.get("key", ""))),
