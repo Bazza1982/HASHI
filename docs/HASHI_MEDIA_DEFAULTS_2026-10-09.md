@@ -22,6 +22,13 @@ missing voices/languages and empty synthesized WAVs fail instead of producing
 wrong-voice or 0:00 attachments. See the
 [October 10 correction](repairs/VOICE_OPT_IN_REPAIR_20261010.md).
 
+An explicit instance/Agent preference takes priority over that platform fallback.
+The user's October 10 HASHI4 correction restores its existing Agents to Edge
+Xiaoxiao/Xiaoyi, with previously missing narration choices saved OFF. The isolated
+Edge helper explicitly decodes its UTF-8 pipe, independent of Windows code page
+or ignored Python environment variables. See
+[Edge restoration and adoption boundary](repairs/EDGE_VOICE_RESTORATION_20261010.md).
+
 An absent call declaration is initialized by its Functions owner from the
 originally approved OpenRouter targets: `openai/whisper-large-v3`,
 `google/gemini-3.8-flash-lite-tts` and `google/gemini-3.8-flash`. All use

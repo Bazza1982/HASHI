@@ -1,5 +1,11 @@
 # HASHI Agent FYI
 
+October 10 Edge correction: HASHI4's configured Agent preferences explicitly use
+Edge Xiaoxiao/Xiaoyi; automatic narration remains opt-in. The Edge helper now
+decodes its UTF-8 pipe explicitly on Windows. Real synthesis and decoding pass
+for both voices; Agent adoption of the helper fix still needs the user's explicit
+hot-update authorization. See [Edge restoration](repairs/EDGE_VOICE_RESTORATION_20261010.md).
+
 October 10 correction: `/voice` remains available, but automatic narration
 defaults OFF. Preserve saved off/TTS/native choices. Windows defaults to SAPI,
 with language-matched installed voices and rejection of empty output. The
