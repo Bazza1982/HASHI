@@ -213,16 +213,18 @@ def test_voice_state_conflict_does_not_replay_setting_change(tmp_path, monkeypat
 def test_voice_modes_coordinate_native_and_legacy_tts_state(tmp_path):
     manager = _manager(tmp_path)
 
-    assert manager.get_reply_mode() == "tts"
-    assert manager.is_enabled() is True
+    assert manager.get_reply_mode() == "off"
+    assert manager.is_enabled() is False
     assert not manager.state_path.exists()
 
     manager.set_reply_mode("tts")
+    manager = _manager(tmp_path)
     assert manager.get_reply_mode() == "tts"
     assert manager.is_enabled() is True
     assert manager.native_policy["mode"] == "tts"
 
     manager.set_reply_mode("auto")
+    manager = _manager(tmp_path)
     assert manager.get_reply_mode() == "native"
     assert manager.is_enabled() is False
     assert manager.native_audio_enabled() is True
@@ -232,9 +234,26 @@ def test_voice_modes_coordinate_native_and_legacy_tts_state(tmp_path):
     assert manager.get_voice_profile_id() == "warm_female"
 
     manager.set_reply_mode("off")
+    manager = _manager(tmp_path)
     assert manager.get_reply_mode() == "off"
     assert manager.is_enabled() is False
     assert manager.native_audio_enabled() is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("saved", [None, "{}", "{invalid json"])
+async def test_unconfigured_voice_never_synthesizes_or_writes_state(tmp_path, monkeypatch, saved):
+    manager = _manager(tmp_path)
+    if saved is not None:
+        manager.state_path.parent.mkdir(parents=True, exist_ok=True)
+        manager.state_path.write_text(saved, encoding="utf-8")
+    provider = SimpleNamespace(synthesize=AsyncMock())
+    monkeypatch.setattr(voice_manager_module, "build_provider", lambda *a, **k: provider)
+
+    assert await manager.synthesize_reply("agent", "request", "普通文字回复") is None
+    assert manager.get_reply_mode() == "off"
+    provider.synthesize.assert_not_called()
+    assert (manager.state_path.read_text(encoding="utf-8") if manager.state_path.exists() else None) == saved
 
 
 def test_native_mode_fails_closed_without_a_complete_audio_capability(tmp_path):
@@ -254,7 +273,7 @@ def test_native_mode_fails_closed_without_a_complete_audio_capability(tmp_path):
     with pytest.raises(RuntimeError, match="no compatible audio model"):
         manager.set_reply_mode("native")
 
-    assert manager.get_reply_mode() == "tts"
+    assert manager.get_reply_mode() == "off"
     assert manager.state_path.exists() is False
 
 

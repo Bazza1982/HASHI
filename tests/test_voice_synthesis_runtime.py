@@ -8,6 +8,7 @@ import pytest
 
 from orchestrator import voice_synthesis_runtime
 from orchestrator.tts_providers import edge
+from orchestrator.tts_providers import windows
 
 
 def test_resolve_tts_python_uses_instance_platform_config(tmp_path, monkeypatch):
@@ -100,3 +101,23 @@ async def test_edge_provider_prefers_isolated_runtime(tmp_path, monkeypatch):
         "voice": "en-US-EmmaNeural",
         "rate": "+10%",
     }
+
+
+@pytest.mark.asyncio
+async def test_windows_empty_audio_is_rejected_before_conversion(tmp_path, monkeypatch):
+    import wave
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    # SAPI can report success for Chinese passed to an English-only voice.
+    with wave.open(str(tmp_path / "reply.wav"), "wb") as audio:
+        audio.setparams((1, 2, 22050, 0, "NONE", "not compressed"))
+    process = SimpleNamespace(returncode=0, communicate=AsyncMock(return_value=(b"", b"")))
+    monkeypatch.setattr(windows.asyncio, "create_subprocess_exec", AsyncMock(return_value=process))
+    convert = AsyncMock()
+    monkeypatch.setattr(windows, "convert_wav_to_ogg", convert)
+
+    with pytest.raises(RuntimeError, match="empty audio"):
+        await windows.WindowsSapiProvider().synthesize("中文回复", tmp_path, "reply")
+    convert.assert_not_called()
+    assert not (tmp_path / "reply.ogg").exists()

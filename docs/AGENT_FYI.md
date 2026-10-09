@@ -1,5 +1,14 @@
 # HASHI Agent FYI
 
+October 10 correction: `/voice` remains available, but automatic narration
+defaults OFF. Preserve saved off/TTS/native choices. Windows defaults to SAPI,
+with language-matched installed voices and rejection of empty output. The
+restored external Call capture passes the same sustained-noise fixture at
+3.328 seconds; the rejected amplitude-only trial does not submit at 40.2 seconds.
+Call keeps OpenRouter Whisper/Gemini/Achernar and its existing optimizations.
+Source synchronization and running adoption are separate. See
+[voice correction and Call review](repairs/VOICE_OPT_IN_REPAIR_20261010.md).
+
 October 9 correction: restore only the user's approved OpenRouter Whisper,
 Gemini Flash-Lite TTS and Gemini Flash vision targets. The verified HASHI3
 repair is synchronized. Call audio plays in the call window, without ordinary

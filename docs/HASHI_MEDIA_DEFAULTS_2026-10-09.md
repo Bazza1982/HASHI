@@ -8,8 +8,19 @@ Recording, native-audio compatibility, Phone, Call/video and speech replies are
 available by default. Availability does not start a microphone or camera;
 capture still follows the user's action and browser permission. A saved explicit
 off choice, privacy policy, authenticated routing and qualified model boundaries
-remain binding. Default replies use platform TTS; switching to native model
-audio still requires a compatible declared target.
+remain binding. Automatic speech replies default OFF: availability is not
+consent to narrate every reply. Only a saved TTS/native choice enables automatic
+speech. Missing, empty or unreadable voice state never enables narration and
+reading fallback state never persists it. When TTS is selected, the default
+engine remains platform TTS; switching to native model audio still requires a
+compatible declared target.
+
+On Windows the platform engine is System.Speech/SAPI, not Edge. Without an
+explicit voice it reuses the shared English/Chinese/Japanese text-language hint
+to select an installed matching voice. An explicitly selected voice is retained;
+missing voices/languages and empty synthesized WAVs fail instead of producing
+wrong-voice or 0:00 attachments. See the
+[October 10 correction](repairs/VOICE_OPT_IN_REPAIR_20261010.md).
 
 An absent call declaration is initialized by its Functions owner from the
 originally approved OpenRouter targets: `openai/whisper-large-v3`,
