@@ -510,3 +510,85 @@ def test_windows_attachment_parent_cannot_be_modified_during_secure_open(tmp_pat
             assert source.read() == b"authorized bytes"
     assert observed
     assert writable_parent() == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind,batch", [("photo", False), ("document", False),
+                                       ("video", False), ("photo", True)])
+async def test_telegram_download_reaches_backend_as_current_run_attachment(tmp_path, kind, batch):
+    """Real Telegram intake -> persisted Message/Run -> backend read authority."""
+    from orchestrator import runtime_long, runtime_media, runtime_session
+    from tests.test_runtime_media import _runtime, _update
+
+    mgr, backend, store, session, _, _, _ = fixture(tmp_path, agent="zelda", owner="user:1")
+    runtime = _runtime(tmp_path)
+    runtime.session_store = store
+    runtime.global_config = SimpleNamespace(authorized_id=1)
+    runtime.backend_manager = mgr
+    runtime._request_meta_by_id = {}
+    mgr.runtime = runtime
+    backend.tool_registry = SimpleNamespace(is_allowed=lambda name: True)
+    received = []
+
+    async def download(target):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        payload = (b"\xff\xd8\xff" + b"synthetic jpeg" if kind == "photo" else
+                   b"%PDF-1.4\nsynthetic" if kind == "document" else
+                   b"\x00\x00\x00\x18ftypmp42" + b"synthetic video")
+        target.write_bytes(payload)
+        runtime.app.bot.file.downloaded_to = target
+
+    runtime.app.bot.file.download_to_drive = download
+
+    async def enqueue(chat_id, prompt, source, summary, **kwargs):
+        content = kwargs["request_content"]
+        route, accepted, owner, _, _ = runtime_session.accept_request(
+            runtime, request_id="req-telegram-media", chat_id=chat_id,
+            prompt=prompt, source=source, request_metadata=kwargs["request_metadata"],
+            request_content=content, idempotency_key="telegram-media",
+        )
+        fence = store.mark_request_running(accepted.request_id, worker_id="telegram-worker")
+        meta = {"request_id": accepted.request_id, "hashi_session_id": route["session_id"],
+                "hashi_run_id": accepted.run_id, "hashi_message_id": accepted.message_id,
+                "hashi_fencing_token": fence, "owner_id": owner,
+                "context_generation": route["context_generation"]}
+        runtime._request_meta_by_id[accepted.request_id] = meta
+        response = await mgr.generate_response(prompt, accepted.request_id, request_content=content)
+        received.append((response, content, accepted))
+        return accepted.request_id
+
+    runtime.enqueue_request = enqueue
+    fields = {"photo": [SimpleNamespace(file_id="image")]} if kind == "photo" else {
+        kind: SimpleNamespace(file_id="media", file_name="sample.pdf" if kind == "document" else "sample.mp4")
+    }
+    update = _update(update_id=17, message_id=23, caption="inspect this attachment", **fields)
+    if batch:
+        runtime_long.begin_batch(runtime, 123)
+        runtime_long.collect_text(runtime, 123, "compare these")
+    await getattr(runtime_media, f"handle_{kind}")(runtime, update, SimpleNamespace())
+    if batch:
+        # A second photo in the same batch must retain its distinct binding.
+        update.message.message_id = 24
+        await runtime_media.handle_photo(runtime, update, SimpleNamespace())
+        await runtime_long.cmd_end(runtime, update, SimpleNamespace())
+        if runtime._long_finalize_task:
+            await runtime._long_finalize_task
+
+    assert received, runtime.error_logger.messages
+    response, content, accepted = received[0]
+    assert response.is_success, (response.error_code, response.error)
+    parts = [part for part in content["parts"] if part["type"] == "media"]
+    assert len(parts) == (2 if batch else 1)
+    message = store.get_message(accepted.message_id, owner_id=session["owner_id"],
+                                session_id=session["session_id"])
+    bound_ids = {block["attachment_id"] for block in message["content"] if "attachment_id" in block}
+    assert bound_ids == {part["attachment_id"] for part in parts}
+    assert all(Path(part["local_ref"]).parent == store.attachment_files_root for part in parts)
+    assert runtime.media_dir not in backend.seen_roots
+    assert "inspect this attachment" in message["text"]
+    # A valid committed attachment from the same Session but another Message
+    # must still be rejected by this Run.
+    foreign = intake(store, session)
+    rejected = await mgr.generate_response("foreign", accepted.request_id,
+        request_content={"type": "hashi.request-content", "version": 1, "parts": [foreign]})
+    assert not rejected.is_success and rejected.error_code == "MEDIA_PATH_NOT_AUTHORIZED"

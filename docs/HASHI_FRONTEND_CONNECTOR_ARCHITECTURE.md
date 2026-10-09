@@ -22,6 +22,16 @@ Trusted Telegram media handlers and `/long` submission carry explicit Telegram
 ingress metadata into admission. Media kinds such as photo, document, sticker,
 and multimodal describe content; they do not identify a frontend connector.
 
+Telegram downloads and completed `/long` batches also pass through the
+Functions-owned `telegram_media_admission` adapter before Run admission. It
+commits validated bytes to PAO's Session attachment store, derives canonical
+media parts and persists their attachment IDs in the original user Message.
+The Session, owner and context generation stay frozen through queue admission.
+Download receipts or paths alone are not Run attachment authority; backend
+current-Run, content-integrity and exact-file fences remain unchanged. Native
+voice admission retains its existing transcript and retention policy. See the
+[October 10 repair](repairs/TELEGRAM_MEDIA_ADMISSION_20261010.md).
+
 Frontend Connectors expose HASHI to users and compatible clients without
 creating a second source of Agent, Session, Message, Run, Event, PCM, or Engine
 state. A Connector translates between one user-facing transport and the typed

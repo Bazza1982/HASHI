@@ -1,5 +1,12 @@
 # HASHI Agent FYI
 
+October 10 Telegram attachment repair: photo/document/video and `/long` media
+now register committed PAO attachments and original Message references before
+backend consumption. The previous path-only ingress was rejected by the
+current-Run attachment fence. Focused red/green and scope checks pass; HASHI4
+adoption remains the user's manual reboot. See
+[repair and deployment evidence](repairs/TELEGRAM_MEDIA_ADMISSION_20261010.md).
+
 October 10 in-run questions: native Codex now bridges its bidirectional question
 RPC to the PAO question owner; HERV3 uses ask_user/get_user_answer. Telegram
 delivery carries real answer buttons and scoped free-text replies. Workbench
