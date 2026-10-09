@@ -1,5 +1,15 @@
 # HASHI Agent FYI
 
+October 10 Workbench correction: full-page browser testing found two frontend
+defects missed by the earlier isolated card test: sibling key collisions
+accumulated hidden transcripts, and long chats collapsed the question dock.
+Both are repaired in Workbench. Actual HASHI3 Codex and HERV3 test Runs displayed
+numeric choices; browser clicks selected 2, PAO consumed each answer, and the
+original Runs completed. The correct HASHI4 Workbench assets are deployed and
+the desktop window reloaded. This repair requires no HASHI4 runtime reboot.
+Source, live Run receipts and visually inspected screenshots are recorded in
+the Workbench owning decision, docs/implementation/run-questions-20261010.md.
+
 October 10 Telegram attachment repair: photo/document/video and `/long` media
 now register committed PAO attachments and original Message references before
 backend consumption. The previous path-only ingress was rejected by the
