@@ -1,9 +1,10 @@
 from __future__ import annotations
 import asyncio
+import wave
 from pathlib import Path
 
 from orchestrator.tts_providers.base import BaseTTSProvider
-from orchestrator.voice_synthesizer import VoiceAsset, convert_wav_to_ogg
+from orchestrator.voice_synthesizer import VoiceAsset, convert_wav_to_ogg, spoken_text_language
 
 
 class WindowsSapiProvider(BaseTTSProvider):
@@ -31,6 +32,7 @@ class WindowsSapiProvider(BaseTTSProvider):
         proc = await asyncio.create_subprocess_exec(
             "powershell",
             "-NoProfile",
+            "-NonInteractive",
             "-ExecutionPolicy",
             "Bypass",
             "-Command",
@@ -42,6 +44,12 @@ class WindowsSapiProvider(BaseTTSProvider):
         if proc.returncode != 0 or not wav_path.exists():
             err = stderr.decode("utf-8", errors="replace").strip() or stdout.decode("utf-8", errors="replace").strip()
             raise RuntimeError(f"Windows TTS synthesis failed: {err or f'exit_code={proc.returncode}'}")
+
+        # SAPI may exit successfully without speaking unsupported characters.
+        # Do not turn an empty WAV into a successful 0:00 attachment.
+        with wave.open(str(wav_path), "rb") as audio:
+            if not audio.getnframes():
+                raise RuntimeError("Windows TTS returned empty audio for the selected voice.")
 
         await convert_wav_to_ogg(self.ffmpeg_cmd, wav_path, ogg_path)
         return VoiceAsset(
@@ -55,20 +63,34 @@ class WindowsSapiProvider(BaseTTSProvider):
     def _powershell_script(self, wav_path: str, spoken_text: str, voice_name: str | None, rate: int) -> str:
         safe_wav = wav_path.replace("'", "''")
         safe_text = spoken_text.replace("'", "''")
-        voice_line = ""
         if voice_name:
             safe_voice = voice_name.replace("'", "''")
             voice_line = (
                 "$voice = $synth.GetInstalledVoices() | "
-                f"Where-Object {{ $_.VoiceInfo.Name -eq '{safe_voice}' }} | Select-Object -First 1; "
-                "if ($voice) { $synth.SelectVoice($voice.VoiceInfo.Name) }\n"
+                f"Where-Object {{ $_.Enabled -and $_.VoiceInfo.Name -eq '{safe_voice}' }} | Select-Object -First 1\n"
+                "if (-not $voice) { throw 'Configured Windows TTS voice is unavailable.' }\n"
+                "$synth.SelectVoice($voice.VoiceInfo.Name)\n"
+            )
+        else:
+            language = spoken_text_language(spoken_text)
+            voice_line = (
+                f"if ($synth.Voice.Culture.TwoLetterISOLanguageName -ne '{language}') {{\n"
+                "  $voice = $synth.GetInstalledVoices() | "
+                f"Where-Object {{ $_.Enabled -and $_.VoiceInfo.Culture.TwoLetterISOLanguageName -eq '{language}' }} | Select-Object -First 1\n"
+                f"  if (-not $voice) {{ throw 'No installed Windows TTS voice for language: {language}.' }}\n"
+                "  $synth.SelectVoice($voice.VoiceInfo.Name)\n"
+                "}\n"
             )
         return (
+            "$ErrorActionPreference = 'Stop'\n"
+            "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)\n"
             "Add-Type -AssemblyName System.Speech\n"
             "$synth = New-Object System.Speech.Synthesis.SpeechSynthesizer\n"
+            "try {\n"
             f"$synth.Rate = {int(rate)}\n"
             f"{voice_line}"
             f"$synth.SetOutputToWaveFile('{safe_wav}')\n"
             f"$synth.Speak('{safe_text}')\n"
-            "$synth.Dispose()\n"
+            "@{ voice = $synth.Voice.Name; language = $synth.Voice.Culture.TwoLetterISOLanguageName } | ConvertTo-Json -Compress\n"
+            "} finally { $synth.Dispose() }\n"
         )

@@ -19,7 +19,7 @@ from orchestrator.voice_preview_bundle import (
     validate_voice_preview_bundle,
 )
 from orchestrator.voice_synthesis_runtime import isolated_tts_configured
-from orchestrator.voice_synthesizer import VoiceAsset
+from orchestrator.voice_synthesizer import VoiceAsset, spoken_text_language
 from orchestrator.command_ui import setting_card
 
 
@@ -41,7 +41,7 @@ class VoiceManager:
     VOICE_PREVIEW_VERSION = PRODUCT_VOICE_PREVIEW_VERSION
     VOICE_PREVIEW_RENDERERS = ("native", "tts")
     DEFAULT_STATE = {
-        "enabled": True,
+        "enabled": False,
         "mode": "text_and_voice",
         "provider": _default_tts_provider(),
         "voice_name": None,
@@ -52,8 +52,8 @@ class VoiceManager:
         # the local TTS fallback.  None preserves pre-profile workspaces until
         # their existing raw voice can be inferred or the user chooses one.
         "voice_profile": None,
-        # Speech replies default to platform TTS. Native model audio requires a
-        # qualified target; a user's saved off/native/tts choice remains exact.
+        # Voice is available, but automatic speech requires explicit opt-in.
+        # A user's saved off/native/tts choice remains exact.
         "native": {
             "mode": "off",
             "reply_trigger": "voice_message",
@@ -354,11 +354,7 @@ class VoiceManager:
 
     @staticmethod
     def _text_language(text: str) -> str:
-        if any("\u3040" <= character <= "\u30ff" for character in text):
-            return "ja"
-        if any("\u3400" <= character <= "\u9fff" for character in text):
-            return "zh"
-        return "en"
+        return spoken_text_language(text)
 
     @classmethod
     def _voice_profile_from_state(cls, state: dict) -> str | None:
