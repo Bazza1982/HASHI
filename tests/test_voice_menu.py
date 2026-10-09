@@ -213,6 +213,10 @@ def test_voice_state_conflict_does_not_replay_setting_change(tmp_path, monkeypat
 def test_voice_modes_coordinate_native_and_legacy_tts_state(tmp_path):
     manager = _manager(tmp_path)
 
+    assert manager.get_reply_mode() == "tts"
+    assert manager.is_enabled() is True
+    assert not manager.state_path.exists()
+
     manager.set_reply_mode("tts")
     assert manager.get_reply_mode() == "tts"
     assert manager.is_enabled() is True
@@ -250,7 +254,7 @@ def test_native_mode_fails_closed_without_a_complete_audio_capability(tmp_path):
     with pytest.raises(RuntimeError, match="no compatible audio model"):
         manager.set_reply_mode("native")
 
-    assert manager.get_reply_mode() == "off"
+    assert manager.get_reply_mode() == "tts"
     assert manager.state_path.exists() is False
 
 

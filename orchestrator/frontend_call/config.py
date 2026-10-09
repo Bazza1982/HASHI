@@ -11,6 +11,7 @@ from orchestrator.config_json import (
     write_config_json,
     ConfigConflictError,
     ConfigDurabilityError,
+    new_config_json,
 )
 from .contract import CallError, digest, identifier
 
@@ -160,6 +161,19 @@ class CallConfig:
     def __init__(self, path):
         self.path = path
 
+    def initialize(self):
+        """Create an absent declaration during setup, never replace a saved choice."""
+        try:
+            read_config_json(self.path)
+        except FileNotFoundError:
+            from .defaults import default_call_configuration
+
+            self._write(new_config_json(self.path, default_call_configuration()))
+        except Exception:
+            # A bad optional media declaration fails at the call boundary,
+            # without taking the authenticated chat/command API down with it.
+            return
+
     def route(self, owner, agent, doc=None, targets=None):
         """Project independent /call readiness and the legacy client choice."""
         if doc is None:
@@ -290,6 +304,8 @@ class CallConfig:
             disabled = read_config_json(self.path)
         except FileNotFoundError as exc:
             raise CallError("call_not_configured", 503) from exc
+        except Exception as exc:
+            raise CallError("call_configuration_invalid", 503) from exc
         if disabled.get("version") == 1 and disabled.get("enabled") is not True:
             return {"revision": disabled.revision, "targets": [],
                     "profile": {"stt": None, "tts": None, "vision": None},

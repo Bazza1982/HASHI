@@ -1,4 +1,4 @@
-"""Opt-in media route on the existing authenticated Backend API / Remote hop."""
+"""Default-enabled media route on the authenticated Backend API / Remote hop."""
 
 from __future__ import annotations
 
@@ -16,8 +16,10 @@ from .diagnostics import body_facts, elapsed_ms, emit, error_facts
 
 
 def register_call_api(api):
+    config = CallConfig(Path(api.config_path).parent / "call_profiles.json")
+    config.initialize()
     service = CallService(
-        CallConfig(Path(api.config_path).parent / "call_profiles.json"),
+        config,
         HashiPorts(api),
         MediaAdapters(secret_resolver=getattr(api, "connector_secret_resolver", None)),
     )

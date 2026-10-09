@@ -111,6 +111,7 @@ async def play_ogg_bytes(content: bytes, *, bridge_home: Path | None = None) -> 
         raise TuiAudioError("refusing malformed or oversized Ogg audio")
     descriptor, name = tempfile.mkstemp(prefix="hashi-tui-speech-", suffix=".ogg")
     path = Path(name)
+    wav_path = path.with_suffix(".wav")
     process: asyncio.subprocess.Process | None = None
     try:
         with os.fdopen(descriptor, "wb") as stream:
@@ -119,7 +120,17 @@ async def play_ogg_bytes(content: bytes, *, bridge_home: Path | None = None) -> 
             os.fsync(stream.fileno())
         if os.name != "nt":
             path.chmod(0o600)
-        command = await asyncio.to_thread(_player_command, path, bridge_home=bridge_home)
+        converter = configured_media_executable("ffmpeg", bridge_home=bridge_home) or shutil.which("ffmpeg")
+        playable = path
+        if converter:
+            process = await asyncio.create_subprocess_exec(
+                converter, "-nostdin", "-y", "-loglevel", "error", "-i", str(path), str(wav_path),
+                stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL)
+            if await process.wait() != 0 or not wav_path.is_file():
+                raise TuiAudioError("the local audio converter failed")
+            playable = wav_path
+        command = await asyncio.to_thread(_player_command, playable, bridge_home=bridge_home)
         process = await asyncio.create_subprocess_exec(
             *command,
             stdin=asyncio.subprocess.DEVNULL,
@@ -140,6 +151,7 @@ async def play_ogg_bytes(content: bytes, *, bridge_home: Path | None = None) -> 
         raise
     finally:
         path.unlink(missing_ok=True)
+        wav_path.unlink(missing_ok=True)
 
 
 __all__ = [

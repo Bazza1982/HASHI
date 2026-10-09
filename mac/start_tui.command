@@ -9,6 +9,12 @@
 # ============================================================
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+if [ -x "$ROOT/media/transcription/bin/python3" ]; then
+    export HASHI_TRANSCRIPTION_PYTHON="$ROOT/media/transcription/bin/python3"
+    export HASHI_TTS_PYTHON="$ROOT/media/tts/bin/python3"
+    export HF_HUB_CACHE="$ROOT/media/model-cache"
+    export HASHI_MEDIA_FFMPEG="$("$HASHI_TTS_PYTHON" -c 'import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())')"
+fi
 LOG_DIR="$(dirname "$0")/logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/tui_$(date '+%Y-%m-%d_%H%M%S').log"

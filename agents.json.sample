@@ -2,6 +2,9 @@
   "global": {
     "authorized_id": 0,
     "ui_language": "en",
+    "persistent_session_v1": true,
+    "native_audio_chat_v1": true,
+    "live_voice_v1": true,
     "workbench_port": 18802,
     "default_tools": {
       "allowed": ["*", "vision_inspect"],

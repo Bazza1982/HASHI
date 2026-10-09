@@ -391,8 +391,8 @@ class DeviceWorkerState:
         with self.desktop_init_lock:
             if self.desktop_controller is None:
                 from tools.desktop_session import DesktopController
-                from tools.windows_helper.desktop_capture import NativeDesktop
-                self.desktop_controller = DesktopController(NativeDesktop(), lambda: _DeviceLock(self.lock_path))
+                from tools.windows_helper.secure_desktop import native_desktop_for
+                self.desktop_controller = DesktopController(native_desktop_for(self.bridge_home), lambda: _DeviceLock(self.lock_path))
             return self.desktop_controller
 
     @property
@@ -530,7 +530,9 @@ class DeviceWorkerState:
                     "locked": None,
                     "error": "Computer Control Worker requires Windows",
                 }
-            healthy = os.name == "nt" and bool(desktop_state.get("interactive"))
+            # A Windows lock or consent screen is capability state, not a dead
+            # authenticated transport. Do not unregister the worker at login.
+            healthy = os.name == "nt" and bool(desktop_state.get("available") or desktop_state.get("locked"))
             detail = {
                 "interactive_session": _default_session_id(),
                 "desktop_platform": platform.system(),
@@ -838,11 +840,15 @@ class DeviceWorkerRequestHandler(BaseHTTPRequestHandler):
                 # Manual actors use a separate typed ingress, not fabricated Agent
                 # IDs. Only the existing Broker knows the authenticated worker key.
                 if state.capability_kind != "computer_control" or payload.get("worker_generation") != _generation_id(state.capability_kind):
-                    raise DesktopError("desktop_target_changed", 409)
+                    error = DesktopError("desktop_target_changed", 409)
+                    error.desktop_diagnostics = {'generation_matches': payload.get('worker_generation') == _generation_id(state.capability_kind)}
+                    raise error
                 actor = payload.get("actor") or {}
                 if actor.get("type") != "user" or set(actor) != {"type", "id"}:
                     raise DesktopError("desktop_actor_invalid", 403)
                 result = state.manual_desktop().handle(action, payload.get("args"), actor["id"], payload.get("desktop_session_id"))
+                if action == "desktop_input":
+                    _event(state.logger, "desktop_input_receipt", elapsed_ms=round((time.perf_counter()-started)*1000,1), ok=True)
                 self._write(HTTPStatus.OK, {"ok": True, "identity": state.identity,
                     "worker_generation": _generation_id(state.capability_kind), "request_id": request_id, "result": result})
                 return
@@ -885,12 +891,17 @@ class DeviceWorkerRequestHandler(BaseHTTPRequestHandler):
                 os_error = getattr(cause, "winerror", None)
                 diagnostics = getattr(cause, "desktop_diagnostics", {})
                 private_facts = {key: diagnostics[key] for key in (
-                    "input_desktop_interactive", "thread_on_input_desktop", "window_station_visible", "cursor_at_requested_position")
+                    "input_desktop_interactive", "thread_on_input_desktop", "window_station_visible", "cursor_at_requested_position",
+                    "generation_matches", "secure_host_session_matches", "secure_host_image_matches")
                     if isinstance(diagnostics, dict) and isinstance(diagnostics.get(key), bool)}
+                for key in ("frame_age_ms", "input_wait_ms"):
+                    if isinstance(diagnostics, dict) and type(diagnostics.get(key)) is int:
+                        private_facts[key] = max(-1,min(60000,diagnostics[key]))
                 _event(state.logger, "desktop_action_failed", request_id=request_id,
                     action=action, error_code=getattr(exc, "code", "desktop_worker_failed"),
                     error_type=type(exc).__name__, cause_type=type(cause).__name__,
-                    os_error=os_error if isinstance(os_error, int) else None, **private_facts)
+                    os_error=os_error if isinstance(os_error, int) else None,
+                    elapsed_ms=round((time.perf_counter()-started)*1000,1), **private_facts)
                 self._write(HTTPStatus.OK, {"ok": False, "identity": state.identity,
                     "worker_generation": _generation_id(state.capability_kind),
                     "error_code": getattr(exc, "code", "desktop_worker_failed"),

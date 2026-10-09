@@ -233,13 +233,14 @@ async def test_http_pre_service_failures_record_stage_status_without_unauthentic
         _v1_owner_id=lambda request: "owner",
     )
     service = register_call_api(api)
+    (tmp_path / "call_profiles.json").write_text(json.dumps({"version": 1, "enabled": False}))
     runner, url = await serve(api.app)
     try:
         async with ClientSession() as session:
             async with session.post(url + "/api/v1/call/operation", json={"operation": "end", "call_id": "untrusted-SECRET"}) as response:
                 assert response.status == 403
             async with session.post(url + "/api/v1/call/operation", json={"operation": "context"}, headers={"X-Workbench-Token": "PRIVATE_TOKEN"}) as response:
-                assert (await response.json())["error_code"] == "call_not_configured"
+                assert (await response.json())["error_code"] == "call_disabled"
         rejected = events(caplog, "http_operation_failed")
         assert [(row["stage"], row["http_status"]) for row in rejected] == [("auth", 403), ("config_read", 503)]
         assert rejected[0]["generation"] == service.generation and "operation" not in rejected[0]

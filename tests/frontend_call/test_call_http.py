@@ -1,5 +1,6 @@
 import base64
 import io
+import json
 from types import SimpleNamespace
 import pytest
 from aiohttp import web, ClientSession
@@ -215,11 +216,12 @@ async def test_route_auth_json_and_disable_fail_closed(tmp_path):
                 url + "/api/v1/call/operation", json={"operation": "context"}
             ) as response:
                 assert response.status == 403
+            (tmp_path / "call_profiles.json").write_text(json.dumps({"version": 1, "enabled": False}))
             async with session.post(
                 url + "/api/v1/call/operation",
                 json={},
                 headers={"X-Workbench-Token": "test-token"},
             ) as response:
-                assert (await response.json())["error_code"] == "call_not_configured"
+                assert (await response.json())["error_code"] == "call_disabled"
     finally:
         await runner.cleanup()

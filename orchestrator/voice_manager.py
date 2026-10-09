@@ -41,7 +41,7 @@ class VoiceManager:
     VOICE_PREVIEW_VERSION = PRODUCT_VOICE_PREVIEW_VERSION
     VOICE_PREVIEW_RENDERERS = ("native", "tts")
     DEFAULT_STATE = {
-        "enabled": False,
+        "enabled": True,
         "mode": "text_and_voice",
         "provider": _default_tts_provider(),
         "voice_name": None,
@@ -52,8 +52,8 @@ class VoiceManager:
         # the local TTS fallback.  None preserves pre-profile workspaces until
         # their existing raw voice can be inferred or the user chooses one.
         "voice_profile": None,
-        # Native audio chat is deliberately independent from the legacy TTS
-        # switch above.  Existing workspaces therefore remain native-off.
+        # Speech replies default to platform TTS. Native model audio requires a
+        # qualified target; a user's saved off/native/tts choice remains exact.
         "native": {
             "mode": "off",
             "reply_trigger": "voice_message",

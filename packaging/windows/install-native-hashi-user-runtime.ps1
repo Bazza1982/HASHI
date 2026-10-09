@@ -200,7 +200,7 @@ if (-not $PSCmdlet.ShouldProcess(
 
 
 if (-not $SkipTranscription) {
-    $transcriptionProvisioner = Join-Path $HashiRoot 'scripts\provision_transcription_runtime.py'
+    $transcriptionProvisioner = Join-Path $HashiRoot 'scripts\provision_media_runtime.py'
     if (-not (Test-Path -LiteralPath $transcriptionProvisioner -PathType Leaf)) {
         throw 'Transcription runtime preparation failed: the isolated provisioner is missing.'
     }
@@ -216,7 +216,7 @@ if (-not $SkipTranscription) {
         }
         finally { $ErrorActionPreference = $savedErrorActionPreference }
         if ($transcriptionExitCode -ne 0) {
-            throw 'Transcription runtime preparation failed; no runtime task was registered.'
+            throw 'Full media runtime preparation failed; no runtime task was registered.'
         }
     }
 }

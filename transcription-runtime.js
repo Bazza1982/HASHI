@@ -12,20 +12,24 @@ function transcriptionLockDigest() {
 }
 
 function preparedTranscriptionPython(versionRoot, programVersion) {
+  return preparedHelperPython(versionRoot, programVersion, 'transcription', transcriptionLockDigest());
+}
+
+function preparedHelperPython(versionRoot, programVersion, kind, lockDigest) {
   try {
     const payload = JSON.parse(fs.readFileSync(
-      path.join(versionRoot, 'transcription-active.json'), 'utf8'
+      path.join(versionRoot, `${kind}-active.json`), 'utf8'
     ));
     if (!payload || payload.schema_version !== 1 ||
         payload.program_version !== programVersion ||
         typeof payload.python !== 'string' ||
         typeof payload.runtime_dir !== 'string' ||
-        payload.lock_sha256 !== transcriptionLockDigest()) return '';
+        payload.lock_sha256 !== lockDigest) return '';
     const candidate = path.resolve(payload.python);
     const relative = path.relative(path.resolve(versionRoot), candidate);
     if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) return '';
     const pieces = relative.split(path.sep);
-    if (pieces.length !== 3 || !pieces[0].startsWith('transcription-') ||
+    if (pieces.length !== 3 || !pieces[0].startsWith(`${kind}-`) ||
         pieces[1] !== (process.platform === 'win32' ? 'Scripts' : 'bin') ||
         pieces[2] !== (process.platform === 'win32' ? 'python.exe' : 'python')) return '';
     const runtimeDir = path.join(path.resolve(versionRoot), pieces[0]);
@@ -39,4 +43,4 @@ function preparedTranscriptionPython(versionRoot, programVersion) {
   }
 }
 
-module.exports = { preparedTranscriptionPython, transcriptionLockDigest };
+module.exports = { preparedTranscriptionPython, transcriptionLockDigest, preparedHelperPython };

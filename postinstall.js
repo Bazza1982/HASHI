@@ -8,6 +8,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { preparedPrivacyPython } = require('./privacy-runtime');
 const { preparedTranscriptionPython, transcriptionLockDigest } = require('./transcription-runtime');
+const { preparedTTSPython, ttsLockDigest } = require('./tts-runtime');
 
 const HASHI_ROOT = __dirname;
 const PACKAGE = require(path.join(HASHI_ROOT, 'package.json'));
@@ -15,6 +16,7 @@ const LOCK = path.join(HASHI_ROOT, 'constraints', 'standard-py312.lock');
 const RUNTIME_CHECK = path.join(HASHI_ROOT, 'scripts', 'check_runtime_contract.py');
 const PRIVACY_SETUP = path.join(HASHI_ROOT, 'scripts', 'provision_privacy_runtime.py');
 const TRANSCRIPTION_SETUP = path.join(HASHI_ROOT, 'scripts', 'provision_transcription_runtime.py');
+const TTS_SETUP = path.join(HASHI_ROOT, 'scripts', 'provision_tts_runtime.py');
 
 function dataRoot() {
   if (process.env.HASHI_DATA_ROOT) return path.resolve(process.env.HASHI_DATA_ROOT);
@@ -110,53 +112,74 @@ function tryPreparePrivacy(base, versionRoot) {
 
 
 function prepareTranscription(base, versionRoot) {
-  if (process.env.HASHI_POSTINSTALL_NO_TRANSCRIPTION === '1') {
-    process.stdout.write('Local transcription setup was skipped by request; recording transcription remains unavailable.\n');
+  return prepareSpeechHelper(base, versionRoot, {kind: 'transcription', setup: TRANSCRIPTION_SETUP,
+    selected: preparedTranscriptionPython, lockDigest: transcriptionLockDigest, extra: ['--prepare-model']});
+}
+
+function prepareTTS(base, versionRoot) {
+  return prepareSpeechHelper(base, versionRoot, {kind: 'tts', setup: TTS_SETUP,
+    selected: preparedTTSPython, lockDigest: ttsLockDigest, extra: []});
+}
+
+function prepareSpeechHelper(base, versionRoot, {kind, setup, selected, lockDigest, extra}) {
+  if (process.env[`HASHI_POSTINSTALL_NO_${kind.toUpperCase()}`] === '1') {
+    process.stdout.write(`${kind} setup was explicitly skipped; this is a partial media installation.\n`);
     return false;
   }
   const ready = (python) => {
     const runtimeDir = path.dirname(path.dirname(python));
     const result = spawnSync(base.command, [
-      ...base.prefix, TRANSCRIPTION_SETUP,
-      '--bridge-home', runtimeDir, '--runtime-dir', runtimeDir, '--check',
+      ...base.prefix, setup,
+      '--bridge-home', runtimeDir, '--runtime-dir', runtimeDir, '--check', ...extra,
     ], { stdio: 'ignore', windowsHide: true, timeout: 120_000 });
     return result.status === 0;
   };
   let buildRoot = '';
   try {
-    const active = preparedTranscriptionPython(versionRoot, PACKAGE.version);
+    const active = selected(versionRoot, PACKAGE.version);
     if (active && ready(active)) {
-      process.stdout.write('HASHI local transcription dependency runtime is ready.\n');
+      process.stdout.write(`HASHI ${kind} runtime is ready.\n`);
       return true;
     }
-    buildRoot = path.join(versionRoot, `transcription-${Date.now()}-${crypto.randomUUID()}`);
+    buildRoot = path.join(versionRoot, `${kind}-${Date.now()}-${crypto.randomUUID()}`);
     fs.mkdirSync(buildRoot, { recursive: true, mode: 0o700 });
     // The preparation home is this disposable Function artifact, never an
     // instance or the approved Core virtual environment. The provisioner owns
     // locked pip installation and native import/version validation.
     const install = spawnSync(base.command, [
-      ...base.prefix, TRANSCRIPTION_SETUP,
-      '--bridge-home', buildRoot, '--runtime-dir', buildRoot,
-    ], { stdio: 'inherit', windowsHide: true, timeout: 960_000 });
+      ...base.prefix, setup,
+      '--bridge-home', buildRoot, '--runtime-dir', buildRoot, ...extra,
+    ], { stdio: 'inherit', windowsHide: true, timeout: 1_560_000 });
     const python = preparedPython(buildRoot);
     if (install.status !== 0 || !ready(python)) throw new Error('transcription probe failed');
     const receipt = JSON.parse(fs.readFileSync(
-      path.join(buildRoot, 'state', 'platform', 'transcription.json'), 'utf8'
+      path.join(buildRoot, 'state', 'platform', `${kind}.json`), 'utf8'
     ));
     if (receipt.schema_version !== 1 || receipt.python !== python ||
-        receipt.runtime_dir !== buildRoot || receipt.lock_sha256 !== transcriptionLockDigest()) {
+        receipt.runtime_dir !== buildRoot || receipt.lock_sha256 !== lockDigest()) {
       throw new Error('transcription receipt did not match this generation');
     }
-    atomicJson(path.join(versionRoot, 'transcription-active.json'), {
+    atomicJson(path.join(versionRoot, `${kind}-active.json`), {
       ...receipt, program_version: PACKAGE.version, prepared_at: new Date().toISOString(),
     });
-    process.stdout.write('HASHI local transcription dependency runtime is ready.\n');
+    process.stdout.write(`HASHI ${kind} runtime is ready.\n`);
     return true;
   } catch (_) {
     if (buildRoot) safeRemoveBuild(versionRoot, buildRoot);
-    process.stderr.write('Local transcription setup is incomplete; recording transcription remains unavailable. Reinstall HASHI after fixing runtime prerequisites.\n');
+    process.stderr.write(`HASHI ${kind} setup is incomplete. Reinstall after fixing runtime prerequisites.\n`);
     return false;
   }
+}
+
+function prepareMedia(base, versionRoot) {
+  const stt = prepareTranscription(base, versionRoot);
+  const tts = prepareTTS(base, versionRoot);
+  if (!stt || !tts) {
+    incomplete('Full media setup did not pass. Recording, speech and conversion must all be ready.');
+    return 1;
+  }
+  process.stdout.write('Recording, speech synthesis and media conversion are ready.\n');
+  return 0;
 }
 
 function atomicJson(target, payload) {
@@ -239,13 +262,13 @@ function main() {
   });
   if (!base) {
     incomplete('Approved CPython 3.12.13 was not found.');
-    return 0;
+    return 1;
   }
 
   const selectedDataRoot = dataRoot();
   if (isInsideOrEqual(HASHI_ROOT, selectedDataRoot)) {
     incomplete('HASHI_DATA_ROOT must be outside the installed program directory.');
-    return 0;
+    return 1;
   }
   const versionRoot = path.join(selectedDataRoot, 'runtimes', PACKAGE.version);
   const pointer = path.join(versionRoot, 'active.json');
@@ -257,9 +280,9 @@ function main() {
       if (checkRuntime(candidate, true)) {
         process.stdout.write(`✓ HASHI ${PACKAGE.version} isolated runtime is ready.\n`);
         tryPreparePrivacy(base, versionRoot);
-        prepareTranscription(base, versionRoot);
+        const mediaStatus = prepareMedia(base, versionRoot);
         process.stdout.write('No instance data was changed. Run `hashi` to create or select an instance.\n\n');
-        return 0;
+        return mediaStatus;
       }
     }
   } catch (_) {
@@ -276,7 +299,7 @@ function main() {
   if (venv.status !== 0) {
     safeRemoveBuild(versionRoot, buildRoot);
     incomplete('Could not create the user-scoped Python virtual environment.');
-    return 0;
+    return 1;
   }
   const python = preparedPython(buildRoot);
   const install = spawnSync(
@@ -288,7 +311,7 @@ function main() {
   if (install.status !== 0 || !checkRuntime(candidate, true)) {
     safeRemoveBuild(versionRoot, buildRoot);
     incomplete('The locked HASHI dependency generation could not be installed or verified.');
-    return 0;
+    return 1;
   }
   atomicJson(pointer, {
     schema_version: 1,
@@ -298,14 +321,16 @@ function main() {
   });
   process.stdout.write(`✓ HASHI ${PACKAGE.version} isolated runtime is ready.\n`);
   tryPreparePrivacy(base, versionRoot);
-  prepareTranscription(base, versionRoot);
+  const mediaStatus = prepareMedia(base, versionRoot);
   process.stdout.write('No instance data was changed. Run `hashi` to create or select an instance.\n\n');
-  return 0;
+  return mediaStatus;
 }
 
 module.exports = {
   main,
   prepareTranscription,
+  prepareTTS,
+  prepareMedia,
   atomicJson,
   dataRoot,
   isInsideOrEqual,
@@ -319,6 +344,6 @@ if (require.main === module) {
     process.exitCode = main();
   } catch (error) {
     incomplete(`Unexpected setup error: ${error.message}`);
-    process.exitCode = 0;
+    process.exitCode = 1;
   }
 }

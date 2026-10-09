@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "enabled": false,
+  "enabled": true,
   "targets": [
     {
       "id": "openrouter-whisper",
@@ -81,7 +81,7 @@
   "default_profile": {
     "stt": {"target_id": "openrouter-whisper", "options": {}},
     "tts": {"target_id": "openrouter-gemini-tts", "voice_id": "Achernar", "options": {}},
-    "vision": null
+    "vision": {"target_id": "openrouter-gemini-vision", "options": {}}
   },
   "profiles": {}
 }
