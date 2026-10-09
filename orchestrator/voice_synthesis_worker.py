@@ -80,6 +80,10 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    # The parent writes UTF-8. Isolated mode ignores Python encoding environment
+    # variables, so Windows pipes otherwise use the machine's legacy code page.
+    sys.stdin.reconfigure(encoding="utf-8", errors="strict")
+    sys.stdout.reconfigure(encoding="utf-8", errors="strict")
     try:
         if args.probe:
             payload = probe_runtime()
