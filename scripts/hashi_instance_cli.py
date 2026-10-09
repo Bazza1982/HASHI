@@ -543,6 +543,11 @@ def inspect_instance(record: dict[str, Any], code_root: Path) -> dict[str, Any]:
 
 def _launch_environment(record: dict[str, Any], code_root: Path) -> dict[str, str]:
     environment = os.environ.copy()
+    # A selected instance owns its interpreter and source root. Inheriting a
+    # different HASHI shell's Python import paths also imports its distribution
+    # metadata and makes Core/isolated-Worker qualification disagree.
+    environment.pop("PYTHONPATH", None)
+    environment.pop("PYTHONHOME", None)
     environment.update(
         {
             "BRIDGE_HOME": str(Path(record["bridge_home"]).resolve()),

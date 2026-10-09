@@ -611,7 +611,14 @@ def test_start_accepts_telegram_only_degraded_local_services(
         def poll():
             return 91
 
-    monkeypatch.setattr(hashi_instance_cli.subprocess, "Popen", lambda *_a, **_k: Process())
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path / "other-instance"))
+    monkeypatch.setenv("PYTHONHOME", str(tmp_path / "other-interpreter"))
+    def launch(*_args, **kwargs):
+        assert "PYTHONPATH" not in kwargs["env"]
+        assert "PYTHONHOME" not in kwargs["env"]
+        assert kwargs["env"]["BRIDGE_HOME"] == str(Path(record["bridge_home"]).resolve())
+        return Process()
+    monkeypatch.setattr(hashi_instance_cli.subprocess, "Popen", launch)
 
     assert hashi_instance_cli.start_instance(registry, record) == 0
     assert "local services ready" in capsys.readouterr().out
