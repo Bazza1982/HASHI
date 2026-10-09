@@ -2,6 +2,12 @@
 
 October 9: media defaults cover recording, TTS and Call/video. Complete installs prepare isolated helpers and model weights. Explicit off/permissions remain binding. HASHI4 adoption is reserved to the user. See [decision](HASHI_MEDIA_DEFAULTS_2026-10-09.md) and [repair](repairs/MEDIA_DEFAULTS_REPAIR_20261009.md).
 
+HASHI3 adopted the Phone capability repair through shared hot reboot. Call,
+video observation, Phone WebRTC and default TTS/recording admission passed with
+explicit test devices and real services. Human/physical-device acceptance is
+separate. The unchanged older Phone action harness still has four recorded
+baseline failures; it is not counted as passed.
+
 October 8: production Workbench/HASHI3 delivered real unlocked mouse,
 keyboard/Unicode and public-entry input; native touch emulation passed. Hidden
 chat polling pauses, selected-display fencing and Agent/manual exclusion remain,
