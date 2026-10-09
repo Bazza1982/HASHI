@@ -43,9 +43,11 @@ const fault = process.argv[3];
 const calls = [];
 cp.spawnSync = (command, args, options) => {
   calls.push({command, args});
-  if (!args.some(x => String(x).endsWith('provision_transcription_runtime.py'))) {
+  const script = args.find(x => /provision_(transcription|tts)_runtime\.py$/.test(String(x)));
+  if (!script) {
     return {status: 0};
   }
+  const kind = String(script).includes('provision_tts') ? 'tts' : 'transcription';
   if (args.includes('--check')) return {status: fault === 'check' ? 1 : 0};
   if (fault === 'install') return {status: 1};
   const runtime = args[args.indexOf('--runtime-dir') + 1];
@@ -54,12 +56,12 @@ cp.spawnSync = (command, args, options) => {
     process.platform === 'win32' ? 'python.exe' : 'python');
   fs.mkdirSync(path.dirname(python), {recursive: true});
   fs.writeFileSync(python, 'isolated');
-  const config = path.join(home, 'state', 'platform', 'transcription.json');
+  const config = path.join(home, 'state', 'platform', `${kind}.json`);
   fs.mkdirSync(path.dirname(config), {recursive: true});
   fs.writeFileSync(config, JSON.stringify({
     schema_version: 1, python, runtime_dir: runtime,
     lock_sha256: fault === 'receipt' ? 'wrong' : crypto.createHash('sha256').update(
-      fs.readFileSync(path.join(root, 'constraints', 'transcription-py312.lock'))
+      fs.readFileSync(path.join(root, 'constraints', `${kind}-py312.lock`))
     ).digest('hex'),
     python_version: '3.12.13',
     packages: {'faster-whisper':'1.2.1', ctranslate2:'4.7.1', av:'17.0.0'},
@@ -120,7 +122,8 @@ def test_explicit_transcription_optout_never_installs_or_publishes(tmp_path):
     assert data["pointer"] is None and not root.exists()
 
 
-def test_npm_default_main_calls_sidecar_for_already_prepared_core(installed_data_root):
+@pytest.mark.parametrize("fault", ["none", "install", "base", "data"])
+def test_npm_default_main_calls_sidecars_and_rejects_incomplete_media(installed_data_root, fault):
     version = json.loads((ROOT / "package.json").read_text())["version"]
     data_root = installed_data_root
     version_root = data_root / "runtimes" / version
@@ -132,15 +135,21 @@ def test_npm_default_main_calls_sidecar_for_already_prepared_core(installed_data
     script = _PREPARATION[:_PREPARATION.index("const setup =")] + r"""
 process.env.HASHI_DATA_ROOT = process.argv[4];
 process.env.HASHI_POSTINSTALL_NO_PRIVACY = '1';
+if (fault === 'base') cp.spawnSync = () => ({status: 1});
+if (fault === 'data') process.env.HASHI_DATA_ROOT = root;
 const setup = require(path.join(root, 'postinstall.js'));
 const output = setup.main();
 console.log('RESULT=' + JSON.stringify({output, calls,
-  pointer: fs.existsSync(path.join(versionRoot, 'transcription-active.json'))}));
+  pointer: fs.existsSync(path.join(versionRoot, 'transcription-active.json')),
+  tts: fs.existsSync(path.join(versionRoot, 'tts-active.json'))}));
 """
-    data = _result(_node(script, ROOT, version_root, "none", data_root))
-    assert data["output"] == 0 and data["pointer"] is True
-    assert len([c for c in data["calls"] if any(
-        str(a).endswith("provision_transcription_runtime.py") for a in c["args"])]) == 2
+    data = _result(_node(script, ROOT, version_root, fault, data_root))
+    assert data["output"] == (0 if fault == "none" else 1)
+    assert data["pointer"] is data["tts"] is (fault == "none")
+    for kind in ("transcription", "tts"):
+        assert len([c for c in data["calls"] if any(
+            str(a).endswith(f"provision_{kind}_runtime.py") for a in c["args"])]) == (
+                2 if fault == "none" else 1 if fault == "install" else 0)
 
 
 @pytest.mark.parametrize("fault", ["none", "outside", "version", "lock", "symlink"])
@@ -197,18 +206,20 @@ console.log('RESULT=' + JSON.stringify({python: selected.env.HASHI_TRANSCRIPTION
     assert data["args"][-4:] == ["--instance", "alpha", "--json", "status"]
 
 
-@pytest.mark.parametrize("platform", ["native", "wsl"])
-def test_task_deployment_prepares_and_checks_selected_sidecar_before_registration(platform):
-    installer = (ROOT / f"packaging/windows/install-{platform}-hashi-user-runtime.ps1").read_text()
-    assert "provision_transcription_runtime.py" in installer
-    assert "--bridge-home" in installer and "--check" in installer
-    assert "$SkipTranscription" in installer
-    provision = installer.index("if (-not $SkipTranscription)")
-    # WhatIf remains side-effect free; registration cannot claim success before
-    # the selected instance's actual isolated dependency probe succeeded.
-    assert installer.index("$PSCmdlet.ShouldProcess(") < provision
-    assert provision < installer.index("Register-ScheduledTask")
-    assert "Transcription runtime preparation failed" in installer
+@pytest.mark.parametrize("failure", [None, "stt", "tts"])
+def test_full_media_entrypoint_stops_at_required_failure(tmp_path, monkeypatch, failure):
+    from scripts import provision_media_runtime as media
+
+    calls = []
+    def run(kind, args):
+        calls.append((kind, args))
+        return int(kind == failure)
+    monkeypatch.setattr(media.stt, "main", lambda args: run("stt", args))
+    monkeypatch.setattr(media.tts, "main", lambda args: run("tts", args))
+    status = media.main(["--bridge-home", str(tmp_path), "--check"])
+    assert status == int(failure is not None)
+    assert [kind for kind, _ in calls] == (["stt"] if failure == "stt" else ["stt", "tts"])
+    assert "--prepare-model" in calls[0][1] and "--check" in calls[0][1]
 
 
 

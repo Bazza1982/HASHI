@@ -165,10 +165,10 @@ class GlobalConfig:
     canonical_audit: dict[str, Any] = field(default_factory=dict)
     # The qualified persistent Session/attachment contract is standard for a
     # personal instance.  An explicit false remains an operator opt-out.
-    # Native audio remains separately opt-in because it has extra media and
-    # retention requirements.
+    # Media is available by default; qualified targets and user permissions
+    # still determine which input/output path can actually run.
     persistent_session_v1: bool = True
-    native_audio_chat_v1: bool = False
+    native_audio_chat_v1: bool = True
     desktop_enabled: bool = False
     live_voice_v1: bool = True
     native_audio_retention_seconds: int | str = 3600
@@ -723,7 +723,7 @@ class ConfigManager:
             ),
             desktop_enabled=_truthy(g_raw.get("desktop_enabled", False)),
             native_audio_chat_v1=_truthy(
-                g_raw.get("native_audio_chat_v1", False)
+                g_raw.get("native_audio_chat_v1", True)
             ),
             live_voice_v1=_truthy(g_raw.get("live_voice_v1", True)),
             native_audio_retention_seconds=g_raw.get(

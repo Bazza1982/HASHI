@@ -7,6 +7,7 @@ const os = require('os');
 const path = require('path');
 const { preparedPrivacyPython } = require('./privacy-runtime');
 const { preparedTranscriptionPython } = require('./transcription-runtime');
+const { preparedTTSPython, preparedFFmpeg } = require('./tts-runtime');
 
 const HASHI_ROOT = __dirname;
 const PACKAGE = require(path.join(HASHI_ROOT, 'package.json'));
@@ -164,6 +165,10 @@ function run(argv = process.argv.slice(2)) {
         ...process.env,
         ...(privacyPython ? { HASHI_PRIVACY_FILTER_PYTHON: privacyPython } : {}),
         ...(transcriptionPython ? { HASHI_TRANSCRIPTION_PYTHON: transcriptionPython } : {}),
+        HASHI_TTS_PYTHON: process.env.HASHI_TTS_PYTHON || preparedTTSPython(
+          path.join(dataRoot(), 'runtimes', PACKAGE.version), PACKAGE.version),
+        HASHI_MEDIA_FFMPEG: process.env.HASHI_MEDIA_FFMPEG || preparedFFmpeg(
+          path.join(dataRoot(), 'runtimes', PACKAGE.version), PACKAGE.version),
         HASHI_PROGRAM_ROOT: HASHI_ROOT,
         HASHI_PROGRAM_VERSION: PACKAGE.version,
         HASHI_INVOCATION_CWD: process.cwd(),

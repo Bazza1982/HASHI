@@ -20,6 +20,7 @@ from orchestrator.voice_synthesis_worker import (  # noqa: E402
     REQUIRED_DISTRIBUTIONS,
     RESULT_PREFIX as TTS_RESULT_PREFIX,
 )
+from orchestrator.config_json import read_config_json, new_config_json, write_config_json
 
 CONFIG_SCHEMA_VERSION = 1
 APPROVED_PYTHON = "3.12.13"
@@ -172,17 +173,14 @@ def _write_platform_config(
         "lock_sha256": sha256_file(lock_path),
         "python_version": str(probe["python"]),
         "packages": dict(probe["packages"]),
+        "ffmpeg": str(probe["ffmpeg"]),
     }
-    temporary = config_path.with_name(f".{config_path.name}.{os.getpid()}.tmp")
     try:
-        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, config_path)
-    finally:
-        temporary.unlink(missing_ok=True)
+        document = read_config_json(config_path)
+    except FileNotFoundError:
+        document = new_config_json(config_path)
+    document.update(payload)
+    write_config_json(config_path, document)
     return config_path
 
 

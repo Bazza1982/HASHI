@@ -1,5 +1,7 @@
 # HASHI Agent FYI
 
+October 9 media repair: all voice/Phone/Call/video/TTS availability defaults on. Full installers prepare isolated helpers, model weights and converter. HASHI3 adopted and verified; HASHI4 source/config/dependencies prepared, adoption reserved to the user. No Core changes. See [decision](HASHI_MEDIA_DEFAULTS_2026-10-09.md) and [repair](repairs/MEDIA_DEFAULTS_REPAIR_20261009.md).
+
 2026-10-09: confirmed HASHI3 Function fixes are promoted to HASHI4 source.
 The user reserves reboot. Core, identities, secrets and live services are retained;
 media tools use ignored local platform configuration. Qualification is not live
@@ -184,19 +186,4 @@ Call diagnostics retain safe browser/proxy/Function correlation. Keep historical
 causes and physical acceptance separate; see
 [call decision](HASHI_CALL_INTERACTION_2026-10-04.md).
 
-HERV3 commentary is main-model findings; Tool output/failure changes only activity.
-Coalesce findings, suppress exact repeats and cancel queued progress before Final;
-preserve Persona/transport fences. PAO activity outcomes derive from receipts;
-missing evidence is unknown. See [nightly repair](repairs/NIGHTLY_20261008_HASHI3.md).
-
-TUI speech uses the explicit launch home and private platform media tools outside
-Core. Preserve configuration conflicts/durability errors. Embedded browser reads
-verify same-tab URL and observe without navigation; retain grants, unsent forms
-and Session/Run fences, with no arbitrary evaluation.
-
-Desktop input fences the selected display; hidden chat polling pauses and control
-errors persist. Preserve Agent/manual exclusion. Actual credential login and a
-physical phone remain open. See [input repair](repairs/DESKTOP_INPUT_REPAIR_20261008.md).
-Prior daily-client Phone/Call adoption is HASHI3-only. Preserve open applications;
-installed native client bytes adopt on its next normal launch. Fixture audio and
-mobile viewports do not prove physical microphones/cameras, phones or hearing.
+Full previous notes: [media archive](AGENT_FYI_HISTORY_MEDIA_20261009.md).

@@ -220,6 +220,53 @@ async def test_hashi_api_initializes_without_a_provider_secret(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_phone_judgment_uses_hashi_gateway_without_tools_or_old_context(tmp_path):
+    from orchestrator.frontend_live_voice.worker_actions import invoke_phone_judgment
+
+    adapter = _adapter(tmp_path)
+    adapter.tool_registry = _MediaFallbackRegistry()
+    adapter.sys_prompt = "PREVIOUS_REQUEST_CONTEXT"
+    requests = []
+    decision = {"route": "incomplete", "actions": []}
+
+    def receive(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json={
+            "id": "phone-provider-receipt",
+            "choices": [{"message": {"role": "assistant", "content": json.dumps(decision)},
+                         "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 30, "completion_tokens": 6},
+        })
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(receive))
+    adapter.client = client
+    manager = SimpleNamespace(
+        config=SimpleNamespace(active_backend="her-v2"),
+        current_backend=SimpleNamespace(_v2_config=SimpleNamespace(profiles={
+            "auxiliary": SimpleNamespace(engine="hashi-api", model="gpt-5.6-luna")}),
+        ),
+        create_ephemeral_backend=lambda engine, target_model: adapter,
+    )
+    usage = []
+    result = await invoke_phone_judgment(SimpleNamespace(backend_manager=manager),
+                                        {"utterance": "Wait for the next instruction"},
+                                        observe_usage=usage.append)
+    assert result == decision
+    assert len(requests) == 1
+    payload = requests[0]
+    assert payload["model"] == "gpt-5.6-luna"
+    assert payload["reasoning_effort"] == "none"
+    assert not payload.get("tools")
+    assert "session_id" not in payload
+    assert "PREVIOUS_REQUEST_CONTEXT" not in json.dumps(payload)
+    assert "Wait for the next instruction" in json.dumps(payload)
+    assert adapter.tool_registry is None
+    assert usage[0]["status"] == "completed"
+    assert usage[0]["input"] == 30 and usage[0]["output"] == 6
+    assert client.is_closed
+
+
+@pytest.mark.asyncio
 async def test_hashi_api_observes_each_physical_provider_call(tmp_path):
     adapter = _adapter(tmp_path)
     observed = []

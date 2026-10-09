@@ -588,6 +588,31 @@ def install_python_dependencies(runtime_python: Path) -> None:
     remove_path(site_packages / "bin")
 
 
+def install_media_helpers(staging: Path, app_hashi: Path, cache: Path) -> None:
+    """Bundle independent interpreters and models; never add native deps to Core."""
+    media = staging / "runtime" / "media"
+    for kind, worker in (("transcription", "voice_transcription_worker.py"),
+                         ("tts", "voice_synthesis_worker.py")):
+        runtime = media / kind / "Scripts"
+        extract_python(runtime, cache)
+        run(["uv", "pip", "install", "--target", str(runtime / "Lib" / "site-packages"),
+             "--python-platform", "x86_64-pc-windows-msvc", "--python-version", "3.12",
+             "--only-binary", ":all:", "-r", str(app_hashi / "constraints" / f"{kind}-py312.lock")])
+        command = [str(runtime / "python.exe"), "-I", str(app_hashi / "orchestrator" / worker)]
+        run(command + ["--probe"])
+        if kind == "transcription":
+            previous = os.environ.get("HF_HUB_CACHE")
+            os.environ["HF_HUB_CACHE"] = str(media / "model-cache")
+            try:
+                run(command + ["--prepare-model"])
+                run(command + ["--check-model"])
+            finally:
+                if previous is None:
+                    os.environ.pop("HF_HUB_CACHE", None)
+                else:
+                    os.environ["HF_HUB_CACHE"] = previous
+
+
 def validate_bundled_runtime_contract(runtime_python: Path, app_hashi: Path) -> None:
     status("validate bundled Python and HASHI runtime contract")
     run(
@@ -683,6 +708,9 @@ def install_ffmpeg(runtime_bin: Path, licenses: Path, cache: Path) -> None:
     runtime_bin.mkdir(parents=True, exist_ok=True)
     extract_selected_zip_file(
         archive, lambda name: name.endswith("/bin/ffmpeg.exe"), runtime_bin
+    )
+    extract_selected_zip_file(
+        archive, lambda name: name.endswith("/bin/ffplay.exe"), runtime_bin
     )
     extract_selected_zip_file(
         archive,
@@ -1208,6 +1236,7 @@ def build(args: argparse.Namespace) -> Path:
         validate_bundled_function_contract(runtime_python, app_hashi)
         install_piper(runtime_python, app_hashi, licenses, args.cache)
         install_ffmpeg(runtime_bin, licenses, args.cache)
+        install_media_helpers(staging, app_hashi, args.cache)
         install_tesseract(app_hashi, licenses, args.cache, build_temp)
         configure_data(staging, private_deepseek_key=private_deepseek_key)
         copy_launchers(staging)

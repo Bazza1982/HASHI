@@ -21,6 +21,7 @@ class CallSettings:
         self.runtime = runtime
         root = getattr(runtime.global_config, "bridge_home", None) or runtime.global_config.project_root
         self.config = CallConfig(Path(root) / "call_profiles.json")
+        self.config.initialize()
         self.owner, self.agent = runtime_session.owner_id(runtime), runtime.name
 
     def render(self, page="home"):

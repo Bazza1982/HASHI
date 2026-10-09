@@ -83,7 +83,7 @@ def test_provisioner_installs_and_probes_only_the_isolated_runtime(tmp_path, mon
             )
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
-    monkeypatch.setattr(provisioner.subprocess, "run", run)
+    monkeypatch.setattr(provisioner, "_run_command", run)
 
     receipt = provisioner.provision_runtime(
         bridge_home=bridge_home,
@@ -130,7 +130,7 @@ def test_failed_probe_does_not_publish_platform_config(tmp_path, monkeypatch):
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="missing av")
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
-    monkeypatch.setattr(provisioner.subprocess, "run", run)
+    monkeypatch.setattr(provisioner, "_run_command", run)
 
     with pytest.raises(provisioner.ProvisioningError, match="probe"):
         provisioner.provision_runtime(

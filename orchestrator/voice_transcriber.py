@@ -27,7 +27,7 @@ from orchestrator import voice_transcription_worker
 logger = logging.getLogger("VoiceTranscriber")
 
 # Defaults — can be overridden via GlobalConfig / agents.json
-DEFAULT_MODEL_SIZE = "small"
+DEFAULT_MODEL_SIZE = voice_transcription_worker.DEFAULT_MODEL_SIZE
 DEFAULT_LANGUAGE = None  # None = auto-detect
 EXTERNAL_TRANSCRIPTION_TIMEOUT_SECONDS = 900.0
 

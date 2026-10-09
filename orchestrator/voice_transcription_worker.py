@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 PROTOCOL_VERSION = 1
+DEFAULT_MODEL_SIZE = "small"
 RESULT_PREFIX = "HASHI_VOICE_TRANSCRIPTION_RESULT="
 MAX_OUTPUT_BYTES = 1_048_576
 REQUIRED_DISTRIBUTIONS = ("faster-whisper", "ctranslate2", "av")
@@ -188,10 +189,18 @@ def main(argv: list[str] | None = None) -> int:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--serve", action="store_true")
     mode.add_argument("--probe", action="store_true")
+    mode.add_argument("--prepare-model", action="store_true")
+    mode.add_argument("--check-model", action="store_true")
     args = parser.parse_args(argv)
-    if args.probe:
+    if args.probe or args.prepare_model or args.check_model:
         try:
             payload = probe_runtime()
+            if args.prepare_model or args.check_model:
+                from faster_whisper import WhisperModel
+
+                WhisperModel(DEFAULT_MODEL_SIZE, device="cpu", compute_type="int8",
+                             local_files_only=args.check_model)
+                payload["model"] = DEFAULT_MODEL_SIZE
             return_code = 0
         except Exception as exc:
             payload = {

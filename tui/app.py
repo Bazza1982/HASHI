@@ -2998,7 +2998,7 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
     def _voice_auto_enabled(self, agent: str | None = None) -> bool:
         if self.current_agent_display == "ALL":
             return False
-        return bool(self._voice_auto_by_target.get(self._voice_target_key(agent), False))
+        return bool(self._voice_auto_by_target.get(self._voice_target_key(agent), True))
 
     def _cancel_tui_speech(self) -> None:
         task = self._speech_task

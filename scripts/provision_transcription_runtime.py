@@ -20,6 +20,7 @@ from orchestrator.voice_transcription_worker import (  # noqa: E402
     REQUIRED_DISTRIBUTIONS,
     RESULT_PREFIX as TRANSCRIPTION_RESULT_PREFIX,
 )
+from orchestrator.config_json import read_config_json, new_config_json, write_config_json
 
 CONFIG_SCHEMA_VERSION = 1
 APPROVED_PYTHON = "3.12.13"
@@ -200,17 +201,12 @@ def _write_platform_config(
         "python_version": str(probe["python"]),
         "packages": dict(probe["packages"]),
     }
-    temporary = config_path.with_name(f".{config_path.name}.{os.getpid()}.tmp")
     try:
-        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, config_path)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
+        document = read_config_json(config_path)
+    except FileNotFoundError:
+        document = new_config_json(config_path)
+    document.update(payload)
+    write_config_json(config_path, document)
     return config_path
 
 
@@ -309,6 +305,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--runtime-dir", type=Path)
     parser.add_argument("--base-python", type=Path, default=Path(sys.executable))
     parser.add_argument("--lock", type=Path, default=DEFAULT_LOCK)
+    parser.add_argument("--prepare-model", action="store_true",
+                        help="Prepare and verify the default model before declaring full media ready.")
     parser.add_argument(
         "--check",
         action="store_true",
@@ -332,12 +330,18 @@ def main(argv: list[str] | None = None) -> int:
                 lock_path=lock_path,
             )
         else:
-            receipt = provision_runtime(
-                bridge_home=args.bridge_home,
-                runtime_dir=runtime_dir,
-                base_python=args.base_python,
-                lock_path=lock_path,
-            )
+            try:
+                receipt = check_runtime(bridge_home=args.bridge_home, runtime_dir=runtime_dir,
+                                        lock_path=lock_path)
+            except ProvisioningError:
+                receipt = provision_runtime(
+                    bridge_home=args.bridge_home, runtime_dir=runtime_dir,
+                    base_python=args.base_python, lock_path=lock_path)
+        if args.prepare_model:
+            completed = _run_command(
+                [str(runtime_python_path(runtime_dir)), "-I", str(WORKER_PATH),
+                 "--check-model" if args.check else "--prepare-model"], timeout=1200.0)
+            _require_success(completed, action="default model preparation")
     except (OSError, ValueError, ProvisioningError, json.JSONDecodeError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1

@@ -205,6 +205,11 @@ function Initialize-PortableEnvironment {
     New-Item -ItemType Directory -Force -Path (Join-Path $script:DataRoot 'tmp') | Out-Null
 
     $env:BRIDGE_HOME = $script:DataRoot
+    $env:HASHI_TRANSCRIPTION_PYTHON = Join-Path $script:PortableRoot 'runtime\media\transcription\Scripts\python.exe'
+    $env:HASHI_TTS_PYTHON = Join-Path $script:PortableRoot 'runtime\media\tts\Scripts\python.exe'
+    $env:HF_HUB_CACHE = Join-Path $script:PortableRoot 'runtime\media\model-cache'
+    $env:HASHI_MEDIA_FFMPEG = Join-Path $script:BinRoot 'ffmpeg.exe'
+    $env:HASHI_MEDIA_FFPLAY = Join-Path $script:BinRoot 'ffplay.exe'
     Remove-Item Env:HASHI_PRIVACY_FILTER_SCRIPT -ErrorAction SilentlyContinue
     $privacyPython = Join-Path $script:DataRoot 'state\runtimes\privacy\Scripts\python.exe'
     if (Test-Path -LiteralPath $privacyPython -PathType Leaf) {

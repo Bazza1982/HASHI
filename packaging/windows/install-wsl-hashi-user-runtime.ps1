@@ -222,12 +222,12 @@ if (-not $SkipTranscription) {
     foreach ($checkOnly in @($false, $true)) {
         $transcriptionArguments = @(
             '--distribution', $Distro, '--cd', $LinuxRoot,
-            '--', $LinuxPython, 'scripts/provision_transcription_runtime.py',
+            '--', $LinuxPython, 'scripts/provision_media_runtime.py',
             '--bridge-home', $LinuxRoot
         )
         if ($checkOnly) { $transcriptionArguments += '--check' }
         if ((Invoke-WslProbe -Executable $WslExecutable -Arguments $transcriptionArguments) -ne 0) {
-            throw 'Transcription runtime preparation failed; no runtime task was registered.'
+            throw 'Full media runtime preparation failed; no runtime task was registered.'
         }
     }
 }

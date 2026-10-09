@@ -9,6 +9,12 @@ from orchestrator.config_json import read_config_json
 
 def configured_media_executable(name: str, *, bridge_home: Path | None = None) -> str | None:
     """Read an optional private platform choice without writing a fallback."""
+    override = os.environ.get(f"HASHI_MEDIA_{name.upper()}", "").strip()
+    if override:
+        candidate = Path(override)
+        if not candidate.is_absolute() or not candidate.is_file():
+            raise ValueError(f"Configured {name} executable is unavailable")
+        return str(candidate)
     home = bridge_home or os.environ.get("BRIDGE_HOME")
     if not home:
         return None
@@ -16,7 +22,14 @@ def configured_media_executable(name: str, *, bridge_home: Path | None = None) -
     try:
         document = read_config_json(config_path)
     except FileNotFoundError:
-        return None
+        if name != "ffmpeg":
+            return None
+        try:
+            speech = read_config_json(Path(home) / "state" / "platform" / "tts.json")
+        except FileNotFoundError:
+            return None
+        candidate = Path(str(speech.get("ffmpeg") or ""))
+        return str(candidate) if candidate.is_absolute() and candidate.is_file() else None
     if document.get("schema_version") != 1:
         raise ValueError("Unsupported media platform configuration")
     executables = document.get("executables")

@@ -371,6 +371,7 @@ async def test_voice_auto_read_is_target_scoped_persistent_and_deduplicated(
     async with app.run_test() as pilot:
         app._load_initial_transcript = lambda *_args, **_kwargs: None
         app._select_agent(client.agents[0], client=client)
+        assert app._voice_auto_enabled() is True
         await app._handle_voice_cmd("/voice on")
         message = {"role": "assistant", "text": "one final", "message_id": "msg-2"}
         app._queue_tui_speech(message, announce=False)
@@ -387,6 +388,8 @@ async def test_voice_auto_read_is_target_scoped_persistent_and_deduplicated(
     reopened.current_agent = "akane"
     reopened.current_agent_display = "Akane"
     assert reopened._voice_auto_enabled() is True
+    reopened._voice_auto_by_target[reopened._voice_target_key()] = False
+    assert reopened._voice_auto_enabled() is False
 
 
 @pytest.mark.asyncio
