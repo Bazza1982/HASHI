@@ -1,5 +1,24 @@
 # Phone and Call interaction decision
 
+## Current 2026-10-09 urgent HASHI3 availability repair
+
+The current user requests an immediate HASHI3 `/call` repair before personal
+testing. Frontend Connector owns the external frontend repair on the paired
+release checkout; HASHI Functions and Core are unchanged. Availability and
+route/context/start now follow the explicitly bound registered connection,
+instead of another device's process-wide selection. Existing opt-in, Remote
+authentication, connection-key and owner/Agent/Session checks remain enforced.
+
+Two strengthened existing scenarios fail before repair and pass afterward;
+52 focused frontend checks and the production build pass. The daily service
+adopts the repaired source/assets. Its actual Call button passes browser capture,
+real-provider recognition, HASHI3 reply, playback and confirmed hangup with a
+file microphone. The 5179 page also passes that path. Physical devices and
+hearing remain personal acceptance. Existing user applications remain open.
+The owning external frontend decision is `docs/call/CALL_AVAILABILITY_REPAIR_2026-10-09.md`;
+private red/green and canary receipts are retained in the paired HASHI3 repair
+directory. No HASHI4 source or lifecycle change is part of this repair.
+
 ## Current 2026-10-06 decision — independent entries on HASHI3
 
 The user approved replacing the shared next-call selector with two fixed
@@ -475,3 +494,11 @@ path, not physical hearing, camera content, real mobile or acoustic/latency
 quality. The older generic-script query's unknown receipt is not reclassified.
 The design-to-evidence map is
 [Phone/Call design acceptance](repairs/PHONE_CALL_DESIGN_ACCEPTANCE_20261007.md).
+
+The October 8/9 user request delivers the paired release to the existing daily
+Windows Workbench service and installed desktop client, scoped to HASHI3 only.
+Call is opted in on that connection. Real-provider Phone and Call button-to-audio
+checks pass in the installed client at the actual daily service, with an explicit
+file microphone; physical devices, camera content and hearing remain open.
+Existing user applications and the original Workbench changes are retained.
+See [current scoped delivery](repairs/NIGHTLY_20261008_HASHI3.md).

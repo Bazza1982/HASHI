@@ -383,3 +383,13 @@ opened a fresh card and invoked `deepseek-v4-pro` to restore the retained target
 The retained effort is `max`. This exercises the same callback registry used by
 Telegram registration; a device-side Telegram tap remains an operator observation,
 not a synthesized test result.
+
+The October 8/9 HASHI3-only nightly repair removes observer-generated generic
+Tool-completion commentary, coalesces substantive findings and cancels queued
+updates before Final. The actual main-model contract carries the finding
+guidance; Persona and uncertain-delivery fences remain. A real daily Workbench
+canary displays one grounded model-authored finding before Final without generic
+duplicates. Luna did not produce a finding in its earlier canaries, so prompt
+guidance is not claimed to force every model to report progress. The temporary
+QA target was restored afterward. See
+[current nightly delivery](repairs/NIGHTLY_20261008_HASHI3.md).

@@ -112,9 +112,10 @@ class DesktopController:
         with self.guard:
             self.expire()
             view = view_options(value)
-            rows, rev = self.native.displays()
+            rows, _ = self.native.displays()
             if view["display_id"] not in {r["id"] for r in rows}:
                 raise DesktopError("desktop_display_changed", 409)
+            rev = self._display_revision(rows, view["display_id"])
             sess = self._get_session(session_id)
             if view == sess.view and rev == sess.display_revision:
                 return {"view_revision": sess.view_revision}
@@ -130,6 +131,13 @@ class DesktopController:
 
     def _view_id(self, session_id, view, revision):
         return hashlib.sha256(json.dumps([session_id, view, revision], sort_keys=True).encode()).hexdigest()[:24]
+
+    @staticmethod
+    def _display_revision(rows, display_id):
+        # Input coordinates depend only on the selected monitor's geometry.
+        # Another monitor waking/sleeping must not revoke this control lease.
+        display = next((row for row in rows if row["id"] == display_id), None)
+        return hashlib.sha256(json.dumps(display, sort_keys=True).encode()).hexdigest()[:24]
 
     def handle(self, operation, args, actor, session_id):
         if not isinstance(actor, str) or not 1 <= len(actor) <= 256:
@@ -201,13 +209,14 @@ class DesktopController:
                 rows, revision = self.native.displays()
                 if sess.view is None:
                     sess.view = view_options({"display_id": rows[0]["id"]})
-                if revision != sess.display_revision:
+                selected_revision = self._display_revision(rows, sess.view["display_id"])
+                if selected_revision != sess.display_revision:
                     if self.owner and self.owner[1] == (session_id or ""):
                         self._release()
-                    sess.display_revision = revision
                     if sess.view["display_id"] not in {r["id"] for r in rows}:
                         sess.view = view_options({"display_id": rows[0]["id"]})
-                    sess.view_revision = self._view_id(session_id, sess.view, revision)
+                    sess.display_revision = self._display_revision(rows, sess.view["display_id"])
+                    sess.view_revision = self._view_id(session_id, sess.view, sess.display_revision)
                     sess.frame_cache = None; sess.frame_history.clear()
                 view = dict(sess.view)
                 view_revision = sess.view_revision
@@ -247,6 +256,10 @@ class DesktopController:
                         "display_revision": revision, "display_id": view["display_id"],
                         "width": encoded_size[0], "height": encoded_size[1], "rect": rect,
                         "display": display, "displays": rows, "checked_at": time.time(), "cursor": self.native.cursor()}
+                if callable(getattr(self.native, 'desktop_state', None)):
+                    status = self.native.desktop_state()
+                    meta['windows_locked'] = bool(status.get('locked'))
+                    meta['secure_desktop'] = bool(status.get('secure_desktop'))
                 sess.frame_history[frame_id] = (sess.last_capture, rect, view_revision)
                 sess.frame_history.move_to_end(frame_id)
                 while len(sess.frame_history) > 8: sess.frame_history.popitem(last=False)
@@ -281,6 +294,7 @@ class DesktopController:
         return frame_interval_seconds(profile, idle=inactive > 10)
 
     def input(self, value, actor, session_id, lease_id):
+        input_received = self.clock()
         event = validate_input(value)
         digest = hashlib.sha256(json.dumps(event, sort_keys=True).encode()).hexdigest()
         with self.guard:
@@ -296,10 +310,15 @@ class DesktopController:
             if not release:
                 record = sess.frame_history.get(event["frame_id"])
                 if not record or event["view_revision"] != sess.view_revision or record[2] != sess.view_revision or self.clock()-record[0] > 3:
-                    raise DesktopError("desktop_stale_frame", 409)
+                    error = DesktopError("desktop_stale_frame", 409)
+                    error.desktop_diagnostics = {
+                        "frame_age_ms": round((self.clock()-record[0])*1000) if record else -1,
+                        "input_wait_ms": round((self.clock()-input_received)*1000),
+                    }
+                    raise error
                 # Close the display-change race before mapping input coordinates.
-                _, revision = self.native.displays()
-                if revision != sess.display_revision:
+                rows, _ = self.native.displays()
+                if self._display_revision(rows, sess.view["display_id"]) != sess.display_revision:
                     self._release()
                     raise DesktopError("desktop_display_changed", 409)
                 if self.clock()-self.rate_start >= 1: self.rate_start, self.rate_count = self.clock(), 0

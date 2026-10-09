@@ -122,9 +122,41 @@ lease. Releases remain possible with expired frames. Displays are revalidated at
 input time. Unicode text uses SendInput, never clipboard sync. No command/shell/file
 transfer/audio interfaces are provided. No raw frame or input content is logged.
 
-The Windows login/lock/UAC secure desktop is unavailable. Ordinary workers cannot
-inject into higher-integrity processes. No privilege escalation or UAC bypass is
-part of this feature. Other OS adapters are not implemented.
+The ordinary Windows Worker cannot control the login/lock/UAC secure desktop or
+higher-integrity processes. An explicit local platform opt-in now selects an
+isolated Windows desktop service; the default adapter remains ordinary Windows.
+The service is installed by an administrator with
+`scripts/install_secure_desktop_host.ps1 -BridgeHome <selected-instance> -Start`.
+It binds one verified interactive account and console session, runs a SYSTEM
+child in that session, and exposes only bounded screen/input operations through
+a local ACL-restricted named pipe. There is no TCP, command, file or credential
+interface. ProgramData executable/configuration and their parent directory are
+writable only by SYSTEM/administrators. The Worker authenticates the pipe's
+kernel owner and session before sending request bytes; the host separately
+authenticates the caller's account/session. PAO and the existing OS write lock
+continue to own all manual control leases.
+
+The optional host opens the current input desktop per request and restores its
+thread desktop afterwards. Held keys/buttons are tracked and reset on an idle
+watchdog. Windows credentials are entered by the human, never retrieved or
+stored. Secure attention is not synthesized. The installation is session-pinned;
+a changed console account/session requires a separately reviewed configuration
+adoption, not automatic widening. The installer refuses to overwrite an existing
+service or Worker opt-in. Other OS adapters are not implemented.
+
+Input coordinates are fenced by the selected display's geometry. An unrelated
+monitor waking or sleeping cannot revoke control; an actual change to the
+selected monitor still releases it and clears old frame coordinates. Picture
+freshness includes response transit time. Hidden conversation polling pauses
+while the Workbench desktop is presented, keeping browser HTTP connections
+available for frames, heartbeats and input. Retained conversations hydrate from
+their existing owner on return. A successful frame cannot erase a failed control
+or input explanation, and uncertain input is never replayed.
+
+HASHI3 adoption and the production Workbench observations on October 8 are
+recorded in [the input repair](repairs/DESKTOP_INPUT_REPAIR_20261008.md). Unlocked
+physical input and browser-emulated touch are distinct from physical-phone and
+complete Windows credential-login acceptance.
 
 ## Validation
 

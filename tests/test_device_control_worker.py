@@ -58,6 +58,19 @@ def _state(tmp_path: Path) -> DeviceWorkerState:
     return state
 
 
+def test_locked_desktop_is_capability_state_not_failed_worker_health(tmp_path, monkeypatch):
+    state = _state(tmp_path)
+    state.capability_kind = 'computer_control'
+    monkeypatch.setattr(device_worker.os, 'name', 'nt')
+    monkeypatch.setattr(windows_win32, 'get_desktop_state', lambda: {
+        'available': False, 'interactive': False, 'locked': True,
+        'desktop_name': None, 'error': 'access denied on secure desktop',
+    })
+    result = DeviceWorkerState.health(state)
+    assert result['ok'] is True
+    assert result['health']['desktop_state']['locked'] is True
+
+
 @pytest.mark.asyncio
 async def test_browser_worker_stays_on_its_registered_extension(tmp_path, monkeypatch):
     state = _state(tmp_path)
@@ -450,9 +463,21 @@ def test_computer_worker_health_is_truthful_about_platform(tmp_path):
 
     assert health["ok"] is (
         os.name == "nt"
-        and bool(health["health"]["desktop_state"].get("interactive"))
+        and bool(
+            health["health"]["desktop_state"].get("available")
+            or health["health"]["desktop_state"].get("locked")
+        )
     )
     assert health["capability_kind"] == "computer_control"
+
+
+def test_unknown_desktop_failure_is_not_a_healthy_locked_worker(tmp_path, monkeypatch):
+    state = _state(tmp_path)
+    state.capability_kind = "computer_control"
+    monkeypatch.setattr(windows_win32, "get_desktop_state", lambda: {
+        "available": False, "interactive": False, "locked": None,
+    })
+    assert DeviceWorkerState.health(state)["ok"] is False
 
 
 @pytest.mark.asyncio

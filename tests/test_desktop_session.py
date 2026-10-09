@@ -210,9 +210,44 @@ def test_input_retains_typed_native_failure_and_releases_its_control(desktop):
 def test_wrong_actor_and_display_change_cannot_inject(desktop):
     c,n,t=desktop;c.frame('', 'session-a');control(c)
     with pytest.raises(DesktopError,match='expired'): c.input(event(c),'other-owner','session-a','lease-a')
-    n.rev='new-display-layout'
+    displays=n.displays
+    def changed_selected_display():
+        rows,_=displays()
+        rows[0]={**rows[0],'width':1600}
+        return rows,'new-display-layout'
+    n.displays=changed_selected_display
     with pytest.raises(DesktopError,match='display_changed'): c.input(event(c),'owner-a','session-a','lease-a')
     assert not n.calls and c.owner is None
+
+
+def test_other_monitor_waking_keeps_primary_control_and_coordinates(desktop):
+    c,n,t=desktop
+    before=c.frame('', 'session-a');control(c)
+    original=n.displays
+    def secondary_waking():
+        rows,_=original()
+        rows[1]={**rows[1],'width':2560}
+        return rows,'other-monitor-awake'
+    n.displays=secondary_waking
+    t[0]+=.6
+    after=c.frame(before['meta']['frame_id'],'session-a')
+    assert c.owner==('owner-a','session-a','lease-a')
+    assert after['meta']['view_revision']==before['meta']['view_revision']
+    c.input(event(c),'owner-a','session-a','lease-a')
+    assert n.calls[-1]['px']==-960
+
+
+def test_other_monitor_change_between_frame_and_click_does_not_release_primary(desktop):
+    c,n,_=desktop
+    c.frame('', 'session-a');control(c);old=event(c)
+    original=n.displays
+    def secondary_sleeping():
+        rows,_=original()
+        return rows[:1],'other-monitor-asleep'
+    n.displays=secondary_sleeping
+    c.input(old,'owner-a','session-a','lease-a')
+    assert c.owner==('owner-a','session-a','lease-a')
+    assert len(n.calls)==1
 
 
 def test_view_change_invalidates_old_coordinates(desktop):
