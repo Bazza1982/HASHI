@@ -32,6 +32,7 @@ import httpx
 
 from adapters.base import BackendCapabilities, BackendResponse, TokenUsage
 from adapters.openrouter_api import (
+    HASHI_COMPACTION_CAPABILITIES,
     INVALID_TOOL_CALL_REPAIR_LIMIT,
     _MEDIA_FALLBACK_TOOL_NAMES,
     OpenRouterAdapter,

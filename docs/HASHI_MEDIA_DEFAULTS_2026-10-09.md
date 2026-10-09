@@ -37,3 +37,10 @@ boundaries, npm/full-install failure behavior, sidecar probes, curated Core
 gate and immutable Worker lifecycle tests. Live evidence belongs in
 `docs/repairs/MEDIA_DEFAULTS_REPAIR_20261009.md`; no simulated check is recorded
 as human listening or physical-phone acceptance.
+
+HASHI API's stateless adapter exports the qualified isolation/tool-disabling
+capabilities of its shared transport owner. Phone auxiliary judgments use the
+selected target without tools, reasoning or inherited conversation; no alternate
+model is silently selected. Missing this declaration previously rejected Phone
+before any model request. Its regression exercises the real adapter HTTP payload,
+isolated prompt, usage receipt and connection cleanup.
