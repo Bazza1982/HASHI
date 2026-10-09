@@ -4201,9 +4201,22 @@ async def test_handle_backend_error_buffers_transfer_without_delivery():
 
 
 @pytest.mark.asyncio
-async def test_handle_success_delivery_sends_response_and_routes_hchat(monkeypatch):
+@pytest.mark.parametrize("trusted_call", [False, True])
+async def test_handle_success_delivery_sends_response_and_routes_hchat(monkeypatch, trusted_call):
+    from orchestrator.message_context import (
+        MESSAGE_CONTEXT_METADATA_KEY, build_message_context_snapshot,
+    )
+
     runtime = _runtime()
     item = _item(prompt="user text")
+    call_media = {"version": 2, "call_id": "call-1", "turn_id": "turn-1", "mode": "voice"}
+    # An unsealed caller hint must not suppress ordinary voice preferences.
+    item.request_metadata = {"call_media": call_media}
+    if trusted_call:
+        item.request_metadata[MESSAGE_CONTEXT_METADATA_KEY] = build_message_context_snapshot(
+            runtime, source="session-api", chat_id=item.chat_id, prompt=item.prompt,
+            metadata={"call_media": call_media},
+        )
     response = SimpleNamespace(text="core text")
     delivery_outcomes = []
     monkeypatch.setattr(
@@ -4230,7 +4243,7 @@ async def test_handle_success_delivery_sends_response_and_routes_hchat(monkeypat
 
     assert runtime.last_response["text"] == "visible text"
     assert runtime.sent_message["text"] == "visible text"
-    assert runtime.voice_replies == [(123, "visible text", "req-1")]
+    assert runtime.voice_replies == ([] if trusted_call else [(123, "visible text", "req-1")])
     assert runtime.audit_followups[0]["audit_collector"] == "audit"
     assert runtime.hchat_routes == [("req-1", "visible text")]
     assert runtime.maintenance_events[-1][0] == "send_success"

@@ -4587,8 +4587,13 @@ async def handle_success_delivery(
         send_native_audio_parts,
     )
 
-    native_parts = audio_parts(getattr(response, "content", ()))
-    native_policy = native_reply_content_policy(runtime, item)
+    from orchestrator.frontend_call.context import is_call_request
+
+    # Call owns synthesis and in-call playback using its frozen media profile.
+    # Ordinary voice preferences must not create a second audio reply/mirror.
+    call_reply = is_call_request(item)
+    native_parts = [] if call_reply else audio_parts(getattr(response, "content", ()))
+    native_policy = "text_only" if call_reply else native_reply_content_policy(runtime, item)
     cos_handled = False
     safe_core_raw = extract_memory_plus_update_details(response.text).visible_text
     await runtime._send_wrapper_verbose_trace(item, safe_core_raw, visible_text, wrapper_result)
@@ -4824,7 +4829,7 @@ async def handle_success_delivery(
         delivered=bool(final_delivered or hchat_delivered),
         completion_path="foreground",
     )
-    if not native_parts:
+    if not native_parts and not call_reply:
         request_metadata = getattr(item, "request_metadata", None)
         voice_origin = bool(
             isinstance(request_metadata, Mapping)
