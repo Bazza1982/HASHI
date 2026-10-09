@@ -62,14 +62,21 @@ Evidence is retained under the ignored instance directory
 - Pre-fix preference/Windows checks: 8 failures. The separate empty-WAV boundary
   fails before its guard. An initial missing test-directory setup error was
   corrected before collecting this red evidence.
-- Initial fixed voice component/platform run: 28 passed. Real Windows tests
+- Final voice component/platform and ingress run: 35 passed in HASHI3 and
+  35 passed against synchronized HASHI4 source. Real Windows tests
   check chosen voice language, explicit voice preservation, missing-voice
   failure and nonempty file output; no network or speaker playback is involved.
 - Actual opt-in VoiceManager -> Windows SAPI -> OGG conversion: Chinese WAV is
   3.943 seconds, OGG is nonempty. The same manager generates no audio by default.
 - Call backend and main delivery pipeline: 258 passed, including the previously
   retained 13 optimization/privacy scenarios and duplicate-voice suppression.
-- Restored frontend controller/media/UI scope: 39 passed, no skips.
+- Restored frontend controller/media/UI scope: initially 39 passed. A fresh
+  HASHI4 Call then exposed a separate cold detector startup/retry failure:
+  readiness arrived at 18.783 seconds, after the 15-second timeout, and explicit
+  retry reused the rejected promise. The frontend now allows a bounded 45-second
+  startup, discards failed Workers/promises, and fences their late messages.
+  Both added failure scenarios fail before repair; the final detector/controller/
+  media/UI scope is 43 passed, no skips. Prior hangup/overload tests are retained.
 - Repeated actual acoustic Worker comparison on the same 40.2-second sustained
   background fixture: restored speech submits at 3.328 seconds; the rejected
   amplitude implementation never submits. Background alone produces no speech.
@@ -77,7 +84,42 @@ Evidence is retained under the ignored instance directory
   four microphone cases pass (noise rejection, short word, quiet word, word with
   background). No microphone hardware or human-hearing claim is made.
 
-Source publication, fresh real-provider Call checks, final synchronization and
-operational adoption are recorded separately after completion. Historical
-receipts and synthetic-file microphones do not substitute for subjective
-hearing or physical microphone acceptance.
+## Verified delivery and adoption boundary
+
+The coherent voice fix was committed in HASHI3 (`0906990e`) and cherry-picked
+into HASHI4 (`5f8c18ad`). The instance-specific FYI history was retained while
+resolving its documentation conflict. Product/test files and the decision match
+exactly; unrelated HASHI3 checkout changes were not staged.
+
+The paired frontend's detector correction is committed as `8b037ea`. A clean
+browser profile through an isolated instance-bound copy of the real frontend
+completed the actual Call button path on both real instances:
+
+- HASHI3: microphone -> recognized "What is 2 plus 5?" -> main Agent answer "7"
+  -> nonempty automatic audio playback -> listening resumes -> confirmed hangup.
+- HASHI4: the same question with sustained background sound -> recognized full
+  question -> answer "2加5等于7。" -> nonempty automatic playback -> listening
+  resumes -> confirmed hangup. The actual local detector assets are observed.
+- Observed segment-to-playback times are 13.231 seconds and 15.264 seconds for
+  these runs, respectively. These include recognition, Agent and synthesis work;
+  the separate 3.328-second comparison measures capture endpoint only.
+- Both tests use an explicitly declared synthetic file microphone, with a quiet
+  lead-in and repeating fixture to allow cold readiness. They do not inject a
+  Call turn directly. No camera is requested, and all local tracks end.
+
+The verified static frontend build and detector source are published to the
+existing shared daily frontend. Its actual served entry matches the candidate;
+all 46 earlier hashed assets remain available to open tabs. Both Core identities
+and protected Core source hashes are unchanged. New tabs/reloads use this Call
+repair. Neither HASHI instance has been rebooted by this task.
+
+Automatic `/voice` defaults and Windows voice selection live in immutable Agent
+Function generations. Existing Workers still contain the previous default and
+must hot-adopt the new source before this portion takes effect. No preference
+files were bulk-rewritten, and the user's explicit saved choices remain intact.
+An explicit hot-update authorization has been requested under the user's
+standing no-reboot-without-authorization rule. This is an adoption boundary,
+not a claim that the running voice behavior is already corrected.
+
+Historical receipts and synthetic-file microphones do not substitute for
+subjective hearing or physical microphone acceptance.
