@@ -161,8 +161,19 @@ def speech_segments(text: str):
     text = "\n".join(line for line in text.splitlines() if line.count("|") < 2).strip()
     parts = []
     while text and len(parts) < 12:
-        cut = min(600, len(text))
-        if cut < len(text):
+        # A short first phrase can start playing while the next one is rendered.
+        # This only segments the final answer; it never speaks reasoning/progress.
+        cut = min(120 if not parts else 600, len(text))
+        if not parts:
+            sentences = [m.end() for m in re.finditer(r'[。！？!?][”\"\x27’)]*|\.(?=\s|$)|\n', text[:cut]) if m.end() >= 12]
+            clauses = [m.end() for m in re.finditer(r'[，,；;：:]', text[:cut]) if m.end() >= 24]
+            if sentences or clauses:
+                cut = (sentences or clauses)[0]
+            elif cut < len(text):
+                space = text.rfind(' ', 0, cut + 1)
+                if space >= 12:
+                    cut = space
+        elif cut < len(text):
             ends = [m.end() for m in re.finditer(r"[.!?。！？\n](?:\s|$)?", text[:cut])]
             if ends:
                 cut = ends[-1]

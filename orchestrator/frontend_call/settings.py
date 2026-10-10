@@ -4,10 +4,13 @@ import json
 from html import escape
 from pathlib import Path
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest
 from orchestrator import runtime_session, ui_language
 from orchestrator.command_ui import setting_card, selected_label, back_label, refresh_label
 from .config import CallConfig
 from .contract import CallError
+from .voice_catalog import voice_label
+from .voice_previews import get_call_preview, preview_caption
 
 
 class CallSettings:
@@ -56,10 +59,13 @@ class CallSettings:
                 rows.append([button(tr("call.voice"), "view", "voice")])
         elif page == "voice":
             title = tr("call.voice")
-            target = selected("tts")
+            target = selected("tts") or {}
             for index, voice in enumerate(target.get("voices", [])):
-                label = voice + (" · " + target["voice_styles"][voice] if voice in target.get("voice_styles", {}) else "")
+                label = voice_label(target, voice)
                 rows.append([button(selected_label(label, profile["tts"]["voice_id"] == voice), "voice", str(index))])
+            if profile["tts"]:
+                current = voice_label(target, profile["tts"]["voice_id"])
+                rows.insert(0, [button(tr("call.voice.preview"), "preview")])
         elif page == "advanced":
             title = tr("call.advanced")
             for kind in ("stt", "tts", "vision"):
@@ -84,7 +90,8 @@ class CallSettings:
         if page != "home":
             rows.append([button(back_label(), "view", "tts" if page == "voice" else "home")])
         return setting_card("☎️", title, current=escape(current), facts=facts,
-                            consequence=tr("call.next_call"), action=tr("call.action")), InlineKeyboardMarkup(rows)
+                            consequence=tr("call.next_call"),
+                            action=tr("call.voice.action" if page == "voice" else "call.action")), InlineKeyboardMarkup(rows)
 
     def apply(self, action, value, revision):
         ctx = self.config.context(self.owner, self.agent)
@@ -92,6 +99,8 @@ class CallSettings:
             raise CallError("call_configuration_changed", 409)
         if action == "view":
             return value or "home"
+        if action == "preview":
+            return "voice"
         if action == "route":
             # Old buttons refresh the independent settings without changing either entrance.
             if value not in ("phone", "call"):
@@ -130,6 +139,16 @@ class CallSettings:
             raise CallError("call_menu_invalid")
         self.config.save(self.owner, self.agent, ctx["revision"], profile)
         return page
+
+    def preview(self, *, telegram=False):
+        doc, targets = self.config.read()
+        slot = self.config.profile(self.owner, self.agent, doc, targets)["tts"]
+        if not slot:
+            return "", (), ""
+        target = targets[slot["target_id"]]
+        voice = slot["voice_id"]
+        return (f"call:{target['model']}:{voice}", get_call_preview(target, voice, telegram=telegram),
+                preview_caption(target, voice))
 
     def command(self, args):
         action = args[0].casefold() if args else "menu"
@@ -176,7 +195,25 @@ async def callback(runtime, update, context):
         _, action, value, revision = query.data.split(":", 3)
         settings = CallSettings(runtime)
         text, keyboard = settings.render(settings.apply(action, value, revision))
-        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
-        await query.answer()
+        telegram = str(getattr(update, "_hashi_session_surface", None) or "telegram").casefold() == "telegram"
+        preview = settings.preview(telegram=telegram) if action in {"voice", "preview"} else None
+        if action != "preview":
+            try:
+                await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+            except BadRequest as exc:
+                if "message is not modified" not in str(exc).lower():
+                    raise
+        missing = preview is not None and not preview[1]
+        await query.answer(ui_language.tr("call.voice.preview.unavailable") if missing else None,
+                           show_alert=missing)
+        if preview and preview[1]:
+            profile_id, assets, caption = preview
+            sent = await runtime._send_voice_profile_previews(
+                update, profile_id, assets, caption_override=caption,
+                media_type_override="audio/ogg" if telegram else "audio/mpeg",
+                filename_override=assets[0][1].parent.name + assets[0][1].suffix,
+                preview_id=str(getattr(query, "id", "")))
+            if not sent:
+                await runtime._reply_text(update, ui_language.tr("call.voice.preview.unavailable"))
     except (CallError, ValueError, IndexError, KeyError, StopIteration) as exc:
         await query.answer(ui_language.tr("call.error") + " · " + str(exc), show_alert=True)

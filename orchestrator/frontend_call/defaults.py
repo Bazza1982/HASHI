@@ -3,18 +3,9 @@
 from .config import OPENROUTER_API_BASE
 
 
-_VOICE_STYLES = {
-    "Achernar": "Soft", "Achird": "Friendly", "Algenib": "Gravelly",
-    "Algieba": "Smooth", "Alnilam": "Firm", "Aoede": "Breezy",
-    "Autonoe": "Bright", "Callirrhoe": "Easy-going", "Charon": "Informative",
-    "Despina": "Smooth", "Enceladus": "Breathy", "Erinome": "Clear",
-    "Fenrir": "Excitable", "Gacrux": "Mature", "Iapetus": "Clear",
-    "Kore": "Firm", "Laomedeia": "Upbeat", "Leda": "Youthful", "Orus": "Firm",
-    "Pulcherrima": "Forward", "Puck": "Upbeat", "Rasalgethi": "Informative",
-    "Sadachbia": "Lively", "Sadaltager": "Knowledgeable", "Schedar": "Even",
-    "Sulafat": "Warm", "Umbriel": "Easy-going", "Vindemiatrix": "Gentle",
-    "Zephyr": "Bright", "Zubenelgenubi": "Casual",
-}
+from .voice_catalog import GEMINI_VOICES
+
+_VOICE_STYLES = {name: style for name, (_gender, style) in GEMINI_VOICES.items()}
 
 
 def default_call_configuration():

@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from orchestrator.session_store import SESSION_KIND_CONVERSATION
 from .contract import CallError
+from .spoken_context import resolve_call_spoken_context
 
 
 class HashiPorts:
@@ -46,6 +47,70 @@ class HashiPorts:
 
     def phone_busy(self, owner):
         return self.api.live_voice_manager.has_foreground_call(owner)
+
+    async def opening(self, owner, binding, profile, targets):
+        """Ask the selected Agent for a tool-free once-only call greeting."""
+
+        self.validate(owner, binding)
+        runtime = self.api._runtime_map()[binding["agent_id"]]
+        context = resolve_call_spoken_context(
+            self.api,
+            owner,
+            binding,
+            str((targets.get("tts") or {}).get("model") or "call-opening"),
+        )
+        state = {
+            "kind": "opening",
+            "goal": (
+                "The user has just started /call and is calling you now. Answer this call "
+                "from this point using the effective Persona, language and form of address. "
+                "This opening is a natural greeting, not an answer to an earlier question or task. "
+                "After greeting, pause and let the caller speak. Let later answers take the "
+                "length their substance requires."
+            ),
+            "source_context": "",
+            "instructions": context["instructions"],
+            "recent": context["recent"],
+        }
+        payload = {
+            "owner_id": owner,
+            "scope": {
+                "type": "hashi.call-speech-scope",
+                "version": 1,
+                **{
+                    key: binding[key]
+                    for key in (
+                        "call_id",
+                        "client_id",
+                        "agent_id",
+                        "session_id",
+                        "context_generation",
+                    )
+                },
+            },
+            "state": state,
+        }
+        try:
+            operation = getattr(runtime, "phone_action_operation", None)
+            if callable(operation):
+                result = await operation("call_speak", payload)
+            else:
+                from orchestrator.frontend_live_voice.worker_actions import (
+                    handle_phone_action_operation,
+                )
+
+                result = await handle_phone_action_operation(
+                    runtime, "call_speak", payload
+                )
+        except Exception as exc:
+            code = str(getattr(exc, "code", "call_opening_failed"))
+            if not code.startswith(("call_", "live_")):
+                code = "call_opening_failed"
+            raise CallError(code, int(getattr(exc, "status", 502))) from exc
+        text = result.get("text") if isinstance(result, dict) else None
+        if not isinstance(text, str) or not text.strip() or len(text) > 1200:
+            raise CallError("call_opening_invalid", 502)
+        return text.strip()
 
     async def admit(self, owner, binding, turn_id, text, observation, captured_at):
         self.validate(owner, binding)

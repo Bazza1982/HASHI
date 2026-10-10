@@ -42,6 +42,7 @@ def validate_voice_preview_bundle(
     root: Path | None = None,
     version: str = VOICE_PREVIEW_VERSION,
     require_complete: bool = True,
+    allowed_formats: tuple[str, ...] = ("ogg",),
 ) -> dict[tuple[str, str, str], Path]:
     """Validate one complete bundle and return its indexed asset paths."""
 
@@ -66,7 +67,10 @@ def validate_voice_preview_bundle(
         renderer = str(entry.get("renderer") or "").strip()
         relative_text = str(entry.get("path") or "").strip()
         relative = PurePosixPath(relative_text)
-        expected_relative = PurePosixPath(locale, profile, f"{renderer}.ogg")
+        audio_format = str(entry.get("format") or "ogg")
+        if audio_format not in allowed_formats or audio_format not in {"ogg", "mp3"}:
+            raise VoicePreviewBundleError("voice preview format is unsupported")
+        expected_relative = PurePosixPath(locale, profile, f"{renderer}.{audio_format}")
         if (
             not locale
             or not profile
@@ -90,8 +94,11 @@ def validate_voice_preview_bundle(
             payload = candidate.read_bytes()
         except OSError as exc:
             raise VoicePreviewBundleError("voice preview asset is missing") from exc
-        if len(payload) <= 4 or not payload.startswith(b"OggS"):
-            raise VoicePreviewBundleError("voice preview asset is not a valid OGG file")
+        valid_header = payload.startswith(b"OggS") if audio_format == "ogg" else (
+            payload.startswith(b"ID3") or (len(payload) > 1 and payload[0] == 0xFF and payload[1] & 0xE0 == 0xE0)
+        )
+        if len(payload) <= 4 or not valid_header:
+            raise VoicePreviewBundleError("voice preview asset has an invalid audio header")
         if entry.get("size_bytes") != len(payload):
             raise VoicePreviewBundleError("voice preview asset size does not match")
         if str(entry.get("sha256") or "").casefold() != hashlib.sha256(

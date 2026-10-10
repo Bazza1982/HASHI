@@ -52,6 +52,7 @@ class Call:
     vision_task: asyncio.Task | None = None
     vision_pending: dict = field(default_factory=dict)
     observation: dict = field(default_factory=dict)
+    observation_changed: asyncio.Event = field(default_factory=asyncio.Event)
     vision_error: str = ""
     vision_launches: list = field(default_factory=list)
     video_policy: dict = field(default_factory=dict)
@@ -123,6 +124,7 @@ class CallService:
         call.vision_pending.clear()
         call.observation.clear()
         call.vision_error = ""
+        call.observation_changed.set()
         if call.vision_task:
             if call.vision_task.cancel():
                 emit("vision_cancel_requested", **self._facts(call), reason=reason, camera_epoch=previous_epoch)
@@ -152,6 +154,7 @@ class CallService:
             in {
                 "turn_id",
                 "sequence",
+                "kind",
                 "phase",
                 "text",
                 "answer",
@@ -203,6 +206,20 @@ class CallService:
                 or time.time() - value["captured_unix"] > call.video_policy["freshness_seconds"]):
             return {}
         return value
+
+    async def _join_observation(self, call):
+        # A continuous observer may never finish while frames keep arriving.
+        # Wake on a published result, preserving the existing bounded wait.
+        try:
+            async with asyncio.timeout(2.5):
+                while call.phase == "active" and call.camera_enabled:
+                    call.observation_changed.clear()
+                    if (self._fresh_observation(call)
+                            or not call.vision_task or call.vision_task.done()):
+                        return
+                    await call.observation_changed.wait()
+        except TimeoutError:
+            pass
 
     async def _observe(self, call, epoch):
         """Exactly one inference and one latest pending frame per live camera."""
@@ -270,6 +287,7 @@ class CallService:
                 call.observation = {k: v for k, v in frame.items() if k != "image"}
                 call.observation.update(text=str(observation)[:2400], epoch=epoch)
                 call.vision_error = ""
+                call.observation_changed.set()
         except asyncio.CancelledError:
             emit("vision_cancelled", **self._facts(call), camera_epoch=epoch, frame_sequence=frame.get("frame_sequence"),
                  duration_ms=elapsed_ms(self.clock, started),
@@ -281,6 +299,8 @@ class CallService:
             if call.camera_enabled and epoch == call.camera_epoch:
                 call.vision_error = exc.code if isinstance(exc, CallError) else "call_observation_failed"
                 call.observation.clear()
+        finally:
+            call.observation_changed.set()
 
     def _get(self, owner, body):
         if body.get("generation") != self.generation:
@@ -405,6 +425,15 @@ class CallService:
             # No awaits between busy check and reservation (one event-loop owner).
             self.calls[call_id] = call
             emit("call_started", **self._facts(call), phase=call.phase)
+            opening = getattr(self.ports, "opening", None)
+            if callable(opening):
+                call.turn = {
+                    "turn_id": f"opening-{call_id}",
+                    "sequence": 0,
+                    "kind": "opening",
+                    "phase": "thinking",
+                }
+                call.task = asyncio.create_task(self._open(call))
             return self._view(call)
         call = self._get(owner, body)
         if op == "end":
@@ -532,6 +561,71 @@ class CallService:
             return {"ok": True, "ready": False}
         raise CallError("call_invalid_operation")
 
+    async def _open(self, call):
+        """Generate one Agent-owned greeting without fabricating a user turn."""
+        turn = call.turn
+        started = self.clock()
+        try:
+            emit("opening_started", **self._facts(call, turn), stage="opening")
+            self.ports.validate(call.owner, call.binding)
+            async with asyncio.timeout(8):
+                with diagnostic_context(**self._facts(call, turn), stage="opening"):
+                    answer = await self.ports.opening(
+                        call.owner, call.binding, call.profile, call.targets
+                    )
+            if call.phase != "active" or call.turn is not turn:
+                emit(
+                    "opening_discarded",
+                    **self._facts(call, turn),
+                    stage="opening",
+                    reason="call_ended" if call.phase != "active" else "turn_changed",
+                )
+                return
+            self.ports.validate(call.owner, call.binding)
+            answer = str(answer or "").strip()
+            if not answer or len(answer) > 1200:
+                raise CallError("call_opening_invalid", 502)
+            turn["answer"] = answer
+            turn["speech_segments"], turn["speech_truncated"] = speech_segments(answer)
+            turn["phase"] = "complete"
+            turn["latency_ms"] = int((self.clock() - started) * 1000)
+            call.rows.append(
+                {"speaker": "assistant", "text": answer, "turn_id": turn["turn_id"]}
+            )
+            call.rows = call.rows[-6:]
+            emit(
+                "opening_completed",
+                **self._facts(call, turn),
+                stage="opening",
+                duration_ms=elapsed_ms(self.clock, started),
+                speech_segments=len(turn["speech_segments"]),
+                text_chars=len(answer),
+            )
+            if turn["speech_segments"]:
+                self._start_speech(call, 0, turn["speech_segments"][0])
+        except asyncio.CancelledError:
+            emit(
+                "opening_cancelled",
+                **self._facts(call, turn),
+                stage="opening",
+                duration_ms=elapsed_ms(self.clock, started),
+                reason="call_ended" if call.phase != "active" else "task_cancelled",
+            )
+            return
+        except Exception as exc:
+            if call.phase == "active" and call.turn is turn:
+                turn["phase"] = "failed"
+                turn["error"] = (
+                    exc.code if isinstance(exc, CallError) else "call_opening_failed"
+                )
+            emit(
+                "opening_failed",
+                **self._facts(call, turn),
+                stage="opening",
+                duration_ms=elapsed_ms(self.clock, started),
+                **error_facts(exc, "call_opening_failed"),
+            )
+
     async def _run(self, call, audio, image):
         turn = call.turn
         start = self.clock()
@@ -593,7 +687,7 @@ class CallService:
                 if not self._fresh_observation(call) and call.vision_task and not call.vision_task.done():
                     stage, stage_started = "vision_wait", self.clock()
                     emit("vision_join_started", **self._facts(call, turn), stage=stage, camera_epoch=call.camera_epoch)
-                    await asyncio.wait([call.vision_task], timeout=2.5)
+                    await self._join_observation(call)
                     emit("vision_join_completed", **self._facts(call, turn), stage=stage,
                          camera_epoch=call.camera_epoch, duration_ms=elapsed_ms(self.clock, stage_started))
                 current = self._fresh_observation(call)
