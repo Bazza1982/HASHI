@@ -1,5 +1,24 @@
 # HASHI Agent FYI
 
+October 11 /call immediate-media repair: a video-call click now opens one
+direct Call and begins microphone and camera acquisition together. Camera
+permission/device failure degrades that same call to audio-only; camera off/on
+retains its binding and microphone path. Current `call_ready` capability now
+owns the entrance instead of the retired stored route preference, and the dock
+shows Connecting immediately without labelling an unconnected call as a paused
+microphone. A bounded pre-service compatibility path lets older protocol-1
+runtimes reject the optional locale field without losing localized filler
+support on current runtimes. Models, reasoning, endpointing, default enablement
+and deployment templates are unchanged. Workbench direct Call passes 57 checks,
+existing Phone/live-call passes 81, HASHI3 frontend Call passes 140, and the
+production build passes. Live HASHI3 browser acceptance confirmed concurrent
+audio/video acquisition, live camera off/on in one call, and camera-denial
+audio fallback. Workbench commit 13f14ad is published to the current
+H4-connected service as `index-nF2jbtsW.js`; the served artifact hash matches
+the build and the service was not restarted. User physical-device acceptance on
+HASHI4 remains pending. See Workbench
+`docs/call/CALL_IMMEDIATE_MEDIA_STARTUP_2026-10-11.md`.
+
 October 11 Call speech/caption update: complete answer sentences now synthesize
 and play in FIFO order while the answer is still arriving. Public commentary
 may be spoken during long-running work; reasoning and technical activity are
