@@ -1,5 +1,30 @@
 # HASHI Agent FYI
 
+October 10 Call/Workbench live recovery: the public blank screen came from an
+inactive-Agent controller effect referencing an undefined identifier. Direct
+`/Call` also treated one transient Cloudflare 502 during audio submission as a
+permanent pause, and low variable microphone background was repeatedly uploaded
+after cloud STT rejected it because only the steady floor, not the louder peak,
+was retained. The Workbench now holds uncertain submissions for authoritative
+snapshots without replay, tolerates two transient snapshot-read failures,
+recovers automatically on the next successful read, and learns rejected peak
+background so it is not sent again. Foreground audio resumes once, manual mute is
+preserved, and both direct Call and native Phone use the restored 640-pixel
+phone-like height.
+
+The exact public final bundle and active service worker carry revision
+8a1a9b9bc9e7, with no waiting generation or false update banner. A one-click
+public direct Call reached `可以说话` within five seconds and stayed ready for 24
+seconds; the immediately preceding identical logic stayed ready for 47 seconds.
+Public native Phone received a real Agent greeting and passed hidden/foreground
+auto-mute, auto-resume and manual-mute retention. Sixty-seven Call checks, five
+voice-preview checks, 20 OpenRouter checks and the production build pass. HASHI4
+still selects `x-ai/grok-stt-1.0`; a real provider-chain fixture transcribed the
+known Chinese sentence exactly in 3.284 seconds. No HASHI runtime or Core process
+was restarted or modified. Physical iPhone/iPad microphone, battery and hearing
+acceptance remain open. See Workbench
+docs/call/CALL_WORKBENCH_LIVE_RECOVERY_2026-10-10.md.
+
 October 10 Call follow-up: user approved Grok STT 1.0 with automatic language
 detection. HASHI3/HASHI4 instance Call configuration selects it; the live HASHI4
 context read the matching revision. The four synthetic probes returned correct
