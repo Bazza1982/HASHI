@@ -95,3 +95,81 @@ async def test_phone_start_guard_is_opt_in_and_checks_before_provider_use(tmp_pa
     manager.external_call_busy = lambda owner: owner == "owner"
     with pytest.raises(LiveVoiceError, match="live_other_call_active"):
         await manager._op_start("owner", {})
+
+
+@pytest.mark.anyio
+async def test_call_opening_uses_typed_tool_free_speech_without_creating_a_user_run(tmp_path, monkeypatch):
+    store = SessionStore(tmp_path / "sessions.db", instance_id="TEST")
+    session = store.create_session(owner_id="owner", agent_id="lily", title="Call")
+    captured = []
+
+    class Runtime:
+        backend_manager = SimpleNamespace(privacy_level=1)
+
+        async def phone_action_operation(self, operation, payload):
+            captured.append((operation, payload))
+            return {"text": "您好，我接到您的电话了。请讲。"}
+
+    api = SimpleNamespace(
+        session_store=store,
+        _runtime_map=lambda: {"lily": Runtime()},
+        _persistent_session_v1_ready=lambda: True,
+        live_voice_manager=SimpleNamespace(has_foreground_call=lambda owner: False),
+    )
+    monkeypatch.setattr(
+        "orchestrator.frontend_call.ports.resolve_call_spoken_context",
+        lambda *_args: {"instructions": "effective PCM", "recent": [{"role": "user", "content": "earlier"}]},
+    )
+    binding = {
+        "agent_id": "lily",
+        "session_id": session["session_id"],
+        "context_generation": session["context_generation"],
+        "call_id": "call-1",
+        "client_id": "client-1",
+    }
+    text = await HashiPorts(api).opening(
+        "owner", binding, {"tts": {}}, {"tts": {"model": "fixture-tts"}}
+    )
+    assert text == "您好，我接到您的电话了。请讲。"
+    assert len(store.messages(session["session_id"], owner_id="owner")) == 0
+    operation, payload = captured[0]
+    assert operation == "call_speak"
+    assert payload["scope"]["type"] == "hashi.call-speech-scope"
+    assert payload["state"]["instructions"] == "effective PCM"
+    assert "earlier question" in payload["state"]["goal"]
+    assert "short reply" not in payload["state"]["goal"]
+
+
+@pytest.mark.anyio
+async def test_worker_accepts_scoped_call_opening_without_a_phone_database_row(tmp_path, monkeypatch):
+    from orchestrator.frontend_live_voice import worker_actions
+
+    store = SessionStore(tmp_path / "sessions.db", instance_id="TEST")
+    session = store.create_session(owner_id="owner", agent_id="lily", title="Call")
+    runtime = SimpleNamespace(name="lily", session_store=store)
+    rendered = []
+
+    async def render(_runtime, state, **kwargs):
+        rendered.append((state, kwargs))
+        return {"text": "您好。"}
+
+    monkeypatch.setattr(worker_actions, "invoke_phone_judgment", render)
+    payload = {
+        "owner_id": "owner",
+        "scope": {
+            "type": "hashi.call-speech-scope",
+            "version": 1,
+            "call_id": "call-1",
+            "client_id": "client-1",
+            "agent_id": "lily",
+            "session_id": session["session_id"],
+            "context_generation": session["context_generation"],
+        },
+        "state": {"kind": "opening", "goal": "Answer the call", "instructions": "PCM"},
+    }
+    assert await worker_actions.handle_phone_action_operation(runtime, "call_speak", payload) == {"text": "您好。"}
+    assert rendered[0][1]["speech"] is True
+
+    payload["scope"]["context_generation"] += 1
+    with pytest.raises(LiveVoiceError, match="live_scope_changed"):
+        await worker_actions.handle_phone_action_operation(runtime, "call_speak", payload)

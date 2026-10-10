@@ -13,6 +13,15 @@ from orchestrator.her_v2.v3_prompt import compile_main_prompt
 from orchestrator.her_v2.backend_session import HerBackendSessionCoordinator
 from test_call_service import document
 
+def test_call_presentation_is_spoken_without_a_short_answer_limit():
+    assert "one or two short" not in CALL_INTERACTION_GUIDANCE
+    assert "20 to 60" not in CALL_INTERACTION_GUIDANCE
+    assert "10 to 30 words" not in CALL_INTERACTION_GUIDANCE
+    assert "long story" in CALL_INTERACTION_GUIDANCE
+    assert "as long as needed" in CALL_INTERACTION_GUIDANCE
+    assert "without headings, bullet lists, Markdown" in CALL_INTERACTION_GUIDANCE
+
+
 
 def test_fixed_session_explicitly_revokes_call_policy_for_next_normal_message(tmp_path):
     pcm=tmp_path/'agent.md'

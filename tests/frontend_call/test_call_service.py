@@ -150,6 +150,44 @@ async def finish_task(service):
     await service.calls["call-1"].task
 
 
+async def test_start_generates_exactly_one_agent_opening_before_first_user_turn(tmp_path):
+    service, ports, adapters, base, _ = setup(tmp_path)
+    released = asyncio.Event()
+    openings = []
+
+    async def opening(owner, binding, profile, targets):
+        openings.append((owner, dict(binding), dict(profile), dict(targets)))
+        await released.wait()
+        return "您好，我接到您的电话了。请讲。"
+
+    ports.opening = opening
+    binding, start_body, first = await start(service, base)
+    assert first["turn"] == {
+        "turn_id": "opening-call-1",
+        "sequence": 0,
+        "kind": "opening",
+        "phase": "thinking",
+    }
+    duplicate = await service.invoke("owner", start_body)
+    assert duplicate["turn"] == first["turn"]
+    await asyncio.sleep(0)
+    assert len(openings) == 1
+
+    released.set()
+    await service.calls["call-1"].task
+    final = await service.invoke("owner", {**binding, "operation": "snapshot"})
+    assert final["turn"]["kind"] == "opening"
+    assert final["turn"]["phase"] == "complete"
+    assert final["turn"]["answer"] == "您好，我接到您的电话了。请讲。"
+    assert final["rows"] == [{
+        "speaker": "assistant",
+        "text": "您好，我接到您的电话了。请讲。",
+        "turn_id": "opening-call-1",
+    }]
+    assert adapters.stt == 0
+    await service.close()
+
+
 def test_settings_redact_endpoints_credentials_and_check_revision(tmp_path):
     service, *_ = setup(tmp_path)
     public = service.config.context("owner", "agent-a")

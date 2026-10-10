@@ -154,6 +154,7 @@ class CallService:
             in {
                 "turn_id",
                 "sequence",
+                "kind",
                 "phase",
                 "text",
                 "answer",
@@ -424,6 +425,15 @@ class CallService:
             # No awaits between busy check and reservation (one event-loop owner).
             self.calls[call_id] = call
             emit("call_started", **self._facts(call), phase=call.phase)
+            opening = getattr(self.ports, "opening", None)
+            if callable(opening):
+                call.turn = {
+                    "turn_id": f"opening-{call_id}",
+                    "sequence": 0,
+                    "kind": "opening",
+                    "phase": "thinking",
+                }
+                call.task = asyncio.create_task(self._open(call))
             return self._view(call)
         call = self._get(owner, body)
         if op == "end":
@@ -550,6 +560,71 @@ class CallService:
             self._start_speech(call, index, parts[index])
             return {"ok": True, "ready": False}
         raise CallError("call_invalid_operation")
+
+    async def _open(self, call):
+        """Generate one Agent-owned greeting without fabricating a user turn."""
+        turn = call.turn
+        started = self.clock()
+        try:
+            emit("opening_started", **self._facts(call, turn), stage="opening")
+            self.ports.validate(call.owner, call.binding)
+            async with asyncio.timeout(8):
+                with diagnostic_context(**self._facts(call, turn), stage="opening"):
+                    answer = await self.ports.opening(
+                        call.owner, call.binding, call.profile, call.targets
+                    )
+            if call.phase != "active" or call.turn is not turn:
+                emit(
+                    "opening_discarded",
+                    **self._facts(call, turn),
+                    stage="opening",
+                    reason="call_ended" if call.phase != "active" else "turn_changed",
+                )
+                return
+            self.ports.validate(call.owner, call.binding)
+            answer = str(answer or "").strip()
+            if not answer or len(answer) > 1200:
+                raise CallError("call_opening_invalid", 502)
+            turn["answer"] = answer
+            turn["speech_segments"], turn["speech_truncated"] = speech_segments(answer)
+            turn["phase"] = "complete"
+            turn["latency_ms"] = int((self.clock() - started) * 1000)
+            call.rows.append(
+                {"speaker": "assistant", "text": answer, "turn_id": turn["turn_id"]}
+            )
+            call.rows = call.rows[-6:]
+            emit(
+                "opening_completed",
+                **self._facts(call, turn),
+                stage="opening",
+                duration_ms=elapsed_ms(self.clock, started),
+                speech_segments=len(turn["speech_segments"]),
+                text_chars=len(answer),
+            )
+            if turn["speech_segments"]:
+                self._start_speech(call, 0, turn["speech_segments"][0])
+        except asyncio.CancelledError:
+            emit(
+                "opening_cancelled",
+                **self._facts(call, turn),
+                stage="opening",
+                duration_ms=elapsed_ms(self.clock, started),
+                reason="call_ended" if call.phase != "active" else "task_cancelled",
+            )
+            return
+        except Exception as exc:
+            if call.phase == "active" and call.turn is turn:
+                turn["phase"] = "failed"
+                turn["error"] = (
+                    exc.code if isinstance(exc, CallError) else "call_opening_failed"
+                )
+            emit(
+                "opening_failed",
+                **self._facts(call, turn),
+                stage="opening",
+                duration_ms=elapsed_ms(self.clock, started),
+                **error_facts(exc, "call_opening_failed"),
+            )
 
     async def _run(self, call, audio, image):
         turn = call.turn
