@@ -52,6 +52,7 @@ class Call:
     vision_task: asyncio.Task | None = None
     vision_pending: dict = field(default_factory=dict)
     observation: dict = field(default_factory=dict)
+    observation_changed: asyncio.Event = field(default_factory=asyncio.Event)
     vision_error: str = ""
     vision_launches: list = field(default_factory=list)
     video_policy: dict = field(default_factory=dict)
@@ -123,6 +124,7 @@ class CallService:
         call.vision_pending.clear()
         call.observation.clear()
         call.vision_error = ""
+        call.observation_changed.set()
         if call.vision_task:
             if call.vision_task.cancel():
                 emit("vision_cancel_requested", **self._facts(call), reason=reason, camera_epoch=previous_epoch)
@@ -204,6 +206,20 @@ class CallService:
             return {}
         return value
 
+    async def _join_observation(self, call):
+        # A continuous observer may never finish while frames keep arriving.
+        # Wake on a published result, preserving the existing bounded wait.
+        try:
+            async with asyncio.timeout(2.5):
+                while call.phase == "active" and call.camera_enabled:
+                    call.observation_changed.clear()
+                    if (self._fresh_observation(call)
+                            or not call.vision_task or call.vision_task.done()):
+                        return
+                    await call.observation_changed.wait()
+        except TimeoutError:
+            pass
+
     async def _observe(self, call, epoch):
         """Exactly one inference and one latest pending frame per live camera."""
         frame = {}
@@ -270,6 +286,7 @@ class CallService:
                 call.observation = {k: v for k, v in frame.items() if k != "image"}
                 call.observation.update(text=str(observation)[:2400], epoch=epoch)
                 call.vision_error = ""
+                call.observation_changed.set()
         except asyncio.CancelledError:
             emit("vision_cancelled", **self._facts(call), camera_epoch=epoch, frame_sequence=frame.get("frame_sequence"),
                  duration_ms=elapsed_ms(self.clock, started),
@@ -281,6 +298,8 @@ class CallService:
             if call.camera_enabled and epoch == call.camera_epoch:
                 call.vision_error = exc.code if isinstance(exc, CallError) else "call_observation_failed"
                 call.observation.clear()
+        finally:
+            call.observation_changed.set()
 
     def _get(self, owner, body):
         if body.get("generation") != self.generation:
@@ -593,7 +612,7 @@ class CallService:
                 if not self._fresh_observation(call) and call.vision_task and not call.vision_task.done():
                     stage, stage_started = "vision_wait", self.clock()
                     emit("vision_join_started", **self._facts(call, turn), stage=stage, camera_epoch=call.camera_epoch)
-                    await asyncio.wait([call.vision_task], timeout=2.5)
+                    await self._join_observation(call)
                     emit("vision_join_completed", **self._facts(call, turn), stage=stage,
                          camera_epoch=call.camera_epoch, duration_ms=elapsed_ms(self.clock, stage_started))
                 current = self._fresh_observation(call)

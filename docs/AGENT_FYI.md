@@ -1,5 +1,17 @@
 # HASHI Agent FYI
 
+October 10 Call audit: mobile Phone and Call entries overlapped in one grid cell;
+Workbench patch 140f4ff is published and reserves independent reachable targets.
+All 21 layout cases pass, including eight rotation/split changes; the public
+entry returns the new assets. Open device pages need a reload. HASHI3's Call
+service now wakes on a published camera observation instead of waiting for the
+continuous observer task to finish. Focused red/green evidence and 52 tests pass.
+The backend correction is not yet adopted by HASHI4; no runtime was restarted.
+A four-sample provider comparison supports evaluating Scribe v2 with automatic
+language choice, but no model was switched and no real-user accuracy is claimed.
+Actual reported TTS stages took 5.1–7.6 seconds, so STT alone is not the main
+latency remedy. See repairs/CALL_LANGUAGE_LATENCY_20261010.md for boundaries.
+
 October 10 mobile power repair: Workbench now suspends question, reboot-discovery
 and overview polling while hidden, serializes slow reads, and backs off when
 idle. A 15-second fixture fell from 22 question/reboot reads to 2 foreground

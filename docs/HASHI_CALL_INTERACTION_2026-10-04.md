@@ -1,5 +1,21 @@
 # Phone and Call interaction decision
 
+## 2026-10-10 mobile entries and latency audit
+
+Frontend Connector owns the external mobile entry layout and a HASHI3 Functions
+correction that wakes a speech turn on a fresh camera observation. The observer
+continues processing later frames; its existing 2.5-second join limit remains.
+The latency, correction and service tests pass (52), with a focused regression
+that failed before repair. HASHI4 has not adopted this backend change.
+
+The current Whisper route reproduced short Chinese language/script mistakes in
+a four-sample synthetic comparison. Scribe v2 is a candidate for real-user A/B
+testing with automatic language detection, not an authorized production switch.
+Observed TTS generation (5.1–7.6 seconds) dominates two reported turns; a model
+change to recognition alone cannot remove that wait.
+See [scoped evidence and decisions](repairs/CALL_LANGUAGE_LATENCY_20261010.md).
+Existing model configuration, capture restoration and camera opt-in are retained.
+
 ## Current 2026-10-06 decision — independent entries on HASHI3
 
 The user approved replacing the shared next-call selector with two fixed
