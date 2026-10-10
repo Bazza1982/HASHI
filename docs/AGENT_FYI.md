@@ -8,9 +8,11 @@ connected/failure/hangup cues, and uses a once-only Agent opening turn before
 opening the microphone. Call guidance now controls spoken presentation rather
 than length: natural sentences and pacing, no written report formatting, with
 long stories and detailed explanations allowed for as long as needed. Call-only
-presentation clears after hangup. HASHI3 and synchronized HASHI4 each pass 131
-Call checks; the clean Workbench suite passes 68 checks and its public bundle and
-active service worker match build 85d31b28f8f0. HASHI4 source commit e6a06ae9 is
+presentation clears after hangup. Confirmed hangup also boundedly rechecks a
+briefly stale busy route, so the entrance clears without a reload. HASHI3 and
+synchronized HASHI4 each pass 131 Call checks; the clean Workbench suite passes
+69 checks and its public bundle and active service worker match build
+f9c6104ba662. HASHI4 source commit e6a06ae9 is
 not running adoption: shared Functions still need separately authorized
 `/reboot max`. No Core or HASHI runtime was restarted. See
 repairs/CALL_ANSWERING_EXPERIENCE_20261010.md.

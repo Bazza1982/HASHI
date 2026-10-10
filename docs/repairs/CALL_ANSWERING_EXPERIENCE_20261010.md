@@ -62,25 +62,30 @@ requested conversational behavior.
   explanations and extended discussion for as long as needed.
 - The existing Call tombstone removes Call-only presentation from the next
   non-Call turn after hangup, so later text chat returns to its normal style.
+- A confirmed hangup can briefly leave the route projection busy. Workbench
+  performs two delayed settlement reads at 700 and 1800 milliseconds, stops as
+  soon as busy clears, and does not continue polling while idle.
 
 ## Focused evidence
 
 Red checks were recorded before implementation: the service returned no opening
 turn; the PCM context still contained the one-or-two-sentence constraint; and
 the browser stopped the connecting sound before a perceptible dialing interval.
+A public hangup additionally reproduced a stale “line busy” entrance until page
+reload; the React red/green case now covers that real transition.
 
 Green checks:
 
 - HASHI3 Frontend Call suite: 131 passed.
 - HASHI4 synchronized source, verified with the HASHI3 development interpreter:
   131 passed.
-- Clean Workbench Call suite: 68 passed.
-- Clean production build at Workbench source `85d31b2`: passed.
+- Clean Workbench Call suite: 69 passed.
+- Clean production build at Workbench source `f9c6104`: passed.
 - The 121-file preview asset set is byte-identical between HASHI3 and HASHI4.
 - Protected Core checks pass in both repositories.
 
-The public Workbench serves `assets/index-DZt5DdF6.js`; its active service
-worker and controller both report build `85d31b28f8f0`, with no waiting
+The public Workbench serves `assets/index-Ba3vxzvU.js`; its active service
+worker and controller both report build `f9c6104ba662`, with no waiting
 generation. Browser inspection measured the real Call surface at approximately
 390 by 640 pixels and observed the dialing state and confirmed hangup through
 the public entry. This is visual/protocol evidence, not a physical-device
@@ -90,7 +95,7 @@ hearing test.
 
 HASHI3 backend implementation is committed at `87a78b6f`. Workbench behavior
 is committed at `700ade0`, followed by deterministic playback-test timing at
-`85d31b2`. HASHI4 source and all preview assets are committed at
+`85d31b2` and hangup route settlement at `f9c6104`. HASHI4 source and all preview assets are committed at
 `e6a06ae9`.
 
 The Workbench static client is live without restarting HASHI. HASHI4 shared
