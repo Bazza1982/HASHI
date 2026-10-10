@@ -8,10 +8,12 @@ prepared in the selected Agent voice, cancelled by real speech, and remain
 outside answers, transcripts and Session history. Workbench shows a rolling
 24-row transcript with larger phone text, smart follow/manual return, and visible
 controls on PC, tablet and portrait/landscape phone. Existing endpointing,
-camera cadence and model/reasoning choice remain unchanged. All 140 HASHI3 Call
-tests, 69 focused Workbench checks, 10 Chromium window checks and the production
-build pass. HASHI4 backend source/running Functions were not changed or
-restarted. See Workbench
+camera cadence and model/reasoning choice remain unchanged. HASHI4 source is
+synchronized and passes all 140 Call tests; the published Workbench passes 83
+focused checks, 11 Chromium window checks and the production build. The current
+H4-connected Workbench serves the new assets and reloaded cleanly. HASHI4
+running Functions were not restarted; the user retained that adoption step.
+Already-open pages need one reload. See Workbench
 `docs/call/CALL_STREAMING_SPEECH_CAPTIONS_2026-10-11.md`.
 
 October 10 Workbench Call-control visual repair: the shared button design
