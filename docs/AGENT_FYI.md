@@ -1,5 +1,16 @@
 # HASHI Agent FYI
 
+October 10 Workbench Call-control visual repair: the shared button design
+system painted camera-on and keyboard-focus state on the full icon-and-label
+wrapper, producing the reported oversized oval and outer ring. Workbench now
+keeps that wrapper transparent and paints pressed, hover and focus state on the
+circular icon. A real-browser red/green check passes at PC (1440 x 900), pad
+(820 x 1180) and phone (390 x 844) sizes; all three screenshots were visually
+reviewed, 47 selected Call checks pass, and the production build succeeds. The
+new assets are served by the current Workbench without a process restart.
+Open pages need one reload. No HASHI Core or runtime code changed. See Workbench
+`docs/call/CALL_CONTROL_VISUAL_2026-10-10.md`.
+
 October 10 Workbench history-order repair: the earlier ordering fix remained
 deployed, but delayed durable Frontend Connector errors were an uncovered event
 type. The canonical transcript stayed ordered while an old provider failure
