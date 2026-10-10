@@ -1,5 +1,14 @@
 # HASHI Agent FYI
 
+October 10 mobile question correction: the compact chat grid auto-placed
+the question dock in a composer-button column (48 px dock / 26 px card).
+Workbench now assigns a full-width row and keeps submission reachable in
+short windows. Five full-app browser cases and a real HASHI3 Codex question
+Run in phone-sized WebKit passed, including visual inspection and answer 2.
+The actual service and authenticated public entry serve the corrected assets.
+Open phone pages need a reload; no HASHI runtime reboot is required.
+See the mobile follow-up in Workbench's run-questions-20261010 decision.
+
 October 10 Workbench correction: full-page browser testing found two frontend
 defects missed by the earlier isolated card test: sibling key collisions
 accumulated hidden transcripts, and long chats collapsed the question dock.
