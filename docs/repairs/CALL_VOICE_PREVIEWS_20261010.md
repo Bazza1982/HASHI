@@ -92,12 +92,13 @@ The running HASHI4 context endpoint returned the same configuration revision
 as the verified Grok declaration, with call_ready=true and busy=false.
 Existing calls retain frozen configuration; new calls use the new choice.
 
-HASHI3 contains the backend implementation and packaged samples.
-HASHI4 backend source and running shared Functions have not been changed.
-The shared Call service requires the supported shared Functions handoff
-(`/reboot max`) to adopt a qualified source generation. A targeted Agent reboot
-does not replace that owner. Production adoption needs the user's explicit
-scope; no lifecycle action was used as a test shortcut.
+HASHI3 contains the backend implementation and packaged samples. On the user's
+later explicit instruction, the same verified source and all 121 package files
+were synchronized to HASHI4 as commit `e6a06ae9`; its 131 focused Call checks
+pass against that tree. The running HASHI4 shared Functions have not been
+replaced. The shared Call service requires the supported shared Functions
+handoff (`/reboot max`) to adopt this source generation. A targeted Agent reboot
+does not replace that owner; no lifecycle action was used as a test shortcut.
 
 External Workbench static client publication is separately checked and recorded
 in its Call playback decision. It can enable segment prefetch with the existing
@@ -119,8 +120,8 @@ and asset hashes; the connected desktop page was reloaded. Public verification
 used existing browser authentication after unauthenticated HTTP returned 403;
 the publication was not repeated.
 
-The prepared binary backend patch for the two scoped commits passes read-only
-`git apply --check` against HASHI4. It has not been applied. The patch and
-publication receipts are in the ignored audit directory. Remaining acceptance
-is explicitly authorized production Functions adoption, followed by the user's
-real phone speech, pauses, Bluetooth and perceived-latency test.
+The earlier prepared binary backend patch was superseded by the user's approved
+source synchronization. Publication receipts remain in the ignored audit
+directory. Remaining acceptance is separately authorized production Functions
+adoption, followed by the user's real phone speech, pauses, Bluetooth and
+perceived-latency test.

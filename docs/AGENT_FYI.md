@@ -1,5 +1,20 @@
 # HASHI Agent FYI
 
+October 10 direct Call answering repair: the user's Chinese/gender voice menu
+and 120 prerecorded samples were present in HASHI3 but missing from HASHI4;
+the complete verified source and assets are now synchronized to HASHI4. Direct
+Call keeps symbolic dial/ringback audible for at least 1.4 seconds, plays
+connected/failure/hangup cues, and uses a once-only Agent opening turn before
+opening the microphone. Call guidance now controls spoken presentation rather
+than length: natural sentences and pacing, no written report formatting, with
+long stories and detailed explanations allowed for as long as needed. Call-only
+presentation clears after hangup. HASHI3 and synchronized HASHI4 each pass 131
+Call checks; the clean Workbench suite passes 68 checks and its public bundle and
+active service worker match build 85d31b28f8f0. HASHI4 source commit e6a06ae9 is
+not running adoption: shared Functions still need separately authorized
+`/reboot max`. No Core or HASHI runtime was restarted. See
+repairs/CALL_ANSWERING_EXPERIENCE_20261010.md.
+
 October 10 Call/Workbench live recovery: the public blank screen came from an
 inactive-Agent controller effect referencing an undefined identifier. Direct
 `/Call` also treated one transient Cloudflare 502 during audio submission as a
