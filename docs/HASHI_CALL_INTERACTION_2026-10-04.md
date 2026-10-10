@@ -21,11 +21,15 @@ tablet, portrait phone and landscape phone. Existing speech-end detection,
 camera cadence, selected text model/reasoning level and STT admission remain
 unchanged.
 
-All 140 HASHI3 Frontend Call tests, 69 focused Workbench checks, 10 Chromium
-Call/window checks and the production client build pass. Screenshots at four
-responsive sizes were visually reviewed. HASHI4 running Functions have not been
-restarted; source synchronization, Workbench publication and later runtime
-adoption are recorded separately.
+Approval: on 2026-10-11 the user requested publishing the new Workbench and
+retained the HASHI4 reboot. Implementation: the qualified Function change is
+synchronized to HASHI4 source and the current H4-connected Workbench serves the
+new client and Call proxy. Verification: all 140 HASHI4 Frontend Call tests, 83
+focused Workbench checks, 11 Chromium Call/window checks and the production
+client build pass. The public root, entry asset and Call availability endpoint
+respond successfully after the Workbench service reload. HASHI4 running
+Functions have not been restarted, so an actual commentary-to-TTS call remains
+pending the user's adoption and personal acceptance.
 
 ## Current 2026-10-09 urgent HASHI3 availability repair
 
