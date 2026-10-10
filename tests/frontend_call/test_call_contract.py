@@ -2,7 +2,9 @@ import base64
 import io
 import wave
 import pytest
-from orchestrator.frontend_call.contract import CallError, decode_wav, speech_segments
+from orchestrator.frontend_call.contract import (
+    MAX_SPEECH_CHARS, MAX_SPEECH_SEGMENTS, CallError, decode_wav, speech_segments
+)
 
 
 def wav(seconds=0.2):
@@ -26,6 +28,6 @@ def test_speech_is_bounded_and_never_reads_code_blocks():
     parts, truncated = speech_segments(
         "Hello.\n```python\nSECRET_CODE\n```\n" + ("sentence. " * 3000)
     )
-    assert parts and len(parts) <= 12 and truncated
-    assert all(len(p) <= 600 for p in parts)
+    assert parts and len(parts) <= MAX_SPEECH_SEGMENTS and truncated
+    assert all(len(p) <= MAX_SPEECH_CHARS for p in parts)
     assert "SECRET_CODE" not in "".join(parts)

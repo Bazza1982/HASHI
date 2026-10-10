@@ -1,5 +1,5 @@
 """First audio should not wait for synthesis of the whole final answer."""
-from orchestrator.frontend_call.contract import speech_segments
+from orchestrator.frontend_call.contract import MAX_SPEECH_CHARS, speech_segments
 
 
 def test_first_audio_is_a_short_natural_phrase_without_losing_the_answer():
@@ -23,7 +23,7 @@ def test_english_first_phrase_keeps_words_and_the_rest_of_the_answer():
 def test_long_unpunctuated_opening_is_bounded_and_does_not_split_english_words():
     text = "Please describe " + "the changes you noticed " * 30
     parts, truncated = speech_segments(text)
-    assert len(parts[0]) <= 120
+    assert len(parts[0]) <= MAX_SPEECH_CHARS
     assert " ".join(parts) == text.strip()
     assert not truncated
 

@@ -1,5 +1,32 @@
 # Phone and Call interaction decision
 
+## 2026-10-11 sentence-streamed speech and rolling captions
+
+PAO Call Function owns typed activity filtering, sentence/TTS ordering and
+prepared filler assets; Frontend Connector owns playback and responsive caption
+presentation. Only public `answer_preview` and `user_commentary` activity may
+enter Call speech. Reasoning and technical activity remain excluded.
+
+Stable complete answer sentences now synthesize immediately and play through a
+single FIFO queue, with bounded one-sentence preparation ahead. Final answer
+reconciliation avoids replaying preview text. During a silent long wait, the
+client may play increasingly spaced, localized fillers prepared in the selected
+Agent voice. A real answer cancels pending filler, and filler is never stored as
+an answer, transcript row or Session history.
+
+Workbench retains the latest 24 caption rows, follows the bottom until the user
+scrolls away, and offers a localized return-to-latest action. Caption sizing is
+16 px on desktop/tablet and 18 px on phone; Call controls remain reachable on PC,
+tablet, portrait phone and landscape phone. Existing speech-end detection,
+camera cadence, selected text model/reasoning level and STT admission remain
+unchanged.
+
+All 140 HASHI3 Frontend Call tests, 69 focused Workbench checks, 10 Chromium
+Call/window checks and the production client build pass. Screenshots at four
+responsive sizes were visually reviewed. HASHI4 running Functions have not been
+restarted; source synchronization, Workbench publication and later runtime
+adoption are recorded separately.
+
 ## Current 2026-10-09 urgent HASHI3 availability repair
 
 The current user requests an immediate HASHI3 `/call` repair before personal

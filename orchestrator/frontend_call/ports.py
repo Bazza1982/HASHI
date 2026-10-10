@@ -168,13 +168,50 @@ class HashiPorts:
             "message_id": run["user_message_id"],
         }
 
-    def result(self, owner, binding, run_id):
+    def result(self, owner, binding, run_id, after_sequence=0):
         run = self.api.session_store.get_run(run_id, owner_id=owner)
         if (
             run["session_id"] != binding["session_id"]
             or run["context_generation"] != binding["context_generation"]
         ):
             raise CallError("call_scope_changed", 409)
+        activity_sequence = max(0, int(after_sequence or 0))
+        events = []
+        runtime = self.api._runtime_map().get(binding["agent_id"])
+        activity_store = getattr(runtime, "request_activity", None)
+        request_id = str(run.get("request_id") or "")
+        if activity_store is not None and request_id:
+            activity = activity_store.poll(
+                request_id, after_sequence=activity_sequence, limit=256
+            )
+            if activity.get("ok") is True:
+                activity_events = list(activity.get("events") or ())
+                if activity_events:
+                    activity_sequence = max(
+                        activity_sequence,
+                        max(int(event.get("sequence") or 0) for event in activity_events),
+                    )
+                else:
+                    activity_sequence = max(
+                        activity_sequence, int(activity.get("latest_sequence") or 0)
+                    )
+                for event in activity_events:
+                    owner_class = str(event.get("delivery_class") or "")
+                    channel = str(event.get("presentation_channel") or "")
+                    if (
+                        owner_class == "answer_preview"
+                        and channel == "answer"
+                    ) or (
+                        owner_class == "user_commentary"
+                        and channel == "commentary"
+                    ):
+                        events.append({
+                            key: event.get(key)
+                            for key in (
+                                "sequence", "event_id", "delivery_class",
+                                "presentation_channel", "summary", "detail",
+                            )
+                        })
         terminal = run["state"] in {
             "completed",
             "failed",
@@ -190,4 +227,10 @@ class HashiPorts:
                 owner_id=owner,
             )
             text = str(message.get("text") or "")
-        return {"terminal": terminal, "state": run["state"], "text": text}
+        return {
+            "terminal": terminal,
+            "state": run["state"],
+            "text": text,
+            "activity_sequence": activity_sequence,
+            "events": events,
+        }
