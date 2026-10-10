@@ -1,5 +1,19 @@
 # HASHI Agent FYI
 
+October 10 mobile power repair: Workbench now suspends question, reboot-discovery
+and overview polling while hidden, serializes slow reads, and backs off when
+idle. A 15-second fixture fell from 22 question/reboot reads to 2 foreground
+reads and zero hidden reads. Audio URLs are attached only on play activation;
+WebKit's preload hint alone was insufficient. History completion now clears
+the loading spinner while preserving explicit Session isolation.
+Source patch 716fae7 is deployed; 44 focused checks and browser media/visibility
+checks passed. Actual service phone/iPad screenshots were reviewed, and the
+public hidden browser completed zero API reads in a bounded 15-second sample.
+This is not a physical battery or temperature measurement. Open device pages
+need a reload; no HASHI runtime was restarted and no Core code was changed.
+See Workbench docs/implementation/mobile-idle-media-20261010.md for evidence
+and the independently reproduced Playwright WebKit native-controls warning.
+
 October 10 iPad follow-up: the Workbench question checks now cover 16 tablet
 cases, including portrait/landscape, split views, responsive boundaries and
 answer retention across eight size changes. Rotation exposed a composer
