@@ -26,3 +26,14 @@ def test_long_unpunctuated_opening_is_bounded_and_does_not_split_english_words()
     assert len(parts[0]) <= 120
     assert " ".join(parts) == text.strip()
     assert not truncated
+
+
+def test_short_first_sentence_does_not_leave_one_oversized_followup_segment():
+    first = "这是第一句自然开场，用来尽快开始播报并保持对话自然。"
+    text = first + "接下来继续说明背景、经过和需要确认的细节，让整段回答保持完整。" * 8
+    parts, truncated = speech_segments(text)
+    assert parts[0] == first
+    assert len(parts) > 2
+    assert len(parts[1]) <= len(parts[0]) * 2
+    assert "".join(parts) == text
+    assert not truncated

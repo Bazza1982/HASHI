@@ -1,5 +1,20 @@
 # HASHI Agent FYI
 
+October 10 Call pause repair: content-free diagnostics from the reported call
+showed that one-segment lookahead was working, but a 27-character first phrase
+was followed by a 272-character TTS request. The first audio lasted about 5.4
+seconds while the next synthesis took 15.7 seconds, exposing roughly 10 seconds
+of silence; the next turn exposed an even larger mismatch. Call segmentation
+now grows from the preceding playable segment instead of jumping directly to
+the 600-character ceiling, while retaining the 12-segment/600-character bounds
+for long answers. Workbench's bounded one-segment lookahead and its three
+failure/cancellation checks are restored in source. HASHI3 and synchronized
+HASHI4 source each pass 132 Call checks; 43 Workbench Call checks and the
+production build pass. The public client used for the report already carried
+the lookahead, so no static republish was needed. HASHI4 running adoption still
+requires the user's lifecycle action. No Core or runtime was restarted. See
+repairs/CALL_VOICE_PREVIEWS_20261010.md.
+
 October 10 direct Call answering repair: the user's Chinese/gender voice menu
 and 120 prerecorded samples were present in HASHI3 but missing from HASHI4;
 the complete verified source and assets are now synchronized to HASHI4. Direct
