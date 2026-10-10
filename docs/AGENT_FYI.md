@@ -1,5 +1,19 @@
 # HASHI Agent FYI
 
+October 10 Workbench history-order repair: the earlier ordering fix remained
+deployed, but delayed durable Frontend Connector errors were an uncovered event
+type. The canonical transcript stayed ordered while an old provider failure
+arrived through the answer feed at the live edge; snapshot refresh then retained
+that wrong local position. Workbench now merges non-transient durable feed
+errors by original event time and preserves their position across refresh.
+A red/green regression changed the reproduced 5-15-10 order to 5-10-15; 75
+focused checks, a clean production build, a replay of the reported conversation
+data, baseline bundle comparison, and public static asset hash verification
+pass. The fixed bundle is deployed to the current H4-connected Workbench
+service. Already-open pages need a reload. No Core code changed and no HASHI
+runtime was restarted. See Workbench
+docs/implementation/chat-history-order-20261010.md.
+
 October 10 Call pause repair: content-free diagnostics from the reported call
 showed that one-segment lookahead was working, but a 27-character first phrase
 was followed by a 272-character TTS request. The first audio lasted about 5.4
