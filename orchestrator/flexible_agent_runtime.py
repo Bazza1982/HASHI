@@ -3992,6 +3992,11 @@ class FlexibleAgentRuntime:
         update: Any,
         profile_id: str,
         assets: tuple[tuple[str, Path], ...],
+        *,
+        caption_override: str | None = None,
+        media_type_override: str | None = None,
+        filename_override: str | None = None,
+        preview_id: str = "",
     ) -> int:
         """Send prerecorded UI previews without creating a conversation Turn."""
 
@@ -4021,10 +4026,10 @@ class FlexibleAgentRuntime:
                 or customization.get("route") != "connector_local"
             ):
                 raise RuntimeError("Telegram voice preview is not registered in FC")
-        profile_label = ui_language.tr(f"voice.profile.{profile_id}")
+        profile_label = ui_language.tr(f"voice.profile.{profile_id}") if caption_override is None else ""
         sent = 0
         for renderer, path in assets:
-            caption = ui_language.tr(
+            caption = caption_override if caption_override is not None else ui_language.tr(
                 f"voice.preview.caption.{renderer}",
                 voice=profile_label,
             )
@@ -4035,6 +4040,7 @@ class FlexibleAgentRuntime:
                     + hashlib.sha256(
                         (
                             f"{surface}\0{profile_id}\0{renderer}\0"
+                            + (f"{preview_id}\0" if preview_id else "")
                         ).encode("utf-8")
                         + payload,
                     ).hexdigest()
@@ -4043,8 +4049,8 @@ class FlexibleAgentRuntime:
                     runtime_session.publish_frontend_media_notification_for_update(
                         self,
                         update,
-                        filename=path.name,
-                        media_type="audio/ogg",
+                        filename=filename_override or path.name,
+                        media_type=media_type_override or "audio/ogg",
                         payload=payload,
                         sha256=hashlib.sha256(payload).hexdigest(),
                         caption=caption,

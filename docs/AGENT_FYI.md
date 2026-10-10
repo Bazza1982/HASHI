@@ -1,5 +1,23 @@
 # HASHI Agent FYI
 
+October 10 Call follow-up: user approved Grok STT 1.0 with automatic language
+detection. HASHI3/HASHI4 instance Call configuration selects it; the live HASHI4
+context read the matching revision. The four synthetic probes returned correct
+Chinese “谢谢” and the full topic sentence, correct English, but “嗯” became “文”.
+The earlier Scribe suggestion is superseded by this explicit trial choice.
+
+HASHI3 now contains Chinese/gender Call voice labels, 30 voices with English and
+Chinese prerecorded samples, and selection/replay through the existing FC media
+notification path. Workbench receives MP3 (OGG is unsupported in the tested
+WebKit build); Telegram retains OGG. All 120 packaged files decode. The first
+spoken final-answer phrase is shorter, and the external client prepares one
+segment ahead. Synthetic first-audio synthesis dropped from 5.3–5.8 s to 3.2 s.
+143 Python cases, 30 controller cases, build and four browser layout/playback
+fixtures pass. These do not constitute physical iPhone latency acceptance.
+HASHI4 backend adoption is still pending explicit production/lifecycle scope;
+Grok configuration can apply to a new call without that adoption.
+See repairs/CALL_VOICE_PREVIEWS_20261010.md for separate source/live evidence.
+
 October 10 Call audit: mobile Phone and Call entries overlapped in one grid cell;
 Workbench patch 140f4ff is published and reserves independent reachable targets.
 All 21 layout cases pass, including eight rotation/split changes; the public

@@ -1,5 +1,39 @@
 # Phone and Call interaction decision
 
+## 2026-10-10 approved Grok trial, voice previews and speech latency
+
+Frontend Connector owns this Functions and external Workbench correction.
+The user approved fixing Call defects/latency and evaluating x-ai/grok-stt-1.0,
+without forcing recognition language. The instance Call declarations now select
+Grok with empty STT options; the running HASHI4 context returned the matching
+configuration revision. Active calls retain their frozen configuration.
+
+Call voice labels derive from one Gemini catalog, with localized descriptions
+and documented gender. Selection publishes a verified prerecorded sample through
+the existing /voice FC notification path, outside conversation Turns. Chinese
+and English samples cover all 30 voices. Workbench uses MP3; Telegram uses OGG.
+A preview button replays the selected sample, and a repeated callback stays
+idempotent. No provider synthesis runs in menu callbacks.
+
+The first final-answer audio segment uses a short natural phrase (at most 120
+characters); the remaining segments retain the existing bounded policy.
+Workbench requests exactly one segment ahead while current audio plays, without
+raising its polling frequency. Hangup fencing and explicit retry remain intact.
+This complements the earlier observation-ready join correction.
+
+143 focused Python cases, 30 controller cases and the client build pass.
+All 120 media files validate and decode. Four phone/iPad full-app fixture cases
+verify readable labels and advancing audio; the known Playwright WebKit native
+controls warning remains distinct from playback and product errors.
+Synthetic TTS first-audio wait fell from 5.34/5.78 s to 3.19/3.19 s; this is not
+a whole-call benchmark. Grok still misrecognized the isolated Chinese “嗯”.
+See [evidence and adoption scope](repairs/CALL_VOICE_PREVIEWS_20261010.md).
+
+The source changes are prepared in HASHI3. Workbench client publication is a
+separate static-asset operation. HASHI4 backend code and shared Functions
+adoption remain unperformed: the standing restriction requires explicit
+production/lifecycle authorization. No Core changes or restarts are included.
+
 ## 2026-10-10 mobile entries and latency audit
 
 Frontend Connector owns the external mobile entry layout and a HASHI3 Functions
