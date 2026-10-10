@@ -163,20 +163,30 @@ def speech_segments(text: str):
     while text and len(parts) < 12:
         # A short first phrase can start playing while the next one is rendered.
         # This only segments the final answer; it never speaks reasoning/progress.
-        cut = min(120 if not parts else 600, len(text))
+        # Later segments grow with the audio already available to cover their
+        # synthesis time.  A tiny opener must never be followed by one huge
+        # request that leaves the caller listening to silence.
+        limit = 120 if not parts else min(600, max(48, len(parts[-1]) * 2))
+        cut = min(limit, len(text))
         if not parts:
-            sentences = [m.end() for m in re.finditer(r'[。！？!?][”\"\x27’)]*|\.(?=\s|$)|\n', text[:cut]) if m.end() >= 12]
+            sentences = [m.end() for m in re.finditer(r'[。！？!?][”\"\x27’)]*|\.(?=\s|$)|\n', text[:cut]) if m.end() >= 24]
             clauses = [m.end() for m in re.finditer(r'[，,；;：:]', text[:cut]) if m.end() >= 24]
             if sentences or clauses:
                 cut = (sentences or clauses)[0]
             elif cut < len(text):
                 space = text.rfind(' ', 0, cut + 1)
-                if space >= 12:
+                if space >= 24:
                     cut = space
         elif cut < len(text):
-            ends = [m.end() for m in re.finditer(r"[.!?。！？\n](?:\s|$)?", text[:cut])]
-            if ends:
-                cut = ends[-1]
+            threshold = min(cut, max(24, cut // 2))
+            sentences = [m.end() for m in re.finditer(r"[.!?。！？\n](?:\s|$)?", text[:cut]) if m.end() >= threshold]
+            clauses = [m.end() for m in re.finditer(r'[，,；;：:]', text[:cut]) if m.end() >= threshold]
+            if sentences or clauses:
+                cut = (sentences or clauses)[-1]
+            else:
+                space = text.rfind(' ', 0, cut + 1)
+                if space >= threshold:
+                    cut = space
         part, text = text[:cut].strip(), text[cut:].strip()
         if part:
             parts.append(part)

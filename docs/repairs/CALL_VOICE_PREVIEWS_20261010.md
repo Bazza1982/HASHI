@@ -125,3 +125,45 @@ source synchronization. Publication receipts remain in the ignored audit
 directory. Remaining acceptance is separately authorized production Functions
 adoption, followed by the user's real phone speech, pauses, Bluetooth and
 perceived-latency test.
+
+## Follow-up: long pause after the first phrase
+
+Content-free diagnostics from the reported Call showed that the client did
+request the next segment as soon as the first asset became ready. The pause was
+therefore not an Agent delay or a missing live prefetch. The first completed
+turn produced a 27-character first segment in 3952 ms and about 5.4 seconds of
+audio, followed by a 272-character segment that needed 15733 ms to synthesize.
+That exposed roughly ten seconds of silence after the first phrase. The next
+turn repeated the pattern with 25 and 323 characters; the second synthesis took
+19188 ms. No transcript text or audio is retained in this decision.
+
+The splitter had a structural discontinuity: the first phrase was capped at
+120 characters, then the next segment immediately used a 600-character cap.
+It now derives each following cap from the preceding playable segment, doubling
+gradually up to the existing 600-character ceiling. Natural sentence or clause
+boundaries are still preferred. A synthetic response that formerly split into
+26 and 248 characters now splits into 26, 31, 62, 124 and 31 characters with no
+loss. Unpunctuated long answers still grow to the ceiling, so this repair does
+not impose short replies or prevent long stories.
+
+The Workbench source had also lost its previously qualified one-segment
+lookahead even though the public client used during the reported Call still had
+it. The bounded behavior is restored with its original constraints: request
+exactly one next segment while the current audio plays, do not poll throughout
+playback, do not delay ready audio, and surface a failed prefetch only after the
+current segment finishes. Cancellation and explicit retry remain scoped to the
+same Call and turn.
+
+Focused red checks reproduced both defects before the repair. Green evidence:
+four segmentation cases, 132 full HASHI3 Call cases, three playback scheduling
+and failure cases, the broader Workbench Call suite, and a production build.
+Protected Core remains unchanged. This removes the measured structural cause;
+provider variance and physical-device hearing acceptance remain separate.
+
+The verified Function source and focused tests are synchronized to HASHI4,
+where the same 132 Call checks pass using the independent HASHI3 development
+interpreter. The running HASHI4 shared Functions still use the preceding
+generation; adopting this backend segmentation requires the user's supported
+shared-Function lifecycle action. The public Workbench used during the report
+already carried the bounded lookahead, so no static client republish or HASHI
+runtime restart was performed in this follow-up.

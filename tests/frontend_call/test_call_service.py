@@ -731,7 +731,7 @@ async def test_privacy_revocation_in_later_segment_invalidates_cached_audio(tmp_
         call = service.calls["call-1"]
         await call.speech_task
         speech = {**binding, "operation": "speech", "turn_id": "turn-1", "segment": 0}
-        assert len(call.turn["speech_segments"]) == 2
+        assert len(call.turn["speech_segments"]) >= 2
         assert (await service.invoke("owner", speech))["ready"]
         await service.invoke("owner", {**speech, "segment": 1})
         await asyncio.wait_for(started.wait(), 1)
