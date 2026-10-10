@@ -21,6 +21,10 @@ from .contract import (
     digest,
     decode_wav,
     decode_jpeg,
+    call_locale,
+    complete_speech_segments,
+    filler_phrases,
+    MAX_SPEECH_SEGMENTS,
     speech_segments,
 )
 
@@ -35,6 +39,7 @@ class Call:
     expires: float
     started: float
     allow_cloud: bool = True  # Saved targets and effective privacy own eligibility.
+    locale: str = "en"
     phase: str = "active"
     sequence: int = 0
     turn: dict = field(default_factory=dict)
@@ -44,6 +49,9 @@ class Call:
     speech_cache: dict = field(default_factory=dict)
     speech_errors: dict = field(default_factory=dict)
     speech_attempts: dict = field(default_factory=dict)
+    filler_task: asyncio.Task | None = None
+    filler_cache: dict = field(default_factory=dict)
+    filler_errors: dict = field(default_factory=dict)
     rows: list = field(default_factory=list)
     camera_enabled: bool = False
     camera_epoch: int = 0
@@ -60,10 +68,13 @@ class Call:
 
 class CallService:
     def __init__(
-        self, config, ports, adapters, *, clock=time.monotonic, poll_seconds=0.7
+        self, config, ports, adapters, *, clock=time.monotonic, poll_seconds=0.7,
+        filler_warm_seconds=2.0,
     ):
         self.config, self.ports, self.adapters = config, ports, adapters
         self.clock, self.poll_seconds = clock, poll_seconds
+        self.filler_warm_seconds = filler_warm_seconds
+        self._filler_cache = {}
         self.generation = uuid4().hex
         self.calls = {}
         emit("service_ready", generation=self.generation)
@@ -110,7 +121,11 @@ class CallService:
         if call.speech_task:
             if call.speech_task.cancel():
                 emit("tts_cancel_requested", **self._facts(call, call.turn), reason=reason, segment=call.speech_index)
+        if call.filler_task:
+            if call.filler_task.cancel():
+                emit("filler_warm_cancel_requested", **self._facts(call), reason=reason)
         call.speech_cache.clear()
+        call.filler_cache.clear()
         self._camera_off(call, reason="call_ended")
 
     def _camera_off(self, call, reason="camera_disabled"):
@@ -133,7 +148,7 @@ class CallService:
         tasks = []
         for call in self.calls.values():
             self._end(call, "service_shutdown")
-            tasks += [t for t in (call.task, call.speech_task, call.vision_task) if t]
+            tasks += [t for t in (call.task, call.speech_task, call.filler_task, call.vision_task) if t]
         if tasks:
             done, pending = await asyncio.wait(tasks, timeout=5)
             if pending:
@@ -410,14 +425,15 @@ class CallService:
                 )
             }
             call = Call(
-                owner,
-                binding,
-                profile,
-                targets,
-                fingerprint,
-                self.clock() + LEASE_SECONDS,
-                self.clock(),
-                True,
+                owner=owner,
+                binding=binding,
+                profile=profile,
+                targets=targets,
+                fingerprint=fingerprint,
+                expires=self.clock() + LEASE_SECONDS,
+                started=self.clock(),
+                allow_cloud=True,
+                locale=call_locale(body.get("locale")),
             )
             call.video_policy = context["video_policy"]
             for kind in ("stt", "tts", "vision"):
@@ -524,6 +540,7 @@ class CallService:
                 "sequence": sequence,
                 "digest": fingerprint,
                 "phase": "transcribing",
+                "speech_segments": [],
                 "captured_at": body.get("captured_at") if image else None,
             }
             emit("turn_accepted", **self._facts(call, call.turn), audio_bytes=len(audio),
@@ -531,11 +548,24 @@ class CallService:
                  camera_enabled=call.camera_enabled)
             call.task = asyncio.create_task(self._run(call, audio, image))
             return self._view(call)
+        if op == "filler":
+            slot = integer(body.get("slot"), 0, len(filler_phrases(call.locale)) - 1)
+            text = filler_phrases(call.locale)[slot]
+            cached = call.filler_cache.get(slot)
+            if cached is None:
+                cached = self._filler_cache.get(self._filler_key(call, text))
+            if cached is None:
+                return {"ok": True, "ready": False, "filler": slot, "text": text}
+            self._privacy(call, "tts")
+            call.filler_cache[slot] = cached
+            return {
+                "ok": True, "ready": True, "filler": slot, "text": text, **cached
+            }
         if op == "speech":
-            index = integer(body.get("segment"), 0, 11)
+            index = integer(body.get("segment"), 0, MAX_SPEECH_SEGMENTS - 1)
             if (
                 call.turn.get("turn_id") != body.get("turn_id")
-                or call.turn.get("phase") != "complete"
+                or call.turn.get("phase") not in {"thinking", "complete"}
             ):
                 raise CallError("call_speech_not_ready", 409)
             parts = call.turn.get("speech_segments", [])
@@ -560,6 +590,175 @@ class CallService:
             self._start_speech(call, index, parts[index])
             return {"ok": True, "ready": False}
         raise CallError("call_invalid_operation")
+
+    @staticmethod
+    def _append_row(call, row):
+        call.rows.append(row)
+        call.rows = call.rows[-24:]
+
+    def _filler_key(self, call, text):
+        return digest({
+            "target": call.targets.get("tts"),
+            "profile": call.profile.get("tts"),
+            "locale": call.locale,
+            "text": text,
+        })
+
+    async def _warm_fillers(self, call):
+        try:
+            # The opening sentence is user-facing audio. Let it finish
+            # synthesizing before the low-priority filler cache uses the same
+            # voice provider, so warming never delays the greeting.
+            opening_speech = call.speech_task
+            if opening_speech:
+                await asyncio.shield(opening_speech)
+            await asyncio.sleep(self.filler_warm_seconds)
+            for slot, text in enumerate(filler_phrases(call.locale)):
+                if call.phase != "active":
+                    return
+                key = self._filler_key(call, text)
+                cached = self._filler_cache.get(key)
+                if cached is not None:
+                    call.filler_cache[slot] = cached
+                    continue
+                started = self.clock()
+                try:
+                    self.ports.validate(call.owner, call.binding)
+                    self._privacy(call, "tts")
+                    emit("filler_warm_started", **self._facts(call),
+                         stage="tts", filler=slot, locale=call.locale)
+                    with diagnostic_context(**self._facts(call), stage="tts",
+                                            filler=slot):
+                        result = await self.adapters.synthesize(
+                            call.targets["tts"], call.profile["tts"], text
+                        )
+                    if call.phase != "active":
+                        return
+                    self.ports.validate(call.owner, call.binding)
+                    self._privacy(call, "tts")
+                    while len(self._filler_cache) >= 64:
+                        self._filler_cache.pop(next(iter(self._filler_cache)))
+                    self._filler_cache[key] = result
+                    call.filler_cache[slot] = result
+                    emit("filler_warm_completed", **self._facts(call),
+                         stage="tts", filler=slot, locale=call.locale,
+                         duration_ms=elapsed_ms(self.clock, started))
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    call.filler_errors[slot] = (
+                        exc.code if isinstance(exc, CallError)
+                        else "call_filler_unavailable"
+                    )
+                    emit("filler_warm_failed", **self._facts(call),
+                         stage="tts", filler=slot, locale=call.locale,
+                         duration_ms=elapsed_ms(self.clock, started),
+                         **error_facts(exc, "call_filler_unavailable"))
+        except asyncio.CancelledError:
+            return
+
+    def _queue_speech(self, call, turn, text, kind):
+        text = str(text or "").strip()
+        if not text:
+            return False
+        parts = turn.setdefault("speech_segments", [])
+        if len(parts) >= MAX_SPEECH_SEGMENTS:
+            turn["speech_truncated"] = True
+            return False
+        parts.append(text)
+        turn.setdefault("_speech_kinds", []).append(kind)
+        if (
+            call.speech_index < 0
+            and (not call.speech_task or call.speech_task.done())
+            and call.phase == "active"
+            and call.turn is turn
+        ):
+            self._start_speech(call, 0, parts[0])
+        return True
+
+    def _process_activity(self, call, turn, run):
+        turn["_activity_sequence"] = max(
+            int(turn.get("_activity_sequence") or 0),
+            int(run.get("activity_sequence") or 0),
+        )
+        seen = turn.setdefault("_commentary_events", set())
+        for event in run.get("events") or ():
+            owner = str(event.get("delivery_class") or "")
+            channel = str(event.get("presentation_channel") or "")
+            raw_content = str(event.get("summary") or event.get("detail") or "")
+            if owner == "answer_preview" and channel == "answer" and raw_content.strip():
+                # Answer previews are deltas. Preserve their leading whitespace
+                # so token boundaries do not collapse into a different word.
+                preview = (str(turn.get("_answer_preview") or "") + raw_content)[:64000]
+                turn["_answer_preview"] = preview
+                stable, _remainder = complete_speech_segments(preview)
+                known = list(turn.get("_answer_parts") or ())
+                if stable[:len(known)] == known:
+                    for part in stable[len(known):]:
+                        self._queue_speech(call, turn, part, "answer")
+                    turn["_answer_parts"] = stable
+                else:
+                    emit("answer_preview_reconciled", **self._facts(call, turn),
+                         reason="prefix_changed", stable_segments=len(stable),
+                         queued_segments=len(known))
+                call.rows = [
+                    row for row in call.rows
+                    if not (
+                        row.get("turn_id") == turn.get("turn_id")
+                        and row.get("kind") == "answer_preview"
+                    )
+                ]
+                self._append_row(call, {
+                    "speaker": "assistant",
+                    "text": preview,
+                    "turn_id": turn.get("turn_id"),
+                    "kind": "answer_preview",
+                })
+                continue
+            if owner != "user_commentary" or channel != "commentary":
+                continue
+            content = raw_content.strip()
+            event_id = str(event.get("event_id") or event.get("sequence") or "")
+            if not content or len(content) > 320 or event_id in seen:
+                continue
+            seen.add(event_id)
+            commentary, _truncated = speech_segments(content)
+            for part in commentary[:2]:
+                self._queue_speech(call, turn, part, "commentary")
+            self._append_row(call, {
+                "speaker": "assistant",
+                "text": content,
+                "turn_id": turn.get("turn_id"),
+                "kind": "commentary",
+                "event_id": event_id,
+            })
+
+    def _finalize_speech(self, call, turn, answer):
+        final_parts, truncated = speech_segments(answer)
+        known = list(turn.get("_answer_parts") or ())
+        if final_parts[:len(known)] == known:
+            remaining = final_parts[len(known):]
+        else:
+            unmatched = list(known)
+            remaining = []
+            for part in final_parts:
+                try:
+                    unmatched.remove(part)
+                except ValueError:
+                    remaining.append(part)
+            if known:
+                emit("answer_preview_reconciled", **self._facts(call, turn),
+                     reason="final_changed", final_segments=len(final_parts),
+                     queued_segments=len(known))
+        for part in remaining:
+            self._queue_speech(call, turn, part, "answer")
+        turn["_answer_parts"] = final_parts
+        turn["speech_truncated"] = bool(
+            truncated or turn.get("speech_truncated")
+            or len(turn.get("speech_segments") or ()) >= MAX_SPEECH_SEGMENTS
+            and len(final_parts) + len(turn.get("_commentary_events") or ())
+            > MAX_SPEECH_SEGMENTS
+        )
 
     async def _open(self, call):
         """Generate one Agent-owned greeting without fabricating a user turn."""
@@ -589,10 +788,9 @@ class CallService:
             turn["speech_segments"], turn["speech_truncated"] = speech_segments(answer)
             turn["phase"] = "complete"
             turn["latency_ms"] = int((self.clock() - started) * 1000)
-            call.rows.append(
+            self._append_row(call,
                 {"speaker": "assistant", "text": answer, "turn_id": turn["turn_id"]}
             )
-            call.rows = call.rows[-6:]
             emit(
                 "opening_completed",
                 **self._facts(call, turn),
@@ -603,6 +801,10 @@ class CallService:
             )
             if turn["speech_segments"]:
                 self._start_speech(call, 0, turn["speech_segments"][0])
+            if not call.filler_task or call.filler_task.done():
+                call.filler_task = asyncio.create_task(
+                    self._warm_fillers(call)
+                )
         except asyncio.CancelledError:
             emit(
                 "opening_cancelled",
@@ -713,15 +915,20 @@ class CallService:
             turn.update(result)
             emit("admission_completed", **self._facts(call, turn), stage=stage, duration_ms=elapsed_ms(self.clock, stage_started))
             turn["phase"] = "thinking"
-            call.rows.append(
+            self._append_row(call,
                 {"speaker": "user", "text": text, "turn_id": turn["turn_id"]}
             )
-            call.rows = call.rows[-6:]
             stage, stage_started = "run_result", self.clock()
             last_state = None
             while call.phase == "active":
                 self.ports.validate(call.owner, call.binding)
-                run = self.ports.result(call.owner, call.binding, turn["run_id"])
+                run = self.ports.result(
+                    call.owner,
+                    call.binding,
+                    turn["run_id"],
+                    int(turn.get("_activity_sequence") or 0),
+                )
+                self._process_activity(call, turn, run)
                 turn["run_state"] = run["state"]
                 if run["state"] != last_state:
                     emit("run_state_changed", **self._facts(call, turn), stage=stage,
@@ -734,26 +941,24 @@ class CallService:
                     if not answer:
                         raise CallError("call_answer_empty", 502)
                     turn["answer"] = answer[:64000]
-                    turn["speech_segments"], turn["speech_truncated"] = speech_segments(
-                        answer
-                    )
+                    self._finalize_speech(call, turn, answer)
                     turn["phase"] = "complete"
                     turn["latency_ms"] = int((self.clock() - start) * 1000)
-                    call.rows.append(
-                        {
-                            "speaker": "assistant",
-                            "text": answer[:64000],
-                            "turn_id": turn["turn_id"],
-                        }
-                    )
-                    call.rows = call.rows[-6:]
+                    call.rows = [
+                        row for row in call.rows
+                        if not (
+                            row.get("turn_id") == turn["turn_id"]
+                            and row.get("kind") == "answer_preview"
+                        )
+                    ]
+                    self._append_row(call, {
+                        "speaker": "assistant",
+                        "text": answer[:64000],
+                        "turn_id": turn["turn_id"],
+                    })
                     emit("turn_completed", **self._facts(call, turn), run_state=run["state"],
                          duration_ms=elapsed_ms(self.clock, start), speech_segments=len(turn["speech_segments"]),
                          speech_truncated=turn["speech_truncated"], text_chars=len(answer))
-                    # Start the first segment while the client is discovering
-                    # the final answer. Speech polling joins this same task.
-                    if turn["speech_segments"]:
-                        self._start_speech(call, 0, turn["speech_segments"][0])
                     return
                 if self.clock() - start > 600:
                     raise CallError("call_agent_timeout_continues_in_chat", 504)

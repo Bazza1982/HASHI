@@ -1,5 +1,19 @@
 # HASHI Agent FYI
 
+October 11 Call speech/caption update: complete answer sentences now synthesize
+and play in FIFO order while the answer is still arriving. Public commentary
+may be spoken during long-running work; reasoning and technical activity are
+filtered by typed activity class and never enter TTS. Localized wait fillers are
+prepared in the selected Agent voice, cancelled by real speech, and remain
+outside answers, transcripts and Session history. Workbench shows a rolling
+24-row transcript with larger phone text, smart follow/manual return, and visible
+controls on PC, tablet and portrait/landscape phone. Existing endpointing,
+camera cadence and model/reasoning choice remain unchanged. All 140 HASHI3 Call
+tests, 69 focused Workbench checks, 10 Chromium window checks and the production
+build pass. HASHI4 backend source/running Functions were not changed or
+restarted. See Workbench
+`docs/call/CALL_STREAMING_SPEECH_CAPTIONS_2026-10-11.md`.
+
 October 10 Workbench Call-control visual repair: the shared button design
 system painted camera-on and keyboard-focus state on the full icon-and-label
 wrapper, producing the reported oversized oval and outer ring. Workbench now

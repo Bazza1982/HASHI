@@ -15,6 +15,18 @@ MAX_BODY = 4 * 1024 * 1024
 MAX_AUDIO = 16000 * 2 * 60 + 4096
 MAX_IMAGE = 512 * 1024
 MAX_OUTPUT = 4 * 1024 * 1024
+MAX_SPEECH_SEGMENTS = 32
+MAX_SPEECH_CHARS = 240
+_SENTENCE_END = re.compile(
+    r'[。！？!?]+[”"\x27’』」)]*|\.(?:[”"\x27’)]*)?(?=\s|$)|\n+'
+)
+_FILLERS = {
+    "en": ("Hmm…", "Let me think for a moment…", "I’m still working on that. Please give me a moment."),
+    "zh-CN": ("嗯……", "让我想一想……", "我还在处理，请稍等一下。"),
+    "zh-TW": ("嗯……", "讓我想一想……", "我還在處理，請稍等一下。"),
+    "ja": ("うーん……", "少し考えさせてください……", "まだ確認しています。もう少しお待ちください。"),
+}
+_LOCALE_ALIASES = {"zh": "zh-CN", "zh-Hans": "zh-CN", "zh-Hant": "zh-TW"}
 LEASE_SECONDS = 45
 MAX_CALL_SECONDS = 8 * 3600
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}\Z")
@@ -23,7 +35,7 @@ OPERATIONS = {
     "route": set(),
     "context": set(),
     "save_profile": {"revision", "profile"},
-    "start": {"generation", "revision", "call_id", "allow_cloud"},
+    "start": {"generation", "revision", "call_id", "allow_cloud", "locale"},
     "turn": {
         "generation",
         "call_id",
@@ -37,6 +49,7 @@ OPERATIONS = {
     "camera": {"generation", "call_id", "enabled"},
     "observe": {"generation", "call_id", "frame_sequence", "image_b64", "captured_at"},
     "speech": {"generation", "call_id", "turn_id", "segment", "retry"},
+    "filler": {"generation", "call_id", "slot"},
     "end": {"generation", "call_id"},
 }
 
@@ -59,6 +72,19 @@ def integer(value, low=1, high=2**31 - 1):
     return value
 
 
+def call_locale(value):
+    if value is None:
+        return "en"
+    if not isinstance(value, str) or len(value) > 16:
+        raise CallError("call_locale_invalid")
+    normalized = _LOCALE_ALIASES.get(value, value)
+    return normalized if normalized in _FILLERS else "en"
+
+
+def filler_phrases(value):
+    return _FILLERS[call_locale(value)]
+
+
 def validate_body(body):
     if not isinstance(body, dict) or body.get("operation") not in OPERATIONS:
         raise CallError("call_invalid_operation")
@@ -67,6 +93,8 @@ def validate_body(body):
     for name in ("client_id", "agent_id", "session_id"):
         identifier(body.get(name))
     integer(body.get("context_generation"))
+    if body["operation"] == "start":
+        call_locale(body.get("locale"))
     return body
 
 
@@ -152,42 +180,63 @@ def decode_jpeg(value):
     raise CallError("call_invalid_jpeg")
 
 
-def speech_segments(text: str):
-    """Deterministic rendering only; never another model or answer rewrite."""
+def _clean_speech_text(text: str) -> str:
+    """Remove non-spoken rendering without interpreting or rewriting an answer."""
     text = re.sub(r"```[\s\S]*?```", "", text)
     text = re.sub(r"https?://\S+", "", text)
     text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
     text = re.sub(r"[*#`_]", "", text)
-    text = "\n".join(line for line in text.splitlines() if line.count("|") < 2).strip()
+    return "\n".join(
+        line for line in text.splitlines() if line.count("|") < 2
+    ).strip()
+
+
+def _bounded_sentence(text: str) -> list[str]:
+    """Keep normal sentences whole; bound only pathological provider output."""
     parts = []
-    while text and len(parts) < 12:
-        # A short first phrase can start playing while the next one is rendered.
-        # This only segments the final answer; it never speaks reasoning/progress.
-        # Later segments grow with the audio already available to cover their
-        # synthesis time.  A tiny opener must never be followed by one huge
-        # request that leaves the caller listening to silence.
-        limit = 120 if not parts else min(600, max(48, len(parts[-1]) * 2))
-        cut = min(limit, len(text))
-        if not parts:
-            sentences = [m.end() for m in re.finditer(r'[。！？!?][”\"\x27’)]*|\.(?=\s|$)|\n', text[:cut]) if m.end() >= 24]
-            clauses = [m.end() for m in re.finditer(r'[，,；;：:]', text[:cut]) if m.end() >= 24]
-            if sentences or clauses:
-                cut = (sentences or clauses)[0]
-            elif cut < len(text):
-                space = text.rfind(' ', 0, cut + 1)
-                if space >= 24:
-                    cut = space
-        elif cut < len(text):
-            threshold = min(cut, max(24, cut // 2))
-            sentences = [m.end() for m in re.finditer(r"[.!?。！？\n](?:\s|$)?", text[:cut]) if m.end() >= threshold]
-            clauses = [m.end() for m in re.finditer(r'[，,；;：:]', text[:cut]) if m.end() >= threshold]
-            if sentences or clauses:
-                cut = (sentences or clauses)[-1]
-            else:
-                space = text.rfind(' ', 0, cut + 1)
-                if space >= threshold:
-                    cut = space
-        part, text = text[:cut].strip(), text[cut:].strip()
+    value = text.strip()
+    while value:
+        cut = min(MAX_SPEECH_CHARS, len(value))
+        if cut < len(value):
+            space = value.rfind(" ", 0, cut + 1)
+            clause = max(
+                value.rfind(mark, 0, cut + 1)
+                for mark in ("，", ",", "；", ";", "：", ":")
+            )
+            boundary = max(space, clause + 1)
+            if boundary >= 24:
+                cut = boundary
+        part, value = value[:cut].strip(), value[cut:].strip()
         if part:
             parts.append(part)
-    return parts, bool(text)
+    return parts
+
+
+def _sentence_parts(text: str, *, include_tail: bool) -> tuple[list[str], str]:
+    clean = _clean_speech_text(str(text or ""))
+    parts: list[str] = []
+    offset = 0
+    for match in _SENTENCE_END.finditer(clean):
+        sentence = clean[offset : match.end()].strip()
+        offset = match.end()
+        if sentence:
+            parts.extend(_bounded_sentence(sentence))
+    remainder = clean[offset:].strip()
+    if include_tail and remainder:
+        parts.extend(_bounded_sentence(remainder))
+        remainder = ""
+    return parts, remainder
+
+
+def complete_speech_segments(text: str):
+    """Return stable complete sentences and the still-changing answer tail."""
+    parts, remainder = _sentence_parts(text, include_tail=False)
+    if len(parts) > MAX_SPEECH_SEGMENTS:
+        return parts[:MAX_SPEECH_SEGMENTS], "".join(parts[MAX_SPEECH_SEGMENTS:]) + remainder
+    return parts, remainder
+
+
+def speech_segments(text: str):
+    """Queue final answer TTS by complete sentence, in original order."""
+    parts, _ = _sentence_parts(text, include_tail=True)
+    return parts[:MAX_SPEECH_SEGMENTS], len(parts) > MAX_SPEECH_SEGMENTS
