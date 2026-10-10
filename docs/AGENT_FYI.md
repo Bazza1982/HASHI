@@ -1,5 +1,18 @@
 # HASHI Agent FYI
 
+October 10 iPad follow-up: the Workbench question checks now cover 16 tablet
+cases, including portrait/landscape, split views, responsive boundaries and
+answer retention across eight size changes. Rotation exposed a composer
+ResizeObserver delivery loop; deferring size writes fixes it. All 21 full-app
+phone/tablet/desktop cases pass, and tablet screenshots were visually reviewed.
+A real HASHI3 Codex question was selected, submitted, consumed and acknowledged
+in tablet-sized WebKit through Remote HMAC. Source 9ef446d is deployed to the
+actual Workbench service; the public entry loaded its bundle and service worker.
+These are browser simulations, not physical iPad/iPadOS keyboard verification.
+Open device pages need a reload. No HASHI runtime was restarted.
+See Workbench's run-questions-20261010 decision for scoped evidence.
+
+
 October 10 mobile question correction: the compact chat grid auto-placed
 the question dock in a composer-button column (48 px dock / 26 px card).
 Workbench now assigns a full-width row and keeps submission reachable in
