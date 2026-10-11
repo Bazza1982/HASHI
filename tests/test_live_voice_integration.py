@@ -964,8 +964,16 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
 
         snapshot = asyncio.run(self.manager._op_snapshot(self.owner_id, self.scope))["snapshot"]
         self.assertEqual(snapshot["phase"], "failed")
+        self.assertEqual(snapshot["error_code"], "live_provider_content_filtered")
         self.assertFalse(snapshot["resume_required"])
         self.assertFalse(self.manager.has_foreground_call(self.owner_id))
+        with self.store._lock, self.store._connection() as connection:
+            call = connection.execute(
+                "SELECT termination_initiator, termination_reason FROM live_calls WHERE call_id = ?",
+                (self.binding.call_id,),
+            ).fetchone()
+        self.assertEqual(call["termination_initiator"], "system")
+        self.assertEqual(call["termination_reason"], "provider_content_filtered")
         events = asyncio.run(self.manager._op_events(self.owner_id, self.scope))["events"]
         failed = next(
             item for item in events

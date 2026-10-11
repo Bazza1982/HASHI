@@ -52,6 +52,10 @@ CALL_EVENT_SCHEMA = "hashi.live_voice.event.v1"
 TERMINAL_PROVIDER_CLOSE_ERRORS = {
     "content": "live_provider_content_filtered",
 }
+TERMINAL_ERROR_REASONS = {
+    "live_provider_content_filtered": "provider_content_filtered",
+}
+TERMINATION_REASON_ERRORS = {reason: code for code, reason in TERMINAL_ERROR_REASONS.items()}
 
 
 def render_live_call_record(segments: list[Mapping[str, Any]]) -> str:
@@ -3618,13 +3622,17 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
     async def _op_snapshot(self, owner_id: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         binding, row = self._call_binding(owner_id, payload)
         usage = _public_usage(json.loads(row["usage_json"])) if row["usage_json"] else None
-        return {"ok": True, "snapshot": {"scope": binding.public_scope(), "phase": row["phase"],
+        snapshot = {"scope": binding.public_scope(), "phase": row["phase"],
                 "latest_sequence": int(row["latest_session_event_sequence"]), "started_at": row["started_at"],
                 "ended_at": row["ended_at"], "provider_close_state": row["provider_close_state"], "usage": usage,
                 "resume_required": str(row["phase"]) == "recovering",
                 "phone": self._stored_phone_public(row), "actions": self.actions.snapshot(binding),
                 "media": self._provider_for(binding).media_descriptor(),
-                "opening": self.opening.read(binding)}}
+                "opening": self.opening.read(binding)}
+        error_code = TERMINATION_REASON_ERRORS.get(str(row["termination_reason"] or ""))
+        if error_code:
+            snapshot["error_code"] = error_code
+        return {"ok": True, "snapshot": snapshot}
 
     async def _op_events(self, owner_id: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         binding, _call_row = self._call_binding(owner_id, payload)
@@ -4042,6 +4050,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         error_code: str | None = None,
     ) -> None:
         public_usage = _public_usage(usage)
+        terminal_reason = TERMINAL_ERROR_REASONS.get(str(error_code or ""))
         became_terminal = False
         settled_attempts: list[str] = []
         with self.session_store._lock, self.session_store._connection() as connection:
@@ -4088,9 +4097,13 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                     )
                 return
             connection.execute(
-                "UPDATE live_calls SET phase = ?, ended_at = ?, provider_close_state = ?, usage_json = ? WHERE call_id = ?",
+                """UPDATE live_calls SET phase = ?, ended_at = ?, provider_close_state = ?, usage_json = ?,
+                   termination_initiator = COALESCE(?, termination_initiator),
+                   termination_reason = COALESCE(?, termination_reason)
+                   WHERE call_id = ?""",
                 (phase, _utc_now(), provider_close_state,
-                 json.dumps(public_usage) if public_usage is not None else None, binding.call_id),
+                 json.dumps(public_usage) if public_usage is not None else None,
+                 "system" if terminal_reason else None, terminal_reason, binding.call_id),
             )
             settled_attempts = self._settle_terminal_call_attempts(
                 connection,

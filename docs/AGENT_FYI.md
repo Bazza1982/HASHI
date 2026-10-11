@@ -177,6 +177,8 @@ Local cascade speech is an opt-in Function sidecar. Synthetic evidence does not 
 
 Live Phone defaults on; a missing provider API key blocks calls and must be named in `/phone`. An explicit instance opt-out remains valid. The Agent's Phone settings and PCM readiness do not prove provider readiness.
 
+Phone failures keep a safe durable cause. Content policy, provider authentication, quota, rate limit, rejected configuration, temporary provider outage, microphone permission, and uncertain network outcomes must not collapse into “line busy” or a generic disconnect. Failed/interrupted panels remain until user dismissal; normal hang-up may auto-dismiss.
+
 Renderers/catalogs own UI text. /language changes shared UI, /tui language local TUI; neither translates replies/IDs. TUI switches freeze generation/Agent/capabilities/Session. Remote authenticates. /telegram off and /whatsapp off disable future mirrors, preserving origin replies. /think and /commentary are independent.
 
 Media bind one draft/instance/Agent/Run; Remote sends managed bytes. HERV3 gains no wider authority. Safe Voice uses typed confirm/discard; missing idempotency blocks upload and stale media is discarded. /voice uses a validated Function bundle/local media; Workbench gets Session audio, Telegram its voice renderer.

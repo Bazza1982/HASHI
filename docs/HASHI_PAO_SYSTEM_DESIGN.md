@@ -216,6 +216,20 @@ admission. FC presents that reason to the caller. It must not reconnect the
 same rejected context or leave Phone and Call controls disabled behind a false
 service-unavailable state.
 
+The terminal policy reason is durable call state, not an event-polling hint.
+PAO stores a safe system termination reason and returns the corresponding
+public error code in terminal snapshots. FC can therefore restore the same
+explanation after an event gap or page recovery. Failed and interrupted Phone
+presentations remain visible until the caller dismisses them; a normal user
+hang-up may still dismiss automatically.
+
+Provider API rejection bodies remain private. Adapters reduce explicit HTTP
+status and sanitized provider type/code fields to public, actionable classes:
+authentication/access, quota, rate limit, content policy, rejected requests, and
+temporary provider unavailability. Browser microphone permission and uncertain
+network outcomes are separate FC presentation classes. Raw provider messages,
+credentials, and request bodies never become UI error text.
+
 Every terminal logical-call transition also settles any linked transport
 attempt still recorded as `reserved` or `provider_created`. Owner-level media
 admission treats such an attempt as busy only while it is unbound or its linked
