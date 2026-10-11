@@ -1,5 +1,21 @@
 # HASHI Agent FYI
 
+October 11 shared-replacement cache follow-up: the newest physical HASHI3
+adoption exposed a restart path that the earlier cache reconciliation did not
+exercise. A changed-source restart took about 106.6 seconds preparing and the
+immediate unchanged-source repeat still took about 87.6 seconds. Both selected
+the same immutable Function generation, and the repeat reused its artifact in
+under one second, but the pre-start release process nevertheless rebuilt three
+source manifests and reran the isolated qualification probe.
+
+The cause is local to runtime_release.qualify_release(): unlike the in-process
+Worker supervisor, it persisted a qualified generation but never attempted to
+load that cache on the next shared Function replacement. The candidate now
+reuses the cache only after rechecking the exact runtime, current checkout
+bytes, immutable artifact, and configured observers. A miss still performs the
+complete isolated qualification and final commit checks. The focused regression
+is green; consecutive live restart timing remains the adoption gate.
+
 October 11 Call preview/streaming correction: the consolidated `debug-call`
 line had reintroduced four errors even though the older design decisions were
 still present. Local video replaced the Agent avatar, its flexible sizing let

@@ -199,6 +199,35 @@ an allowed degradation to audio-only; it is not treated as a failed Call start.
 
 HASHI4 was not rebooted.
 
+## Shared-replacement cache follow-up
+
+A later Call correction required a new HASHI3 Function generation and exposed
+one more distinct restart path. Operation 23e386ff… spent about 106.6 seconds
+preparing. The immediate unchanged-source operation e22ab3db… still spent
+about 87.6 seconds preparing. Their Workbench start/success ordering, four-second
+completion dismissal, non-resurrection, restoration, and terminal receipts were
+correct, but their timing failed the release gate.
+
+The second operation selected the same
+sha256:eef3850c4419fdf01b4e1e517f4141f9be61ee84b89b9445f499e64dc19d9842
+generation and materialized its existing artifact in about 0.97 seconds. It
+still spent about 38.2 seconds qualifying: initial manifest 8.9 seconds,
+isolated probe 15.6 seconds, and final manifest verification 12.4 seconds.
+
+This was not another missing branch. The earlier repair covered the live
+FunctionWorkerSupervisor cache path. Shared Function replacement first runs
+runtime_release.qualify_release() in a separate pre-start process, and that
+path always called the full probe before persisting the same cache again. It
+never attempted the qualified-cache read used by the supervisor.
+
+The release process now checks the persisted qualified generation first. Reuse
+is allowed only when the cache revalidates the exact current runtime, checkout
+bytes, immutable artifact, and configured observer set. A miss or observer
+change still runs the complete isolated qualification, materialization,
+persistence, and final commit checks. A focused regression recorded the former
+unconditional probe red and now passes. Consecutive live timing remains pending
+until this exact committed candidate is adopted.
+
 ## Rule for future integrations
 
 Future recovery branches must enumerate every local, remote-tracking, reflog, and
