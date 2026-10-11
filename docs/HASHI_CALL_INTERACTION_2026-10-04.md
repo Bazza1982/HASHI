@@ -1,5 +1,30 @@
 # Phone and Call interaction decision
 
+## 2026-10-11 authoritative debug-call recovery
+
+The user-approved current behavior is
+[HASHI /call Current Behavior Contract](HASHI_CALL_CURRENT_BEHAVIOR.md).
+It is the release checklist for the clean `debug-call` branch and supersedes
+every conflicting behavior below. In particular, video Call now requests the
+microphone and camera together on the initiating click; camera failure degrades
+that Call to audio-only. The former camera-off startup rule and fixed
+sentence/character answer limits are retired.
+
+Frontend Connector owns Workbench media, controls, captions, and connection
+sounds. PAO Call Function owns the bound Call, opening, typed speech projection,
+streaming order, and canonical Session boundary. Protected Core is unchanged.
+Models, reasoning, endpointing, default availability, and install-time
+deployment defaults are unchanged.
+
+The candidate passes 165/165 Workbench Call and Phone/live checks, 143/143
+HASHI3 Frontend Call checks, the complete Workbench server suite, production
+build, and protected-Core check. Physical HASHI3 acceptance verified immediate
+microphone/camera startup, same-call camera off/on, microphone mute/unmute,
+once-only opening, visible two-sided captions, natural Agent speech without
+stage directions, completed TTS playback, ringback termination after connection,
+hangup, and ended camera tracks. HASHI4 source, running adoption, and live
+observations remain separate facts; this authorization excludes a HASHI4 reboot.
+
 ## 2026-10-11 sentence-streamed speech and rolling captions
 
 PAO Call Function owns typed activity filtering, sentence/TTS ordering and
@@ -77,7 +102,11 @@ change to recognition alone cannot remove that wait.
 See [scoped evidence and decisions](repairs/CALL_LANGUAGE_LATENCY_20261010.md).
 Existing model configuration, capture restoration and camera opt-in are retained.
 
-## Current 2026-10-06 decision — independent entries on HASHI3
+## Historical 2026-10-06 decision — superseded startup behavior
+
+This section records the earlier independent-entry design. Its camera-off
+startup requirement is obsolete and must not be used as an assertion or release
+test after the 2026-10-11 contract above.
 
 The user approved replacing the shared next-call selector with two fixed
 entries. Frontend Connector owns the Functions readiness/start/settings change
@@ -85,7 +114,7 @@ and the matching external frontend presentation on `development/hashi3-20261006`
 
 - The phone icon always starts or returns to `/phone`; the camera-shaped icon
   always starts or returns to `/call`. Neither entry writes a route selection.
-- `/call` starts with its camera off, including when vision is configured.
+- Historical behavior: `/call` started with its camera off, including when vision was configured.
   Returning to an existing call does not enable its camera. The user enables
   camera sharing explicitly inside the call panel.
 - Unconfigured entries are absent. Readiness comes from the existing Phone
