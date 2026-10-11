@@ -91,6 +91,11 @@ numeric response-length requirements are retired.
 - **CALL-SPEECH-06** — TTS and visible Call captions use the same cleaned
   conversational text. The canonical PAO Session answer remains intact outside
   the Call presentation.
+- **CALL-SPEECH-07** — Direct Call admission declares Workbench as its
+  presentation surface while retaining Session API as the physical frontend
+  transport. Those facts are not interchangeable: public complete-sentence
+  answer previews and commentary must reach the Call speech queue before the
+  terminal answer whenever they become available.
 
 ## Captions and controls
 
@@ -105,6 +110,13 @@ numeric response-length requirements are retired.
 - **CALL-UI-04** — Preconnection shows Connecting. It must not claim that the
   microphone is paused or redirect to settings while normal connection work is
   still in progress.
+- **CALL-UI-05** — The local camera preview has stable geometry, fills its
+  bounded frame without pale side bars, and is mirrored horizontally. Caption
+  growth cannot resize or remove it. The selected Agent's avatar and identity
+  remain visible while local video is on.
+- **CALL-UI-06** — The Call panel renders one canonical rolling transcript from
+  PAO Call rows. Playback-only current-sentence state must not create a second
+  caption track or duplicate the same Agent answer.
 
 ## Turn safety, recovery, and termination
 
@@ -169,7 +181,7 @@ numeric response-length requirements are retired.
 | Ring/opening | timing/order tests and live speaker observation |
 | Spoken style | PCM guidance and deterministic Call-cleaning tests |
 | Streaming/fillers | FIFO, complete-sentence, cancellation, no-duplicate tests |
-| Captions/UI | rolling transcript, smart-follow, visual/browser tests |
+| Captions/UI | single rolling transcript, stable mirrored preview, retained Agent identity, smart-follow, visual/browser tests |
 | Recovery/hangup | existing noise, network, lifecycle, and settlement regressions |
 | H3 live | versioned frontend acceptance receipt plus real media observations |
 | H4 live | exact deployed artifact/source identity plus live observations, without reboot |

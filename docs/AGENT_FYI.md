@@ -1,5 +1,21 @@
 # HASHI Agent FYI
 
+October 11 Call preview/streaming correction: the consolidated `debug-call`
+line had reintroduced four errors even though the older design decisions were
+still present. Local video replaced the Agent avatar, its flexible sizing let
+captions collapse the preview, playback state created a second caption track,
+and direct Call labelled the presentation surface as `session-api`. The last
+error disabled Workbench answer previews and made speech wait for the terminal
+answer.
+
+The current candidate keeps a stable mirrored preview together with the Agent
+identity, renders one canonical rolling transcript, and distinguishes Workbench
+presentation from Session API transport. Public commentary and complete answer
+sentences enter the existing FIFO immediately. No additional historical branch
+is a merge input; wholesale merging would restore explicitly retired behavior.
+HASHI3 Frontend Call passes 144/144, Workbench Call passes 89/89, and the
+production client build passes. Live adoption remains a separate fact.
+
 October 11 restart-lifecycle correction: the expanded `debug-call` audit found
 two formal performance commits that the earlier audit had incorrectly called
 equivalent. They survive only under the retained

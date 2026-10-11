@@ -138,7 +138,7 @@ class HashiPorts:
                 request_metadata={
                     "session_id": binding["session_id"],
                     "owner_id": owner,
-                    "session_surface": "session-api",
+                    "session_surface": "workbench",
                     "session_channel_key": binding["client_id"],
                     "session_message_text": execution_text,
                     "session_message_display_text": text,

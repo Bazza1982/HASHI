@@ -666,8 +666,12 @@ class CallService:
         if len(parts) >= MAX_SPEECH_SEGMENTS:
             turn["speech_truncated"] = True
             return False
+        index = len(parts)
         parts.append(text)
         turn.setdefault("_speech_kinds", []).append(kind)
+        emit("speech_segment_queued", **self._facts(call, turn), segment=index,
+             speech_kind=str(kind or ""), queued_segments=len(parts),
+             text_chars=len(text))
         if (
             call.speech_index < 0
             and (not call.speech_task or call.speech_task.done())
@@ -682,8 +686,21 @@ class CallService:
             int(turn.get("_activity_sequence") or 0),
             int(run.get("activity_sequence") or 0),
         )
+        events = list(run.get("events") or ())
+        if events:
+            emit("activity_observed", **self._facts(call, turn),
+                 activity_sequence=int(turn.get("_activity_sequence") or 0),
+                 event_count=len(events),
+                 answer_preview_events=sum(
+                     event.get("delivery_class") == "answer_preview"
+                     for event in events
+                 ),
+                 commentary_events=sum(
+                     event.get("delivery_class") == "user_commentary"
+                     for event in events
+                 ))
         seen = turn.setdefault("_commentary_events", set())
-        for event in run.get("events") or ():
+        for event in events:
             owner = str(event.get("delivery_class") or "")
             channel = str(event.get("presentation_channel") or "")
             raw_content = str(event.get("summary") or event.get("detail") or "")

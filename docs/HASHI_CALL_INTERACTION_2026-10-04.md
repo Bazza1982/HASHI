@@ -19,6 +19,32 @@ streaming order, and canonical Session boundary. Protected Core is unchanged.
 Models, reasoning, endpointing, default availability, and install-time
 deployment defaults are unchanged.
 
+## 2026-10-11 preview, transcript, and streaming correction
+
+The follow-up regression was an integration error in the consolidated
+`debug-call` implementation, not a missing branch that should be merged
+wholesale. The Call renderer replaced the Agent avatar with local video, let
+the preview participate in caption flex sizing, and appended playback state to
+the already canonical PAO transcript. Separately, direct Call admission marked
+its presentation surface as `session-api`; the request pipeline therefore did
+not enable Workbench answer previews even though Session API correctly remained
+the physical transport.
+
+The corrected contract keeps a stable mirrored local preview, retains the Agent
+identity below it, and renders only canonical Call rows. Direct Call now declares
+the Workbench presentation surface while keeping the Session API transport
+identity. Public commentary and complete answer sentences enter the existing
+single speech FIFO as soon as observed; content-free diagnostics record activity
+and queued-segment timing without recording speech content.
+
+Focused red/green evidence covers the incorrect admission surface, duplicate
+caption source, stable mirrored preview with retained avatar, commentary speech
+before terminal completion, and a newly streamed sentence being prepared while
+current audio is still playing. The complete current Call suites pass 144/144
+on HASHI3 and 89/89 in Workbench; the production Workbench build also passes.
+Physical HASHI3 acceptance and later non-rebooted HASHI4 loading are separate
+release facts.
+
 The candidate passes the focused Workbench Call and Phone/live checks,
 143/143 HASHI3 Frontend Call checks, the complete Workbench server suite,
 production build, and protected-Core check. Physical HASHI3 acceptance verified

@@ -80,6 +80,9 @@ async def test_real_session_store_is_the_only_message_and_result_owner(tmp_path,
     from orchestrator.message_context import verify_connector_evidence, CONNECTOR_EVIDENCE_METADATA_KEY
     facts = verify_connector_evidence(tmp_path, evidence=captured[0][1]['request_metadata'][CONNECTOR_EVIDENCE_METADATA_KEY], prompt=captured[0][0])
     assert facts['call_media']['observation'] == 'The label says AC.'
+    metadata = captured[0][1]["request_metadata"]
+    assert metadata["session_surface"] == "workbench"
+    assert metadata["frontend_client"]["kind"] == "session_api"
     with pytest.raises(CallError):
         ports.validate("owner", {**binding, "context_generation": 999})
     with pytest.raises(Exception):
