@@ -1,6 +1,7 @@
 # Debug Call restart reconciliation — 2026-10-11
 
-Status: candidate on `debug-call`; offline checks pass, live HASHI3 adoption pending
+Status: adopted on HASHI3 from `debug-call`; offline and live restart gates pass;
+the post-restart Call smoke test remains separate
 
 Owner: PAO for Function generation and reboot receipts; Frontend Connector for
 Workbench restart presentation
@@ -14,8 +15,8 @@ Protected Core: unchanged
 After the first clean Call consolidation, live HASHI3 showed three restart
 regressions:
 
-- a first changed-source restart took about 80.7 seconds and a repeated restart
-  took about 25.4 seconds;
+- a first changed-source restart took about 80.0 seconds and an unchanged
+  repeat took about 36.5 seconds;
 - the completion banner could return after it had dismissed;
 - one committed restart logged a Windows access-denied error while replacing the
   receipt journal, although a later terminal write completed.
@@ -41,6 +42,17 @@ dependency-drift implementation; the current Function contract has a newer,
 stricter form that validates the exact standard lock while tolerating unrelated
 optional distributions.
 
+The final audit found no further formal branch to merge:
+
+- backend restart optimization `2e4a923c` and every later October commit that
+  touches Function generation are ancestors of `debug-call`;
+- Workbench restart fixes `716fae7`, `4aa68ad`, `55c1105`, `ce37d6d`,
+  `dea855e`, `87d5463`, `9618017`, `13715d2`, `ea67957`, `3de8e98`,
+  `c1b99c6`, and `b63c20f` are ancestors of `debug-call`;
+- recent Call branches are ancestors or patch-equivalent;
+- older HASHI2 Call and cloud-speech lines conflict with explicit current
+  requirements and remain excluded.
+
 ## Causes
 
 1. The earlier branch audit concentrated on recent local and `origin` refs.
@@ -54,6 +66,11 @@ optional distributions.
 4. The receipt journal correctly failed closed on disk errors, but Windows can
    transiently deny the atomic replace. That pre-commit condition had no
    bounded retry or focused test.
+5. Most importantly, deployment verification treated source, built generation,
+   and running shared Functions as if they were one fact. Agent-scoped
+   `/reboot` replaced Agent Workers but left the old shared Functions process
+   running. That old process still performed the expensive qualification path,
+   so the new cache was present on disk but absent from the live path.
 
 ## Repair
 
@@ -70,6 +87,12 @@ optional distributions.
   connection scope even if a newer restart has already replaced the polling
   target. The old timer cannot clear the newer operation, and later discovery
   cannot resurrect the older receipt.
+- Live adoption now has an explicit generation check. After a shared Function
+  change, the running Function PID and generation must match the qualified
+  candidate before restart timing can be accepted. An Agent Worker reboot alone
+  is not adoption evidence.
+- The live gate measures two consecutive operations and verifies the exact
+  target, message order, elapsed time, dismissal, and late polling behavior.
 
 ## Verification before live adoption
 
@@ -89,20 +112,44 @@ independent Python 3.14 environment. Four cases correctly reject that interprete
 because production requires Python 3.12.13. They must be exercised by HASHI3's
 supported live Function qualification; this mismatch is not waived.
 
-## Live gate
+## HASHI3 live adoption and restart evidence
 
-Before this candidate can be called complete:
+The first two runs exposed the adoption gap rather than validating the fix:
 
-1. commit the exact `debug-call` source;
-2. load it into HASHI3 only;
-3. observe one changed-source restart and one unchanged-generation restart;
-4. verify canonical start/completion messages and absence of receipt write
-   errors;
-5. verify the completion banner disappears after four elapsed seconds and does
-   not return on subsequent polling or command entry;
-6. run the post-restart Call smoke test;
-7. keep HASHI4 running without reboot.
+| Operation | Target | Running shared Function | Result |
+| --- | --- | --- | --- |
+| `f706c352655344aa9b969fa75d66a5d0` | Lumi | old generation | about 80.0 seconds |
+| `0bc235fb23f9406c84bfc8cfebc69461` | Lumi | old generation | about 36.5 seconds |
+
+The live source already contained commit `f19c3da4`, but the shared Function
+PID and generation were still the pre-fix values. The authorized HASHI3
+Function replacement then adopted generation
+`sha256:7a4278d783e38e980086e117f599180c38292f3cdbbf8af07d4635294cc8cb7c`
+under PID 53440. Core PID 29144 did not change, and all 11 Agents returned
+online.
+
+Post-adoption evidence:
+
+| Operation | Exact target | Duration | Qualification |
+| --- | --- | --- | --- |
+| `59e21395a6164b9fa4cc9464baadebee` | Portfolio Manager | about 14.8 seconds | performance evidence only; the UI coordinate selected the wrong Agent |
+| `2a1f42043a5b4e39951959fb0c56b561` | Lumi (`agent1`) | 12.2 seconds; preparing 8.6 seconds | exact acceptance run |
+
+For the exact Lumi run:
+
+- the receipt is committed, terminal, online, and has an empty failure reason;
+- the canonical “开始热重启…” message precedes
+  “Lumi (Chief of Staff)热重启成功，耗时12.2秒。”;
+- the top completion banner disappeared after its four-second display window;
+- it remained absent after later polling while the terminal receipt was still
+  discoverable, so there was no resurrection;
+- HASHI4 was not rebooted.
+
+The restart reconciliation is accepted. The remaining live gate for the larger
+`debug-call` repair is the post-restart Call smoke test.
 
 Future integrations must enumerate all local and remote-tracking refs, classify
 patch-unique commits by current semantics, and record two consecutive live
-restart timings. Passing a single restart or only unit tests is insufficient.
+restart timings. They must also compare the expected Function generation with
+the running shared generation. Passing a single restart, only unit tests, or
+only checking the live checkout is insufficient.
