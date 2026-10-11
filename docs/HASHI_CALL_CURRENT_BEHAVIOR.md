@@ -86,8 +86,12 @@ numeric response-length requirements are retired.
   bounded polling/retry behavior, and stops cleanly on user stop, mute,
   background, network suspension, or hangup.
 - **CALL-SPEECH-05** — Localized short fillers may acknowledge a long wait at
-  defined thresholds. They stop when answer speech arrives and never enter the
-  canonical answer, Session history, or transcript as Agent content.
+  defined thresholds. This includes a bounded inter-chunk grace period when the
+  next public answer chunk is already known but its TTS asset is not ready. The
+  approved prepared fillers may play in order to bridge an unusually long silent
+  gap, and the active filler is cut off as soon as answer audio is ready. Fillers
+  never enter the canonical answer, Session history, or transcript as Agent
+  content.
 - **CALL-SPEECH-06** — TTS and visible Call captions use the same cleaned
   conversational text. The canonical PAO Session answer remains intact outside
   the Call presentation.

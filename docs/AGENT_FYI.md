@@ -9,7 +9,10 @@ Session. Connected speech stops dial/ringback. Local video is mirrored in a
 stable bounded preview while the Agent avatar and identity remain visible.
 Captions use one canonical rolling PAO transcript. Public commentary and
 complete answer chunks enter the same speech FIFO, with natural playable
-chunking and no stage directions or artificial sentence gaps.
+chunking and no stage directions or artificial sentence gaps. If a known next
+chunk is still synthesizing after the bounded playback grace period, the
+approved prepared localized fillers may bridge the silence in order and stop as
+soon as answer audio is ready; they never create another caption or Session row.
 
 The same candidate retains the recovered restart work: immutable qualified
 generations are reused only after exact runtime/source/artifact checks;

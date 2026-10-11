@@ -1,7 +1,8 @@
 # Call speech pacing reconciliation — 2026-10-11
 
-Status: implementation and offline checks pass on `debug-call`; running
-adoption and physical acceptance are separate receipts.
+Status: implementation, focused checks, and HASHI3 physical acceptance pass on
+`debug-call`; exact candidate identity and any HASHI4 load remain separate
+receipts.
 
 Owner: Frontend Connector Call Function
 
@@ -51,6 +52,23 @@ overestimated the playable duration of the first English chunk.
 The minimum natural chunk is an internal presentation bound, not a response
 length rule. It does not shorten or rewrite the Agent answer.
 
+## Inter-chunk wait correction
+
+A later physical trace found one remaining 5.284-second silence. The next final
+chunk was already public, but it arrived late in the preceding commentary audio
+and its selected-voice TTS took about 4.4 seconds. Browser polling and concurrent
+camera/snapshot traffic extended the wait. The one-segment lookahead was loaded
+and worked whenever enough audio lead existed; widening lookahead or weakening
+the 1.5-second gate would therefore hide the failure rather than fix it.
+
+Workbench now prefetches the three already-approved localized filler assets for
+the active turn. When a known next speech asset is still unavailable after a
+bounded 250 ms grace period, those prepared clips may play in order to bridge
+the silent interval. The real answer interrupts the active clip as soon as it
+becomes ready. This bridge does not enter PAO rows, Call captions, Session
+history, or the answer text, and it does not permit more than one answer segment
+of lookahead.
+
 ## Regression gates
 
 The old assertions that required one synthesis item per sentence were replaced
@@ -61,11 +79,17 @@ pathological output.
 
 The focused red reproduction failed the exact English physical reply against
 the previous implementation, in addition to the earlier short-sentence red
-cases. After the duration-aware correction, the complete Frontend Call suite
-passes 151/151. The Protected Core check passes. The physical receipt must
+cases. After the duration-aware correction, the HASHI3 Frontend Call suite
+passes 154/154 and the Workbench focused Call suite passes 93/93. The Protected
+Core check passes. The physical receipt must
 measure only playback gaps whose next segment was already present before the
 current audio ended; it must exclude time in which the Agent was still working
-and no next public segment existed.
+and no next public segment existed. Workbench also covers a slow known next
+sentence with deterministic red/green tests: prepared filler playback begins,
+continues to the next prepared clip when needed, creates no transcript row, and
+yields immediately to the ready FIFO answer. The latest physical HASHI3 run
+passes all 18 media, presentation, speech, commentary, control, and cleanup
+gates.
 
 ## Release boundary
 
