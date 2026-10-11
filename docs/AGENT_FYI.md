@@ -11,41 +11,63 @@ optimization is already an ancestor. Recent Workbench branches remain ancestors,
 patch-equivalent, or semantically superseded; the divergent
 `fix/nightly-nonvoice-20261003` line must not be merged wholesale.
 
-The same correction hardens two observed boundaries. A late success-banner
-timer now remembers the dismissed operation even after a newer reboot becomes
-the active target, so polling cannot resurrect it or clear the newer result.
-Receipt persistence boundedly retries only transient Windows pre-commit replace
-denials; permanent and post-commit failures remain visible. Cache checks,
-receipt failure-boundary checks, the complete reboot-manager suite, the new
-late-dismissal integration reproduction, and the protected-Core gate pass.
-Repeated live HASHI3 restart timing and post-restart Call remain the adoption
-gate. See `docs/repairs/DEBUG_CALL_RESTART_RECONCILIATION_20261011.md`.
+The later 37-second live regression was not another missing branch. Two newer
+API paths bypassed the recovered cache: a generation returned by
+`qualified_generation()` was immediately source-verified again by
+`prepare_generation()`, and Worker preparation called the uncached dependency
+digest directly. The trusted immediate handoff now skips only that duplicate
+first check; default and untrusted callers still verify, and the final
+pre-cutover source verification remains. Workers now use the authoritative
+current runtime-fingerprint cache.
+
+The same correction hardens two observed presentation and persistence
+boundaries. A late success-banner timer remembers the dismissed operation even
+after a newer reboot becomes the active target, so polling cannot resurrect it
+or clear the newer result. Receipt persistence boundedly retries only transient
+Windows pre-commit replace denials; permanent and post-commit failures remain
+visible. Three focused red/green checks, the 129-case expanded restart suite,
+and the protected-Core gate pass.
+
+The exact HASHI3 `debug-call` candidate then completed three real Lumi restarts
+in 17.4 seconds after the cold instance start, 14.3 seconds, and 9.8 seconds.
+Canonical start preceded success; the completion banner remained for about four
+seconds, dismissed automatically, and did not return on later polling. A
+post-restart physical Electron Phone-entry test opened video-first, preserved
+camera off/on and microphone mute/unmute, used natural telephone speech, and
+released media on hangup. See
+`docs/repairs/DEBUG_CALL_RESTART_RECONCILIATION_20261011.md`.
 
 October 11 authoritative `debug-call` recovery: the clean candidate is defined
 by [the current behavior contract](HASHI_CALL_CURRENT_BEHAVIOR.md), which
-supersedes conflicting historical Call notes. A video-call click immediately
-starts microphone and camera acquisition in one action; camera denial or device
-failure degrades the same call to audio-only. Camera off/on, microphone
-mute/unmute, captions, speech, and hangup retain the same Call and Session
-binding. Dial/ringback stops before connected speech or microphone admission.
+supersedes conflicting historical Call notes. Both fixed Phone and video
+controls start the same video-first direct Call. Either click immediately starts
+microphone and camera acquisition; camera denial or device failure degrades the
+same call to audio-only. An unresolved route is refreshed on foreground and
+rechecked on click, and legacy Phone is used only after direct Call is confirmed
+unavailable. Camera off/on, microphone mute/unmute, captions, speech, and hangup
+retain the same Call and Session binding. Dial/ringback stops before connected
+speech or microphone admission.
 Call presentation uses natural spoken language and removes stage directions
 from Call captions and TTS while preserving the canonical PAO Session answer.
 Models, reasoning, endpointing, default availability, and installation-template
 behavior are unchanged.
 
-The exact HASHI3 candidate is on `debug-call`. Workbench Call and Phone/live
-checks pass 165/165, HASHI3 Frontend Call passes 143/143, the complete Workbench
-server suite and production build pass, and the protected-Core check is clean.
-Real HASHI3 browser acceptance used the physical LifeCam microphone/camera and
-speaker: the Call window appeared in 62 ms, live camera was available in about
-1.1-1.2 seconds, camera off/on and microphone mute/unmute worked in the same
-call, one microphone turn produced visible caller/Agent captions and completed
-TTS playback, and hangup ended the camera track. Browser sound-source
-observation found no new ringback starts during the four seconds after the call
-became ready. The established controls, rolling captions, and once-only opening
-remained present across repeated calls.
+The exact HASHI3 candidate is on `debug-call`. Focused Workbench Call and
+Phone/live checks pass, HASHI3 Frontend Call passes 143/143, the complete
+Workbench server suite and production build pass, and the protected-Core check
+is clean. Real HASHI3 acceptance used the physical LifeCam microphone/camera and
+speaker. It verified both fixed launch entries, immediate video-first startup,
+same-call camera off/on and microphone mute/unmute, caller/Agent captions,
+completed TTS playback, ringback termination, and media release on hangup. The
+established controls, rolling captions, natural telephone speech, and once-only
+opening remained present.
 
 The shared Workbench service is running the verified `debug-call` client.
+Service identity alone is not enough: the final acceptance relaunched Workbench
+through its official launcher, verified the newly created renderer emitted the
+expected direct Call route request, and then ran the physical Phone-entry test.
+Source, build, service, shared Function generation, and loaded renderer are
+separate release facts.
 HASHI4 source is loaded on its own `debug-call` branch. Its product, contract,
 and test blobs match the HASHI3 candidate; the protected-Core check is clean,
 and the exact HASHI4 tree passes 143/143 Frontend Call checks in an isolated

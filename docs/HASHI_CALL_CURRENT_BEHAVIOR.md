@@ -13,15 +13,19 @@ numeric response-length requirements are retired.
 
 ## Entry, availability, and binding
 
-- **CALL-ENTRY-01** — Workbench shows independent fixed Phone and video Call
-  controls with the established icons, focus treatment, and usable touch targets.
-  Phone behavior remains unchanged.
-- **CALL-ENTRY-02** — Video Call binds to the currently selected Agent,
+- **CALL-ENTRY-01** — Workbench shows the established fixed Phone and video Call
+  controls with their icons, focus treatment, and usable touch targets. Either
+  control starts or returns to the same direct, video-first Call. The legacy
+  Phone route is only a compatibility fallback after direct Call is confirmed
+  unavailable.
+- **CALL-ENTRY-02** — Direct Call binds to the currently selected Agent,
   connection, Session, and context generation. Changing the reading view during
   a call does not silently rebind the live call.
 - **CALL-ENTRY-03** — Current `call_ready` is authoritative. A retired stored
-  route cannot block direct Call. Phone is the fallback only when direct Call is
-  unavailable.
+  route cannot block direct Call. An unresolved route is refreshed when the
+  Workbench returns to the foreground and rechecked from either launch click; it
+  must not be treated as unavailable. Phone fallback is allowed only after a
+  current check confirms direct Call is unavailable.
 - **CALL-ENTRY-04** — Busy state prevents a second call. Existing calls remain
   returnable and endable. Unconfigured or explicitly disabled Call stays hidden.
 - **CALL-ENTRY-05** — Call remains available by default in the installed
@@ -30,8 +34,9 @@ numeric response-length requirements are retired.
 
 ## Immediate media startup and degradation
 
-- **CALL-MEDIA-01** — A video Call click immediately displays Connecting and
-  begins microphone and camera acquisition in that same user action. Context and
+- **CALL-MEDIA-01** — Either fixed launch control immediately displays
+  Connecting and begins microphone and camera acquisition in that same user
+  action. Camera is part of Call startup, not a later optional mode. Context and
   server startup may proceed concurrently; they must not postpone the device
   permission request.
 - **CALL-MEDIA-02** — Media acquired while the Agent opening is pending is held
@@ -119,7 +124,9 @@ numeric response-length requirements are retired.
 
 - **CALL-REL-01** — Workbench static assets, Workbench Call proxy, and PAO Call
   Function changes are versioned and adopted together. Source, built artifact,
-  and running generation are reported as separate facts.
+  running service/generation, and the code loaded by an already-open Electron
+  renderer are reported as separate facts. A service restart alone does not
+  prove that an existing renderer adopted the new client.
 - **CALL-REL-02** — Every changed behavior has a focused regression test.
   Previously correct Call tests remain present; obsolete tests that assert
   retired behavior are removed or rewritten against this contract.
@@ -135,10 +142,16 @@ numeric response-length requirements are retired.
 
 ## 2026-10-11 verified checkpoint
 
-- HASHI3: exact Function candidate hot-adopted; 143/143 focused checks and the
-  complete physical microphone/camera/speaker Call path passed.
-- Workbench: exact `debug-call` client/proxy candidate; 165/165 focused checks,
-  complete server suite, production build, and real H3/H4 browser controls passed.
+- HASHI3: exact `debug-call` Function candidate at `d1a872c8` is running.
+  The 129-case expanded restart suite, 143/143 focused Call checks, three live
+  restarts (17.4 seconds cold, 14.3 seconds, 9.8 seconds), and the complete
+  physical microphone/camera/speaker Call path passed.
+- Workbench: exact `debug-call` client/proxy candidate; focused Call/Phone/live
+  checks, complete server suite, and production build passed. A newly launched
+  Electron renderer verified that either fixed entry starts video-first,
+  camera and microphone controls remain reversible, and hangup releases media.
+  The Phone-entry physical smoke test was repeated after the final HASHI3
+  restart integration and passed.
 - HASHI4 source: `debug-call`; product/contract/test blobs match HASHI3 and the
   isolated exact tree passes 143/143 focused checks.
 - HASHI4 runtime: no reboot and no new Function-generation adoption. Live
