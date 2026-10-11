@@ -170,6 +170,37 @@ class HashiPorts:
             "message_id": run["user_message_id"],
         }
 
+    async def cancel(self, owner, binding, *, request_id, run_id, reason):
+        """Cancel exactly one admitted Call Run through PAO's existing fence."""
+
+        try:
+            run = self.api.session_store.get_run_by_request(
+                str(request_id), owner_id=owner, agent_id=binding["agent_id"]
+            )
+        except Exception as exc:
+            raise CallError("call_run_cancel_scope_changed", 409) from exc
+        if (
+            run["run_id"] != str(run_id)
+            or run["session_id"] != binding["session_id"]
+            or run["context_generation"] != binding["context_generation"]
+        ):
+            raise CallError("call_run_cancel_scope_changed", 409)
+        cancel = getattr(self.api, "_cancel_selected_run_result", None)
+        if not callable(cancel):
+            raise CallError("call_run_cancel_unavailable", 503)
+        try:
+            result, status = await cancel(
+                run,
+                owner_id=owner,
+                reason=str(reason or "call_ended")[:160],
+                source="call.hangup",
+            )
+        except Exception as exc:
+            raise CallError("call_run_cancel_outcome_unknown", 502) from exc
+        if status not in {200, 202} or not result.get("ok"):
+            raise CallError("call_run_cancel_rejected", int(status or 409))
+        return result
+
     @staticmethod
     def _project_activity(activity, after_sequence):
         activity_sequence = max(0, int(after_sequence or 0))

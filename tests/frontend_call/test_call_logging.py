@@ -202,7 +202,7 @@ async def test_turn_timing_correlates_pao_and_tts_and_never_logs_speech(tmp_path
     await service.close()
 
 
-async def test_ending_during_admission_preserves_uncertain_request_and_records_detach(tmp_path, caplog):
+async def test_ending_during_admission_resolves_identity_then_cancels_exact_run(tmp_path, caplog):
     caplog.set_level(logging.INFO, logger=diagnostics.logger.name)
     service, ports, _, base, _ = setup(tmp_path)
     began, release = asyncio.Event(), asyncio.Event()
@@ -224,9 +224,49 @@ async def test_ending_during_admission_preserves_uncertain_request_and_records_d
     release.set()
     await finish_task(service)
     assert len(ports.accepted) == 1
+    assert ports.cancelled == [{
+        "owner": "owner", "agent_id": "agent-a", "session_id": "sess-a",
+        "request_id": "req-1", "run_id": "run-1", "reason": "explicit_end",
+    }]
     detached = events(caplog, "turn_detached")[-1]
     assert detached["reason"] == "call_ended" and detached["run_id"] == "run-1"
     assert not events(caplog, "turn_cancelled")
+    cancelled = events(caplog, "run_cancel_completed")[-1]
+    assert cancelled["request_id"] == "req-1" and cancelled["run_id"] == "run-1"
+    await service.close()
+
+
+async def test_hangup_cancels_only_the_known_call_run(tmp_path, caplog):
+    caplog.set_level(logging.INFO, logger=diagnostics.logger.name)
+    service, ports, _, base, _ = setup(tmp_path)
+    ports.finished = False
+    binding, _, _ = await start(service, base)
+    await service.invoke("owner", {
+        **binding, "operation": "turn", "turn_id": "turn-1", "sequence": 1,
+        "audio_b64": wav(),
+    })
+    for _ in range(100):
+        if service.calls["call-1"].turn.get("phase") == "thinking":
+            break
+        await asyncio.sleep(0)
+    assert service.calls["call-1"].turn["phase"] == "thinking"
+
+    ended = await service.invoke("owner", {**binding, "operation": "end"})
+    await finish_task(service)
+    cancel_task = getattr(service.calls["call-1"], "cancel_task", None)
+    if cancel_task:
+        await cancel_task
+
+    assert ended["phase"] == "ended"
+    assert ports.cancelled == [{
+        "owner": "owner", "agent_id": "agent-a", "session_id": "sess-a",
+        "request_id": "req-1", "run_id": "run-1", "reason": "explicit_end",
+    }]
+    requested = events(caplog, "run_cancel_requested")[-1]
+    completed = events(caplog, "run_cancel_completed")[-1]
+    assert requested["request_id"] == completed["request_id"] == "req-1"
+    assert requested["run_id"] == completed["run_id"] == "run-1"
+    assert events(caplog, "turn_cancelled")[-1]["reason"] == "call_ended"
     await service.close()
 
 

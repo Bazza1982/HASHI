@@ -49,6 +49,7 @@ def document(location="local"):
 class Ports:
     def __init__(self):
         self.accepted = []
+        self.cancelled = []
         self.phone = False
         self.level = 1
         self.valid = True
@@ -67,6 +68,24 @@ class Ports:
     async def admit(self, owner, binding, turn, text, observation, captured_at):
         self.accepted.append((turn, text, observation, captured_at))
         return {"run_id": "run-1", "request_id": "req-1", "message_id": "msg-1"}
+
+    async def cancel(self, owner, binding, *, request_id, run_id, reason):
+        self.cancelled.append({
+            "owner": owner,
+            "agent_id": binding["agent_id"],
+            "session_id": binding["session_id"],
+            "request_id": request_id,
+            "run_id": run_id,
+            "reason": reason,
+        })
+        return {
+            "ok": True,
+            "request_id": request_id,
+            "run_id": run_id,
+            "session_id": binding["session_id"],
+            "status": "cancellation_requested",
+            "terminal": False,
+        }
 
     def result(self, *args):
         return {

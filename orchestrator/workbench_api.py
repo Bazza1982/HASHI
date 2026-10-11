@@ -5318,7 +5318,9 @@ class WorkbenchApiServer:
         )
         return web.json_response(payload)
 
-    async def _cancel_selected_run(self, run, *, owner_id: str, reason: str, source: str):
+    async def _cancel_selected_run_result(self, run, *, owner_id: str, reason: str, source: str):
+        """Cancel one PAO-selected Run without coupling the result to HTTP."""
+
         def audit(status, error_code=""):
             self.session_store.record_run_control(
                 run["run_id"], owner_id=owner_id, source=source, status=status,
@@ -5330,10 +5332,8 @@ class WorkbenchApiServer:
         cancel = getattr(runtime, "cancel_session_run", None) if runtime is not None else None
         if not callable(cancel):
             audit("unavailable", "run_cancel_unavailable")
-            return web.json_response(
-                {"ok": False, "error_code": "run_cancel_unavailable",
-                 "error": "The selected Agent Worker is unavailable."}, status=503,
-            )
+            return ({"ok": False, "error_code": "run_cancel_unavailable",
+                     "error": "The selected Agent Worker is unavailable."}, 503)
         try:
             result = await cancel(
                 owner_id=owner_id, session_id=run["session_id"],
@@ -5345,6 +5345,12 @@ class WorkbenchApiServer:
         audit(str(result.get("status") or "outcome_unknown"), str(result.get("error_code") or ""))
         status = 200 if result.get("ok") and result.get("terminal") else (
             202 if result.get("ok") else 409
+        )
+        return dict(result), status
+
+    async def _cancel_selected_run(self, run, *, owner_id: str, reason: str, source: str):
+        result, status = await self._cancel_selected_run_result(
+            run, owner_id=owner_id, reason=reason, source=source,
         )
         return web.json_response(result, status=status)
 

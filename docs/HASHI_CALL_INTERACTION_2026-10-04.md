@@ -475,6 +475,22 @@ generation runs on all five Workers, service health is ready, and Core PID,
 runtime and protected source are unchanged. Actual camera continuity,
 recognition accuracy and conversation latency remain open user acceptance.
 
+## 2026-10-11 Call-owned Run termination correction
+
+A live HASHI3 replacement exposed an admitted Call Run that survived hangup
+and continued as real Provider work. Shared Function quiescence correctly
+protected it, then timed out after 120 seconds. Branch history confirmed that
+the restart and Call repair lines were already present; this was a missing
+lifecycle requirement rather than another merge omission.
+
+Call keeps the admission-race safety boundary: it does not cancel while PAO's
+acceptance identity is unknown. Once the exact request and Run IDs resolve,
+hangup uses PAO's existing targeted Run fence and records the control outcome.
+An already-known Call Run is cancelled at once. No session-wide or Agent-wide
+stop is introduced, and unrelated foreground or background work remains
+protected. The former test that required the admitted request to detach after
+hangup is retired in favor of exact-scope red/green coverage.
+
 ## 2026-10-05 approved call latency repair
 
 The user approved eliminating unnecessary waits, preserving the selected

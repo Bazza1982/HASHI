@@ -101,6 +101,53 @@ async def test_phone_start_guard_is_opt_in_and_checks_before_provider_use(tmp_pa
 
 
 @pytest.mark.anyio
+async def test_call_cancel_uses_exact_pao_run_fence(tmp_path):
+    store = SessionStore(tmp_path / "sessions.db", instance_id="TEST")
+    session = store.create_session(owner_id="owner", agent_id="lily", title="Call")
+    accepted = store.accept_run(
+        session_id=session["session_id"], owner_id="owner", agent_id="lily",
+        request_id="request-1", text="Keep this exact request scoped.",
+        source="session-api", idempotency_key="call:call-1:turn-1",
+        expected_context_generation=session["context_generation"],
+    )
+    selected = []
+
+    async def cancel_selected_run(run, **kwargs):
+        selected.append((dict(run), kwargs))
+        return ({
+            "ok": True, "request_id": run["request_id"],
+            "run_id": run["run_id"], "session_id": run["session_id"],
+            "status": "cancellation_requested", "terminal": False,
+        }, 202)
+
+    api = SimpleNamespace(
+        session_store=store,
+        _cancel_selected_run_result=cancel_selected_run,
+    )
+    binding = {
+        "agent_id": "lily", "session_id": session["session_id"],
+        "context_generation": session["context_generation"],
+        "call_id": "call-1", "client_id": "client-1",
+    }
+    result = await HashiPorts(api).cancel(
+        "owner", binding, request_id=accepted.request_id,
+        run_id=accepted.run_id, reason="explicit_end",
+    )
+    assert result["status"] == "cancellation_requested"
+    assert selected[0][0]["request_id"] == "request-1"
+    assert selected[0][1] == {
+        "owner_id": "owner", "reason": "explicit_end", "source": "call.hangup",
+    }
+
+    with pytest.raises(CallError, match="call_run_cancel_scope_changed"):
+        await HashiPorts(api).cancel(
+            "owner", binding, request_id=accepted.request_id,
+            run_id="another-run", reason="explicit_end",
+        )
+    assert len(selected) == 1
+
+
+@pytest.mark.anyio
 async def test_call_opening_uses_typed_tool_free_speech_without_creating_a_user_run(tmp_path, monkeypatch):
     store = SessionStore(tmp_path / "sessions.db", instance_id="TEST")
     session = store.create_session(owner_id="owner", agent_id="lily", title="Call")

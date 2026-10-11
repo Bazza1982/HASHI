@@ -145,6 +145,11 @@ numeric response-length requirements are retired.
 - **CALL-SAFE-04** — Hangup settles the exact call ID. A pending start is ended
   after it resolves; an unconfirmed end remains retryable and cannot start a new
   call over the old binding.
+- **CALL-SAFE-05** — Hangup also stops the exact PAO Run admitted by that Call.
+  If admission identity is still uncertain, Call waits only until the accepted
+  request and Run IDs are known, then uses PAO's targeted cancellation fence.
+  It never converts hangup into an Agent-wide stop and never cancels unrelated
+  foreground or background work.
 
 ## Release and evidence gate
 

@@ -46,6 +46,8 @@ class Call:
     sequence: int = 0
     turn: dict = field(default_factory=dict)
     task: asyncio.Task | None = None
+    cancel_task: asyncio.Task | None = None
+    end_reason: str = ""
     speech_task: asyncio.Task | None = None
     speech_index: int = -1
     speech_cache: dict = field(default_factory=dict)
@@ -112,11 +114,21 @@ class CallService:
         call.phase = "ended"
         call.expires = self.clock()
         if ending:
+            call.end_reason = reason
             emit("call_ended", **self._facts(call, call.turn), reason=reason,
                  phase=call.phase, turn_phase=call.turn.get("phase"), camera_enabled=call.camera_enabled,
                  camera_epoch=call.camera_epoch, admission_in_flight=call.turn.get("phase") == "submitting",
                  call_duration_ms=elapsed_ms(self.clock, call.started))
-        # Once PAO admission starts, do not cancel an uncertain accepted request.
+        # Once identity is known, stop exactly this Call-owned PAO Run. During
+        # admission its identity is still uncertain, so _run requests the same
+        # targeted cancellation immediately after admission resolves.
+        if (
+            call.turn.get("request_id")
+            and call.turn.get("run_id")
+            and call.turn.get("phase") not in {"complete", "failed"}
+        ):
+            self._request_run_cancel(call, call.turn, call.end_reason or reason)
+        # Never cancel an admission whose acceptance identity is still unknown.
         if call.task and call.turn.get("phase") != "submitting":
             if call.task.cancel():
                 emit("turn_cancel_requested", **self._facts(call, call.turn), reason=reason, turn_phase=call.turn.get("phase"))
@@ -129,6 +141,50 @@ class CallService:
         call.speech_cache.clear()
         call.filler_cache.clear()
         self._camera_off(call, reason="call_ended")
+
+    def _request_run_cancel(self, call, turn, reason):
+        if not turn.get("request_id") or not turn.get("run_id"):
+            return None
+        if turn.get("_run_cancel_requested"):
+            return call.cancel_task
+        turn["_run_cancel_requested"] = True
+        call.cancel_task = asyncio.create_task(
+            self._cancel_admitted_run(call, turn, reason)
+        )
+        return call.cancel_task
+
+    async def _cancel_admitted_run(self, call, turn, reason):
+        started = self.clock()
+        emit("run_cancel_requested", **self._facts(call, turn),
+             stage="run_result", reason=reason)
+        try:
+            with diagnostic_context(**self._facts(call, turn), stage="run_result"):
+                result = await self.ports.cancel(
+                    call.owner,
+                    call.binding,
+                    request_id=turn["request_id"],
+                    run_id=turn["run_id"],
+                    reason=reason,
+                )
+            emit("run_cancel_completed", **self._facts(call, turn),
+                 stage="run_result", reason=reason,
+                 run_state=str(result.get("status") or "outcome_unknown"),
+                 terminal=bool(result.get("terminal")),
+                 duration_ms=elapsed_ms(self.clock, started))
+            return result
+        except asyncio.CancelledError:
+            turn["_run_cancel_requested"] = False
+            emit("run_cancel_cancelled", **self._facts(call, turn),
+                 stage="run_result", reason="task_cancelled",
+                 duration_ms=elapsed_ms(self.clock, started))
+            raise
+        except Exception as exc:
+            turn["_run_cancel_requested"] = False
+            emit("run_cancel_failed", **self._facts(call, turn),
+                 stage="run_result", reason=reason,
+                 duration_ms=elapsed_ms(self.clock, started),
+                 **error_facts(exc, "call_run_cancel_failed"))
+            return None
 
     def _camera_off(self, call, reason="camera_disabled"):
         changed = call.camera_enabled or bool(call.vision_pending) or bool(call.observation)
@@ -150,7 +206,10 @@ class CallService:
         tasks = []
         for call in self.calls.values():
             self._end(call, "service_shutdown")
-            tasks += [t for t in (call.task, call.speech_task, call.filler_task, call.vision_task) if t]
+            tasks += [t for t in (
+                call.task, call.cancel_task, call.speech_task,
+                call.filler_task, call.vision_task,
+            ) if t]
         if tasks:
             done, pending = await asyncio.wait(tasks, timeout=5)
             if pending:
@@ -939,6 +998,15 @@ class CallService:
                 {"speaker": "user", "text": text, "turn_id": turn["turn_id"]}
             )
             stage, stage_started = "run_result", self.clock()
+            if call.phase != "active":
+                cancel_task = self._request_run_cancel(
+                    call, turn, call.end_reason or "call_ended"
+                )
+                if cancel_task:
+                    await cancel_task
+                emit("turn_detached", **self._facts(call, turn), stage=stage,
+                     reason="call_ended", duration_ms=elapsed_ms(self.clock, start))
+                return
             last_state = None
             while call.phase == "active":
                 self.ports.validate(call.owner, call.binding)
