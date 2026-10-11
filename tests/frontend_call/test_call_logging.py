@@ -27,6 +27,37 @@ def events(caplog, event=None):
     return [row for row in rows if event is None or row["event"] == event]
 
 
+def test_incremental_speech_diagnostics_keep_timing_facts_without_text(caplog):
+    caplog.set_level(logging.INFO, logger=diagnostics.logger.name)
+    diagnostics.emit(
+        "speech_segment_queued",
+        call_id="call-1",
+        turn_id="turn-1",
+        segment=2,
+        speech_kind="commentary",
+        queued_segments=3,
+        private_text="PRIVATE_COMMENTARY",
+    )
+    diagnostics.emit(
+        "activity_observed",
+        call_id="call-1",
+        turn_id="turn-1",
+        activity_sequence=4,
+        event_count=5,
+        answer_preview_events=1,
+        commentary_events=2,
+        private_text="PRIVATE_ACTIVITY",
+    )
+
+    queued = events(caplog, "speech_segment_queued")[-1]
+    assert queued["speech_kind"] == "commentary"
+    assert queued["segment"] == 2 and queued["queued_segments"] == 3
+    observed = events(caplog, "activity_observed")[-1]
+    assert observed["activity_sequence"] == 4 and observed["event_count"] == 5
+    assert observed["answer_preview_events"] == 1 and observed["commentary_events"] == 2
+    assert "PRIVATE_COMMENTARY" not in caplog.text and "PRIVATE_ACTIVITY" not in caplog.text
+
+
 async def test_shared_call_diagnostics_reach_existing_durable_bridge_journal(tmp_path):
     from orchestrator.bootstrap_logging import setup_bridge_file_logging
 
