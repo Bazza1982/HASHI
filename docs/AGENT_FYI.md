@@ -22,6 +22,9 @@ Stop speaking remains visible and clickable with video and rolling captions at
 qualified GPT Live per-minute rate; Call counts only STT/TTS media. Backend text
 stays in `/metre`, Call vision stays excluded, and non-provider figures are
 visibly marked as estimates.
+Provider-declared Phone content-policy closure is terminal: show the explicit
+content-filter reason, release the foreground line, and do not reconnect the
+same rejected context as though the service were temporarily unavailable.
 
 The same candidate retains the recovered restart work: immutable qualified
 generations are reused only after exact runtime/source/artifact checks;

@@ -49,6 +49,9 @@ PROVIDER_SESSION_MAX_DURATION_SECONDS = 1800
 PROVIDER_SESSION_ROLLOVER_MARGIN_SECONDS = 90
 TERMINAL_PHASES = {"ended", "failed", "interrupted"}
 CALL_EVENT_SCHEMA = "hashi.live_voice.event.v1"
+TERMINAL_PROVIDER_CLOSE_ERRORS = {
+    "content": "live_provider_content_filtered",
+}
 
 
 def render_live_call_record(segments: list[Mapping[str, Any]]) -> str:
@@ -3968,6 +3971,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
     def _mark_terminal(
         self, binding: CallBinding, phase: str, *, provider_close_state: str,
         summary: str, usage: Mapping[str, Any] | None = None,
+        error_code: str | None = None,
     ) -> None:
         public_usage = _public_usage(usage)
         became_terminal = False
@@ -4019,8 +4023,13 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 (phase, _utc_now(), provider_close_state,
                  json.dumps(public_usage) if public_usage is not None else None, binding.call_id),
             )
-            self._append_call_state(connection, binding, phase, summary,
-                                    provider_close_state=provider_close_state, usage=public_usage)
+            state_detail: dict[str, Any] = {
+                "provider_close_state": provider_close_state,
+                "usage": public_usage,
+            }
+            if error_code:
+                state_detail["error_code"] = error_code
+            self._append_call_state(connection, binding, phase, summary, **state_detail)
             became_terminal = True
         if became_terminal:
             self._cascade_generations.pop(
@@ -4417,6 +4426,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                         elif event_type == "provider.closed":
                             confirmed_close = True
                             provider_reason = _provider_close_reason(event)
+                            terminal_error_code = TERMINAL_PROVIDER_CLOSE_ERRORS.get(provider_reason)
                             self.audit.record(binding, "provider.session_closed",
                                               provider_reason=provider_reason,
                                               provider_close_state="confirmed", usage=_event_usage(event))
@@ -4428,6 +4438,15 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                             if call is not None and call["termination_initiator"] == "user" and call["termination_reason"] == "user_hangup":
                                 self._mark_terminal(binding, "ended", provider_close_state="confirmed",
                                                     summary="User ended the live phone call", usage=_event_usage(event))
+                            elif terminal_error_code:
+                                self._mark_terminal(
+                                    binding,
+                                    "failed",
+                                    provider_close_state="confirmed",
+                                    summary="Voice provider content filter ended the live phone call",
+                                    usage=_event_usage(event),
+                                    error_code=terminal_error_code,
+                                )
                             else:
                                 self._mark_recovering(binding, reason="provider_session_closed",
                                                       summary="Provider transport closed; logical phone remains open",
