@@ -1,5 +1,21 @@
 # HASHI Agent FYI
 
+October 11 restart-lifecycle follow-up: the final `debug-call` audit found no
+additional formal repair branch to merge. Recent Workbench and HASHI repair
+branches are ancestors or patch-equivalent; the older
+`fix/nightly-nonvoice-20261003` line is divergent and would remove later
+approved fixes if merged wholesale. Its required immediate-media behavior is
+already retained by the current Call implementation and checks. The remaining
+restart regression was a shared Frontend Connector gap: a recent terminal
+receipt retained by PAO could be presented as new after changing connections,
+and polling could resurrect it after dismissal. A newly active connection now
+baselines its existing terminal receipt, while active and subsequently created
+operations remain visible. Dismissal is durable for the operation, and confirmed
+success uses a four-second elapsed-time deadline even when renderer visibility
+changes. Focused lifecycle checks, full UI policy, complete Call/Phone/voice
+checks, production build, and protected-Core checks pass. Live repeated HASHI3
+restart and post-restart Call observations remain a separate adoption gate.
+
 October 11 authoritative `debug-call` recovery: the clean candidate is defined
 by [the current behavior contract](HASHI_CALL_CURRENT_BEHAVIOR.md), which
 supersedes conflicting historical Call notes. A video-call click immediately
