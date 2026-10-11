@@ -973,6 +973,48 @@ def test_qualified_generation_cache_round_trip_and_tamper_rejection(
     )
 
 
+@pytest.mark.asyncio
+async def test_prepare_generation_skips_only_preverified_source_scan(
+    tmp_path,
+    monkeypatch,
+):
+    source_root = tmp_path / "source"
+    bridge_home = tmp_path / "bridge"
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    generation = _verified_generation(source_root)
+    kernel = _Kernel()
+    kernel.paths = SimpleNamespace(code_root=source_root, bridge_home=bridge_home)
+    supervisor = FunctionWorkerSupervisor(kernel)
+    verifications = []
+    monkeypatch.setattr(
+        VerifiedFunctionGeneration,
+        "verify_qualified_source",
+        lambda self, expected_runtime: verifications.append(expected_runtime),
+    )
+    monkeypatch.setattr(
+        "orchestrator.function_worker_supervisor.materialize_generation_artifact",
+        lambda *_args, **_kwargs: artifact,
+    )
+    monkeypatch.setattr(
+        "orchestrator.function_worker_supervisor.persist_qualified_generation_cache",
+        lambda *_args, **_kwargs: None,
+    )
+
+    prepared = await supervisor.prepare_generation(
+        generation,
+        source_already_verified=True,
+    )
+
+    assert prepared == (generation, artifact)
+    assert verifications == []
+    assert await supervisor.prepare_generation(generation) == (
+        generation,
+        artifact,
+    )
+    assert verifications == [kernel.runtime_fingerprint]
+
+
 def test_boot_cache_keeps_last_verified_generation_when_checkout_is_broken(
     tmp_path,
     monkeypatch,
@@ -1184,9 +1226,25 @@ async def test_cancelled_worker_preparation_retires_unready_process(
     )
     supervisor = FunctionWorkerSupervisor(kernel)
     monkeypatch.setattr(supervisor, "topology_snapshot", lambda **kwargs: {})
+    cache_calls = []
     monkeypatch.setattr(
         "orchestrator.function_worker_supervisor.dependency_digest",
-        lambda: "worker-full-distribution-set",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("worker startup must not bypass the runtime fingerprint cache")
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "orchestrator.function_worker_supervisor.load_runtime_policy",
+        lambda code_root: ("policy", code_root),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "orchestrator.function_worker_supervisor.cached_current_runtime_fingerprint",
+        lambda policy, *, code_root: (
+            cache_calls.append((policy, code_root))
+            or SimpleNamespace(dependency_digest="worker-full-distribution-set")
+        ),
         raising=False,
     )
     process = SimpleNamespace(start=lambda: None)
@@ -1239,3 +1297,4 @@ async def test_cancelled_worker_preparation_retires_unready_process(
     assert process_args[0][1]["runtime"]["dependency_digest"] == (
         "worker-full-distribution-set"
     )
+    assert cache_calls == [(("policy", tmp_path), tmp_path)]

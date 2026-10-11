@@ -38,7 +38,8 @@ from orchestrator.function_worker_protocol import (
     FunctionWorkerProtocolError,
     JsonConnectionPeer,
 )
-from orchestrator.runtime_contract import dependency_digest
+from orchestrator.runtime_contract import load_runtime_policy
+from orchestrator.runtime_fingerprint_cache import cached_current_runtime_fingerprint
 from orchestrator.telegram_ingress import CoreTelegramIngress
 from orchestrator.telegram_ingress_diagnostics import TelegramIngressDiagnostics, safe_error
 from orchestrator.telegram_delivery_errors import TelegramDeliveryError
@@ -1295,12 +1296,19 @@ class FunctionWorkerSupervisor:
     async def prepare_generation(
         self,
         generation: VerifiedFunctionGeneration | None = None,
+        *,
+        source_already_verified: bool = False,
     ) -> tuple[VerifiedFunctionGeneration, Path]:
-        """Qualify and materialize one generation for any number of Workers."""
+        """Qualify and materialize one generation for any number of Workers.
+
+        ``source_already_verified`` is valid only for the immediate result of
+        ``qualified_generation()`` in the same reboot preparation flow.
+        """
 
         if generation is None:
             generation = await self.qualified_generation()
-        else:
+            source_already_verified = True
+        if not source_already_verified:
             await asyncio.to_thread(
                 generation.verify_qualified_source,
                 self.kernel.runtime_fingerprint,
@@ -1658,7 +1666,11 @@ class FunctionWorkerSupervisor:
         parent_connection, child_connection = context.Pipe(duplex=True)
         nonce = uuid4().hex
         worker_runtime = self.kernel.runtime_fingerprint.to_dict()
-        worker_runtime["dependency_digest"] = dependency_digest()
+        live_runtime = cached_current_runtime_fingerprint(
+            load_runtime_policy(self.kernel.paths.code_root),
+            code_root=self.kernel.paths.code_root,
+        )
+        worker_runtime["dependency_digest"] = live_runtime.dependency_digest
         bootstrap = {
             "entrypoint": "orchestrator.function_worker_host:run_function_worker",
             "protocol": FUNCTION_WORKER_PROTOCOL_VERSION,
