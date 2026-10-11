@@ -50,6 +50,7 @@ from orchestrator.runtime_contract import (
     load_runtime_policy,
     validate_standard_dependencies,
 )
+from orchestrator.runtime_fingerprint_cache import cached_current_runtime_fingerprint
 
 PROBE_RESULT_PREFIX = "HASHI_FUNCTION_PROBE_RESULT="
 DEFAULT_PROBE_TIMEOUT_SECONDS = 180.0
@@ -221,7 +222,9 @@ class VerifiedFunctionGeneration:
 
     def verify(self, expected_runtime: RuntimeFingerprint) -> None:
         policy = load_runtime_policy(self.code_root)
-        live_runtime = current_runtime_fingerprint(policy, code_root=self.code_root)
+        live_runtime = cached_current_runtime_fingerprint(
+            policy, code_root=self.code_root
+        )
         compare_function_candidate_runtime(
             expected_runtime,
             live_runtime,
@@ -254,7 +257,9 @@ class VerifiedFunctionGeneration:
         """
 
         policy = load_runtime_policy(self.code_root)
-        live_runtime = current_runtime_fingerprint(policy, code_root=self.code_root)
+        live_runtime = cached_current_runtime_fingerprint(
+            policy, code_root=self.code_root
+        )
         compare_function_candidate_runtime(
             expected_runtime,
             live_runtime,

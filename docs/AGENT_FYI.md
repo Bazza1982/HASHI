@@ -1,20 +1,25 @@
 # HASHI Agent FYI
 
-October 11 restart-lifecycle follow-up: the final `debug-call` audit found no
-additional formal repair branch to merge. Recent Workbench and HASHI repair
-branches are ancestors or patch-equivalent; the older
-`fix/nightly-nonvoice-20261003` line is divergent and would remove later
-approved fixes if merged wholesale. Its required immediate-media behavior is
-already retained by the current Call implementation and checks. The remaining
-restart regression was a shared Frontend Connector gap: a recent terminal
-receipt retained by PAO could be presented as new after changing connections,
-and polling could resurrect it after dismissal. A newly active connection now
-baselines its existing terminal receipt, while active and subsequently created
-operations remain visible. Dismissal is durable for the operation, and confirmed
-success uses a four-second elapsed-time deadline even when renderer visibility
-changes. Focused lifecycle checks, full UI policy, complete Call/Phone/voice
-checks, production build, and protected-Core checks pass. Live repeated HASHI3
-restart and post-restart Call observations remain a separate adoption gate.
+October 11 restart-lifecycle correction: the expanded `debug-call` audit found
+two formal performance commits that the earlier audit had incorrectly called
+equivalent. They survive only under the retained
+`migration-hashi2/preserve/h2-runtime-cache-20260917` remote-tracking ref and
+were never ancestors or patch-equivalent. Their runtime-fingerprint cache and
+tests are now ported onto the current Function-generation API without merging
+the branch's superseded dependency-drift implementation. The older worker-start
+optimization is already an ancestor. Recent Workbench branches remain ancestors,
+patch-equivalent, or semantically superseded; the divergent
+`fix/nightly-nonvoice-20261003` line must not be merged wholesale.
+
+The same correction hardens two observed boundaries. A late success-banner
+timer now remembers the dismissed operation even after a newer reboot becomes
+the active target, so polling cannot resurrect it or clear the newer result.
+Receipt persistence boundedly retries only transient Windows pre-commit replace
+denials; permanent and post-commit failures remain visible. Cache checks,
+receipt failure-boundary checks, the complete reboot-manager suite, the new
+late-dismissal integration reproduction, and the protected-Core gate pass.
+Repeated live HASHI3 restart timing and post-restart Call remain the adoption
+gate. See `docs/repairs/DEBUG_CALL_RESTART_RECONCILIATION_20261011.md`.
 
 October 11 authoritative `debug-call` recovery: the clean candidate is defined
 by [the current behavior contract](HASHI_CALL_CURRENT_BEHAVIOR.md), which
