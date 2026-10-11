@@ -17,9 +17,17 @@ MAX_IMAGE = 512 * 1024
 MAX_OUTPUT = 4 * 1024 * 1024
 MAX_SPEECH_SEGMENTS = 32
 MAX_SPEECH_CHARS = 240
+MIN_SPEECH_DURATION_UNITS = 24
 _SENTENCE_END = re.compile(
     r'[。！？!?]+[”"\x27’』」)]*|\.(?:[”"\x27’)]*)?(?=\s|$)|\n+'
 )
+_LATIN_SPEECH_WORD = re.compile(
+    r"[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)*"
+)
+_COMPACT_SPEECH_CHAR = re.compile(
+    r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]"
+)
+_SPEECH_PAUSE = re.compile(r"[。！？!?，,；;：:]|\.(?=\s|$)")
 _STAGE_BRACKET_PREFIX = re.compile(
     r"^\s*[（(\[【]\s*(?P<cue>[^）)\]】\r\n]{1,48})\s*[）)\]】]"
     r"\s*(?:[:：,，\-–—]\s*)?"
@@ -253,31 +261,90 @@ def _bounded_sentence(text: str) -> list[str]:
     return parts
 
 
+def _join_speech_parts(left: str, right: str) -> str:
+    if not left:
+        return right.lstrip()
+    if not right:
+        return left
+    return left + right
+
+
+def _speech_duration_units(text: str) -> int:
+    """Estimate playable duration across compact and space-delimited scripts."""
+    return (
+        len(_COMPACT_SPEECH_CHAR.findall(text))
+        + 2 * len(_LATIN_SPEECH_WORD.findall(text))
+        + len(_SPEECH_PAUSE.findall(text))
+    )
+
+
+def _group_speech_parts(
+    parts: list[str], *, include_tail: bool
+) -> tuple[list[str], str]:
+    """Coalesce short sentences so TTS can prepare the next natural chunk."""
+    grouped: list[str] = []
+    pending = ""
+    for part in parts:
+        candidate = _join_speech_parts(pending, part)
+        if pending and len(candidate) > MAX_SPEECH_CHARS:
+            grouped.append(pending.strip())
+            pending = part.lstrip()
+        else:
+            pending = candidate
+        if _speech_duration_units(pending) >= MIN_SPEECH_DURATION_UNITS:
+            grouped.append(pending.strip())
+            pending = ""
+    if include_tail and pending:
+        grouped.append(pending.strip())
+        pending = ""
+    return grouped, pending
+
+
 def _sentence_parts(text: str, *, include_tail: bool) -> tuple[list[str], str]:
     clean = clean_speech_text(str(text or ""))
-    parts: list[str] = []
+    sentences: list[str] = []
     offset = 0
     for match in _SENTENCE_END.finditer(clean):
-        sentence = clean[offset : match.end()].strip()
+        raw_sentence = clean[offset : match.end()]
+        sentence = raw_sentence.strip()
         offset = match.end()
         if sentence:
-            parts.extend(_bounded_sentence(sentence))
-    remainder = clean[offset:].strip()
-    if include_tail and remainder:
-        parts.extend(_bounded_sentence(remainder))
+            bounded = _bounded_sentence(sentence)
+            leading = raw_sentence[: len(raw_sentence) - len(raw_sentence.lstrip())]
+            trailing = raw_sentence[len(raw_sentence.rstrip()) :]
+            if leading:
+                bounded[0] = leading + bounded[0]
+            if trailing:
+                bounded[-1] += trailing
+            sentences.extend(bounded)
+    remainder = clean[offset:]
+    if include_tail and remainder.strip():
+        bounded = _bounded_sentence(remainder.strip())
+        leading = remainder[: len(remainder) - len(remainder.lstrip())]
+        if leading:
+            bounded[0] = leading + bounded[0]
+        sentences.extend(bounded)
         remainder = ""
+    parts, pending = _group_speech_parts(sentences, include_tail=include_tail)
+    remainder = _join_speech_parts(pending, remainder).strip()
     return parts, remainder
 
 
 def complete_speech_segments(text: str):
-    """Return stable complete sentences and the still-changing answer tail."""
+    """Return stable natural chunks and the still-changing answer tail."""
     parts, remainder = _sentence_parts(text, include_tail=False)
     if len(parts) > MAX_SPEECH_SEGMENTS:
-        return parts[:MAX_SPEECH_SEGMENTS], "".join(parts[MAX_SPEECH_SEGMENTS:]) + remainder
+        overflow = ""
+        for part in parts[MAX_SPEECH_SEGMENTS:]:
+            overflow = _join_speech_parts(overflow, part)
+        return (
+            parts[:MAX_SPEECH_SEGMENTS],
+            _join_speech_parts(overflow, remainder),
+        )
     return parts, remainder
 
 
 def speech_segments(text: str):
-    """Queue final answer TTS by complete sentence, in original order."""
+    """Queue final TTS in natural, bounded chunks, in original order."""
     parts, _ = _sentence_parts(text, include_tail=True)
     return parts[:MAX_SPEECH_SEGMENTS], len(parts) > MAX_SPEECH_SEGMENTS

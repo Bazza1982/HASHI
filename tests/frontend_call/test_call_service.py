@@ -49,6 +49,7 @@ def document(location="local"):
 class Ports:
     def __init__(self):
         self.accepted = []
+        self.cancelled = []
         self.phone = False
         self.level = 1
         self.valid = True
@@ -67,6 +68,24 @@ class Ports:
     async def admit(self, owner, binding, turn, text, observation, captured_at):
         self.accepted.append((turn, text, observation, captured_at))
         return {"run_id": "run-1", "request_id": "req-1", "message_id": "msg-1"}
+
+    async def cancel(self, owner, binding, *, request_id, run_id, reason):
+        self.cancelled.append({
+            "owner": owner,
+            "agent_id": binding["agent_id"],
+            "session_id": binding["session_id"],
+            "request_id": request_id,
+            "run_id": run_id,
+            "reason": reason,
+        })
+        return {
+            "ok": True,
+            "request_id": request_id,
+            "run_id": run_id,
+            "session_id": binding["session_id"],
+            "status": "cancellation_requested",
+            "terminal": False,
+        }
 
     def result(self, *args):
         return {
@@ -558,6 +577,61 @@ async def test_answer_starts_speech_before_client_poll_and_reuses_it(tmp_path):
         assert adapters.tts == 1 and len(ports.accepted) == 1
     finally:
         release.set()
+        await service.close()
+
+
+async def test_requested_segment_warms_only_one_queued_segment_without_next_poll(tmp_path):
+    service, _ports, adapters, base, _ = setup(tmp_path)
+    first_started, release_first = asyncio.Event(), asyncio.Event()
+    synthesized = []
+
+    async def synthesize(_target, _profile, text):
+        synthesized.append(text)
+        if len(synthesized) == 1:
+            first_started.set()
+            await release_first.wait()
+        return {"media_type": "audio/wav", "content_b64": wav()}
+
+    adapters.synthesize = synthesize
+    binding, _, _ = await start(service, base)
+    call = service.calls["call-1"]
+    call.turn = {
+        "turn_id": "turn-1", "sequence": 1, "phase": "thinking",
+        "speech_segments": [],
+    }
+    try:
+        service._queue_speech(call, call.turn, "First sentence.", "commentary")
+        first_task = call.speech_task
+        await asyncio.wait_for(first_started.wait(), 1)
+
+        speech0 = {
+            **binding, "operation": "speech", "turn_id": "turn-1", "segment": 0,
+        }
+        assert not (await service.invoke("owner", speech0))["ready"]
+        assert call.speech_requested_index == 0
+
+        service._queue_speech(call, call.turn, "Second sentence.", "answer")
+        service._queue_speech(call, call.turn, "Third sentence.", "answer")
+        await asyncio.sleep(0)
+        assert synthesized == ["First sentence."]
+
+        release_first.set()
+        await first_task
+        second_task = call.speech_task
+        assert second_task is not first_task
+        await second_task
+        assert synthesized == ["First sentence.", "Second sentence."]
+        assert set(call.speech_cache) == {0, 1}
+
+        speech1 = {**speech0, "segment": 1}
+        assert (await service.invoke("owner", speech1))["ready"]
+        await call.speech_task
+        assert synthesized == [
+            "First sentence.", "Second sentence.", "Third sentence.",
+        ]
+        assert set(call.speech_cache) == {1, 2}
+    finally:
+        release_first.set()
         await service.close()
 
 

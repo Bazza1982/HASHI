@@ -34,7 +34,8 @@ _numbers = {
     "context_generation", "sequence", "camera_epoch", "frame_sequence", "segment", "attempt",
     "duration_ms", "call_duration_ms", "wait_ms", "frame_age_ms", "audio_bytes",
     "image_bytes", "response_bytes", "http_status", "error_status", "lookup_count",
-    "response_duration_ms", "pending_tasks", "speech_segments", "text_chars",
+    "response_duration_ms", "pending_tasks", "speech_segments", "text_chars", "queued_segments",
+    "activity_sequence", "event_count", "answer_preview_events", "commentary_events",
 }
 _booleans = {"camera_enabled", "pending_replaced", "cached", "terminal", "speech_truncated", "admission_in_flight"}
 _choices = {
@@ -46,6 +47,7 @@ _choices = {
         "auth", "owner", "content_type", "body_read", "json", "invoke", "response", "shutdown",
     },
     "media_kind": {"stt", "tts", "vision"},
+    "speech_kind": {"answer", "commentary"},
     "target_location": {"cloud", "local"},
     "gateway": {"OpenRouter"},
     "reason": {

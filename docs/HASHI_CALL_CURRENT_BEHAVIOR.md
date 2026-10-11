@@ -13,15 +13,19 @@ numeric response-length requirements are retired.
 
 ## Entry, availability, and binding
 
-- **CALL-ENTRY-01** — Workbench shows independent fixed Phone and video Call
-  controls with the established icons, focus treatment, and usable touch targets.
-  Phone behavior remains unchanged.
-- **CALL-ENTRY-02** — Video Call binds to the currently selected Agent,
+- **CALL-ENTRY-01** — Workbench shows the established fixed Phone and video Call
+  controls with their icons, focus treatment, and usable touch targets. Either
+  control starts or returns to the same direct, video-first Call. The legacy
+  Phone route is only a compatibility fallback after direct Call is confirmed
+  unavailable.
+- **CALL-ENTRY-02** — Direct Call binds to the currently selected Agent,
   connection, Session, and context generation. Changing the reading view during
   a call does not silently rebind the live call.
 - **CALL-ENTRY-03** — Current `call_ready` is authoritative. A retired stored
-  route cannot block direct Call. Phone is the fallback only when direct Call is
-  unavailable.
+  route cannot block direct Call. An unresolved route is refreshed when the
+  Workbench returns to the foreground and rechecked from either launch click; it
+  must not be treated as unavailable. Phone fallback is allowed only after a
+  current check confirms direct Call is unavailable.
 - **CALL-ENTRY-04** — Busy state prevents a second call. Existing calls remain
   returnable and endable. Unconfigured or explicitly disabled Call stays hidden.
 - **CALL-ENTRY-05** — Call remains available by default in the installed
@@ -30,8 +34,9 @@ numeric response-length requirements are retired.
 
 ## Immediate media startup and degradation
 
-- **CALL-MEDIA-01** — A video Call click immediately displays Connecting and
-  begins microphone and camera acquisition in that same user action. Context and
+- **CALL-MEDIA-01** — Either fixed launch control immediately displays
+  Connecting and begins microphone and camera acquisition in that same user
+  action. Camera is part of Call startup, not a later optional mode. Context and
   server startup may proceed concurrently; they must not postpone the device
   permission request.
 - **CALL-MEDIA-02** — Media acquired while the Agent opening is pending is held
@@ -81,11 +86,34 @@ numeric response-length requirements are retired.
   bounded polling/retry behavior, and stops cleanly on user stop, mute,
   background, network suspension, or hangup.
 - **CALL-SPEECH-05** — Localized short fillers may acknowledge a long wait at
-  defined thresholds. They stop when answer speech arrives and never enter the
-  canonical answer, Session history, or transcript as Agent content.
+  defined thresholds. This includes a bounded inter-chunk grace period when the
+  next public answer chunk is already known but its TTS asset is not ready. The
+  approved prepared fillers may play in order to bridge an unusually long silent
+  gap, and the active filler is cut off as soon as answer audio is ready. Fillers
+  never enter the canonical answer, Session history, or transcript as Agent
+  content.
 - **CALL-SPEECH-06** — TTS and visible Call captions use the same cleaned
   conversational text. The canonical PAO Session answer remains intact outside
   the Call presentation.
+- **CALL-SPEECH-07** — Direct Call admission declares Workbench as its
+  presentation surface while retaining Session API as the physical frontend
+  transport. Those facts are not interchangeable: public complete-sentence
+  answer previews and commentary must reach the Call speech queue before the
+  terminal answer whenever they become available.
+- **CALL-SPEECH-08** — The selected Agent Worker is authoritative for live
+  request activity. When its activity poll is available, Call must not prefer a
+  shared-process compatibility store, because that store can be present but
+  stale in the isolated-Worker runtime. Call consumes the Worker stream with a
+  monotonic cursor so commentary and answer previews are neither missed nor
+  replayed.
+- **CALL-SPEECH-09** — Complete-sentence streaming uses bounded natural speech
+  chunks. A sufficiently substantial complete sentence may start before the run
+  finishes; adjacent short sentences are coalesced so repeated local TTS startup
+  does not create avoidable sentence gaps. Chunk readiness is based on estimated
+  playable duration across compact scripts, spoken words, and punctuation pauses;
+  raw character count is not a valid cross-language duration proxy. A short
+  terminal tail is always flushed, and every streamed chunk remains an exact
+  prefix of the final chunk sequence.
 
 ## Captions and controls
 
@@ -100,6 +128,13 @@ numeric response-length requirements are retired.
 - **CALL-UI-04** — Preconnection shows Connecting. It must not claim that the
   microphone is paused or redirect to settings while normal connection work is
   still in progress.
+- **CALL-UI-05** — The local camera preview has stable geometry, fills its
+  bounded frame without pale side bars, and is mirrored horizontally. Caption
+  growth cannot resize or remove it. The selected Agent's avatar and identity
+  remain visible while local video is on.
+- **CALL-UI-06** — The Call panel renders one canonical rolling transcript from
+  PAO Call rows. Playback-only current-sentence state must not create a second
+  caption track or duplicate the same Agent answer.
 
 ## Turn safety, recovery, and termination
 
@@ -114,12 +149,19 @@ numeric response-length requirements are retired.
 - **CALL-SAFE-04** — Hangup settles the exact call ID. A pending start is ended
   after it resolves; an unconfirmed end remains retryable and cannot start a new
   call over the old binding.
+- **CALL-SAFE-05** — Hangup also stops the exact PAO Run admitted by that Call.
+  If admission identity is still uncertain, Call waits only until the accepted
+  request and Run IDs are known, then uses PAO's targeted cancellation fence.
+  It never converts hangup into an Agent-wide stop and never cancels unrelated
+  foreground or background work.
 
 ## Release and evidence gate
 
 - **CALL-REL-01** — Workbench static assets, Workbench Call proxy, and PAO Call
   Function changes are versioned and adopted together. Source, built artifact,
-  and running generation are reported as separate facts.
+  running service/generation, and the code loaded by an already-open Electron
+  renderer are reported as separate facts. A service restart alone does not
+  prove that an existing renderer adopted the new client.
 - **CALL-REL-02** — Every changed behavior has a focused regression test.
   Previously correct Call tests remain present; obsolete tests that assert
   retired behavior are removed or rewritten against this contract.
@@ -133,18 +175,14 @@ numeric response-length requirements are retired.
   until the complete candidate is verified and deliberately merged back to
   main.
 
-## 2026-10-11 verified checkpoint
+## Release receipts
 
-- HASHI3: exact Function candidate hot-adopted; 143/143 focused checks and the
-  complete physical microphone/camera/speaker Call path passed.
-- Workbench: exact `debug-call` client/proxy candidate; 165/165 focused checks,
-  complete server suite, production build, and real H3/H4 browser controls passed.
-- HASHI4 source: `debug-call`; product/contract/test blobs match HASHI3 and the
-  isolated exact tree passes 143/143 focused checks.
-- HASHI4 runtime: no reboot and no new Function-generation adoption. Live
-  observation covers the existing runtime with the verified Workbench client;
-  it does not prove the new HASHI4 Function source is running.
-- Branches remain unmerged pending deliberate review and user acceptance.
+This contract is the stable acceptance source, not a claim that a checkout or
+running process has adopted it. Exact source, artifact, running generation,
+loaded renderer, restart timing, and physical media observations are recorded
+as separate versioned receipts under the authorized live-evidence directory.
+Every new candidate must satisfy the complete matrix below; results from an
+older commit or renderer cannot be carried forward.
 
 ## Required release matrix
 
@@ -156,7 +194,7 @@ numeric response-length requirements are retired.
 | Ring/opening | timing/order tests and live speaker observation |
 | Spoken style | PCM guidance and deterministic Call-cleaning tests |
 | Streaming/fillers | FIFO, complete-sentence, cancellation, no-duplicate tests |
-| Captions/UI | rolling transcript, smart-follow, visual/browser tests |
+| Captions/UI | single rolling transcript, stable mirrored preview, retained Agent identity, smart-follow, visual/browser tests |
 | Recovery/hangup | existing noise, network, lifecycle, and settlement regressions |
 | H3 live | versioned frontend acceptance receipt plus real media observations |
 | H4 live | exact deployed artifact/source identity plus live observations, without reboot |

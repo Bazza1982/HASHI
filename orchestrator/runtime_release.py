@@ -10,10 +10,12 @@ from types import SimpleNamespace
 
 from orchestrator.function_generation import (
     UncommittedFunctionSourceError,
+    configured_observers_are_qualified,
     probe_function_generation,
 )
 from orchestrator.function_worker_supervisor import (
     load_bootable_generation_cache,
+    load_qualified_generation_cache,
     materialize_generation_artifact,
     persist_qualified_generation_cache,
 )
@@ -45,37 +47,51 @@ def qualify_release(payload: dict) -> dict:
         "build_paths", build_bridge_paths, root, bridge_home, canonical_home=True
     )
     adoption = {"status": "qualified", "reason_code": None}
+    release_kernel = SimpleNamespace(
+        paths=paths,
+        runtime_fingerprint=runtime,
+    )
     try:
-        generation = timed(
-            "generation_qualification",
-            probe_function_generation,
-            SimpleNamespace(
-                paths=paths,
-                runtime_fingerprint=runtime,
-            ),
-            timing_callback=record_phase,
-        )
-        artifact = timed(
-            "materialize_artifact",
-            materialize_generation_artifact,
+        cached = timed(
+            "load_qualified_cache",
+            load_qualified_generation_cache,
             bridge_home,
-            generation,
+            root,
+            runtime,
         )
-        try:
-            timed(
-                "persist_cache",
-                persist_qualified_generation_cache,
+        if (
+            cached is not None
+            and configured_observers_are_qualified(release_kernel, cached[0])
+        ):
+            generation, artifact = cached
+        else:
+            generation = timed(
+                "generation_qualification",
+                probe_function_generation,
+                release_kernel,
+                timing_callback=record_phase,
+            )
+            artifact = timed(
+                "materialize_artifact",
+                materialize_generation_artifact,
                 bridge_home,
                 generation,
-                artifact,
             )
-        except Exception as exc:
-            logger.warning(
-                "Function startup succeeded but its recovery cache could not be saved: "
-                "%s: %s",
-                type(exc).__name__,
-                exc,
-            )
+            try:
+                timed(
+                    "persist_cache",
+                    persist_qualified_generation_cache,
+                    bridge_home,
+                    generation,
+                    artifact,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Function startup succeeded but its recovery cache could not be saved: "
+                    "%s: %s",
+                    type(exc).__name__,
+                    exc,
+                )
     except Exception as candidate_error:
         cached = timed(
             "load_fallback_cache",

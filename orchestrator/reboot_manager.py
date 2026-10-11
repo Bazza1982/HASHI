@@ -1089,7 +1089,10 @@ class RebootManager:
             None,
         )
         if callable(prepare_generation):
-            generation, generation_root = await prepare_generation(generation)
+            generation, generation_root = await prepare_generation(
+                generation,
+                source_already_verified=True,
+            )
         else:
             generation_root = None
         bridge_logger.info(

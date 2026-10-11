@@ -12,8 +12,9 @@ async def test_complete_answer_sentence_starts_tts_before_run_finishes(tmp_path)
     binding, _, _ = await start(service, base)
     released = asyncio.Event()
     calls = 0
+    first = "第一句已经完整，而且长度足够自然，可以立即开始播报。"
 
-    def result(*_args, **_kwargs):
+    async def result(*_args, **_kwargs):
         nonlocal calls
         calls += 1
         if not released.is_set():
@@ -26,13 +27,13 @@ async def test_complete_answer_sentence_starts_tts_before_run_finishes(tmp_path)
                     "sequence": 2,
                     "delivery_class": "answer_preview",
                     "presentation_channel": "answer",
-                    "summary": "第一句已经完整。第二句还在生成",
+                    "summary": first + "第二句还在生成",
                 }],
             }
         return {
             "terminal": True,
             "state": "completed",
-            "text": "第一句已经完整。第二句还在生成，现已完成。",
+            "text": first + "第二句还在生成，现已完成。",
             "activity_sequence": 3,
             "events": [],
         }
@@ -50,15 +51,80 @@ async def test_complete_answer_sentence_starts_tts_before_run_finishes(tmp_path)
             await asyncio.sleep(0.001)
         call = service.calls["call-1"]
         assert call.turn["phase"] == "thinking"
-        assert call.turn["speech_segments"] == ["第一句已经完整。"]
+        assert call.turn["speech_segments"] == [first]
         assert adapters.tts == 1
         released.set()
         await finish_task(service)
         assert call.turn["speech_segments"] == [
-            "第一句已经完整。",
+            first,
             "第二句还在生成，现已完成。",
         ]
         assert calls >= 2
+    finally:
+        released.set()
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_short_preview_waits_and_then_becomes_one_natural_chunk(tmp_path):
+    service, ports, adapters, base, _clock = setup(tmp_path)
+    binding, _, _ = await start(service, base)
+    released = asyncio.Event()
+    calls = 0
+    preview = "测试官，查完了。"
+    answer = preview + "当前服务在线。"
+
+    def result(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {
+                "terminal": False,
+                "state": "running",
+                "text": "",
+                "activity_sequence": 2,
+                "events": [{
+                    "sequence": 2,
+                    "delivery_class": "answer_preview",
+                    "presentation_channel": "answer",
+                    "summary": preview,
+                }],
+            }
+        if not released.is_set():
+            return {
+                "terminal": False,
+                "state": "running",
+                "text": "",
+                "activity_sequence": 2,
+                "events": [],
+            }
+        return {
+            "terminal": True,
+            "state": "completed",
+            "text": answer,
+            "activity_sequence": 3,
+            "events": [],
+        }
+
+    ports.result = result
+    try:
+        await service.invoke("owner", {
+            **binding, "operation": "turn", "turn_id": "turn-1",
+            "sequence": 1, "audio_b64": wav(),
+        })
+        for _ in range(100):
+            call = service.calls["call-1"]
+            if call.turn.get("_answer_preview"):
+                break
+            await asyncio.sleep(0.001)
+        call = service.calls["call-1"]
+        assert call.turn["_answer_preview"] == preview
+        assert call.turn["speech_segments"] == []
+        assert adapters.tts == 0
+        released.set()
+        await finish_task(service)
+        assert call.turn["speech_segments"] == [answer]
+        assert adapters.tts == 1
     finally:
         released.set()
         await service.close()
@@ -111,11 +177,69 @@ async def test_preview_deltas_keep_word_boundaries_and_repeated_final_sentences(
         })
         await finish_task(service)
         call = service.calls["call-1"]
-        assert call.turn["speech_segments"] == [
-            "First sentence.", "Again.", "Again.",
-        ]
+        assert call.turn["speech_segments"] == ["First sentence. Again. Again."]
         assert call.turn["_answer_preview"] == "First sentence. Again."
     finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_public_commentary_starts_tts_before_run_finishes(tmp_path):
+    service, ports, adapters, base, _clock = setup(tmp_path)
+    binding, _, _ = await start(service, base)
+    released = asyncio.Event()
+
+    def result(*_args, **_kwargs):
+        if not released.is_set():
+            return {
+                "terminal": False,
+                "state": "running",
+                "text": "",
+                "activity_sequence": 2,
+                "events": [
+                    {
+                        "sequence": 2,
+                        "event_id": "commentary-2",
+                        "delivery_class": "user_commentary",
+                        "presentation_channel": "commentary",
+                        "summary": "我正在核对记录，请稍等。",
+                    }
+                ],
+            }
+        return {
+            "terminal": True,
+            "state": "completed",
+            "text": "最终答案。",
+            "activity_sequence": 3,
+            "events": [],
+        }
+
+    ports.result = result
+    try:
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "turn",
+                "turn_id": "turn-1",
+                "sequence": 1,
+                "audio_b64": wav(),
+            },
+        )
+        for _ in range(100):
+            call = service.calls["call-1"]
+            if adapters.tts and call.turn.get("speech_segments"):
+                break
+            await asyncio.sleep(0.001)
+        call = service.calls["call-1"]
+        assert call.turn["phase"] == "thinking"
+        assert call.turn["speech_segments"] == ["我正在核对记录，请稍等。"]
+        assert adapters.tts == 1
+        released.set()
+        await finish_task(service)
+        assert call.turn["speech_segments"] == ["我正在核对记录，请稍等。", "最终答案。"]
+    finally:
+        released.set()
         await service.close()
 
 
@@ -186,8 +310,7 @@ async def test_call_projection_removes_stage_directions_from_captions_and_speech
         assert source["text"].startswith("（小声）")
         assert call.turn["answer"] == "李总，电话通了。预算（含 GST）不变。"
         assert call.turn["speech_segments"] == [
-            "李总，电话通了。",
-            "预算（含 GST）不变。",
+            "李总，电话通了。预算（含 GST）不变。",
         ]
         assistant_rows = [
             row["text"] for row in call.rows

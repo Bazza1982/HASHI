@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 import hashlib
+import inspect
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from uuid import uuid4
@@ -45,8 +46,11 @@ class Call:
     sequence: int = 0
     turn: dict = field(default_factory=dict)
     task: asyncio.Task | None = None
+    cancel_task: asyncio.Task | None = None
+    end_reason: str = ""
     speech_task: asyncio.Task | None = None
     speech_index: int = -1
+    speech_requested_index: int = -1
     speech_cache: dict = field(default_factory=dict)
     speech_errors: dict = field(default_factory=dict)
     speech_attempts: dict = field(default_factory=dict)
@@ -111,11 +115,21 @@ class CallService:
         call.phase = "ended"
         call.expires = self.clock()
         if ending:
+            call.end_reason = reason
             emit("call_ended", **self._facts(call, call.turn), reason=reason,
                  phase=call.phase, turn_phase=call.turn.get("phase"), camera_enabled=call.camera_enabled,
                  camera_epoch=call.camera_epoch, admission_in_flight=call.turn.get("phase") == "submitting",
                  call_duration_ms=elapsed_ms(self.clock, call.started))
-        # Once PAO admission starts, do not cancel an uncertain accepted request.
+        # Once identity is known, stop exactly this Call-owned PAO Run. During
+        # admission its identity is still uncertain, so _run requests the same
+        # targeted cancellation immediately after admission resolves.
+        if (
+            call.turn.get("request_id")
+            and call.turn.get("run_id")
+            and call.turn.get("phase") not in {"complete", "failed"}
+        ):
+            self._request_run_cancel(call, call.turn, call.end_reason or reason)
+        # Never cancel an admission whose acceptance identity is still unknown.
         if call.task and call.turn.get("phase") != "submitting":
             if call.task.cancel():
                 emit("turn_cancel_requested", **self._facts(call, call.turn), reason=reason, turn_phase=call.turn.get("phase"))
@@ -128,6 +142,50 @@ class CallService:
         call.speech_cache.clear()
         call.filler_cache.clear()
         self._camera_off(call, reason="call_ended")
+
+    def _request_run_cancel(self, call, turn, reason):
+        if not turn.get("request_id") or not turn.get("run_id"):
+            return None
+        if turn.get("_run_cancel_requested"):
+            return call.cancel_task
+        turn["_run_cancel_requested"] = True
+        call.cancel_task = asyncio.create_task(
+            self._cancel_admitted_run(call, turn, reason)
+        )
+        return call.cancel_task
+
+    async def _cancel_admitted_run(self, call, turn, reason):
+        started = self.clock()
+        emit("run_cancel_requested", **self._facts(call, turn),
+             stage="run_result", reason=reason)
+        try:
+            with diagnostic_context(**self._facts(call, turn), stage="run_result"):
+                result = await self.ports.cancel(
+                    call.owner,
+                    call.binding,
+                    request_id=turn["request_id"],
+                    run_id=turn["run_id"],
+                    reason=reason,
+                )
+            emit("run_cancel_completed", **self._facts(call, turn),
+                 stage="run_result", reason=reason,
+                 run_state=str(result.get("status") or "outcome_unknown"),
+                 terminal=bool(result.get("terminal")),
+                 duration_ms=elapsed_ms(self.clock, started))
+            return result
+        except asyncio.CancelledError:
+            turn["_run_cancel_requested"] = False
+            emit("run_cancel_cancelled", **self._facts(call, turn),
+                 stage="run_result", reason="task_cancelled",
+                 duration_ms=elapsed_ms(self.clock, started))
+            raise
+        except Exception as exc:
+            turn["_run_cancel_requested"] = False
+            emit("run_cancel_failed", **self._facts(call, turn),
+                 stage="run_result", reason=reason,
+                 duration_ms=elapsed_ms(self.clock, started),
+                 **error_facts(exc, "call_run_cancel_failed"))
+            return None
 
     def _camera_off(self, call, reason="camera_disabled"):
         changed = call.camera_enabled or bool(call.vision_pending) or bool(call.observation)
@@ -149,7 +207,10 @@ class CallService:
         tasks = []
         for call in self.calls.values():
             self._end(call, "service_shutdown")
-            tasks += [t for t in (call.task, call.speech_task, call.filler_task, call.vision_task) if t]
+            tasks += [t for t in (
+                call.task, call.cancel_task, call.speech_task,
+                call.filler_task, call.vision_task,
+            ) if t]
         if tasks:
             done, pending = await asyncio.wait(tasks, timeout=5)
             if pending:
@@ -535,6 +596,7 @@ class CallService:
             call.speech_errors.clear()
             call.speech_attempts.clear()
             call.speech_index = -1
+            call.speech_requested_index = -1
             call.sequence = sequence
             call.turn = {
                 "turn_id": turn_id,
@@ -574,10 +636,14 @@ class CallService:
                 raise CallError("call_speech_index_invalid")
             if index in call.speech_cache:
                 self._privacy(call, "tts")
-                return {"ok": True, "ready": True, **call.speech_cache[index]}
+                asset = call.speech_cache[index]
+                call.speech_requested_index = max(call.speech_requested_index, index)
+                self._start_queued_speech(call)
+                return {"ok": True, "ready": True, **asset}
             if call.speech_task and not call.speech_task.done():
                 if index != call.speech_index:
                     raise CallError("call_speech_busy", 409)
+                call.speech_requested_index = max(call.speech_requested_index, index)
                 return {"ok": True, "ready": False}
             if index in call.speech_errors:
                 if body.get("retry") is not True or call.speech_attempts[index] >= 2:
@@ -588,6 +654,7 @@ class CallService:
                 raise CallError("call_speech_order_invalid", 409)
             self._privacy(call, "tts")
             call.speech_errors.pop(index, None)
+            call.speech_requested_index = max(call.speech_requested_index, index)
             self._start_speech(call, index, parts[index])
             return {"ok": True, "ready": False}
         raise CallError("call_invalid_operation")
@@ -666,15 +733,13 @@ class CallService:
         if len(parts) >= MAX_SPEECH_SEGMENTS:
             turn["speech_truncated"] = True
             return False
+        index = len(parts)
         parts.append(text)
         turn.setdefault("_speech_kinds", []).append(kind)
-        if (
-            call.speech_index < 0
-            and (not call.speech_task or call.speech_task.done())
-            and call.phase == "active"
-            and call.turn is turn
-        ):
-            self._start_speech(call, 0, parts[0])
+        emit("speech_segment_queued", **self._facts(call, turn), segment=index,
+             speech_kind=str(kind or ""), queued_segments=len(parts),
+             text_chars=len(text))
+        self._start_queued_speech(call)
         return True
 
     def _process_activity(self, call, turn, run):
@@ -682,8 +747,21 @@ class CallService:
             int(turn.get("_activity_sequence") or 0),
             int(run.get("activity_sequence") or 0),
         )
+        events = list(run.get("events") or ())
+        if events:
+            emit("activity_observed", **self._facts(call, turn),
+                 activity_sequence=int(turn.get("_activity_sequence") or 0),
+                 event_count=len(events),
+                 answer_preview_events=sum(
+                     event.get("delivery_class") == "answer_preview"
+                     for event in events
+                 ),
+                 commentary_events=sum(
+                     event.get("delivery_class") == "user_commentary"
+                     for event in events
+                 ))
         seen = turn.setdefault("_commentary_events", set())
-        for event in run.get("events") or ():
+        for event in events:
             owner = str(event.get("delivery_class") or "")
             channel = str(event.get("presentation_channel") or "")
             raw_content = str(event.get("summary") or event.get("detail") or "")
@@ -921,6 +999,15 @@ class CallService:
                 {"speaker": "user", "text": text, "turn_id": turn["turn_id"]}
             )
             stage, stage_started = "run_result", self.clock()
+            if call.phase != "active":
+                cancel_task = self._request_run_cancel(
+                    call, turn, call.end_reason or "call_ended"
+                )
+                if cancel_task:
+                    await cancel_task
+                emit("turn_detached", **self._facts(call, turn), stage=stage,
+                     reason="call_ended", duration_ms=elapsed_ms(self.clock, start))
+                return
             last_state = None
             while call.phase == "active":
                 self.ports.validate(call.owner, call.binding)
@@ -930,6 +1017,8 @@ class CallService:
                     turn["run_id"],
                     int(turn.get("_activity_sequence") or 0),
                 )
+                if inspect.isawaitable(run):
+                    run = await run
                 self._process_activity(call, turn, run)
                 turn["run_state"] = run["state"]
                 if run["state"] != last_state:
@@ -982,6 +1071,27 @@ class CallService:
             audio = b""
             image = None
 
+    def _start_queued_speech(self, call):
+        """Warm the first segment, then at most one beyond client demand."""
+        active_task = call.speech_task
+        if (
+            call.phase != "active"
+            or (active_task and not active_task.done()
+                and active_task is not asyncio.current_task())
+            or call.speech_index in call.speech_errors
+        ):
+            return False
+        index = call.speech_index + 1
+        parts = call.turn.get("speech_segments", [])
+        if (
+            index >= len(parts)
+            or index > call.speech_requested_index + 1
+            or index in call.speech_errors
+        ):
+            return False
+        self._start_speech(call, index, parts[index])
+        return True
+
     def _start_speech(self, call, index, text):
         self.expire()
         if call.phase != "active":
@@ -1018,6 +1128,7 @@ class CallService:
                 call.speech_cache[index] = result
                 for old in sorted(call.speech_cache)[:-2]:
                     call.speech_cache.pop(old, None)
+                self._start_queued_speech(call)
             else:
                 emit("tts_discarded", **self._facts(call, turn), segment=index,
                      reason="call_ended" if call.phase != "active" else "turn_changed")

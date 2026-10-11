@@ -11,11 +11,14 @@ def test_first_audio_is_a_short_natural_phrase_without_losing_the_answer():
     assert all(len(part) <= 600 for part in parts)
 
 
-def test_english_first_phrase_keeps_words_and_the_rest_of_the_answer():
+def test_english_first_chunk_is_playable_long_enough_without_losing_the_answer():
     first = "Let us start with the changes you noticed."
     text = first + " Then we can discuss the details and decide what to check next." * 9
     parts, truncated = speech_segments(text)
-    assert parts[0] == first
+    assert parts[0].startswith(first)
+    assert parts[0] != first
+    assert parts[0].endswith(".")
+    assert len(parts[0]) <= MAX_SPEECH_CHARS
     assert " ".join(parts) == text
     assert not truncated
 

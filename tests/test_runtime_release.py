@@ -138,6 +138,58 @@ def test_cold_release_saves_new_verified_generation_for_future_boots(
     assert timing["phases_ms"]["persist_cache"] >= 0
 
 
+def test_cold_release_reuses_unchanged_qualified_generation(
+    tmp_path,
+    monkeypatch,
+):
+    bridge_home = tmp_path / "bridge"
+    artifact = bridge_home / "state" / "function_generations" / ("a" * 64)
+    generation = SimpleNamespace(manifest=_Manifest())
+    probed = []
+    persisted = []
+
+    monkeypatch.setattr(
+        runtime_release,
+        "load_qualified_generation_cache",
+        lambda *_args, **_kwargs: (generation, artifact),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        runtime_release,
+        "configured_observers_are_qualified",
+        lambda *_args, **_kwargs: True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        runtime_release,
+        "probe_function_generation",
+        lambda *_args, **_kwargs: probed.append(True) or generation,
+    )
+    monkeypatch.setattr(
+        runtime_release,
+        "materialize_generation_artifact",
+        lambda *_args, **_kwargs: artifact,
+    )
+    monkeypatch.setattr(
+        runtime_release,
+        "persist_qualified_generation_cache",
+        lambda *args: persisted.append(args),
+    )
+
+    release = runtime_release.qualify_release(_payload(bridge_home))
+
+    assert release["generation_root"] == str(artifact)
+    assert release["adoption"] == {
+        "status": "qualified",
+        "reason_code": None,
+    }
+    assert probed == []
+    assert persisted == []
+    assert release["qualification_timing"]["phases_ms"][
+        "load_qualified_cache"
+    ] >= 0
+
+
 def test_cold_release_fails_only_without_candidate_or_verified_fallback(
     tmp_path,
     monkeypatch,

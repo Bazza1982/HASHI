@@ -6,6 +6,7 @@ from copy import deepcopy
 import json
 import logging
 import math
+import os
 from pathlib import Path
 import time
 from uuid import uuid4
@@ -30,6 +31,7 @@ LIFECYCLE_STATES = frozenset(
 )
 RECEIPT_SCHEMA_VERSION = 5
 MAX_PROGRESS_EVENTS = 32
+_WINDOWS_REPLACE_RETRY_DELAYS = (0.025, 0.075, 0.2, 0.5)
 logger = logging.getLogger("BridgeU.RebootReceipts")
 
 
@@ -41,6 +43,26 @@ def _default_shared_replacement():
         "old_shared_pid": None,
         "generation_id": None,
     }
+
+
+def _transient_windows_replace_denial(exc: PermissionError) -> bool:
+    return os.name == "nt" and getattr(exc, "winerror", None) in {5, 32}
+
+
+def _write_receipt_record(path: Path, payload: dict) -> None:
+    """Retry only transient Windows replace denials before commit."""
+
+    for attempt in range(len(_WINDOWS_REPLACE_RETRY_DELAYS) + 1):
+        try:
+            write_record(path, payload)
+            return
+        except PermissionError as exc:
+            if (
+                not _transient_windows_replace_denial(exc)
+                or attempt == len(_WINDOWS_REPLACE_RETRY_DELAYS)
+            ):
+                raise
+            time.sleep(_WINDOWS_REPLACE_RETRY_DELAYS[attempt])
 
 
 def _default_delivery(*, requested: bool = False):
@@ -382,7 +404,7 @@ class RebootReceipts:
                 # operation capacity. Expiration is not a delivery success.
                 expired_notices.append(expired["id"])
         if self.path is not None:
-            write_record(self.path, payload)
+            _write_receipt_record(self.path, payload)
         self._records = deepcopy(records)
         for operation_id in expired_notices:
             logger.warning(

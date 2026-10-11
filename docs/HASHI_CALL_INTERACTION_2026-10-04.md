@@ -5,10 +5,13 @@
 The user-approved current behavior is
 [HASHI /call Current Behavior Contract](HASHI_CALL_CURRENT_BEHAVIOR.md).
 It is the release checklist for the clean `debug-call` branch and supersedes
-every conflicting behavior below. In particular, video Call now requests the
-microphone and camera together on the initiating click; camera failure degrades
-that Call to audio-only. The former camera-off startup rule and fixed
-sentence/character answer limits are retired.
+every conflicting behavior below. Both fixed Phone and video controls now start
+the same video-first direct Call: microphone and camera are requested together
+on the initiating click, and camera failure degrades that Call to audio-only.
+Legacy Phone is only a compatibility fallback after a fresh route check confirms
+direct Call is unavailable. An unresolved route is refreshed on foreground and
+rechecked from either launch click. The former camera-off startup rule, separate
+entry-route assertion, and fixed sentence/character answer limits are retired.
 
 Frontend Connector owns Workbench media, controls, captions, and connection
 sounds. PAO Call Function owns the bound Call, opening, typed speech projection,
@@ -16,13 +19,42 @@ streaming order, and canonical Session boundary. Protected Core is unchanged.
 Models, reasoning, endpointing, default availability, and install-time
 deployment defaults are unchanged.
 
-The candidate passes 165/165 Workbench Call and Phone/live checks, 143/143
-HASHI3 Frontend Call checks, the complete Workbench server suite, production
-build, and protected-Core check. Physical HASHI3 acceptance verified immediate
-microphone/camera startup, same-call camera off/on, microphone mute/unmute,
-once-only opening, visible two-sided captions, natural Agent speech without
-stage directions, completed TTS playback, ringback termination after connection,
-hangup, and ended camera tracks.
+## 2026-10-11 preview, transcript, and streaming correction
+
+The follow-up regression was an integration error in the consolidated
+`debug-call` implementation, not a missing branch that should be merged
+wholesale. The Call renderer replaced the Agent avatar with local video, let
+the preview participate in caption flex sizing, and appended playback state to
+the already canonical PAO transcript. Separately, direct Call admission marked
+its presentation surface as `session-api`; the request pipeline therefore did
+not enable Workbench answer previews even though Session API correctly remained
+the physical transport.
+
+The corrected contract keeps a stable mirrored local preview, retains the Agent
+identity below it, and renders only canonical Call rows. Direct Call now declares
+the Workbench presentation surface while keeping the Session API transport
+identity. Public commentary and complete answer sentences enter the existing
+single speech FIFO as soon as observed; content-free diagnostics record activity
+and queued-segment timing without recording speech content.
+
+Focused red/green evidence covers the incorrect admission surface, duplicate
+caption source, stable mirrored preview with retained avatar, commentary speech
+before terminal completion, and a newly streamed sentence being prepared while
+current audio is still playing. The complete current Call suites pass 144/144
+on HASHI3 and 89/89 in Workbench; the production Workbench build also passes.
+Physical HASHI3 acceptance and later non-rebooted HASHI4 loading are separate
+release facts.
+
+The candidate passes the focused Workbench Call and Phone/live checks,
+143/143 HASHI3 Frontend Call checks, the complete Workbench server suite,
+production build, and protected-Core check. Physical HASHI3 acceptance verified
+both fixed launch entries, immediate microphone/camera startup, same-call camera
+off/on, microphone mute/unmute, once-only opening, visible two-sided captions,
+natural Agent speech without stage directions, completed TTS playback, ringback
+termination after connection, hangup, and ended camera tracks. The physical
+Phone-entry test was repeated after the final HASHI3 restart integration and
+again passed video-first startup, reversible controls, natural opening, and
+media release.
 
 HASHI4 `debug-call` carries the exact candidate product blobs and its isolated
 tree passes 143/143 Frontend Call checks. Live acceptance against the existing
@@ -32,6 +64,14 @@ caller transcript and was not admitted as caller speech, so HASHI3
 remains the end-to-end physical speech-loop evidence. The running HASHI4
 Function has not adopted the new generation; this authorization excludes a
 HASHI4 reboot.
+
+The final Workbench acceptance also distinguishes source, production build,
+running service identity, and the code loaded by the Electron renderer. The
+service reported the exact candidate, but an already-open renderer still held
+the old launcher until Workbench was relaunched through its official launcher.
+The newly created renderer emitted the expected direct Call route request and
+then passed the physical Phone-entry video-first test. A service restart or
+source hash alone is therefore not renderer-adoption evidence.
 
 ## 2026-10-11 sentence-streamed speech and rolling captions
 
@@ -54,34 +94,61 @@ tablet, portrait phone and landscape phone. Existing speech-end detection,
 camera cadence, selected text model/reasoning level and STT admission remain
 unchanged.
 
-Approval: on 2026-10-11 the user requested publishing the new Workbench and
-retained the HASHI4 reboot. Implementation: the qualified Function change is
-synchronized to HASHI4 source and the current H4-connected Workbench serves the
-new client and Call proxy. Verification: all 140 HASHI4 Frontend Call tests, 83
-focused Workbench checks, 11 Chromium Call/window checks and the production
-client build pass. The public root, entry asset and Call availability endpoint
-respond successfully after the Workbench service reload. HASHI4 running
-Functions have not been restarted, so an actual commentary-to-TTS call remains
-pending the user's adoption and personal acceptance.
+All 140 HASHI3 Frontend Call tests, 69 focused Workbench checks, 10 Chromium
+Call/window checks and the production client build pass. Screenshots at four
+responsive sizes were visually reviewed. HASHI4 backend source and running
+Functions were not changed or restarted. See Workbench
+`docs/call/CALL_STREAMING_SPEECH_CAPTIONS_2026-10-11.md`.
 
-## Current 2026-10-09 urgent HASHI3 availability repair
+## 2026-10-10 approved Grok trial, voice previews and speech latency
 
-The current user requests an immediate HASHI3 `/call` repair before personal
-testing. Frontend Connector owns the external frontend repair on the paired
-release checkout; HASHI Functions and Core are unchanged. Availability and
-route/context/start now follow the explicitly bound registered connection,
-instead of another device's process-wide selection. Existing opt-in, Remote
-authentication, connection-key and owner/Agent/Session checks remain enforced.
+Frontend Connector owns this Functions and external Workbench correction.
+The user approved fixing Call defects/latency and evaluating x-ai/grok-stt-1.0,
+without forcing recognition language. The instance Call declarations now select
+Grok with empty STT options; the running HASHI4 context returned the matching
+configuration revision. Active calls retain their frozen configuration.
 
-Two strengthened existing scenarios fail before repair and pass afterward;
-52 focused frontend checks and the production build pass. The daily service
-adopts the repaired source/assets. Its actual Call button passes browser capture,
-real-provider recognition, HASHI3 reply, playback and confirmed hangup with a
-file microphone. The 5179 page also passes that path. Physical devices and
-hearing remain personal acceptance. Existing user applications remain open.
-The owning external frontend decision is `docs/call/CALL_AVAILABILITY_REPAIR_2026-10-09.md`;
-private red/green and canary receipts are retained in the paired HASHI3 repair
-directory. No HASHI4 source or lifecycle change is part of this repair.
+Call voice labels derive from one Gemini catalog, with localized descriptions
+and documented gender. Selection publishes a verified prerecorded sample through
+the existing /voice FC notification path, outside conversation Turns. Chinese
+and English samples cover all 30 voices. Workbench uses MP3; Telegram uses OGG.
+A preview button replays the selected sample, and a repeated callback stays
+idempotent. No provider synthesis runs in menu callbacks.
+
+The first final-answer audio segment uses a short natural phrase (at most 120
+characters); the remaining segments retain the existing bounded policy.
+Workbench requests exactly one segment ahead while current audio plays, without
+raising its polling frequency. Hangup fencing and explicit retry remain intact.
+This complements the earlier observation-ready join correction.
+
+143 focused Python cases, 30 controller cases and the client build pass.
+All 120 media files validate and decode. Four phone/iPad full-app fixture cases
+verify readable labels and advancing audio; the known Playwright WebKit native
+controls warning remains distinct from playback and product errors.
+Synthetic TTS first-audio wait fell from 5.34/5.78 s to 3.19/3.19 s; this is not
+a whole-call benchmark. Grok still misrecognized the isolated Chinese “嗯”.
+See [evidence and adoption scope](repairs/CALL_VOICE_PREVIEWS_20261010.md).
+
+The source changes are prepared in HASHI3. Workbench client publication is a
+separate static-asset operation. HASHI4 backend code and shared Functions
+adoption remain unperformed: the standing restriction requires explicit
+production/lifecycle authorization. No Core changes or restarts are included.
+
+## 2026-10-10 mobile entries and latency audit
+
+Frontend Connector owns the external mobile entry layout and a HASHI3 Functions
+correction that wakes a speech turn on a fresh camera observation. The observer
+continues processing later frames; its existing 2.5-second join limit remains.
+The latency, correction and service tests pass (52), with a focused regression
+that failed before repair. HASHI4 has not adopted this backend change.
+
+The current Whisper route reproduced short Chinese language/script mistakes in
+a four-sample synthetic comparison. Scribe v2 is a candidate for real-user A/B
+testing with automatic language detection, not an authorized production switch.
+Observed TTS generation (5.1–7.6 seconds) dominates two reported turns; a model
+change to recognition alone cannot remove that wait.
+See [scoped evidence and decisions](repairs/CALL_LANGUAGE_LATENCY_20261010.md).
+Existing model configuration, capture restoration and camera opt-in are retained.
 
 ## Historical 2026-10-06 decision — superseded startup behavior
 
@@ -408,6 +475,22 @@ generation runs on all five Workers, service health is ready, and Core PID,
 runtime and protected source are unchanged. Actual camera continuity,
 recognition accuracy and conversation latency remain open user acceptance.
 
+## 2026-10-11 Call-owned Run termination correction
+
+A live HASHI3 replacement exposed an admitted Call Run that survived hangup
+and continued as real Provider work. Shared Function quiescence correctly
+protected it, then timed out after 120 seconds. Branch history confirmed that
+the restart and Call repair lines were already present; this was a missing
+lifecycle requirement rather than another merge omission.
+
+Call keeps the admission-race safety boundary: it does not cancel while PAO's
+acceptance identity is unknown. Once the exact request and Run IDs resolve,
+hangup uses PAO's existing targeted Run fence and records the control outcome.
+An already-known Call Run is cancelled at once. No session-wide or Agent-wide
+stop is introduced, and unrelated foreground or background work remains
+protected. The former test that required the admitted request to detach after
+hangup is retired in favor of exact-scope red/green coverage.
+
 ## 2026-10-05 approved call latency repair
 
 The user approved eliminating unnecessary waits, preserving the selected
@@ -562,11 +645,3 @@ path, not physical hearing, camera content, real mobile or acoustic/latency
 quality. The older generic-script query's unknown receipt is not reclassified.
 The design-to-evidence map is
 [Phone/Call design acceptance](repairs/PHONE_CALL_DESIGN_ACCEPTANCE_20261007.md).
-
-The October 8/9 user request delivers the paired release to the existing daily
-Windows Workbench service and installed desktop client, scoped to HASHI3 only.
-Call is opted in on that connection. Real-provider Phone and Call button-to-audio
-checks pass in the installed client at the actual daily service, with an explicit
-file microphone; physical devices, camera content and hearing remain open.
-Existing user applications and the original Workbench changes are retained.
-See [current scoped delivery](repairs/NIGHTLY_20261008_HASHI3.md).
