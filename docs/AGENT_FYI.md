@@ -1,39 +1,33 @@
 # HASHI Agent FYI
 
-October 11 /call immediate-media repair: a video-call click now opens one
-direct Call and begins microphone and camera acquisition together. Camera
-permission/device failure degrades that same call to audio-only; camera off/on
-retains its binding and microphone path. Current `call_ready` capability now
-owns the entrance instead of the retired stored route preference, and the dock
-shows Connecting immediately without labelling an unconnected call as a paused
-microphone. A bounded pre-service compatibility path lets older protocol-1
-runtimes reject the optional locale field without losing localized filler
-support on current runtimes. Models, reasoning, endpointing, default enablement
-and deployment templates are unchanged. Workbench direct Call passes 57 checks,
-existing Phone/live-call passes 81, HASHI3 frontend Call passes 140, and the
-production build passes. Live HASHI3 browser acceptance confirmed concurrent
-audio/video acquisition, live camera off/on in one call, and camera-denial
-audio fallback. Workbench commit 13f14ad is published to the current
-H4-connected service as `index-nF2jbtsW.js`; the served artifact hash matches
-the build and the service was not restarted. User physical-device acceptance on
-HASHI4 remains pending. See Workbench
-`docs/call/CALL_IMMEDIATE_MEDIA_STARTUP_2026-10-11.md`.
+October 11 authoritative `debug-call` recovery: the clean candidate is defined
+by [the current behavior contract](HASHI_CALL_CURRENT_BEHAVIOR.md), which
+supersedes conflicting historical Call notes. A video-call click immediately
+starts microphone and camera acquisition in one action; camera denial or device
+failure degrades the same call to audio-only. Camera off/on, microphone
+mute/unmute, captions, speech, and hangup retain the same Call and Session
+binding. Dial/ringback stops before connected speech or microphone admission.
+Call presentation uses natural spoken language and removes stage directions
+from Call captions and TTS while preserving the canonical PAO Session answer.
+Models, reasoning, endpointing, default availability, and installation-template
+behavior are unchanged.
 
-October 11 Call speech/caption update: complete answer sentences now synthesize
-and play in FIFO order while the answer is still arriving. Public commentary
-may be spoken during long-running work; reasoning and technical activity are
-filtered by typed activity class and never enter TTS. Localized wait fillers are
-prepared in the selected Agent voice, cancelled by real speech, and remain
-outside answers, transcripts and Session history. Workbench shows a rolling
-24-row transcript with larger phone text, smart follow/manual return, and visible
-controls on PC, tablet and portrait/landscape phone. Existing endpointing,
-camera cadence and model/reasoning choice remain unchanged. HASHI4 source is
-synchronized and passes all 140 Call tests; the published Workbench passes 83
-focused checks, 11 Chromium window checks and the production build. The current
-H4-connected Workbench serves the new assets and reloaded cleanly. HASHI4
-running Functions were not restarted; the user retained that adoption step.
-Already-open pages need one reload. See Workbench
-`docs/call/CALL_STREAMING_SPEECH_CAPTIONS_2026-10-11.md`.
+The exact HASHI3 candidate is on `debug-call`. Workbench Call and Phone/live
+checks pass 165/165, HASHI3 Frontend Call passes 143/143, the complete Workbench
+server suite and production build pass, and the protected-Core check is clean.
+Real HASHI3 browser acceptance used the physical LifeCam microphone/camera and
+speaker: the Call window appeared in 62 ms, live camera was available in about
+1.1-1.2 seconds, camera off/on and microphone mute/unmute worked in the same
+call, one microphone turn produced visible caller/Agent captions and completed
+TTS playback, and hangup ended the camera track. Browser sound-source
+observation found no new ringback starts during the four seconds after the call
+became ready. The established controls, rolling captions, and once-only opening
+remained present across repeated calls.
+
+The shared Workbench service is running the verified `debug-call` client.
+HASHI4 source/adoption and HASHI4 live acceptance are recorded separately; no
+HASHI4 reboot is authorized. See Workbench
+`docs/call/CALL_DEBUG_BASELINE_2026-10-11.md`.
 
 October 10 Workbench Call-control visual repair: the shared button design
 system painted camera-on and keyboard-focus state on the full icon-and-label
