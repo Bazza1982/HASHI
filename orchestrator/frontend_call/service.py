@@ -22,6 +22,7 @@ from .contract import (
     decode_wav,
     decode_jpeg,
     call_locale,
+    clean_speech_text,
     complete_speech_segments,
     filler_phrases,
     MAX_SPEECH_SEGMENTS,
@@ -691,7 +692,8 @@ class CallService:
                 # so token boundaries do not collapse into a different word.
                 preview = (str(turn.get("_answer_preview") or "") + raw_content)[:64000]
                 turn["_answer_preview"] = preview
-                stable, _remainder = complete_speech_segments(preview)
+                presented_preview = clean_speech_text(preview)
+                stable, _remainder = complete_speech_segments(presented_preview)
                 known = list(turn.get("_answer_parts") or ())
                 if stable[:len(known)] == known:
                     for part in stable[len(known):]:
@@ -710,14 +712,14 @@ class CallService:
                 ]
                 self._append_row(call, {
                     "speaker": "assistant",
-                    "text": preview,
+                    "text": presented_preview,
                     "turn_id": turn.get("turn_id"),
                     "kind": "answer_preview",
                 })
                 continue
             if owner != "user_commentary" or channel != "commentary":
                 continue
-            content = raw_content.strip()
+            content = clean_speech_text(raw_content)
             event_id = str(event.get("event_id") or event.get("sequence") or "")
             if not content or len(content) > 320 or event_id in seen:
                 continue
@@ -781,7 +783,7 @@ class CallService:
                 )
                 return
             self.ports.validate(call.owner, call.binding)
-            answer = str(answer or "").strip()
+            answer = clean_speech_text(str(answer or ""))
             if not answer or len(answer) > 1200:
                 raise CallError("call_opening_invalid", 502)
             turn["answer"] = answer
@@ -937,7 +939,7 @@ class CallService:
                 if run["terminal"]:
                     if run["state"] != "completed":
                         raise CallError("call_agent_" + run["state"], 409)
-                    answer = run["text"]
+                    answer = clean_speech_text(run["text"])
                     if not answer:
                         raise CallError("call_answer_empty", 502)
                     turn["answer"] = answer[:64000]
