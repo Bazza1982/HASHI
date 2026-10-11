@@ -32,18 +32,24 @@ resume cannot leave both entry icons permanently busy across a reboot.
 
 October 12 HASHI4 Call latency correction: correlated physical-call evidence
 shows normal Agent Runs (about 2.8/4.4 s) and STT (about 1.8/2.4 s), while one
-browser recording remained open for the 59.8-second safety limit because a
-stable WebRTC room floor sat above the ordinary silence threshold. Frontend
-Connector now closes only a speech-then-stable-room tail, learns a narrow room
-band without hiding later quieter speech, and retains the normal 800 ms silence
-endpoint and continuous-sound bound. PAO now records the once-only audible
+browser recording remained open for the 59.8-second safety limit. The approved
+Aptenra-inspired local detector plus moving idle-noise baseline had been
+replaced by a later HASHI2-only cloud experiment and was never actually
+reconnected despite the restoration record. The temporary stable-tail repair
+was a different symptom heuristic and is superseded. Frontend Connector now
+again warms and reuses the local speech detector, learns its baseline only from
+rejected idle frames, and retains onset pre-roll, the normal 800 ms quiet
+endpoint, and the continuous-speech bound. Detector failure is explicit and
+never falls back to amplitude-only capture. PAO records the once-only audible
 opening in the same conversation, delays filler warming until every opening
 segment is synthesized, and tells the Agent to compare explicit timestamps
-when relative dates or elapsed time matter. Complete checks pass 158 HASHI Call
-cases, 97 Workbench Call cases, the production build, and the Protected-Core
-gate. This is `debug-call` source validation; running HASHI4 adoption, fresh
-renderer proof, and physical acoustic acceptance remain pending the user's
-lifecycle action.
+when relative dates or elapsed time matter. The retained acoustic replay rejects
+noise and Call tones, preserves normal and quiet speech segments, and processes
+95% of detector frames within 1.1 ms. The complete Workbench Call suite passes
+95/95, its production build passes, the matching HASHI Function suite passes
+158/158, and Protected Core remains clean. This is `debug-call` source and
+deterministic-browser validation; running HASHI4 adoption, fresh renderer proof,
+and physical acoustic acceptance remain pending the user's lifecycle action.
 
 The same candidate retains the recovered restart work: immutable qualified
 generations are reused only after exact runtime/source/artifact checks;
