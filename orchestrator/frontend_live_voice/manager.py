@@ -420,6 +420,11 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             if key in public
         }
         allowed_public["adapter_version"] = adapter.capabilities.version
+        billing_descriptor = getattr(adapter, "billing_descriptor", None)
+        if callable(billing_descriptor):
+            billing = billing_descriptor(model)
+            if billing:
+                allowed_public["billing"] = billing
         return {
             "adapter": adapter,
             "media": adapter.media_descriptor(),

@@ -14,31 +14,32 @@ numeric response-length requirements are retired.
 ## Entry, availability, and binding
 
 - **CALL-ENTRY-01** — Workbench shows the established fixed Phone and video Call
-  controls with their icons, focus treatment, and usable touch targets. Either
-  control starts or returns to the same direct, video-first Call. The legacy
-  Phone route is only a compatibility fallback after direct Call is confirmed
-  unavailable.
+  controls with their icons, focus treatment, and usable touch targets. Phone
+  starts or returns only `/phone`; video starts or returns only `/call`. Neither
+  control can fall back to, launch, or retarget the other transport.
 - **CALL-ENTRY-02** — Direct Call binds to the currently selected Agent,
   connection, Session, and context generation. Changing the reading view during
   a call does not silently rebind the live call.
 - **CALL-ENTRY-03** — Current `call_ready` is authoritative. A retired stored
-  route cannot block direct Call. An unresolved route is refreshed when the
-  Workbench returns to the foreground and rechecked from either launch click; it
-  must not be treated as unavailable. Phone fallback is allowed only after a
-  current check confirms direct Call is unavailable.
+  route cannot block direct Call. An unresolved route remains hidden until
+  discovery confirms readiness. Unknown, unavailable, or failed Call never
+  invokes Phone, and Phone startup never reads or selects the Call route.
 - **CALL-ENTRY-04** — Busy state prevents a second call. Existing calls remain
   returnable and endable. Unconfigured or explicitly disabled Call stays hidden.
-- **CALL-ENTRY-05** — Call remains available by default in the installed
-  Workbench templates. This recovery does not change any model, reasoning level,
-  default enablement, or deployment-template promise.
+- **CALL-ENTRY-05** — Phone and Call are basic Functions. Phone is available
+  when its selected live provider/model and credential are configured. Call is
+  available when its selected STT/TTS targets and credentials are configured.
+  A Workbench per-instance allowlist is not an availability owner. A global
+  opt-out may still disable new Call starts.
 
 ## Immediate media startup and degradation
 
 - **CALL-MEDIA-01** — Either fixed launch control immediately displays
-  Connecting and begins microphone and camera acquisition in that same user
-  action. Camera is part of Call startup, not a later optional mode. Context and
-  server startup may proceed concurrently; they must not postpone the device
-  permission request.
+  Connecting and begins its own media acquisition in that same user action.
+  Phone acquires its WebRTC microphone; video Call acquires microphone and
+  camera. Camera is part of video Call startup, not Phone. Context and server
+  startup may proceed concurrently; they must not postpone the applicable
+  device permission request.
 - **CALL-MEDIA-02** — Media acquired while the Agent opening is pending is held
   for that call and does not admit caller speech until the once-only opening has
   completed.
@@ -135,6 +136,22 @@ numeric response-length requirements are retired.
 - **CALL-UI-06** — The Call panel renders one canonical rolling transcript from
   PAO Call rows. Playback-only current-sentence state must not create a second
   caption track or duplicate the same Agent answer.
+- **CALL-UI-07** — Context actions sit outside the clipped flexible media/body
+  region. At 390×640 with video and rolling captions, Stop speaking remains
+  fully visible and its complete hit target remains clickable.
+
+## Voice-media billing
+
+- **CALL-COST-01** — Phone projects a live voice-media amount from the qualified
+  GPT Live per-minute rate and provider-session seconds. It does not include a
+  separate backend text-model amount.
+- **CALL-COST-02** — Call projects only STT and TTS media cost. Provider-returned
+  cost wins; otherwise the qualified model catalogue and measured audio duration
+  produce a visibly marked estimate. Backend text-model usage remains in
+  `/metre`, and vision cost is excluded from the voice-media total.
+- **CALL-COST-03** — Unknown catalogue price or missing usage is incomplete,
+  never silently zero. The display freezes the selected qualified rate/model
+  for the call so a mid-call configuration change cannot rewrite prior cost.
 
 ## Turn safety, recovery, and termination
 
@@ -194,7 +211,8 @@ older commit or renderer cannot be carried forward.
 | Ring/opening | timing/order tests and live speaker observation |
 | Spoken style | PCM guidance and deterministic Call-cleaning tests |
 | Streaming/fillers | FIFO, complete-sentence, cancellation, no-duplicate tests |
-| Captions/UI | single rolling transcript, stable mirrored preview, retained Agent identity, smart-follow, visual/browser tests |
+| Captions/UI | single rolling transcript, stable mirrored preview, retained Agent identity, smart-follow, visible/clickable contextual actions, visual/browser tests |
+| Voice cost | Phone per-minute and Call STT/TTS projections, exact/estimate boundary, backend text and vision exclusions |
 | Recovery/hangup | existing noise, network, lifecycle, and settlement regressions |
 | H3 live | versioned frontend acceptance receipt plus real media observations |
 | H4 live | exact deployed artifact/source identity plus live observations, without reboot |

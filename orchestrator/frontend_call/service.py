@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from uuid import uuid4
 from .diagnostics import body_facts, diagnostic_context, elapsed_ms, emit, error_facts, receipt_facts
 from .transcription import spoken_transcription
+from .billing import MediaBilling, wav_seconds
 from .contract import (
     CallError,
     PROTOCOL,
@@ -69,6 +70,7 @@ class Call:
     vision_error: str = ""
     vision_launches: list = field(default_factory=list)
     video_policy: dict = field(default_factory=dict)
+    billing: MediaBilling = field(default_factory=MediaBilling)
 
 
 class CallService:
@@ -93,6 +95,23 @@ class CallService:
         # turn facts prevents that request's IDs leaking into the ended call.
         facts.update({key: (turn or {}).get(key) for key in ("turn_id", "sequence", "run_id", "request_id", "message_id")})
         return facts
+
+    def _project_readiness(self, owner, agent, projection):
+        """Hide Call unless its selected STT/TTS credentials are usable."""
+        result = dict(projection)
+        available = getattr(self.adapters, "target_available", None)
+        if not result.get("call_ready") or not callable(available):
+            return result
+        _profile, targets = self.config.freeze(owner, agent, result["revision"])
+        result["call_ready"] = all(
+            targets.get(kind) is not None and available(targets[kind])
+            for kind in ("stt", "tts")
+        )
+        vision = targets.get("vision")
+        result["camera_available"] = bool(
+            result["call_ready"] and vision and available(vision)
+        )
+        return result
 
     def busy(self, owner):
         self.expire()
@@ -260,6 +279,7 @@ class CallService:
             "turn": turn,
             "rows": list(call.rows),
             "duration_seconds": int(self.clock() - call.started),
+            "billing": call.billing.view(call.targets),
             "camera": self._camera_view(call),
         }
 
@@ -433,11 +453,16 @@ class CallService:
         if op in ("route", "context", "save_profile", "start"):
             self.ports.validate(owner, body)
         if op == "route":
+            route = self._project_readiness(
+                owner, body["agent_id"],
+                self.config.route(owner, body["agent_id"]),
+            )
             return {"ok": True, "protocol": PROTOCOL,
                     "busy": self.busy(owner) or self.ports.phone_busy(owner),
-                    **self.config.route(owner, body["agent_id"])}
+                    **route}
         if op == "context":
             context = self.config.context(owner, body["agent_id"])
+            context = self._project_readiness(owner, body["agent_id"], context)
             return {
                 "ok": True,
                 "protocol": PROTOCOL,
@@ -476,6 +501,11 @@ class CallService:
             profile, targets = self.config.freeze(
                 owner, body["agent_id"], body.get("revision")
             )
+            available = getattr(self.adapters, "target_available", None)
+            if callable(available) and not all(
+                available(targets[kind]) for kind in ("stt", "tts")
+            ):
+                raise CallError("call_credential_missing", 503)
             binding = {
                 k: body[k]
                 for k in (
@@ -700,6 +730,10 @@ class CallService:
                         result = await self.adapters.synthesize(
                             call.targets["tts"], call.profile["tts"], text
                         )
+                    call.billing.record_tts(
+                        call.targets["tts"], text,
+                        result.pop("_billing_usage", None),
+                    )
                     if call.phase != "active":
                         return
                     self.ports.validate(call.owner, call.binding)
@@ -919,6 +953,10 @@ class CallService:
                 transcription = await self.adapters.transcribe(
                     call.targets["stt"], call.profile["stt"], audio
                 )
+            call.billing.record_stt(
+                call.targets["stt"], wav_seconds(audio),
+                transcription.pop("_billing_usage", None),
+            )
             text, ignore_reason = spoken_transcription(transcription)
             emit("stt_completed", **self._facts(call, turn), stage=stage,
                  duration_ms=elapsed_ms(self.clock, stage_started), text_chars=len(text),
@@ -1115,6 +1153,10 @@ class CallService:
                 result = await self.adapters.synthesize(
                     call.targets["tts"], call.profile["tts"], text
                 )
+            call.billing.record_tts(
+                call.targets["tts"], text,
+                result.pop("_billing_usage", None),
+            )
             emit("tts_completed", **self._facts(call, turn), stage="tts", segment=index,
                  duration_ms=elapsed_ms(self.clock, started), **receipt_facts(result.get("provider_receipt")))
             self.expire()

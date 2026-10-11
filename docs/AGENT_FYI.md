@@ -2,8 +2,11 @@
 
 October 11 authoritative debug-call baseline: the current
 [Call behavior contract](HASHI_CALL_CURRENT_BEHAVIOR.md) supersedes conflicting
-historical notes. Both Phone and video controls enter the same direct Call and
-immediately request microphone and camera; camera denial or failure degrades
+historical notes. Phone enters only `/phone`; the video control enters only
+`/call` and requests microphone and camera. The transports never fall back to
+each other, and an unknown or unavailable Function has no entry. Call is a
+basic Function once its selected STT/TTS models and credentials are ready; no
+Workbench per-instance allowlist is required. Camera denial or failure degrades
 that Call to audio-only. Camera and microphone toggles retain the same Call and
 Session. Connected speech stops dial/ringback. Local video is mirrored in a
 stable bounded preview while the Agent avatar and identity remain visible.
@@ -13,6 +16,11 @@ chunking and no stage directions or artificial sentence gaps. If a known next
 chunk is still synthesizing after the bounded playback grace period, the
 approved prepared localized fillers may bridge the silence in order and stop as
 soon as answer audio is ready; they never create another caption or Session row.
+Context actions sit outside the clipped flexible body, so Stop speaking remains
+visible and clickable with video and rolling captions at 390×640. Phone and
+Call show a compact live voice-media cost: Phone uses the qualified GPT Live
+per-minute rate; Call counts only STT/TTS media. Backend text stays in `/metre`,
+Call vision stays excluded, and non-provider figures are visibly estimates.
 
 The same candidate retains the recovered restart work: immutable qualified
 generations are reused only after exact runtime/source/artifact checks;
@@ -31,8 +39,7 @@ targeted cancellation fence. A known Call Run is cancelled immediately. It
 never becomes an Agent-wide stop and unrelated foreground/background work
 remains protected.
 
-Models, effort, endpointing, default availability and install-template
-behavior remain unchanged. Source, artifact, running generation, renderer
+Models, effort and endpointing remain unchanged. Source, artifact, running generation, renderer
 adoption, restart timing and physical media acceptance are separate facts.
 HASHI4 must not be rebooted for this recovery. Detailed October 10-11 notes
 remain in [history](AGENT_FYI_HISTORY_2026-10-11.md).

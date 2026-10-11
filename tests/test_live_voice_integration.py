@@ -181,6 +181,8 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         self.assertTrue(result["capability"]["available"])
         self.assertEqual(result["capability"]["phone"]["voice"], "willow")
         self.assertEqual(result["capability"]["phone"]["voice_presentation"], "feminine")
+        self.assertEqual(result["capability"]["phone"]["billing"]["usd_per_minute"], 0.05)
+        self.assertIn("backend_text_model", result["capability"]["phone"]["billing"]["excludes"])
 
     def test_append_fragment_deduplication(self):
         frag = Fragment(provider_event_id="evt-1", speaker="user", text="hello world", start_ms=0, end_ms=500)
