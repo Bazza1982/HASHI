@@ -185,8 +185,9 @@ numeric response-length requirements are retired.
   relevant broader checks, a production build, and real Workbench acceptance
   with microphone, camera, speaker/ring, captions, toggles, and hangup.
 - **CALL-REL-04** — Only that exact verified candidate may be loaded into
-  HASHI4. HASHI4 adoption and live observations must be recorded separately;
-  no HASHI4 reboot is authorized for this recovery.
+  HASHI4. HASHI4 adoption and live observations must be recorded separately.
+  The Agent does not initiate the HASHI4 reboot; the user owns the authorized
+  adoption reboot.
 - **CALL-REL-05** — All recovery work stays on the clean `debug-call` branch
   until the complete candidate is verified and deliberately merged back to
   main.

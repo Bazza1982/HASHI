@@ -42,8 +42,9 @@ remains protected.
 
 Models, effort and endpointing remain unchanged. Source, artifact, running generation, renderer
 adoption, restart timing and physical media acceptance are separate facts.
-HASHI4 must not be rebooted for this recovery. Detailed October 10-11 notes
-remain in [history](AGENT_FYI_HISTORY_2026-10-11.md).
+The Agent must not reboot HASHI4 for this recovery; the user owns the later
+adoption reboot. Detailed October 10-11 notes remain in
+[history](AGENT_FYI_HISTORY_2026-10-11.md).
 
 HASHI4 source-load receipt: the final HASHI3 `debug-call` candidate was copied
 from its previously matched baseline into this `debug-call` branch. At the
@@ -75,6 +76,22 @@ received an answer that correctly described the camera frame; no Phone audit
 was created. A separate Phone click opened only the audio panel and created the
 expected legacy attempt/call audit. Both calls ended normally. This correction
 performed no HASHI4 lifecycle action.
+
+October 11 final Call action and voice-cost receipt: Workbench commit
+`a396e12123a57a9b1576c45f728292f425518f57` and HASHI4 commit
+`912d9daf` are loaded on `debug-call`. Independent checks pass 53 focused
+Workbench tests, its production build, 249 Call/Phone Function tests, and the
+Protected Core check. The managed Workbench service reports that exact source
+commit, and the existing Electron window created a fresh renderer session after
+reload. A physical direct Call opened a live 1024x576 camera track with mirror
+transform, retained the Agent identity and one transcript, and kept all three
+controls visible. During real playback, Stop speaking was fully inside the
+viewport and the pointer hit-test selected the button; clicking it produced the
+`user_stopped` playback receipt and returned the Call to listening. The Call
+then ended and released camera and microphone. The Function source is staged for
+the user-owned HASHI4 reboot; running-generation adoption and live cost display
+remain pending that reboot. See
+[source-load receipt](repairs/CALL_ENTRY_COST_HASHI4_SOURCE_LOAD_20261011.md).
 
 ## Authority and ownership
 
