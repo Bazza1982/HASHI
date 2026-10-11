@@ -683,6 +683,87 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         self.assertEqual(snap["snapshot"]["provider_close_state"], "unconfirmed")
         self.assertTrue(snap["snapshot"]["resume_required"])
 
+    def test_terminal_call_settles_inflight_resume_attempt(self):
+        attempt_id = "terminal-resume-attempt"
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        with self.store._lock, self.store._connection() as connection:
+            connection.execute(
+                """INSERT INTO live_call_attempts(
+                     attempt_id, owner_id, session_id, agent_id, instance_id,
+                     instance_generation, context_generation, request_digest,
+                     state, call_id, created_at, updated_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?, ?, ?)""",
+                (attempt_id, self.owner_id, self.session_id, self.agent_id, "HASHI", "1", 1,
+                 "digest", self.call_id, now, now),
+            )
+            connection.execute(
+                """UPDATE live_calls SET phase = 'ending', termination_initiator = 'user',
+                   termination_reason = 'user_hangup' WHERE call_id = ?""",
+                (self.call_id,),
+            )
+
+        self.manager._mark_terminal(
+            self.binding, "ended", provider_close_state="confirmed",
+            summary="User ended the live phone call",
+        )
+
+        with self.store._lock, self.store._connection() as connection:
+            attempt = connection.execute(
+                "SELECT state, cancel_requested, cleanup_state, outcome_json "
+                "FROM live_call_attempts WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+        self.assertEqual(attempt["state"], "cancelled")
+        self.assertEqual(attempt["cancel_requested"], 1)
+        self.assertEqual(attempt["cleanup_state"], "confirmed")
+        self.assertEqual(json.loads(attempt["outcome_json"])["error_code"], "live_attempt_cancelled")
+        self.assertFalse(self.manager.has_foreground_call(self.owner_id))
+
+    def test_initialization_reconciles_pending_attempt_linked_to_terminal_call(self):
+        attempt_id = "persisted-terminal-resume-attempt"
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        with self.store._lock, self.store._connection() as connection:
+            connection.execute(
+                "UPDATE live_calls SET phase = 'ended', ended_at = ?, provider_close_state = 'confirmed' "
+                "WHERE call_id = ?",
+                (now, self.call_id),
+            )
+            connection.execute(
+                """INSERT INTO live_call_attempts(
+                     attempt_id, owner_id, session_id, agent_id, instance_id,
+                     instance_generation, context_generation, request_digest,
+                     state, call_id, created_at, updated_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?, ?, ?)""",
+                (attempt_id, self.owner_id, self.session_id, self.agent_id, "HASHI", "1", 1,
+                 "digest", self.call_id, now, now),
+            )
+
+        # Terminal calls never make another Connector busy, even before the
+        # persisted attempt is reconciled by the next Function generation.
+        self.assertFalse(self.manager.has_foreground_call(self.owner_id))
+
+        recovered = LiveVoiceManager(
+            session_store=self.store,
+            global_config=self.global_config,
+            secrets={"openai_api_key": "sk-test-fake"},
+            admit_run=self._admit_run,
+            judge_action=self._judge_action,
+            resolve_phone_session=resolved_phone_session,
+            proposal_grace_seconds=0,
+            close_timeout_seconds=0.01,
+        )
+        with self.store._lock, self.store._connection() as connection:
+            attempt = connection.execute(
+                "SELECT state, cancel_requested, cleanup_state, outcome_json "
+                "FROM live_call_attempts WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+        self.assertEqual(attempt["state"], "cancelled")
+        self.assertEqual(attempt["cancel_requested"], 1)
+        self.assertEqual(attempt["cleanup_state"], "confirmed")
+        self.assertEqual(json.loads(attempt["outcome_json"])["error_code"], "live_attempt_cancelled")
+        self.assertFalse(recovered.has_foreground_call(self.owner_id))
+
     def test_shutdown_preserves_call_and_closes_only_the_sideband_socket(self):
         sent = []
         manager = self.manager

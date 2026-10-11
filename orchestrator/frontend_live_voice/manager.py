@@ -764,8 +764,47 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         if queue is not None:
             await queue.join()
 
+    @staticmethod
+    def _settle_terminal_call_attempts(
+        connection: sqlite3.Connection,
+        *,
+        call_id: str,
+        phase: str,
+        provider_close_state: str,
+        error_code: str | None = None,
+    ) -> list[str]:
+        """Make unfinished transport attempts non-blocking once their call is terminal."""
+
+        if phase not in TERMINAL_PHASES:
+            return []
+        rows = connection.execute(
+            """SELECT attempt_id FROM live_call_attempts
+               WHERE call_id = ? AND state IN ('reserved', 'provider_created')""",
+            (call_id,),
+        ).fetchall()
+        attempt_ids = [str(row["attempt_id"]) for row in rows]
+        if not attempt_ids:
+            return []
+        cancelled = phase == "ended"
+        terminal_state = "cancelled" if cancelled else "failed"
+        terminal_error = "live_attempt_cancelled" if cancelled else (error_code or "live_call_terminated")
+        outcome = json.dumps(
+            {"ok": False, "error_code": terminal_error, "call_id": call_id, "phase": phase},
+            separators=(",", ":"),
+        )
+        connection.execute(
+            """UPDATE live_call_attempts
+               SET state = ?,
+                   cancel_requested = CASE WHEN ? = 1 THEN 1 ELSE cancel_requested END,
+                   cleanup_state = ?, outcome_json = COALESCE(outcome_json, ?), updated_at = ?
+               WHERE call_id = ? AND state IN ('reserved', 'provider_created')""",
+            (terminal_state, int(cancelled), provider_close_state, outcome, _utc_now(), call_id),
+        )
+        return attempt_ids
+
     def _sanitize_persisted_attempts(self) -> None:
-        """Remove SDP written by the pre-qualified prototype."""
+        """Remove prototype SDP and reconcile attempts whose logical call is terminal."""
+        reconciled: list[tuple[str, str, str]] = []
         with self.session_store._lock, self.session_store._connection() as connection:
             rows = connection.execute(
                 "SELECT attempt_id, outcome_json FROM live_call_attempts WHERE outcome_json IS NOT NULL"
@@ -785,6 +824,31 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                         "UPDATE live_call_attempts SET outcome_json = ? WHERE attempt_id = ?",
                         (json.dumps(value, separators=(",", ":")), row["attempt_id"]),
                     )
+            terminal_calls = connection.execute(
+                """SELECT DISTINCT c.call_id, c.phase, c.provider_close_state
+                   FROM live_call_attempts AS a
+                   JOIN live_calls AS c ON c.call_id = a.call_id
+                   WHERE a.state IN ('reserved', 'provider_created')
+                     AND c.phase IN ('ended', 'failed', 'interrupted')"""
+            ).fetchall()
+            for call in terminal_calls:
+                attempt_ids = self._settle_terminal_call_attempts(
+                    connection,
+                    call_id=str(call["call_id"]),
+                    phase=str(call["phase"]),
+                    provider_close_state=str(call["provider_close_state"] or "unconfirmed"),
+                )
+                reconciled.extend(
+                    (attempt_id, str(call["call_id"]), str(call["phase"]))
+                    for attempt_id in attempt_ids
+                )
+        for attempt_id, call_id, phase in reconciled:
+            self.audit.record_attempt(
+                attempt_id,
+                "dial.reconciled_terminal_call",
+                call_id=call_id,
+                phase=phase,
+            )
 
     async def start(self) -> None:
         self._closing = False
@@ -2881,8 +2945,12 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 (owner_id,),
             ).fetchone()
             pending = connection.execute(
-                "SELECT 1 FROM live_call_attempts WHERE owner_id=? "
-                "AND state IN ('reserved','provider_created') LIMIT 1",
+                """SELECT 1 FROM live_call_attempts AS a
+                   LEFT JOIN live_calls AS c ON c.call_id = a.call_id
+                   WHERE a.owner_id = ? AND a.state IN ('reserved', 'provider_created')
+                     AND (a.call_id IS NULL OR c.call_id IS NULL
+                          OR c.phase IN ('connecting', 'active', 'ending', 'recovering'))
+                   LIMIT 1""",
                 (owner_id,),
             ).fetchone()
         return bool(active or pending)
@@ -3975,6 +4043,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
     ) -> None:
         public_usage = _public_usage(usage)
         became_terminal = False
+        settled_attempts: list[str] = []
         with self.session_store._lock, self.session_store._connection() as connection:
             row = connection.execute(
                 "SELECT phase, provider_close_state, usage_json, termination_initiator, termination_reason, "
@@ -4023,6 +4092,13 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 (phase, _utc_now(), provider_close_state,
                  json.dumps(public_usage) if public_usage is not None else None, binding.call_id),
             )
+            settled_attempts = self._settle_terminal_call_attempts(
+                connection,
+                call_id=binding.call_id,
+                phase=phase,
+                provider_close_state=provider_close_state,
+                error_code=error_code,
+            )
             state_detail: dict[str, Any] = {
                 "provider_close_state": provider_close_state,
                 "usage": public_usage,
@@ -4032,6 +4108,13 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             self._append_call_state(connection, binding, phase, summary, **state_detail)
             became_terminal = True
         if became_terminal:
+            if settled_attempts:
+                self.audit.record(
+                    binding,
+                    "dial.pending_attempts_settled",
+                    phase=phase,
+                    attempt_count=len(settled_attempts),
+                )
             self._cascade_generations.pop(
                 (binding.call_id, binding.call_epoch, binding.provider_session_id), None)
             queue = self._provider_event_queues.get(binding.call_id)

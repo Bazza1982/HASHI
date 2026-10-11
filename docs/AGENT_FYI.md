@@ -25,6 +25,10 @@ visibly marked as estimates.
 Provider-declared Phone content-policy closure is terminal: show the explicit
 content-filter reason, release the foreground line, and do not reconnect the
 same rejected context as though the service were temporarily unavailable.
+Terminal Phone calls also settle linked pending transport attempts. Startup
+reconciles older terminal-call attempts, and Call/Phone admission ignores a
+pending attempt whose linked logical call is already terminal, so a cancelled
+resume cannot leave both entry icons permanently busy across a reboot.
 
 The same candidate retains the recovered restart work: immutable qualified
 generations are reused only after exact runtime/source/artifact checks;

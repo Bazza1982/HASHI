@@ -216,6 +216,13 @@ admission. FC presents that reason to the caller. It must not reconnect the
 same rejected context or leave Phone and Call controls disabled behind a false
 service-unavailable state.
 
+Every terminal logical-call transition also settles any linked transport
+attempt still recorded as `reserved` or `provider_created`. Owner-level media
+admission treats such an attempt as busy only while it is unbound or its linked
+logical call remains nonterminal. Function startup reconciles older pending
+attempts already linked to terminal calls. A cancelled resume or generation
+replacement therefore cannot preserve a false instance-wide busy line.
+
 Each logical call has an append-only diagnostic timeline independent of the
 ordinary Session-event sequence. It correlates PAO Runs, FC/browser states,
 provider lifecycle and close reason, transport epochs, persistence failures,
