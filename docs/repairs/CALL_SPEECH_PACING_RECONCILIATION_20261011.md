@@ -16,6 +16,13 @@ were local defects: the next public sentence was already in the Call snapshot,
 but playback paused for about 2.34, 2.75, and 1.55 seconds while a separate TTS
 request completed.
 
+A follow-up physical receipt exposed the remaining cross-language defect. The
+59-character English reply `Fashion is on mark. Camera is stable. All test is
+complete.` was split after its first seven spoken words. Both chunks were known
+before playback, but synthesis of the 21-character tail took about 2.31 seconds
+and produced a measured 2.192-second local playback gap. Character count had
+overestimated the playable duration of the first English chunk.
+
 ## Regression lineage
 
 - `8defd5e9` repaired speech gaps by keeping a short phrase with following text
@@ -32,6 +39,9 @@ request completed.
   the Agent run is terminal.
 - Adjacent short complete sentences coalesce into one bounded natural speech
   chunk.
+- The coalescing threshold estimates playable duration: compact-script
+  characters, space-delimited spoken words, and punctuation pauses contribute
+  separately. It does not treat raw character count as language-neutral time.
 - A short incomplete or terminal tail is never discarded; terminal rendering
   flushes it.
 - Every chunk emitted from a preview remains an exact prefix of the chunks
@@ -49,9 +59,10 @@ of a substantial sentence, terminal-tail delivery, preview/final prefix
 stability, commentary delivery, stage-direction cleaning, and bounded
 pathological output.
 
-The focused red reproduction failed both new short-sentence cases against the
-previous implementation. After the change, the complete Frontend Call suite
-passes 150/150 and the Protected Core check passes. The physical receipt must
+The focused red reproduction failed the exact English physical reply against
+the previous implementation, in addition to the earlier short-sentence red
+cases. After the duration-aware correction, the complete Frontend Call suite
+passes 151/151. The Protected Core check passes. The physical receipt must
 measure only playback gaps whose next segment was already present before the
 current audio ended; it must exclude time in which the Agent was still working
 and no next public segment existed.

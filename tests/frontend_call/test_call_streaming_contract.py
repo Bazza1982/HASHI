@@ -33,6 +33,21 @@ def test_final_answer_coalesces_adjacent_short_sentences():
     assert not truncated
 
 
+def test_final_answer_keeps_short_english_sentences_in_one_playable_chunk():
+    text = "Fashion is on mark. Camera is stable. All test is complete."
+    parts, truncated = speech_segments(text)
+    assert parts == [text]
+    assert not truncated
+
+    first = (
+        "This complete sentence has enough spoken words to begin playback "
+        "while the answer continues."
+    )
+    stable, remainder = complete_speech_segments(first + " Tail still changing")
+    assert stable == [first]
+    assert remainder == "Tail still changing"
+
+
 def test_streaming_chunks_remain_a_prefix_of_the_final_chunks():
     first = "这是一句长度足够自然的完整开场，可以在回答仍生成时先播报。"
     short = "好的。"

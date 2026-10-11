@@ -105,9 +105,11 @@ numeric response-length requirements are retired.
 - **CALL-SPEECH-09** — Complete-sentence streaming uses bounded natural speech
   chunks. A sufficiently substantial complete sentence may start before the run
   finishes; adjacent short sentences are coalesced so repeated local TTS startup
-  does not create avoidable sentence gaps. A short terminal tail is always
-  flushed, and every streamed chunk remains an exact prefix of the final chunk
-  sequence.
+  does not create avoidable sentence gaps. Chunk readiness is based on estimated
+  playable duration across compact scripts, spoken words, and punctuation pauses;
+  raw character count is not a valid cross-language duration proxy. A short
+  terminal tail is always flushed, and every streamed chunk remains an exact
+  prefix of the final chunk sequence.
 
 ## Captions and controls
 

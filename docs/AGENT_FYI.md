@@ -109,10 +109,20 @@ from Call captions and TTS while preserving the canonical PAO Session answer.
 Models, reasoning, endpointing, default availability, and installation-template
 behavior are unchanged.
 
+October 11 Call pacing follow-up: the first coalescing repair still used raw
+character count as a proxy for audio duration. A physical English reply was
+therefore split into a seven-word chunk and a short tail; although both were
+known, playback paused for 2.192 seconds while the tail finished synthesis.
+Call now estimates playable duration from compact-script characters, spoken
+words, and punctuation pauses. The exact physical reply is a red/green
+regression, obsolete first-sentence-only assertions were replaced with a
+playable-chunk invariant, and the Frontend Call suite passes 151/151. Fresh
+HASHI3 adoption and physical acceptance remain separate receipts.
+
 The exact HASHI3 candidate is on `debug-call`. Focused Workbench Call and
-Phone/live checks pass, HASHI3 Frontend Call passes 143/143, the complete
+Phone/live checks pass, HASHI3 Frontend Call passes 151/151, the complete
 Workbench server suite and production build pass, and the protected-Core check
-is clean. Real HASHI3 acceptance used the physical LifeCam microphone/camera and
+is clean. The prior HASHI3 acceptance used the physical LifeCam microphone/camera and
 speaker. It verified both fixed launch entries, immediate video-first startup,
 same-call camera off/on and microphone mute/unmute, caller/Agent captions,
 completed TTS playback, ringback termination, and media release on hangup. The

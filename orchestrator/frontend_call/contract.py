@@ -17,10 +17,17 @@ MAX_IMAGE = 512 * 1024
 MAX_OUTPUT = 4 * 1024 * 1024
 MAX_SPEECH_SEGMENTS = 32
 MAX_SPEECH_CHARS = 240
-MIN_SPEECH_CHARS = 24
+MIN_SPEECH_DURATION_UNITS = 24
 _SENTENCE_END = re.compile(
     r'[。！？!?]+[”"\x27’』」)]*|\.(?:[”"\x27’)]*)?(?=\s|$)|\n+'
 )
+_LATIN_SPEECH_WORD = re.compile(
+    r"[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)*"
+)
+_COMPACT_SPEECH_CHAR = re.compile(
+    r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]"
+)
+_SPEECH_PAUSE = re.compile(r"[。！？!?，,；;：:]|\.(?=\s|$)")
 _STAGE_BRACKET_PREFIX = re.compile(
     r"^\s*[（(\[【]\s*(?P<cue>[^）)\]】\r\n]{1,48})\s*[）)\]】]"
     r"\s*(?:[:：,，\-–—]\s*)?"
@@ -262,6 +269,15 @@ def _join_speech_parts(left: str, right: str) -> str:
     return left + right
 
 
+def _speech_duration_units(text: str) -> int:
+    """Estimate playable duration across compact and space-delimited scripts."""
+    return (
+        len(_COMPACT_SPEECH_CHAR.findall(text))
+        + 2 * len(_LATIN_SPEECH_WORD.findall(text))
+        + len(_SPEECH_PAUSE.findall(text))
+    )
+
+
 def _group_speech_parts(
     parts: list[str], *, include_tail: bool
 ) -> tuple[list[str], str]:
@@ -275,7 +291,7 @@ def _group_speech_parts(
             pending = part.lstrip()
         else:
             pending = candidate
-        if len(pending) >= MIN_SPEECH_CHARS:
+        if _speech_duration_units(pending) >= MIN_SPEECH_DURATION_UNITS:
             grouped.append(pending.strip())
             pending = ""
     if include_tail and pending:
