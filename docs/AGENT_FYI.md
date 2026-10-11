@@ -47,6 +47,15 @@ Call/restart checks and the Protected Core check. This is source qualification,
 not running Function adoption; HASHI4 remained running and was not rebooted.
 See [final source load](repairs/DEBUG_CALL_HASHI4_FINAL_SOURCE_LOAD_20261011.md).
 
+Non-rebooted H4 live receipt: the new Workbench client passed physical media,
+stable mirrored preview, retained avatar, one canonical transcript, natural
+spoken projection, ringback termination, reversible controls, and hangup media
+release. The old running Function did not publish commentary and released five
+final speech segments together; even after the client played all three bridge
+fillers, one synthesis wait left 7.367 seconds of silence. These four failed
+gates are the exact behavior corrected in the loaded Function source. They are
+not adopted until a separately authorized HASHI4 lifecycle action occurs.
+
 ## Authority and ownership
 
 PCM owns Persona, Context and Memory; PAO owns Agents, Sessions, Runs, jobs, Workzones and delivery; HERV3 owns Engine Turns, model/tool loop and cost; Frontend Connectors authenticate and render. Use the narrowest Function/configuration owner. Core has no product policy/imports. Protected Core requires explicit major-migration authorization, version bump, label and independent review; flags grant nothing.

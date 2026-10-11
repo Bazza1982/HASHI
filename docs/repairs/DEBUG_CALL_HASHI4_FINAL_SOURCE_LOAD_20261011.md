@@ -47,3 +47,28 @@ generation therefore remains the pre-load generation. A fresh Workbench
 renderer and a non-rebooted live H4 Call are separate frontend/runtime
 observations and must be recorded separately. User manual acceptance remains
 the final gate.
+
+## Non-rebooted live observation
+
+The first browser attempt encountered a transient automatic Session-selection
+race before any Call or media operation. A bounded retry entered the Call and
+completed the physical acceptance flow.
+
+Fourteen of eighteen observable gates passed against the old running HASHI4
+Function. The verified Workbench client provided the physical camera and
+microphone, a stable 356 x 230.25 borderless mirrored preview, retained Agent
+avatar, one non-duplicated rolling transcript, natural spoken text, ringback
+termination, same-call camera off/on and microphone mute/unmute, and complete
+hangup media release.
+
+The four failures were `commentaryObserved`,
+`commentaryStreamedBeforeTerminal`, `commentarySpoken`, and
+`boundedSentenceGap`. The running Function published no commentary and exposed
+all five final speech segments only after terminal completion. Workbench played
+all three ordered bridge fillers, but the old selected-voice synthesis path then
+left 7.367 seconds before segment 1. Later eligible gaps were 54 ms, 32 ms, and
+317 ms. This is direct evidence that the new client is loaded while the old
+Function generation still lacks the now-qualified backend changes.
+
+HASHI4 was not rebooted. Full 18/18 H4 acceptance remains pending running
+Function adoption and user manual testing.
