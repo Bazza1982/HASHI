@@ -323,6 +323,53 @@ async def test_call_projection_removes_stage_directions_from_captions_and_speech
 
 
 @pytest.mark.asyncio
+async def test_filler_warming_waits_for_every_opening_speech_segment(tmp_path):
+    service, ports, adapters, base, _clock = setup(tmp_path)
+    service.filler_warm_seconds = 0
+    first = "第一句已经足够长，可以单独成为自然的开场播报内容。"
+    second = "第二句同样足够长，应当先合成完成，再准备后台填充语音。"
+    first_started, second_started, filler_started = (
+        asyncio.Event(), asyncio.Event(), asyncio.Event()
+    )
+    release_first, release_second = asyncio.Event(), asyncio.Event()
+    original_synthesize = adapters.synthesize
+
+    async def opening(*_args):
+        return first + second
+
+    async def synthesize(target, profile, text):
+        if text == first:
+            first_started.set()
+            await release_first.wait()
+        elif text == second:
+            second_started.set()
+            await release_second.wait()
+        else:
+            filler_started.set()
+        return await original_synthesize(target, profile, text)
+
+    ports.opening = opening
+    adapters.synthesize = synthesize
+    try:
+        binding, _, _ = await start(service, base)
+        await asyncio.wait_for(first_started.wait(), 1)
+        await service.invoke("owner", {
+            **binding, "operation": "speech", "turn_id": "opening-call-1", "segment": 0,
+        })
+        release_first.set()
+        await asyncio.wait_for(second_started.wait(), 1)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not filler_started.is_set(), "filler synthesis competed with the opening voice"
+        release_second.set()
+        await asyncio.wait_for(filler_started.wait(), 1)
+    finally:
+        release_first.set()
+        release_second.set()
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_fillers_are_prepared_in_the_selected_voice_and_locale(tmp_path):
     service, ports, adapters, base, _clock = setup(tmp_path)
     service.filler_warm_seconds = 0

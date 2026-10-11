@@ -114,6 +114,38 @@ class HashiPorts:
             raise CallError("call_opening_invalid", 502)
         return text.strip()
 
+    def persist_opening(self, owner, binding, text):
+        """Record the audible greeting as one canonical assistant message."""
+
+        self.validate(owner, binding)
+        try:
+            message = self.api.session_store.append_presentation_message(
+                session_id=binding["session_id"],
+                owner_id=owner,
+                agent_id=binding["agent_id"],
+                role="assistant",
+                text=str(text or "").strip(),
+                source="call",
+                idempotency_key=f"call-opening:{binding['call_id']}",
+                presentation_channel="call",
+                history_eligible=False,
+                message_context={
+                    "call_opening": {
+                        "type": "hashi.call-opening",
+                        "version": 1,
+                        "call_id": binding["call_id"],
+                        "client_id": binding["client_id"],
+                    }
+                },
+            )
+        except Exception as exc:
+            raise CallError("call_opening_persistence_failed", 503) from exc
+        if int(message.get("context_generation") or 0) != int(
+            binding["context_generation"]
+        ):
+            raise CallError("call_scope_changed", 409)
+        return message
+
     async def admit(self, owner, binding, turn_id, text, observation, captured_at):
         self.validate(owner, binding)
         runtime = self.api._runtime_map()[binding["agent_id"]]

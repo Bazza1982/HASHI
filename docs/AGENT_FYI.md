@@ -30,6 +30,21 @@ reconciles older terminal-call attempts, and Call/Phone admission ignores a
 pending attempt whose linked logical call is already terminal, so a cancelled
 resume cannot leave both entry icons permanently busy across a reboot.
 
+October 12 HASHI4 Call latency correction: correlated physical-call evidence
+shows normal Agent Runs (about 2.8/4.4 s) and STT (about 1.8/2.4 s), while one
+browser recording remained open for the 59.8-second safety limit because a
+stable WebRTC room floor sat above the ordinary silence threshold. Frontend
+Connector now closes only a speech-then-stable-room tail, learns a narrow room
+band without hiding later quieter speech, and retains the normal 800 ms silence
+endpoint and continuous-sound bound. PAO now records the once-only audible
+opening in the same conversation, delays filler warming until every opening
+segment is synthesized, and tells the Agent to compare explicit timestamps
+when relative dates or elapsed time matter. Complete checks pass 158 HASHI Call
+cases, 97 Workbench Call cases, the production build, and the Protected-Core
+gate. This is `debug-call` source validation; running HASHI4 adoption, fresh
+renderer proof, and physical acoustic acceptance remain pending the user's
+lifecycle action.
+
 The same candidate retains the recovered restart work: immutable qualified
 generations are reused only after exact runtime/source/artifact checks;
 duplicate warm-path verification is skipped without weakening the final

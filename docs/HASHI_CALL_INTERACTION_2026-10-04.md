@@ -684,3 +684,42 @@ present, and a qualified STT/TTS catalogue estimate otherwise. Provider cost
 receipts take precedence over estimates. Backend text-model usage remains in
 `/metre`; vision is excluded from the Call voice-media total. Estimates are
 labelled and missing catalogue prices remain incomplete rather than zero.
+
+## 2026-10-12 HASHI4 listening endpoint, opening record, and time continuity
+
+The user's physical HASHI4 report explicitly authorizes this Call defect repair
+on the matching `debug-call` HASHI and Workbench branches. It does not authorize
+a HASHI4 lifecycle action. PAO Call Function owns opening persistence, spoken
+context, and TTS scheduling; Frontend Connector owns browser capture endpointing.
+Protected Core remains unchanged.
+
+The correlated Feiyan trace separates the regression from backend reasoning.
+The two Agent Runs completed in about 2.8 and 4.4 seconds. STT completed in
+about 1.8 and 2.4 seconds, but the second browser recording stayed open for the
+59.8-second hard limit. WebRTC processing left a stable room-noise floor above
+the detector's capped ordinary silence threshold. A separate opening trace
+showed low-priority filler preparation starting while a later opening segment
+still used the same TTS provider. The audible opening had no canonical
+presentation row, and Call guidance exposed timestamps without telling the
+Agent to compare them when relative dates or elapsed time mattered.
+
+After a meaningful speech peak, the browser now recognizes a stable moderate
+room-noise tail and seals the recording after a longer bounded observation. It
+learns that room floor as a narrow rejection band, preserving later speech that
+is quieter than the former room. The ordinary 800 ms silence endpoint and the
+59.8-second continuous-sound safety bound remain. A stable active sound without
+a preceding peak is not treated as this endpoint.
+
+The Function persists the generated opening once through SessionStore with a
+Call-scoped idempotency key before exposing its audio. It is visible in the
+conversation record and explicitly excluded from model history because no user
+Turn created it. Filler preparation waits for every opening speech segment.
+Spoken-turn guidance uses `call.valid_at` and existing exchange timestamps to
+compare relative dates and real gaps only when relevant.
+
+Red checks reproduced the one-minute capture, missing opening row, absent time
+guidance, and TTS contention. The final complete suites pass 158/158 HASHI
+Frontend Call checks and 97/97 Workbench Call checks; the Workbench production
+build and Protected-Core/whitespace checks pass. These are source checks.
+Post-fix HASHI4 Function adoption, a fresh renderer, and physical acoustic
+acceptance remain separate and pending the user's lifecycle action.

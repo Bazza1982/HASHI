@@ -148,7 +148,7 @@ async def test_call_cancel_uses_exact_pao_run_fence(tmp_path):
 
 
 @pytest.mark.anyio
-async def test_call_opening_uses_typed_tool_free_speech_without_creating_a_user_run(tmp_path, monkeypatch):
+async def test_call_opening_uses_typed_tool_free_speech_and_persists_one_assistant_message(tmp_path, monkeypatch):
     store = SessionStore(tmp_path / "sessions.db", instance_id="TEST")
     session = store.create_session(owner_id="owner", agent_id="lily", title="Call")
     captured = []
@@ -177,11 +177,18 @@ async def test_call_opening_uses_typed_tool_free_speech_without_creating_a_user_
         "call_id": "call-1",
         "client_id": "client-1",
     }
-    text = await HashiPorts(api).opening(
+    ports = HashiPorts(api)
+    text = await ports.opening(
         "owner", binding, {"tts": {}}, {"tts": {"model": "fixture-tts"}}
     )
     assert text == "您好，我接到您的电话了。请讲。"
-    assert len(store.messages(session["session_id"], owner_id="owner")) == 0
+    recorded = ports.persist_opening("owner", binding, text)
+    duplicate = ports.persist_opening("owner", binding, text)
+    messages = store.messages(session["session_id"], owner_id="owner")
+    assert recorded["message_id"] == duplicate["message_id"]
+    assert [(item["role"], item["text"], item["history_eligible"]) for item in messages] == [
+        ("assistant", text, False)
+    ]
     operation, payload = captured[0]
     assert operation == "call_speak"
     assert payload["scope"]["type"] == "hashi.call-speech-scope"

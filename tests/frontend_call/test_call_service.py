@@ -49,6 +49,7 @@ def document(location="local"):
 class Ports:
     def __init__(self):
         self.accepted = []
+        self.persisted_openings = []
         self.cancelled = []
         self.phone = False
         self.level = 1
@@ -68,6 +69,10 @@ class Ports:
     async def admit(self, owner, binding, turn, text, observation, captured_at):
         self.accepted.append((turn, text, observation, captured_at))
         return {"run_id": "run-1", "request_id": "req-1", "message_id": "msg-1"}
+
+    def persist_opening(self, owner, binding, text):
+        self.persisted_openings.append((owner, dict(binding), text))
+        return {"message_id": "opening-msg-1"}
 
     async def cancel(self, owner, binding, *, request_id, run_id, reason):
         self.cancelled.append({
@@ -216,6 +221,9 @@ async def test_start_generates_exactly_one_agent_opening_before_first_user_turn(
         "text": "您好，我接到您的电话了。请讲。",
         "turn_id": "opening-call-1",
     }]
+    assert ports.persisted_openings == [(
+        "owner", openings[0][1], "您好，我接到您的电话了。请讲。"
+    )]
     assert adapters.stt == 0
     await service.close()
 

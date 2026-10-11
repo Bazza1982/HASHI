@@ -704,12 +704,23 @@ class CallService:
 
     async def _warm_fillers(self, call):
         try:
-            # The opening sentence is user-facing audio. Let it finish
-            # synthesizing before the low-priority filler cache uses the same
-            # voice provider, so warming never delays the greeting.
-            opening_speech = call.speech_task
-            if opening_speech:
-                await asyncio.shield(opening_speech)
+            # Every opening segment is user-facing audio. The task pointer
+            # advances as the browser requests each segment, so follow that
+            # chain before low-priority filler work uses the same provider.
+            opening_turn = call.turn if call.turn.get("kind") == "opening" else None
+            while (
+                opening_turn is not None
+                and call.phase == "active"
+                and call.turn is opening_turn
+            ):
+                opening_speech = call.speech_task
+                if opening_speech and not opening_speech.done():
+                    await asyncio.shield(opening_speech)
+                    continue
+                opening_parts = opening_turn.get("speech_segments", [])
+                if call.speech_index >= len(opening_parts) - 1:
+                    break
+                await asyncio.sleep(0.05)
             await asyncio.sleep(self.filler_warm_seconds)
             for slot, text in enumerate(filler_phrases(call.locale)):
                 if call.phase != "active":
@@ -898,6 +909,18 @@ class CallService:
             answer = clean_speech_text(str(answer or ""))
             if not answer or len(answer) > 1200:
                 raise CallError("call_opening_invalid", 502)
+            persist_opening = getattr(self.ports, "persist_opening", None)
+            if callable(persist_opening):
+                recorded = persist_opening(call.owner, call.binding, answer)
+                if inspect.isawaitable(recorded):
+                    recorded = await recorded
+                if isinstance(recorded, dict) and recorded.get("message_id"):
+                    turn["message_id"] = str(recorded["message_id"])
+                    emit(
+                        "opening_persisted",
+                        **self._facts(call, turn),
+                        stage="opening",
+                    )
             turn["answer"] = answer
             turn["speech_segments"], turn["speech_truncated"] = speech_segments(answer)
             turn["phase"] = "complete"
