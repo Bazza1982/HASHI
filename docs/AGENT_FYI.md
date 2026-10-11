@@ -51,6 +51,25 @@ noise and Call tones, preserves normal and quiet speech segments, and processes
 deterministic-browser validation; running HASHI4 adoption, fresh renderer proof,
 and physical acoustic acceptance remain pending the user's lifecycle action.
 
+October 12 remote Call correction: the Shirley trace showed normal HASHI4 Agent
+turns but two independent Frontend Connector failures. A remote browser camera
+prompt ended with repeated ten-second `AbortError` results; Workbench now clears
+the prior Call identity before redial, treats a rejection arriving after hangup
+as cancellation, and keeps voice active with an explicit device/permission
+notice. The phone's background failure sound came from intermittent read-only
+502 responses through `a9_max.local`, which resolved to multiple unrelated
+interfaces. The same-host Workbench route is now `127.0.0.1:8771`; its
+authenticated probe returned HASHI4/200 and 20/20 Call availability checks
+passed. One in-flight automatic-discovery scan initially restored the stale
+hostname after the manual correction. Frontend Connector now fences discovery
+reconciliation against a connection snapshot changed during its network probe;
+the live route was corrected again after that stale scan settled and remained
+loopback through later refresh cycles. Speech-asset reads get one bounded retry, and a recoverable playback
+failure no longer emits the whole-call failure sound. No mutating operation is
+replayed and no HASHI4 lifecycle action was performed. Focused tests, the full
+Workbench Call suite, and the production build pass; a refreshed remote page is
+still required for physical client acceptance.
+
 The same candidate retains the recovered restart work: immutable qualified
 generations are reused only after exact runtime/source/artifact checks;
 duplicate warm-path verification is skipped without weakening the final
