@@ -13,7 +13,7 @@ async def test_complete_answer_sentence_starts_tts_before_run_finishes(tmp_path)
     released = asyncio.Event()
     calls = 0
 
-    def result(*_args, **_kwargs):
+    async def result(*_args, **_kwargs):
         nonlocal calls
         calls += 1
         if not released.is_set():

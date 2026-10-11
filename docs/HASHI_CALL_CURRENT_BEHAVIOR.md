@@ -96,6 +96,12 @@ numeric response-length requirements are retired.
   transport. Those facts are not interchangeable: public complete-sentence
   answer previews and commentary must reach the Call speech queue before the
   terminal answer whenever they become available.
+- **CALL-SPEECH-08** — The selected Agent Worker is authoritative for live
+  request activity. When its activity poll is available, Call must not prefer a
+  shared-process compatibility store, because that store can be present but
+  stale in the isolated-Worker runtime. Call consumes the Worker stream with a
+  monotonic cursor so commentary and answer previews are neither missed nor
+  replayed.
 
 ## Captions and controls
 

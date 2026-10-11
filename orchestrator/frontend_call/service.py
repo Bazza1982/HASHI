@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 import hashlib
+import inspect
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from uuid import uuid4
@@ -947,6 +948,8 @@ class CallService:
                     turn["run_id"],
                     int(turn.get("_activity_sequence") or 0),
                 )
+                if inspect.isawaitable(run):
+                    run = await run
                 self._process_activity(call, turn, run)
                 turn["run_state"] = run["state"]
                 if run["state"] != last_state:

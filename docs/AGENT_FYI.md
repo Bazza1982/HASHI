@@ -10,11 +10,17 @@ answer.
 
 The current candidate keeps a stable mirrored preview together with the Agent
 identity, renders one canonical rolling transcript, and distinguishes Workbench
-presentation from Session API transport. Public commentary and complete answer
-sentences enter the existing FIFO immediately. No additional historical branch
-is a merge input; wholesale merging would restore explicitly retired behavior.
-HASHI3 Frontend Call passes 144/144, Workbench Call passes 89/89, and the
-production client build passes. Live adoption remains a separate fact.
+presentation from Session API transport. The first physical retest then proved
+that public commentary reached the Workbench feed but not Call speech: Call was
+reading a stale shared-process compatibility store instead of the selected
+isolated Agent Worker's authoritative activity stream. Call now prefers the
+Worker poll, awaits it, and advances its existing monotonic cursor before
+queueing commentary and complete answer sentences in the same FIFO. The stale
+store remains only as the in-process compatibility fallback. No additional
+historical branch is a merge input; wholesale merging would restore explicitly
+retired behavior. HASHI3 Frontend Call passes 146/146, Workbench Call passes
+89/89, and the production client build passes. Adoption and live verification
+of this newest backend correction remain separate facts.
 
 October 11 restart-lifecycle correction: the expanded `debug-call` audit found
 two formal performance commits that the earlier audit had incorrectly called

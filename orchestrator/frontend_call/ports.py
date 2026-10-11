@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 from orchestrator.session_store import SESSION_KIND_CONVERSATION
@@ -169,50 +170,45 @@ class HashiPorts:
             "message_id": run["user_message_id"],
         }
 
-    def result(self, owner, binding, run_id, after_sequence=0):
-        run = self.api.session_store.get_run(run_id, owner_id=owner)
-        if (
-            run["session_id"] != binding["session_id"]
-            or run["context_generation"] != binding["context_generation"]
-        ):
-            raise CallError("call_scope_changed", 409)
+    @staticmethod
+    def _project_activity(activity, after_sequence):
         activity_sequence = max(0, int(after_sequence or 0))
         events = []
-        runtime = self.api._runtime_map().get(binding["agent_id"])
-        activity_store = getattr(runtime, "request_activity", None)
-        request_id = str(run.get("request_id") or "")
-        if activity_store is not None and request_id:
-            activity = activity_store.poll(
-                request_id, after_sequence=activity_sequence, limit=256
+        if not isinstance(activity, dict) or activity.get("ok") is not True:
+            return activity_sequence, events
+        activity_events = list(activity.get("events") or ())
+        if activity_events:
+            activity_sequence = max(
+                activity_sequence,
+                max(int(event.get("sequence") or 0) for event in activity_events),
             )
-            if activity.get("ok") is True:
-                activity_events = list(activity.get("events") or ())
-                if activity_events:
-                    activity_sequence = max(
-                        activity_sequence,
-                        max(int(event.get("sequence") or 0) for event in activity_events),
+        else:
+            activity_sequence = max(
+                activity_sequence, int(activity.get("latest_sequence") or 0)
+            )
+        for event in activity_events:
+            owner_class = str(event.get("delivery_class") or "")
+            channel = str(event.get("presentation_channel") or "")
+            if (
+                owner_class == "answer_preview"
+                and channel == "answer"
+            ) or (
+                owner_class == "user_commentary"
+                and channel == "commentary"
+            ):
+                events.append({
+                    key: event.get(key)
+                    for key in (
+                        "sequence", "event_id", "delivery_class",
+                        "presentation_channel", "summary", "detail",
                     )
-                else:
-                    activity_sequence = max(
-                        activity_sequence, int(activity.get("latest_sequence") or 0)
-                    )
-                for event in activity_events:
-                    owner_class = str(event.get("delivery_class") or "")
-                    channel = str(event.get("presentation_channel") or "")
-                    if (
-                        owner_class == "answer_preview"
-                        and channel == "answer"
-                    ) or (
-                        owner_class == "user_commentary"
-                        and channel == "commentary"
-                    ):
-                        events.append({
-                            key: event.get(key)
-                            for key in (
-                                "sequence", "event_id", "delivery_class",
-                                "presentation_channel", "summary", "detail",
-                            )
-                        })
+                })
+        return activity_sequence, events
+
+    def _project_result(
+        self, owner, binding, run, activity, *, after_sequence=0
+    ):
+        activity_sequence, events = self._project_activity(activity, after_sequence)
         terminal = run["state"] in {
             "completed",
             "failed",
@@ -235,3 +231,55 @@ class HashiPorts:
             "activity_sequence": activity_sequence,
             "events": events,
         }
+
+    async def _worker_result(
+        self, owner, binding, run, poll_activity, request_id, after_sequence
+    ):
+        activity = poll_activity(
+            request_id, after_sequence=after_sequence, limit=256
+        )
+        if inspect.isawaitable(activity):
+            activity = await activity
+        return self._project_result(
+            owner,
+            binding,
+            run,
+            activity,
+            after_sequence=after_sequence,
+        )
+
+    def result(self, owner, binding, run_id, after_sequence=0):
+        run = self.api.session_store.get_run(run_id, owner_id=owner)
+        if (
+            run["session_id"] != binding["session_id"]
+            or run["context_generation"] != binding["context_generation"]
+        ):
+            raise CallError("call_scope_changed", 409)
+        activity_sequence = max(0, int(after_sequence or 0))
+        runtime = self.api._runtime_map().get(binding["agent_id"])
+        request_id = str(run.get("request_id") or "")
+        poll_activity = getattr(runtime, "poll_request_activity", None)
+        if callable(poll_activity) and request_id:
+            # Isolated Workers own live request activity. The shared-process
+            # compatibility store can be present but stale, so never prefer it.
+            return self._worker_result(
+                owner,
+                binding,
+                run,
+                poll_activity,
+                request_id,
+                activity_sequence,
+            )
+        activity = {}
+        activity_store = getattr(runtime, "request_activity", None)
+        if activity_store is not None and request_id:
+            activity = activity_store.poll(
+                request_id, after_sequence=activity_sequence, limit=256
+            )
+        return self._project_result(
+            owner,
+            binding,
+            run,
+            activity,
+            after_sequence=activity_sequence,
+        )
