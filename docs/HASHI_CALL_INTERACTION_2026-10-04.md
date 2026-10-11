@@ -22,8 +22,16 @@ build, and protected-Core check. Physical HASHI3 acceptance verified immediate
 microphone/camera startup, same-call camera off/on, microphone mute/unmute,
 once-only opening, visible two-sided captions, natural Agent speech without
 stage directions, completed TTS playback, ringback termination after connection,
-hangup, and ended camera tracks. HASHI4 source, running adoption, and live
-observations remain separate facts; this authorization excludes a HASHI4 reboot.
+hangup, and ended camera tracks.
+
+HASHI4 `debug-call` carries the exact candidate product blobs and its isolated
+tree passes 143/143 Frontend Call checks. Live acceptance against the existing
+non-rebooted HASHI4 runtime verified the physical camera, controls, captions,
+ringback termination, and media release. An external speaker phrase produced no
+caller transcript and was not admitted as caller speech, so HASHI3
+remains the end-to-end physical speech-loop evidence. The running HASHI4
+Function has not adopted the new generation; this authorization excludes a
+HASHI4 reboot.
 
 ## 2026-10-11 sentence-streamed speech and rolling captions
 

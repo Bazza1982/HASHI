@@ -133,6 +133,19 @@ numeric response-length requirements are retired.
   until the complete candidate is verified and deliberately merged back to
   main.
 
+## 2026-10-11 verified checkpoint
+
+- HASHI3: exact Function candidate hot-adopted; 143/143 focused checks and the
+  complete physical microphone/camera/speaker Call path passed.
+- Workbench: exact `debug-call` client/proxy candidate; 165/165 focused checks,
+  complete server suite, production build, and real H3/H4 browser controls passed.
+- HASHI4 source: `debug-call`; product/contract/test blobs match HASHI3 and the
+  isolated exact tree passes 143/143 focused checks.
+- HASHI4 runtime: no reboot and no new Function-generation adoption. Live
+  observation covers the existing runtime with the verified Workbench client;
+  it does not prove the new HASHI4 Function source is running.
+- Branches remain unmerged pending deliberate review and user acceptance.
+
 ## Required release matrix
 
 | Area | Mandatory evidence |

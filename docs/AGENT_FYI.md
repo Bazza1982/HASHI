@@ -25,8 +25,16 @@ became ready. The established controls, rolling captions, and once-only opening
 remained present across repeated calls.
 
 The shared Workbench service is running the verified `debug-call` client.
-HASHI4 source/adoption and HASHI4 live acceptance are recorded separately; no
-HASHI4 reboot is authorized. See Workbench
+HASHI4 source is loaded on its own `debug-call` branch. Its product, contract,
+and test blobs match the HASHI3 candidate; the protected-Core check is clean,
+and the exact HASHI4 tree passes 143/143 Frontend Call checks in an isolated
+checkout. Without rebooting HASHI4, live Workbench acceptance verified the
+physical LifeCam, same-call camera off/on, microphone mute/unmute, captions,
+ringback termination after readiness, and hangup media release. An external
+Windows speaker phrase produced no caller transcript and was not admitted as
+caller speech, so it is not counted as a second H4 speech-loop proof.
+The running HASHI4 Function has not adopted the new generation, and no HASHI4
+reboot is authorized. See Workbench
 `docs/call/CALL_DEBUG_BASELINE_2026-10-11.md`.
 
 October 10 Workbench Call-control visual repair: the shared button design
