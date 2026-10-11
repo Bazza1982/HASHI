@@ -14,6 +14,7 @@ import json
 import os
 import wave
 import time
+import math
 import aiohttp
 from .config import OPENROUTER_API_BASE, OPENROUTER_GEMINI_TTS_MODELS
 from .contract import CallError, MAX_OUTPUT
@@ -24,6 +25,22 @@ class MediaAdapters:
     def __init__(self, session_factory=aiohttp.ClientSession, secret_resolver=None):
         self.session_factory = session_factory
         self.secret_resolver = secret_resolver
+
+    def target_available(self, target):
+        """Check configured credentials without making a provider request."""
+        ref = target.get("credential_ref")
+        env = target.get("credential_env")
+        if not ref and not env:
+            return True
+        try:
+            if ref:
+                return bool(
+                    self.secret_resolver
+                    and self.secret_resolver.resolve(ref).value
+                )
+            return bool(os.environ.get(env, ""))
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return False
 
     async def _request(
         self, target, path, *, data=None, json_body=None, maximum=MAX_OUTPUT
@@ -120,6 +137,18 @@ class MediaAdapters:
         except (ValueError, UnicodeError) as exc:
             raise CallError("call_provider_response_invalid", 502) from exc
 
+    @staticmethod
+    def _billing_usage(value):
+        if not isinstance(value, dict):
+            return None
+        result = {}
+        for key in ("cost", "seconds", "input_tokens", "output_tokens", "total_tokens"):
+            item = value.get(key)
+            if (isinstance(item, (int, float)) and not isinstance(item, bool)
+                    and math.isfinite(item) and item >= 0):
+                result[key] = item
+        return result or None
+
     async def transcribe(self, target, slot, audio):
         if target.get("stt_protocol") == "audio_chat":
             return await self._transcribe_audio_chat(target, slot, audio)
@@ -145,7 +174,8 @@ class MediaAdapters:
         text = result.get("text")
         if not isinstance(text, str) or len(text) > 12000:
             raise CallError("call_transcription_empty_or_invalid", 502)
-        return {"text": text.strip(), "segments": result.get("segments"), "provider_receipt": receipt}
+        return {"text": text.strip(), "segments": result.get("segments"), "provider_receipt": receipt,
+                "_billing_usage": self._billing_usage(result.get("usage"))}
 
     async def _transcribe_audio_chat(self, target, slot, audio):
         # One inference performs both acoustic judgment and verbatim STT.
@@ -182,7 +212,8 @@ class MediaAdapters:
                 target, "/chat/completions", json_body=body, maximum=65536
             )
         try:
-            content = self._json(data)["choices"][0]["message"]["content"]
+            response = self._json(data)
+            content = response["choices"][0]["message"]["content"]
             result = self._json(content)
         except (KeyError, IndexError, TypeError) as exc:
             raise CallError("call_transcription_empty_or_invalid", 502) from exc
@@ -193,7 +224,8 @@ class MediaAdapters:
         ):
             raise CallError("call_transcription_empty_or_invalid", 502)
         return {"text": result["text"].strip(), "has_speech": result["has_speech"],
-                "provider_receipt": receipt}
+                "provider_receipt": receipt,
+                "_billing_usage": self._billing_usage(response.get("usage"))}
 
     async def observe(self, target, slot, image, question):
         body = {
@@ -261,11 +293,13 @@ class MediaAdapters:
             )
         if not data:
             raise CallError("call_speech_response_empty", 502)
+        audio_seconds = None
         if fmt == "pcm":
             # OpenRouter Gemini 3.8 emits headerless 24 kHz mono signed 16-bit PCM.
             # Browser playback already accepts WAV; keep raw PCM off the client wire.
             if mime != "audio/pcm" or len(data) < 4800 or len(data) % 2:
                 raise CallError("call_speech_format_invalid", 502)
+            audio_seconds = len(data) / (24000 * 2)
             output = io.BytesIO()
             with wave.open(output, "wb") as wav:
                 wav.setnchannels(1)
@@ -277,6 +311,11 @@ class MediaAdapters:
             if not (data.startswith(b"RIFF") and data[8:12] == b"WAVE"):
                 raise CallError("call_speech_format_invalid", 502)
             mime = "audio/wav"
+            try:
+                with wave.open(io.BytesIO(data), "rb") as audio:
+                    audio_seconds = audio.getnframes() / audio.getframerate()
+            except (wave.Error, EOFError, OSError, ZeroDivisionError):
+                audio_seconds = None
         else:
             if not (
                 data.startswith(b"ID3")
@@ -288,4 +327,5 @@ class MediaAdapters:
             "content_b64": base64.b64encode(data).decode(),
             "media_type": mime,
             "provider_receipt": receipt,
+            "_billing_usage": {"audio_seconds": audio_seconds} if audio_seconds is not None else None,
         }

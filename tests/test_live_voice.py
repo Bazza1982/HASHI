@@ -8,6 +8,7 @@ from orchestrator.frontend_live_voice.protocol import CallBinding, Fragment, Liv
 from orchestrator.frontend_live_voice.delegation import build_proposal
 from orchestrator.frontend_live_voice.service import LiveVoiceEventService
 from orchestrator.frontend_live_voice.openai_live import (
+    OpenAILiveProvider,
     append_update,
     create_provider_session,
     fit_live_session_input,
@@ -62,6 +63,12 @@ class ProposalTests(unittest.TestCase):
         with self.assertRaises(LiveVoiceError):build_proposal(BINDING,'d1',[fragment(text='x'*40000)],after_ms=0,cutoff_ms=600,expires_at='2099')
 
 class ProviderTests(unittest.TestCase):
+    def test_gpt_live_billing_is_voice_only_and_per_minute(self):
+        billing = OpenAILiveProvider().billing_descriptor("gpt-live-1")
+        self.assertEqual(billing["scope"], "voice_media")
+        self.assertEqual(billing["usd_per_minute"], 0.05)
+        self.assertIn("backend_text_model", billing["excludes"])
+
     def test_exact_provider_count_drops_only_oldest_complete_history_units(self):
         weights = {
             "MANDATORY": 4_000,

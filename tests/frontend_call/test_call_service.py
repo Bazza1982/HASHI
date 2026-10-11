@@ -165,6 +165,19 @@ async def start(service, base, cloud=False):
     return {**base, "call_id": "call-1", "generation": info["generation"]}, body, result
 
 
+async def test_context_hides_call_when_selected_media_credentials_are_unavailable(tmp_path):
+    service, _ports, adapters, base, _clock = setup(tmp_path)
+    adapters.target_available = lambda target: target["kind"] != "stt"
+
+    context = await service.invoke("owner", {**base, "operation": "context"})
+    route = await service.invoke("owner", {**base, "operation": "route"})
+
+    assert context["call_ready"] is False
+    assert context["camera_available"] is False
+    assert route["call_ready"] is False
+    assert route["route"] == "phone"
+
+
 async def finish_task(service):
     await service.calls["call-1"].task
 

@@ -665,3 +665,22 @@ path, not physical hearing, camera content, real mobile or acoustic/latency
 quality. The older generic-script query's unknown receipt is not reclassified.
 The design-to-evidence map is
 [Phone/Call design acceptance](repairs/PHONE_CALL_DESIGN_ACCEPTANCE_20261007.md).
+
+## 2026-10-11 independent availability and voice-media billing
+
+Phone and Call remain independent basic Functions. Phone readiness comes from
+its configured live provider and credential. Call readiness requires an enabled
+configuration plus available selected STT and TTS credentials; vision is
+optional and its own credential controls camera availability. The Frontend
+Connector shows only entries confirmed ready. Unknown, unavailable or failed
+Call never launches Phone, and Phone never selects Call. The old Workbench
+per-instance Call allowlist is retired; instance Function configuration is the
+single availability owner.
+
+The call surfaces project a separate `voice_media` billing view. Phone uses the
+qualified GPT Live session-second meter at its published per-minute rate. Call
+records actual input/output audio duration, provider-reported STT cost when
+present, and a qualified STT/TTS catalogue estimate otherwise. Provider cost
+receipts take precedence over estimates. Backend text-model usage remains in
+`/metre`; vision is excluded from the Call voice-media total. Estimates are
+labelled and missing catalogue prices remain incomplete rather than zero.
