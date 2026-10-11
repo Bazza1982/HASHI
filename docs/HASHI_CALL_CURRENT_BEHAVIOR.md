@@ -13,19 +13,18 @@ numeric response-length requirements are retired.
 
 ## Entry, availability, and binding
 
-- **CALL-ENTRY-01** — Workbench shows the established fixed Phone and video Call
-  controls with their icons, focus treatment, and usable touch targets. Either
-  control starts or returns to the same direct, video-first Call. The legacy
-  Phone route is only a compatibility fallback after direct Call is confirmed
-  unavailable.
+- **CALL-ENTRY-01** — Workbench shows independent fixed Phone and video Call
+  controls with their established icons, focus treatment, and usable touch
+  targets. Phone starts or returns legacy `/phone`; video starts or returns
+  direct `/call`. Neither route falls back to or silently replaces the other.
 - **CALL-ENTRY-02** — Direct Call binds to the currently selected Agent,
   connection, Session, and context generation. Changing the reading view during
   a call does not silently rebind the live call.
 - **CALL-ENTRY-03** — Current `call_ready` is authoritative. A retired stored
   route cannot block direct Call. An unresolved route is refreshed when the
-  Workbench returns to the foreground and rechecked from either launch click; it
-  must not be treated as unavailable. Phone fallback is allowed only after a
-  current check confirms direct Call is unavailable.
+  Workbench returns to the foreground and rechecked from a video launch click;
+  it must not be treated as unavailable. Phone startup never reads or selects
+  the direct route, and video failure never creates a Phone session.
 - **CALL-ENTRY-04** — Busy state prevents a second call. Existing calls remain
   returnable and endable. Unconfigured or explicitly disabled Call stays hidden.
 - **CALL-ENTRY-05** — Call remains available by default in the installed
@@ -34,11 +33,11 @@ numeric response-length requirements are retired.
 
 ## Immediate media startup and degradation
 
-- **CALL-MEDIA-01** — Either fixed launch control immediately displays
+- **CALL-MEDIA-01** — The fixed video launch control immediately displays
   Connecting and begins microphone and camera acquisition in that same user
-  action. Camera is part of Call startup, not a later optional mode. Context and
-  server startup may proceed concurrently; they must not postpone the device
-  permission request.
+  action. Camera is part of direct Call startup, not a later optional mode.
+  Context and server startup may proceed concurrently; they must not postpone
+  the device permission request. Phone retains its independent media behavior.
 - **CALL-MEDIA-02** — Media acquired while the Agent opening is pending is held
   for that call and does not admit caller speech until the once-only opening has
   completed.

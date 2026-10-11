@@ -2,9 +2,10 @@
 
 October 11 authoritative debug-call baseline: the current
 [Call behavior contract](HASHI_CALL_CURRENT_BEHAVIOR.md) supersedes conflicting
-historical notes. Both Phone and video controls enter the same direct Call and
-immediately request microphone and camera; camera denial or failure degrades
-that Call to audio-only. Camera and microphone toggles retain the same Call and
+historical notes. The fixed Phone control owns legacy `/phone`; the fixed video
+control owns direct `/call`. They never cross-fallback. A video click immediately
+requests microphone and camera; camera denial or failure degrades that direct
+Call to audio-only. Camera and microphone toggles retain the same Call and
 Session. Connected speech stops dial/ringback. Local video is mirrored in a
 stable bounded preview while the Agent avatar and identity remain visible.
 Captions use one canonical rolling PAO transcript. Public commentary and

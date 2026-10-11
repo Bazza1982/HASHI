@@ -5,13 +5,14 @@
 The user-approved current behavior is
 [HASHI /call Current Behavior Contract](HASHI_CALL_CURRENT_BEHAVIOR.md).
 It is the release checklist for the clean `debug-call` branch and supersedes
-every conflicting behavior below. Both fixed Phone and video controls now start
-the same video-first direct Call: microphone and camera are requested together
-on the initiating click, and camera failure degrades that Call to audio-only.
-Legacy Phone is only a compatibility fallback after a fresh route check confirms
-direct Call is unavailable. An unresolved route is refreshed on foreground and
-rechecked from either launch click. The former camera-off startup rule, separate
-entry-route assertion, and fixed sentence/character answer limits are retired.
+every conflicting behavior below. The two fixed controls keep independent
+ownership: Phone starts or returns legacy `/phone`, while video starts or returns
+direct `/call`. A video click requests microphone and camera together, and
+camera failure degrades that direct Call to audio-only. An unresolved direct
+route is refreshed on foreground and rechecked only from the video click.
+Neither route may fall back to the other. The former camera-off direct startup
+rule and fixed sentence/character answer limits are retired; separate
+entry-route assertions are required.
 
 Frontend Connector owns Workbench media, controls, captions, and connection
 sounds. PAO Call Function owns the bound Call, opening, typed speech projection,
@@ -48,13 +49,13 @@ release facts.
 The candidate passes the focused Workbench Call and Phone/live checks,
 143/143 HASHI3 Frontend Call checks, the complete Workbench server suite,
 production build, and protected-Core check. Physical HASHI3 acceptance verified
-both fixed launch entries, immediate microphone/camera startup, same-call camera
-off/on, microphone mute/unmute, once-only opening, visible two-sided captions,
-natural Agent speech without stage directions, completed TTS playback, ringback
-termination after connection, hangup, and ended camera tracks. The physical
-Phone-entry test was repeated after the final HASHI3 restart integration and
-again passed video-first startup, reversible controls, natural opening, and
-media release.
+direct Call's immediate microphone/camera startup, same-call camera off/on,
+microphone mute/unmute, once-only opening, visible two-sided captions, natural
+Agent speech without stage directions, completed TTS playback, ringback
+termination after connection, hangup, and ended camera tracks. The tests that
+opened video-first direct Call from the Phone control are now classified as the
+entry-routing regression. They remain direct Call evidence but do not prove the
+required Phone-to-`/phone` mapping.
 
 HASHI4 `debug-call` carries the exact candidate product blobs and its isolated
 tree passes 143/143 Frontend Call checks. Live acceptance against the existing
@@ -70,8 +71,10 @@ running service identity, and the code loaded by the Electron renderer. The
 service reported the exact candidate, but an already-open renderer still held
 the old launcher until Workbench was relaunched through its official launcher.
 The newly created renderer emitted the expected direct Call route request and
-then passed the physical Phone-entry video-first test. A service restart or
-source hash alone is therefore not renderer-adoption evidence.
+then reproduced the incorrect Phone-to-direct mapping. That observation proves
+renderer adoption while simultaneously failing entry routing. A service restart
+or source hash alone is therefore not renderer-adoption evidence; current
+acceptance also needs separate Phone and video route receipts.
 
 ## 2026-10-11 sentence-streamed speech and rolling captions
 
