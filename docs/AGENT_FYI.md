@@ -77,13 +77,14 @@ was created. A separate Phone click opened only the audio panel and created the
 expected legacy attempt/call audit. Both calls ended normally. This correction
 performed no HASHI4 lifecycle action.
 
-October 11 final Call action and voice-cost receipt: Workbench commit
-`a396e12123a57a9b1576c45f728292f425518f57` and HASHI4 commit
+October 11 final Call action and voice-cost receipt: Workbench behavior commit
+`a396e12123a57a9b1576c45f728292f425518f57`, final Workbench source
+`57c99bf97c01121463d820ff828a2e1fff94b2ad`, and HASHI4 Function commit
 `912d9daf` are loaded on `debug-call`. Independent checks pass 53 focused
 Workbench tests, its production build, 249 Call/Phone Function tests, and the
-Protected Core check. The managed Workbench service reports that exact source
-commit, and the existing Electron window created a fresh renderer session after
-reload. A physical direct Call opened a live 1024x576 camera track with mirror
+Protected Core check. The managed Workbench service reports the final source,
+and the existing Electron window created a fresh renderer session after reload.
+A physical direct Call opened a live 1024x576 camera track with mirror
 transform, retained the Agent identity and one transcript, and kept all three
 controls visible. During real playback, Stop speaking was fully inside the
 viewport and the pointer hit-test selected the button; clicking it produced the

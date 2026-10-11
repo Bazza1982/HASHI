@@ -10,7 +10,8 @@ billing. Protected Core was not changed.
 
 ## Loaded candidate
 
-- Workbench `debug-call`: `a396e12123a57a9b1576c45f728292f425518f57`
+- Workbench behavior: `a396e12123a57a9b1576c45f728292f425518f57`
+- Final Workbench `debug-call` source: `57c99bf97c01121463d820ff828a2e1fff94b2ad`
 - HASHI3 `debug-call`: `c8cd6ecb`
 - HASHI4 `debug-call`: `912d9daf`
 
@@ -34,7 +35,7 @@ launch or fall back to each other.
 
 ## Workbench adoption and live observation
 
-The managed Workbench service reported the exact Workbench commit above and a
+The managed Workbench service reported the final Workbench source above and a
 new runtime run. The existing Electron window was reloaded and created a fresh
 renderer session against that run.
 
