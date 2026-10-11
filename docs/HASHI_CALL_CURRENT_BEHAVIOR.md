@@ -102,6 +102,12 @@ numeric response-length requirements are retired.
   stale in the isolated-Worker runtime. Call consumes the Worker stream with a
   monotonic cursor so commentary and answer previews are neither missed nor
   replayed.
+- **CALL-SPEECH-09** — Complete-sentence streaming uses bounded natural speech
+  chunks. A sufficiently substantial complete sentence may start before the run
+  finishes; adjacent short sentences are coalesced so repeated local TTS startup
+  does not create avoidable sentence gaps. A short terminal tail is always
+  flushed, and every streamed chunk remains an exact prefix of the final chunk
+  sequence.
 
 ## Captions and controls
 
@@ -158,24 +164,14 @@ numeric response-length requirements are retired.
   until the complete candidate is verified and deliberately merged back to
   main.
 
-## 2026-10-11 verified checkpoint
+## Release receipts
 
-- HASHI3: exact `debug-call` Function candidate at `d1a872c8` is running.
-  The 129-case expanded restart suite, 143/143 focused Call checks, three live
-  restarts (17.4 seconds cold, 14.3 seconds, 9.8 seconds), and the complete
-  physical microphone/camera/speaker Call path passed.
-- Workbench: exact `debug-call` client/proxy candidate; focused Call/Phone/live
-  checks, complete server suite, and production build passed. A newly launched
-  Electron renderer verified that either fixed entry starts video-first,
-  camera and microphone controls remain reversible, and hangup releases media.
-  The Phone-entry physical smoke test was repeated after the final HASHI3
-  restart integration and passed.
-- HASHI4 source: `debug-call`; product/contract/test blobs match HASHI3 and the
-  isolated exact tree passes 143/143 focused checks.
-- HASHI4 runtime: no reboot and no new Function-generation adoption. Live
-  observation covers the existing runtime with the verified Workbench client;
-  it does not prove the new HASHI4 Function source is running.
-- Branches remain unmerged pending deliberate review and user acceptance.
+This contract is the stable acceptance source, not a claim that a checkout or
+running process has adopted it. Exact source, artifact, running generation,
+loaded renderer, restart timing, and physical media observations are recorded
+as separate versioned receipts under the authorized live-evidence directory.
+Every new candidate must satisfy the complete matrix below; results from an
+older commit or renderer cannot be carried forward.
 
 ## Required release matrix
 

@@ -1,5 +1,24 @@
 # HASHI Agent FYI
 
+October 11 Call pacing reconciliation: live diagnostics separated real Agent
+work from local playback delay. Tool work correctly produced a long interval
+with no answer available, but three transitions where the next sentence was
+already public still exposed about 2.34, 2.75, and 1.55 seconds of silence.
+Commit `8defd5e9` had repaired this class by making short phrases part of a
+natural TTS chunk. Later complete-sentence streaming in `649b1ced` replaced
+that segmentation with one synthesis request per sentence, so the earlier
+latency repair was no longer effective.
+
+The current `debug-call` candidate combines the two valid behaviors:
+sufficiently substantial complete sentences still stream before the run
+finishes, while adjacent short sentences wait for one bounded natural chunk and
+the terminal tail is always flushed. Streamed chunks are a prefix of final
+chunks, so preview/final reconciliation cannot replay text. Tests that required
+one TTS item per sentence were retired. The red reproduction failed both short
+sentence cases before the change; the complete Frontend Call suite now passes
+150/150 and Protected Core remains unchanged. Running-generation adoption and
+physical pacing acceptance remain separate release facts.
+
 October 11 shared-replacement cache follow-up: the newest physical HASHI3
 adoption exposed a restart path that the earlier cache reconciliation did not
 exercise. A changed-source restart took about 106.6 seconds preparing and the
