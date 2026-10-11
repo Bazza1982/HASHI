@@ -76,6 +76,23 @@ renderer adoption while simultaneously failing entry routing. A service restart
 or source hash alone is therefore not renderer-adoption evidence; current
 acceptance also needs separate Phone and video route receipts.
 
+That entry-routing gate passed after the Workbench repair at
+`d76fbc0949f21e19fb2c13eede70b0398dea77d6`. The remaining deployment
+fault was an ignored local Workbench allow-list that admitted direct Call only
+for HASHI2. Its scoped value now names HASHI2, HASHI3, and HASHI4, and the
+managed Workbench reload reports direct Call available for HASHI4. This local
+configuration correction did not restart HASHI4.
+
+Physical HASHI4 checks then distinguished the two fixed controls. Video opened
+direct `/call`, displayed stable live camera, retained the Agent avatar, and
+used one rolling transcript. A spoken question received a visible answer while
+the panel showed active speech. It identified the session as video and correctly
+described the chair in the camera frame. No
+legacy Phone audit appeared. Phone then opened the audio-only
+`/phone` panel, showed that video was unsupported, and created a new legacy
+attempt/call audit pair. Both calls hung up and released their active media.
+These are separate route receipts and close the Workbench entry-routing gate.
+
 ## 2026-10-11 sentence-streamed speech and rolling captions
 
 PAO Call Function owns typed activity filtering, sentence/TTS ordering and

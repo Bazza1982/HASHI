@@ -57,6 +57,18 @@ fillers, one synthesis wait left 7.367 seconds of silence. These four failed
 gates are the exact behavior corrected in the loaded Function source. They are
 not adopted until a separately authorized HASHI4 lifecycle action occurs.
 
+October 11 Workbench entry-routing receipt: the video button had been wired to
+a video-first launcher that silently fell back to legacy `/phone`, and the local
+Workbench allow-list admitted direct Call only for HASHI2. Workbench commit
+`d76fbc0949f21e19fb2c13eede70b0398dea77d6` restores strict ownership and
+the scoped local configuration now admits HASHI2, HASHI3 and HASHI4. After a
+managed Workbench reload, a physical HASHI4 video click opened only `/call`,
+showed stable live camera, retained the Agent avatar, used one transcript, and
+received an answer that correctly described the camera frame; no Phone audit
+was created. A separate Phone click opened only the audio panel and created the
+expected legacy attempt/call audit. Both calls ended normally. This correction
+performed no HASHI4 lifecycle action.
+
 ## Authority and ownership
 
 PCM owns Persona, Context and Memory; PAO owns Agents, Sessions, Runs, jobs, Workzones and delivery; HERV3 owns Engine Turns, model/tool loop and cost; Frontend Connectors authenticate and render. Use the narrowest Function/configuration owner. Core has no product policy/imports. Protected Core requires explicit major-migration authorization, version bump, label and independent review; flags grant nothing.
