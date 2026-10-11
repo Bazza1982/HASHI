@@ -20,6 +20,30 @@ MAX_SPEECH_CHARS = 240
 _SENTENCE_END = re.compile(
     r'[。！？!?]+[”"\x27’』」)]*|\.(?:[”"\x27’)]*)?(?=\s|$)|\n+'
 )
+_STAGE_BRACKET_PREFIX = re.compile(
+    r"^\s*[（(\[【]\s*(?P<cue>[^）)\]】\r\n]{1,48})\s*[）)\]】]"
+    r"\s*(?:[:：,，\-–—]\s*)?"
+)
+_STAGE_EMPHASIS_PREFIX = re.compile(
+    r"^\s*(?:\*{1,2}|_{1,2})"
+    r"(?P<cue>[^*_\r\n]{1,48})"
+    r"(?:\*{1,2}|_{1,2})\s*(?:[:：,，\-–—]\s*)?"
+)
+_STAGE_CUE = re.compile(
+    r"(?:"
+    r"小声|轻声|低声|压低(?:了)?声音|柔声|温柔地?|"
+    r"笑(?:着|了|声)?|叹(?:气|息)|停顿|沉默|深呼吸|清了清嗓|"
+    r"囁|静か|ため息|優しく|声を落と|"
+    r"\bsoftly\b|\bquietly\b|\bgently\b|"
+    r"\bwhisper(?:s|ed|ing)?\b|"
+    r"\bsigh(?:s|ed|ing)?\b|"
+    r"\blaugh(?:s|ed|ing)?\b|"
+    r"\bpause(?:s|d|ing)?\b|"
+    r"\bclear(?:s|ed|ing)?(?:\s+(?:his|her|their))?\s+throat\b|"
+    r"\bin\s+a\s+low\s+voice\b"
+    r")",
+    re.IGNORECASE,
+)
 _FILLERS = {
     "en": ("Hmm…", "Let me think for a moment…", "I’m still working on that. Please give me a moment."),
     "zh-CN": ("嗯……", "让我想一想……", "我还在处理，请稍等一下。"),
@@ -180,15 +204,32 @@ def decode_jpeg(value):
     raise CallError("call_invalid_jpeg")
 
 
-def _clean_speech_text(text: str) -> str:
+def _strip_leading_stage_directions(text: str) -> str:
+    """Remove recognized performance cues without treating all parentheses as cues."""
+    value = text
+    while value:
+        match = _STAGE_BRACKET_PREFIX.match(value) or _STAGE_EMPHASIS_PREFIX.match(value)
+        if match is None or _STAGE_CUE.search(match.group("cue")) is None:
+            break
+        value = value[match.end():]
+    return value.lstrip()
+
+
+def clean_speech_text(text: str) -> str:
     """Remove non-spoken rendering without interpreting or rewriting an answer."""
     text = re.sub(r"```[\s\S]*?```", "", text)
     text = re.sub(r"https?://\S+", "", text)
     text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
+    text = "\n".join(
+        _strip_leading_stage_directions(line) for line in text.splitlines()
+    )
     text = re.sub(r"[*#`_]", "", text)
     return "\n".join(
         line for line in text.splitlines() if line.count("|") < 2
     ).strip()
+
+
+_clean_speech_text = clean_speech_text
 
 
 def _bounded_sentence(text: str) -> list[str]:
@@ -213,7 +254,7 @@ def _bounded_sentence(text: str) -> list[str]:
 
 
 def _sentence_parts(text: str, *, include_tail: bool) -> tuple[list[str], str]:
-    clean = _clean_speech_text(str(text or ""))
+    clean = clean_speech_text(str(text or ""))
     parts: list[str] = []
     offset = 0
     for match in _SENTENCE_END.finditer(clean):

@@ -66,7 +66,8 @@ class HashiPorts:
                 "from this point using the effective Persona, language and form of address. "
                 "This opening is a natural greeting, not an answer to an earlier question or task. "
                 "After greeting, pause and let the caller speak. Let later answers take the "
-                "length their substance requires."
+                "length their substance requires. Do not include stage directions, performance "
+                "cues or parenthetical actions; speak the greeting directly."
             ),
             "source_context": "",
             "instructions": context["instructions"],

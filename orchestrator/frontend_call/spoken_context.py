@@ -95,7 +95,9 @@ def resolve_call_spoken_context(api, owner: str, binding: dict, model: str) -> d
             ),
             style_instruction=(
                 "Speak naturally for a live call. Match the length to the caller's request; "
-                "long stories and detailed explanations are allowed when appropriate."
+                "long stories and detailed explanations are allowed when appropriate. "
+                "Do not write stage directions, performance cues or parenthetical actions; "
+                "speak the intended words directly."
             ),
             pcm_payload=pcm_payload,
         )

@@ -158,7 +158,7 @@ async def test_start_generates_exactly_one_agent_opening_before_first_user_turn(
     async def opening(owner, binding, profile, targets):
         openings.append((owner, dict(binding), dict(profile), dict(targets)))
         await released.wait()
-        return "您好，我接到您的电话了。请讲。"
+        return "（小声）您好，我接到您的电话了。请讲。"
 
     ports.opening = opening
     binding, start_body, first = await start(service, base)

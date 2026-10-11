@@ -134,7 +134,7 @@ async def test_public_commentary_is_spoken_but_reasoning_is_never_queued(tmp_pat
                 {"sequence": 2, "delivery_class": "reasoning",
                  "presentation_channel": "thinking", "summary": "内部推理不能播报。"},
                 {"sequence": 3, "delivery_class": "user_commentary",
-                 "presentation_channel": "commentary", "summary": "我正在核对记录，请稍等。"},
+                 "presentation_channel": "commentary", "summary": "（小声）我正在核对记录，请稍等。"},
             ],
         }
 
@@ -149,6 +149,52 @@ async def test_public_commentary_is_spoken_but_reasoning_is_never_queued(tmp_pat
         assert queued == ["我正在核对记录，请稍等。", "最终答案。"]
         assert all("内部推理" not in text for text in queued)
         assert any(row.get("kind") == "commentary" for row in service.calls["call-1"].rows)
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_call_projection_removes_stage_directions_from_captions_and_speech(tmp_path):
+    service, ports, _adapters, base, _clock = setup(tmp_path)
+    binding, _, _ = await start(service, base)
+    source = {
+        "terminal": True,
+        "state": "completed",
+        "text": "（小声）李总，电话通了。预算（含 GST）不变。",
+        "activity_sequence": 3,
+        "events": [
+            {
+                "sequence": 2,
+                "delivery_class": "answer_preview",
+                "presentation_channel": "answer",
+                "summary": "（小声）李总，电话通了。",
+            },
+        ],
+    }
+
+    def result(*_args, **_kwargs):
+        return source
+
+    ports.result = result
+    try:
+        await service.invoke("owner", {
+            **binding, "operation": "turn", "turn_id": "turn-1",
+            "sequence": 1, "audio_b64": wav(),
+        })
+        await finish_task(service)
+        call = service.calls["call-1"]
+        assert source["text"].startswith("（小声）")
+        assert call.turn["answer"] == "李总，电话通了。预算（含 GST）不变。"
+        assert call.turn["speech_segments"] == [
+            "李总，电话通了。",
+            "预算（含 GST）不变。",
+        ]
+        assistant_rows = [
+            row["text"] for row in call.rows
+            if row.get("speaker") == "assistant"
+        ]
+        assert assistant_rows[-1] == "李总，电话通了。预算（含 GST）不变。"
+        assert all("小声" not in text for text in assistant_rows)
     finally:
         await service.close()
 

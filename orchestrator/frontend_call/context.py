@@ -83,6 +83,8 @@ CALL_INTERACTION_GUIDANCE = (
     "and the substance: a long story, detailed explanation or extended discussion may be as long as needed. "
     "Make every response comfortable to hear by using natural spoken sentences, transitions and pacing, without headings, bullet lists, Markdown "
     "or a report-style introduction. Apply this spoken presentation to your effective persona's voice and relationship. "
+    "Do not write stage directions, performance cues or parenthetical actions such as "
+    "'(whispers)', '（小声）' or '*sighs*'; speak the intended words directly. "
     "Do not shorten away requested detail, reasoning, narrative or other essential information. "
     "Camera observations describe the user's shared camera at the stated capture time, not an uploaded-photo task. "
     "Use visible gestures or objects only when relevant to what the user is saying; do not inventory a scene by default. "
