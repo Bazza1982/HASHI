@@ -580,6 +580,61 @@ async def test_answer_starts_speech_before_client_poll_and_reuses_it(tmp_path):
         await service.close()
 
 
+async def test_requested_segment_warms_only_one_queued_segment_without_next_poll(tmp_path):
+    service, _ports, adapters, base, _ = setup(tmp_path)
+    first_started, release_first = asyncio.Event(), asyncio.Event()
+    synthesized = []
+
+    async def synthesize(_target, _profile, text):
+        synthesized.append(text)
+        if len(synthesized) == 1:
+            first_started.set()
+            await release_first.wait()
+        return {"media_type": "audio/wav", "content_b64": wav()}
+
+    adapters.synthesize = synthesize
+    binding, _, _ = await start(service, base)
+    call = service.calls["call-1"]
+    call.turn = {
+        "turn_id": "turn-1", "sequence": 1, "phase": "thinking",
+        "speech_segments": [],
+    }
+    try:
+        service._queue_speech(call, call.turn, "First sentence.", "commentary")
+        first_task = call.speech_task
+        await asyncio.wait_for(first_started.wait(), 1)
+
+        speech0 = {
+            **binding, "operation": "speech", "turn_id": "turn-1", "segment": 0,
+        }
+        assert not (await service.invoke("owner", speech0))["ready"]
+        assert call.speech_requested_index == 0
+
+        service._queue_speech(call, call.turn, "Second sentence.", "answer")
+        service._queue_speech(call, call.turn, "Third sentence.", "answer")
+        await asyncio.sleep(0)
+        assert synthesized == ["First sentence."]
+
+        release_first.set()
+        await first_task
+        second_task = call.speech_task
+        assert second_task is not first_task
+        await second_task
+        assert synthesized == ["First sentence.", "Second sentence."]
+        assert set(call.speech_cache) == {0, 1}
+
+        speech1 = {**speech0, "segment": 1}
+        assert (await service.invoke("owner", speech1))["ready"]
+        await call.speech_task
+        assert synthesized == [
+            "First sentence.", "Second sentence.", "Third sentence.",
+        ]
+        assert set(call.speech_cache) == {1, 2}
+    finally:
+        release_first.set()
+        await service.close()
+
+
 async def test_automatic_speech_never_publishes_after_call_changes(tmp_path):
     for change in ("end", "turn", "scope"):
         case_path = tmp_path / change

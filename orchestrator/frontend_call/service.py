@@ -50,6 +50,7 @@ class Call:
     end_reason: str = ""
     speech_task: asyncio.Task | None = None
     speech_index: int = -1
+    speech_requested_index: int = -1
     speech_cache: dict = field(default_factory=dict)
     speech_errors: dict = field(default_factory=dict)
     speech_attempts: dict = field(default_factory=dict)
@@ -595,6 +596,7 @@ class CallService:
             call.speech_errors.clear()
             call.speech_attempts.clear()
             call.speech_index = -1
+            call.speech_requested_index = -1
             call.sequence = sequence
             call.turn = {
                 "turn_id": turn_id,
@@ -634,10 +636,14 @@ class CallService:
                 raise CallError("call_speech_index_invalid")
             if index in call.speech_cache:
                 self._privacy(call, "tts")
-                return {"ok": True, "ready": True, **call.speech_cache[index]}
+                asset = call.speech_cache[index]
+                call.speech_requested_index = max(call.speech_requested_index, index)
+                self._start_queued_speech(call)
+                return {"ok": True, "ready": True, **asset}
             if call.speech_task and not call.speech_task.done():
                 if index != call.speech_index:
                     raise CallError("call_speech_busy", 409)
+                call.speech_requested_index = max(call.speech_requested_index, index)
                 return {"ok": True, "ready": False}
             if index in call.speech_errors:
                 if body.get("retry") is not True or call.speech_attempts[index] >= 2:
@@ -648,6 +654,7 @@ class CallService:
                 raise CallError("call_speech_order_invalid", 409)
             self._privacy(call, "tts")
             call.speech_errors.pop(index, None)
+            call.speech_requested_index = max(call.speech_requested_index, index)
             self._start_speech(call, index, parts[index])
             return {"ok": True, "ready": False}
         raise CallError("call_invalid_operation")
@@ -732,13 +739,7 @@ class CallService:
         emit("speech_segment_queued", **self._facts(call, turn), segment=index,
              speech_kind=str(kind or ""), queued_segments=len(parts),
              text_chars=len(text))
-        if (
-            call.speech_index < 0
-            and (not call.speech_task or call.speech_task.done())
-            and call.phase == "active"
-            and call.turn is turn
-        ):
-            self._start_speech(call, 0, parts[0])
+        self._start_queued_speech(call)
         return True
 
     def _process_activity(self, call, turn, run):
@@ -1070,6 +1071,27 @@ class CallService:
             audio = b""
             image = None
 
+    def _start_queued_speech(self, call):
+        """Warm the first segment, then at most one beyond client demand."""
+        active_task = call.speech_task
+        if (
+            call.phase != "active"
+            or (active_task and not active_task.done()
+                and active_task is not asyncio.current_task())
+            or call.speech_index in call.speech_errors
+        ):
+            return False
+        index = call.speech_index + 1
+        parts = call.turn.get("speech_segments", [])
+        if (
+            index >= len(parts)
+            or index > call.speech_requested_index + 1
+            or index in call.speech_errors
+        ):
+            return False
+        self._start_speech(call, index, parts[index])
+        return True
+
     def _start_speech(self, call, index, text):
         self.expire()
         if call.phase != "active":
@@ -1106,6 +1128,7 @@ class CallService:
                 call.speech_cache[index] = result
                 for old in sorted(call.speech_cache)[:-2]:
                     call.speech_cache.pop(old, None)
+                self._start_queued_speech(call)
             else:
                 emit("tts_discarded", **self._facts(call, turn), segment=index,
                      reason="call_ended" if call.phase != "active" else "turn_changed")
