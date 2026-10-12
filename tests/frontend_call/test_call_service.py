@@ -287,6 +287,44 @@ async def test_turn_enters_agent_once_and_duplicate_upload_is_idempotent(tmp_pat
     await service.close()
 
 
+async def test_new_voice_turn_is_admitted_without_cancelling_the_running_turn(tmp_path):
+    service, ports, adapters, base, _ = setup(tmp_path)
+    binding, _, _ = await start(service, base)
+    release_first = asyncio.Event()
+    first_started = asyncio.Event()
+    original_transcribe = adapters.transcribe
+
+    async def transcribe(*args):
+        result = await original_transcribe(*args)
+        if adapters.stt == 1:
+            first_started.set()
+            await release_first.wait()
+        return result
+
+    adapters.transcribe = transcribe
+    first = {**binding, "operation": "turn", "turn_id": "turn-1", "sequence": 1, "audio_b64": wav()}
+    second = {**binding, "operation": "turn", "turn_id": "turn-2", "sequence": 2, "audio_b64": wav()}
+    try:
+        await service.invoke("owner", first)
+        await first_started.wait()
+        accepted = await service.invoke("owner", second)
+        assert accepted["turn"]["turn_id"] == "turn-2"
+        assert accepted["turn"]["phase"] == "transcribing"
+        assert service.calls["call-1"].sequence == 2
+        assert ports.cancelled == []
+        with pytest.raises(CallError, match="call_turn_id_conflict"):
+            await service.invoke("owner", {**second, "sequence": 3})
+        assert service.calls["call-1"].sequence == 2
+        release_first.set()
+        await asyncio.gather(*service.calls["call-1"].turn_tasks.values())
+        assert [item[0] for item in ports.accepted] == ["turn-2", "turn-1"]
+        assert ports.cancelled == []
+        assert service.calls["call-1"].turn["turn_id"] == "turn-2"
+    finally:
+        release_first.set()
+        await service.close()
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("annotation", [
     "*Loud sound*", " [noise] ", "*Music*", "**Loud sound**", "*Coughing* *Loud sound*",

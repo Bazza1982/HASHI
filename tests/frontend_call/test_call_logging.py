@@ -186,6 +186,10 @@ async def test_turn_timing_correlates_pao_and_tts_and_never_logs_speech(tmp_path
     await finish_task(service)
     await service.invoke("owner", {**binding, "operation": "speech", "turn_id": "turn-1", "segment": 0})
     await service.calls["call-1"].speech_task
+    delivered = await service.invoke(
+        "owner", {**binding, "operation": "speech", "turn_id": "turn-1", "segment": 0}
+    )
+    assert delivered["ready"] is True
     transcribed = events(caplog, "stt_completed")[-1]
     assert transcribed["provider_generation_id"] == "gen-stt-1" and transcribed["duration_ms"] >= 11
     assert transcribed["gateway"] == "OpenRouter" and transcribed["actual_provider"] == "Groq"
@@ -197,6 +201,12 @@ async def test_turn_timing_correlates_pao_and_tts_and_never_logs_speech(tmp_path
     assert completed["duration_ms"] >= 31
     tts = events(caplog, "tts_completed")[-1]
     assert tts["call_id"] == "call-1" and tts["turn_id"] == "turn-1" and tts["segment"] == 0
+    published = events(caplog, "speech_asset_published")[-1]
+    retrieved = events(caplog, "speech_asset_retrieved")[-1]
+    assert published["response_bytes"] > 0 and published["cached"] is True
+    assert retrieved["response_bytes"] == published["response_bytes"]
+    ordered = [row["event"] for row in events(caplog)]
+    assert ordered.index("tts_completed") < ordered.index("speech_asset_published") < ordered.index("speech_asset_retrieved")
     assert "PRIVATE_TRANSCRIPT" not in caplog.text and "PRIVATE_ANSWER" not in caplog.text
     assert wav() not in caplog.text
     await service.close()
@@ -310,12 +320,19 @@ async def test_http_pre_service_failures_record_stage_status_without_unauthentic
         async with ClientSession() as session:
             async with session.post(url + "/api/v1/call/operation", json={"operation": "end", "call_id": "untrusted-SECRET"}) as response:
                 assert response.status == 403
-            async with session.post(url + "/api/v1/call/operation", json={"operation": "context"}, headers={"X-Workbench-Token": "PRIVATE_TOKEN"}) as response:
+            async with session.post(url + "/api/v1/call/operation", json={"operation": "context"}, headers={
+                "X-Workbench-Token": "PRIVATE_TOKEN",
+                "X-Hashi-Correlation-Id": "call-request-1",
+                "X-Hashi-Trace-Id": "call-trace-1",
+                "X-Hashi-Span-Id": "call-span-1",
+            }) as response:
                 assert (await response.json())["error_code"] == "call_disabled"
         rejected = events(caplog, "http_operation_failed")
         assert [(row["stage"], row["http_status"]) for row in rejected] == [("auth", 403), ("config_read", 503)]
         assert rejected[0]["generation"] == service.generation and "operation" not in rejected[0]
         assert rejected[1]["operation"] == "context"
+        assert rejected[1]["correlation_id"] == "call-request-1"
+        assert rejected[1]["trace_id"] == "call-trace-1" and rejected[1]["span_id"] == "call-span-1"
         assert "untrusted-SECRET" not in caplog.text and "PRIVATE_TOKEN" not in caplog.text
     finally:
         await runner.cleanup()
@@ -382,7 +399,8 @@ async def test_real_provider_success_keeps_task_correlation_and_run_polls_are_qu
         for _ in range(3):
             assert (await service.invoke("owner", speech))["ready"]
             await service.invoke("owner", {**binding, "operation": "snapshot"})
-        assert len(events(caplog)) == before_polls
+        later = events(caplog)[before_polls:]
+        assert [row["event"] for row in later] == ["speech_asset_retrieved"]
         assert requests == ["stt", "tts"] and len(ports.accepted) == 1 and len(polls) == 4
         states = events(caplog, "run_state_changed")
         assert [row["run_state"] for row in states] == ["running", "completed"]

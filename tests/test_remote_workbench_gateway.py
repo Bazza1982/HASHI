@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import Path
 from urllib.error import URLError
@@ -67,6 +68,15 @@ def _signed_headers(
     )
 
 
+def _gateway_events(caplog, event: str | None = None):
+    rows = [
+        json.loads(record.getMessage().removeprefix("workbench gateway "))
+        for record in caplog.records
+        if record.getMessage().startswith("workbench gateway ")
+    ]
+    return [row for row in rows if event is None or row["event"] == event]
+
+
 def test_gateway_status_requires_shared_token_even_in_lan_mode(tmp_path, monkeypatch):
     client, token = _client(tmp_path, lan_mode=True)
     monkeypatch.setattr(remote_server, "_fetch_workbench_health", lambda timeout=1.0: {"ok": True})
@@ -91,7 +101,8 @@ def test_gateway_status_requires_shared_token_even_in_lan_mode(tmp_path, monkeyp
     assert payload["workbench_online"] is True
 
 
-def test_gateway_proxy_authenticates_exact_body_and_forwards_api_request(tmp_path, monkeypatch):
+def test_gateway_proxy_authenticates_exact_body_and_forwards_api_request(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO, logger=remote_server.logger.name)
     client, token = _client(tmp_path)
     captured: dict = {}
 
@@ -108,6 +119,9 @@ def test_gateway_proxy_authenticates_exact_body_and_forwards_api_request(tmp_pat
         content=body,
         headers={
             "Content-Type": "application/json",
+            "X-Hashi-Correlation-Id": "call-request-1",
+            "X-Hashi-Trace-Id": "call-trace-1",
+            "X-Hashi-Span-Id": "workbench-span-1",
             **_signed_headers(
                 token,
                 method="POST",
@@ -124,6 +138,13 @@ def test_gateway_proxy_authenticates_exact_body_and_forwards_api_request(tmp_pat
     assert captured["api_path"] == "chat"
     assert captured["query"] == query
     assert captured["body_bytes"] == body
+    assert captured["request_headers"]["x-hashi-correlation-id"] == "call-request-1"
+    assert captured["request_headers"]["x-hashi-trace-id"] == "call-trace-1"
+    assert response.headers["x-hashi-correlation-id"] == "call-request-1"
+    assert response.headers["x-hashi-trace-id"] == "call-trace-1"
+    names = [row["event"] for row in _gateway_events(caplog)]
+    assert names.index("proxy_received") < names.index("proxy_authenticated") < names.index("proxy_response_ready")
+    assert names.index("proxy_response_ready") < names.index("asgi_response_completed")
 
 
 def test_gateway_proxy_authenticates_bridge_transfer_response(tmp_path, monkeypatch):
@@ -233,7 +254,12 @@ def test_forwarder_keeps_gateway_auth_out_of_loopback_and_injects_local_admin(mo
 
     class _Response:
         status = 200
-        headers = {"Content-Type": "application/json", "Server": "hidden"}
+        headers = {
+            "Content-Type": "application/json",
+            "Server": "hidden",
+            "X-Hashi-Correlation-Id": "call-request-2",
+            "X-Hashi-Gateway-Request-Id": "gateway-request-2",
+        }
 
         def __enter__(self):
             return self
@@ -265,20 +291,63 @@ def test_forwarder_keeps_gateway_auth_out_of_loopback_and_injects_local_admin(mo
         body_bytes=b'{"text":"hello"}',
         request_headers={
             "content-type": "application/json",
+            "x-hashi-correlation-id": "call-request-2",
+            "x-hashi-trace-id": "call-trace-2",
+            "x-hashi-span-id": "remote-span-2",
             "x-hashi-digest": "must-not-leak",
         },
     )
 
     assert status == 200
     assert body == b'{"ok":true}'
-    assert headers == {"content-type": "application/json"}
+    assert headers == {
+        "content-type": "application/json",
+        "x-hashi-correlation-id": "call-request-2",
+        "x-hashi-gateway-request-id": "gateway-request-2",
+    }
     assert captured["url"] == "http://127.0.0.1:18800/api/chat?source=workbench"
     assert captured["body"] == b'{"text":"hello"}'
     assert captured["headers"]["x-workbench-token"] == "local-admin"
+    assert captured["headers"]["x-hashi-correlation-id"] == "call-request-2"
+    assert captured["headers"]["x-hashi-trace-id"] == "call-trace-2"
+    assert captured["headers"]["x-hashi-span-id"] == "remote-span-2"
     assert "x-hashi-digest" not in captured["headers"]
     started = remote_server._request_workbench_agent_lifecycle("windows-fixture", action="start")
     assert started["ok"] is True
     assert captured["timeout"] >= 35
+
+
+def test_forwarder_records_safe_socket_cause_without_endpoint_or_message(monkeypatch, caplog):
+    caplog.set_level(logging.INFO, logger=remote_server.logger.name)
+    cause = OSError(104, "PRIVATE loopback endpoint")
+    cause.code = "ECONNRESET"
+    cause.syscall = "read"
+
+    def fail(_request, timeout):
+        raise URLError(cause)
+
+    monkeypatch.setattr(remote_server, "local_http_hosts", lambda: ("127.0.0.1",))
+    monkeypatch.setattr(remote_server, "_workbench_admin_token", lambda: "local-admin")
+    monkeypatch.setattr(remote_server.urllib_request, "urlopen", fail)
+
+    with pytest.raises(ConnectionError):
+        remote_server._forward_workbench_gateway_request(
+            method="POST",
+            api_path="call/operation",
+            query="private=SECRET",
+            body_bytes=b'{"private":"BODY"}',
+            request_headers={
+                "content-type": "application/json",
+                "x-hashi-correlation-id": "call-request-3",
+            },
+        )
+
+    failed = _gateway_events(caplog, "local_request_failed")[-1]
+    assert failed["correlation_id"] == "call-request-3"
+    assert failed["exception_type"] == "URLError" and failed["cause_type"] == "OSError"
+    assert failed["cause_errno"] == 104 and failed["cause_code"] == "ECONNRESET"
+    assert failed["cause_syscall"] == "read"
+    assert "PRIVATE" not in caplog.text and "SECRET" not in caplog.text
 
 
 def test_desktop_gateway_selects_live_local_api_before_post(monkeypatch):

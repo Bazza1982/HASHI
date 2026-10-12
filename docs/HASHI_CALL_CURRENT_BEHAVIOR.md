@@ -1,7 +1,7 @@
 # HASHI /call Current Behavior Contract
 
 Status: **Authoritative current behavior**
-Approved scope: user-directed `debug-call` recovery on 2026-10-11
+Approved scope: user-directed `debug-call` recovery through 2026-10-12
 Owners: Frontend Connector (Workbench presentation/media) and PAO Call Function
 Engineering layers: external Workbench plus replaceable Layer 2 Functions
 Protected Core: unchanged
@@ -66,9 +66,10 @@ numeric response-length requirements are retired.
 - **CALL-OPEN-01** — The selected Agent answers once, in its existing persona,
   language, Session, and conversation context. Polling, reconnects, or delayed
   responses cannot repeat that opening.
-- **CALL-OPEN-02** — The opening is spoken before new caller speech is admitted.
-  If the opening fails, the call recovers to voice listening without inventing a
-  successful opening.
+- **CALL-OPEN-02** — The opening begins before ordinary caller capture. Once
+  playback begins, the same confirmed barge-in rule as other Agent speech may
+  stop its presentation and admit the caller's new input. If the opening fails,
+  the call recovers to voice listening without inventing a successful opening.
 
 ## Spoken response and streaming
 
@@ -114,6 +115,22 @@ numeric response-length requirements are retired.
   raw character count is not a valid cross-language duration proxy. A short
   terminal tail is always flushed, and every streamed chunk remains an exact
   prefix of the final chunk sequence.
+- **CALL-SPEECH-10** — While Agent audio or a filler is playing, browser echo
+  cancellation/noise suppression and a local detector monitor for sustained
+  caller speech. Playback audio cannot retrain the noise baseline. A short
+  pre-roll is retained so confirmation does not cut off the first syllable;
+  brief echo, clicks, and ordinary background noise do not stop playback.
+- **CALL-SPEECH-11** — Confirmed caller speech stops only the current audio
+  presentation, fences late playback completion, and becomes an ordinary new
+  Call input immediately. It may be conversation, newly queued work, an explicit
+  cancellation instruction, or another request. Barge-in itself never guesses
+  that intent and never cancels, pauses, or rewrites existing PAO work.
+- **CALL-SPEECH-12** — New caller input has admission priority over unfinished
+  older Call turns. Older admitted Runs may continue concurrently within a
+  bounded Call-owned task set, but cannot reclaim current speech presentation.
+  Existing PAO semantics remain authoritative for later queueing or explicit
+  cancellation. After playback, ordinary listening may update the same-call
+  background-noise estimate before the next utterance.
 
 ## Captions and controls
 
@@ -170,6 +187,12 @@ numeric response-length requirements are retired.
   request and Run IDs are known, then uses PAO's targeted cancellation fence.
   It never converts hangup into an Agent-wide stop and never cancels unrelated
   foreground or background work.
+- **CALL-SAFE-06** — Browser, Workbench proxy, Remote loopback gateway, and Call
+  Function records carry the same bounded correlation/trace identity. Logs
+  distinguish request start, response headers, body completion, producer-made
+  502, caller abort, socket cause, TTS completion, speech-cache publication and
+  client retrieval. They never contain audio, transcript, answer, credentials,
+  full query strings, or native exception messages.
 
 ## Release and evidence gate
 

@@ -1,5 +1,16 @@
 # HASHI Agent FYI
 
+October 12 Call interruption decision: confirmed caller speech may now interrupt
+Agent or filler playback. Browser AEC/noise suppression, a frozen playback-time
+noise baseline, conservative onset confirmation, and short pre-roll protect echo
+and the first syllable. The result is a normal new Call input with admission
+priority; it does not itself cancel or pause older PAO work. Older Runs may
+continue, but cannot reclaim current speech presentation. Correlated,
+content-free lifecycle records now cross renderer, Workbench proxy, Remote and
+Call Function, distinguishing caller abort, socket cause, generated 502, TTS
+completion, cache publication, retrieval, and response completion. This enables
+future attribution but cannot reconstruct the origin of historical disconnects.
+
 October 11 authoritative debug-call baseline: the current
 [Call behavior contract](HASHI_CALL_CURRENT_BEHAVIOR.md) supersedes conflicting
 historical notes. The fixed Phone control owns legacy `/phone`; the fixed video

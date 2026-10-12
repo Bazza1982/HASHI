@@ -1,5 +1,26 @@
 # Phone and Call interaction decision
 
+## 2026-10-12 caller barge-in and transport evidence
+
+The user approved full-duplex-style caller interruption for direct Call without
+turning it into background-work control. During Agent/filler playback the
+Frontend Connector keeps the microphone path alive with browser echo
+cancellation/noise suppression, a frozen same-call noise baseline, conservative
+local speech confirmation, and short pre-roll. Sustained caller speech stops
+only the audible presentation and is submitted as a normal new input. It may
+later mean chat, queued work, or explicit cancellation, but barge-in itself does
+not infer or perform any of those actions. PAO continues older admitted work;
+the latest caller turn owns presentation, while stale turns cannot take it back.
+
+The same decision closes the known `fetch failed`/502 evidence gap. One bounded
+correlation ID now crosses renderer, Workbench proxy, Remote loopback relay and
+Call Function. Each boundary records headers/body completion separately, names
+whether Workbench or a proxy produced the response, records client cancellation
+and final server send, and preserves safe nested socket type/code/errno/syscall.
+No media, conversation text, full query, credentials, endpoint-bearing native
+message, or automatic retry is added. This makes a future failure attributable;
+it does not retroactively identify which layer closed an earlier connection.
+
 ## 2026-10-11 authoritative debug-call recovery
 
 The user-approved current behavior is
