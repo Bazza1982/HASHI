@@ -29,6 +29,7 @@ _provider = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,99}\Z")
 _identifiers = {
     "generation", "requested_generation", "call_id", "turn_id", "client_id",
     "agent_id", "session_id", "run_id", "request_id", "message_id", "provider_request_id",
+    "correlation_id", "trace_id", "span_id",
 }
 _numbers = {
     "context_generation", "sequence", "camera_epoch", "frame_sequence", "segment", "attempt",
@@ -54,7 +55,7 @@ _choices = {
         "explicit_end", "lease_expired", "max_duration", "service_shutdown", "camera_enabled",
         "camera_disabled", "call_ended", "task_cancelled", "turn_changed", "stale_frame",
         "epoch_changed", "newer_observation", "rate_limit", "interval", "camera_unavailable",
-        "non_speech_annotation", "no_speech",
+        "non_speech_annotation", "no_speech", "user_input_priority", "sequential_input",
     },
     "verification": {"verified", "unverified"},
 }

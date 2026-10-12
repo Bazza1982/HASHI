@@ -1,17 +1,36 @@
 # Phone and Call interaction decision
 
+## 2026-10-12 caller barge-in and transport evidence
+
+The user approved full-duplex-style caller interruption for direct Call without
+turning it into background-work control. During Agent/filler playback the
+Frontend Connector keeps the microphone path alive with browser echo
+cancellation/noise suppression, a frozen same-call noise baseline, conservative
+local speech confirmation, and short pre-roll. Sustained caller speech stops
+only the audible presentation and is submitted as a normal new input. It may
+later mean chat, queued work, or explicit cancellation, but barge-in itself does
+not infer or perform any of those actions. PAO continues older admitted work;
+the latest caller turn owns presentation, while stale turns cannot take it back.
+
+The same decision closes the known `fetch failed`/502 evidence gap. One bounded
+correlation ID now crosses renderer, Workbench proxy, Remote loopback relay and
+Call Function. Each boundary records headers/body completion separately, names
+whether Workbench or a proxy produced the response, records client cancellation
+and final server send, and preserves safe nested socket type/code/errno/syscall.
+No media, conversation text, full query, credentials, endpoint-bearing native
+message, or automatic retry is added. This makes a future failure attributable;
+it does not retroactively identify which layer closed an earlier connection.
+
 ## 2026-10-11 authoritative debug-call recovery
 
 The user-approved current behavior is
 [HASHI /call Current Behavior Contract](HASHI_CALL_CURRENT_BEHAVIOR.md).
 It is the release checklist for the clean `debug-call` branch and supersedes
-every conflicting behavior below. Both fixed Phone and video controls now start
-the same video-first direct Call: microphone and camera are requested together
-on the initiating click, and camera failure degrades that Call to audio-only.
-Legacy Phone is only a compatibility fallback after a fresh route check confirms
-direct Call is unavailable. An unresolved route is refreshed on foreground and
-rechecked from either launch click. The former camera-off startup rule, separate
-entry-route assertion, and fixed sentence/character answer limits are retired.
+every conflicting behavior below. The fixed Phone control starts or returns only
+legacy `/phone`; the fixed video control starts or returns only direct `/call`
+and requests microphone and camera together. Neither falls back to or retargets
+the other. Camera failure degrades the direct Call to audio-only. The former
+camera-off startup rule and fixed sentence/character answer limits are retired.
 
 Frontend Connector owns Workbench media, controls, captions, and connection
 sounds. PAO Call Function owns the bound Call, opening, typed speech projection,

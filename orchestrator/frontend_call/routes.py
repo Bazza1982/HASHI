@@ -12,7 +12,7 @@ from .config import CallConfig
 from .contract import CallError, MAX_BODY
 from .ports import HashiPorts
 from .service import CallService
-from .diagnostics import body_facts, elapsed_ms, emit, error_facts
+from .diagnostics import body_facts, diagnostic_context, elapsed_ms, emit, error_facts
 
 
 def register_call_api(api):
@@ -32,7 +32,7 @@ def register_call_api(api):
         "X-Content-Type-Options": "nosniff",
     }
 
-    async def handle(request):
+    async def handle_scoped(request):
         body = None  # Never inspect unauthed content for logging.
         stage = "profile"
         started = time.monotonic()
@@ -96,6 +96,19 @@ def register_call_api(api):
                 status=500,
                 headers=headers,
             )
+
+    async def handle(request):
+        # Propagated IDs join browser, Workbench, Remote and Call Function
+        # records. The diagnostics allowlist rejects malformed values.
+        correlation_id = request.headers.get("x-hashi-correlation-id")
+        trace_id = request.headers.get("x-hashi-trace-id") or correlation_id
+        span_id = request.headers.get("x-hashi-span-id")
+        with diagnostic_context(
+            correlation_id=correlation_id,
+            trace_id=trace_id,
+            span_id=span_id,
+        ):
+            return await handle_scoped(request)
 
     async def start(app):
         nonlocal reaper
