@@ -25,6 +25,21 @@ Provider-declared Phone content-policy closure is terminal: show the explicit
 content-filter reason, release the foreground line, and do not reconnect the
 same rejected context as though the service were temporarily unavailable.
 
+October 12 Frontend Connector microphone correction: ordinary browser
+scheduling can deliver a fourth 32 ms PCM frame before three already-completed
+detector replies are reconciled. This is recoverable backpressure, not
+microphone loss. Keep at most three worker requests in flight and retain the
+burst in an ordered, session-fenced queue bounded to 128 frames (about 4.096
+seconds). Drain it as replies arrive and clear it on stop/retry/close. A worker
+that fills the bound still fails closed as `queue_stalled`; never silently drop
+audio or fall back to amplitude-only detection. The Aptenra-inspired adaptive
+noise baseline, local Silero gate, onset pre-roll, 800 ms quiet tail and
+continuous-speech bound are unchanged. The full 103-test Call suite and build
+pass. Two physical HASHI3 video Calls passed camera, microphone, transcript,
+Agent reply, playback, controls and media release, including a hangup during
+opening speech. HASHI4 deployment is client/source load only: no implementer
+reboot or live HASHI4 Call is authorized.
+
 The same candidate retains the recovered restart work: immutable qualified
 generations are reused only after exact runtime/source/artifact checks;
 duplicate warm-path verification is skipped without weakening the final
