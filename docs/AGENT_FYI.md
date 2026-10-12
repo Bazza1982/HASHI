@@ -70,6 +70,23 @@ replayed and no HASHI4 lifecycle action was performed. Focused tests, the full
 Workbench Call suite, and the production build pass; a refreshed remote page is
 still required for physical client acceptance.
 
+October 12 detector scheduling-jitter correction: a fourth 32 ms PCM frame can
+arrive before three already-completed local detector replies are reconciled on
+the browser main thread. That burst is recoverable backpressure, not microphone
+loss. Frontend Connector keeps three requests in flight and drains additional
+frames in order from a session-fenced queue bounded to 128 frames (about 4.096
+seconds). Stop, retry and close clear the queue. A worker that fills the bound
+still fails closed as `queue_stalled`; audio is never silently dropped and the
+client never falls back to amplitude-only detection. The Aptenra-inspired
+adaptive baseline, local Silero gate, onset pre-roll, 800 ms quiet tail and
+Call window design are unchanged. Red/green coverage verifies recovery,
+ordering, cross-Call fencing and the true-stall boundary. The complete 103-test
+Call suite and production build pass. Two physical HASHI3 video Calls passed
+camera, microphone, transcript, Agent reply, playback, controls, repeated
+admission and media release. HASHI4 receives only this qualified Workbench
+client and this source receipt; the implementer performs no HASHI4 reboot or
+live HASHI4 Call. User acceptance remains separate.
+
 The same candidate retains the recovered restart work: immutable qualified
 generations are reused only after exact runtime/source/artifact checks;
 duplicate warm-path verification is skipped without weakening the final
