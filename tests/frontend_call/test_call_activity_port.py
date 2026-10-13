@@ -74,9 +74,7 @@ def test_call_activity_port_exposes_answer_and_public_commentary_only():
         "context_generation": 2,
     }
 
-    result = HashiPorts(api).result(
-        "owner", binding, "run-1", after_sequence=4
-    )
+    result = HashiPorts(api).result("owner", binding, "run-1", after_sequence=4)
 
     assert observed == {
         "request_id": "request-1",
@@ -127,13 +125,15 @@ async def test_call_activity_port_reads_the_isolated_worker_instead_of_stale_loc
             return {
                 "ok": True,
                 "latest_sequence": 6,
-                "events": [{
-                    "sequence": 6,
-                    "event_id": "commentary-6",
-                    "delivery_class": "user_commentary",
-                    "presentation_channel": "commentary",
-                    "summary": "I am checking that now.",
-                }],
+                "events": [
+                    {
+                        "sequence": 6,
+                        "event_id": "commentary-6",
+                        "delivery_class": "user_commentary",
+                        "presentation_channel": "commentary",
+                        "summary": "I am checking that now.",
+                    }
+                ],
             }
 
     api = SimpleNamespace(
@@ -145,9 +145,7 @@ async def test_call_activity_port_reads_the_isolated_worker_instead_of_stale_loc
         "session_id": "session-1",
         "context_generation": 2,
     }
-    projected = HashiPorts(api).result(
-        "owner", binding, "run-1", after_sequence=4
-    )
+    projected = HashiPorts(api).result("owner", binding, "run-1", after_sequence=4)
     if hasattr(projected, "__await__"):
         projected = await projected
 

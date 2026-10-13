@@ -27,36 +27,112 @@ _state = re.compile(r"[a-z][a-z0-9_]{0,39}\Z")
 _model = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{0,159}\Z")
 _provider = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,99}\Z")
 _identifiers = {
-    "generation", "requested_generation", "call_id", "turn_id", "client_id",
-    "agent_id", "session_id", "run_id", "request_id", "message_id", "provider_request_id",
-    "correlation_id", "trace_id", "span_id",
+    "generation",
+    "requested_generation",
+    "call_id",
+    "turn_id",
+    "client_id",
+    "agent_id",
+    "session_id",
+    "run_id",
+    "request_id",
+    "message_id",
+    "provider_request_id",
+    "correlation_id",
+    "trace_id",
+    "span_id",
 }
 _numbers = {
-    "context_generation", "sequence", "camera_epoch", "frame_sequence", "segment", "attempt",
-    "duration_ms", "call_duration_ms", "wait_ms", "frame_age_ms", "audio_bytes",
-    "image_bytes", "response_bytes", "http_status", "error_status", "lookup_count",
-    "response_duration_ms", "pending_tasks", "speech_segments", "text_chars", "queued_segments",
-    "activity_sequence", "event_count", "answer_preview_events", "commentary_events",
+    "context_generation",
+    "sequence",
+    "camera_epoch",
+    "frame_sequence",
+    "segment",
+    "attempt",
+    "duration_ms",
+    "call_duration_ms",
+    "wait_ms",
+    "frame_age_ms",
+    "audio_bytes",
+    "image_bytes",
+    "response_bytes",
+    "http_status",
+    "error_status",
+    "lookup_count",
+    "response_duration_ms",
+    "pending_tasks",
+    "speech_segments",
+    "text_chars",
+    "queued_segments",
+    "activity_sequence",
+    "event_count",
+    "answer_preview_events",
+    "commentary_events",
 }
-_booleans = {"camera_enabled", "pending_replaced", "cached", "terminal", "speech_truncated", "admission_in_flight"}
+_booleans = {
+    "camera_enabled",
+    "pending_replaced",
+    "cached",
+    "terminal",
+    "speech_truncated",
+    "admission_in_flight",
+}
 _choices = {
     "operation": set(OPERATIONS),
     "stage": {
-        "validation", "scope_validation", "config_read", "config_context", "config_freeze",
-        "start", "camera", "frame_validation", "turn_validation", "speech_validation",
-        "stt", "vision", "vision_wait", "admission", "run_result", "tts", "profile",
-        "auth", "owner", "content_type", "body_read", "json", "invoke", "response", "shutdown",
+        "validation",
+        "scope_validation",
+        "config_read",
+        "config_context",
+        "config_freeze",
+        "start",
+        "camera",
+        "frame_validation",
+        "turn_validation",
+        "speech_validation",
+        "stt",
+        "vision",
+        "vision_wait",
+        "admission",
+        "run_result",
+        "tts",
+        "profile",
+        "auth",
+        "owner",
+        "content_type",
+        "body_read",
+        "json",
+        "invoke",
+        "response",
+        "shutdown",
     },
     "media_kind": {"stt", "tts", "vision"},
     "speech_kind": {"answer", "commentary"},
     "target_location": {"cloud", "local"},
     "gateway": {"OpenRouter"},
     "reason": {
-        "explicit_end", "lease_expired", "max_duration", "service_shutdown", "camera_enabled",
-        "camera_disabled", "call_ended", "task_cancelled", "turn_changed", "stale_frame",
-        "epoch_changed", "newer_observation", "rate_limit", "interval", "camera_unavailable",
-        "startup_unavailable", "observation_unavailable", "frame_unavailable",
-        "non_speech_annotation", "no_speech", "user_input_priority", "sequential_input",
+        "explicit_end",
+        "lease_expired",
+        "max_duration",
+        "service_shutdown",
+        "camera_enabled",
+        "camera_disabled",
+        "call_ended",
+        "task_cancelled",
+        "turn_changed",
+        "stale_frame",
+        "epoch_changed",
+        "newer_observation",
+        "rate_limit",
+        "interval",
+        "camera_unavailable",
+        "startup_unavailable",
+        "observation_unavailable",
+        "frame_unavailable",
+        "non_speech_annotation",
+        "no_speech",
+        "user_input_priority",
+        "sequential_input",
     },
     "verification": {"verified", "unverified"},
 }
@@ -65,10 +141,21 @@ _choices = {
 def body_facts(body):
     if not isinstance(body, dict):
         return {}
-    facts = {key: body[key] for key in (
-        "operation", "call_id", "turn_id", "client_id", "agent_id", "session_id",
-        "context_generation", "sequence", "frame_sequence",
-    ) if key in body}
+    facts = {
+        key: body[key]
+        for key in (
+            "operation",
+            "call_id",
+            "turn_id",
+            "client_id",
+            "agent_id",
+            "session_id",
+            "context_generation",
+            "sequence",
+            "frame_sequence",
+        )
+        if key in body
+    }
     facts["requested_generation"] = body.get("generation")
     return facts
 
@@ -120,20 +207,46 @@ def _emit(event, **facts):
         return
     record = {"event": event}
     for key, value in {**_context.get(), **facts}.items():
-        if key in _identifiers and isinstance(value, str) and _identifier.fullmatch(value):
+        if (
+            key in _identifiers
+            and isinstance(value, str)
+            and _identifier.fullmatch(value)
+        ):
             record[key] = value
-        elif key == "provider_generation_id" and isinstance(value, str) and _generation.fullmatch(value):
+        elif (
+            key == "provider_generation_id"
+            and isinstance(value, str)
+            and _generation.fullmatch(value)
+        ):
             record[key] = value
         elif key == "error_code" and isinstance(value, str) and _code.fullmatch(value):
             record[key] = value
-        elif key in ("exception_type", "cause_type") and isinstance(value, str) and _name.fullmatch(value):
+        elif (
+            key in ("exception_type", "cause_type")
+            and isinstance(value, str)
+            and _name.fullmatch(value)
+        ):
             record[key] = value
-        elif key in ("phase", "turn_phase", "run_state") and isinstance(value, str) and _state.fullmatch(value):
+        elif (
+            key in ("phase", "turn_phase", "run_state")
+            and isinstance(value, str)
+            and _state.fullmatch(value)
+        ):
             # These are PAO/service-owned tokens, not a copied state catalogue.
             record[key] = value
-        elif key == "requested_model" and isinstance(value, str) and _model.fullmatch(value) and "://" not in value and "//" not in value:
+        elif (
+            key == "requested_model"
+            and isinstance(value, str)
+            and _model.fullmatch(value)
+            and "://" not in value
+            and "//" not in value
+        ):
             record[key] = value
-        elif key == "actual_provider" and isinstance(value, str) and _provider.fullmatch(value):
+        elif (
+            key == "actual_provider"
+            and isinstance(value, str)
+            and _provider.fullmatch(value)
+        ):
             record[key] = value
         elif key in _numbers and type(value) is int and -3000 <= value <= 2**53:
             record[key] = value
@@ -141,4 +254,6 @@ def _emit(event, **facts):
             record[key] = value
         elif key in _choices and isinstance(value, str) and value in _choices[key]:
             record[key] = value
-    logger.info("call diagnostic %s", json.dumps(record, ensure_ascii=True, sort_keys=True))
+    logger.info(
+        "call diagnostic %s", json.dumps(record, ensure_ascii=True, sort_keys=True)
+    )

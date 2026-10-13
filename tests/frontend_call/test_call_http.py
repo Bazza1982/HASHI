@@ -135,9 +135,7 @@ async def test_openrouter_media_returns_without_secondary_provider_queries(monke
     async def generation(request):
         generation_id = request.query["id"]
         lookups.append(generation_id)
-        provider = {"gen-stt-1": "Groq", "gen-tts-1": "Google AI Studio"}[
-            generation_id
-        ]
+        provider = {"gen-stt-1": "Groq", "gen-tts-1": "Google AI Studio"}[generation_id]
         return web.json_response(
             {"data": {"id": generation_id, "provider_name": provider}}
         )
@@ -216,7 +214,9 @@ async def test_route_auth_json_and_disable_fail_closed(tmp_path):
                 url + "/api/v1/call/operation", json={"operation": "context"}
             ) as response:
                 assert response.status == 403
-            (tmp_path / "call_profiles.json").write_text(json.dumps({"version": 1, "enabled": False}))
+            (tmp_path / "call_profiles.json").write_text(
+                json.dumps({"version": 1, "enabled": False})
+            )
             async with session.post(
                 url + "/api/v1/call/operation",
                 json={},

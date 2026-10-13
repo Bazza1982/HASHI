@@ -15,13 +15,16 @@ OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 # always wins; these rates are the live estimate while a final receipt is absent.
 _PRICING = {
     (OPENROUTER_API_BASE, "openai/whisper-large-v3"): {
-        "kind": "stt", "audio_second_usd": 0.000008,
+        "kind": "stt",
+        "audio_second_usd": 0.000008,
     },
     (OPENROUTER_API_BASE, "x-ai/grok-stt-1.0"): {
-        "kind": "stt", "audio_second_usd": 0.000028,
+        "kind": "stt",
+        "audio_second_usd": 0.000028,
     },
     (OPENROUTER_API_BASE, "google/gemini-3.8-flash-lite-tts"): {
-        "kind": "tts", "text_token_usd": 0.50 / 1_000_000,
+        "kind": "tts",
+        "text_token_usd": 0.50 / 1_000_000,
         "audio_second_usd": 6.00 * 25 / 1_000_000,
     },
 }
@@ -51,7 +54,10 @@ def estimate_text_tokens(text: str) -> int:
 
 
 def _pricing(target: Mapping[str, Any]) -> Mapping[str, Any] | None:
-    key = (str(target.get("base_url") or "").rstrip("/"), str(target.get("model") or ""))
+    key = (
+        str(target.get("base_url") or "").rstrip("/"),
+        str(target.get("model") or ""),
+    )
     return _PRICING.get(key)
 
 
@@ -68,33 +74,52 @@ class _Meter:
 
 @dataclass
 class MediaBilling:
-    meters: dict[str, _Meter] = field(default_factory=lambda: {
-        "stt": _Meter(), "tts": _Meter(),
-    })
+    meters: dict[str, _Meter] = field(
+        default_factory=lambda: {
+            "stt": _Meter(),
+            "tts": _Meter(),
+        }
+    )
 
     def record_stt(
-        self, target: Mapping[str, Any], audio_seconds: float | None,
+        self,
+        target: Mapping[str, Any],
+        audio_seconds: float | None,
         provider_usage: Mapping[str, Any] | None = None,
     ) -> None:
-        self._record("stt", target, audio_seconds=audio_seconds, provider_usage=provider_usage)
+        self._record(
+            "stt", target, audio_seconds=audio_seconds, provider_usage=provider_usage
+        )
 
     def record_tts(
-        self, target: Mapping[str, Any], text: str,
+        self,
+        target: Mapping[str, Any],
+        text: str,
         provider_usage: Mapping[str, Any] | None = None,
     ) -> None:
         usage = provider_usage if isinstance(provider_usage, Mapping) else {}
         self._record(
-            "tts", target, audio_seconds=_number(usage.get("audio_seconds")),
-            text_tokens=estimate_text_tokens(text), provider_usage=usage,
+            "tts",
+            target,
+            audio_seconds=_number(usage.get("audio_seconds")),
+            text_tokens=estimate_text_tokens(text),
+            provider_usage=usage,
         )
 
     def _record(
-        self, kind: str, target: Mapping[str, Any], *, audio_seconds: float | None,
-        text_tokens: int = 0, provider_usage: Mapping[str, Any] | None = None,
+        self,
+        kind: str,
+        target: Mapping[str, Any],
+        *,
+        audio_seconds: float | None,
+        text_tokens: int = 0,
+        provider_usage: Mapping[str, Any] | None = None,
     ) -> None:
         usage = provider_usage if isinstance(provider_usage, Mapping) else {}
         provider_seconds = _number(usage.get("seconds"))
-        seconds = provider_seconds if provider_seconds is not None else _number(audio_seconds)
+        seconds = (
+            provider_seconds if provider_seconds is not None else _number(audio_seconds)
+        )
         meter = self.meters[kind]
         meter.model = str(target.get("model") or meter.model)
         meter.requests += 1
@@ -108,8 +133,12 @@ class MediaBilling:
         if not pricing or pricing.get("kind") != kind:
             meter.unpriced_requests += 1
             return
-        meter.estimated_cost_usd += (seconds or 0.0) * float(pricing.get("audio_second_usd", 0))
-        meter.estimated_cost_usd += text_tokens * float(pricing.get("text_token_usd", 0))
+        meter.estimated_cost_usd += (seconds or 0.0) * float(
+            pricing.get("audio_second_usd", 0)
+        )
+        meter.estimated_cost_usd += text_tokens * float(
+            pricing.get("text_token_usd", 0)
+        )
 
     def view(self, targets: Mapping[str, Mapping[str, Any] | None]) -> dict[str, Any]:
         breakdown = {}
@@ -128,9 +157,8 @@ class MediaBilling:
                 "requests": meter.requests,
                 "audio_seconds": round(meter.audio_seconds, 3),
                 "cost_usd": round(row_cost, 8),
-                "estimated": meter.estimated_cost_usd > 0 or (
-                    meter.requests == 0 and _pricing(target) is not None
-                ),
+                "estimated": meter.estimated_cost_usd > 0
+                or (meter.requests == 0 and _pricing(target) is not None),
             }
             if kind == "tts":
                 breakdown[kind]["text_tokens_estimated"] = meter.text_tokens_estimated
@@ -138,9 +166,9 @@ class MediaBilling:
             "scope": "voice_media",
             "currency": "USD",
             "cost_usd": round(exact + estimated, 8),
-            "estimated": estimated > 0 or incomplete or not any(
-                meter.requests for meter in self.meters.values()
-            ),
+            "estimated": estimated > 0
+            or incomplete
+            or not any(meter.requests for meter in self.meters.values()),
             "incomplete": incomplete,
             "breakdown": breakdown,
             "excludes": ["backend_text_model", "vision"],

@@ -72,14 +72,16 @@ class Ports:
         return {"run_id": "run-1", "request_id": "req-1", "message_id": "msg-1"}
 
     async def cancel(self, owner, binding, *, request_id, run_id, reason):
-        self.cancelled.append({
-            "owner": owner,
-            "agent_id": binding["agent_id"],
-            "session_id": binding["session_id"],
-            "request_id": request_id,
-            "run_id": run_id,
-            "reason": reason,
-        })
+        self.cancelled.append(
+            {
+                "owner": owner,
+                "agent_id": binding["agent_id"],
+                "session_id": binding["session_id"],
+                "request_id": request_id,
+                "run_id": run_id,
+                "reason": reason,
+            }
+        )
         return {
             "ok": True,
             "request_id": request_id,
@@ -145,7 +147,11 @@ def setup(tmp_path, location="local", *, startup_video_timeout=None):
     if startup_video_timeout is not None:
         options["startup_video_timeout"] = startup_video_timeout
     service = CallService(
-        config, ports, adapters, clock=lambda: clock[0], poll_seconds=0.001,
+        config,
+        ports,
+        adapters,
+        clock=lambda: clock[0],
+        poll_seconds=0.001,
         **options,
     )
     base = {
@@ -172,7 +178,9 @@ async def start(service, base, cloud=False, *, video_requested=False):
     return {**base, "call_id": "call-1", "generation": info["generation"]}, body, result
 
 
-async def test_context_hides_call_when_selected_media_credentials_are_unavailable(tmp_path):
+async def test_context_hides_call_when_selected_media_credentials_are_unavailable(
+    tmp_path,
+):
     service, _ports, adapters, base, _clock = setup(tmp_path)
     adapters.target_available = lambda target: target["kind"] != "stt"
 
@@ -189,13 +197,17 @@ async def finish_task(service):
     await service.calls["call-1"].task
 
 
-async def test_start_generates_exactly_one_agent_opening_before_first_user_turn(tmp_path):
+async def test_start_generates_exactly_one_agent_opening_before_first_user_turn(
+    tmp_path,
+):
     service, ports, adapters, base, _ = setup(tmp_path)
     released = asyncio.Event()
     openings = []
 
     async def opening(owner, binding, profile, targets, visual_context=None):
-        openings.append((owner, dict(binding), dict(profile), dict(targets), visual_context))
+        openings.append(
+            (owner, dict(binding), dict(profile), dict(targets), visual_context)
+        )
         await released.wait()
         return "（小声）您好，我接到您的电话了。请讲。"
 
@@ -218,11 +230,13 @@ async def test_start_generates_exactly_one_agent_opening_before_first_user_turn(
     assert final["turn"]["kind"] == "opening"
     assert final["turn"]["phase"] == "complete"
     assert final["turn"]["answer"] == "您好，我接到您的电话了。请讲。"
-    assert final["rows"] == [{
-        "speaker": "assistant",
-        "text": "您好，我接到您的电话了。请讲。",
-        "turn_id": "opening-call-1",
-    }]
+    assert final["rows"] == [
+        {
+            "speaker": "assistant",
+            "text": "您好，我接到您的电话了。请讲。",
+            "turn_id": "opening-call-1",
+        }
+    ]
     assert adapters.stt == 0
     await service.close()
 
@@ -231,7 +245,9 @@ async def test_video_start_waits_for_first_observation_before_agent_opening(tmp_
     service, ports, _adapters, base, _ = setup(tmp_path)
     context = service.config.context("owner", base["agent_id"])
     context["profile"]["vision"] = {"target_id": "eyes", "options": {}}
-    service.config.save("owner", base["agent_id"], context["revision"], context["profile"])
+    service.config.save(
+        "owner", base["agent_id"], context["revision"], context["profile"]
+    )
     openings = []
 
     async def opening(owner, binding, profile, targets, visual_context=None):
@@ -243,17 +259,22 @@ async def test_video_start_waits_for_first_observation_before_agent_opening(tmp_
     assert first["camera"]["state"] == "pending"
     assert first["camera"]["enabled"] is True
     await asyncio.sleep(0)
-    assert openings == [], "the greeting waits while ringback covers first-frame preparation"
+    assert openings == [], (
+        "the greeting waits while ringback covers first-frame preparation"
+    )
 
     captured_at = datetime.now(timezone.utc).isoformat()
     image = base64.b64encode(bytes.fromhex("ffd8ffc00008080010001000ffd9")).decode()
-    await service.invoke("owner", {
-        **binding,
-        "operation": "observe",
-        "frame_sequence": 1,
-        "image_b64": image,
-        "captured_at": captured_at,
-    })
+    await service.invoke(
+        "owner",
+        {
+            **binding,
+            "operation": "observe",
+            "frame_sequence": 1,
+            "image_b64": image,
+            "captured_at": captured_at,
+        },
+    )
     await service.calls["call-1"].task
 
     assert len(openings) == 1
@@ -267,12 +288,12 @@ async def test_video_start_waits_for_first_observation_before_agent_opening(tmp_
 
 
 async def test_video_start_timeout_falls_back_to_voice_without_ending_call(tmp_path):
-    service, ports, _adapters, base, _ = setup(
-        tmp_path, startup_video_timeout=0.01
-    )
+    service, ports, _adapters, base, _ = setup(tmp_path, startup_video_timeout=0.01)
     context = service.config.context("owner", base["agent_id"])
     context["profile"]["vision"] = {"target_id": "eyes", "options": {}}
-    service.config.save("owner", base["agent_id"], context["revision"], context["profile"])
+    service.config.save(
+        "owner", base["agent_id"], context["revision"], context["profile"]
+    )
     openings = []
 
     async def opening(owner, binding, profile, targets, visual_context=None):
@@ -293,10 +314,10 @@ async def test_video_start_timeout_falls_back_to_voice_without_ending_call(tmp_p
     await service.close()
 
 
-async def test_video_start_keeps_camera_while_an_accepted_first_frame_is_processing(tmp_path):
-    service, ports, adapters, base, _ = setup(
-        tmp_path, startup_video_timeout=0.01
-    )
+async def test_video_start_keeps_camera_while_an_accepted_first_frame_is_processing(
+    tmp_path,
+):
+    service, ports, adapters, base, _ = setup(tmp_path, startup_video_timeout=0.01)
     context = service.config.context("owner", base["agent_id"])
     context["profile"]["vision"] = {"target_id": "eyes", "options": {}}
     service.config.save(
@@ -319,9 +340,7 @@ async def test_video_start_keeps_camera_while_an_accepted_first_frame_is_process
     try:
         binding, _, _ = await start(service, base, video_requested=True)
         captured_at = datetime.now(timezone.utc).isoformat()
-        image = base64.b64encode(
-            bytes.fromhex("ffd8ffc00008080010001000ffd9")
-        ).decode()
+        image = base64.b64encode(bytes.fromhex("ffd8ffc00008080010001000ffd9")).decode()
         await service.invoke(
             "owner",
             {
@@ -335,18 +354,14 @@ async def test_video_start_keeps_camera_while_an_accepted_first_frame_is_process
         await asyncio.wait_for(began.wait(), 1)
         await asyncio.sleep(0.03)
 
-        pending = await service.invoke(
-            "owner", {**binding, "operation": "snapshot"}
-        )
+        pending = await service.invoke("owner", {**binding, "operation": "snapshot"})
         assert pending["camera"]["enabled"] is True
         assert pending["camera"]["state"] == "pending"
         assert openings == []
 
         release.set()
         await service.calls["call-1"].task
-        final = await service.invoke(
-            "owner", {**binding, "operation": "snapshot"}
-        )
+        final = await service.invoke("owner", {**binding, "operation": "snapshot"})
         assert final["camera"]["state"] == "fresh"
         assert openings[0]["observation"] == "A book is visible."
     finally:
@@ -399,9 +414,7 @@ async def test_recent_accepted_frame_keeps_stale_observation_delayed(tmp_path):
         await asyncio.wait_for(began.wait(), 1)
         release.set()
         await call.vision_task
-        final = await service.invoke(
-            "owner", {**binding, "operation": "snapshot"}
-        )
+        final = await service.invoke("owner", {**binding, "operation": "snapshot"})
         assert final["camera"]["state"] == "fresh"
     finally:
         release.set()
@@ -441,9 +454,7 @@ async def test_camera_falls_back_when_frame_ingress_really_stops(tmp_path):
         await asyncio.wait_for(began.wait(), 1)
         clock[0] += service.calls["call-1"].video_policy["freshness_seconds"] + 1
 
-        result = await service.invoke(
-            "owner", {**binding, "operation": "snapshot"}
-        )
+        result = await service.invoke("owner", {**binding, "operation": "snapshot"})
 
         assert result["phase"] == "active"
         assert result["camera"]["enabled"] is False
@@ -527,8 +538,20 @@ async def test_new_voice_turn_is_admitted_without_cancelling_the_running_turn(tm
         return result
 
     adapters.transcribe = transcribe
-    first = {**binding, "operation": "turn", "turn_id": "turn-1", "sequence": 1, "audio_b64": wav()}
-    second = {**binding, "operation": "turn", "turn_id": "turn-2", "sequence": 2, "audio_b64": wav()}
+    first = {
+        **binding,
+        "operation": "turn",
+        "turn_id": "turn-1",
+        "sequence": 1,
+        "audio_b64": wav(),
+    }
+    second = {
+        **binding,
+        "operation": "turn",
+        "turn_id": "turn-2",
+        "sequence": 2,
+        "audio_b64": wav(),
+    }
     try:
         await service.invoke("owner", first)
         await first_started.wait()
@@ -551,10 +574,19 @@ async def test_new_voice_turn_is_admitted_without_cancelling_the_running_turn(tm
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("annotation", [
-    "*Loud sound*", " [noise] ", "*Music*", "**Loud sound**", "*Coughing* *Loud sound*",
-    "*Loud sound*.", "[noise], [music].", "*Loud sound.*",
-])
+@pytest.mark.parametrize(
+    "annotation",
+    [
+        "*Loud sound*",
+        " [noise] ",
+        "*Music*",
+        "**Loud sound**",
+        "*Coughing* *Loud sound*",
+        "*Loud sound*.",
+        "[noise], [music].",
+        "*Loud sound.*",
+    ],
+)
 async def test_non_speech_annotation_skips_agent_and_speech_then_accepts_next_turn(
     tmp_path, annotation
 ):
@@ -585,7 +617,8 @@ async def test_non_speech_annotation_skips_agent_and_speech_then_accepts_next_tu
             await service.invoke("owner", {**body, "turn_id": "different"})
         with pytest.raises(CallError, match="speech_not_ready"):
             await service.invoke(
-                "owner", {**binding, "operation": "speech", "turn_id": "noise-1", "segment": 0}
+                "owner",
+                {**binding, "operation": "speech", "turn_id": "noise-1", "segment": 0},
             )
 
         adapters.text = "停"
@@ -604,18 +637,31 @@ async def test_non_speech_annotation_skips_agent_and_speech_then_accepts_next_tu
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     "spoken_text, expected",
-    [("Loud sound", "Loud sound"), ("嗯", "嗯"), ("停", "停"),
-     ("*Loud sound* 我说24", "我说24"), ("[noise] please stop", "please stop"),
-     ("*please stop*", "*please stop*")],
+    [
+        ("Loud sound", "Loud sound"),
+        ("嗯", "嗯"),
+        ("停", "停"),
+        ("*Loud sound* 我说24", "我说24"),
+        ("[noise] please stop", "please stop"),
+        ("*please stop*", "*please stop*"),
+    ],
 )
-async def test_spoken_text_and_mixed_annotations_are_preserved(tmp_path, spoken_text, expected):
+async def test_spoken_text_and_mixed_annotations_are_preserved(
+    tmp_path, spoken_text, expected
+):
     service, ports, adapters, base, _ = setup(tmp_path)
     binding, _, _ = await start(service, base)
     adapters.text = spoken_text
     try:
         await service.invoke(
             "owner",
-            {**binding, "operation": "turn", "turn_id": "turn-1", "sequence": 1, "audio_b64": wav()},
+            {
+                **binding,
+                "operation": "turn",
+                "turn_id": "turn-1",
+                "sequence": 1,
+                "audio_b64": wav(),
+            },
         )
         await finish_task(service)
         await service.calls["call-1"].speech_task
@@ -636,7 +682,13 @@ async def test_noise_completion_after_scope_change_remains_a_failure(tmp_path):
     try:
         await service.invoke(
             "owner",
-            {**binding, "operation": "turn", "turn_id": "turn-1", "sequence": 1, "audio_b64": wav()},
+            {
+                **binding,
+                "operation": "turn",
+                "turn_id": "turn-1",
+                "sequence": 1,
+                "audio_b64": wav(),
+            },
         )
         await asyncio.sleep(0)
         ports.valid = False
@@ -650,22 +702,37 @@ async def test_noise_completion_after_scope_change_remains_a_failure(tmp_path):
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("text, segments, has_speech", [
-    ("", None, None),
-    ("   ", None, None),
-    ("Thank you for watching.", [{"no_speech_prob": .96, "avg_logprob": -2.0}], None),
-    ("A noise description", None, False),
-])
-async def test_cloud_no_speech_skips_agent_and_tts_without_failing_the_call(tmp_path, text, segments, has_speech):
+@pytest.mark.parametrize(
+    "text, segments, has_speech",
+    [
+        ("", None, None),
+        ("   ", None, None),
+        (
+            "Thank you for watching.",
+            [{"no_speech_prob": 0.96, "avg_logprob": -2.0}],
+            None,
+        ),
+        ("A noise description", None, False),
+    ],
+)
+async def test_cloud_no_speech_skips_agent_and_tts_without_failing_the_call(
+    tmp_path, text, segments, has_speech
+):
     service, ports, adapters, base, _ = setup(tmp_path)
     binding, _, _ = await start(service, base)
     adapters.text, adapters.stt_segments = text, segments
     adapters.has_speech = has_speech
     try:
-        await service.invoke("owner", {
-            **binding, "operation": "turn", "turn_id": "noise-1",
-            "sequence": 1, "audio_b64": wav(),
-        })
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "turn",
+                "turn_id": "noise-1",
+                "sequence": 1,
+                "audio_b64": wav(),
+            },
+        )
         await finish_task(service)
         final = await service.invoke("owner", {**binding, "operation": "snapshot"})
         assert final["phase"] == "active" and final["turn"]["phase"] == "ignored"
@@ -674,10 +741,16 @@ async def test_cloud_no_speech_skips_agent_and_tts_without_failing_the_call(tmp_
         assert not ports.accepted and adapters.tts == 0
         adapters.text, adapters.stt_segments = "嗯", None
         adapters.has_speech = True
-        await service.invoke("owner", {
-            **binding, "operation": "turn", "turn_id": "speech-2",
-            "sequence": 2, "audio_b64": wav(),
-        })
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "turn",
+                "turn_id": "speech-2",
+                "sequence": 2,
+                "audio_b64": wav(),
+            },
+        )
         await finish_task(service)
         await service.calls["call-1"].speech_task
         assert ports.accepted == [("speech-2", "嗯", "", None)]
@@ -686,23 +759,37 @@ async def test_cloud_no_speech_skips_agent_and_tts_without_failing_the_call(tmp_
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("segments", [
-    None,
-    [],
-    [{"no_speech_prob": .99}],
-    [{"no_speech_prob": .99, "avg_logprob": -.1}],
-    [{"no_speech_prob": .99, "avg_logprob": -2}, {"no_speech_prob": .1, "avg_logprob": -.1}],
-    [{"no_speech_prob": float("nan"), "avg_logprob": -2}],
-])
-async def test_uncertain_or_mixed_cloud_evidence_retains_a_short_spoken_word(tmp_path, segments):
+@pytest.mark.parametrize(
+    "segments",
+    [
+        None,
+        [],
+        [{"no_speech_prob": 0.99}],
+        [{"no_speech_prob": 0.99, "avg_logprob": -0.1}],
+        [
+            {"no_speech_prob": 0.99, "avg_logprob": -2},
+            {"no_speech_prob": 0.1, "avg_logprob": -0.1},
+        ],
+        [{"no_speech_prob": float("nan"), "avg_logprob": -2}],
+    ],
+)
+async def test_uncertain_or_mixed_cloud_evidence_retains_a_short_spoken_word(
+    tmp_path, segments
+):
     service, ports, adapters, base, _ = setup(tmp_path)
     binding, _, _ = await start(service, base)
     adapters.text, adapters.stt_segments = "停", segments
     try:
-        await service.invoke("owner", {
-            **binding, "operation": "turn", "turn_id": "speech-1",
-            "sequence": 1, "audio_b64": wav(),
-        })
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "turn",
+                "turn_id": "speech-1",
+                "sequence": 1,
+                "audio_b64": wav(),
+            },
+        )
         await finish_task(service)
         await service.calls["call-1"].speech_task
         assert ports.accepted == [("speech-1", "停", "", None)]
@@ -844,8 +931,16 @@ async def test_answer_starts_speech_before_client_poll_and_reuses_it(tmp_path):
     adapters.synthesize = synthesize
     binding, _, _ = await start(service, base)
     try:
-        await service.invoke("owner", {**binding, "operation": "turn",
-            "turn_id": "turn-1", "sequence": 1, "audio_b64": wav()})
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "turn",
+                "turn_id": "turn-1",
+                "sequence": 1,
+                "audio_b64": wav(),
+            },
+        )
         await finish_task(service)
         call = service.calls["call-1"]
         assert call.speech_task is not None
@@ -864,7 +959,9 @@ async def test_answer_starts_speech_before_client_poll_and_reuses_it(tmp_path):
         await service.close()
 
 
-async def test_requested_segment_warms_only_one_queued_segment_without_next_poll(tmp_path):
+async def test_requested_segment_warms_only_one_queued_segment_without_next_poll(
+    tmp_path,
+):
     service, _ports, adapters, base, _ = setup(tmp_path)
     first_started, release_first = asyncio.Event(), asyncio.Event()
     synthesized = []
@@ -880,7 +977,9 @@ async def test_requested_segment_warms_only_one_queued_segment_without_next_poll
     binding, _, _ = await start(service, base)
     call = service.calls["call-1"]
     call.turn = {
-        "turn_id": "turn-1", "sequence": 1, "phase": "thinking",
+        "turn_id": "turn-1",
+        "sequence": 1,
+        "phase": "thinking",
         "speech_segments": [],
     }
     try:
@@ -889,7 +988,10 @@ async def test_requested_segment_warms_only_one_queued_segment_without_next_poll
         await asyncio.wait_for(first_started.wait(), 1)
 
         speech0 = {
-            **binding, "operation": "speech", "turn_id": "turn-1", "segment": 0,
+            **binding,
+            "operation": "speech",
+            "turn_id": "turn-1",
+            "segment": 0,
         }
         assert not (await service.invoke("owner", speech0))["ready"]
         assert call.speech_requested_index == 0
@@ -911,7 +1013,9 @@ async def test_requested_segment_warms_only_one_queued_segment_without_next_poll
         assert (await service.invoke("owner", speech1))["ready"]
         await call.speech_task
         assert synthesized == [
-            "First sentence.", "Second sentence.", "Third sentence.",
+            "First sentence.",
+            "Second sentence.",
+            "Third sentence.",
         ]
         assert set(call.speech_cache) == {1, 2}
     finally:
@@ -943,8 +1047,13 @@ async def _automatic_speech_after_change(tmp_path, change):
     adapters.synthesize = synthesize
     binding, _, _ = await start(service, base)
     try:
-        turn = {**binding, "operation": "turn", "turn_id": "turn-1",
-                "sequence": 1, "audio_b64": wav()}
+        turn = {
+            **binding,
+            "operation": "turn",
+            "turn_id": "turn-1",
+            "sequence": 1,
+            "audio_b64": wav(),
+        }
         await service.invoke("owner", turn)
         await finish_task(service)
         call = service.calls["call-1"]
@@ -982,8 +1091,16 @@ async def test_automatic_speech_checks_privacy_without_failing_text_answer(tmp_p
 
     ports.result = result
     try:
-        await service.invoke("owner", {**binding, "operation": "turn",
-            "turn_id": "turn-1", "sequence": 1, "audio_b64": wav()})
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "turn",
+                "turn_id": "turn-1",
+                "sequence": 1,
+                "audio_b64": wav(),
+            },
+        )
         await finish_task(service)
         call = service.calls["call-1"]
         assert call.speech_task is not None
@@ -995,7 +1112,9 @@ async def test_automatic_speech_checks_privacy_without_failing_text_answer(tmp_p
         await service.close()
 
 
-async def test_expired_call_does_not_start_automatic_speech_after_agent_finishes(tmp_path):
+async def test_expired_call_does_not_start_automatic_speech_after_agent_finishes(
+    tmp_path,
+):
     service, ports, adapters, base, clock = setup(tmp_path)
     binding, _, _ = await start(service, base)
     original_result = ports.result
@@ -1007,8 +1126,16 @@ async def test_expired_call_does_not_start_automatic_speech_after_agent_finishes
 
     ports.result = result
     try:
-        await service.invoke("owner", {**binding, "operation": "turn",
-            "turn_id": "turn-1", "sequence": 1, "audio_b64": wav()})
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "turn",
+                "turn_id": "turn-1",
+                "sequence": 1,
+                "audio_b64": wav(),
+            },
+        )
         call = service.calls["call-1"]
         await asyncio.gather(call.task, return_exceptions=True)
         if call.speech_task:
@@ -1036,8 +1163,16 @@ async def test_privacy_revocation_discards_inflight_and_cached_speech(tmp_path):
         adapters.synthesize = synthesize
         binding, _, _ = await start(service, base, True)
         try:
-            await service.invoke("owner", {**binding, "operation": "turn",
-                "turn_id": "turn-1", "sequence": 1, "audio_b64": wav()})
+            await service.invoke(
+                "owner",
+                {
+                    **binding,
+                    "operation": "turn",
+                    "turn_id": "turn-1",
+                    "sequence": 1,
+                    "audio_b64": wav(),
+                },
+            )
             await finish_task(service)
             call = service.calls["call-1"]
             await asyncio.wait_for(started.wait(), 1)
@@ -1048,7 +1183,12 @@ async def test_privacy_revocation_discards_inflight_and_cached_speech(tmp_path):
             if moment == "cached":
                 assert call.speech_cache
                 ports.level = 2
-            speech = {**binding, "operation": "speech", "turn_id": "turn-1", "segment": 0}
+            speech = {
+                **binding,
+                "operation": "speech",
+                "turn_id": "turn-1",
+                "segment": 0,
+            }
             with pytest.raises(CallError, match="privacy"):
                 await service.invoke("owner", speech)
             assert not call.speech_cache and call.turn["phase"] == "complete"
@@ -1083,8 +1223,16 @@ async def test_privacy_revocation_in_later_segment_invalidates_cached_audio(tmp_
     adapters.synthesize = synthesize
     binding, _, _ = await start(service, base, True)
     try:
-        await service.invoke("owner", {**binding, "operation": "turn",
-            "turn_id": "turn-1", "sequence": 1, "audio_b64": wav()})
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "turn",
+                "turn_id": "turn-1",
+                "sequence": 1,
+                "audio_b64": wav(),
+            },
+        )
         await finish_task(service)
         call = service.calls["call-1"]
         await call.speech_task
@@ -1123,8 +1271,16 @@ async def test_rejected_speech_retry_preserves_recovery_after_privacy_returns(tm
 
     ports.result = result
     try:
-        await service.invoke("owner", {**binding, "operation": "turn",
-            "turn_id": "turn-1", "sequence": 1, "audio_b64": wav()})
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "turn",
+                "turn_id": "turn-1",
+                "sequence": 1,
+                "audio_b64": wav(),
+            },
+        )
         await finish_task(service)
         call = service.calls["call-1"]
         await call.speech_task

@@ -1,4 +1,5 @@
 """PCM projection of sealed call facts; never identity or authorization."""
+
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from .contract import identifier, CallError
@@ -17,7 +18,9 @@ class CallMessageContextSection(tuple):
 def is_call_request(item):
     """Derive presentation from PAO's frozen snapshot, never caller hints."""
     from orchestrator.message_context import (
-        MESSAGE_CONTEXT_METADATA_KEY, MESSAGE_CONTEXT_TYPE, MESSAGE_CONTEXT_VERSION,
+        MESSAGE_CONTEXT_METADATA_KEY,
+        MESSAGE_CONTEXT_TYPE,
+        MESSAGE_CONTEXT_VERSION,
     )
 
     metadata = getattr(item, "request_metadata", None)
@@ -43,7 +46,10 @@ def project_call_context(value):
     if not isinstance(value, Mapping) or value.get("version") != 2:
         return None
     try:
-        call_id, turn_id = identifier(value.get("call_id")), identifier(value.get("turn_id"))
+        call_id, turn_id = (
+            identifier(value.get("call_id")),
+            identifier(value.get("turn_id")),
+        )
         mode = value.get("mode")
         if mode not in ("voice", "video"):
             return None
@@ -61,15 +67,31 @@ def project_call_context(value):
             if stamp.tzinfo is None:
                 raise ValueError()
             age = (datetime.now(timezone.utc) - stamp).total_seconds()
-        usable = (state in ("fresh", "delayed") and age is not None
-                  and -3 <= age <= min(30, int(value.get("freshness_seconds", 20))))
-        return {"type": "hashi.call-context", "version": 1,
-                "call_id": call_id, "turn_id": turn_id, "mode": mode,
-                "interaction": "conversation_with_current_user", "valid_at": value.get("observed_at"),
-                "scope": "current_input_only", "camera": {"state": state if usable or state not in ("fresh", "delayed") else "unavailable",
-                  "source": "user_shared_camera", "captured_at": captured_at,
-                  "observation": observation if usable else None, "observation_authority": "untrusted_data",
-                  "freshness_seconds": value.get("freshness_seconds", 20)}}
+        usable = (
+            state in ("fresh", "delayed")
+            and age is not None
+            and -3 <= age <= min(30, int(value.get("freshness_seconds", 20)))
+        )
+        return {
+            "type": "hashi.call-context",
+            "version": 1,
+            "call_id": call_id,
+            "turn_id": turn_id,
+            "mode": mode,
+            "interaction": "conversation_with_current_user",
+            "valid_at": value.get("observed_at"),
+            "scope": "current_input_only",
+            "camera": {
+                "state": state
+                if usable or state not in ("fresh", "delayed")
+                else "unavailable",
+                "source": "user_shared_camera",
+                "captured_at": captured_at,
+                "observation": observation if usable else None,
+                "observation_authority": "untrusted_data",
+                "freshness_seconds": value.get("freshness_seconds", 20),
+            },
+        }
     except (CallError, ValueError, TypeError, OverflowError):
         return None
 

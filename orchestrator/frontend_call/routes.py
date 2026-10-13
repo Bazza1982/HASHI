@@ -73,14 +73,26 @@ def register_call_api(api):
             return web.json_response(result, headers=headers)
         except asyncio.CancelledError:
             if stage != "invoke":
-                emit("http_operation_cancelled", **body_facts(body), generation=service.generation,
-                     stage=stage, reason="task_cancelled", duration_ms=elapsed_ms(time.monotonic, started))
+                emit(
+                    "http_operation_cancelled",
+                    **body_facts(body),
+                    generation=service.generation,
+                    stage=stage,
+                    reason="task_cancelled",
+                    duration_ms=elapsed_ms(time.monotonic, started),
+                )
             raise
         except CallError as exc:
             if stage != "invoke":
-                emit("http_operation_failed", **body_facts(body), generation=service.generation,
-                     stage=stage, http_status=exc.status, duration_ms=elapsed_ms(time.monotonic, started),
-                     **error_facts(exc, "call_internal_error"))
+                emit(
+                    "http_operation_failed",
+                    **body_facts(body),
+                    generation=service.generation,
+                    stage=stage,
+                    http_status=exc.status,
+                    duration_ms=elapsed_ms(time.monotonic, started),
+                    **error_facts(exc, "call_internal_error"),
+                )
             return web.json_response(
                 {"ok": False, "error_code": exc.code},
                 status=exc.status,
@@ -88,9 +100,15 @@ def register_call_api(api):
             )
         except Exception as exc:
             if stage != "invoke":
-                emit("http_operation_failed", **body_facts(body), generation=service.generation,
-                     stage=stage, http_status=500, duration_ms=elapsed_ms(time.monotonic, started),
-                     **error_facts(exc, "call_internal_error"))
+                emit(
+                    "http_operation_failed",
+                    **body_facts(body),
+                    generation=service.generation,
+                    stage=stage,
+                    http_status=500,
+                    duration_ms=elapsed_ms(time.monotonic, started),
+                    **error_facts(exc, "call_internal_error"),
+                )
             return web.json_response(
                 {"ok": False, "error_code": "call_internal_error"},
                 status=500,

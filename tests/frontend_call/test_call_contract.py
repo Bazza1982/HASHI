@@ -3,7 +3,11 @@ import io
 import wave
 import pytest
 from orchestrator.frontend_call.contract import (
-    MAX_SPEECH_CHARS, MAX_SPEECH_SEGMENTS, CallError, decode_wav, speech_segments
+    MAX_SPEECH_CHARS,
+    MAX_SPEECH_SEGMENTS,
+    CallError,
+    decode_wav,
+    speech_segments,
 )
 
 

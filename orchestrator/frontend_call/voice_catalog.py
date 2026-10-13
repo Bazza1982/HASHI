@@ -43,7 +43,11 @@ GEMINI_VOICES = {
 
 
 def voice_label(target, voice):
-    metadata = GEMINI_VOICES.get(voice) if target.get("model") in OPENROUTER_GEMINI_TTS_MODELS else None
+    metadata = (
+        GEMINI_VOICES.get(voice)
+        if target.get("model") in OPENROUTER_GEMINI_TTS_MODELS
+        else None
+    )
     style = target.get("voice_styles", {}).get(voice, metadata[1] if metadata else "")
     if not metadata:
         return voice + (" · " + style if style else "")

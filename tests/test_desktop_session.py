@@ -22,12 +22,13 @@ from tools.windows_helper.desktop_capture import fit_size, jpeg_bytes
 class Native:
     def __init__(self):
         self.calls = []; self.captures = 0; self.resets = 0; self.rev = 'display-one'; self.locked = False
+        self.monitor_one_x = -1920
     def available(self):
         if self.locked: raise DesktopError('desktop_locked', 423)
     def displays(self):
         self.available()
         return [
-            {'id': 'monitor-1', 'x': -1920, 'y': 0, 'width': 1920, 'height': 1080, 'primary': True},
+            {'id': 'monitor-1', 'x': self.monitor_one_x, 'y': 0, 'width': 1920, 'height': 1080, 'primary': True},
             {'id': 'monitor-2', 'x': 0, 'y': 0, 'width': 1920, 'height': 1080, 'primary': False}
         ], self.rev
     def cursor(self): return {'visible': True, 'x': -1000, 'y': 200}
@@ -210,7 +211,7 @@ def test_input_retains_typed_native_failure_and_releases_its_control(desktop):
 def test_wrong_actor_and_display_change_cannot_inject(desktop):
     c,n,t=desktop;c.frame('', 'session-a');control(c)
     with pytest.raises(DesktopError,match='expired'): c.input(event(c),'other-owner','session-a','lease-a')
-    n.rev='new-display-layout'
+    n.monitor_one_x = -1919
     with pytest.raises(DesktopError,match='display_changed'): c.input(event(c),'owner-a','session-a','lease-a')
     assert not n.calls and c.owner is None
 

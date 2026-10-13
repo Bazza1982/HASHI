@@ -18,15 +18,9 @@ MAX_OUTPUT = 4 * 1024 * 1024
 MAX_SPEECH_SEGMENTS = 32
 MAX_SPEECH_CHARS = 240
 MIN_SPEECH_DURATION_UNITS = 24
-_SENTENCE_END = re.compile(
-    r'[。！？!?]+[”"\x27’』」)]*|\.(?:[”"\x27’)]*)?(?=\s|$)|\n+'
-)
-_LATIN_SPEECH_WORD = re.compile(
-    r"[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)*"
-)
-_COMPACT_SPEECH_CHAR = re.compile(
-    r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]"
-)
+_SENTENCE_END = re.compile(r'[。！？!?]+[”"\x27’』」)]*|\.(?:[”"\x27’)]*)?(?=\s|$)|\n+')
+_LATIN_SPEECH_WORD = re.compile(r"[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)*")
+_COMPACT_SPEECH_CHAR = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]")
 _SPEECH_PAUSE = re.compile(r"[。！？!?，,；;：:]|\.(?=\s|$)")
 _STAGE_BRACKET_PREFIX = re.compile(
     r"^\s*[（(\[【]\s*(?P<cue>[^）)\]】\r\n]{1,48})\s*[）)\]】]"
@@ -53,10 +47,18 @@ _STAGE_CUE = re.compile(
     re.IGNORECASE,
 )
 _FILLERS = {
-    "en": ("Hmm…", "Let me think for a moment…", "I’m still working on that. Please give me a moment."),
+    "en": (
+        "Hmm…",
+        "Let me think for a moment…",
+        "I’m still working on that. Please give me a moment.",
+    ),
     "zh-CN": ("嗯……", "让我想一想……", "我还在处理，请稍等一下。"),
     "zh-TW": ("嗯……", "讓我想一想……", "我還在處理，請稍等一下。"),
-    "ja": ("うーん……", "少し考えさせてください……", "まだ確認しています。もう少しお待ちください。"),
+    "ja": (
+        "うーん……",
+        "少し考えさせてください……",
+        "まだ確認しています。もう少しお待ちください。",
+    ),
 }
 _LOCALE_ALIASES = {"zh": "zh-CN", "zh-Hans": "zh-CN", "zh-Hant": "zh-TW"}
 LEASE_SECONDS = 45
@@ -67,7 +69,14 @@ OPERATIONS = {
     "route": set(),
     "context": set(),
     "save_profile": {"revision", "profile"},
-    "start": {"generation", "revision", "call_id", "allow_cloud", "locale", "video_requested"},
+    "start": {
+        "generation",
+        "revision",
+        "call_id",
+        "allow_cloud",
+        "locale",
+        "video_requested",
+    },
     "turn": {
         "generation",
         "call_id",
@@ -216,10 +225,12 @@ def _strip_leading_stage_directions(text: str) -> str:
     """Remove recognized performance cues without treating all parentheses as cues."""
     value = text
     while value:
-        match = _STAGE_BRACKET_PREFIX.match(value) or _STAGE_EMPHASIS_PREFIX.match(value)
+        match = _STAGE_BRACKET_PREFIX.match(value) or _STAGE_EMPHASIS_PREFIX.match(
+            value
+        )
         if match is None or _STAGE_CUE.search(match.group("cue")) is None:
             break
-        value = value[match.end():]
+        value = value[match.end() :]
     return value.lstrip()
 
 
@@ -232,9 +243,7 @@ def clean_speech_text(text: str) -> str:
         _strip_leading_stage_directions(line) for line in text.splitlines()
     )
     text = re.sub(r"[*#`_]", "", text)
-    return "\n".join(
-        line for line in text.splitlines() if line.count("|") < 2
-    ).strip()
+    return "\n".join(line for line in text.splitlines() if line.count("|") < 2).strip()
 
 
 _clean_speech_text = clean_speech_text

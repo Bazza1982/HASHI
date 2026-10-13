@@ -1,9 +1,13 @@
 """First audio should not wait for synthesis of the whole final answer."""
+
 from orchestrator.frontend_call.contract import MAX_SPEECH_CHARS, speech_segments
 
 
 def test_first_audio_is_a_short_natural_phrase_without_losing_the_answer():
-    text = "我们可以继续聊这个问题，先从您刚才提到的变化说起。" + "接下来再一起确认时间和具体表现。" * 18
+    text = (
+        "我们可以继续聊这个问题，先从您刚才提到的变化说起。"
+        + "接下来再一起确认时间和具体表现。" * 18
+    )
     parts, truncated = speech_segments(text)
     assert parts[0] == "我们可以继续聊这个问题，先从您刚才提到的变化说起。"
     assert "".join(parts) == text

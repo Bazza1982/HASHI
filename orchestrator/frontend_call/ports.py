@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import inspect
-import json
 from pathlib import Path
 from orchestrator.session_store import SESSION_KIND_CONVERSATION
 from .contract import CallError
@@ -124,11 +123,24 @@ class HashiPorts:
         # Speech stays verbatim; sealed media facts enter PCM through its typed
         # current-message projection, never through another user instruction.
         execution_text = text
-        from orchestrator.message_context import CONNECTOR_EVIDENCE_METADATA_KEY, seal_connector_evidence
-        media = {"version": 2, "call_id": binding["call_id"], "turn_id": turn_id,
-                 **binding.get("call_context", {}), "captured_at": captured_at, "observation": observation}
-        evidence = seal_connector_evidence(Path(self.api.config_path).parent,
-                                           claims={"call_media": media}, prompt=execution_text)
+        from orchestrator.message_context import (
+            CONNECTOR_EVIDENCE_METADATA_KEY,
+            seal_connector_evidence,
+        )
+
+        media = {
+            "version": 2,
+            "call_id": binding["call_id"],
+            "turn_id": turn_id,
+            **binding.get("call_context", {}),
+            "captured_at": captured_at,
+            "observation": observation,
+        }
+        evidence = seal_connector_evidence(
+            Path(self.api.config_path).parent,
+            claims={"call_media": media},
+            prompt=execution_text,
+        )
         if evidence is None:
             raise CallError("call_context_unqualified", 503)
         content = [{"type": "text", "text": execution_text}]
@@ -224,25 +236,25 @@ class HashiPorts:
         for event in activity_events:
             owner_class = str(event.get("delivery_class") or "")
             channel = str(event.get("presentation_channel") or "")
-            if (
-                owner_class == "answer_preview"
-                and channel == "answer"
-            ) or (
-                owner_class == "user_commentary"
-                and channel == "commentary"
+            if (owner_class == "answer_preview" and channel == "answer") or (
+                owner_class == "user_commentary" and channel == "commentary"
             ):
-                events.append({
-                    key: event.get(key)
-                    for key in (
-                        "sequence", "event_id", "delivery_class",
-                        "presentation_channel", "summary", "detail",
-                    )
-                })
+                events.append(
+                    {
+                        key: event.get(key)
+                        for key in (
+                            "sequence",
+                            "event_id",
+                            "delivery_class",
+                            "presentation_channel",
+                            "summary",
+                            "detail",
+                        )
+                    }
+                )
         return activity_sequence, events
 
-    def _project_result(
-        self, owner, binding, run, activity, *, after_sequence=0
-    ):
+    def _project_result(self, owner, binding, run, activity, *, after_sequence=0):
         activity_sequence, events = self._project_activity(activity, after_sequence)
         terminal = run["state"] in {
             "completed",
@@ -270,9 +282,7 @@ class HashiPorts:
     async def _worker_result(
         self, owner, binding, run, poll_activity, request_id, after_sequence
     ):
-        activity = poll_activity(
-            request_id, after_sequence=after_sequence, limit=256
-        )
+        activity = poll_activity(request_id, after_sequence=after_sequence, limit=256)
         if inspect.isawaitable(activity):
             activity = await activity
         return self._project_result(

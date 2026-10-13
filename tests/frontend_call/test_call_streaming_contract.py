@@ -7,9 +7,7 @@ from orchestrator.frontend_call.contract import (
 
 def test_streaming_only_releases_complete_sentences_in_order():
     first = "第一句已经完整，而且长度足够自然，可以立即开始播报。"
-    parts, remainder = complete_speech_segments(
-        first + "第二句还没有"
-    )
+    parts, remainder = complete_speech_segments(first + "第二句还没有")
     assert parts == [first]
     assert remainder == "第二句还没有"
 
@@ -56,7 +54,7 @@ def test_streaming_chunks_remain_a_prefix_of_the_final_chunks():
     assert not truncated
     for preview in (first, first + short, first + short + third):
         stable, _remainder = complete_speech_segments(preview)
-        assert final[:len(stable)] == stable
+        assert final[: len(stable)] == stable
 
 
 def test_final_answer_groups_short_sentences_into_a_natural_tts_item():
@@ -70,7 +68,11 @@ def test_final_answer_groups_short_sentences_into_a_natural_tts_item():
 
 
 def test_fillers_are_localized_and_do_not_claim_an_answer():
-    assert filler_phrases("zh-CN") == ("嗯……", "让我想一想……", "我还在处理，请稍等一下。")
+    assert filler_phrases("zh-CN") == (
+        "嗯……",
+        "让我想一想……",
+        "我还在处理，请稍等一下。",
+    )
     assert filler_phrases("unknown") == filler_phrases("en")
 
 

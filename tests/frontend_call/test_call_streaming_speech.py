@@ -23,12 +23,14 @@ async def test_complete_answer_sentence_starts_tts_before_run_finishes(tmp_path)
                 "state": "running",
                 "text": "",
                 "activity_sequence": 2,
-                "events": [{
-                    "sequence": 2,
-                    "delivery_class": "answer_preview",
-                    "presentation_channel": "answer",
-                    "summary": first + "第二句还在生成",
-                }],
+                "events": [
+                    {
+                        "sequence": 2,
+                        "delivery_class": "answer_preview",
+                        "presentation_channel": "answer",
+                        "summary": first + "第二句还在生成",
+                    }
+                ],
             }
         return {
             "terminal": True,
@@ -40,10 +42,16 @@ async def test_complete_answer_sentence_starts_tts_before_run_finishes(tmp_path)
 
     ports.result = result
     try:
-        await service.invoke("owner", {
-            **binding, "operation": "turn", "turn_id": "turn-1",
-            "sequence": 1, "audio_b64": wav(),
-        })
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "turn",
+                "turn_id": "turn-1",
+                "sequence": 1,
+                "audio_b64": wav(),
+            },
+        )
         for _ in range(100):
             call = service.calls["call-1"]
             if adapters.tts and call.turn.get("speech_segments"):
@@ -83,12 +91,14 @@ async def test_short_preview_waits_and_then_becomes_one_natural_chunk(tmp_path):
                 "state": "running",
                 "text": "",
                 "activity_sequence": 2,
-                "events": [{
-                    "sequence": 2,
-                    "delivery_class": "answer_preview",
-                    "presentation_channel": "answer",
-                    "summary": preview,
-                }],
+                "events": [
+                    {
+                        "sequence": 2,
+                        "delivery_class": "answer_preview",
+                        "presentation_channel": "answer",
+                        "summary": preview,
+                    }
+                ],
             }
         if not released.is_set():
             return {
@@ -108,10 +118,16 @@ async def test_short_preview_waits_and_then_becomes_one_natural_chunk(tmp_path):
 
     ports.result = result
     try:
-        await service.invoke("owner", {
-            **binding, "operation": "turn", "turn_id": "turn-1",
-            "sequence": 1, "audio_b64": wav(),
-        })
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "turn",
+                "turn_id": "turn-1",
+                "sequence": 1,
+                "audio_b64": wav(),
+            },
+        )
         for _ in range(100):
             call = service.calls["call-1"]
             if call.turn.get("_answer_preview"):
@@ -131,7 +147,9 @@ async def test_short_preview_waits_and_then_becomes_one_natural_chunk(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_preview_deltas_keep_word_boundaries_and_repeated_final_sentences(tmp_path):
+async def test_preview_deltas_keep_word_boundaries_and_repeated_final_sentences(
+    tmp_path,
+):
     service, ports, _adapters, base, _clock = setup(tmp_path)
     binding, _, _ = await start(service, base)
     calls = 0
@@ -141,25 +159,33 @@ async def test_preview_deltas_keep_word_boundaries_and_repeated_final_sentences(
         calls += 1
         if calls == 1:
             return {
-                "terminal": False, "state": "running", "text": "",
+                "terminal": False,
+                "state": "running",
+                "text": "",
                 "activity_sequence": 2,
-                "events": [{
-                    "sequence": 2,
-                    "delivery_class": "answer_preview",
-                    "presentation_channel": "answer",
-                    "summary": "First",
-                }],
+                "events": [
+                    {
+                        "sequence": 2,
+                        "delivery_class": "answer_preview",
+                        "presentation_channel": "answer",
+                        "summary": "First",
+                    }
+                ],
             }
         if calls == 2:
             return {
-                "terminal": False, "state": "running", "text": "",
+                "terminal": False,
+                "state": "running",
+                "text": "",
                 "activity_sequence": 3,
-                "events": [{
-                    "sequence": 3,
-                    "delivery_class": "answer_preview",
-                    "presentation_channel": "answer",
-                    "summary": " sentence. Again.",
-                }],
+                "events": [
+                    {
+                        "sequence": 3,
+                        "delivery_class": "answer_preview",
+                        "presentation_channel": "answer",
+                        "summary": " sentence. Again.",
+                    }
+                ],
             }
         return {
             "terminal": True,
@@ -171,10 +197,16 @@ async def test_preview_deltas_keep_word_boundaries_and_repeated_final_sentences(
 
     ports.result = result
     try:
-        await service.invoke("owner", {
-            **binding, "operation": "turn", "turn_id": "turn-1",
-            "sequence": 1, "audio_b64": wav(),
-        })
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "turn",
+                "turn_id": "turn-1",
+                "sequence": 1,
+                "audio_b64": wav(),
+            },
+        )
         await finish_task(service)
         call = service.calls["call-1"]
         assert call.turn["speech_segments"] == ["First sentence. Again. Again."]
@@ -237,7 +269,10 @@ async def test_public_commentary_starts_tts_before_run_finishes(tmp_path):
         assert adapters.tts == 1
         released.set()
         await finish_task(service)
-        assert call.turn["speech_segments"] == ["我正在核对记录，请稍等。", "最终答案。"]
+        assert call.turn["speech_segments"] == [
+            "我正在核对记录，请稍等。",
+            "最终答案。",
+        ]
     finally:
         released.set()
         await service.close()
@@ -255,30 +290,48 @@ async def test_public_commentary_is_spoken_but_reasoning_is_never_queued(tmp_pat
             "text": "最终答案。",
             "activity_sequence": 4,
             "events": [
-                {"sequence": 2, "delivery_class": "reasoning",
-                 "presentation_channel": "thinking", "summary": "内部推理不能播报。"},
-                {"sequence": 3, "delivery_class": "user_commentary",
-                 "presentation_channel": "commentary", "summary": "（小声）我正在核对记录，请稍等。"},
+                {
+                    "sequence": 2,
+                    "delivery_class": "reasoning",
+                    "presentation_channel": "thinking",
+                    "summary": "内部推理不能播报。",
+                },
+                {
+                    "sequence": 3,
+                    "delivery_class": "user_commentary",
+                    "presentation_channel": "commentary",
+                    "summary": "（小声）我正在核对记录，请稍等。",
+                },
             ],
         }
 
     ports.result = result
     try:
-        await service.invoke("owner", {
-            **binding, "operation": "turn", "turn_id": "turn-1",
-            "sequence": 1, "audio_b64": wav(),
-        })
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "turn",
+                "turn_id": "turn-1",
+                "sequence": 1,
+                "audio_b64": wav(),
+            },
+        )
         await finish_task(service)
         queued = service.calls["call-1"].turn["speech_segments"]
         assert queued == ["我正在核对记录，请稍等。", "最终答案。"]
         assert all("内部推理" not in text for text in queued)
-        assert any(row.get("kind") == "commentary" for row in service.calls["call-1"].rows)
+        assert any(
+            row.get("kind") == "commentary" for row in service.calls["call-1"].rows
+        )
     finally:
         await service.close()
 
 
 @pytest.mark.asyncio
-async def test_call_projection_removes_stage_directions_from_captions_and_speech(tmp_path):
+async def test_call_projection_removes_stage_directions_from_captions_and_speech(
+    tmp_path,
+):
     service, ports, _adapters, base, _clock = setup(tmp_path)
     binding, _, _ = await start(service, base)
     source = {
@@ -301,10 +354,16 @@ async def test_call_projection_removes_stage_directions_from_captions_and_speech
 
     ports.result = result
     try:
-        await service.invoke("owner", {
-            **binding, "operation": "turn", "turn_id": "turn-1",
-            "sequence": 1, "audio_b64": wav(),
-        })
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "turn",
+                "turn_id": "turn-1",
+                "sequence": 1,
+                "audio_b64": wav(),
+            },
+        )
         await finish_task(service)
         call = service.calls["call-1"]
         assert source["text"].startswith("（小声）")
@@ -313,8 +372,7 @@ async def test_call_projection_removes_stage_directions_from_captions_and_speech
             "李总，电话通了。预算（含 GST）不变。",
         ]
         assistant_rows = [
-            row["text"] for row in call.rows
-            if row.get("speaker") == "assistant"
+            row["text"] for row in call.rows if row.get("speaker") == "assistant"
         ]
         assert assistant_rows[-1] == "李总，电话通了。预算（含 GST）不变。"
         assert all("小声" not in text for text in assistant_rows)

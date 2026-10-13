@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 
 import pytest
 
@@ -55,6 +56,11 @@ def _paths(tmp_path) -> BridgePaths:
     )
 
 
+@pytest.fixture
+def installed_cli_backends(monkeypatch):
+    monkeypatch.setattr(shutil, "which", lambda command: f"/usr/bin/{command}")
+
+
 def test_agent_name_validation_rejects_paths():
     assert validate_agent_name("researcher-1") == "researcher-1"
     for value in ("../escape", "agent/name", "agent name", "-agent", ""):
@@ -62,7 +68,9 @@ def test_agent_name_validation_rejects_paths():
             validate_agent_name(value)
 
 
-def test_service_creates_inactive_agent_through_authoritative_config_writer(tmp_path):
+def test_service_creates_inactive_agent_through_authoritative_config_writer(
+    tmp_path, installed_cli_backends
+):
     paths = _paths(tmp_path)
     result = AgentCreationService(paths, global_config={}).create(
         AgentCreationSpec(
@@ -140,7 +148,7 @@ def test_non_selectable_backend_is_rejected():
         )
 
 
-def test_duplicate_and_orphan_workspace_are_preserved(tmp_path):
+def test_duplicate_and_orphan_workspace_are_preserved(tmp_path, installed_cli_backends):
     paths = _paths(tmp_path)
     service = AgentCreationService(paths, global_config={})
     service.create(AgentCreationSpec(name="one", backend="codex-cli"))
@@ -156,7 +164,9 @@ def test_duplicate_and_orphan_workspace_are_preserved(tmp_path):
     assert keep.read_text(encoding="utf-8") == "preserve"
 
 
-def test_config_conflict_removes_only_new_scaffold(tmp_path, monkeypatch):
+def test_config_conflict_removes_only_new_scaffold(
+    tmp_path, monkeypatch, installed_cli_backends
+):
     paths = _paths(tmp_path)
     service = AgentCreationService(paths, global_config={})
 

@@ -44,7 +44,9 @@ def resolve_call_spoken_context(api, owner: str, binding: dict, model: str) -> d
                 BridgeMemoryStore(workspace),
                 canonical_agent_md(workspace),
                 sys_prompt_manager=SysPromptManager(workspace),
-                global_sys_prompt_manager=SysPromptManager.for_instance(api.global_config),
+                global_sys_prompt_manager=SysPromptManager.for_instance(
+                    api.global_config
+                ),
             )
 
         generation = int(binding["context_generation"])
@@ -101,9 +103,7 @@ def resolve_call_spoken_context(api, owner: str, binding: dict, model: str) -> d
             ),
             pcm_payload=pcm_payload,
         )
-        recent, context_audit = build_live_voice_input(
-            pcm_payload, recent_history
-        )
+        recent, context_audit = build_live_voice_input(pcm_payload, recent_history)
         return {
             "instructions": instructions,
             "recent": recent[-4:],

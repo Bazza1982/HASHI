@@ -79,9 +79,10 @@ def validate_target(target):
         or target.get("adapter") != "openai_compatible"
     ):
         raise CallError("call_adapter_unsupported", 503)
-    if target.get("stt_protocol", "audio_transcriptions") not in ("audio_transcriptions", "audio_chat") or (
-        "stt_protocol" in target and target["kind"] != "stt"
-    ):
+    if target.get("stt_protocol", "audio_transcriptions") not in (
+        "audio_transcriptions",
+        "audio_chat",
+    ) or ("stt_protocol" in target and target["kind"] != "stt"):
         raise CallError("call_adapter_unsupported", 503)
     parsed = urlsplit(str(target.get("base_url", "")))
     if (
@@ -129,7 +130,10 @@ def validate_target(target):
     if (
         not isinstance(voice_styles, dict)
         or set(voice_styles) - set(target.get("voices", []))
-        or any(not isinstance(label, str) or not 1 <= len(label) <= 50 for label in voice_styles.values())
+        or any(
+            not isinstance(label, str) or not 1 <= len(label) <= 50
+            for label in voice_styles.values()
+        )
     ):
         raise CallError("call_voices_invalid", 503)
     audio_format = target.get("audio_format", "mp3")
@@ -180,7 +184,11 @@ class CallConfig:
             try:
                 doc = read_config_json(self.path)
             except FileNotFoundError:
-                return {"route": "phone", "camera_available": False, "call_ready": False}
+                return {
+                    "route": "phone",
+                    "camera_available": False,
+                    "call_ready": False,
+                }
             except Exception as exc:
                 raise CallError("call_configuration_invalid", 503) from exc
         route = doc.get("routes", {}).get(digest([owner, agent]), "phone")
@@ -192,10 +200,17 @@ class CallConfig:
         camera = False
         if ready:
             if targets is None:
-                targets = {row["id"]: row for row in map(validate_target, doc.get("targets", []))}
+                targets = {
+                    row["id"]: row
+                    for row in map(validate_target, doc.get("targets", []))
+                }
             camera = self.profile(owner, agent, doc, targets).get("vision") is not None
-        return {"route": route, "camera_available": camera,
-                "call_ready": ready, "revision": doc.revision}
+        return {
+            "route": route,
+            "camera_available": camera,
+            "call_ready": ready,
+            "revision": doc.revision,
+        }
 
     def select_route(self, owner, agent, revision, route):
         if route not in ("phone", "call"):
@@ -222,9 +237,13 @@ class CallConfig:
     def video_policy(self, doc=None):
         if doc is None:
             doc, _ = self.read()
-        policy = {"interval_ms": 2000, "freshness_seconds": 20,
-                  "responsive_seconds": 12, "startup_timeout_seconds": 8,
-                  "max_observations_per_minute": 20}
+        policy = {
+            "interval_ms": 2000,
+            "freshness_seconds": 20,
+            "responsive_seconds": 12,
+            "startup_timeout_seconds": 8,
+            "max_observations_per_minute": 20,
+        }
         supplied = doc.get("video_policy", {})
         if not isinstance(supplied, dict) or set(supplied) - set(policy):
             raise CallError("call_video_policy_invalid", 503)
@@ -236,11 +255,17 @@ class CallConfig:
             policy["responsive_seconds"] = min(
                 policy["responsive_seconds"], policy["freshness_seconds"]
             )
-        bounds = {"interval_ms": (1000, 10000), "freshness_seconds": (3, 30),
-                  "responsive_seconds": (3, 30), "startup_timeout_seconds": (3, 20),
-                  "max_observations_per_minute": (1, 60)}
-        if any(type(policy[k]) is not int or not low <= policy[k] <= high
-               for k, (low, high) in bounds.items()):
+        bounds = {
+            "interval_ms": (1000, 10000),
+            "freshness_seconds": (3, 30),
+            "responsive_seconds": (3, 30),
+            "startup_timeout_seconds": (3, 20),
+            "max_observations_per_minute": (1, 60),
+        }
+        if any(
+            type(policy[k]) is not int or not low <= policy[k] <= high
+            for k, (low, high) in bounds.items()
+        ):
             raise CallError("call_video_policy_invalid", 503)
         if policy["responsive_seconds"] > policy["freshness_seconds"]:
             raise CallError("call_video_policy_invalid", 503)
@@ -318,10 +343,13 @@ class CallConfig:
         except Exception as exc:
             raise CallError("call_configuration_invalid", 503) from exc
         if disabled.get("version") == 1 and disabled.get("enabled") is not True:
-            return {"revision": disabled.revision, "targets": [],
-                    "profile": {"stt": None, "tts": None, "vision": None},
-                    "video_policy": self.video_policy(disabled),
-                    **self.route(owner, agent, disabled)}
+            return {
+                "revision": disabled.revision,
+                "targets": [],
+                "profile": {"stt": None, "tts": None, "vision": None},
+                "video_policy": self.video_policy(disabled),
+                **self.route(owner, agent, disabled),
+            }
         doc, targets = self.read()
         public = [
             {
