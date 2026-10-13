@@ -279,6 +279,12 @@ def admit_frontend_ingress(
         require_connector_operation,
     )
     connector_id = normalized_env["connector"]["id"]
+    normalized_control_action = str(control_action or "").strip().casefold()
+    if normalized_control_action == "stop":
+        require_connector_operation(connector_id, "ingress", "control")
+        command_name = "stop"
+        command_arguments = []
+        control_action = None
 
     # 1. Instance and Agent verification
     expected_instance = str(
@@ -338,10 +344,10 @@ def admit_frontend_ingress(
         )
 
     # 2. Control intent
-    if control_action is not None or command_name in {"/cancel", "cancel", "/stop", "stop"}:
+    if control_action is not None or command_name in {"/cancel", "cancel"}:
         require_connector_operation(connector_id, "ingress", "control")
         action = str(control_action or "cancel").strip().casefold()
-        if action in {"cancel", "stop"}:
+        if action == "cancel":
             endpoint_id = normalized_env["connector"]["endpoint_id"]
             client_id = f"{normalized_env['connector']['id']}:{endpoint_id}"
             request_id = normalized_env["message"]["request_id"]
@@ -502,7 +508,7 @@ def admit_frontend_ingress(
             "idempotency_digest": normalized_env["message"]["idempotency_digest"],
             "authorization": {
                 "decision": "allowed" if command_allowed else "denied",
-                "scope": "session",
+                "scope": "agent" if cmd == "stop" else "session",
             },
         }
         try:

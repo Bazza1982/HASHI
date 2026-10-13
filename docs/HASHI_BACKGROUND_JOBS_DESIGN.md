@@ -186,6 +186,11 @@ Current strengths:
   `runtime_lifecycle` -> `run_backend_generation()` ->
   `_register_background_task()` -> `_on_background_complete()`.
 
+Agent `/stop` now also cancels non-terminal managed OS jobs. Each job snapshots
+the owning Agent's durable stop epoch. A cancelled job, or a completion from an
+older epoch, keeps its terminal receipt and logs but cannot notify or enqueue a
+new Agent event.
+
 Current gaps:
 
 - This background path is only for backend LLM generation tasks, not arbitrary

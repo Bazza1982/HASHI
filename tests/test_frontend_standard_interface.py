@@ -47,7 +47,12 @@ def _setup_runtime(tmp_path: Path):
             self.cmds = {
                 "ping": SimpleNamespace(
                     handler=lambda rt, *args: {"ok": True, "pong": True, "args": list(args)}
-                )
+                ),
+                "stop": SimpleNamespace(
+                    handler=lambda rt, *args: (
+                        rt.stop_calls.append(list(args)) or {"ok": True, "scope": "agent"}
+                    )
+                ),
             }
 
         def has_command(self, cmd):
@@ -61,6 +66,7 @@ def _setup_runtime(tmp_path: Path):
         global_config=SimpleNamespace(instance_id="HASHI1", authorized_id=7),
         session_store=store,
         command_registry=FakeRegistry(),
+        stop_calls=[],
     )
     return runtime, store, owner, session
 
@@ -235,6 +241,55 @@ async def test_t03_ingress_command_and_control_cancellation(tmp_path: Path):
     )
     assert cmd_replay["status"] == "accepted"
     assert cmd_replay["replayed"] is True
+
+
+def test_t03_stop_control_routes_to_agent_command_without_session_cancel(
+    tmp_path: Path,
+):
+    runtime, store, owner, session = _setup_runtime(tmp_path)
+    env_run = build_frontend_ingress_envelope(
+        source_id="backend_api",
+        ingress_transport="session-api",
+        surface="workbench",
+        channel_key="default",
+        instance_id="HASHI1",
+        principal={"kind": "human_or_client", "assurance": "runtime_observed"},
+        network_authentication="not_applicable",
+        relay_chain=[],
+        request_id="req-active-before-stop",
+        idempotency_key="key-active-before-stop",
+        session_id=session["session_id"],
+        agent_id="test-agent",
+    )
+    active = admit_frontend_ingress(runtime, env_run, text="Still active")
+    env_stop = build_frontend_ingress_envelope(
+        source_id="backend_api",
+        ingress_transport="session-api",
+        surface="workbench",
+        channel_key="default",
+        instance_id="HASHI1",
+        principal={"kind": "human_or_client", "assurance": "runtime_observed"},
+        network_authentication="not_applicable",
+        relay_chain=[],
+        request_id="req-agent-stop",
+        idempotency_key="key-agent-stop",
+        session_id=session["session_id"],
+        agent_id="test-agent",
+    )
+
+    receipt = admit_frontend_ingress(runtime, env_stop, control_action="stop")
+
+    assert receipt["status"] == "accepted"
+    assert receipt["reason"] == "command_executed"
+    assert runtime.stop_calls == [[]]
+    active_ids = {
+        item["run_id"]
+        for item in store.list_active_runs(
+            owner_id=owner,
+            session_id=session["session_id"],
+        )
+    }
+    assert active["run_id"] in active_ids
 
 
 def test_t04_t05_frontend_projection_and_presentation_rendering(tmp_path: Path):

@@ -104,6 +104,11 @@ Phone failures retain a safe durable cause: content policy, authentication, quot
 
 Renderers/catalogs own UI text. /language changes shared UI, /tui language local TUI; neither translates replies/IDs. TUI switches freeze generation/Agent/capabilities/Session. Remote authenticates. /telegram off and /whatsapp off disable future mirrors, preserving origin replies. /think and /commentary are independent.
 
+`/stop` is Agent-wide across Sessions. It advances a durable stop epoch,
+cancels work admitted before that epoch, and blocks stale background or nudge
+callbacks from starting more work. Cron, heartbeat, and nudge definitions stay
+enabled. See [Agent stop fence](HASHI_AGENT_STOP_FENCE_DECISION.md).
+
 Media bind one draft/instance/Agent/Run; Remote sends managed bytes. HERV3 gains no wider authority. Safe Voice uses typed confirm/discard; missing idempotency blocks upload and stale media is discarded. /voice uses a validated Function bundle/local media; Workbench gets Session audio, Telegram its voice renderer.
 
 Phone stays bound to the owner's foreground Conversation until hang-up.

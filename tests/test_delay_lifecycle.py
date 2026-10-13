@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
-from orchestrator import runtime_control, runtime_remote, runtime_workspace
-from orchestrator.runtime_autonomy import admission_snapshot, status
+from orchestrator import (
+    runtime_control,
+    runtime_pending,
+    runtime_remote,
+    runtime_workspace,
+)
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.scheduler import TaskScheduler
 
@@ -153,7 +156,7 @@ async def test_agent_delete_blocks_while_target_owns_delays(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_stop_preserves_and_reports_delayed_messages(tmp_path):
+async def test_stop_cancels_agent_delayed_messages(tmp_path):
     scheduler = _scheduler(tmp_path)
     await _schedule(scheduler)
     replies: list[str] = []
@@ -177,34 +180,51 @@ async def test_stop_preserves_and_reports_delayed_messages(tmp_path):
 
     await runtime_control.cmd_stop(runtime, _update(), SimpleNamespace(args=[]))
 
-    assert scheduler.count_delayed_messages("zelda") == 1
-    assert "Preserved 1 delayed message(s)" in replies[0]
+    assert scheduler.count_delayed_messages("zelda") == 0
+    assert "Preserved" not in replies[0]
 
 
 @pytest.mark.asyncio
-async def test_due_delay_stays_parked_after_stop_until_new_user_request(tmp_path):
+async def test_stop_recall_does_not_consume_work_admitted_after_fence(tmp_path):
     scheduler = _scheduler(tmp_path)
-    await _schedule(scheduler)
+    old_delay = await scheduler.schedule_delayed_message(
+        agent_name="zelda",
+        chat_id=42,
+        prompt="old delayed work",
+        delay_minutes=5,
+        request_metadata={"agent_stop_epoch": 0},
+    )
+    new_delay = await scheduler.schedule_delayed_message(
+        agent_name="zelda",
+        chat_id=42,
+        prompt="new delayed work",
+        delay_minutes=5,
+        request_metadata={"agent_stop_epoch": 1},
+    )
     runtime = SimpleNamespace(
         name="zelda",
-        workspace_dir=tmp_path,
-        enqueue_request=AsyncMock(return_value="req-delayed"),
+        orchestrator=SimpleNamespace(scheduler=scheduler),
+        queue=asyncio.Queue(),
     )
-    from orchestrator.runtime_autonomy import pause
+    old_ready = SimpleNamespace(
+        request_id="",
+        request_metadata={"agent_stop_epoch": 0},
+    )
+    new_ready = SimpleNamespace(
+        request_id="",
+        request_metadata={"agent_stop_epoch": 1},
+    )
+    runtime.queue.put_nowait(old_ready)
+    runtime.queue.put_nowait(new_ready)
 
-    pause(runtime)
-    await scheduler.dispatch_due_delayed_messages(
-        {"zelda": runtime}, now_ts=time.time() + 3600
+    removed = await runtime_pending.recall_pending(
+        runtime,
+        before_agent_stop_epoch=1,
     )
-    runtime.enqueue_request.assert_not_awaited()
-    assert scheduler.count_delayed_messages("zelda") == 1
-    assert status(runtime)["paused"] is True
 
-    assert admission_snapshot(runtime, "api", {})[0] is True
-    await scheduler.dispatch_due_delayed_messages(
-        {"zelda": runtime}, now_ts=time.time() + 3600
-    )
-    assert runtime.enqueue_request.await_count == 1
-    assert runtime.enqueue_request.await_args.kwargs["request_metadata"][
-        "_hashi_autonomous_wakeup"
-    ] == "delayed"
+    assert removed.ready == 1
+    assert removed.delayed == 1
+    assert list(runtime.queue._queue) == [new_ready]
+    remaining = scheduler.list_delayed_messages_now("zelda")
+    assert [record["id"] for record in remaining] == [new_delay["id"]]
+    assert old_delay["id"] != new_delay["id"]
