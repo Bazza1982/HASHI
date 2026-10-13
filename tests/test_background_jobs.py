@@ -303,6 +303,13 @@ async def test_background_job_completion_enqueues_agent_event_once(tmp_path: Pat
     assert queued[0]["source"] == "background-job-event"
     assert queued[0]["deliver_to_telegram"] is True
     assert queued[0]["request_metadata"]["origin_kind"] == "background_job"
+    assert queued[0]["request_metadata"]["agent_activity_context"] == {
+        "kind": "background_job",
+        "task_id": record.job_id,
+        "trigger": "completion",
+        "origin_request_id": "req-origin",
+        "origin_session_id": "ses-origin",
+    }
     assert queued[0]["idempotency_key"] == (
         f"background-job-event:{record.job_id}:succeeded"
     )
@@ -326,8 +333,13 @@ async def test_background_job_failure_enqueues_agent_event(tmp_path: Path):
         request_metadata: dict | None = None,
         idempotency_key: str | None = None,
     ):
-        del source, deliver_to_telegram, request_metadata, idempotency_key
-        queued.append(text)
+        queued.append({
+            "text": text,
+            "source": source,
+            "deliver_to_telegram": deliver_to_telegram,
+            "request_metadata": request_metadata,
+            "idempotency_key": idempotency_key,
+        })
         return "queued-failure"
 
     runtime = SimpleNamespace(name="zelda", enqueue_api_text=enqueue_api_text)
@@ -349,9 +361,15 @@ async def test_background_job_failure_enqueues_agent_event(tmp_path: Path):
     assert saved.notification["agent_event_enqueued"] is True
     assert saved.notification["agent_event_request_id"] == "queued-failure"
     assert len(queued) == 1
-    assert "event: failed" in queued[0]
-    assert "returncode: 3" in queued[0]
-    assert "agent event failed" in queued[0]
+    assert queued[0]["source"] == "background-job-event"
+    assert queued[0]["deliver_to_telegram"] is True
+    assert queued[0]["request_metadata"]["agent_activity_context"]["task_id"] == record.job_id
+    assert queued[0]["idempotency_key"] == (
+        f"background-job-event:{record.job_id}:failed"
+    )
+    assert "event: failed" in queued[0]["text"]
+    assert "returncode: 3" in queued[0]["text"]
+    assert "agent event failed" in queued[0]["text"]
 
 
 @pytest.mark.asyncio

@@ -2188,10 +2188,13 @@ class FunctionWorkerSupervisor:
             return record.to_dict()
         if method == "core.background_jobs.list":
             states = params.get("states")
+            requested_limit = int(params.get("limit") or 50)
+            # Internal lifecycle consumers use -1 for the complete snapshot.
+            limit = -1 if requested_limit == -1 else max(1, min(requested_limit, 1000))
             records = manager.list(
                 agent=(str(params["agent"]) if params.get("agent") else None),
                 states=(set(str(item) for item in states) if states else None),
-                limit=max(1, min(int(params.get("limit") or 50), 1000)),
+                limit=limit,
             )
             return [record.to_dict() for record in records]
         job_id = str(params.get("job_id") or "")

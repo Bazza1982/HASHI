@@ -66,3 +66,35 @@ Focused tests cover cross-Session stop, READY/FUTURE removal, detached request
 markers, managed-job cancellation, stale completion suppression, nudge lease
 mutual exclusion, stop-epoch persistence/recovery, quiet WIP, and existing HER
 Turn ownership conflicts. Protected Core checks remain mandatory.
+
+## Independent pre-merge review (2026-10-14)
+
+The review on HASHI3 `debug-stop` found two release blockers in the original
+implementation:
+
+- Stop could finish while a managed process was being created; the late
+  process handle then overwrote the cancelled record with `running`. Cancelling
+  the start caller during creation could also leave a child process unowned.
+  Launch ownership now survives caller cancellation, the stop waits for the
+  handle and reaps the child, and the launch rechecks the persisted stop epoch.
+- The stop pass used a 1,000-item display limit. Through the real Worker service
+  facade, a fixture with 1,001 older owned jobs plus newer/other-Agent jobs
+  cancelled only 999. Lifecycle callers now request a complete snapshot;
+  the epoch and Agent filters still protect new work and other Agents.
+
+Three real-process regression cases failed before the launch fix and passed
+after it. The large-job-set case failed before the list fix. Existing success
+and failure event ownership/idempotency assertions have also been restored.
+The FYI summary was shortened with a link to the complete Call decision so
+the added stop guidance does not truncate unrelated engineering guidance.
+
+Initial curated Core-gate run: 811 passed, 1 skipped, 3 failed because the
+Function qualification checks correctly rejected the uncommitted review fix.
+The committed candidate must pass the gate before merge and deployment.
+The final focused run passed 118 cases, including four new regressions and
+the restored event assertions. Protected Core and whitespace checks also
+passed.
+These are offline checks. The HASHI3 live canary recorded above exercised
+`6c12e927`, not the subsequent review fixes; it is not evidence of HASHI4
+adoption. Source deployment and a separately authorized Function adoption
+remain distinct.

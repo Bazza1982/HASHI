@@ -434,7 +434,8 @@ async def _cancel_managed_background_jobs(
     records = list_jobs(
         agent=str(getattr(runtime, "name", "") or ""),
         states={"created", "starting", "running", "cancel_requested"},
-        limit=1000,
+        # A stop must cover all owned work, not one operator display page.
+        limit=-1,
     )
     if inspect.isawaitable(records):
         records = await records
