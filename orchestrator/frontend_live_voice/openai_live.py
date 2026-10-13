@@ -86,6 +86,47 @@ def _safe_provider_field(value: object) -> str:
     return cleaned or "unknown"
 
 
+def _provider_error_fields(body: bytes) -> tuple[str, str]:
+    try:
+        payload = json.loads(body)
+    except (TypeError, ValueError):
+        payload = {}
+    error = payload.get("error") if isinstance(payload, Mapping) else None
+    error = error if isinstance(error, Mapping) else {}
+    return (
+        _safe_provider_field(error.get("type")).lower(),
+        _safe_provider_field(error.get("code")).lower(),
+    )
+
+
+def _provider_rejection_error(response: Any, body: bytes, fallback: str) -> LiveVoiceError:
+    status = int(getattr(response, "status", 0) or 0)
+    error_type, error_code = _provider_error_fields(body)
+    marker = f"{error_type}:{error_code}"
+    if status in {401, 403}:
+        return LiveVoiceError("live_provider_authentication_failed", 502)
+    if status == 402:
+        return LiveVoiceError("live_provider_quota_exceeded", 503)
+    if status == 429:
+        quota_markers = (
+            "insufficient_quota", "quota_exceeded", "billing_hard_limit",
+            "billing_not_active", "billing_required",
+        )
+        code = (
+            "live_provider_quota_exceeded"
+            if any(item in marker for item in quota_markers)
+            else "live_provider_rate_limited"
+        )
+        return LiveVoiceError(code, 503)
+    if any(item in marker for item in ("content_filter", "content_policy", "safety_filter")):
+        return LiveVoiceError("live_provider_content_filtered", 422)
+    if status in {400, 404, 409, 413, 422}:
+        return LiveVoiceError("live_provider_request_rejected", 502)
+    if status >= 500:
+        return LiveVoiceError("live_provider_unavailable", 503)
+    return LiveVoiceError(fallback, 502)
+
+
 def _log_provider_rejection(response: Any, body: bytes) -> None:
     try:
         payload = json.loads(body)
@@ -197,7 +238,7 @@ async def _provider_input_token_count(
             body = await _response_bytes(response, limit=65536)
             if response.status != 200:
                 _log_provider_rejection(response, body)
-                raise LiveVoiceError("live_provider_count_failed", 502)
+                raise _provider_rejection_error(response, body, "live_provider_count_failed")
             payload = json.loads(body)
     except LiveVoiceError:
         raise
@@ -356,7 +397,7 @@ async def create_provider_session(http: Any, *, key: str, request: Mapping[str, 
             if response.status != 200 and response.status != 201:
                 body = await _response_bytes(response, limit=65536)
                 _log_provider_rejection(response, body)
-                raise LiveVoiceError("live_provider_create_failed", 502)
+                raise _provider_rejection_error(response, body, "live_provider_create_failed")
             value = json.loads(await _response_bytes(response, limit=1048576))
     except LiveVoiceError:
         raise

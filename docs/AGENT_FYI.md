@@ -1,5 +1,9 @@
 # HASHI Agent FYI
 
+October 13 `debug-call` reconciliation preserves H4 Call/Phone repairs and
+main's memory safety together. The [65-file record](repairs/DEBUG_CALL_RECONCILIATION_20261013.md)
+separates complete source alignment from runtime adoption.
+
 October 13 Call camera decision: local preview is not proof that the Agent can
 see, but slow vision inference is also not proof that the camera failed. Video
 Call prepares one default camera during ringback and falls back to voice when no
@@ -95,6 +99,8 @@ cannot restore revoked authority. Show typed progress, not private reasoning.
 Local cascade speech is an opt-in Function sidecar. Synthetic evidence does not establish physical audio acceptance. See [local Phone](HASHI_PHONE_LOCAL_CASCADE_GATE2.md).
 
 Live Phone defaults on; a missing provider API key blocks calls and must be named in `/phone`. An explicit instance opt-out remains valid. The Agent's Phone settings and PCM readiness do not prove provider readiness.
+
+Phone failures retain a safe durable cause: content policy, authentication, quota, rate limit, rejected configuration and provider outage remain distinct. Failed/interrupted panels stay until dismissal; normal hang-up may dismiss automatically. Terminal calls settle pending attempts and release busy state across Function replacement.
 
 Renderers/catalogs own UI text. /language changes shared UI, /tui language local TUI; neither translates replies/IDs. TUI switches freeze generation/Agent/capabilities/Session. Remote authenticates. /telegram off and /whatsapp off disable future mirrors, preserving origin replies. /think and /commentary are independent.
 

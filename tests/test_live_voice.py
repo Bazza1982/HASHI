@@ -257,10 +257,62 @@ class ProviderTests(unittest.TestCase):
                 )
 
         logged = '\n'.join(captured.output)
-        self.assertEqual(caught.exception.code, 'live_provider_create_failed')
+        self.assertEqual(caught.exception.code, 'live_provider_request_rejected')
         self.assertIn('context_length_exceeded', logged)
         self.assertIn('session.input', logged)
         self.assertNotIn('SENSITIVE PROVIDER DETAIL', logged)
+
+    def test_provider_rejections_expose_safe_actionable_categories(self):
+        class FakeContent:
+            def __init__(self, payload):
+                self.payload = payload
+
+            async def iter_chunked(self, _size):
+                yield json.dumps(self.payload).encode()
+
+        class FakeResponse:
+            headers = {'x-request-id': 'req-safe-category'}
+
+            def __init__(self, status, payload):
+                self.status = status
+                self.content = FakeContent(payload)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+        class FakeHttp:
+            def __init__(self, response):
+                self.response = response
+
+            def post(self, *_args, **_kwargs):
+                return self.response
+
+        scenarios = (
+            (401, 'invalid_api_key', 'live_provider_authentication_failed'),
+            (402, 'billing_required', 'live_provider_quota_exceeded'),
+            (429, 'insufficient_quota', 'live_provider_quota_exceeded'),
+            (429, 'rate_limit_exceeded', 'live_provider_rate_limited'),
+            (400, 'content_filter', 'live_provider_content_filtered'),
+            (413, 'request_too_large', 'live_provider_request_rejected'),
+            (503, 'server_error', 'live_provider_unavailable'),
+        )
+        for status, provider_code, expected in scenarios:
+            with self.subTest(status=status, provider_code=provider_code):
+                response = FakeResponse(status, {
+                    'error': {
+                        'type': 'provider_error',
+                        'code': provider_code,
+                        'message': 'SENSITIVE PROVIDER DETAIL',
+                    }
+                })
+                with self.assertRaises(LiveVoiceError) as caught:
+                    asyncio.run(create_provider_session(
+                        FakeHttp(response), key='test-key', request={'session': {}}
+                    ))
+                self.assertEqual(caught.exception.code, expected)
 
 class FakeDurable:
     """TEST ONLY. Not a persistence implementation or authorization system."""

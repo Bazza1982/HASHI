@@ -22,13 +22,12 @@ from tools.windows_helper.desktop_capture import fit_size, jpeg_bytes
 class Native:
     def __init__(self):
         self.calls = []; self.captures = 0; self.resets = 0; self.rev = 'display-one'; self.locked = False
-        self.monitor_one_x = -1920
     def available(self):
         if self.locked: raise DesktopError('desktop_locked', 423)
     def displays(self):
         self.available()
         return [
-            {'id': 'monitor-1', 'x': self.monitor_one_x, 'y': 0, 'width': 1920, 'height': 1080, 'primary': True},
+            {'id': 'monitor-1', 'x': -1920, 'y': 0, 'width': 1920, 'height': 1080, 'primary': True},
             {'id': 'monitor-2', 'x': 0, 'y': 0, 'width': 1920, 'height': 1080, 'primary': False}
         ], self.rev
     def cursor(self): return {'visible': True, 'x': -1000, 'y': 200}
@@ -208,12 +207,50 @@ def test_input_retains_typed_native_failure_and_releases_its_control(desktop):
     assert controller.owner is None
 
 
-def test_wrong_actor_and_display_change_cannot_inject(desktop):
+@pytest.mark.parametrize(
+    'geometry_change', [{'x': -1919}, {'width': 1600}], ids=['position', 'size']
+)
+def test_wrong_actor_and_display_change_cannot_inject(desktop, geometry_change):
     c,n,t=desktop;c.frame('', 'session-a');control(c)
     with pytest.raises(DesktopError,match='expired'): c.input(event(c),'other-owner','session-a','lease-a')
-    n.monitor_one_x = -1919
+    displays=n.displays
+    def changed_selected_display():
+        rows,_=displays()
+        rows[0]={**rows[0],**geometry_change}
+        return rows,'new-display-layout'
+    n.displays=changed_selected_display
     with pytest.raises(DesktopError,match='display_changed'): c.input(event(c),'owner-a','session-a','lease-a')
     assert not n.calls and c.owner is None
+
+
+def test_other_monitor_waking_keeps_primary_control_and_coordinates(desktop):
+    c,n,t=desktop
+    before=c.frame('', 'session-a');control(c)
+    original=n.displays
+    def secondary_waking():
+        rows,_=original()
+        rows[1]={**rows[1],'width':2560}
+        return rows,'other-monitor-awake'
+    n.displays=secondary_waking
+    t[0]+=.6
+    after=c.frame(before['meta']['frame_id'],'session-a')
+    assert c.owner==('owner-a','session-a','lease-a')
+    assert after['meta']['view_revision']==before['meta']['view_revision']
+    c.input(event(c),'owner-a','session-a','lease-a')
+    assert n.calls[-1]['px']==-960
+
+
+def test_other_monitor_change_between_frame_and_click_does_not_release_primary(desktop):
+    c,n,_=desktop
+    c.frame('', 'session-a');control(c);old=event(c)
+    original=n.displays
+    def secondary_sleeping():
+        rows,_=original()
+        return rows[:1],'other-monitor-asleep'
+    n.displays=secondary_sleeping
+    c.input(old,'owner-a','session-a','lease-a')
+    assert c.owner==('owner-a','session-a','lease-a')
+    assert len(n.calls)==1
 
 
 def test_view_change_invalidates_old_coordinates(desktop):

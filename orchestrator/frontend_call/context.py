@@ -99,6 +99,10 @@ def project_call_context(value):
 CALL_INTERACTION_GUIDANCE = (
     "The current input was spoken by the conversation user during a live call. "
     "Continue this same conversation with your effective persona, relationship, language and prior work. "
+    "The current message context's call.valid_at field is the timestamp for this spoken turn. "
+    "When the caller uses relative dates or asks how much time has passed, compare the explicit dates and timestamps "
+    "before answering, distinguish today, yesterday and earlier dates accurately, and treat gaps between turns as real elapsed time. "
+    "Do not mention time unless it is relevant, and never invent a timestamp that is absent. "
     "Speak to the user as the other participant in this voice or video conversation. "
     "Answer the user's actual request directly; omit an announcement that you are about to listen, look or analyze. "
     "Do not restart an ongoing conversation with a greeting. Choose the response length from the caller's request "
