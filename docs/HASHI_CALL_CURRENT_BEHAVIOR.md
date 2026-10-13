@@ -1,7 +1,7 @@
 # HASHI /call Current Behavior Contract
 
 Status: **Authoritative current behavior**
-Approved scope: user-directed `debug-call` recovery through 2026-10-13
+Approved scope: user-directed Call recovery and main-only closeout on 2026-10-13
 Owners: Frontend Connector (Workbench presentation/media) and PAO Call Function
 Engineering layers: external Workbench plus replaceable Layer 2 Functions
 Protected Core: unchanged
@@ -13,10 +13,12 @@ numeric response-length requirements are retired.
 
 ## Entry, availability, and binding
 
-- **CALL-ENTRY-01** — Workbench shows the established fixed Phone and video Call
-  controls with their icons, focus treatment, and usable touch targets. Phone
-  starts or returns only `/phone`; video starts or returns only `/call`. Neither
-  control can fall back to, launch, or retarget the other transport.
+- **CALL-ENTRY-01** — Desktop Workbench retains its header Phone and video Call
+  controls. Compact mobile headers keep the Agent identity centred and place
+  separate Voice call and Video call actions in the composer More menu; an
+  active call exposes Return to call. Icons, focus treatment, and usable touch
+  targets remain. Voice starts or returns only `/phone`; video starts or returns
+  only `/call`. Neither entry can fall back to or retarget the other transport.
 - **CALL-ENTRY-02** — Direct Call binds to the currently selected Agent,
   connection, Session, and context generation. Changing the reading view during
   a call does not silently rebind the live call.
@@ -244,9 +246,10 @@ numeric response-length requirements are retired.
 - **CALL-REL-04** — Only that exact verified candidate may be loaded into
   HASHI4. HASHI4 source deployment, the user's later reboot, and live
   observations are recorded separately; the implementer does not reboot HASHI4.
-- **CALL-REL-05** — All recovery work stays on the clean `debug-call` branch
-  until the complete candidate is verified and deliberately merged back to
-  main.
+- **CALL-REL-05** — The reconciled source is merged into `main`. HASHI3, HASHI4,
+  and the Workbench source checkout continue on their existing `main` branches.
+  Do not create a branch or another worktree for follow-up work. Earlier
+  `debug-call` construction instructions are historical and superseded.
 
 ## Release receipts
 

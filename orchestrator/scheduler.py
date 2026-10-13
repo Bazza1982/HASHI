@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import logging
 import time
@@ -9,6 +10,8 @@ from typing import Any
 from uuid import uuid4
 
 from orchestrator import runtime_pending, scheduler_recovery, ui_language
+from orchestrator.agent_stop_fence import AgentStopFenceStore, stop_fence_path
+from orchestrator.background_jobs import NONTERMINAL_STATES
 from orchestrator.config_json import (
     ConfigDocument,
     new_config_json,
@@ -231,6 +234,23 @@ def _runtime_busy(runtime) -> bool:
             return bool(checker())
         except Exception:
             pass
+    metadata_reader = getattr(runtime, "get_runtime_metadata", None)
+    if callable(metadata_reader):
+        try:
+            metadata = metadata_reader()
+        except Exception:
+            metadata = {}
+        if isinstance(metadata, Mapping):
+            try:
+                queue_depth = max(0, int(metadata.get("queue_depth") or 0))
+                detached = max(
+                    0, int(metadata.get("detached_request_count") or 0)
+                )
+            except (TypeError, ValueError):
+                queue_depth = 0
+                detached = 0
+            if bool(metadata.get("is_generating")) or queue_depth or detached:
+                return True
     queue = getattr(runtime, "queue", None)
     queue_busy = bool(queue is not None and hasattr(queue, "empty") and not queue.empty())
     return bool(getattr(runtime, "is_generating", False) or queue_busy)
@@ -270,6 +290,7 @@ class TaskScheduler:
         self.state.setdefault("heartbeats", {})
         self.state.setdefault("crons", {})
         self.state.setdefault("nudges", {})
+        self.state.setdefault("nudge_leases", {})
         self.state.setdefault("missed_crons", {})
         self.state.setdefault("missed_heartbeats", {})
         self.state.setdefault("recovery_batches", {})
@@ -278,6 +299,7 @@ class TaskScheduler:
             self.state["delayed_messages"] = {}
         self._delay_lock = asyncio.Lock()
         self._recovery_lock = asyncio.Lock()
+        self.stop_fences = AgentStopFenceStore(stop_fence_path(self.state_path.parent))
         if self._prepare_recovery_state():
             self._save_state()
         # Only the first successful scheduler pass is downtime recovery. Later
@@ -340,6 +362,7 @@ class TaskScheduler:
                     "heartbeats": {},
                     "crons": {},
                     "nudges": {},
+                    "nudge_leases": {},
                     "missed_crons": {},
                     "missed_heartbeats": {},
                     "recovery_batches": {},
@@ -349,6 +372,7 @@ class TaskScheduler:
             "heartbeats": {},
             "crons": {},
             "nudges": {},
+            "nudge_leases": {},
             "missed_crons": {},
             "missed_heartbeats": {},
             "recovery_batches": {},
@@ -438,6 +462,11 @@ class TaskScheduler:
             raise ValueError("Delayed message requires an owning agent.")
         key = str(idempotency_key or "").strip()
         current = time.time() if now_ts is None else float(now_ts)
+        metadata = dict(request_metadata or {})
+        metadata.setdefault(
+            "agent_stop_epoch",
+            self.stop_fences.current(agent).epoch,
+        )
 
         async with self._delay_lock:
             records = self._delayed_message_records()
@@ -459,6 +488,8 @@ class TaskScheduler:
                 )
 
             delay_id = f"delay-{uuid4().hex[:10]}"
+            metadata.setdefault("origin_kind", "delayed_message")
+            metadata.setdefault("origin_id", delay_id)
             record: dict[str, Any] = {
                 "id": delay_id,
                 "agent": agent,
@@ -476,9 +507,9 @@ class TaskScheduler:
                 "attempts": 0,
                 "deliver_to_telegram": bool(deliver_to_telegram),
             }
-            if request_metadata:
-                record["request_metadata"] = dict(request_metadata)
-                session_id = str(request_metadata.get("session_id") or "").strip()
+            if metadata:
+                record["request_metadata"] = metadata
+                session_id = str(metadata.get("session_id") or "").strip()
                 if session_id:
                     record["session_id"] = session_id
             if key:
@@ -593,14 +624,11 @@ class TaskScheduler:
                     try:
                         enqueue_options: dict[str, Any] = {}
                         request_metadata = record.get("request_metadata")
-                        enqueue_options["request_metadata"] = {
-                            **(dict(request_metadata) if isinstance(request_metadata, dict) else {}),
-                            "_hashi_autonomous_wakeup": "delayed",
-                        }
-                        from orchestrator import runtime_autonomy
-
-                        if runtime_autonomy.status(runtime)["paused"]:
-                            continue
+                        enqueue_options["request_metadata"] = (
+                            dict(request_metadata)
+                            if isinstance(request_metadata, dict)
+                            else {}
+                        )
                         if not bool(record.get("deliver_to_telegram", True)):
                             enqueue_options["deliver_to_telegram"] = False
                         request_id = await runtime.enqueue_request(
@@ -921,7 +949,122 @@ class TaskScheduler:
             self._save_tasks(tasks)
         return changed
 
-    def _register_nudge_completion_listener(self, runtime, task_id: str, request_id: str | None) -> None:
+    def _nudge_leases(self) -> dict[str, dict[str, Any]]:
+        leases = self.state.setdefault("nudge_leases", {})
+        if not isinstance(leases, dict):
+            leases = {}
+            self.state["nudge_leases"] = leases
+        return leases
+
+    @staticmethod
+    def _request_is_outstanding(runtime: Any, request_id: str) -> bool:
+        wanted = str(request_id or "")
+        if not wanted:
+            return False
+        for attribute in ("_outstanding_request_ids", "_background_request_ids"):
+            values = getattr(runtime, attribute, None)
+            if isinstance(values, (set, frozenset, list, tuple)) and wanted in {
+                str(value) for value in values
+            }:
+                return True
+        for attribute in ("_request_listeners", "listeners"):
+            listeners = getattr(runtime, attribute, None)
+            if isinstance(listeners, Mapping) and wanted in listeners:
+                return True
+        current = getattr(runtime, "current_request_meta", None)
+        if isinstance(current, Mapping) and str(current.get("request_id") or "") == wanted:
+            return True
+        metadata_reader = getattr(runtime, "get_runtime_metadata", None)
+        if callable(metadata_reader):
+            try:
+                metadata = metadata_reader()
+            except Exception:
+                metadata = {}
+            current = (
+                metadata.get("current_request_meta")
+                if isinstance(metadata, Mapping)
+                else None
+            )
+            if isinstance(current, Mapping) and str(
+                current.get("request_id") or ""
+            ) == wanted:
+                return True
+        return False
+
+    def _release_nudge_lease(
+        self,
+        task_id: str,
+        *,
+        invocation_id: str | None = None,
+    ) -> bool:
+        lease = self._nudge_leases().get(task_id)
+        if not isinstance(lease, dict):
+            return False
+        if invocation_id and str(lease.get("invocation_id") or "") != str(
+            invocation_id
+        ):
+            return False
+        self._nudge_leases().pop(task_id, None)
+        self._save_state()
+        return True
+
+    def _nudge_lease_is_active(
+        self,
+        task_id: str,
+        *,
+        agent_name: str,
+        runtime: Any,
+    ) -> bool:
+        lease = self._nudge_leases().get(task_id)
+        if not isinstance(lease, dict):
+            return False
+        current_epoch = self.stop_fences.current(agent_name).epoch
+        try:
+            lease_epoch = int(lease.get("agent_stop_epoch") or 0)
+        except (TypeError, ValueError):
+            lease_epoch = -1
+        if lease_epoch != current_epoch:
+            self._release_nudge_lease(task_id)
+            scheduler_logger.info(
+                "Released stale nudge lease %s after Agent stop epoch changed.",
+                task_id,
+            )
+            return False
+        request_id = str(lease.get("request_id") or "")
+        if request_id and self._request_is_outstanding(runtime, request_id):
+            return True
+        if _runtime_busy(runtime):
+            return True
+        self._release_nudge_lease(task_id)
+        scheduler_logger.info(
+            "Released recovered nudge lease %s because its request is no longer active.",
+            task_id,
+        )
+        return False
+
+    async def _agent_has_managed_background_work(self, agent_name: str) -> bool:
+        manager = getattr(self.orchestrator, "background_job_manager", None)
+        list_jobs = getattr(manager, "list", None)
+        if not callable(list_jobs):
+            return False
+        records = list_jobs(
+            agent=agent_name,
+            states=NONTERMINAL_STATES,
+            limit=1,
+        )
+        if inspect.isawaitable(records):
+            records = await records
+        return bool(records)
+
+    def _register_nudge_completion_listener(
+        self,
+        runtime,
+        task_id: str,
+        request_id: str | None,
+        *,
+        invocation_id: str,
+        agent_stop_epoch: int,
+    ) -> None:
         if not request_id:
             return
         register = getattr(runtime, "register_request_listener", None)
@@ -931,6 +1074,18 @@ class TaskScheduler:
         marker = f"NUDGE_COMPLETE:{task_id}"
 
         def _on_result(payload: dict) -> None:
+            self._release_nudge_lease(
+                task_id,
+                invocation_id=invocation_id,
+            )
+            if self.stop_fences.current(getattr(runtime, "name", "")).epoch != int(
+                agent_stop_epoch
+            ):
+                scheduler_logger.info(
+                    "Ignored stale completion for nudge %s after Agent stop.",
+                    task_id,
+                )
+                return
             text = str((payload or {}).get("text") or "")
             if not any(line.strip() == marker for line in text.splitlines()):
                 return
@@ -1059,10 +1214,6 @@ class TaskScheduler:
         return batch
 
     async def _deliver_recovery_notice(self, runtime, batch: dict[str, Any]) -> bool:
-        from orchestrator import runtime_autonomy
-
-        if runtime_autonomy.status(runtime)["paused"]:
-            return False
         sender = getattr(runtime, "enqueue_request", None)
         if not callable(sender):
             scheduler_logger.error(
@@ -1382,10 +1533,6 @@ class TaskScheduler:
         prompt = hb.get("prompt", "")
         action = hb.get("action", "enqueue_prompt")
         rt = runtime_map[agent_name]
-        from orchestrator import runtime_autonomy
-
-        if runtime_autonomy.status(rt)["paused"]:
-            return False
         scheduler_logger.info(f"Triggering heartbeat {task_id} for {agent_name}")
         recovery_header = ""
         if scheduled_for is not None:
@@ -1465,10 +1612,6 @@ class TaskScheduler:
         """Run one due cron while preserving loop and action semantics."""
         task_id = cron["id"]
         agent_name = cron["agent"]
-        from orchestrator import runtime_autonomy
-
-        if runtime_autonomy.status(runtime_map[agent_name])["paused"]:
-            return False
         action = cron.get("action", "enqueue_prompt")
 
         loop_meta = cron.get("loop_meta")
@@ -1685,11 +1828,22 @@ class TaskScheduler:
                         continue
 
                     rt = runtime_map[agent_name]
-                    from orchestrator import runtime_autonomy
-
-                    if runtime_autonomy.status(rt)["paused"]:
+                    if self._nudge_lease_is_active(
+                        task_id,
+                        agent_name=agent_name,
+                        runtime=rt,
+                    ):
+                        scheduler_logger.info(
+                            "Skipping nudge %s for %s: invocation lease active.",
+                            task_id,
+                            agent_name,
+                        )
+                        self.state["nudges"][task_id] = now
+                        state_changed = True
                         continue
-                    if _runtime_busy(rt):
+                    if _runtime_busy(rt) or await self._agent_has_managed_background_work(
+                        agent_name
+                    ):
                         scheduler_logger.info(f"Skipping nudge {task_id} for {agent_name}: runtime busy.")
                         self.state["nudges"][task_id] = now
                         state_changed = True
@@ -1709,18 +1863,56 @@ class TaskScheduler:
                         continue
 
                     scheduler_logger.info(f"Triggering nudge {task_id} for {agent_name}")
-                    request_id = await rt.enqueue_request(
-                        chat_id=self.authorized_id,
-                        prompt=prompt,
-                        source="scheduler",
-                        summary=f"Nudge Task [{task_id}]",
-                        scheduler_context={
-                            "kind": "nudge",
-                            "task_id": task_id,
-                            "trigger": "scheduled",
-                        },
-                    )
-                    self._register_nudge_completion_listener(rt, task_id, request_id)
+                    invocation_id = f"nudge-{uuid4().hex[:16]}"
+                    agent_stop_epoch = self.stop_fences.current(agent_name).epoch
+                    lease = {
+                        "invocation_id": invocation_id,
+                        "agent": agent_name,
+                        "request_id": "",
+                        "agent_stop_epoch": agent_stop_epoch,
+                        "acquired_at": now,
+                    }
+                    self._nudge_leases()[task_id] = lease
+                    self._save_state()
+                    try:
+                        request_id = await rt.enqueue_request(
+                            chat_id=self.authorized_id,
+                            prompt=prompt,
+                            source="scheduler",
+                            summary=f"Nudge Task [{task_id}]",
+                            scheduler_context={
+                                "kind": "nudge",
+                                "task_id": task_id,
+                                "trigger": "scheduled",
+                            },
+                            request_metadata={
+                                "origin_kind": "nudge",
+                                "origin_id": task_id,
+                                "root_run_id": invocation_id,
+                                "agent_stop_epoch": agent_stop_epoch,
+                            },
+                        )
+                    except BaseException:
+                        self._release_nudge_lease(
+                            task_id,
+                            invocation_id=invocation_id,
+                        )
+                        raise
+                    if request_id:
+                        lease["request_id"] = str(request_id)
+                        self._save_state()
+                        self._register_nudge_completion_listener(
+                            rt,
+                            task_id,
+                            request_id,
+                            invocation_id=invocation_id,
+                            agent_stop_epoch=agent_stop_epoch,
+                        )
+                    else:
+                        self._release_nudge_lease(
+                            task_id,
+                            invocation_id=invocation_id,
+                        )
                     meta["count"] = count
                     self._save_tasks(tasks)
                     self.state["nudges"][task_id] = now

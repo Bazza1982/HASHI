@@ -12,6 +12,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from orchestrator.agent_stop_fence import (
+    AgentStopFenceStore,
+    record_predates_fence,
+)
 from orchestrator.process_execution import (
     decode_process_output,
     process_group_kwargs,
@@ -353,7 +357,12 @@ class BackgroundJobManager:
         self.logs_dir = self.base_dir / "logs"
         self.store = BackgroundJobStore(self.base_dir / "jobs.db")
         self.kernel = kernel
+        self.stop_fences = AgentStopFenceStore(
+            self.base_dir.parent / "runtime_control" / "agent_stop_fences.db"
+        )
         self._processes: dict[str, asyncio.subprocess.Process] = {}
+        self._launch_tasks: dict[str, asyncio.Task[BackgroundJobRecord]] = {}
+        self._cancel_locks: dict[str, asyncio.Lock] = {}
         self._monitor_tasks: dict[str, asyncio.Task[Any]] = {}
         self._stream_tasks: dict[str, list[asyncio.Task[Any]]] = {}
         self._started = False
@@ -427,6 +436,11 @@ class BackgroundJobManager:
         stdout_path = job_log_dir / "stdout.log"
         stderr_path = job_log_dir / "stderr.log"
         now = utc_now()
+        origin_payload = dict(origin or {})
+        origin_payload.setdefault(
+            "agent_stop_epoch",
+            self.stop_fences.current(str(agent or "unknown")).epoch,
+        )
         command_payload = {
             "mode": "argv" if argv else "shell",
             "display": " ".join(argv or []) if argv else command,
@@ -468,7 +482,7 @@ class BackgroundJobManager:
                 state="created",
                 agent=str(agent or "unknown"),
                 command=command_payload,
-                origin=dict(origin or {}),
+                origin=origin_payload,
                 policy=policy,
                 process={},
                 logs=logs,
@@ -478,40 +492,63 @@ class BackgroundJobManager:
             )
         )
         self.store.update(job_id, state="starting")
-        try:
-            child_env = dict(os.environ)
-            child_env.setdefault("PYTHONIOENCODING", "utf-8")
-            child_env.setdefault("PYTHONUTF8", "1")
-            process = await asyncio.create_subprocess_exec(
-                *spawn_argv,
-                cwd=str(cwd_path),
-                env=child_env,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                **process_group_kwargs(),
-            )
-        except Exception as exc:
-            return self.store.update(job_id, state="start_failed", ended_at=utc_now(), error=str(exc))
 
-        process_meta = {
-            "pid": process.pid,
-            "pgid": self._pgid(process.pid),
-            "started_at": utc_now(),
-            "ended_at": None,
-            "returncode": None,
-            "process_scope": "process_tree" if os.name == "nt" else "process_group",
-            "shell": shell_name,
-            "executable": launcher_executable,
-            "resolved_executable": resolved_executable,
-            "launcher": launcher,
-            "launcher_executable": launcher_executable,
-            "encoding": encoding,
-        }
-        record = self.store.update(job_id, state="running", process=process_meta)
-        self._processes[job_id] = process
-        self._monitor_tasks[job_id] = asyncio.create_task(self._monitor_job(job_id, process), name=f"background-job:{job_id}")
-        logger.info("Background job %s started pid=%s", job_id, process.pid)
+        async def launch() -> BackgroundJobRecord:
+            try:
+                child_env = dict(os.environ)
+                child_env.setdefault("PYTHONIOENCODING", "utf-8")
+                child_env.setdefault("PYTHONUTF8", "1")
+                process = await asyncio.create_subprocess_exec(
+                    *spawn_argv,
+                    cwd=str(cwd_path),
+                    env=child_env,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    **process_group_kwargs(),
+                )
+            except Exception as exc:
+                return self.store.update(job_id, state="start_failed", ended_at=utc_now(), error=str(exc))
+
+            process_meta = {
+                "pid": process.pid,
+                "pgid": self._pgid(process.pid),
+                "started_at": utc_now(),
+                "ended_at": None,
+                "returncode": None,
+                "process_scope": "process_tree" if os.name == "nt" else "process_group",
+                "shell": shell_name,
+                "executable": launcher_executable,
+                "resolved_executable": resolved_executable,
+                "launcher": launcher,
+                "launcher_executable": launcher_executable,
+                "encoding": encoding,
+            }
+            latest = self.store.get(job_id) or record
+            stopped = self._completion_suppression_reason(latest) is not None
+            saved = self.store.update(
+                job_id, state="cancel_requested" if stopped else "running",
+                process=process_meta,
+            )
+            self._processes[job_id] = process
+            self._monitor_tasks[job_id] = asyncio.create_task(self._monitor_job(job_id, process), name=f"background-job:{job_id}")
+            logger.info("Background job %s started pid=%s", job_id, process.pid)
+            return saved
+
+        launch_task = asyncio.create_task(launch(), name=f"background-launch:{job_id}")
+        self._launch_tasks[job_id] = launch_task
+        try:
+            record = await asyncio.shield(launch_task)
+        except asyncio.CancelledError:
+            # The OS may already have created a child before returning its
+            # handle. Keep ownership until launch resolves, then reap it.
+            await self.cancel(job_id)
+            raise
+        finally:
+            self._launch_tasks.pop(job_id, None)
+        record = self.store.get(job_id) or record
+        if record.state == "cancel_requested":
+            return await self.cancel(job_id)
         return record
 
     def get(self, job_id: str) -> BackgroundJobRecord | None:
@@ -543,12 +580,42 @@ class BackgroundJobManager:
             raise KeyError(job_id)
         if record.is_terminal:
             return record
-        self.store.update(job_id, state="cancel_requested")
-        process = self._processes.get(job_id)
-        if process is None:
-            return self.store.update(job_id, state="abandoned_after_restart", ended_at=utc_now(), error="process_not_attached")
-        await self._terminate_process_group(process, grace_seconds=grace_seconds)
-        return self.store.update(job_id, state="cancelled", ended_at=utc_now(), returncode=process.returncode)
+        lock = self._cancel_locks.setdefault(job_id, asyncio.Lock())
+        async with lock:
+            record = self.store.get(job_id)
+            if record.is_terminal:
+                return record
+            self.store.update(job_id, state="cancel_requested")
+            launch_task = self._launch_tasks.get(job_id)
+            if launch_task is not None:
+                # A pending spawn is still owned work, not an abandoned job.
+                await asyncio.shield(launch_task)
+                record = self.store.get(job_id)
+                if record.is_terminal:
+                    self._cancel_locks.pop(job_id, None)
+                    return record
+            process = self._processes.get(job_id)
+            if process is None:
+                self._cancel_locks.pop(job_id, None)
+                return self.store.update(job_id, state="abandoned_after_restart", ended_at=utc_now(), error="process_not_attached")
+            await self._terminate_process_group(process, grace_seconds=grace_seconds)
+            return self.store.update(job_id, state="cancelled", ended_at=utc_now(), returncode=process.returncode)
+
+    async def cancel_agent(
+        self,
+        agent: str,
+        *,
+        grace_seconds: float = 2.0,
+    ) -> list[BackgroundJobRecord]:
+        """Cancel only non-terminal managed jobs owned by one Agent."""
+
+        records = self.list(agent=str(agent), states=NONTERMINAL_STATES, limit=-1)
+        cancelled: list[BackgroundJobRecord] = []
+        for record in records:
+            cancelled.append(
+                await self.cancel(record.job_id, grace_seconds=grace_seconds)
+            )
+        return cancelled
 
     async def _monitor_job(self, job_id: str, process: asyncio.subprocess.Process) -> None:
         record = self.store.get(job_id)
@@ -598,6 +665,7 @@ class BackgroundJobManager:
             self._processes.pop(job_id, None)
             self._monitor_tasks.pop(job_id, None)
             self._stream_tasks.pop(job_id, None)
+            self._cancel_locks.pop(job_id, None)
 
     async def _copy_stream(self, stream: asyncio.StreamReader | None, path: Path, max_bytes: int) -> int:
         if stream is None:
@@ -673,6 +741,11 @@ class BackgroundJobManager:
 
     async def _notify(self, record: BackgroundJobRecord) -> None:
         notification = dict(record.notification)
+        suppression = self._completion_suppression_reason(record)
+        if suppression:
+            notification["delivery_suppressed_reason"] = suppression
+            self.store.update(record.job_id, notification=notification)
+            return
         should_notify = (
             (record.state == "succeeded" and notification.get("notify_on_complete"))
             or (record.state != "succeeded" and notification.get("notify_on_failure"))
@@ -705,6 +778,11 @@ class BackgroundJobManager:
         notification = dict(record.notification)
         if notification.get("agent_event_enqueued"):
             return
+        suppression = self._completion_suppression_reason(record)
+        if suppression:
+            notification["agent_event_suppressed_reason"] = suppression
+            self.store.update(record.job_id, notification=notification)
+            return
         should_trigger = (
             (record.state == "succeeded" and notification.get("trigger_agent_on_complete"))
             or (record.state != "succeeded" and notification.get("trigger_agent_on_failure"))
@@ -734,6 +812,12 @@ class BackgroundJobManager:
                     deliver_to_telegram=True,
                     request_metadata={
                         "agent_activity_context": activity_context,
+                        "agent_stop_epoch": record.origin.get(
+                            "agent_stop_epoch", 0
+                        ),
+                        "root_request_id": record.origin.get("request_id"),
+                        "origin_kind": "background_job",
+                        "origin_id": record.job_id,
                     },
                     idempotency_key=(
                         f"background-job-event:{record.job_id}:{record.state}"
@@ -750,6 +834,25 @@ class BackgroundJobManager:
 
         notification["agent_event_errors"] = errors
         self.store.update(record.job_id, notification=notification)
+
+    def _completion_suppression_reason(
+        self,
+        record: BackgroundJobRecord,
+    ) -> str | None:
+        if record.state in {
+            "cancelled",
+            "cancel_requested",
+            "abandoned_after_restart",
+        }:
+            return "managed_job_cancelled"
+        fence = self.stop_fences.current(record.agent)
+        if record_predates_fence(
+            fence,
+            origin=record.origin,
+            created_at=record.created_at,
+        ):
+            return f"stale_after_agent_stop_epoch_{fence.epoch}"
+        return None
 
     def _runtime_for_agent(self, agent: str) -> Any | None:
         for runtime in getattr(self.kernel, "runtimes", []) if self.kernel is not None else []:

@@ -86,7 +86,11 @@ async def test_delay_persists_and_dispatches_through_normal_text_queue_when_due(
             "prompt": "send me a message to say hi",
             "source": "text",
             "summary": "send me a message to say hi",
-            "request_metadata": {"_hashi_autonomous_wakeup": "delayed"},
+            "request_metadata": {
+                "agent_stop_epoch": 0,
+                "origin_kind": "delayed_message",
+                "origin_id": record["id"],
+            },
         }
     ]
     assert runtime.transcript == [("user", "send me a message to say hi", "text")]
@@ -133,7 +137,7 @@ async def test_delayed_message_preserves_session_route_across_restart(tmp_path):
         "session_channel_key": "window-a",
     }
     first = _scheduler(tmp_path)
-    await first.schedule_delayed_message(
+    record = await first.schedule_delayed_message(
         agent_name="zelda",
         chat_id=0,
         prompt="continue this Session later",
@@ -149,7 +153,9 @@ async def test_delayed_message_preserves_session_route_across_restart(tmp_path):
 
     assert runtime.enqueued[0]["request_metadata"] == {
         **metadata,
-        "_hashi_autonomous_wakeup": "delayed",
+        "agent_stop_epoch": 0,
+        "origin_kind": "delayed_message",
+        "origin_id": record["id"],
     }
     assert runtime.enqueued[0]["deliver_to_telegram"] is False
 

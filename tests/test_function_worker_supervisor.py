@@ -261,6 +261,9 @@ async def test_worker_scheduler_facade_creates_via_rpc_in_scheduler_owned_state(
         assert record["request_metadata"] == {
             "session_id": "session-1",
             "surface": "telegram",
+            "agent_stop_epoch": 0,
+            "origin_kind": "delayed_message",
+            "origin_id": record["id"],
         }
         assert record["deliver_to_telegram"] is False
         assert await scheduler.list_delayed_messages("zelda") == [record]

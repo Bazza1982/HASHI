@@ -2,10 +2,13 @@
 
 ## 2026-10-13 complete debug-call reconciliation
 
-The user requests that all correct HASHI3/HASHI4 repairs be preserved together,
-without a new branch or worktree. Integration stays on HASHI3's existing
-`debug-call`; one reviewed merge retains both histories and the complete
-65-path inventory in the [reconciliation record](repairs/DEBUG_CALL_RECONCILIATION_20261013.md).
+The user requested preservation of all correct HASHI3/HASHI4 repairs, then
+explicitly directed all ongoing work back to `main`. The reviewed merge is
+complete; HASHI3 and HASHI4 share GitHub `main`, and Workbench uses its own
+GitHub `main`. Continue only on those existing `main` branches, without a new
+branch or worktree. The [reconciliation record](repairs/DEBUG_CALL_RECONCILIATION_20261013.md)
+retains both original histories, the complete 65-path inventory, and closeout
+evidence. Earlier `debug-call` construction instructions below are superseded.
 
 PAO Functions preserve the once-only canonical opening, all opening-segment TTS
 ordering, terminal Phone attempt cleanup and durable safe provider errors. PCM

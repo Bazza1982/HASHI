@@ -1014,15 +1014,6 @@ class FlexibleAgentRuntime:
         idempotency_key: str | None = None,
         reply_to_message_id: Any | None = None,
     ):
-        from orchestrator import runtime_autonomy
-
-        async with runtime_autonomy.lock_for(self):
-            autonomy_allowed, autonomy_generation = runtime_autonomy.admission_snapshot(
-                self, source, request_metadata
-            )
-        if not autonomy_allowed:
-            self.logger.warning("Autonomous wakeup declined after /stop: source=%s", source)
-            return None
         # Mirror targets are server-owned. Legacy client delivery flags cannot
         # override the owner's persistent connector preference.
         from orchestrator import runtime_session
@@ -1114,6 +1105,28 @@ class FlexibleAgentRuntime:
             metadata=request_metadata,
             prompt=clean_prompt,
         )
+        from orchestrator.agent_stop_fence import current_runtime_epoch
+
+        current_stop_epoch = current_runtime_epoch(self)
+        supplied_stop_epoch = metadata.get("agent_stop_epoch")
+        if supplied_stop_epoch is not None:
+            try:
+                supplied_stop_epoch = int(supplied_stop_epoch)
+            except (TypeError, ValueError):
+                self.error_logger.error(
+                    "Rejected request with invalid Agent stop epoch from %s",
+                    source,
+                )
+                return None
+            if supplied_stop_epoch < current_stop_epoch:
+                self.message_logger.info(
+                    "Rejected stale request from %s at stop epoch %s (current=%s)",
+                    source,
+                    supplied_stop_epoch,
+                    current_stop_epoch,
+                )
+                return None
+        metadata["agent_stop_epoch"] = current_stop_epoch
         if str(source or "").strip().casefold() == "hchat-exchange":
             exchange_context = metadata.get(HCHAT_CONTEXT_METADATA_KEY)
             if not (
@@ -1452,8 +1465,10 @@ class FlexibleAgentRuntime:
             request_content=normalized_request_content,
             attachment_manifest=manifest,
         )
-        async with runtime_autonomy.lock_for(self):
-            if not runtime_autonomy.admission_is_current(self, autonomy_generation):
+        from orchestrator.agent_stop_fence import lock_for as stop_fence_lock_for
+
+        async with stop_fence_lock_for(self):
+            if current_runtime_epoch(self) != current_stop_epoch:
                 if accepted is not None:
                     await asyncio.to_thread(
                         self.session_store.finish_request,
@@ -1967,7 +1982,11 @@ class FlexibleAgentRuntime:
             raise
 
     def _backend_busy(self) -> bool:
-        return self.is_generating or (not self.queue.empty())
+        return (
+            self.is_generating
+            or (not self.queue.empty())
+            or bool(getattr(self, "_background_request_ids", set()))
+        )
 
     def _sync_workzone_to_backend_config(self) -> None:
         runtime_workzone.sync_workzone_to_backend_config(self)
@@ -2732,10 +2751,6 @@ class FlexibleAgentRuntime:
         return idle_for >= min_idle_seconds
 
     async def process_parked_topic_followups(self, now_dt: datetime | None = None):
-        from orchestrator import runtime_autonomy
-
-        if runtime_autonomy.status(self)["paused"]:
-            return
         now_dt = now_dt or datetime.now()
         if not self.telegram_connected or not self.is_idle_for_proactive_message():
             return
@@ -3006,10 +3021,6 @@ class FlexibleAgentRuntime:
         *,
         scheduler_context: Mapping[str, str] | None = None,
     ) -> tuple[bool, str | None]:
-        from orchestrator import runtime_autonomy
-
-        if runtime_autonomy.status(self)["paused"]:
-            return False, "Agent autonomous wakeups are paused by /stop"
         if str(skill_id or "").casefold() == "dream":
             # Legacy scheduled Dream jobs must never reach the retired generic
             # memory/AGENT.md writer. Route them through native HER Dream.
@@ -3071,10 +3082,6 @@ class FlexibleAgentRuntime:
         args: str,
         task_id: str,
     ) -> tuple[bool, str | None]:
-        from orchestrator import runtime_autonomy
-
-        if runtime_autonomy.status(self)["paused"]:
-            return False, "Agent autonomous wakeups are paused by /stop"
         from orchestrator.automation_runner import run_automation
 
         if not self.skill_manager:

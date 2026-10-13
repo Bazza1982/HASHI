@@ -1,24 +1,18 @@
 # HASHI Agent FYI
 
-October 13 `debug-call` reconciliation preserves H4 Call/Phone repairs and
-main's memory safety together. The [65-file record](repairs/DEBUG_CALL_RECONCILIATION_20261013.md)
-separates complete source alignment from runtime adoption.
+October 13: HASHI3/HASHI4 and Workbench use GitHub `main`; continue there,
+without new branches/worktrees. [Reconciliation](repairs/DEBUG_CALL_RECONCILIATION_20261013.md)
+preserves the repairs; source and runtime adoption remain separate.
 
-October 13 Call camera decision: local preview is not proof that the Agent can
-see, but slow vision inference is also not proof that the camera failed. Video
-Call prepares one default camera during ringback and falls back to voice when no
-first frame reaches HASHI. Once frames are accepted, pending/delayed inference
-keeps the camera live; only stopped frame ingress or a confirmed initial vision
-failure disables it. Older snapshot responses cannot cancel a newer camera
-transition. Multi-camera users can replace the active source on the same Call
-through a 44×44 camera-and-swap action; no-camera startup still uses voice.
-Diagnostics retain state, epoch, fallback reason, frame age, and ignored stale
-responses without image content. Camera content remains silent context: never
-announce video or ordinary appearance by default; mention it unprompted only
-when exceptionally noticeable, directly relevant, and socially natural.
-Protected Core, Phone, models, reasoning, STT/TTS and Session ownership are
-unchanged. HASHI4 source deployment, the user's reboot, and its live acceptance
-remain separate.
+October 13 Call camera decision: video prepares a default camera during
+ringback; no first frame means voice fallback. Local preview is not proof of
+Agent vision. Once frames arrive, slow inference keeps the camera live; only
+stopped ingress or confirmed initial vision failure disables it. Stale
+snapshots cannot reverse newer camera changes. Multi-camera users can swap
+sources on the same Call. Camera content stays silent unless exceptionally
+noticeable, directly relevant and socially natural. Phone, model, reasoning,
+STT/TTS and Session ownership remain unchanged. See
+[Call decision](HASHI_CALL_INTERACTION_2026-10-04.md) for the complete contract.
 
 Earlier October 11-12 Call, microphone, restart and hangup checkpoints are
 preserved in [history](AGENT_FYI_HISTORY_2026-10-13.md). The current Call
@@ -103,6 +97,13 @@ Live Phone defaults on; a missing provider API key blocks calls and must be name
 Phone failures retain a safe durable cause: content policy, authentication, quota, rate limit, rejected configuration and provider outage remain distinct. Failed/interrupted panels stay until dismissal; normal hang-up may dismiss automatically. Terminal calls settle pending attempts and release busy state across Function replacement.
 
 Renderers/catalogs own UI text. /language changes shared UI, /tui language local TUI; neither translates replies/IDs. TUI switches freeze generation/Agent/capabilities/Session. Remote authenticates. /telegram off and /whatsapp off disable future mirrors, preserving origin replies. /think and /commentary are independent.
+
+`/stop` is Agent-wide across Sessions. It advances a durable stop epoch,
+cancels work admitted before that epoch, and blocks stale background or nudge
+callbacks from starting more work. Cron, heartbeat, and nudge definitions stay
+enabled. In-flight process launches stay owned until cancelled and reaped;
+stop covers every owned job, not one list page. See
+[Agent stop fence](HASHI_AGENT_STOP_FENCE_DECISION.md).
 
 Media bind one draft/instance/Agent/Run; Remote sends managed bytes. HERV3 gains no wider authority. Safe Voice uses typed confirm/discard; missing idempotency blocks upload and stale media is discarded. /voice uses a validated Function bundle/local media; Workbench gets Session audio, Telegram its voice renderer.
 
