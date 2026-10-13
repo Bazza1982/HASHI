@@ -178,8 +178,17 @@ async def test_call_opening_uses_typed_tool_free_speech_and_persists_one_assista
         "client_id": "client-1",
     }
     ports = HashiPorts(api)
+    visual_context = {
+        "type": "hashi.call-opening-visual",
+        "version": 1,
+        "source": "user_shared_camera",
+        "observation_authority": "untrusted_data",
+        "captured_at": "2026-10-13T00:00:00Z",
+        "observation": "A person is seated in front of the camera.",
+    }
     text = await ports.opening(
-        "owner", binding, {"tts": {}}, {"tts": {"model": "fixture-tts"}}
+        "owner", binding, {"tts": {}}, {"tts": {"model": "fixture-tts"}},
+        visual_context,
     )
     assert text == "您好，我接到您的电话了。请讲。"
     recorded = ports.persist_opening("owner", binding, text)
@@ -193,6 +202,9 @@ async def test_call_opening_uses_typed_tool_free_speech_and_persists_one_assista
     assert operation == "call_speak"
     assert payload["scope"]["type"] == "hashi.call-speech-scope"
     assert payload["state"]["instructions"] == "effective PCM"
+    assert payload["state"]["source_context"] == visual_context
+    assert "silent context" in payload["state"]["goal"]
+    assert "exceptionally noticeable" in payload["state"]["goal"]
     assert "earlier question" in payload["state"]["goal"]
     assert "short reply" not in payload["state"]["goal"]
 

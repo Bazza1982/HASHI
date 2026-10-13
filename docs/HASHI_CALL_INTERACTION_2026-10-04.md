@@ -1,5 +1,37 @@
 # Phone and Call interaction decision
 
+## 2026-10-13 Agent-visible video readiness and conversational use
+
+The user approved making Agent-usable vision, rather than a successful local
+camera preview, the source of truth. Video Call now opens the camera during
+ringback, waits for local readiness before starting the Agent opening, and sends
+the first frame while ringback continues. The opening waits at most eight
+seconds for a completed observation. If that does not arrive, the same Call
+continues by voice, local preview turns off, and the camera control remains an
+explicit retry. This is not a cross-transport fallback to Phone.
+
+The visible state machine is preparing, current, delayed, or voice-only.
+Observations are current through 12 seconds and remain usable with a visible
+delay warning through 20 seconds. After that, the camera is disabled until the
+caller retries. One transient upload/provider failure retains the last usable
+observation; increasing frame cadence is explicitly not the remedy.
+
+The first observation is untrusted silent context for the natural once-only
+greeting. The Agent must not default to “video connected”/“I can see you” or
+describe ordinary appearance, clothing, expression, or surroundings. It may
+volunteer a visual only when exceptionally noticeable, directly relevant, and
+natural for a polite human; otherwise visuals are discussed when the caller
+asks or refers to them. The same conservative rule applies to later turns.
+
+PCM owns that conversational policy, PAO Call Function owns readiness and the
+frozen observation, and Frontend Connector owns preflight, overlay, fallback,
+and retry presentation. Protected Core, models, reasoning, frame cadence, STT,
+TTS, Session ownership, and Phone remain unchanged. Focused red evidence
+captured the former startup race, local/Agent visibility mismatch, missing
+proxy field and missing overlays. Offline validation passes 224 HASHI3 Call
+cases, 113 Workbench Call cases, and the production Workbench build. Runtime
+adoption and physical acceptance remain separate.
+
 ## 2026-10-12 caller barge-in and transport evidence
 
 The user approved full-duplex-style caller interruption for direct Call without

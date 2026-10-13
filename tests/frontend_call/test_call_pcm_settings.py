@@ -8,7 +8,7 @@ from orchestrator.message_context import (seal_connector_evidence, apply_connect
     build_message_context_snapshot, pcm_message_context_section, CONNECTOR_EVIDENCE_METADATA_KEY)
 from orchestrator.bridge_memory import BridgeContextAssembler, BridgeMemoryStore
 from orchestrator.pcm import render_pcm_document
-from orchestrator.frontend_call.context import CALL_INTERACTION_GUIDANCE
+from orchestrator.frontend_call.context import CALL_INTERACTION_GUIDANCE, project_call_context
 from orchestrator.her_v2.v3_prompt import compile_main_prompt
 from orchestrator.her_v2.backend_session import HerBackendSessionCoordinator
 from test_call_service import document
@@ -25,6 +25,20 @@ def test_call_presentation_is_spoken_without_a_short_answer_limit():
     assert "call.valid_at" in CALL_INTERACTION_GUIDANCE
     assert "elapsed time" in CALL_INTERACTION_GUIDANCE
     assert "Do not mention time unless it is relevant" in CALL_INTERACTION_GUIDANCE
+    assert "silent context" in CALL_INTERACTION_GUIDANCE
+    assert "exceptionally noticeable" in CALL_INTERACTION_GUIDANCE
+    assert "ordinary appearance" in CALL_INTERACTION_GUIDANCE
+
+
+def test_delayed_but_usable_camera_observation_reaches_the_agent():
+    captured_at = (datetime.now(timezone.utc) - timedelta(seconds=13)).isoformat()
+    projected = project_call_context({
+        'version': 2, 'call_id': 'call-1', 'turn_id': 'turn-1', 'mode': 'video',
+        'camera': {'state': 'delayed'}, 'captured_at': captured_at,
+        'observation': 'A hand holds a red cup.', 'freshness_seconds': 20,
+    })
+    assert projected['camera']['state'] == 'delayed'
+    assert projected['camera']['observation'] == 'A hand holds a red cup.'
 
 
 

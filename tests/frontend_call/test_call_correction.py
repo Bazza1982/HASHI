@@ -1,11 +1,19 @@
 import asyncio
 import base64
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import pytest
 
 from test_call_service import setup, start, wav, finish_task
 from orchestrator.frontend_call.contract import CallError
+
+
+def test_video_policy_has_a_human_readable_readiness_window(tmp_path):
+    service, *_ = setup(tmp_path)
+    policy = service.config.video_policy()
+    assert policy["freshness_seconds"] == 20
+    assert policy["responsive_seconds"] == 12
+    assert policy["startup_timeout_seconds"] == 8
 
 
 def test_call_readiness_and_camera_do_not_depend_on_legacy_selection(tmp_path):
@@ -132,7 +140,7 @@ async def test_silent_video_latest_frame_is_bounded_and_camera_off_discards_late
     await service.invoke('owner', frame(1))
     await asyncio.sleep(0)
     for seq in range(2, 20):
-        clock[0] += 2
+        clock[0] += 0.1
         await service.invoke('owner', frame(seq))
     assert len(calls) == 1 and not ports.accepted
     call = service.calls['call-1']
@@ -143,4 +151,64 @@ async def test_silent_video_latest_frame_is_bounded_and_camera_off_discards_late
     view = await service.invoke('owner', {**binding, 'operation': 'snapshot'})
     assert view['camera']['state'] == 'off'
     assert not call.vision_pending and not call.observation
+    await service.close()
+
+
+async def test_one_failed_observation_keeps_the_last_usable_agent_view(tmp_path):
+    service, _, adapters, base, clock = setup(tmp_path)
+    info = service.config.context('owner', 'agent-a')
+    info['profile']['vision'] = {'target_id': 'eyes', 'options': {}}
+    service.config.save('owner', 'agent-a', info['revision'], info['profile'])
+    binding, _, _ = await start(service, base)
+    await service.invoke('owner', {**binding, 'operation': 'camera', 'enabled': True})
+
+    def frame(sequence, jpeg):
+        return {**binding, 'operation': 'observe', 'frame_sequence': sequence,
+                'image_b64': base64.b64encode(bytes.fromhex(jpeg)).decode(),
+                'captured_at': datetime.now(timezone.utc).isoformat()}
+
+    await service.invoke('owner', frame(1, 'ffd8ffc00008080010001000ffd9'))
+    await service.calls['call-1'].vision_task
+
+    async def fail(*_args):
+        raise CallError('call_provider_rejected', 502)
+
+    adapters.observe = fail
+    clock[0] += 2
+    await service.invoke('owner', frame(2, 'ffd8ffc00008080011001000ffd9'))
+    await service.calls['call-1'].vision_task
+    view = await service.invoke('owner', {**binding, 'operation': 'snapshot'})
+
+    assert view['camera']['state'] == 'fresh'
+    assert view['camera']['observed_sequence'] == 1
+    assert view['camera']['error'] == 'call_provider_rejected'
+    await service.close()
+
+
+async def test_agent_view_reports_delay_then_falls_back_to_voice_when_it_expires(tmp_path):
+    service, _, _, base, clock = setup(tmp_path)
+    info = service.config.context('owner', 'agent-a')
+    info['profile']['vision'] = {'target_id': 'eyes', 'options': {}}
+    service.config.save('owner', 'agent-a', info['revision'], info['profile'])
+    binding, _, _ = await start(service, base)
+    await service.invoke('owner', {**binding, 'operation': 'camera', 'enabled': True})
+    image = base64.b64encode(bytes.fromhex('ffd8ffc00008080010001000ffd9')).decode()
+    await service.invoke('owner', {**binding, 'operation': 'observe', 'frame_sequence': 1,
+        'image_b64': image, 'captured_at': datetime.now(timezone.utc).isoformat()})
+    await service.calls['call-1'].vision_task
+
+    call = service.calls['call-1']
+    delayed = datetime.now(timezone.utc) - timedelta(seconds=13)
+    call.observation.update(captured_at=delayed.isoformat(), captured_unix=delayed.timestamp())
+    view = await service.invoke('owner', {**binding, 'operation': 'snapshot'})
+    assert view['camera']['state'] == 'delayed'
+    assert view['camera']['enabled'] is True
+
+    expired = datetime.now(timezone.utc) - timedelta(seconds=21)
+    call.observation.update(captured_at=expired.isoformat(), captured_unix=expired.timestamp())
+    clock[0] += 21
+    view = await service.invoke('owner', {**binding, 'operation': 'snapshot'})
+    assert view['phase'] == 'active'
+    assert view['camera']['state'] == 'off'
+    assert view['camera']['reason'] == 'observation_unavailable'
     await service.close()

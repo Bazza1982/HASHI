@@ -51,7 +51,7 @@ def project_call_context(value):
         if not isinstance(camera, Mapping):
             return None
         state = camera.get("state", "off")
-        if state not in ("off", "fresh", "pending", "unavailable"):
+        if state not in ("off", "fresh", "delayed", "pending", "unavailable"):
             return None
         captured_at = value.get("captured_at")
         observation = str(value.get("observation") or "")[:2400]
@@ -61,15 +61,15 @@ def project_call_context(value):
             if stamp.tzinfo is None:
                 raise ValueError()
             age = (datetime.now(timezone.utc) - stamp).total_seconds()
-        fresh = (state == "fresh" and age is not None
-                 and -3 <= age <= min(30, int(value.get("freshness_seconds", 8))))
+        usable = (state in ("fresh", "delayed") and age is not None
+                  and -3 <= age <= min(30, int(value.get("freshness_seconds", 20))))
         return {"type": "hashi.call-context", "version": 1,
                 "call_id": call_id, "turn_id": turn_id, "mode": mode,
                 "interaction": "conversation_with_current_user", "valid_at": value.get("observed_at"),
-                "scope": "current_input_only", "camera": {"state": state if fresh or state != "fresh" else "unavailable",
+                "scope": "current_input_only", "camera": {"state": state if usable or state not in ("fresh", "delayed") else "unavailable",
                   "source": "user_shared_camera", "captured_at": captured_at,
-                  "observation": observation if fresh else None, "observation_authority": "untrusted_data",
-                  "freshness_seconds": value.get("freshness_seconds", 8)}}
+                  "observation": observation if usable else None, "observation_authority": "untrusted_data",
+                  "freshness_seconds": value.get("freshness_seconds", 20)}}
     except (CallError, ValueError, TypeError, OverflowError):
         return None
 
@@ -91,7 +91,10 @@ CALL_INTERACTION_GUIDANCE = (
     "'(whispers)', '（小声）' or '*sighs*'; speak the intended words directly. "
     "Do not shorten away requested detail, reasoning, narrative or other essential information. "
     "Camera observations describe the user's shared camera at the stated capture time, not an uploaded-photo task. "
-    "Use visible gestures or objects only when relevant to what the user is saying; do not inventory a scene by default. "
+    "Treat ordinary camera content as silent context. Do not announce that video connected or volunteer commentary "
+    "about ordinary appearance, clothing, expression or surroundings. Mention a visual without being asked only when "
+    "it is exceptionally noticeable, directly relevant and something a polite human would naturally mention. "
+    "Use visible gestures or objects when relevant to what the user is saying; do not inventory a scene by default. "
     "When a fresh observation is available and the user asks what they are showing you, name the salient object "
     "or gesture clearly, adding the relevant visual detail needed to answer the question without mechanically inventorying the scene. "
     "Summarize the relevant detail instead of reading the observation report, visual timecodes or internal processing details. "
