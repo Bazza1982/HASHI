@@ -8,7 +8,7 @@ WORKDIR /app
 ARG HASHI_ENTERPRISE_EXTRAS=""
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git curl ca-certificates \
+    && apt-get install -y --no-install-recommends git curl ca-certificates ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
@@ -18,6 +18,11 @@ RUN pip install --no-cache-dir -r constraints/standard-py312.lock
 COPY . .
 RUN python scripts/provision_privacy_runtime.py \
     && python scripts/provision_privacy_runtime.py --check
+ENV HF_HUB_CACHE=/opt/hashi-media/model-cache
+RUN python scripts/provision_media_runtime.py --bridge-home /opt/hashi-media --runtime-root /opt/hashi-media \
+    && python scripts/provision_media_runtime.py --bridge-home /opt/hashi-media --runtime-root /opt/hashi-media --check
+ENV HASHI_TRANSCRIPTION_PYTHON=/opt/hashi-media/transcription/bin/python
+ENV HASHI_TTS_PYTHON=/opt/hashi-media/tts/bin/python
 RUN python -B -c "from orchestrator.voice_preview_bundle import validate_voice_preview_bundle; validate_voice_preview_bundle()"
 RUN if [ -n "$HASHI_ENTERPRISE_EXTRAS" ]; then \
         pip install --no-cache-dir ".[${HASHI_ENTERPRISE_EXTRAS}]"; \

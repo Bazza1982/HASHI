@@ -38,8 +38,6 @@ def audit_core_model_choices(runtime: Any) -> list[tuple[str, str, str, str]]:
             ("claude_opus", "Claude Opus 4.7", "claude-cli", "claude-opus-4-7"),
             ("claude_opus_46", "Claude Opus 4.6", "claude-cli", "claude-opus-4-6"),
             ("claude_sonnet", "Claude Sonnet 4.6", "claude-cli", "claude-sonnet-4-6"),
-            ("gemini_pro", "Gemini Pro", "gemini-cli", "gemini-2.5-pro"),
-            ("gemini_flash", "Gemini Flash", "gemini-cli", "gemini-2.5-flash"),
             ("deepseek_pro", "DeepSeek Pro", "deepseek-api", "deepseek-v4-pro"),
             ("deepseek_flash", "DeepSeek Flash", "deepseek-api", "deepseek-flash"),
             ("or_v32", "OR DeepSeek V3.2 Exp", "openrouter-api", "deepseek/deepseek-v3.2-exp"),
@@ -69,8 +67,6 @@ def audit_auditor_model_choices(runtime: Any) -> list[tuple[str, str, str, str]]
             ("codex_gpt6_astra", "Codex GPT-6 Astra", "codex-cli", "gpt-6-astra"),
             ("deepseek_pro", "DeepSeek Pro", "deepseek-api", "deepseek-v4-pro"),
             ("deepseek_flash", "DeepSeek Flash", "deepseek-api", "deepseek-flash"),
-            ("gemini_pro", "Gemini Pro", "gemini-cli", "gemini-2.5-pro"),
-            ("gemini_flash", "Gemini Flash", "gemini-cli", "gemini-2.5-flash"),
         ]
     )
 

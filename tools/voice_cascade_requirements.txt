@@ -1,0 +1,7 @@
+# Install only in the isolated Cascade sidecar interpreter, never HASHI Core.
+aiohttp==3.14.3
+aiortc==1.15.0
+av==17.1.0
+faster-whisper==1.2.1
+numpy==2.2.6
+piper-tts==1.8.0

@@ -13,7 +13,6 @@ from collections.abc import Mapping
 from typing import Any
 
 from orchestrator.frontend_command_admission import (
-    FrontendCommandReservation,
     reserve_frontend_command_invocation,
 )
 from orchestrator.frontend_contracts import (
@@ -216,18 +215,36 @@ def accept_runtime_ingress(
         }
     )
 
-    from orchestrator import runtime_session
+    from orchestrator import runtime_session, runtime_transfer
 
-    result = runtime_session.accept_request(
-        runtime,
-        request_id=request_id,
-        chat_id=chat_id,
-        prompt=prompt,
-        source=source,
-        request_metadata=metadata,
-        request_content=request_content,
-        idempotency_key=idempotency_key,
+    normalized_source = str(source or "").strip().casefold()
+    trusted_bridge_ingress = normalized_source.startswith(
+        ("bridge-transfer:", "bridge-fork:")
     )
+    fenced_connector = normalized["connector"]["id"] == "session_api"
+    with runtime_transfer.transfer_admission_lock(runtime):
+        if (
+            fenced_connector
+            and not trusted_bridge_ingress
+            and runtime_transfer.session_request_requires_transfer_fence(
+                request_content
+            )
+        ):
+            redirect = runtime_transfer.authoritative_transfer_redirect_snapshot(
+                runtime
+            )
+            if redirect is not None:
+                raise runtime_transfer.TransferRedirectRequired(redirect)
+        result = runtime_session.accept_request(
+            runtime,
+            request_id=request_id,
+            chat_id=chat_id,
+            prompt=prompt,
+            source=source,
+            request_metadata=metadata,
+            request_content=request_content,
+            idempotency_key=idempotency_key,
+        )
     session, accepted, _owner, _surface, _channel = result
     if str(session.get("session_id") or "") != normalized["target"]["session_id"]:
         raise SessionConflict("frontend ingress Session binding was not preserved")

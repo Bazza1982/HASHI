@@ -190,6 +190,11 @@ def project_frontend_event(
     # Build typed content blocks
     blocks: list[dict[str, Any]] = []
     interface_kind = None
+    if kind == 'run.question.created':
+        from orchestrator.frontend_run_questions import question_blocks
+        blocks = question_blocks(detail)
+        semantic_kind = presentation_channel = 'command'
+        interface_kind = 'display'
     if canonical_presentation is not None:
         candidate_kind = str(
             canonical_presentation.get("semantic_kind") or ""
@@ -303,6 +308,22 @@ def project_frontend_event(
         blocks.append({"type": "text", "text": summary or "Event", "format": "plain"})
 
     created_at = str(raw.get("created_at") or "") or "2026-09-25T00:00:00Z"
+    error_context = detail.get("error_context")
+    public_failure = None
+    if semantic_kind == 'error':
+        from orchestrator.runtime_delivery import build_public_failure
+        public_failure = error_context.get('public_failure') if isinstance(error_context, Mapping) else None
+        if not isinstance(public_failure, Mapping):
+            public_failure = build_public_failure(
+                str(error_context.get('backend') or '') if isinstance(error_context, Mapping) else '',
+                summary, error_context=error_context,
+            )
+        blocks = [{'type':'text', 'text':public_failure['text'], 'format':'plain'}]
+    typed_error_code = (
+        str(error_context.get("error_code") or "").strip()
+        if isinstance(error_context, Mapping)
+        else ""
+    )
 
     return normalize_frontend_event(
         {
@@ -323,6 +344,8 @@ def project_frontend_event(
             "semantic_kind": semantic_kind,
             "presentation_channel": presentation_channel,
             "content_blocks": blocks,
+            **({"error_code": typed_error_code} if typed_error_code else {}),
+            **({'public_failure':public_failure} if public_failure else {}),
             "delivery_intent_ref": None,
             "replaces_event_id": None,
             "superseded_by": None,

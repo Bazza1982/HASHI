@@ -191,6 +191,7 @@ async def _render_and_cache(
     source: her_persona.HERPersonaSource,
     request_id: str,
 ) -> PersonaBackgroundStatus | None:
+    epoch = getattr(runtime, "_persona_background_status_epoch", 0)
     try:
         response = await _invoke_renderer(runtime, _renderer_prompt(source), request_id)
         message = _validated_message(response)
@@ -205,6 +206,11 @@ async def _render_and_cache(
             )
         return None
 
+    if (
+        getattr(runtime, "_persona_background_status_paused", False)
+        or epoch != getattr(runtime, "_persona_background_status_epoch", 0)
+    ):
+        return None
     current = _persona_source(runtime)
     if not current.usable or current.content_sha256 != source.content_sha256:
         # The Persona changed while rendering. Never cache or deliver stale voice.
@@ -223,10 +229,27 @@ async def _render_and_cache(
     return status
 
 
+def cancel_for_quiesce(runtime: Any) -> None:
+    """Stop optional wording work; it never owns a Run or the drain boundary."""
+
+    runtime._persona_background_status_paused = True
+    runtime._persona_background_status_epoch = (
+        getattr(runtime, "_persona_background_status_epoch", 0) + 1
+    )
+    for task in tuple(getattr(runtime, "_persona_background_status_tasks", ())):
+        if not task.done():
+            task.cancel()
+    inflight = getattr(runtime, "_persona_background_status_inflight", None)
+    if isinstance(inflight, dict):
+        inflight.clear()
+
+
 def prepare(runtime: Any, item: Any) -> asyncio.Task | None:
     """Pre-render once per Persona revision while the foreground task runs."""
 
     if not is_enabled_for(runtime, item):
+        return None
+    if getattr(runtime, "_persona_background_status_paused", False):
         return None
     source = _persona_source(runtime)
     if not source.usable or _cached_status(runtime, source) is not None:
@@ -272,6 +295,7 @@ async def _deliver(
     generation_task: asyncio.Task,
     placeholder: Any | None,
 ) -> None:
+    epoch = getattr(runtime, "_persona_background_status_epoch", 0)
     try:
         status = None
         # Persona edits are meaningful progress, so they may trigger another
@@ -301,7 +325,12 @@ async def _deliver(
                     continue
                 break
 
-        if generation_task.done() or status is None:
+        if (
+            generation_task.done()
+            or status is None
+            or getattr(runtime, "_persona_background_status_paused", False)
+            or epoch != getattr(runtime, "_persona_background_status_epoch", 0)
+        ):
             await _delete_placeholder(runtime, item, placeholder)
             return
         current_source = _persona_source(runtime)

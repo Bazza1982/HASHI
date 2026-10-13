@@ -75,8 +75,8 @@ async def test_transcript_identity_and_recovery_are_bound_to_current_session(tmp
     assert payload["context_generation"] == 1
     refs = [m["message_ref"] for m in payload["messages"]]
     assert len(set(refs)) == 3
-    assert payload["messages"][0]["text"] == "hello"
-    assert payload["messages"][0]["canonical"] is True
+    assert payload["messages"][-1]["text"] == "hello"
+    assert payload["messages"][-1]["canonical"] is True
     # Exercise recovery from an explicitly invalid byte cursor on every OS.
     # Path.write_text() newline translation previously made this invalid only
     # on Windows and a valid record boundary on Linux.
@@ -86,7 +86,7 @@ async def test_transcript_identity_and_recovery_are_bound_to_current_session(tmp
     )
     increment = json.loads((await server.handle_transcript_poll(poll)).text)
     assert increment["cursor_reset"] is True
-    assert increment["messages"][0]["message_ref"] == refs[1]
+    assert increment["messages"][0]["message_ref"] == refs[0]
     assert payload["requests"][0]["request_id"] == accepted.request_id
     assert payload["requests"][0]["session_id"] == session["session_id"]
     assert "text" not in payload["requests"][0]
@@ -317,6 +317,41 @@ def test_canonical_snapshot_keeps_transcript_only_thinking_between_run_messages(
         "working",
         "answer",
     ]
+
+
+def test_snapshot_keeps_new_scheduled_results_after_a_full_older_log_page(tmp_path: Path):
+    store = SessionStore(tmp_path / "scheduled.sqlite", instance_id="HASHI3")
+    session = store.ensure_default_session(owner_id="user:7", agent_id="a")
+    workspace = store.session_workspace(session["session_id"], session["context_generation"])
+    workspace.mkdir(parents=True, exist_ok=True)
+    old_rows = [
+        {"role": "assistant", "text": f"old-{index}",
+         "ts": f"2026-10-04T00:{index:02d}:00Z"}
+        for index in range(60)
+    ]
+    (workspace / "transcript.jsonl").write_bytes(
+        "".join(json.dumps(row) + "\n" for row in old_rows).encode("utf-8")
+    )
+    for index in range(8):
+        store.append_presentation_message(
+            session_id=session["session_id"], owner_id="user:7", agent_id="a",
+            role="assistant", text=f"scheduled-{index}", source="scheduler",
+            idempotency_key=f"scheduled-{index}", history_eligible=True,
+        )
+
+    snapshot = build_chat_projection(store, session=store.get_session(session["session_id"]),
+                                     owner_id="user:7", limit=60)
+    assert [row["text"] for row in snapshot["messages"]] == (
+        [f"old-{index}" for index in range(8, 60)]
+        + [f"scheduled-{index}" for index in range(8)]
+    )
+    assert len({row["message_ref"] for row in snapshot["messages"]}) == 60
+    assert snapshot["message_cursor"] == snapshot["messages"][-1]["source_sequence"]
+    polled = build_chat_projection(
+        store, session=store.get_session(session["session_id"]), owner_id="user:7",
+        offset=snapshot["offset"], after_message_ordinal=snapshot["message_cursor"], limit=60,
+    )
+    assert polled["messages"] == []
 
 
 def test_canonical_projection_keeps_final_identity_and_safe_media_metadata(tmp_path: Path):

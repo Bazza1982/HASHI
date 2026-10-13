@@ -45,8 +45,14 @@ def test_macos_portable_builder_pins_the_official_apple_silicon_python_asset() -
 @pytest.mark.platform
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash is unavailable")
 def test_macos_portable_builder_has_valid_bash_syntax() -> None:
+    bash = shutil.which("bash")
+    if __import__("sys").platform == "win32":
+        git = shutil.which("git")
+        native_bash = Path(git).parents[1] / "bin" / "bash.exe" if git else None
+        if native_bash and native_bash.is_file():
+            bash = str(native_bash)
     result = subprocess.run(
-        ["bash", "-n", BUILDER.relative_to(ROOT).as_posix()],
+        [bash, "-n", BUILDER.relative_to(ROOT).as_posix()],
         cwd=ROOT,
         check=False,
         capture_output=True,

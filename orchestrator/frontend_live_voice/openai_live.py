@@ -415,6 +415,9 @@ class OpenAILiveProvider:
         import os
         return str(secrets.get("openai_api_key") or os.environ.get("OPENAI_API_KEY", "")).strip()
 
+    def is_available(self, secrets: Mapping[str, Any]) -> bool:
+        return bool(self.credential(secrets))
+
     def validate_selection(self, model: str, voice: str) -> None:
         if model != "gpt-live-1":
             raise LiveVoiceError("live_model_unqualified", 503)
@@ -424,6 +427,18 @@ class OpenAILiveProvider:
     def media_descriptor(self) -> dict[str, Any]:
         return {"transport": "webrtc", "protocol": self.capabilities.version,
                 "data_channel": "oai-events", "version": 1}
+
+    def billing_descriptor(self, model: str) -> dict[str, Any] | None:
+        if model != "gpt-live-1":
+            return None
+        return {
+            "scope": "voice_media",
+            "currency": "USD",
+            "meter": "session_second",
+            "usd_per_minute": 0.05,
+            "estimated": True,
+            "excludes": ["backend_text_model", "tools"],
+        }
 
     def encode_history(self, messages: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         result = []

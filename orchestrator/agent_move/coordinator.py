@@ -410,6 +410,7 @@ def _prepare_outbound_transfer(
             "status": "packaging",
             "created_at": utc_now_iso(),
             "history_mode": history_mode,
+            "transfer_mode": transfer_mode,
         }
         _atomic_json(state_path, state)
     try:
@@ -504,6 +505,9 @@ def _prepare_outbound_transfer(
     except Exception as exc:
         state["status"] = "prepare_failed"
         state["last_error"] = str(exc)
+        workspace_changes = getattr(exc, "workspace_changes", None)
+        if workspace_changes is not None:
+            state["workspace_changes"] = workspace_changes
         _atomic_json(state_path, state)
         raise
 

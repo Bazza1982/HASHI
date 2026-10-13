@@ -37,7 +37,6 @@ from orchestrator.flexible_backend_registry import (
     PROVIDER_ONLY_ENGINE_IDS,
     canonical_backend_engine,
     get_secret_lookup_order,
-    normalize_effort,
 )
 from orchestrator.her_v2.config import HERv2Config
 from orchestrator.her_v2.v3_config import (
@@ -78,7 +77,9 @@ from orchestrator.privacy_levels import (
     require_herv3_provider_compatibility,
     require_level_available,
 )
-from orchestrator.runtime_effort_options import get_available_efforts as runtime_available_efforts
+from orchestrator.runtime_effort_options import (
+    get_available_efforts as runtime_available_efforts, model_is_allowed,
+)
 from orchestrator.workspace_state import WorkspaceStateStore
 from orchestrator import workzone as workzone_module
 
@@ -378,20 +379,9 @@ class FlexibleBackendManager:
                             )
                             if canonical_engine == HER_V2_ENGINE:
                                 target = self.get_her_v3_target()
-                                choices = runtime_available_efforts(
-                                    target.provider,
-                                    target.model,
-                                    allowed_backends=self.config.allowed_backends,
-                                    provider=True,
-                                )
-                                if normalized not in choices:
-                                    main = self._her_v3_base_config().get("main") or {}
-                                    configured = str(main.get("reasoning") or "").strip().lower()
-                                    normalized = (
-                                        configured if configured in choices
-                                        else "high" if "high" in choices
-                                        else next(iter(choices), "")
-                                    )
+                                repaired = self._supported_her_v3_effort(target, normalized)
+                                if repaired != normalized:
+                                    normalized = repaired
                                     self.logger.warning(
                                         "Repaired unsupported HERV3 effort %r for %s/%s to %r",
                                         raw_effort, target.provider, target.model, normalized,
@@ -751,6 +741,19 @@ class FlexibleBackendManager:
         self._validate_her_v3_target(target)
         return target
 
+    def _supported_her_v3_effort(self, target: HERv3ModelTarget, raw: str | None) -> str:
+        normalized = str(raw or "").strip().casefold()
+        normalized = {"none": "off", "zero": "off"}.get(normalized, normalized)
+        choices = runtime_available_efforts(
+            target.provider, target.model,
+            allowed_backends=self.config.allowed_backends, provider=True,
+        )
+        if normalized in choices:
+            return normalized
+        main = self._her_v3_base_config().get("main") or {}
+        configured = str(main.get("reasoning") or "").strip().casefold()
+        return configured if configured in choices else "high" if "high" in choices else next(iter(choices), "")
+
     def apply_her_v3_target(self, target: HERv3ModelTarget) -> None:
         """Persist one main target and refresh future turns immediately."""
 
@@ -783,6 +786,9 @@ class FlexibleBackendManager:
                     "Run /compact after the active Turn settles, then retry."
                 )
         serialized = target.to_dict()
+        backend_config = next((row for row in self.config.allowed_backends
+                               if canonical_backend_engine(row.get("engine")) == HER_V2_ENGINE), {})
+        effort = self._supported_her_v3_effort(target, backend_config.get("effort"))
 
         def update_state(state: dict[str, Any]) -> dict[str, Any]:
             state[HER_V3_CONFIGURATION_STATE_KEY] = serialized
@@ -794,6 +800,7 @@ class FlexibleBackendManager:
             ):
                 state.pop(key, None)
             self._apply_managed_state_fields(state)
+            state.setdefault("backend_efforts", {})[HER_V2_ENGINE] = effort
             return state
 
         try:
@@ -803,7 +810,12 @@ class FlexibleBackendManager:
         self._her_v3_configuration_override = serialized
         self._her_v2_configuration_override = None
         self._her_v2_configuration_draft = None
+        if effort:
+            backend_config["effort"] = effort
         self._refresh_live_her_v2_configuration(effective, parsed)
+        if self.current_backend is not None and effort:
+            self.current_backend.effort = "zero" if effort == "off" else effort
+            self.current_backend.config.extra["effort"] = effort
 
     def get_her_v2_provider_options(self) -> list[dict[str, Any]]:
         options = build_her_v2_provider_options(
@@ -1332,6 +1344,7 @@ class FlexibleBackendManager:
         backend_extra.pop("model", None)
         backend_extra.pop("models", None)
         backend_extra.pop("default_model", None)
+        backend_extra.pop("available_models", None)
         backend_scope = backend_cfg_raw.get("access_scope", self.config.access_scope)
         backend_extra.pop("access_scope", None)
         extra = {**agent_extra, **backend_extra}
@@ -1365,6 +1378,9 @@ class FlexibleBackendManager:
         resolved_model = target_model or backend_cfg_raw.get("default_model") or backend_cfg_raw.get("model")
         if not resolved_model and isinstance(backend_cfg_raw.get("models"), list):
             resolved_model = next(iter(backend_cfg_raw["models"]), None)
+        if engine != HER_V2_ENGINE and "available_models" in backend_cfg_raw:
+            if not model_is_allowed(engine, resolved_model, backend=backend_cfg_raw):
+                raise ValueError(f"model {resolved_model!r} is not available for backend {engine!r}")
         return AgentConfig(
             name=self.config.name,
             engine=engine,
@@ -1738,12 +1754,16 @@ class FlexibleBackendManager:
             self.logger.error(f"Active backend {engine} not found in allowed_backends.")
             return None
 
-        adapter_cfg = self._build_adapter_config(
-            engine,
-            backend_cfg_raw,
-            target_model=resolved_model,
-            target_provider=resolved_provider,
-        )
+        try:
+            adapter_cfg = self._build_adapter_config(
+                engine,
+                backend_cfg_raw,
+                target_model=resolved_model,
+                target_provider=resolved_provider,
+            )
+        except ValueError as exc:
+            self.logger.error("Backend configuration rejected: %s", exc)
+            return None
 
         backend = None
         initialized = False
@@ -1788,6 +1808,10 @@ class FlexibleBackendManager:
             await backend.shutdown()
         except Exception:
             self.logger.exception("Failed to shut down discarded backend")
+        proxy = getattr(backend, "_browser_gateway_proxy", None)
+        if proxy is not None:
+            await asyncio.to_thread(proxy.close)
+            backend._browser_gateway_proxy = None
 
     def _resolve_tools_config(self, backend_cfg_raw: dict) -> dict | None:
         """Merge global default_tools with per-backend tools config.
@@ -1928,6 +1952,11 @@ class FlexibleBackendManager:
                     getattr(self, "runtime", None), "canonical_audit", None
                 ),
                 access_roots=list(access_roots),
+                search_scope=workzone_module.build_search_scope(
+                    state, owner_id=str(getattr(self.global_config, "authorized_id", "") or ""),
+                    agent_id=str(adapter_cfg.name), agent_home=adapter_cfg.workspace_dir,
+                    execution_cwd=workspace_dir, access_roots=tuple(access_roots),
+                ),
             )
             target = backend if backend is not None else self.current_backend
             target.tool_registry = registry
@@ -2048,7 +2077,7 @@ class FlexibleBackendManager:
 
     async def shutdown(self):
         if self.current_backend:
-            await self.current_backend.shutdown()
+            await self._dispose_backend(self.current_backend)
             self.current_backend = None
 
     async def generate_response(
@@ -2060,9 +2089,45 @@ class FlexibleBackendManager:
         on_stream_event=None,
         request_content: dict[str, Any] | None = None,
     ):
+        from adapters.base import BackendResponse
+        from orchestrator.multimodal_contract import MultimodalContractError
+        from orchestrator.session_attachment_authorization import (
+            bind_backend_attachment_reads, current_run_attachment_grants,
+            released_codex_voice_input,
+        )
+        try:
+            grants = current_run_attachment_grants(self, request_id, request_content)
+            with bind_backend_attachment_reads(self.current_backend, grants):
+                prompt, request_content, transcript_routes = await released_codex_voice_input(
+                    self, request_id, prompt, request_content,
+                )
+                response = await self._generate_response_with_attachment_reads(
+                    prompt, request_id, is_retry=is_retry, silent=silent,
+                    on_stream_event=on_stream_event, request_content=request_content,
+                )
+                if transcript_routes:
+                    metadata = dict(getattr(response, "stream_metadata", None) or {})
+                    metadata["multimodal_routing"] = list(transcript_routes) + list(metadata.get("multimodal_routing") or [])
+                    response.stream_metadata = metadata
+                return response
+        except MultimodalContractError as exc:
+            return BackendResponse(
+                text="", duration_ms=0, error=str(exc), is_success=False,
+                error_code=exc.code, error_retryable=False,
+                stream_metadata={"attachment_id": exc.attachment_id or None},
+            )
+
+    async def _generate_response_with_attachment_reads(
+        self,
+        prompt: str,
+        request_id: str,
+        is_retry: bool = False,
+        silent: bool = False,
+        on_stream_event=None,
+        request_content: dict[str, Any] | None = None,
+    ):
         if not self.current_backend:
             raise RuntimeError("No active backend initialized.")
-        self._refresh_tool_runtime_context(request_id)
         kwargs = {
             "is_retry": is_retry,
             "silent": silent,
@@ -2160,13 +2225,18 @@ class FlexibleBackendManager:
                                 ],
                             },
                         )
-        return await self.current_backend.generate_response(
-            prompt,
-            request_id,
-            **kwargs,
-        )
+        invocation = self._refresh_tool_runtime_context(request_id)
+        try:
+            return await self.current_backend.generate_response(
+                prompt,
+                request_id,
+                **kwargs,
+            )
+        finally:
+            if invocation is not None:
+                invocation.close()
 
-    def _refresh_tool_runtime_context(self, request_id: str) -> None:
+    def _refresh_tool_runtime_context(self, request_id: str):
         registry = getattr(self.current_backend, "tool_registry", None)
         if registry is None:
             return
@@ -2264,7 +2334,6 @@ class FlexibleBackendManager:
             authorization = request_metadata.get("memory_search_authorization")
             if isinstance(authorization, dict):
                 context["memory_search_authorization"] = dict(authorization)
-        registry.audit_context = context
         if str(getattr(self.config, "active_backend", "")) in {
             "codex-cli",
             "claude-cli",
@@ -2274,7 +2343,10 @@ class FlexibleBackendManager:
             # scoped authority cannot be stale from backend initialisation.
             from adapters.hashi_mcp import prepare_hashi_mcp
 
-            prepare_hashi_mcp(
+            return prepare_hashi_mcp(
                 self.current_backend,
                 backend=str(self.config.active_backend),
+                audit_context=context,
             )
+        registry.audit_context = context
+        return None

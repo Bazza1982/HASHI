@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import platform
+import re
 import socket
 import tempfile
 import threading
@@ -283,8 +284,12 @@ def _capability_id(
     device_id: str,
     user_session_id: str,
     capability_kind: str,
+    browser_id: str = "",
 ) -> str:
-    seed = "|".join((instance_id, device_id, user_session_id, capability_kind))
+    parts = [instance_id, device_id, user_session_id, capability_kind]
+    if capability_kind == "browser_control" and browser_id:
+        parts.append(browser_id)
+    seed = "|".join(parts)
     return "cap-" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:32]
 
 
@@ -366,6 +371,8 @@ class DeviceWorkerState:
     advertise_host: str
     wsl_distro: str | None
     logger: logging.Logger
+    browser_id: str = ""
+    browser_name: str = ""
     auto_bind: bool = False
     browser_provider: str = "extension"
     browser_descriptor: str = ""
@@ -384,8 +391,8 @@ class DeviceWorkerState:
         with self.desktop_init_lock:
             if self.desktop_controller is None:
                 from tools.desktop_session import DesktopController
-                from tools.windows_helper.desktop_capture import NativeDesktop
-                self.desktop_controller = DesktopController(NativeDesktop(), lambda: _DeviceLock(self.lock_path))
+                from tools.windows_helper.secure_desktop import native_desktop_for
+                self.desktop_controller = DesktopController(native_desktop_for(self.bridge_home), lambda: _DeviceLock(self.lock_path))
             return self.desktop_controller
 
     @property
@@ -402,6 +409,7 @@ class DeviceWorkerState:
             self.device_id,
             self.user_session_id,
             self.capability_kind,
+            self.browser_id,
         ) + (":embedded" if self.capability_kind == "browser_control" and self.browser_provider == "embedded" else "")
 
     @property
@@ -431,11 +439,16 @@ class DeviceWorkerState:
 
     @property
     def status_path(self) -> Path:
+        suffix = (
+            f"_{self.browser_id}"
+            if self.capability_kind == "browser_control" and self.browser_id
+            else ""
+        )
         return (
             self.bridge_home
             / "state"
             / "device_control"
-            / f"{self.capability_kind}{"-embedded" if self.browser_provider == "embedded" else ""}.json"
+            / f"{self.capability_kind}{suffix}{'-embedded' if self.browser_provider == 'embedded' else ''}.json"
         )
 
     def mark_request(self, request_id: str) -> None:
@@ -517,7 +530,9 @@ class DeviceWorkerState:
                     "locked": None,
                     "error": "Computer Control Worker requires Windows",
                 }
-            healthy = os.name == "nt" and bool(desktop_state.get("interactive"))
+            # A Windows lock or consent screen is capability state, not a dead
+            # authenticated transport. Do not unregister the worker at login.
+            healthy = os.name == "nt" and bool(desktop_state.get("available") or desktop_state.get("locked"))
             detail = {
                 "interactive_session": _default_session_id(),
                 "desktop_platform": platform.system(),
@@ -533,6 +548,14 @@ class DeviceWorkerState:
                 else:
                     bridge = healthcheck(timeout_s=1.0)
                 healthy = bool(bridge.get("connected"))
+                if healthy and not self.browser_name:
+                    meta = (bridge.get("response") or {}).get("extension_meta") or {}
+                    user_agent = str(meta.get("user_agent") or "")
+                    self.browser_name = (
+                        "Microsoft Edge" if "Edg/" in user_agent else
+                        "Google Chrome" if "Chrome/" in user_agent else
+                        "Chromium browser"
+                    )
                 detail = {
                     "bridge_connected": healthy,
                     "bridge_endpoint": bridge.get("endpoint"),
@@ -601,6 +624,12 @@ class DeviceWorkerState:
             from tools.windows_helper.backends import execute_action
 
             return await execute_action(action, args)
+        if str(args.get("cdp_url") or "").strip():
+            raise DeviceWorkerError(
+                "Browser Worker only controls its registered extension; cdp_url is not allowed"
+            )
+        args["bridge_backend"] = "extension"
+        args["_bound_browser_worker"] = True
         return await _execute_browser_action(action, args)
 
     def cleanup(self, *, reason: str) -> dict[str, Any]:
@@ -811,11 +840,15 @@ class DeviceWorkerRequestHandler(BaseHTTPRequestHandler):
                 # Manual actors use a separate typed ingress, not fabricated Agent
                 # IDs. Only the existing Broker knows the authenticated worker key.
                 if state.capability_kind != "computer_control" or payload.get("worker_generation") != _generation_id(state.capability_kind):
-                    raise DesktopError("desktop_target_changed", 409)
+                    error = DesktopError("desktop_target_changed", 409)
+                    error.desktop_diagnostics = {'generation_matches': payload.get('worker_generation') == _generation_id(state.capability_kind)}
+                    raise error
                 actor = payload.get("actor") or {}
                 if actor.get("type") != "user" or set(actor) != {"type", "id"}:
                     raise DesktopError("desktop_actor_invalid", 403)
                 result = state.manual_desktop().handle(action, payload.get("args"), actor["id"], payload.get("desktop_session_id"))
+                if action == "desktop_input":
+                    _event(state.logger, "desktop_input_receipt", elapsed_ms=round((time.perf_counter()-started)*1000,1), ok=True)
                 self._write(HTTPStatus.OK, {"ok": True, "identity": state.identity,
                     "worker_generation": _generation_id(state.capability_kind), "request_id": request_id, "result": result})
                 return
@@ -854,6 +887,21 @@ class DeviceWorkerRequestHandler(BaseHTTPRequestHandler):
             if action in DESKTOP_ACTIONS:
                 # Typed errors are RPC envelopes; HTTP ingress maps the status.
                 # Never leak frame/text/OS exception detail or globally reset input.
+                cause = exc.__cause__ or exc
+                os_error = getattr(cause, "winerror", None)
+                diagnostics = getattr(cause, "desktop_diagnostics", {})
+                private_facts = {key: diagnostics[key] for key in (
+                    "input_desktop_interactive", "thread_on_input_desktop", "window_station_visible", "cursor_at_requested_position",
+                    "generation_matches", "secure_host_session_matches", "secure_host_image_matches")
+                    if isinstance(diagnostics, dict) and isinstance(diagnostics.get(key), bool)}
+                for key in ("frame_age_ms", "input_wait_ms"):
+                    if isinstance(diagnostics, dict) and type(diagnostics.get(key)) is int:
+                        private_facts[key] = max(-1,min(60000,diagnostics[key]))
+                _event(state.logger, "desktop_action_failed", request_id=request_id,
+                    action=action, error_code=getattr(exc, "code", "desktop_worker_failed"),
+                    error_type=type(exc).__name__, cause_type=type(cause).__name__,
+                    os_error=os_error if isinstance(os_error, int) else None,
+                    elapsed_ms=round((time.perf_counter()-started)*1000,1), **private_facts)
                 self._write(HTTPStatus.OK, {"ok": False, "identity": state.identity,
                     "worker_generation": _generation_id(state.capability_kind),
                     "error_code": getattr(exc, "code", "desktop_worker_failed"),
@@ -934,6 +982,7 @@ def _load_bootstrap(state: DeviceWorkerState) -> dict[str, Any]:
 
 
 def _registration_payload(state: DeviceWorkerState) -> dict[str, Any]:
+    from orchestrator.host_identity import physical_host_id, interactive_session_id
     try:
         host_gateway = not ipaddress.ip_address(state.advertise_host).is_loopback
     except ValueError:
@@ -942,10 +991,14 @@ def _registration_payload(state: DeviceWorkerState) -> dict[str, Any]:
         "schema_version": CAPABILITY_REGISTRATION_SCHEMA_VERSION,
         "capability_id": state.capability_id,
         "capability_kind": state.capability_kind,
+        "browser_id": state.browser_id if state.capability_kind == "browser_control" else "",
+        "browser_name": state.browser_name if state.capability_kind == "browser_control" else "",
         "instance_id": state.instance_id,
         "device_id": state.device_id,
         "user_session_id": state.user_session_id,
         "platform": platform.system().lower(),
+        "physical_host_id": physical_host_id(),
+        "interactive_session_id": interactive_session_id(),
         "transport_kind": (
             "authenticated_http_host_gateway"
             if host_gateway
@@ -968,6 +1021,8 @@ def _registration_payload(state: DeviceWorkerState) -> dict[str, Any]:
 
 
 def _register(state: DeviceWorkerState, bootstrap: Mapping[str, Any]) -> None:
+    if state.capability_kind == "browser_control":
+        state.health()
     response = _http_json(
         str(bootstrap["registration_url"]),
         method="POST",
@@ -1113,6 +1168,9 @@ def build_state(args: argparse.Namespace) -> DeviceWorkerState:
         raise DeviceWorkerError("worker port must be between 0 and 65535")
     device_id = str(args.device_id or _default_device_id()).strip()
     user_session_id = str(args.user_session_id or _default_session_id()).strip()
+    browser_id = str(args.browser_id or "").strip().casefold()
+    if browser_id and not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,39}", browser_id):
+        raise DeviceWorkerError("browser-id must be a short ASCII identifier")
     if not device_id or not user_session_id:
         raise DeviceWorkerError("worker device and user-session identities are required")
     if getattr(args, "browser_provider", "extension") == "embedded" and not getattr(args, "browser_descriptor", ""):
@@ -1127,7 +1185,9 @@ def build_state(args: argparse.Namespace) -> DeviceWorkerState:
         bind_host=bind_host,
         advertise_host=advertise_host,
         wsl_distro=str(args.wsl_distro or "").strip() or None,
-        logger=_logger(log_dir / f"{capability_kind}.jsonl"),
+        logger=_logger(log_dir / f"{capability_kind}{'_' + browser_id if browser_id else ''}.jsonl"),
+        browser_id=browser_id,
+        browser_name=str(args.browser_name or "").strip(),
         auto_bind=str(args.host).strip().casefold() == "auto",
         browser_provider=getattr(args, "browser_provider", "extension"),
         browser_descriptor=str(getattr(args, "browser_descriptor", "") or ""),
@@ -1151,6 +1211,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--launch-id", default="", help="Local launcher receipt correlation; grants no capability authority")
     parser.add_argument("--browser-endpoint")
     parser.add_argument("--browser-auth-file")
+    parser.add_argument("--browser-id", default="")
+    parser.add_argument("--browser-name", default="")
     parser.add_argument(
         "--log-dir",
         default=str(

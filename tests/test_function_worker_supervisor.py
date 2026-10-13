@@ -138,6 +138,73 @@ def _handle(kernel: _Kernel, client: _Client) -> AgentRuntimeHandle:
     return AgentRuntimeHandle(kernel, client, _metadata(client.agent_name, client.pid))
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "source", ["bridge-transfer:trf-rpc", "bridge-fork:frk-rpc"]
+)
+async def test_bridge_handoff_enqueue_crosses_worker_rpc_once(source):
+    calls = []
+
+    async def enqueue_api_text(text, **kwargs):
+        calls.append((text, kwargs))
+        return "req-target-once"
+
+    host = FunctionWorkerHost.__new__(FunctionWorkerHost)
+    host.runtime = SimpleNamespace(enqueue_api_text=enqueue_api_text)
+    host.phase = "ACTIVE"
+    host.accepting = True
+
+    async def emit_metadata():
+        return None
+
+    host.emit_metadata = emit_metadata
+
+    async def responder(method, params):
+        return await host.handle_request(method, params)
+
+    kernel = _Kernel()
+    client = _Client("target", 101, responder=responder)
+    handle = _handle(kernel, client)
+
+    request_id = await handle.enqueue_api_text(
+        "continue transferred work",
+        source=source,
+        deliver_to_telegram=True,
+    )
+
+    assert request_id == "req-target-once"
+    assert client.calls == ["runtime.enqueue_api_text"]
+    assert calls == [
+        (
+            "continue transferred work",
+            {
+                "source": source,
+                "deliver_to_telegram": True,
+                "chat_id": None,
+                "request_metadata": {},
+                "idempotency_key": None,
+            },
+        )
+    ]
+
+
+def test_public_metadata_requires_live_worker_and_actual_telegram_ingress():
+    kernel = _Kernel()
+    client = _Client("alpha", 101)
+    handle = _handle(kernel, client)
+    handle.metadata.update(telegram_connected=True, worker_phase="ACTIVE", worker_accepting=True)
+    ingress = {"configured": True, "running": False, "connected": False}
+    kernel.function_workers = SimpleNamespace(telegram_ingress_snapshot=lambda _: ingress)
+    metadata = handle.get_runtime_metadata()
+    assert metadata["online"]
+    assert metadata["telegram_outbound_connected"]
+    assert not metadata["telegram_connected"]
+    ingress.update(running=True, connected=True)
+    assert handle.get_runtime_metadata()["telegram_connected"]
+    client.process.alive = False
+    assert not handle.get_runtime_metadata()["online"]
+
+
 def _scheduler_rpc_stack(tmp_path: Path, *, worker_agent: str):
     kernel = _Kernel()
     state_path = tmp_path / "scheduler_state.json"
@@ -366,23 +433,30 @@ async def test_shutdown_status_change_does_not_call_exiting_worker():
 async def test_runtime_status_failures_are_aggregated_once(
     monkeypatch,
     caplog,
+    tmp_path,
 ):
     def fail_status(_method, _params):
         raise ConnectionResetError("worker channel reset")
 
     kernel = _Kernel()
-    kernel.global_cfg = SimpleNamespace(instance_id="HASHI2")
+    kernel.global_cfg = SimpleNamespace(instance_id="HASHI1")
     alpha = _handle(kernel, _Client("alpha", 101, responder=fail_status))
     beta = _handle(kernel, _Client("beta", 202, responder=fail_status))
     kernel.runtimes.extend((alpha, beta))
     supervisor = FunctionWorkerSupervisor(kernel)
+    from orchestrator.telegram_ingress_diagnostics import TelegramIngressDiagnostics
+    for name in ("alpha", "beta"):
+        diagnostic=TelegramIngressDiagnostics(bridge_home=tmp_path,instance_id="HASHI1",
+            agent=name,generation_id="gen-shared",token="private-token-"+name)
+        diagnostic.begin("get_updates")
+        supervisor._telegram_ingress_diagnostics[name]=diagnostic
     monkeypatch.setattr(
         "orchestrator.function_worker_supervisor.TELEGRAM_STATUS_WARNING_DEBOUNCE_SECONDS",
         0.0,
     )
 
     with caplog.at_level(logging.WARNING, logger="BridgeU.Orchestrator"):
-        await asyncio.gather(
+        results=await asyncio.gather(
             supervisor.set_worker_telegram_status("alpha", False),
             supervisor.set_worker_telegram_status("beta", False),
         )
@@ -399,6 +473,14 @@ async def test_runtime_status_failures_are_aggregated_once(
     assert "Worker IPC channels (ConnectionResetError)" in messages[0]
     assert "does not itself stop an active task" in messages[0]
     assert "Diagnostic code: telegram_status_channel_disconnected" in messages[0]
+
+    assert results==[False,False]
+    for name in ("alpha","beta"):
+        records=supervisor.telegram_ingress_diagnostics(name)["records"]
+        assert records[-1]["stage"]=="status_propagation"
+        assert records[-1]["error"]["type"]=="ConnectionResetError"
+        assert records[-1]["agent"]==name
+        assert "worker channel reset" not in json.dumps(records)
 
 
 @pytest.mark.asyncio
@@ -891,6 +973,48 @@ def test_qualified_generation_cache_round_trip_and_tamper_rejection(
     )
 
 
+@pytest.mark.asyncio
+async def test_prepare_generation_skips_only_preverified_source_scan(
+    tmp_path,
+    monkeypatch,
+):
+    source_root = tmp_path / "source"
+    bridge_home = tmp_path / "bridge"
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    generation = _verified_generation(source_root)
+    kernel = _Kernel()
+    kernel.paths = SimpleNamespace(code_root=source_root, bridge_home=bridge_home)
+    supervisor = FunctionWorkerSupervisor(kernel)
+    verifications = []
+    monkeypatch.setattr(
+        VerifiedFunctionGeneration,
+        "verify_qualified_source",
+        lambda self, expected_runtime: verifications.append(expected_runtime),
+    )
+    monkeypatch.setattr(
+        "orchestrator.function_worker_supervisor.materialize_generation_artifact",
+        lambda *_args, **_kwargs: artifact,
+    )
+    monkeypatch.setattr(
+        "orchestrator.function_worker_supervisor.persist_qualified_generation_cache",
+        lambda *_args, **_kwargs: None,
+    )
+
+    prepared = await supervisor.prepare_generation(
+        generation,
+        source_already_verified=True,
+    )
+
+    assert prepared == (generation, artifact)
+    assert verifications == []
+    assert await supervisor.prepare_generation(generation) == (
+        generation,
+        artifact,
+    )
+    assert verifications == [kernel.runtime_fingerprint]
+
+
 def test_boot_cache_keeps_last_verified_generation_when_checkout_is_broken(
     tmp_path,
     monkeypatch,
@@ -1102,9 +1226,25 @@ async def test_cancelled_worker_preparation_retires_unready_process(
     )
     supervisor = FunctionWorkerSupervisor(kernel)
     monkeypatch.setattr(supervisor, "topology_snapshot", lambda **kwargs: {})
+    cache_calls = []
     monkeypatch.setattr(
         "orchestrator.function_worker_supervisor.dependency_digest",
-        lambda: "worker-full-distribution-set",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("worker startup must not bypass the runtime fingerprint cache")
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "orchestrator.function_worker_supervisor.load_runtime_policy",
+        lambda code_root: ("policy", code_root),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "orchestrator.function_worker_supervisor.cached_current_runtime_fingerprint",
+        lambda policy, *, code_root: (
+            cache_calls.append((policy, code_root))
+            or SimpleNamespace(dependency_digest="worker-full-distribution-set")
+        ),
         raising=False,
     )
     process = SimpleNamespace(start=lambda: None)
@@ -1157,3 +1297,4 @@ async def test_cancelled_worker_preparation_retires_unready_process(
     assert process_args[0][1]["runtime"]["dependency_digest"] == (
         "worker-full-distribution-set"
     )
+    assert cache_calls == [(("policy", tmp_path), tmp_path)]

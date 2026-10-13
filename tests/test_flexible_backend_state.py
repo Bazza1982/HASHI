@@ -239,7 +239,7 @@ def test_persisted_fixed_mode_migrates_to_flex_for_stateless_backend(
     (workspace / "state.json").write_text(
         json.dumps(
             {
-                "active_backend": "gemini-cli",
+                "active_backend": "ollama-api",
                 "agent_mode": "fixed",
             }
         ),
@@ -252,7 +252,7 @@ def test_persisted_fixed_mode_migrates_to_flex_for_stateless_backend(
         telegram_token_key="capability-fallback",
         allowed_backends=[
             {"engine": "codex-cli", "model": "gpt-5.4"},
-            {"engine": "gemini-cli", "model": "gemini-3.1-pro-preview"},
+            {"engine": "ollama-api", "model": "gemma4:26b"},
         ],
         active_backend="codex-cli",
         project_root=workspace,
@@ -270,10 +270,10 @@ def test_persisted_fixed_mode_migrates_to_flex_for_stateless_backend(
     ):
         manager = FlexibleBackendManager(config, global_config, secrets={})
 
-    assert manager.config.active_backend == "gemini-cli"
+    assert manager.config.active_backend == "ollama-api"
     assert manager.agent_mode == "flex"
     assert _read_state(workspace)["agent_mode"] == "flex"
-    assert "incompatible with stateless backend gemini-cli" in caplog.text
+    assert "incompatible with stateless backend ollama-api" in caplog.text
 
 
 def test_save_state_preserves_unknown_keys(tmp_path):

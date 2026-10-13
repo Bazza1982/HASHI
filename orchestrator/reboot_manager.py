@@ -32,6 +32,9 @@ REBOOT_DRAIN_TIMEOUT_SECONDS = 10.0
 # have independent bounded stages. Leave headroom before declaring a missing
 # Core receipt unconfirmed; this timeout never changes Core's own transaction.
 SHARED_REPLACEMENT_TIMEOUT_SECONDS = 1200.0
+# Progress is durable before cutover. Optional chat delivery gets a bounded
+# head start, never a permission gate or a browser-render dependency.
+REBOOT_START_NOTICE_TIMEOUT_SECONDS = 2.0
 
 TARGETED_REBOOT_MODES = frozenset({"min", "same", "number"})
 BROAD_REBOOT_MODES = frozenset({"max"})
@@ -91,6 +94,7 @@ class RebootManager:
         self.delivery_task = None
         self.delivery_lock = asyncio.Lock()
         self.receipt_fault = False
+        self._delivery_wake = asyncio.Event()
 
     def _new_receipt(self, restart, targets=None):
         if targets is None:
@@ -124,7 +128,12 @@ class RebootManager:
         except (OSError, ValueError):
             return {"accepted": False, "reason": "storage"}
         if previous is not None:
-            return {"accepted": True, "duplicate": True, "record": previous}
+            return {
+                "accepted": True,
+                "duplicate": True,
+                "record": previous,
+                "operation": self._operation_projection(previous),
+            }
         if (
             self.active_operation
             or getattr(self.kernel, "_restart_request", None) is not None
@@ -145,15 +154,10 @@ class RebootManager:
             record = self._new_receipt(restart, targets)
         except (OSError, ValueError):
             return {"accepted": False, "reason": "storage"}
-        # Admission closes only the selected routes. Existing calls may finish.
-        # Targeted calls wait for the new route; max rejects new shared-process
-        # calls while Telegram retains unaccepted updates at its server.
-        for handle in handles.values():
-            handle.fence_for_reboot(reject_new=restart.get("mode") in BROAD_REBOOT_MODES)
-        if restart.get("mode") in BROAD_REBOOT_MODES:
-            gateway = getattr(self.kernel, "api_gateway", None)
-            if gateway is not None and hasattr(gateway, "_accepting_requests"):
-                gateway._accepting_requests = False
+        # Admission is intentionally non-disruptive.  The accepted receipt and
+        # origin-visible start notice must exist before any selected route is
+        # fenced; otherwise Workbench can only discover the start after the
+        # target Worker returns.
         self.kernel._restart_request = {
             **restart,
             "operation_id": record["id"],
@@ -167,16 +171,36 @@ class RebootManager:
             record["mode"],
             record["targets"],
         )
-        return {"accepted": True, "record": record}
+        return {
+            "accepted": True,
+            "record": record,
+            "operation": self._operation_projection(record),
+        }
 
     def latest(
-        self, *, actor_id=None, chat_id=None, thread_id=None, surface="telegram"
+        self,
+        *,
+        owner_id=None,
+        actor_id=None,
+        chat_id=None,
+        thread_id=None,
+        surface="telegram",
     ):
         if not actor_id or not chat_id:
             return None
         for record in reversed(self.receipts.records()):
             origin = record.get("origin", {})
+            recorded_owner = str(origin.get("owner_id") or "")
+            if not recorded_owner:
+                legacy_actor = str(origin.get("actor_id") or "")
+                if legacy_actor.isdigit():
+                    recorded_owner = f"user:{legacy_actor}"
             if (
+                (
+                    owner_id is None
+                    or recorded_owner == str(owner_id)
+                )
+                and
                 str(origin.get("actor_id")) == str(actor_id)
                 and str(origin.get("chat_id")) == str(chat_id)
                 and origin.get("thread_id") == thread_id
@@ -187,10 +211,181 @@ class RebootManager:
                 return record
         return None
 
+    @staticmethod
+    def _operation_projection(record, *, after_sequence: int = 0):
+        if (
+            isinstance(after_sequence, bool) or not isinstance(after_sequence, int)
+        ):
+            raise ValueError("after_sequence must be an integer")
+        receipt_status = str(record.get("status") or "")
+        terminal = receipt_status not in ACTIVE
+        if receipt_status == "succeeded":
+            status = "completed"
+        elif receipt_status == "failed" and record.get("restored"):
+            status = "rolled_back"
+        elif terminal:
+            status = "failed"
+        else:
+            status = receipt_status
+        progress = [
+            event
+            for event in record.get("progress") or ()
+            if int(event.get("sequence") or 0) > after_sequence
+        ]
+        latest_sequence = max(
+            (int(event.get("sequence") or 0) for event in record.get("progress") or ()),
+            default=0,
+        )
+        presentation_ack = record.get("presentation_ack") or {}
+        return {
+            "operation_id": record["id"],
+            "action": "reboot",
+            "mode": record["mode"],
+            "status": status,
+            "terminal": terminal,
+            "latest_sequence": latest_sequence,
+            "progress": progress,
+            "targets": list(record.get("targets") or ()),
+            "source_agent": record.get("source_agent"),
+            "start_message": dict((record.get("start_delivery") or {}).get("presentation_message") or {}),
+            "lifecycle_state": record.get("lifecycle_state"),
+            "reason": record.get("reason") or "",
+            "presentation_ack": {
+                "required": False,
+                "status": presentation_ack.get("status") or "not_required",
+                "expected_sequence": presentation_ack.get("expected_sequence"),
+                "sequence": presentation_ack.get("sequence"),
+            },
+        }
+
+    def visible_operations(self, *, owner_id: str):
+        """Discover owner-scoped lifecycle changes, including Telegram origins."""
+        result = []
+        for record in reversed(self.receipts.records()):
+            origin = record.get("origin") or {}
+            recorded_owner = str(origin.get("owner_id") or "")
+            if not recorded_owner and str(origin.get("actor_id") or "").isdigit():
+                recorded_owner = "user:" + str(origin["actor_id"])
+            if recorded_owner != str(owner_id or ""):
+                continue
+            # Existing sessions can recover a recent completion after disconnect.
+            timestamps = [float(event.get("created_at") or 0) for event in record.get("progress") or ()]
+            if record.get("status") not in ACTIVE and max(timestamps, default=0) < time.time() - 60:
+                continue
+            result.append(self._operation_projection(record))
+        return result
+
+    def operation(
+        self,
+        operation_id: str,
+        *,
+        owner_id: str,
+        agent_id: str,
+        after_sequence: int = 0,
+    ):
+        """Return one owner/Agent-scoped monotonic PAO operation projection."""
+
+        if (
+            not isinstance(operation_id, str)
+            or len(operation_id) != 32
+            or any(char not in "0123456789abcdef" for char in operation_id)
+        ):
+            return None
+        if isinstance(after_sequence, bool) or not isinstance(after_sequence, int):
+            raise ValueError("after_sequence must be an integer")
+        if after_sequence < 0:
+            raise ValueError("after_sequence must be non-negative")
+        owner = str(owner_id or "").strip()
+        agent = str(agent_id or "").strip().casefold()
+        if not owner or not agent:
+            return None
+        record = self.receipts.get(operation_id)
+        if record is None:
+            return None
+        origin = record.get("origin") or {}
+        recorded_owner = str(origin.get("owner_id") or "")
+        if not recorded_owner:
+            legacy_actor = str(origin.get("actor_id") or "")
+            if legacy_actor.isdigit():
+                recorded_owner = f"user:{legacy_actor}"
+        if (
+            recorded_owner != owner
+            or str(record.get("source_agent") or "").casefold() != agent
+        ):
+            return None
+        return self._operation_projection(record, after_sequence=after_sequence)
+
+    def acknowledge_start_presentation(
+        self,
+        operation_id: str,
+        *,
+        owner_id: str,
+        agent_id: str,
+        sequence: int,
+        message_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Retain legacy browser-render observations without gating execution.
+
+        Authentication supplies ``owner_id``; callers must not take it from
+        the request body.  Scope mismatch is intentionally indistinguishable
+        from a missing operation.
+        """
+
+        operation = self.operation(
+            operation_id,
+            owner_id=owner_id,
+            agent_id=agent_id,
+        )
+        if operation is None:
+            return {"acknowledged": False, "reason": "not_found"}
+        if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence <= 0:
+            return {"acknowledged": False, "reason": "invalid_sequence"}
+        if message_id is not None and (
+            not isinstance(message_id, str) or len(message_id) > 200
+        ):
+            return {"acknowledged": False, "reason": "invalid_message_id"}
+        record = self.receipts.get(operation_id)
+        notice = (record.get("start_delivery") or {}).get("presentation_message") or {}
+        if notice.get("message_id") and message_id != notice["message_id"]:
+            return {"acknowledged": False, "reason": "message_mismatch"}
+        ack = dict(record.get("presentation_ack") or {})
+        status = ack.get("status") or "not_required"
+        if status == "not_required":
+            return {"acknowledged": False, "reason": "not_required"}
+        expected_sequence = ack.get("expected_sequence")
+        if sequence != expected_sequence:
+            return {"acknowledged": False, "reason": "sequence_mismatch"}
+        if status == "confirmed":
+            if ack.get("sequence") != sequence:
+                return {"acknowledged": False, "reason": "sequence_mismatch"}
+            return {
+                "acknowledged": True,
+                "duplicate": True,
+                "operation": self._operation_projection(record),
+            }
+        if status == "expired" or record.get("status") not in ACTIVE:
+            return {"acknowledged": False, "reason": "not_pending"}
+        ack.update(
+            status="confirmed",
+            sequence=sequence,
+            message_id=message_id,
+            confirmed_at=time.time(),
+        )
+        record = self.receipts.update(
+            operation_id,
+            presentation_ack=ack,
+        )
+        return {
+            "acknowledged": True,
+            "duplicate": False,
+            "operation": self._operation_projection(record),
+        }
+
     async def _deliver(self, record, *, starting=False):
         origin = record.get("origin", {})
         surface = origin.get("surface", "telegram")
-        if record["delivery"]["status"] == "not_requested":
+        delivery_key = "start_delivery" if starting else "delivery"
+        if record[delivery_key]["status"] == "not_requested":
             return {"sent": False}
         if surface == "telegram" and not origin.get("chat_id"):
             return {"sent": False}
@@ -216,12 +411,18 @@ class RebootManager:
                 render_text=render,
             )
             if result.get("sent") and rendered.get("text"):
-                runtime_session.record_kernel_presentation_notice(
+                message = runtime_session.record_kernel_presentation_notice(
                     self.kernel,
                     agent_id=record["source_agent"],
                     text=rendered["text"],
                     idempotency_key=idempotency_key,
                 )
+                if message and starting:
+                    from orchestrator.frontend_projection import transport_text_component
+                    result["presentation_message"] = {
+                        "message_id": message.get("message_id"), "session_id": message.get("session_id"),
+                        "text": transport_text_component(rendered["text"], "telegram-html")["text"],
+                    }
             return result
 
         # Workbench (and other shared-primary frontends) are delivered through
@@ -234,12 +435,49 @@ class RebootManager:
             idempotency_key=idempotency_key,
         )
         if message:
+            from orchestrator.frontend_projection import transport_text_component
             return {
                 "sent": True,
                 "sender": "workbench",
                 "message_id": message.get("message_id"),
+                **({"presentation_message": {"message_id": message.get("message_id"), "session_id": message.get("session_id"),
+                    "text": transport_text_component(text, "telegram-html")["text"]}} if starting else {}),
             }
         return {"sent": False}
+
+    def _record_start_delivery(self, record, result):
+        delivery = dict(record.get("start_delivery") or {})
+        if delivery.get("status") == "not_requested":
+            return record
+        delivery["attempts"] = int(delivery.get("attempts") or 0) + 1
+        if result.get("sent"):
+            delivery.update(
+                status="sent",
+                sender=result.get("sender"),
+                message_id=result.get("message_id"),
+                sent_at=time.time(),
+                presentation_message=result.get("presentation_message") or {},
+            )
+            return self.receipts.update(
+                record["id"],
+                phase="start_visible",
+                start_delivery=delivery,
+                progress_message_id=result.get("message_id"),
+            )
+        delivery.update(status="exhausted", next_attempt_at=0)
+        return self.receipts.update(record["id"], start_delivery=delivery)
+
+    def _fence_reboot_routes(self, record: Mapping[str, Any]) -> None:
+        """Gate the frozen target set only after start progress is readable."""
+
+        handles = self._target_handles(tuple(record.get("targets") or ()))
+        broad = str(record.get("mode") or "") in BROAD_REBOOT_MODES
+        for handle in handles.values():
+            handle.fence_for_reboot(reject_new=broad)
+        if broad:
+            gateway = getattr(self.kernel, "api_gateway", None)
+            if gateway is not None and hasattr(gateway, "_accepting_requests"):
+                gateway._accepting_requests = False
 
     async def send_pending(self, *, now=None):
         if getattr(self.kernel, "_handoff_draining", False) or getattr(
@@ -664,7 +902,11 @@ class RebootManager:
                     bridge_logger.error(
                         "Reboot receipt watcher failed (%s)", type(exc).__name__
                     )
-                await asyncio.sleep(5)
+                try:
+                    await asyncio.wait_for(self._delivery_wake.wait(), timeout=5)
+                except TimeoutError:
+                    pass
+                self._delivery_wake.clear()
 
         self.delivery_task = asyncio.create_task(watch(), name="reboot-receipts")
 
@@ -811,6 +1053,72 @@ class RebootManager:
             )
         return handles
 
+    async def _preflight_target_activity(
+        self,
+        selected_targets: tuple[str, ...],
+        handles: Mapping[str, AgentRuntimeHandle],
+        record: Mapping[str, Any],
+    ) -> bool:
+        """Reject a reboot before cutover when live Worker work cannot drain."""
+
+        # Read the owning Workers, not asynchronously updated route caches.
+        # This is an observation, not an idle reservation: the transactional
+        # route fence and drain still handle work arriving after this check.
+        observations = await asyncio.gather(
+            *(
+                handles[name].client.call("worker.metadata", timeout=10)
+                for name in selected_targets
+            ),
+            return_exceptions=True,
+        )
+        unavailable_targets: list[str] = []
+        busy_targets: list[str] = []
+        activity_by_target: dict[str, tuple[bool, int]] = {}
+        for name, state in zip(selected_targets, observations, strict=True):
+            if (
+                not isinstance(state, dict)
+                or type(state.get("is_generating")) is not bool
+                or type(state.get("queue_depth")) is not int
+                or state["queue_depth"] < 0
+            ):
+                unavailable_targets.append(name)
+                continue
+            generating = state["is_generating"]
+            queue_depth = state["queue_depth"]
+            activity_by_target[name] = (generating, queue_depth)
+            if generating or queue_depth:
+                busy_targets.append(name)
+
+        if unavailable_targets:
+            for name in unavailable_targets:
+                bridge_logger.warning(
+                    "Reboot activity unavailable: target=%s", name
+                )
+            self._finish(
+                record,
+                "rejected",
+                reason="activity_unavailable",
+                activity_targets=unavailable_targets,
+            )
+            return False
+        if busy_targets:
+            for name in busy_targets:
+                generating, queue_depth = activity_by_target[name]
+                bridge_logger.info(
+                    "Reboot target busy: target=%s generating=%s queued=%s",
+                    name,
+                    generating,
+                    queue_depth,
+                )
+            self._finish(
+                record,
+                "rejected",
+                reason="target_busy",
+                busy_targets=busy_targets,
+            )
+            return False
+        return True
+
     async def _release_reboot_fences(self, record: Mapping[str, Any]) -> None:
         runtime_map = self.kernel._runtime_map()
         await asyncio.gather(
@@ -847,7 +1155,10 @@ class RebootManager:
             None,
         )
         if callable(prepare_generation):
-            generation, generation_root = await prepare_generation(generation)
+            generation, generation_root = await prepare_generation(
+                generation,
+                source_already_verified=True,
+            )
         else:
             generation_root = None
         bridge_logger.info(
@@ -955,16 +1266,37 @@ class RebootManager:
         staged_shared = None
         result = False
         try:
-            self.receipts.update(record["id"], status="running", phase="preparing")
+            record = self.receipts.update(
+                record["id"], status="running", phase="announcing"
+            )
             try:
-                await self._deliver(record, starting=True)
+                async with asyncio.timeout(REBOOT_START_NOTICE_TIMEOUT_SECONDS):
+                    start_result = await self._deliver(record, starting=True)
             except Exception as exc:
                 bridge_logger.warning(
                     "Reboot start notification failed (%s)", type(exc).__name__
                 )
+                start_result = {"sent": False}
+            record = self._record_start_delivery(record, start_result)
+            self.receipts.update(record["id"], phase="preparing")
             if str(restart.get("mode") or "same") in BROAD_REBOOT_MODES:
-                staged_shared = self._stage_shared_replacement(record)
-                result = True
+                selected_targets = tuple(record["targets"])
+                try:
+                    handles = self._target_handles(selected_targets)
+                except ValueError as exc:
+                    bridge_logger.error(
+                        "Shared Function reboot scope rejected: %s", exc
+                    )
+                    self._finish(record, "rejected", reason="invalid_scope")
+                    result = False
+                else:
+                    idle = await self._preflight_target_activity(
+                        selected_targets, handles, record
+                    )
+                    if idle:
+                        self._fence_reboot_routes(record)
+                        staged_shared = self._stage_shared_replacement(record)
+                        result = True
             else:
                 result = await self._perform_restart(restart, record)
         except asyncio.CancelledError:
@@ -996,13 +1328,9 @@ class RebootManager:
                     result = False
             else:
                 await self._release_reboot_fences(record)
-            try:
-                await self.send_pending()
-            except Exception as exc:
-                bridge_logger.error(
-                    "Reboot result is retained; notification pending (%s)",
-                    type(exc).__name__,
-                )
+            # The independent watcher owns retry I/O. A backlog must not keep
+            # the lifecycle loop inside this reboot or delay the next command.
+            self._delivery_wake.set()
         return result
 
     async def _perform_restart(self, restart, record) -> bool:
@@ -1023,30 +1351,10 @@ class RebootManager:
             self._finish(record, "rejected", reason="invalid_scope")
             return False
 
-        # Read the owning Worker, not the asynchronously updated route cache.
-        # This is a preflight, not an idle reservation: the transactional drain
-        # below still handles work arriving after this observation.
-        observations = await asyncio.gather(
-            *(handle.client.call("worker.metadata", timeout=10) for handle in handles.values()),
-            return_exceptions=True,
-        )
-        for name, state in zip(selected_targets, observations, strict=True):
-            if (
-                not isinstance(state, dict)
-                or type(state.get("is_generating")) is not bool
-                or type(state.get("queue_depth")) is not int
-                or state["queue_depth"] < 0
-            ):
-                bridge_logger.warning("Reboot activity unavailable: target=%s", name)
-                self._finish(record, "rejected", reason="activity_unavailable")
-                return False
-            if state["is_generating"] or state["queue_depth"]:
-                bridge_logger.info(
-                    "Reboot target busy: target=%s generating=%s queued=%s",
-                    name, state["is_generating"], state["queue_depth"],
-                )
-                self._finish(record, "rejected", reason="target_busy")
-                return False
+        if not await self._preflight_target_activity(
+            selected_targets, handles, record
+        ):
+            return False
 
         try:
             candidates = await self._prepare_candidates(selected_targets)
@@ -1076,6 +1384,7 @@ class RebootManager:
         quiesced: set[str] = set()
         failure_reason = "route_busy"
         try:
+            self._fence_reboot_routes(record)
             self.receipts.update(record["id"], phase="switching")
             for name in selected_targets:
                 old_clients[name] = await asyncio.wait_for(

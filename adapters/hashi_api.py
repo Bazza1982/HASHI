@@ -32,6 +32,7 @@ import httpx
 
 from adapters.base import BackendCapabilities, BackendResponse, TokenUsage
 from adapters.openrouter_api import (
+    HASHI_COMPACTION_CAPABILITIES,
     INVALID_TOOL_CALL_REPAIR_LIMIT,
     _MEDIA_FALLBACK_TOOL_NAMES,
     OpenRouterAdapter,
@@ -418,6 +419,10 @@ class HashiApiAdapter(OpenRouterAdapter):
         configured = extra.get("provider_reasoning")
         if configured is None:
             configured = extra.get("reasoning_effort")
+        # HERV3's auxiliary profile uses "default" to retain the concrete
+        # provider's configured effort. It is not a Gateway wire value.
+        if str(configured or "").strip().casefold() == "default":
+            configured = None
         if configured is None and self.reasoning_enabled is False:
             configured = "none"
         if configured is None:
@@ -1028,7 +1033,9 @@ class HashiApiAdapter(OpenRouterAdapter):
                     gateway_transport_calls.append(
                         {
                             "provider_attempt": provider_attempt_count,
-                            "incremental": bool(tool_loop_count > 0),
+                            "incremental": bool(
+                                gateway_session_id is not None and tool_loop_count > 0
+                            ),
                             "message_count": len(outbound_messages),
                             "message_chars": len(
                                 json.dumps(
@@ -1432,7 +1439,15 @@ class HashiApiAdapter(OpenRouterAdapter):
                         ),
                     },
                 )
-                outbound_messages = messages[tool_result_start:]
+                # Only the request-local Gateway cache can reconstruct a tool
+                # delta. Inline media deliberately bypasses that cache, so
+                # stateless rounds must retain the user content, assistant
+                # calls and every preceding tool result.
+                outbound_messages = (
+                    messages[tool_result_start:]
+                    if gateway_session_id is not None
+                    else messages
+                )
                 completed_tool_calls.extend(
                     {
                         "id": str(call.get("id") or ""),

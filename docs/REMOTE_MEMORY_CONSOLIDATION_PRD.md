@@ -334,6 +334,12 @@ logs/remote_wiki_sync.jsonl
 6. Privacy scan must run before central import acceptance.
 7. Importer must fail closed on parse, checksum, privacy, or schema failures.
 
+The standalone remote-memory script owns its privacy filter. Its decisions must
+not change when the Wiki package is absent or the HASHI checkout changes
+branches. Lily's central scheduled importer should execute an installed copy
+outside the mutable source checkout and pass `--root` only for instance data and
+private configuration.
+
 ## 11. Success Criteria
 
 The feature is successful when:

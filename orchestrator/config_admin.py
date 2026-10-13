@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from orchestrator.config_json import (
     ConfigConflictError,
@@ -37,13 +38,23 @@ class ConfigAdmin:
         raw = self.load_raw_config()
         return raw.get("agents", [])
 
-    def set_agent_active(self, agent_name: str, active: bool) -> bool:
+    def set_agent_active(
+        self,
+        agent_name: str,
+        active: bool,
+        *,
+        expected_revision: str | None = None,
+        allow_last_active_deactivation: bool = False,
+    ) -> bool:
         """Toggle is_active for an agent. Returns True if found and updated."""
         raw = self.load_raw_config()
+        if expected_revision is not None and raw.revision != expected_revision:
+            raise ConfigConflictError("agents configuration changed")
         for ag in raw.get("agents", []):
             if ag.get("name") == agent_name:
                 if (
                     not active
+                    and not allow_last_active_deactivation
                     and ag.get("is_active", True) is not False
                     and sum(
                         1
@@ -57,6 +68,33 @@ class ConfigAdmin:
                 self.write_raw_config(raw)
                 return True
         return False
+
+    def update_agent_metadata(
+        self,
+        agent_name: str,
+        *,
+        display_name: str | None = None,
+        emoji: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Publish the PAO-owned public Agent metadata fields in one revision."""
+
+        raw = self.load_raw_config()
+        row = next(
+            (
+                item
+                for item in raw.get("agents", [])
+                if isinstance(item, dict) and item.get("name") == agent_name
+            ),
+            None,
+        )
+        if row is None:
+            return None
+        if display_name is not None:
+            row["display_name"] = display_name
+        if emoji is not None:
+            row["emoji"] = emoji
+        self.write_raw_config(raw)
+        return dict(row)
 
     def delete_agent_from_config(self, agent_name: str) -> bool:
         """Remove an agent entry from config. Returns True if found and removed."""
@@ -105,6 +143,8 @@ class ConfigAdmin:
         agent_name: str,
         agent_cfg: dict | str | None = None,
         token: str | None = None,
+        *,
+        raw_config: dict | None = None,
     ):
         """Add a flex agent scaffold.
 
@@ -115,7 +155,7 @@ class ConfigAdmin:
         wants_message = isinstance(agent_cfg, str) or token is not None
         display_name = agent_cfg if isinstance(agent_cfg, str) else agent_name
 
-        raw = self.load_raw_config()
+        raw = raw_config if raw_config is not None else self.load_raw_config()
         existing_names = {ag.get("name") for ag in raw.get("agents", [])}
         if agent_name in existing_names:
             return (False, f"Agent '{agent_name}' already exists.") if wants_message else False

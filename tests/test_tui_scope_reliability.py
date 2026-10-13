@@ -297,7 +297,8 @@ async def test_say_plays_last_visible_reply_locally_without_chat_or_telegram_sen
 ):
     played = []
 
-    async def play(content):
+    async def play(content, *, bridge_home):
+        assert bridge_home == tmp_path
         played.append(content)
 
     monkeypatch.setattr("tui.app.play_ogg_bytes", play)
@@ -326,7 +327,7 @@ async def test_say_plays_last_visible_reply_locally_without_chat_or_telegram_sen
 async def test_say_range_skips_meter_and_plays_three_replies_in_order(tmp_path, monkeypatch):
     played = []
 
-    async def play(content):
+    async def play(content, *, bridge_home):
         played.append(content)
 
     monkeypatch.setattr("tui.app.play_ogg_bytes", play)
@@ -360,7 +361,7 @@ async def test_voice_auto_read_is_target_scoped_persistent_and_deduplicated(
 ):
     played = []
 
-    async def play(content):
+    async def play(content, *, bridge_home):
         played.append(content)
 
     monkeypatch.setattr("tui.app.play_ogg_bytes", play)
@@ -370,6 +371,7 @@ async def test_voice_auto_read_is_target_scoped_persistent_and_deduplicated(
     async with app.run_test() as pilot:
         app._load_initial_transcript = lambda *_args, **_kwargs: None
         app._select_agent(client.agents[0], client=client)
+        assert app._voice_auto_enabled() is True
         await app._handle_voice_cmd("/voice on")
         message = {"role": "assistant", "text": "one final", "message_id": "msg-2"}
         app._queue_tui_speech(message, announce=False)
@@ -386,6 +388,8 @@ async def test_voice_auto_read_is_target_scoped_persistent_and_deduplicated(
     reopened.current_agent = "akane"
     reopened.current_agent_display = "Akane"
     assert reopened._voice_auto_enabled() is True
+    reopened._voice_auto_by_target[reopened._voice_target_key()] = False
+    assert reopened._voice_auto_enabled() is False
 
 
 @pytest.mark.asyncio
@@ -427,7 +431,7 @@ async def test_agent_switch_discards_late_speech_before_local_player(
                 "media_type": "audio/ogg",
             }
 
-    async def play(content):
+    async def play(content, *, bridge_home):
         played.append(content)
 
     monkeypatch.setattr("tui.app.play_ogg_bytes", play)

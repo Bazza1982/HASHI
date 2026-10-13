@@ -810,8 +810,11 @@ async def test_audio_only_immediate_crosses_adapter_delivery_boundary():
 
 
 @pytest.mark.asyncio
-async def test_text_only_triage_waits_for_and_uses_released_local_transcript(
-    tmp_path,
+@pytest.mark.parametrize("stage", [Stage.TRIAGE, Stage.EXECUTION, Stage.DIRECT])
+@pytest.mark.parametrize("sibling_image", [False, True])
+@pytest.mark.parametrize("her_v3", [False, True])
+async def test_text_voice_stage_waits_for_and_uses_released_local_transcript(
+    tmp_path, stage, sibling_image, her_v3,
 ):
     source = tmp_path / "voice.wav"
     _wav_bytes(source)
@@ -831,6 +834,24 @@ async def test_text_only_triage_waits_for_and_uses_released_local_transcript(
         roots=(tmp_path,),
         audio=False,
     )
+    if sibling_image:
+        image = tmp_path / "sibling.png"
+        payload = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aZfUAAAAASUVORK5CYII="
+        )
+        image.write_bytes(payload)
+        content = canonical_request_content([*content["parts"], {
+            "type": "media", "item_index": 2, "attachment_id": "att-sibling",
+            "modality": "image", "kind": "image", "mime_type": "image/png",
+            "filename": image.name, "caption": "", "local_ref": str(image),
+            "size_bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest(),
+            "transport": {},
+        }])
+        triage.input_capability = InputCapability(
+            provider="text-api", model="text-model", source="test",
+            input_modalities=frozenset({"text", "image"}),
+            input_transports={"image": ("data_url",)},
+        )
 
     class _Manager:
         privacy_level = 1
@@ -853,6 +874,7 @@ async def test_text_only_triage_waits_for_and_uses_released_local_transcript(
     }
 
     async def _confirm_for_test():
+        assert triage.calls == []
         confirmation_requests.append("triage")
         transcript_state["status"] = "released"
         released.set()
@@ -869,13 +891,17 @@ async def test_text_only_triage_waits_for_and_uses_released_local_transcript(
     request = StageRequest(
         turn_id="turn-triage",
         request_ref="hashi-request:req-triage",
-        stage=Stage.TRIAGE,
+        stage=stage,
         role="triage",
         attempt=1,
         goal="Respond to the attached voice message.",
         classification=None,
         effort=Effort.LOW,
-        context={},
+        context=({"her_v3": True, "pcm_input": {
+            "current_request": "Respond to the attached voice message.",
+            "sections": [{"key": "permanent_system", "authority": "permanent_system",
+                          "text": "CANARY_KEEP_TRUSTED_BOUNDARIES", "order": 0}],
+        }} if her_v3 else {}),
         request_content=content,
         attachment_manifest=attachment_manifest(content),
         allow_tools=False,
@@ -892,11 +918,51 @@ async def test_text_only_triage_waits_for_and_uses_released_local_transcript(
     )
 
     assert json.loads(response.text)["classification"] == "DIRECT_RESPONSE"
-    assert triage.calls[0]["request_content"] is None
+    assert [item["attachment_id"] for item in attachment_manifest(
+        triage.calls[0]["request_content"]
+    )] == (["att-sibling"] if sibling_image else [])
     assert "Please check tomorrow's weather." in triage.calls[0]["prompt"]
     assert "Respond to the attached voice message." in triage.calls[0]["prompt"]
+    if her_v3 and stage is Stage.DIRECT:
+        assert "CANARY_KEEP_TRUSTED_BOUNDARIES" in triage.sys_prompt
     assert response.media_routing[0]["route"] == "local_transcript"
     assert confirmation_requests == ["triage"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["unavailable", "discarded"])
+async def test_voice_execution_without_released_transcript_starts_no_model(tmp_path, status):
+    from orchestrator.her_v2.interfaces import StageInvocationError
+
+    source = tmp_path / "voice.wav"
+    _wav_bytes(source)
+    content = _voice_content(source)
+    backend = _NativeBackend(BackendResponse(text="must not run", duration_ms=1),
+                             roots=(tmp_path,), audio=False)
+    ready = asyncio.Event()
+    release = asyncio.Event()
+    ready.set()
+    release.set()
+    provider = HashiStageProvider(
+        backend_manager=SimpleNamespace(
+            privacy_level=1, create_ephemeral_backend=lambda *_args, **_kwargs: backend,
+        ),
+        runtime_context=SimpleNamespace(_native_voice_transcripts={"req-unreleased": {
+            "status": status, "text": "", "safe_voice": True,
+            "ready_event": ready, "release_event": release,
+        }}),
+    )
+    with pytest.raises(StageInvocationError) as failure:
+        await provider.invoke(
+            ProviderProfile("main", "text-api", "text-model"),
+            StageRequest(turn_id="turn-unreleased", request_ref="hashi-request:req-unreleased",
+                         stage=Stage.EXECUTION, role="execution", attempt=1, goal="Voice request",
+                         classification=None, effort=Effort.HIGH, request_content=content,
+                         attachment_manifest=attachment_manifest(content)),
+        )
+    assert failure.value.code.value == "INPUT_MODALITY_CONVERSION_FAILED"
+    assert failure.value.retryable is False
+    assert backend.calls == []
 
 
 @pytest.mark.asyncio
@@ -1350,15 +1416,18 @@ async def test_native_audio_direct_completion_releases_ready_stt_without_prompt(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('native_model_ready', [True, False])
 async def test_generic_turn_transcribes_each_voice_asset_once_and_keeps_order(
     tmp_path,
     monkeypatch,
+    native_model_ready,
 ):
     server, runtime = _server(tmp_path)
     monkeypatch.setattr(workbench_api, "PERSISTENT_SESSION_V1_QUALIFIED", True)
     server.global_config.persistent_session_v1 = True
     server.global_config.native_audio_chat_v1 = True
     runtime._safevoice_enabled = False
+    monkeypatch.setattr(server, '_runtime_native_audio_ready', lambda *args, **kwargs: native_model_ready)
     calls = []
 
     class _Transcriber:
@@ -1420,6 +1489,7 @@ async def test_generic_turn_transcribes_each_voice_asset_once_and_keeps_order(
             )
         ).text
     )
+    assert run.get('ok') is True, run
     for _attempt in range(100):
         events = server.session_store.events(
             session["session_id"], owner_id="user:7"

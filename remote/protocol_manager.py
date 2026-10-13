@@ -906,8 +906,16 @@ class ProtocolManager:
                             )
                             succeeded = True
                             break
-                        # If a fallback host worked, re-register peer with the working host
-                        if host != peer.host:
+                        # A known same-host loopback is an observer-local route,
+                        # not a new LAN advertisement. Publishing it as fallback
+                        # made every refresh fight the unchanged LAN observation.
+                        known_loopback = str((peer.properties or {}).get("same_host_loopback") or "").strip()
+                        same_host_route = host in {"127.0.0.1", "localhost", "::1"} and (
+                            host == known_loopback or self._same_machine_hint(
+                                self._load_instances().get(peer.instance_id.lower(), {}),
+                            )
+                        )
+                        if host != peer.host and not same_host_route:
                             updated = dataclasses.replace(peer, host=host)
                             updated.properties = {
                                 key: value
@@ -1764,9 +1772,11 @@ class ProtocolManager:
             return str(result["session_id"]) if result.get("session_id") else None
 
         try:
-            service = SuperloopReceiptService(
-                SuperloopStore(root / "superloops"), local_instance=str(self._instance_info.get("instance_id") or ""),
-            )
+            service = getattr(self, "_superloop_receipt_service", None)
+            if service is None:
+                service = self._superloop_receipt_service = SuperloopReceiptService(
+                    SuperloopStore(root / "superloops"), local_instance=str(self._instance_info.get("instance_id") or ""),
+                )
             await asyncio.get_running_loop().run_in_executor(None, service.process, receipts, enqueue, resolve_session, activity)
         except Exception:
             logger.exception("Superloop receipt review deferred; durable receipt retained")

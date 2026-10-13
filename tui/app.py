@@ -2998,7 +2998,7 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
     def _voice_auto_enabled(self, agent: str | None = None) -> bool:
         if self.current_agent_display == "ALL":
             return False
-        return bool(self._voice_auto_by_target.get(self._voice_target_key(agent), False))
+        return bool(self._voice_auto_by_target.get(self._voice_target_key(agent), True))
 
     def _cancel_tui_speech(self) -> None:
         task = self._speech_task
@@ -3114,7 +3114,7 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
                             style="hashi.muted",
                         )
                     )
-                await play_ogg_bytes(content)
+                await play_ogg_bytes(content, bridge_home=self.bridge_home)
                 if dedupe_ref is not None:
                     self._auto_spoken_refs[dedupe_ref] = None
                     while len(self._auto_spoken_refs) > 1000:

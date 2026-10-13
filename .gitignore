@@ -236,3 +236,6 @@ exp/barry/aonsw_data_analysis/
 # Root-level local credential/state backups (never commit)
 /agents.json.bak-*
 /bridge_memory.sqlite
+
+# Instance-only call target URLs and per-Agent choices.
+call_profiles.json

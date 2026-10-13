@@ -20,9 +20,10 @@ import re
 import stat
 import subprocess
 import sys
+import time
 import traceback
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from types import ModuleType
 from typing import Any
@@ -49,6 +50,7 @@ from orchestrator.runtime_contract import (
     load_runtime_policy,
     validate_standard_dependencies,
 )
+from orchestrator.runtime_fingerprint_cache import cached_current_runtime_fingerprint
 
 PROBE_RESULT_PREFIX = "HASHI_FUNCTION_PROBE_RESULT="
 DEFAULT_PROBE_TIMEOUT_SECONDS = 180.0
@@ -206,6 +208,8 @@ class CandidateProbeReceipt:
     runtime: RuntimeFingerprint
     probe_pid: int
     source_commit: str = ""
+    # Diagnostics from the disposable probe; not part of the generation identity.
+    stage_timings_ms: tuple[tuple[str, float], ...] = field(default=(), compare=False)
 
 
 @dataclass(frozen=True)
@@ -218,7 +222,9 @@ class VerifiedFunctionGeneration:
 
     def verify(self, expected_runtime: RuntimeFingerprint) -> None:
         policy = load_runtime_policy(self.code_root)
-        live_runtime = current_runtime_fingerprint(policy, code_root=self.code_root)
+        live_runtime = cached_current_runtime_fingerprint(
+            policy, code_root=self.code_root
+        )
         compare_function_candidate_runtime(
             expected_runtime,
             live_runtime,
@@ -251,7 +257,9 @@ class VerifiedFunctionGeneration:
         """
 
         policy = load_runtime_policy(self.code_root)
-        live_runtime = current_runtime_fingerprint(policy, code_root=self.code_root)
+        live_runtime = cached_current_runtime_fingerprint(
+            policy, code_root=self.code_root
+        )
         compare_function_candidate_runtime(
             expected_runtime,
             live_runtime,
@@ -333,6 +341,7 @@ def _declared_function_imports(
     *,
     code_root: Path,
     source_index: Mapping[str, Path],
+    tree: ast.AST | None = None,
 ) -> set[str]:
     """Return function imports anywhere in the AST, including lazy branches."""
 
@@ -342,7 +351,8 @@ def _declared_function_imports(
         if relative.endswith("/__init__.py")
         else module_name.rpartition(".")[0]
     )
-    tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+    if tree is None:
+        tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
     candidates: list[str] = []
 
     class AllImportVisitor(ast.NodeVisitor):
@@ -407,9 +417,11 @@ def _module_scope_dependencies(
     *,
     code_root: Path,
     available: set[str],
+    tree: ast.AST | None = None,
 ) -> set[str]:
     source = code_root / entry.relative_path
-    tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+    if tree is None:
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
     package = (
         entry.module
         if entry.relative_path.endswith("/__init__.py")
@@ -463,10 +475,12 @@ def _module_scope_dependencies(
 def _order_source_entries(
     entries: list[SourceEntry],
     code_root: Path,
+    *,
+    dependencies: Mapping[str, set[str]] | None = None,
 ) -> list[SourceEntry]:
     by_name = {entry.module: entry for entry in entries}
     available = set(by_name)
-    dependencies = {
+    dependencies = {name: set(values) & available for name, values in dependencies.items()} if dependencies is not None else {
         name: _module_scope_dependencies(
             entry,
             code_root=code_root,
@@ -578,6 +592,7 @@ def build_source_manifest(
     root = Path(code_root).resolve()
     source_index = _function_source_index(root)
     entries: list[SourceEntry] = []
+    dependencies: dict[str, set[str]] = {}
     missing: list[str] = []
     pending = sorted(set(module_names), key=function_module_order_key)
     visited: set[str] = set()
@@ -594,7 +609,8 @@ def build_source_manifest(
             continue
         data = path.read_bytes()
         try:
-            compile(data, str(path), "exec", dont_inherit=True)
+            tree = ast.parse(data, filename=str(path))
+            compile(tree, str(path), "exec", dont_inherit=True)
         except SyntaxError as exc:
             raise FunctionGenerationError(
                 f"Candidate source does not compile: {name}: {exc.msg} "
@@ -612,6 +628,10 @@ def build_source_manifest(
             path,
             code_root=root,
             source_index=source_index,
+            tree=tree,
+        )
+        dependencies[name] = _module_scope_dependencies(
+            entries[-1], code_root=root, available=set(source_index), tree=tree,
         )
         pending.extend(
             sorted(
@@ -624,7 +644,7 @@ def build_source_manifest(
             f"Candidate function modules have no project source: {sorted(missing)}"
         )
     return build_source_manifest_from_entries(
-        _order_source_entries(entries, root),
+        _order_source_entries(entries, root, dependencies=dependencies),
         # A legacy shared generation can only qualify an Agent Worker closure.
         # Keep that closure compatible with its historical asset rules so the
         # new Worker can request the one-time Core handoff. The Core-qualified
@@ -743,10 +763,10 @@ def verify_manifest_source_commit(
     changed = _nul_paths(
         _git_output(root, "diff", "--name-only", "-z", "HEAD", "--")
     )
-    untracked = _nul_paths(
-        _git_output(root, "ls-files", "--others", "--exclude-standard", "-z")
-    )
-    invalid = sorted((qualified - tracked) | (qualified & (changed | untracked)))
+    # HEAD membership already rejects every unpublished qualified path, including
+    # untracked or ignored source. Enumerating unrelated local trees adds no
+    # evidence and can time out in checkouts holding large test fixtures.
+    invalid = sorted((qualified - tracked) | (qualified & changed))
     if invalid:
         raise UncommittedFunctionSourceError(
             "Function generation manifest contains files that are not committed: "
@@ -892,6 +912,10 @@ def run_candidate_probe(
         runtime=runtime,
         probe_pid=int(result["probe_pid"]),
         source_commit=str(result["source_commit"]),
+        stage_timings_ms=tuple(
+            (str(name), float(elapsed_ms))
+            for name, elapsed_ms in result.get("stage_timings_ms", {}).items()
+        ),
     )
 
 
@@ -904,8 +928,17 @@ def probe_function_generation(
     *,
     module_names: list[str] | tuple[str, ...] | None = None,
     probe_runner=run_candidate_probe,
+    timing_callback=None,
 ) -> VerifiedFunctionGeneration:
     """Qualify exact source/assets without importing them into HASHI Core."""
+
+    def timed(name, function, *args, **kwargs):
+        started = time.perf_counter()
+        try:
+            return function(*args, **kwargs)
+        finally:
+            if timing_callback is not None:
+                timing_callback(name, (time.perf_counter() - started) * 1000)
 
     code_root = Path(kernel.paths.code_root).resolve()
     expected_runtime = getattr(kernel, "runtime_fingerprint", None)
@@ -927,20 +960,39 @@ def probe_function_generation(
     # the single deterministic qualification path for both cases.
     if module_names is not None:
         requested.update(module_names)
-    initial_manifest = build_source_manifest(
+    initial_manifest = timed(
+        "initial_manifest",
+        build_source_manifest,
         tuple(sorted(requested, key=function_module_order_key)),
         code_root=code_root,
     )
-    source_commit = verify_manifest_source_commit(
+    source_commit = timed(
+        "initial_commit_check",
+        verify_manifest_source_commit,
         initial_manifest,
         code_root=code_root,
     )
-    receipt = probe_runner(
+    receipt = timed(
+        "isolated_probe",
+        probe_runner,
         code_root=code_root,
         module_names=initial_manifest.module_names,
         expected_runtime=expected_runtime,
     )
-    manifest = build_source_manifest(receipt.module_names, code_root=code_root)
+    if timing_callback is not None:
+        for name, elapsed_ms in receipt.stage_timings_ms:
+            timing_callback(f"isolated_probe.{name}", elapsed_ms)
+    if set(receipt.module_names) == set(initial_manifest.module_names):
+        # The independent interpreter accepted this exact closure. Re-hash all
+        # its bytes and rediscover assets rather than parse the same graph again.
+        timed("final_manifest", verify_qualified_manifest_bytes,
+              initial_manifest, code_root=code_root)
+        manifest = initial_manifest
+    else:
+        # A dynamic import expanded the closure: qualify its graph normally.
+        manifest = timed(
+            "final_manifest", build_source_manifest, receipt.module_names, code_root=code_root
+        )
     if manifest.generation_id != receipt.generation_id:
         raise FunctionGenerationError(
             "Candidate source/assets differ between Core and staging Worker"
@@ -949,7 +1001,10 @@ def probe_function_generation(
         raise FunctionGenerationError(
             "Candidate source commit differs between Core and staging Worker"
         )
-    if verify_manifest_source_commit(manifest, code_root=code_root) != source_commit:
+    if timed(
+        "final_commit_check", verify_manifest_source_commit, manifest,
+        code_root=code_root,
+    ) != source_commit:
         raise FunctionGenerationError(
             "Candidate source commit changed during Function qualification"
         )
@@ -958,17 +1013,32 @@ def probe_function_generation(
         manifest=manifest,
         receipt=receipt,
     )
-    generation.verify(expected_runtime)
+    timed("generation_verify", generation.verify_qualified_source, expected_runtime)
     return generation
 
 
 def _probe_main() -> int:
+    stage_timings_ms: dict[str, float] = {}
+
+    def timed(name, function, *args, **kwargs):
+        started = time.perf_counter()
+        try:
+            return function(*args, **kwargs)
+        finally:
+            stage_timings_ms[name] = round(
+                (time.perf_counter() - started) * 1000, 1
+            )
+
     try:
         payload = json.loads(sys.stdin.read())
         code_root = Path(payload["code_root"]).resolve()
         sys.path.insert(0, str(code_root))
         policy = load_runtime_policy(code_root)
-        runtime = current_runtime_fingerprint(policy, code_root=code_root)
+        runtime = timed(
+            "runtime_fingerprint",
+            current_runtime_fingerprint,
+            policy, code_root=code_root,
+        )
         expected = RuntimeFingerprint.from_mapping(payload["expected_runtime"])
         compare_function_candidate_runtime(
             expected,
@@ -976,13 +1046,24 @@ def _probe_main() -> int:
             code_root=code_root,
         )
         requested = tuple(str(name) for name in payload["module_names"])
-        with candidate_import_guard():
-            for name in requested:
-                importlib.import_module(name)
-            validate_function_contract()
-        expanded = tuple(discover_loaded_function_modules(code_root=code_root))
-        manifest = build_source_manifest(expanded, code_root=code_root)
-        source_commit = verify_manifest_source_commit(
+        def import_and_validate():
+            with candidate_import_guard():
+                for name in requested:
+                    importlib.import_module(name)
+                validate_function_contract()
+
+        timed("imports_contract", import_and_validate)
+        expanded = timed(
+            "loaded_module_discovery",
+            discover_loaded_function_modules,
+            code_root=code_root,
+        )
+        manifest = timed(
+            "manifest", build_source_manifest, tuple(expanded), code_root=code_root
+        )
+        source_commit = timed(
+            "commit_check",
+            verify_manifest_source_commit,
             manifest,
             code_root=code_root,
         )
@@ -993,6 +1074,7 @@ def _probe_main() -> int:
             "runtime": runtime.to_dict(),
             "probe_pid": os.getpid(),
             "source_commit": source_commit,
+            "stage_timings_ms": stage_timings_ms,
         }
         print(PROBE_RESULT_PREFIX + json.dumps(result, sort_keys=True), flush=True)
         return 0
@@ -1002,6 +1084,7 @@ def _probe_main() -> int:
             "error": f"{type(exc).__name__}: {exc}",
             "traceback": traceback.format_exc(limit=20),
             "probe_pid": os.getpid(),
+            "stage_timings_ms": stage_timings_ms,
         }
         print(PROBE_RESULT_PREFIX + json.dumps(result, sort_keys=True), flush=True)
         return 1

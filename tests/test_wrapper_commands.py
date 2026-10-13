@@ -36,6 +36,7 @@ from orchestrator.memory_plus_mode import (
 from orchestrator.runtime_common import QueuedRequest
 from orchestrator import (
     runtime_cross_session,
+    runtime_lifecycle,
     runtime_model_selection,
     telegram_stream_policy,
     ui_language,
@@ -262,6 +263,58 @@ def test_agent_specific_openrouter_models_extend_shared_catalog(tmp_path):
         runtime, "openrouter-api", False
     )
     assert "✓ deepseek/deepseek-v3.2-exp" in str(keyboard)
+
+
+@pytest.mark.asyncio
+async def test_native_codex_models_are_inherited_and_selection_survives_reload(
+    tmp_path, monkeypatch,
+):
+    codex_home = tmp_path / "codex"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    (codex_home / "models_cache.json").write_text(json.dumps({
+        "models": [
+            {"slug": "gpt-6.1-sol", "visibility": "list",
+             "supported_reasoning_levels": [{"effort": "max"}, {"effort": "ultra"}]},
+            {"slug": "internal-review", "visibility": "hide"},
+        ],
+    }), encoding="utf-8")
+    manager = _make_manager(tmp_path / "agent")
+    manager.current_backend = SimpleNamespace(
+        config=SimpleNamespace(engine="codex-cli", model="gpt-5.4"), effort="max",
+    )
+    runtime, _messages = _make_runtime(manager)
+
+    await runtime.cmd_model(*_update())
+    keyboard = runtime._reply_payloads[-1]["reply_markup"]
+    assert "gpt-6.1-sol" in str(keyboard)
+    assert "internal-review" not in str(keyboard)
+    assert runtime._get_available_efforts_for("codex-cli", "gpt-6.1-sol") == ["max", "ultra"]
+
+    await runtime.cmd_model(*_update(["gpt-6.1-sol"]))
+    assert manager.current_backend.config.model == "gpt-6.1-sol"
+    assert manager.current_backend.effort == "max"
+    assert _read_state(manager.config.workspace_dir)["active_model"] == "gpt-6.1-sol"
+    restored = _make_manager(manager.config.workspace_dir)
+    assert restored._active_model_override == "gpt-6.1-sol"
+    assert "gpt-6.1-sol" in _make_runtime(restored)[0]._get_available_models()
+
+    # An explicit per-Agent effort override remains authoritative.
+    manager.config.allowed_backends[0]["model_efforts"] = {"gpt-6.1-sol": ["high"]}
+    assert runtime._get_available_efforts_for("codex-cli", "gpt-6.1-sol") == ["high"]
+
+    # Explicit restrictions are different from a selected model or opt-in.
+    backend = manager.config.allowed_backends[0]
+    backend["available_models"] = ["gpt-6-sol"]
+    assert runtime._get_available_models() == ["gpt-6-sol"]
+    await runtime.cmd_model(*_update(["gpt-6.1-sol"]))
+    assert _read_state(manager.config.workspace_dir)["active_model"] == "gpt-6.1-sol"
+    with pytest.raises(ValueError):
+        manager._build_adapter_config("codex-cli", backend, target_model="gpt-6.1-sol")
+
+    backend["available_models"] = []
+    await runtime.cmd_model(*_update(["gpt-6.1-sol"]))
+    assert _read_state(manager.config.workspace_dir)["active_model"] == "gpt-6.1-sol"
 
 
 def _update(args: list[str] | None = None, text: str | None = None):
@@ -2268,7 +2321,7 @@ async def test_wrapper_config_status_commands_include_clickable_buttons(tmp_path
     assert runtime._reply_payloads[-1]["reply_markup"] is not None
     wrap_markup = str(runtime._reply_payloads[-1]["reply_markup"])
     assert "wcfg:wrapid:claude_haiku" in wrap_markup
-    assert "wcfg:wrapid:gemini_flash" in wrap_markup
+    assert "wcfg:wrapid:gemini_flash" not in wrap_markup
     assert "wcfg:wrapid:deepseek_pro" in wrap_markup
     assert "wcfg:wrapid:or_v4_pro" in wrap_markup
     assert "wcfg:wrapctx:3" in wrap_markup
@@ -2577,7 +2630,7 @@ async def test_wrapper_config_buttons_update_wrapper_model_across_backends(tmp_p
     manager = _make_manager(tmp_path / "agent")
     manager.config.allowed_backends.extend(
         [
-            {"engine": "gemini-cli", "model": "gemini-2.5-flash"},
+            {"engine": "antigravity-cli", "model": "gemini-3.8-flash-high"},
             {"engine": "deepseek-api", "model": "deepseek-v4-pro"},
             {"engine": "openrouter-api", "model": "deepseek/deepseek-v4-flash"},
         ]
@@ -2871,8 +2924,20 @@ async def test_wrapper_final_only_skips_polishing_placeholder_and_typing(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_background_completion_uses_wrapper_output_for_visible_surfaces(tmp_path):
+async def test_background_completion_uses_wrapper_output_for_visible_surfaces(
+    tmp_path, monkeypatch
+):
     runtime, sent, voices = _make_background_runtime(tmp_path)
+    capability_releases = []
+
+    async def release_capability_task(_runtime, request_id):
+        capability_releases.append(request_id)
+
+    monkeypatch.setattr(
+        runtime_lifecycle,
+        "release_capability_task",
+        release_capability_task,
+    )
     listener_payloads = []
     runtime.register_request_listener = (
         FlexibleAgentRuntime.register_request_listener.__get__(
@@ -2916,6 +2981,7 @@ async def test_background_completion_uses_wrapper_output_for_visible_surfaces(tm
     assert core_entry["visible_text"] == "wrapped visible"
     assert core_entry["completion_path"] == "background"
     assert core_entry["wrapper_used"] is True
+    assert capability_releases == ["req-001"]
 
 
 @pytest.mark.asyncio
@@ -2946,6 +3012,76 @@ async def test_background_final_waits_for_transition_status_delivery(tmp_path):
     await completion
     assert sent[0]["text"] == "wrapped visible"
     assert _voices[0]["text"] == "wrapped visible"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("before_completion_starts", [False, True])
+async def test_background_completion_cancel_stops_exact_run_before_final_delivery(
+    tmp_path, monkeypatch, before_completion_starts,
+):
+    from orchestrator import runtime_cancel
+
+    runtime, sent, _voices = _make_background_runtime(tmp_path)
+    item = _queued_request()
+    item.run_id = "run-001"
+    item.session_id = "ses-001"
+    state = {"state": "running"}
+
+    class Store:
+        def get_run(self, run_id, *, owner_id=None):
+            assert run_id == "run-001"
+            return {"run_id": run_id, "request_id": item.request_id,
+                    "session_id": item.session_id, "agent_id": runtime.name,
+                    "state": state["state"]}
+
+    store = Store()
+    runtime.session_store = store
+    monkeypatch.setattr(runtime_cancel.runtime_session, "ensure_store", lambda _runtime: store)
+    runtime._background_request_ids = {item.request_id}
+    stopped = []
+
+    async def notify(request_id, payload):
+        stopped.append((request_id, payload))
+        state["state"] = "stopped"
+
+    runtime._notify_request_listeners = notify
+    status_entered = asyncio.Event()
+    status_release = asyncio.Event()
+
+    async def deliver_status():
+        status_entered.set()
+        await status_release.wait()
+
+    item._background_status_delivery_task = asyncio.create_task(deliver_status())
+    generation = asyncio.create_task(
+        _completed_task(BackendResponse(text="should not be delivered", duration_ms=1.0))
+    )
+    await generation
+    completion = asyncio.create_task(FlexibleAgentRuntime._on_background_complete(
+        runtime, generation, item,
+    ))
+    runtime._background_completion_tasks_by_request = {item.request_id: completion}
+    try:
+        if not before_completion_starts:
+            await status_entered.wait()
+            await asyncio.sleep(0)
+        result = await runtime_cancel.cancel_session_run(
+            runtime, owner_id="owner", session_id=item.session_id,
+            run_id=item.run_id, request_id=item.request_id,
+        )
+        await completion
+        assert result["status"] == "cancellation_requested"
+        assert state["state"] == "stopped"
+        assert len(stopped) == 1
+        assert stopped[0][1]["interrupt_reason"] == "user_stop"
+        assert sent == []
+        assert runtime._background_completion_tasks_by_request == {}
+    finally:
+        status_release.set()
+        await asyncio.gather(item._background_status_delivery_task, return_exceptions=True)
+        if not completion.done():
+            completion.cancel()
+            await asyncio.gather(completion, return_exceptions=True)
 
 
 @pytest.mark.asyncio

@@ -63,6 +63,93 @@ INVALID_TOOL_CALL_REPAIR_LIMIT = 3
 _PROVIDER_FORENSIC_WRITE_LOCK = threading.Lock()
 
 
+def _verified_read_effect_fact(
+    *,
+    tool_name: str,
+    tool_call_id: str,
+    result: Any,
+) -> dict[str, Any]:
+    """Return bounded recovery evidence for one completed tool invocation.
+
+    Registry declarations and model-visible output are not effect evidence.
+    HERV3's execution wrapper must have completed the call successfully, and
+    the Tool owner must have attached the exact typed observation receipt.
+    """
+
+    name = str(tool_name or "")
+    call_id = str(tool_call_id or "")
+    details = dict(getattr(result, "details", None) or {})
+    result_call_id = str(getattr(result, "tool_call_id", "") or "")
+    from tools.effect_receipts import is_verified_read_effect_receipt
+
+    verified_read = bool(
+        not bool(getattr(result, "is_error", False))
+        and result_call_id == call_id
+        and is_verified_read_effect_receipt(
+            tool_name=name,
+            tool_call_id=call_id,
+            receipt=details.get("effect_receipt"),
+            completed=details.get("receipt_completed"),
+            status=details.get("receipt_status"),
+        )
+    )
+    checkpoint = details.get('continuation_checkpoint')
+    checkpoint_complete = bool(
+        call_id and details.get('receipt_completed') is True
+        and result_call_id == call_id
+        and isinstance(checkpoint, Mapping)
+        and checkpoint.get('type') == 'hashi.tool-checkpoint'
+        and checkpoint.get('version') == 1
+        and checkpoint.get('tool_call_id') == call_id
+        and checkpoint.get('tool_name') == name
+        and str(checkpoint.get('status') or '').casefold() == str(details.get('receipt_status') or '').casefold()
+        and str(checkpoint.get('status') or '').casefold() in {'success', 'failed'}
+        and str(checkpoint.get('operation_id') or '').endswith(':tool:' + call_id)
+        and checkpoint.get('evidence_ref')
+        and checkpoint.get('output_sha256') == hashlib.sha256(str(getattr(result, 'output', '')).encode('utf-8')).hexdigest()
+    )
+    return {
+        "tool_name": name,
+        "tool_call_id": call_id,
+        "executed": True,
+        "verified_read": verified_read,
+        **({'checkpoint_complete': True} if checkpoint_complete else {}),
+    }
+
+
+def _nonexecuted_tool_fact(*, tool_name: str, tool_call_id: str) -> dict[str, Any]:
+    return {
+        "tool_name": str(tool_name or ""),
+        "tool_call_id": str(tool_call_id or ""),
+        "executed": False,
+        "verified_read": False,
+    }
+
+
+def _effect_recovery_summary(
+    facts: list[dict[str, Any]],
+    *,
+    discarded_partial_draft: bool = False,
+) -> dict[str, Any]:
+    executed = [fact for fact in facts if fact.get("executed") is True]
+    verified_reads = sum(
+        1 for fact in executed if fact.get("verified_read") is True
+    )
+    unsafe_or_unverified = len(executed) - verified_reads
+    checkpoints = sum(1 for fact in executed if fact.get('checkpoint_complete') is True)
+    return {
+        "executed_tool_count": len(executed),
+        "verified_read_count": verified_reads,
+        "unsafe_or_unverified_count": unsafe_or_unverified,
+        "safe_current_call_continuation": bool(
+            executed and all(fact.get('verified_read') is True or fact.get('checkpoint_complete') is True for fact in executed)
+        ),
+        **({'completed_checkpoint_count': checkpoints, 'continuation_scope': 'current_provider_call'} if checkpoints else {}),
+        "tools_replayed": False,
+        "discarded_partial_draft": bool(discarded_partial_draft),
+    }
+
+
 class ProviderProtocolForensicError(RuntimeError):
     """A mandatory private Provider-protocol record could not be persisted."""
 
@@ -818,6 +905,19 @@ def _provider_response_decision(
                 "decision_reason": f"{normalized}_with_tool_calls",
                 "error_code": "PROVIDER_FINISH_REASON_CONFLICT",
             }
+        if not (
+            str(result.text or "").strip()
+            or isinstance(result.structured_data, Mapping)
+            or result.audio_bytes
+            or str(result.audio_transcript or "").strip()
+        ):
+            return {
+                **base,
+                "decision": "reject_empty_response",
+                "decision_reason": f"{normalized}_without_usable_output",
+                "error_code": "PROVIDER_EMPTY_RESPONSE",
+                "error_retryable": True,
+            }
         return {
             **base,
             "decision": "complete",
@@ -945,6 +1045,9 @@ _PROVIDER_PROTOCOL_ERROR_MESSAGES = {
     "PROVIDER_INCOMPLETE_STREAM": (
         "The Provider response stream ended before a complete decision could be made."
     ),
+    "PROVIDER_EMPTY_RESPONSE": (
+        "The Provider completed the response without returning usable output."
+    ),
 }
 
 
@@ -998,6 +1101,8 @@ async def _iter_provider_stream_lines(
                 return
             yield line
     except BaseException as exc:
+        if not hasattr(exc, "response"):
+            setattr(exc, "response", response)
         _annotate_stream_exception(exc, state)
         raise
 
@@ -1154,10 +1259,53 @@ async def _read_http_error_body(response: Any) -> None:
     setattr(response, "hashi_body_read_state", state)
 
 
+async def _trace_provider_request(request: httpx.Request) -> None:
+    """Keep bounded timings for actual httpcore phases without logging payloads."""
+    started = time.perf_counter()
+    previous_trace = request.extensions.get("trace")
+    trace_state: dict[str, Any] = {"events": [], "evidence_limited": False}
+    request.extensions["hashi_network_trace"] = trace_state
+
+    async def trace(event: str, info: dict[str, Any]) -> None:
+        trace_state["phase"] = str(event)[:120]
+        entry = {"event": str(event)[:120], "elapsed_ms": round((time.perf_counter() - started) * 1000, 3)}
+        trace_state["events"].append(entry)
+        if len(trace_state["events"]) > 64:
+            del trace_state["events"][0]
+            trace_state["evidence_limited"] = True
+        if previous_trace is not None:
+            await previous_trace(event, info)
+
+    request.extensions["trace"] = trace
+
+
+async def _trace_provider_response(response: httpx.Response) -> None:
+    state = response.request.extensions.get("hashi_network_trace")
+    if isinstance(state, dict):
+        state["response_headers_received"] = True
+        state["http_status"] = response.status_code
+
+
 def _provider_http_failure_diagnostics(error: Exception) -> dict[str, Any]:
     """Preserve the complete HTTP request/response evidence for local audit."""
 
+    from orchestrator.bootstrap_logging import redact_log_text
+
     diagnostics: dict[str, Any] = {}
+    chain: list[dict[str, Any]] = []
+    cause: BaseException | None = error
+    seen: set[int] = set()
+    while cause is not None and id(cause) not in seen and len(chain) < 8:
+        seen.add(id(cause))
+        entry = {"type": type(cause).__name__, "message": redact_log_text(str(cause))[:2000]}
+        if isinstance(cause, OSError) and cause.errno is not None:
+            entry["errno"] = cause.errno
+        chain.append(entry)
+        cause = cause.__cause__ or (None if cause.__suppress_context__ else cause.__context__)
+    diagnostics["exception_chain"] = chain
+    timing = getattr(error, "hashi_provider_call_timing", None)
+    if isinstance(timing, Mapping):
+        diagnostics["call_timing"] = dict(timing)
     try:
         response = getattr(error, "response", None)
     except RuntimeError:
@@ -1173,6 +1321,9 @@ def _provider_http_failure_diagnostics(error: Exception) -> dict[str, Any]:
             request = None
 
     if isinstance(request, httpx.Request):
+        trace = request.extensions.get("hashi_network_trace")
+        if isinstance(trace, Mapping):
+            diagnostics["network_trace"] = dict(trace)
         try:
             request_body = bytes(request.content)
         except (httpx.RequestNotRead, TypeError, ValueError):
@@ -1342,7 +1493,7 @@ def _backend_failure_response(
     return BackendResponse(
         text="",
         duration_ms=duration_ms,
-        error=str(error),
+        error=str(error).strip() or f"{type(error).__name__}: {description}",
         is_success=False,
         tool_call_count=int(tool_call_count),
         tool_loop_count=int(tool_loop_count),
@@ -2097,7 +2248,10 @@ class OpenRouterAdapter(BaseBackend):
 
     def _ensure_client(self):
         if self.client is None or getattr(self.client, "is_closed", False):
-            self.client = httpx.AsyncClient(timeout=float(self.PROCESS_TIMEOUT_SEC))
+            self.client = httpx.AsyncClient(
+                timeout=float(self.PROCESS_TIMEOUT_SEC),
+                event_hooks={"request": [_trace_provider_request], "response": [_trace_provider_response]},
+            )
 
     def _summarize_reasoning_detail(self, detail) -> str:
         if not isinstance(detail, dict):
@@ -2569,8 +2723,9 @@ class OpenRouterAdapter(BaseBackend):
         native_local_refs: set[str] | None = None,
         all_media_native: bool = False,
         provider_call_context: Mapping[str, Any] | None = None,
-    ) -> None:
+    ) -> tuple[dict[str, Any], ...]:
         """Execute all tool_calls and append tool result messages to `messages`."""
+        effect_facts: list[dict[str, Any]] = []
         for tc in tool_calls:
             fn = tc.get("function", {})
             tool_name = fn.get("name", "unknown")
@@ -2600,6 +2755,12 @@ class OpenRouterAdapter(BaseBackend):
                     else (json.loads(raw_args) if raw_args else {})
                 )
             except json.JSONDecodeError as e:
+                effect_facts.append(
+                    _nonexecuted_tool_fact(
+                        tool_name=tool_name,
+                        tool_call_id=tc_id,
+                    )
+                )
                 result_text = f"Error: could not parse tool arguments: {e}"
                 await self._emit(
                     on_stream_event,
@@ -2650,6 +2811,12 @@ class OpenRouterAdapter(BaseBackend):
                     local_refs=set(native_local_refs or ()),
                 )
             ):
+                effect_facts.append(
+                    _nonexecuted_tool_fact(
+                        tool_name=tool_name,
+                        tool_call_id=tc_id,
+                    )
+                )
                 result_text = (
                     "Error: this attachment was already supplied through the native "
                     "media route; duplicate fallback processing is blocked."
@@ -2672,6 +2839,12 @@ class OpenRouterAdapter(BaseBackend):
 
             policy = self._evaluate_tool_policy(tool_name, arguments)
             if not policy.allowed:
+                effect_facts.append(
+                    _nonexecuted_tool_fact(
+                        tool_name=tool_name,
+                        tool_call_id=tc_id,
+                    )
+                )
                 result_text = self._blocked_tool_result_text(tool_name, policy)
                 denial_recorder = getattr(
                     self.tool_registry, "record_policy_denial", None
@@ -2722,6 +2895,13 @@ class OpenRouterAdapter(BaseBackend):
                 raise
 
             output_preview = result.output[:100].replace("\n", " ")
+            effect_facts.append(
+                _verified_read_effect_fact(
+                    tool_name=tool_name,
+                    tool_call_id=tc_id,
+                    result=result,
+                )
+            )
             await self._emit(on_stream_event, KIND_TOOL_END,
                              f"{tool_name}: {output_preview}", tool_name=tool_name,
                              metadata={
@@ -2735,6 +2915,7 @@ class OpenRouterAdapter(BaseBackend):
                 "tool_call_id": tc_id,
                 "content": result.output,
             })
+        return tuple(effect_facts)
 
     def _evaluate_tool_policy(self, tool_name: str, arguments: dict):
         action, resource = self._tool_policy_action_resource(tool_name, arguments)
@@ -3325,6 +3506,7 @@ class OpenRouterAdapter(BaseBackend):
         last_forensic_path: Path | None = None
         total_tool_repair_requests = 0
         total_local_recovery_requests = 0
+        tool_effect_facts: list[dict[str, Any]] = []
 
         try:
             self._touch_activity()
@@ -3390,6 +3572,12 @@ class OpenRouterAdapter(BaseBackend):
                     payload = await self._protect_outbound_payload(
                         payload, request_id=str(request_id or ""), gate=privacy_gate
                     )
+                    # Level-2 placeholders may be longer than the sensitive
+                    # spans they replace.  The first check protects the local
+                    # privacy sidecar from an already-oversized request; this
+                    # second check governs the exact text payload that will be
+                    # audited and sent over HTTP.
+                    self._preflight_payload_capacity(payload)
                     provider_call_emitted_text = False
                     effective_parameters = _effective_protocol_parameters(payload)
 
@@ -3519,6 +3707,11 @@ class OpenRouterAdapter(BaseBackend):
                         )
                         raise
                     except Exception as exc:
+                        setattr(exc, "hashi_provider_call_timing", {
+                            "request_started_at": provider_call_started_at,
+                            "failure_observed_at": _utc_timestamp(),
+                            "elapsed_ms": round((time.perf_counter() - provider_call_started) * 1000, 3),
+                        })
                         if not isinstance(exc, ProviderProtocolForensicError):
                             provider_wire_refs.append(
                                 self._record_provider_wire_evidence(
@@ -3553,11 +3746,33 @@ class OpenRouterAdapter(BaseBackend):
                             INVALID_TOOL_CALL_REPAIR_LIMIT,
                             max(0, int(self.TRANSIENT_PROVIDER_CALL_RETRIES)),
                         )
+                        effect_recovery = _effect_recovery_summary(
+                            tool_effect_facts
+                        )
+                        current_call_continuation = bool(
+                            effect_recovery["safe_current_call_continuation"]
+                        )
+                        checkpoint_continuation = bool(current_call_continuation and effect_recovery.get('completed_checkpoint_count'))
+                        verified_read_continuation = bool(current_call_continuation and not checkpoint_continuation)
+                        no_executed_effect = (
+                            effect_recovery["executed_tool_count"] == 0
+                        )
                         can_transport_retry = bool(
                             not can_media_fallback
                             and recovery_attempts_used < retry_limit
-                            and not provider_call_emitted_text
                             and _transient_provider_call_error(exc)
+                            and (
+                                current_call_continuation
+                                or (
+                                    no_executed_effect
+                                    and not provider_call_emitted_text
+                                )
+                            )
+                        )
+                        effect_recovery["discarded_partial_draft"] = bool(
+                            can_transport_retry
+                            and current_call_continuation
+                            and provider_call_emitted_text
                         )
                         partial_protocol = dict(
                             getattr(exc, "hashi_provider_protocol", {}) or {}
@@ -3568,6 +3783,11 @@ class OpenRouterAdapter(BaseBackend):
                             if can_media_fallback
                             else (
                                 "retry_unfinished_provider_call"
+                                if can_transport_retry
+                                and not current_call_continuation
+                                else 'retry_current_call_checkpoint'
+                                if can_transport_retry and checkpoint_continuation
+                                else "retry_verified_read_only_continuation"
                                 if can_transport_retry
                                 else "return_provider_failure"
                             )
@@ -3622,6 +3842,11 @@ class OpenRouterAdapter(BaseBackend):
                                     "decision": failure_decision,
                                     "decision_reason": type(exc).__name__,
                                     "decision_success": False,
+                                    **(
+                                        {"effect_recovery": effect_recovery}
+                                        if tool_effect_facts
+                                        else {}
+                                    ),
                                     "provider_wire_evidence_refs": list(
                                         provider_wire_refs
                                     ),
@@ -3653,7 +3878,12 @@ class OpenRouterAdapter(BaseBackend):
                             total_local_recovery_requests += 1
                             provider_transport_retry_count += 1
                             next_provider_recovery_kind = (
-                                "provider_transport_retry"
+                                'current_call_checkpoint'
+                                if checkpoint_continuation
+                                else
+                                "verified_read_only_continuation"
+                                if verified_read_continuation
+                                else "provider_transport_retry"
                             )
                             await asyncio.sleep(
                                 _provider_call_retry_delay(
@@ -3924,19 +4154,21 @@ class OpenRouterAdapter(BaseBackend):
                         )
 
                 # Execute tools, append results
-                await self._run_tool_calls(
-                    result.tool_calls,
-                    messages,
-                    on_stream_event,
-                    native_attachment_ids=native_attachment_ids,
-                    native_local_refs=native_local_refs,
-                    all_media_native=all_media_native,
-                    provider_call_context={
-                        "provider_call_serial": provider_attempt_serial,
-                        "provider_request_id": last_provider_call_record.get(
-                            "provider_request_id", ""
-                        ),
-                    },
+                tool_effect_facts.extend(
+                    await self._run_tool_calls(
+                        result.tool_calls,
+                        messages,
+                        on_stream_event,
+                        native_attachment_ids=native_attachment_ids,
+                        native_local_refs=native_local_refs,
+                        all_media_native=all_media_native,
+                        provider_call_context={
+                            "provider_call_serial": provider_attempt_serial,
+                            "provider_request_id": last_provider_call_record.get(
+                                "provider_request_id", ""
+                            ),
+                        },
+                    )
                 )
                 completed_tool_calls.extend(
                     {

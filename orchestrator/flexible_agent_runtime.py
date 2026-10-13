@@ -126,7 +126,12 @@ from orchestrator.flexible_backend_registry import (
     normalize_model,
     public_backend_engine,
 )
-from orchestrator.runtime_effort_options import get_available_efforts, normalize_effort
+from orchestrator.runtime_effort_options import (
+    backend_model_view,
+    get_available_models as runtime_available_models,
+    get_available_efforts,
+    normalize_effort,
+)
 from orchestrator.memory_index import MemoryIndex
 from orchestrator.memory_search_mode import apply_memory_injection_preferences
 from orchestrator.handoff_builder import HandoffBuilder
@@ -193,6 +198,20 @@ def _parse_key_values(args: list[str]) -> dict[str, str]:
 
 class FlexibleAgentRuntime:
 
+    def __getattribute__(self, name):
+        from orchestrator import runtime_execution
+        if name in runtime_execution.LOCAL_FIELDS:
+            found, value = runtime_execution.read_field(self, name)
+            if found:
+                return value
+        return object.__getattribute__(self, name)
+
+    def __setattr__(self, name, value):
+        from orchestrator import runtime_execution
+        if name in runtime_execution.LOCAL_FIELDS and runtime_execution.write_field(self, name, value):
+            return
+        object.__setattr__(self, name, value)
+
     CODEX_CHUNK_LIMIT_ERROR = "Separator is not found, and chunk exceed the limit"
     CODEX_SCHEDULER_RETRY_DELAY_S = 120
 
@@ -231,7 +250,9 @@ class FlexibleAgentRuntime:
         self.backend_ready = False
         self.telegram_connected = False
         self.process_task = None
-        self.queue = asyncio.Queue()
+        from orchestrator.runtime_execution import SessionQueue
+        self.queue = SessionQueue()
+        self._execution_admissions = {}
         self.request_seq = 0
         self.is_generating = False
         self.last_prompt = None
@@ -340,6 +361,7 @@ class FlexibleAgentRuntime:
         self.project_chat_logger = ProjectChatLogger(self.workspace_dir)
         self.runtime_session_path = self.workspace_dir / ".runtime_session.json"
         self.transfer_state_path = self.workspace_dir / "active_transfer.json"
+        runtime_transfer.transfer_admission_lock(self)
         self._cos_enabled: bool = (self.workspace_dir / ".cos_on").exists()
         runtime_session.initialize_runtime_sessions(self)
         workzone_state = self.session_store.get_agent_workzone_set(
@@ -705,17 +727,19 @@ class FlexibleAgentRuntime:
                             )
                             return
                     with bind_slash_command_audit_session(session):
-                        await handler(update, context)
+                        handler_result = await handler(update, context)
                     if ticket is not None:
-                        ticket.complete(
-                            {
-                                "ok": True,
-                                "command": command_name,
-                                "execution_state": "completed",
-                                "connector_id": "telegram",
-                                "transport_delivery_state": "not_observed",
-                            }
-                        )
+                        response = {
+                            "ok": True,
+                            "command": command_name,
+                            "execution_state": "completed",
+                            "connector_id": "telegram",
+                            "transport_delivery_state": "not_observed",
+                        }
+                        if isinstance(handler_result, Mapping):
+                            response["result"] = dict(handler_result)
+                        ticket.complete(response)
+                    return handler_result
             except Exception as exc:
                 session.fail(exc)
                 raise
@@ -1455,6 +1479,8 @@ class FlexibleAgentRuntime:
                 source=item.source,
                 created_at=datetime.fromisoformat(item.created_at).timestamp(),
             )
+            from orchestrator import runtime_execution
+            self._execution_admissions[item.request_id] = runtime_execution.snapshot(self)
             await self.queue.put(item)
         self.message_logger.info(f"Queued {item.request_id} from {source} (summary={summary!r})")
         return item.request_id
@@ -2163,6 +2189,7 @@ class FlexibleAgentRuntime:
 
     def get_runtime_metadata(self) -> dict:
         from orchestrator.frontend_status import runtime_presentation_status
+        from orchestrator.agent_creation_policy import runtime_backend_catalogue
 
         delivery = telegram_delivery_failover.delivery_status_summary(self)
         display_policy = telegram_stream_policy.get_display_policy(self)
@@ -2206,6 +2233,8 @@ class FlexibleAgentRuntime:
                         ),
                     }
                 )
+            else:
+                row = backend_model_view(configured)
             public_allowed_backends.append(row)
         return {
             "id": self.name,
@@ -2217,6 +2246,9 @@ class FlexibleAgentRuntime:
             "model": self.get_current_model(),
             "provider": self.get_current_provider(),
             "allowed_backends": public_allowed_backends,
+            "privacy_level": int(getattr(self.backend_manager, "privacy_level", 1)),
+            "backend_catalogue": runtime_backend_catalogue(self),
+            "active_provider": self.get_current_provider(),
             "workspace_dir": str(self.workspace_dir),
             "transcript_path": str(self.transcript_log_path),
             "online": bool(self.backend_ready),
@@ -2277,14 +2309,14 @@ class FlexibleAgentRuntime:
         }
         if fixed_mcp and not bool(getattr(backend, "_hashi_mcp_enabled", False)):
             return []
-        exposed_names = {
-            str(name)
-            for name in (
-                (getattr(backend, "_hashi_mcp_descriptor", None) or {}).get(
-                    "exposed_tools", []
-                )
-            )
-        }
+        exposed_names: set[str] = set()
+        if fixed_mcp:
+            from tools.gateway.mcp_stdio import exposed_tool_name
+
+            exposed_names = {
+                exposed_tool_name(name)
+                for name in registry.allowed_tool_names()
+            }
         definitions = registry.get_tool_definitions()
         catalogue: list[dict[str, str]] = []
         for definition in definitions:
@@ -2323,11 +2355,10 @@ class FlexibleAgentRuntime:
                 return False
             from tools.gateway.mcp_stdio import exposed_tool_name
 
-            return exposed_tool_name(tool_name) in set(
-                (getattr(backend, "_hashi_mcp_descriptor", None) or {}).get(
-                    "exposed_tools", []
-                )
-            )
+            return exposed_tool_name(tool_name) in {
+                exposed_tool_name(item)
+                for item in registry.allowed_tool_names()
+            }
         return True
 
     def _get_available_skill_catalogue(self) -> list[dict[str, str]]:
@@ -3142,14 +3173,7 @@ class FlexibleAgentRuntime:
         idempotency_key: str | None = None,
     ):
         if self._should_redirect_after_transfer() and not source.startswith(("bridge-transfer:", "bridge-fork:")):
-            if deliver_to_telegram:
-                await self.send_long_message(
-                    self._primary_chat_id(),
-                    self._transfer_redirect_text(),
-                    request_id=f"transfer-redirect-{uuid4().hex[:8]}",
-                    purpose="transfer-redirect",
-                )
-            return None
+            runtime_transfer.require_untransferred(self)
         _print_user_message(self.name, text)
         return await self.enqueue_request(
             self._primary_chat_id() if chat_id is None else chat_id,
@@ -3450,6 +3474,8 @@ class FlexibleAgentRuntime:
         request_metadata: Mapping[str, Any] | None = None,
         idempotency_key: str | None = None,
     ):
+        if media_kind.lower() != "voice" and self._should_redirect_after_transfer():
+            runtime_transfer.require_untransferred(self)
         if self._should_redirect_after_transfer():
             if deliver_to_telegram:
                 await self.send_long_message(
@@ -3852,7 +3878,7 @@ class FlexibleAgentRuntime:
 
         state = self.phone_manager.get_state()
         provider = self.phone_manager.PROVIDERS[state["provider"]]
-        adapter = default_registry().get(state["provider"])
+        adapter = default_registry(include_experimental=True).get(state["provider"])
         if not bool(getattr(self.global_config, "live_voice_v1", True)):
             availability = ui_language.tr("phone.status.disabled")
         elif adapter is None:
@@ -3966,6 +3992,11 @@ class FlexibleAgentRuntime:
         update: Any,
         profile_id: str,
         assets: tuple[tuple[str, Path], ...],
+        *,
+        caption_override: str | None = None,
+        media_type_override: str | None = None,
+        filename_override: str | None = None,
+        preview_id: str = "",
     ) -> int:
         """Send prerecorded UI previews without creating a conversation Turn."""
 
@@ -3995,10 +4026,10 @@ class FlexibleAgentRuntime:
                 or customization.get("route") != "connector_local"
             ):
                 raise RuntimeError("Telegram voice preview is not registered in FC")
-        profile_label = ui_language.tr(f"voice.profile.{profile_id}")
+        profile_label = ui_language.tr(f"voice.profile.{profile_id}") if caption_override is None else ""
         sent = 0
         for renderer, path in assets:
-            caption = ui_language.tr(
+            caption = caption_override if caption_override is not None else ui_language.tr(
                 f"voice.preview.caption.{renderer}",
                 voice=profile_label,
             )
@@ -4009,6 +4040,7 @@ class FlexibleAgentRuntime:
                     + hashlib.sha256(
                         (
                             f"{surface}\0{profile_id}\0{renderer}\0"
+                            + (f"{preview_id}\0" if preview_id else "")
                         ).encode("utf-8")
                         + payload,
                     ).hexdigest()
@@ -4017,8 +4049,8 @@ class FlexibleAgentRuntime:
                     runtime_session.publish_frontend_media_notification_for_update(
                         self,
                         update,
-                        filename=path.name,
-                        media_type="audio/ogg",
+                        filename=filename_override or path.name,
+                        media_type=media_type_override or "audio/ogg",
                         payload=payload,
                         sha256=hashlib.sha256(payload).hexdigest(),
                         caption=caption,
@@ -4464,6 +4496,10 @@ class FlexibleAgentRuntime:
                 preview_assets,
             )
 
+    async def callback_call(self, update: Update, context: Any):
+        from orchestrator.frontend_call.settings import callback
+        await callback(self, update, context)
+
     async def callback_phone(self, update: Update, context: Any):
         query = update.callback_query
         if not self._is_authorized_user(query.from_user.id):
@@ -4730,7 +4766,7 @@ class FlexibleAgentRuntime:
             await query.answer()
 
         elif target == "reboot":
-            await runtime_reboot.callback(self, update, query, value)
+            return await runtime_reboot.callback(self, update, query, value)
         else:
             await query.answer()
 
@@ -4811,7 +4847,7 @@ class FlexibleAgentRuntime:
         asyncio.create_task(orchestrator.stop_agent(self.name))
 
     async def cmd_reboot(self, update: Update, context: Any):
-        await runtime_reboot.command(self, update, context)
+        return await runtime_reboot.command(self, update, context)
 
     # ── /move command ────────────────────────────────────────────────────────
     def _load_instances(self) -> dict:
@@ -5103,27 +5139,36 @@ class FlexibleAgentRuntime:
 
         try:
             _, endpoint = self._resolve_bridge_handoff_endpoint(target_instance, action)
-            timeout = aiohttp.ClientTimeout(
-                total=None,
-                connect=10,
-                sock_connect=10,
+            body = await runtime_transfer.send_bridge_handoff(
+                self,
+                endpoint=endpoint,
+                expected_target=target_instance,
+                payload=package,
             )
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                health_endpoint = runtime_transfer.handoff_health_endpoint(endpoint)
-                async with session.get(health_endpoint) as health_response:
-                    health = await health_response.json()
-                    if health_response.status >= 400:
-                        raise RuntimeError(
-                            str(health.get("error") or f"HTTP {health_response.status}")
-                        )
-                    runtime_transfer.verify_handoff_instance_identity(
-                        health,
-                        expected_instance=target_instance,
-                    )
-                async with session.post(endpoint, json=package) as response:
-                    body = await response.json()
-                    if response.status >= 400 or not body.get("ok"):
-                        raise RuntimeError(str(body.get("error") or f"HTTP {response.status}"))
+        except runtime_transfer.BridgeHandoffOutcomeUnknown as e:
+            self.logger.warning(
+                "%s outcome unknown for %s: %s",
+                label,
+                package["transfer_id"],
+                e.cause,
+            )
+            if action == "transfer":
+                runtime_transfer.record_transfer_outcome_unknown(
+                    self,
+                    transfer_id=package["transfer_id"],
+                    error=e.cause,
+                )
+                message_key = "transfer.unknown"
+            else:
+                message_key = "transfer.fork_unknown"
+            await self._send_text(
+                update.effective_chat.id,
+                ui_language.tr(
+                    message_key,
+                    transfer_id=package["transfer_id"],
+                ),
+            )
+            return
         except Exception as e:
             self.logger.warning(f"{label} failed for {package['transfer_id']}: {e}")
             if action == "transfer":
@@ -5145,44 +5190,39 @@ class FlexibleAgentRuntime:
 
         final_status = str(body.get("status") or "accepted")
         if action == "transfer":
-            self._transfer_state["status"] = "accepted"
-            self._transfer_state["target_status"] = final_status
-            self._persist_transfer_state()
+            runtime_transfer.record_transfer_accepted(
+                self,
+                transfer_id=package["transfer_id"],
+                target_status=final_status,
+            )
+            publish_metadata = getattr(self, "_publish_worker_metadata", None)
+            if callable(publish_metadata):
+                try:
+                    await publish_metadata()
+                except Exception:
+                    self.logger.warning(
+                        "Transfer accepted but Worker metadata refresh failed",
+                        exc_info=True,
+                    )
             self._suppressed_transfer_results.clear()
-            if final_status == "accepted_but_chat_offline":
-                target_status = body.get("target_chat_status") or "offline"
-                message = ui_language.tr(
-                    "transfer.accepted_offline",
-                    target=f"{target_agent}@{target_instance}",
-                    status=target_status,
-                    transfer_id=package["transfer_id"],
-                )
-            else:
-                message = ui_language.tr(
-                    "transfer.accepted",
-                    target=f"{target_agent}@{target_instance}",
-                    transfer_id=package["transfer_id"],
-                )
+            message = runtime_transfer.handoff_acceptance_text(
+                body,
+                mode="transfer",
+                target=f"{target_agent}@{target_instance}",
+                transfer_id=package["transfer_id"],
+            )
             await self._send_text(
                 update.effective_chat.id,
                 message,
             )
             return
 
-        if final_status == "accepted_but_chat_offline":
-            target_status = body.get("target_chat_status") or "offline"
-            message = ui_language.tr(
-                "transfer.fork_accepted_offline",
-                target=f"{target_agent}@{target_instance}",
-                status=target_status,
-                transfer_id=package["transfer_id"],
-            )
-        else:
-            message = ui_language.tr(
-                "transfer.fork_accepted",
-                target=f"{target_agent}@{target_instance}",
-                transfer_id=package["transfer_id"],
-            )
+        message = runtime_transfer.handoff_acceptance_text(
+            body,
+            mode="fork",
+            target=f"{target_agent}@{target_instance}",
+            transfer_id=package["transfer_id"],
+        )
         await self._send_text(
             update.effective_chat.id,
             message,
@@ -5453,6 +5493,7 @@ class FlexibleAgentRuntime:
         if not self._is_authorized_user(update.effective_user.id):
             return
         async def reply_browser_status():
+            connected_browsers = []
             secrets = getattr(self.backend_manager, "secrets", {}) or {}
             secrets_path = getattr(getattr(self, "global_config", None), "secrets_path", None)
             if secrets_path:
@@ -5480,6 +5521,11 @@ class FlexibleAgentRuntime:
                         and item.get("capability_kind") == "browser_control"
                         for item in capability_status.get("capabilities") or []
                     )
+                    connected_browsers = [
+                        item for item in capability_status.get("capabilities") or []
+                        if isinstance(item, dict)
+                        and item.get("capability_kind") == "browser_control"
+                    ]
                 except Exception as e:
                     self.logger.warning(
                         "Failed to refresh Browser Control capability status: %s",
@@ -5501,6 +5547,7 @@ class FlexibleAgentRuntime:
                     active_backend=active_backend,
                     brave_configured=bool(secrets.get("brave_api_key")),
                     extension_bridge_configured=extension_bridge_configured,
+                    connected_browsers=connected_browsers,
                 ),
                 parse_mode="HTML",
             )
@@ -5707,6 +5754,10 @@ class FlexibleAgentRuntime:
                 ui_language.tr("safevoice.confirmation_expired")
             )
             await query.answer(ui_language.tr("safevoice.expired"))
+
+    async def cmd_call(self, update: Update, context: Any):
+        from orchestrator.frontend_call.settings import command
+        await command(self, update, context)
 
     async def cmd_phone(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
@@ -8280,26 +8331,8 @@ class FlexibleAgentRuntime:
             selected = self.backend_manager.get_her_v3_target()
             option = self.backend_manager._her_v3_provider_option(selected.provider)
             return list(option["models"]) if option and option["available"] else []
-        models = get_available_models(engine)
         backend_cfg = self._get_backend_cfg(engine)
-        if not backend_cfg:
-            return models
-
-        # Agent-local model rows extend the shared catalog. This lets one Agent
-        # opt into an OpenRouter model without exposing it to every Agent or
-        # removing any globally registered choices.
-        configured_models: list[object] = []
-        raw_models = backend_cfg.get("models")
-        if isinstance(raw_models, list):
-            configured_models.extend(raw_models)
-        configured_models.extend(
-            [backend_cfg.get("model"), backend_cfg.get("default_model")]
-        )
-        for configured_model in configured_models:
-            model = str(configured_model or "").strip()
-            if model and model not in models:
-                models.append(model)
-        return models
+        return runtime_available_models(engine, backend=backend_cfg)
 
     def _get_configured_model_for(self, engine: str) -> str | None:
         configured = str(
@@ -8307,7 +8340,9 @@ class FlexibleAgentRuntime:
         ).strip()
         if configured and configured in self._get_available_models_for(engine):
             return configured
-        return normalize_model(engine, configured)
+        choices = self._get_available_models_for(engine)
+        default = normalize_model(engine, configured)
+        return default if default in choices else next(iter(choices), None)
 
     def _get_available_efforts(self) -> list[str]:
         return self._get_available_efforts_for(self.config.active_backend, self.get_current_model())
@@ -8852,8 +8887,6 @@ class FlexibleAgentRuntime:
         return [
             ("claude_haiku", "Claude Haiku", "claude-cli", "claude-haiku-4-5"),
             ("claude_sonnet", "Claude Sonnet", "claude-cli", "claude-sonnet-4-6"),
-            ("gemini_flash", "Gemini Flash", "gemini-cli", "gemini-2.5-flash"),
-            ("gemini_lite", "Gemini Lite", "gemini-cli", "gemini-2.5-flash-lite"),
             ("deepseek_flash", "DeepSeek Flash", "deepseek-api", "deepseek-flash"),
             ("deepseek_pro", "DeepSeek Pro", "deepseek-api", "deepseek-v4-pro"),
             ("or_v32", "OR DeepSeek V3.2 Exp", "openrouter-api", "deepseek/deepseek-v3.2-exp"),
@@ -8870,7 +8903,6 @@ class FlexibleAgentRuntime:
         choices = {choice_id: (label, backend, model) for choice_id, label, backend, model in self._wrapper_model_choices()}
         grouped_rows = [
             ["claude_haiku", "claude_sonnet"],
-            ["gemini_flash", "gemini_lite"],
             ["deepseek_flash", "deepseek_pro"],
             ["or_v32", "or_v4_flash"],
             ["or_v4_pro", "or_gemini"],
@@ -11070,6 +11102,10 @@ class FlexibleAgentRuntime:
         """Safety timeout: auto-submit the collected batch after 5 minutes."""
         await runtime_long.long_buffer_timeout(self)
 
+    async def callback_run_question(self, update: Update, context: Any):
+        from orchestrator.runtime_run_questions import handle_callback
+        await handle_callback(self, update, context)
+
     async def handle_message(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             self.logger.warning(f"Ignored message from unauthorized user ID: {update.effective_user.id}")
@@ -11081,6 +11117,9 @@ class FlexibleAgentRuntime:
             await self._reply_text(update, self._transfer_redirect_text())
             return
         text = update.message.text
+        from orchestrator.runtime_run_questions import handle_text_reply
+        if await handle_text_reply(self, update):
+            return
         if await runtime_workzone.handle_pending_path_reply(self, update):
             return
         # /long is scoped to the chat that started it.
@@ -12357,7 +12396,12 @@ class FlexibleAgentRuntime:
             self._background_tasks.discard(task)
             try:
                 loop = asyncio.get_event_loop()
-                loop.create_task(self._on_background_complete(task, item))
+                completion = loop.create_task(self._on_background_complete(task, item))
+                completion_tasks = getattr(self, "_background_completion_tasks_by_request", None)
+                if not isinstance(completion_tasks, dict):
+                    completion_tasks = {}
+                    self._background_completion_tasks_by_request = completion_tasks
+                completion_tasks[item.request_id] = completion
             except RuntimeError:
                 pass  # loop closed during shutdown
 
@@ -12378,6 +12422,7 @@ class FlexibleAgentRuntime:
             registry = getattr(self, "_request_meta_by_id", None)
             if isinstance(registry, dict):
                 registry.pop(item.request_id, None)
+            await runtime_lifecycle.release_capability_task(self, item.request_id)
             return
 
         receipt_text = ""
@@ -12387,12 +12432,25 @@ class FlexibleAgentRuntime:
         receipt_disposition = "background_transport_not_attempted"
         receipt_chunk_count = 0
         receipt_error_type = ""
+        completion_started = getattr(self, "_background_completion_started_request_ids", None)
+        if not isinstance(completion_started, set):
+            completion_started = set()
+            self._background_completion_started_request_ids = completion_started
+        completion_started.add(item.request_id)
         try:
+            from orchestrator.runtime_cancel import requested_ids
+
+            if item.request_id in requested_ids(self) and not task.cancelled():
+                raise asyncio.CancelledError
             await runtime_delivery_order.wait_for_turn(self, item.request_id)
             await runtime_background_status.wait_for_delivery(item)
+            if item.request_id in requested_ids(self) and not task.cancelled():
+                raise asyncio.CancelledError
             if task.cancelled():
+                user_cancelled = item.request_id in requested_ids(self)
                 receipt_error = "background_task_cancelled"
-                self._mark_error(f"Background task cancelled: {item.summary}")
+                if not user_cancelled:
+                    self._mark_error(f"Background task cancelled: {item.summary}")
                 self.logger.warning(f"Background task {item.request_id} was cancelled.")
                 is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
                 self._notify_right_brain_interrupted(
@@ -12411,6 +12469,8 @@ class FlexibleAgentRuntime:
                         "error": "background_task_cancelled",
                         "source": item.source,
                         "summary": item.summary,
+                        **({"interrupted": True, "interrupt_reason": "user_stop"}
+                           if user_cancelled else {}),
                         **runtime_pipeline.request_context_warning_fields(
                             self, item.request_id
                         ),
@@ -12482,13 +12542,19 @@ class FlexibleAgentRuntime:
             if recovered is not None:
                 response, _recovered_prompt = recovered
                 runtime_pipeline.observe_terminal_response(self, item, response)
+            if item.request_id in requested_ids(self):
+                raise asyncio.CancelledError
             receipt_response = response
 
             if response.is_success and response.text:
                 display_text = self._strip_transfer_accept_prefix(item, response.text)
-                self._mark_success()
                 visible_text, wrapper_result = await self._apply_wrapper_to_visible_text(item, display_text or response.text)
                 visible_text = normalize_user_visible_paths(visible_text)
+                from orchestrator.runtime_cancel import claim_final_result
+
+                if not await claim_final_result(self, item):
+                    raise asyncio.CancelledError
+                self._mark_success()
                 receipt_text = visible_text
                 runtime_retry.clear_completed_interrupted_task(self, item)
                 safe_core_raw = extract_memory_plus_update_details(response.text).visible_text
@@ -12821,6 +12887,29 @@ class FlexibleAgentRuntime:
                 )
                 receipt_delivered = chunk_count > 0
 
+        except asyncio.CancelledError:
+            from orchestrator.runtime_cancel import requested_ids
+            from orchestrator.session_store import TERMINAL_RUN_STATES
+
+            if item.request_id not in requested_ids(self):
+                raise
+            run_id = getattr(item, "run_id", None)
+            store = getattr(self, "session_store", None)
+            terminal = bool(run_id and store is not None
+                            and store.get_run(run_id)["state"] in TERMINAL_RUN_STATES)
+            if not terminal:
+                receipt_response = None
+                receipt_error = "background_task_cancelled"
+                await self._notify_request_listeners(item.request_id, {
+                    "request_id": item.request_id,
+                    "success": False,
+                    "text": None,
+                    "error": receipt_error,
+                    "source": item.source,
+                    "summary": item.summary,
+                    "interrupted": True,
+                    "interrupt_reason": "user_stop",
+                })
         except Exception as e:
             terminal_console.observe_exception(self.name, item.request_id, e)
             terminal_console.finish_request(
@@ -12838,6 +12927,18 @@ class FlexibleAgentRuntime:
                 f"Unhandled error in _on_background_complete for {item.request_id}: {e}"
             )
         finally:
+            from orchestrator.runtime_cancel import requested_ids
+
+            completion_started.discard(item.request_id)
+            requested_ids(self).discard(item.request_id)
+            from orchestrator.runtime_cancel import finalizing_ids
+            finalizing_ids(self).discard(item.request_id)
+            tasks_by_request = getattr(self, "_generation_tasks_by_request", None)
+            if isinstance(tasks_by_request, dict) and tasks_by_request.get(item.request_id) is task:
+                tasks_by_request.pop(item.request_id, None)
+            completion_tasks = getattr(self, "_background_completion_tasks_by_request", None)
+            if isinstance(completion_tasks, dict) and completion_tasks.get(item.request_id) is asyncio.current_task():
+                completion_tasks.pop(item.request_id, None)
             if receipt_response is not None:
                 await runtime_pipeline.record_her_v2_transport_receipt(
                     self,
@@ -12870,6 +12971,7 @@ class FlexibleAgentRuntime:
                 self,
                 item.request_id,
             )
+            await runtime_lifecycle.release_capability_task(self, item.request_id)
             await runtime_delivery_order.complete_turn(self, item.request_id)
 
     async def process_queue(self):

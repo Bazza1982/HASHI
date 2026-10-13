@@ -25,6 +25,10 @@ OPENAI_LIVE_VOICE_PRESENTATIONS = {
     "cinder": "masculine",
 }
 
+CASCADE_VOICES = (
+    "default", "zh_female_1", "zh_female_2", "zh_male_1", "zh_male_2",
+)
+
 PHONE_PROVIDERS = {
     "openai": {
         "label": "OpenAI",
@@ -32,6 +36,15 @@ PHONE_PROVIDERS = {
             "gpt-live-1": {
                 "label": "GPT Live 1",
                 "voices": OPENAI_LIVE_VOICES,
+            },
+        },
+    },
+    "local-cascade": {
+        "label": "Local Cascade (Experimental)",
+        "models": {
+            "cascade-v1": {
+                "label": "Cascade V1 (Local Audio)",
+                "voices": CASCADE_VOICES,
             },
         },
     },

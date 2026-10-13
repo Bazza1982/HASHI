@@ -207,6 +207,128 @@ async def test_start_agent_registers_one_isolated_handle_and_publishes_topology(
 
 
 @pytest.mark.asyncio
+async def test_start_agent_keeps_ingress_supervised_when_outbound_setup_failed():
+    kernel = _Kernel(names=("alpha",))
+    kernel.function_workers.next_handle = _handle(kernel, "alpha", 101, telegram=False)
+
+    ok, _ = await AgentLifecycleManager(kernel).start_agent("alpha")
+
+    assert ok
+    assert kernel.function_workers.telegram_ingress == {"alpha"}
+
+
+@pytest.mark.asyncio
+async def test_requested_start_returns_pending_and_deduplicates_until_worker_ready():
+    kernel = _Kernel(names=("alpha",))
+    manager = AgentLifecycleManager(kernel)
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def create(name):
+        calls.append(name)
+        entered.set()
+        await release.wait()
+        return _handle(kernel, name, 101)
+
+    kernel.function_workers.create_active_handle = create
+    first = await manager.request_start_agent("alpha")
+    assert first["status"] == "starting"
+    await entered.wait()
+    second = await manager.request_start_agent("alpha")
+    assert second["status"] == "starting"
+    assert calls == ["alpha"]
+    assert not kernel.runtimes
+    task = kernel._startup_tasks["alpha"]
+    release.set()
+    await task
+    assert len(kernel.runtimes) == 1
+    assert kernel._startup_tasks == {}
+    assert kernel.startup_status["agent_states"]["alpha"] == "online"
+
+
+@pytest.mark.asyncio
+async def test_requested_start_failure_is_observable_without_duplicate_task():
+    kernel = _Kernel(names=("alpha",))
+    kernel.function_workers.creation_error = RuntimeError("candidate rejected")
+    manager = AgentLifecycleManager(kernel)
+    await manager.request_start_agent("alpha")
+    await kernel._startup_tasks["alpha"]
+    assert not kernel._startup_tasks
+    assert not kernel.runtimes
+    assert kernel.startup_status["agent_states"]["alpha"] == "failed"
+    assert "candidate rejected" in kernel.startup_status["agent_reasons"]["alpha"]
+
+
+@pytest.mark.asyncio
+async def test_new_agent_requested_start_failure_rolls_back_exact_config_revision():
+    kernel = _Kernel(names=("alpha",))
+    kernel.function_workers.creation_error = RuntimeError("candidate rejected")
+    calls = []
+    def rollback(*args, **kwargs):
+        assert kernel._startup_tasks["alpha"] is asyncio.current_task()
+        calls.append((args, kwargs))
+        return True
+
+    kernel.config_admin = SimpleNamespace(set_agent_active=rollback)
+    manager = AgentLifecycleManager(kernel)
+
+    await manager.request_start_agent(
+        "alpha", deactivate_on_failure_revision="sha256:created"
+    )
+    await kernel._startup_tasks["alpha"]
+
+    assert calls == [
+        (
+            ("alpha", False),
+            {
+                "expected_revision": "sha256:created",
+                "allow_last_active_deactivation": True,
+            },
+        )
+    ]
+    assert kernel.startup_status["agent_states"]["alpha"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_new_agent_start_also_rolls_back_exact_config_revision():
+    kernel = _Kernel(names=("alpha",))
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def create(_name):
+        entered.set()
+        await release.wait()
+        return _handle(kernel, "alpha", 101)
+
+    kernel.function_workers.create_active_handle = create
+    kernel.config_admin = SimpleNamespace(
+        set_agent_active=lambda *args, **kwargs: calls.append((args, kwargs)) or True
+    )
+    manager = AgentLifecycleManager(kernel)
+
+    await manager.request_start_agent(
+        "alpha", deactivate_on_failure_revision="sha256:created"
+    )
+    task = kernel._startup_tasks["alpha"]
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert calls == [
+        (
+            ("alpha", False),
+            {
+                "expected_revision": "sha256:created",
+                "allow_last_active_deactivation": True,
+            },
+        )
+    ]
+    assert kernel.startup_status["agent_states"]["alpha"] == "failed"
+
+
+@pytest.mark.asyncio
 async def test_start_candidate_failure_never_registers_a_partial_runtime(monkeypatch):
     kernel = _Kernel(names=("alpha",))
     kernel.function_workers.creation_error = RuntimeError("candidate rejected")

@@ -17,7 +17,7 @@ cp examples/agents.json.example agents.json
 
 **Key fields:**
 - `name`: Agent identifier
-- `engine`: Backend engine (`gemini-cli`, `claude-cli`, `codex-cli`, `openrouter-api`)
+- `engine`: Backend engine (`antigravity-cli`, `claude-cli`, `codex-cli`, `her-v3`)
 - `authorized_id`: Your Telegram user ID
 - `system_prompt_file`: Path to agent personality file
 
@@ -119,7 +119,7 @@ cp examples/tasks.json.example tasks.json
 
 # 2. Edit agents.json
 #    - Set your Telegram user ID in authorized_id
-#    - Choose your backend (gemini-cli, claude-cli, codex-cli, or openrouter-api)
+#    - Choose your backend (antigravity-cli, claude-cli, codex-cli, or her-v3)
 #    - Customize agent name and personality file
 
 # 3. Edit secrets.json

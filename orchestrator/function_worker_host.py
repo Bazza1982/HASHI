@@ -34,6 +34,7 @@ from orchestrator.function_worker_protocol import (
 from orchestrator.function_contract import validate_function_contract
 from orchestrator.pathing import build_bridge_paths
 from orchestrator.reboot_adoption_bridge import bridge_legacy_broad_reboot
+from orchestrator import runtime_background_status
 from orchestrator.runtime_contract import (
     RuntimeFingerprint,
     compare_runtime_fingerprints,
@@ -872,6 +873,8 @@ class FunctionWorkerHost:
             secrets,
             skill_manager,
         )
+        from orchestrator.execution_resources import execution_configuration
+        execution_configuration(getattr(runtime.backend_manager, '_agents_json_global', None), agent_cfg.extra)
         facade = WorkerKernelFacade(
             peer=self.peer,
             paths=self.paths,
@@ -946,7 +949,9 @@ class FunctionWorkerHost:
     def metadata(self) -> dict[str, Any]:
         runtime = self._require_runtime()
         from orchestrator.agent_incarnation import lifecycle_id_from_config
+        from orchestrator.runtime_transfer import transfer_redirect_snapshot
         from orchestrator.telegram_delivery_failover import telegram_bot_fingerprint
+        from orchestrator.runtime_execution import queue_reasons
 
         result = dict(runtime.get_runtime_metadata())
         agent_mode = str(
@@ -1032,8 +1037,10 @@ class FunctionWorkerHost:
                 "supported_commands": commands,
                 "command_registry_notices": command_registry_notices,
                 "active_transfer": bool(runtime.has_active_transfer()),
+                "transfer_redirect": transfer_redirect_snapshot(runtime),
                 "is_generating": bool(runtime.is_generating),
-                "queue_depth": int(runtime.queue.qsize()),
+                "queue_depth": len(queue_reasons(runtime)),
+                "execution_queue_reasons": queue_reasons(runtime),
                 "current_request_meta": self._current_request_metadata(runtime),
                 "org_id": getattr(runtime, "org_id", None),
                 "agent_lifecycle_id": lifecycle_id_from_config(runtime.config),
@@ -1278,14 +1285,14 @@ class FunctionWorkerHost:
         self.accepting = False
         self.was_telegram_connected = bool(runtime.telegram_connected)
         runtime.telegram_connected = False
+        runtime_background_status.cancel_for_quiesce(runtime)
+        # Let cooperative optional tasks settle without waiting for a Provider.
+        await asyncio.sleep(0)
         deadline = time.monotonic() + max(0.1, float(timeout))
         while True:
             active_background = any(
                 not task.done()
-                for task in (
-                    list(getattr(runtime, "_background_tasks", ()))
-                    + list(getattr(runtime, "_persona_background_status_tasks", ()))
-                )
+                for task in getattr(runtime, "_background_tasks", ())
             )
             if (
                 runtime.queue.empty()
@@ -1312,6 +1319,7 @@ class FunctionWorkerHost:
                 f"resume requires DRAINING or QUIESCED, current phase={self.phase}"
             )
         runtime = self._require_runtime()
+        runtime._persona_background_status_paused = False
         if self.was_telegram_connected:
             runtime.telegram_connected = True
         self.accepting = True
@@ -1557,6 +1565,17 @@ class FunctionWorkerHost:
 
             return await handle_phone_action_operation(runtime, str(params.get("operation") or ""),
                                                        dict(params.get("payload") or {}))
+        if method == "runtime.cancel_session_run":
+            from orchestrator.runtime_cancel import cancel_session_run
+
+            return await cancel_session_run(
+                runtime,
+                owner_id=str(params.get("owner_id") or ""),
+                session_id=str(params.get("session_id") or ""),
+                run_id=str(params.get("run_id") or ""),
+                request_id=str(params.get("request_id") or ""),
+                reason=str(params.get("reason") or "cancelled_by_user"),
+            )
         if method == "runtime.slash":
             from orchestrator.admin_local_testing import (
                 try_execute_slash_command_text,

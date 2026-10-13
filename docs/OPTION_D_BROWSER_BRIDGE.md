@@ -42,6 +42,35 @@ The installer uses `.venv\Scripts\python.exe` when present, otherwise the `pytho
 It derives an instance-scoped namespace, extension identity, named pipe,
 authentication file, native-host registration, and installation directory.
 Loading one instance's unpacked extension does not authorize another instance.
+An explicit `-RepoRoot` determines the installation's instance identity; an
+inherited caller instance cannot change it. Native-host logs are kept under
+that same installation namespace.
+
+The native Windows launcher forwards and flushes each available chunk in both
+directions while the connection remains open. Waiting for EOF strands the
+extension's initial handshake and hides the browser tools despite successful
+installation. The Windows transport regression compiles the actual launcher
+and observes two replies before closing its input. Reinstall only the affected
+instance's launcher and reload its extension to adopt this fix; Core and other
+instances do not require a restart.
+
+For Edge on the same HASHI instance, install a second isolated bridge:
+
+```powershell
+.\tools\install_browser_option_d_windows.ps1 -Browser Edge
+```
+
+Load the printed extension directory from `edge://extensions`. Edge gets its
+own extension identity, native-host registration, pipe, and authentication
+file. Keep the existing Chrome installation for Chrome. Install a separate
+Browser Worker for Edge using the printed Edge endpoint and auth-file paths,
+plus `-BrowserId edge -BrowserName "Microsoft Edge"` with
+`scripts/install_device_control_workers.ps1 -BrowserOnly`. This creates a
+separate `Browser-edge` scheduled task. Browser registrations expose their
+IDs/names to every HASHI backend. `/browser 4` may use either connected browser
+when the user has not chosen one; a task remains on its first selected browser.
+Uninstall only Edge's bridge with
+`tools/uninstall_browser_option_d_windows.ps1 -Browser Edge`.
 
 Install the persistent Browser Worker separately. When HASHI itself is hosted
 in WSL, pass the instance's UNC path as `BridgeHome` and a Windows-local checkout

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ import pytest
 
 from orchestrator.capability_broker import CapabilityUnavailableError
 from tools.registry import ToolRegistry
+from tools.device_control_worker import DeviceWorkerState
 
 
 class _CapabilityFacade:
@@ -32,6 +34,29 @@ class _CapabilityFacade:
         if isinstance(self.result, Exception):
             raise self.result
         return self.result
+
+
+class _ReplayCheckingFacade(_CapabilityFacade):
+    """Exercise the sender against the Device Worker's real replay boundary."""
+
+    def __init__(self, tmp_path):
+        super().__init__(capabilities=[_browser_registration(actions=("active_tab",))])
+        self.worker = DeviceWorkerState(
+            bridge_home=tmp_path,
+            capability_kind="browser_control",
+            instance_id="HASHI1",
+            device_id="test-device",
+            user_session_id="test-session",
+            worker_token="x" * 64,
+            bind_host="127.0.0.1",
+            advertise_host="127.0.0.1",
+            wsl_distro=None,
+            logger=logging.getLogger(__name__),
+        )
+
+    async def invoke_capability(self, kind, action, args, **kwargs):
+        self.worker.mark_request(kwargs["request_id"])
+        return await super().invoke_capability(kind, action, args, **kwargs)
 
 
 def _registry(
@@ -85,6 +110,49 @@ def _definition_names(registry):
     }
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "second_scope", [{"request_id": "request-8"}, {"agent_name": "agent2"}]
+)
+async def test_device_call_counter_is_scoped_but_same_call_replay_still_rejected(
+    tmp_path, second_scope
+):
+    facade = _ReplayCheckingFacade(tmp_path)
+    registry = _registry(tmp_path, "browser_active_tab", facade)
+    shared_task = {"task_id": "long-running-task"}
+    first = await registry.execute_with_audit_context(
+        "browser_active_tab", {}, "2", audit_context=shared_task
+    )
+    scope = {**shared_task, **second_scope}
+    second = await registry.execute_with_audit_context(
+        "browser_active_tab", {}, "2", audit_context=scope
+    )
+    # Changing arguments must not disguise a repeat of the same scoped call.
+    replay = await registry.execute_with_audit_context(
+        "browser_active_tab", {"url": "https://changed.test"}, "2", audit_context=scope
+    )
+
+    assert not first.is_error and not second.is_error
+    assert len(facade.calls) == 2
+    assert facade.calls[0][3]["task_id"] == facade.calls[1][3]["task_id"]
+    assert replay.is_error and "replayed capability request rejected" in replay.output
+    assert first.tool_call_id == second.tool_call_id == replay.tool_call_id == "2"
+
+
+@pytest.mark.asyncio
+async def test_unscoped_registries_do_not_share_low_device_call_counters(tmp_path):
+    facade = _ReplayCheckingFacade(tmp_path)
+    registries = [_registry(tmp_path, "browser_active_tab", facade) for _ in range(2)]
+    for registry in registries:
+        registry.audit_context.pop("request_id")
+        registry.audit_context.pop("agent_name")
+        result = await registry.execute("browser_active_tab", {}, "2")
+        assert not result.is_error
+    replay = await registries[-1].execute("browser_active_tab", {}, "2")
+    assert replay.is_error and "replayed capability request rejected" in replay.output
+    assert len(facade.calls) == 2
+
+
 def test_catalogue_hides_unregistered_browser_and_explains_web_replacement(tmp_path):
     facade = _CapabilityFacade()
     registry = ToolRegistry(
@@ -116,6 +184,37 @@ def test_catalogue_tracks_browser_registration_expiry_and_recovery(tmp_path):
 
     facade.capabilities["capabilities"] = [_browser_registration()]
     assert _definition_names(registry) == {"browser_get_text"}
+
+
+def test_connected_browser_catalogue_describes_bridge_without_standalone_options(tmp_path):
+    chrome = {
+        **_browser_registration(actions=("active_tab", "screenshot", "get_text")),
+        "browser_id": "chrome",
+        "browser_name": "Google Chrome",
+    }
+    facade = _CapabilityFacade(capabilities=[chrome])
+    registry = ToolRegistry(
+        ["browser_active_tab", "browser_screenshot", "browser_get_text"],
+        access_root=tmp_path,
+        workspace_dir=tmp_path,
+        secrets={},
+        audit_context={
+            "_runtime": SimpleNamespace(orchestrator=facade),
+            "global_config": SimpleNamespace(instance_id="HASHI1"),
+        },
+    )
+
+    definitions = {
+        item["function"]["name"]: item["function"]
+        for item in registry.get_tool_definitions()
+    }
+    assert "Google Chrome [chrome]" in definitions["browser_active_tab"]["description"]
+    for function in definitions.values():
+        assert "cdp_url" not in function["parameters"]["properties"]
+        assert "headed" not in function["parameters"]["properties"]
+        assert "CDP" not in function["description"]
+    assert "visible Chrome" not in definitions["browser_active_tab"]["description"]
+    assert "logged-in browser" not in definitions["browser_get_text"]["description"]
 
 
 @pytest.mark.asyncio
@@ -160,6 +259,45 @@ async def test_capability_disappearing_after_catalogue_preflight_stays_typed(tmp
     assert "unexpected failure" not in result.output
 
 
+@pytest.mark.asyncio
+async def test_requested_browser_missing_keeps_actionable_reason(tmp_path):
+    facade = _CapabilityFacade(
+        CapabilityUnavailableError(
+            "browser_control", action="get_text",
+            reason="requested_browser_not_connected",
+        ),
+        capabilities=[_browser_registration()],
+    )
+    registry = _registry(tmp_path, "browser_get_text", facade)
+    result = await registry.execute(
+        "browser_get_text", {"browser_target": "edge"}, tool_call_id="missing-edge"
+    )
+    assert result.is_error is True
+    assert result.details["reason"] == "requested_browser_not_connected"
+    assert "connected browser target" in result.output
+
+
+@pytest.mark.asyncio
+async def test_switching_a_task_bound_browser_reports_clear_error(tmp_path):
+    facade = _CapabilityFacade(
+        RuntimeError(
+            "core.capability.invoke: CapabilityBrokerError: browser target is fixed "
+            "for this task; start a new task to switch"
+        ),
+        capabilities=[_browser_registration()],
+    )
+    registry = _registry(tmp_path, "browser_get_text", facade)
+
+    result = await registry.execute(
+        "browser_get_text", {"browser_target": "edge"}, tool_call_id="locked-target"
+    )
+
+    assert result.is_error is True
+    assert result.details["code"] == "browser_target_locked"
+    assert "start a new task" in result.output
+    assert "unexpected failure" not in result.output
+
+
 def test_cross_instance_capability_never_enters_local_catalogue(tmp_path):
     facade = _CapabilityFacade(capabilities=[_browser_registration()])
     facade.capabilities["instance_id"] = "HASHI2"
@@ -201,9 +339,10 @@ async def test_windows_tools_route_through_core_capability_facade(tmp_path):
     kind, action, args, kwargs = facade.calls[0]
     assert (kind, action) == ("computer_control", "click")
     assert args["_authorized_roots"] == [str(tmp_path)]
+    assert kwargs["request_id"] != "call-7"
     assert kwargs == {
         "task_id": "request-7",
-        "request_id": "call-7",
+        "request_id": kwargs["request_id"],
         "authorization": "tool_registry",
     }
 

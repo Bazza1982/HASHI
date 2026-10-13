@@ -21,6 +21,7 @@ class _LifecycleState:
 async def test_core_publishes_workbench_before_starting_function_workers(
     tmp_path,
     monkeypatch,
+    caplog,
     deferred,
 ):
     events: list[str] = []
@@ -60,6 +61,11 @@ async def test_core_publishes_workbench_before_starting_function_workers(
         config_path=tmp_path / "agents.json",
     )
     kernel.runtime_fingerprint = runtime_fingerprint
+    kernel.function_release_timing = {
+        "started_at": "2026-10-04T10:00:00+11:00",
+        "total_ms": 1200.0,
+        "phases_ms": {"isolated_probe": 800.0},
+    }
     kernel._handoff_draining = deferred
     kernel.lifecycle_state = _LifecycleState()
     kernel.startup_manager = _StartupManager()
@@ -74,7 +80,8 @@ async def test_core_publishes_workbench_before_starting_function_workers(
 
     monkeypatch.setattr(main_module, "setup_bridge_file_logging", lambda *_args: None)
 
-    await main_module.UniversalOrchestrator.run(kernel)
+    with caplog.at_level("INFO", logger="BridgeU.Bridge"):
+        await main_module.UniversalOrchestrator.run(kernel)
 
     assert events == [
         "workbench",
@@ -85,6 +92,7 @@ async def test_core_publishes_workbench_before_starting_function_workers(
     ]
     assert kernel.startup_status["ready"] is not deferred
     assert kernel.startup_status["phase"] == ("connecting" if deferred else "ready")
+    assert '"isolated_probe": 800.0' in caplog.text
 
 
 @pytest.mark.asyncio

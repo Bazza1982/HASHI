@@ -482,6 +482,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--socket", "--endpoint", dest="endpoint", default=DEFAULT_ENDPOINT)
     parser.add_argument("--auth-file", default=str(DEFAULT_WINDOWS_AUTH_FILE))
     parser.add_argument("--log-file", default=str(DEFAULT_LOG_PATH))
+    parser.add_argument("--expected-origin", default=EXPECTED_EXTENSION_ORIGIN)
     parser.add_argument("origin", nargs="?", help=argparse.SUPPRESS)
     parser.add_argument("--parent-window", help=argparse.SUPPRESS)
     return parser
@@ -492,7 +493,7 @@ def main() -> int:
     args = parser.parse_args()
     if not args.stdio:
         parser.error("--stdio is required for this host")
-    if args.origin and args.origin != EXPECTED_EXTENSION_ORIGIN:
+    if args.origin and args.origin != args.expected_origin:
         parser.error("native messaging origin is not authorised")
     if os.name == "nt":
         import msvcrt

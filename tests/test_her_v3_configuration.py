@@ -143,6 +143,22 @@ def test_v3_manager_persists_and_live_refreshes_model_target(tmp_path):
     assert "her_v2_configuration" not in state
 
 
+@pytest.mark.parametrize("previous,expected", [("off", "high"), ("low", "low")])
+def test_v3_target_switch_adopts_supported_reasoning_in_live_and_durable_state(tmp_path, previous, expected):
+    manager = _manager(tmp_path)
+    manager.config.allowed_backends.append({"engine": "hashi-api", "model": "gpt-5.6-luna"})
+    manager.config.allowed_backends[0]["effort"] = previous
+    manager.current_backend = SimpleNamespace(
+        config=SimpleNamespace(engine="her-v2", extra={"her_v2": _raw_config(), "effort": previous}),
+        effort="zero" if previous == "off" else previous, _v2_config=None,
+    )
+    manager.apply_her_v3_target(HERv3ModelTarget("hashi-api", "gpt-5.6-luna"))
+    assert manager.config.allowed_backends[0]["effort"] == expected
+    assert manager.current_backend.effort == expected
+    assert manager.current_backend.config.extra["effort"] == expected
+    assert manager.state_store.read()["backend_efforts"]["her-v2"] == expected
+
+
 def test_v3_provider_options_derive_deepseek_models_from_provider_catalogue(tmp_path):
     manager = _manager(tmp_path)
 

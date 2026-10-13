@@ -43,7 +43,9 @@ class PhoneManager:
     PROVIDERS = PHONE_PROVIDERS
     VOICE_LABELS = {
         voice: voice.title()
-        for voice in PROVIDERS["openai"]["models"]["gpt-live-1"]["voices"]
+        for provider_data in PROVIDERS.values()
+        for model_data in provider_data["models"].values()
+        for voice in model_data["voices"]
     }
     VOICE_PRESENTATIONS = OPENAI_LIVE_VOICE_PRESENTATIONS
     LANGUAGES = PHONE_LANGUAGES
@@ -245,7 +247,7 @@ class PhoneManager:
         resolved_agent_id = str(agent_id or self.workspace_dir.name)
         resolved_display_name = str(display_name or resolved_agent_id)
         from orchestrator.frontend_live_voice.provider import default_registry, select_provider
-        adapter = select_provider(default_registry(), state["provider"])
+        adapter = select_provider(default_registry(include_experimental=True), state["provider"])
         instructions = build_live_voice_instructions(
             agent_id=resolved_agent_id,
             display_name=resolved_display_name,

@@ -1,6 +1,7 @@
 param(
     [string]$RepoRoot = (Split-Path -Parent $PSScriptRoot),
-    [string]$PythonExe = ""
+    [string]$PythonExe = "",
+    [ValidateSet("Chrome", "Edge")][string]$Browser = "Chrome"
 )
 
 $ErrorActionPreference = "Stop"
@@ -24,10 +25,17 @@ finally {
 if ([string]::IsNullOrWhiteSpace($Namespace) -or $Namespace -notmatch '^[a-z0-9][a-z0-9_-]{0,95}$') {
     throw "Refusing to remove a Browser Bridge with an invalid namespace"
 }
+if ($Browser -eq "Edge") {
+    $Namespace += "-edge"
+}
 
 $HostSuffix = ($Namespace.ToLowerInvariant() -replace "[^a-z0-9_]", "_")
 $HostName = "com.hashi.browser_bridge.$HostSuffix"
-$RegistryPath = "HKCU:\Software\Google\Chrome\NativeMessagingHosts\$HostName"
+$RegistryPath = if ($Browser -eq "Edge") {
+    "HKCU:\Software\Microsoft\Edge\NativeMessagingHosts\$HostName"
+} else {
+    "HKCU:\Software\Google\Chrome\NativeMessagingHosts\$HostName"
+}
 $InstallBase = Join-Path $env:LOCALAPPDATA "HASHI\browser_bridge"
 $InstallRoot = Join-Path $InstallBase $Namespace
 
@@ -45,4 +53,5 @@ if (Test-Path -LiteralPath $InstallRoot -PathType Container) {
     Write-Host "Removed instance-scoped Browser Bridge files for $Namespace"
 }
 
-Write-Host "Remove the matching unpacked Chrome extension from chrome://extensions if it is still loaded."
+$ExtensionsUrl = if ($Browser -eq "Edge") { "edge://extensions" } else { "chrome://extensions" }
+Write-Host "Remove the matching unpacked $Browser extension from $ExtensionsUrl if it is still loaded."

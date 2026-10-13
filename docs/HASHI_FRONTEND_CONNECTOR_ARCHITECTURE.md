@@ -22,6 +22,16 @@ Trusted Telegram media handlers and `/long` submission carry explicit Telegram
 ingress metadata into admission. Media kinds such as photo, document, sticker,
 and multimodal describe content; they do not identify a frontend connector.
 
+Telegram downloads and completed `/long` batches also pass through the
+Functions-owned `telegram_media_admission` adapter before Run admission. It
+commits validated bytes to PAO's Session attachment store, derives canonical
+media parts and persists their attachment IDs in the original user Message.
+The Session, owner and context generation stay frozen through queue admission.
+Download receipts or paths alone are not Run attachment authority; backend
+current-Run, content-integrity and exact-file fences remain unchanged. Native
+voice admission retains its existing transcript and retention policy. See the
+[October 10 repair](repairs/TELEGRAM_MEDIA_ADMISSION_20261010.md).
+
 Frontend Connectors expose HASHI to users and compatible clients without
 creating a second source of Agent, Session, Message, Run, Event, PCM, or Engine
 state. A Connector translates between one user-facing transport and the typed
@@ -438,6 +448,26 @@ These are implementation identifiers, not an active product boundary. New
 documentation and user-facing text must say **Backend API** unless it is
 explaining an exact compatibility name. Private external product names must not
 appear in general HASHI architecture.
+
+Cross-instance Session transfer uses the existing authenticated Hashi Remote
+relay rather than exposing the loopback Backend API. The source verifies one
+explicit target's signed gateway status, including the target's local Backend
+API identity, before sending the transfer exactly once. The transfer/fork relay
+response is bound to the request nonce; an unsigned response, wrong instance,
+or uncertain write outcome can never mark the source Session accepted or cause
+an automatic replay. Only transfer/fork uses the bounded long-running relay
+budget: the target relay has 3,590 seconds and the source client 3,600 seconds
+so the relay can return a signed result before the client deadline. Generic
+Backend API proxy requests retain their existing shorter timeout.
+
+The target model acknowledgement is the authority for a successful Session
+transfer or fork. Once that acknowledgement is valid, the target records and
+returns `status=accepted`; delivery of the accompanying Telegram system notices
+is an independent Connector projection and cannot downgrade the transfer or
+imply that another frontend is offline. New peers return a bounded
+`telegram_notification` result. Consumers accept the older
+`accepted_but_chat_offline` response only as a compatibility indication that
+the Telegram notice was unavailable, while preserving the accepted handoff.
 
 ## 8. Connector neutrality
 
@@ -1076,3 +1106,48 @@ capability registration and resource leases, accepts an authenticated human acto
 and never creates a conversational Run. It is not a new frontend product inside
 HASHI. Source/automated checks and physical-device acceptance remain separate;
 feature availability defaults to disabled.
+
+### Post-transfer Session admission fence (2026-10-03)
+
+The canonical Session API rejects new non-voice user Runs and ordinary
+attachment staging after a transfer is accepted or its receiver outcome is
+unknown.  The shared API performs an early rejection for clear HTTP 409
+feedback.  The selected Function Worker repeats the same check at PAO's sole
+Run writer; that check and the accepted/unknown fence transition share one
+per-runtime lock, so a request linearizes either before the fence or after it
+and cannot create a Run in between.
+
+Attachment staging is rejected early only when the shared process can already
+observe a persisted fence; staging and a later Worker fence transition are not
+one cross-process transaction.  If the transition happens after staging, the
+Worker-side Run writer still prevents the attachment from entering execution.
+
+The durable `active_transfer.json` fact is a bounded read-only fallback when a
+Worker metadata projection is stale.  No file plus no metadata means no fence.
+An existing unreadable, oversized, malformed, or semantically invalid fence is
+fail-closed as outcome unknown.  A complete ordinary pending transfer retains
+its prior admission semantics.  Rejections reuse the existing typed Frontend
+Command admission/result and do not create a second transfer ledger.
+
+This fence is limited to the canonical `session_api` user-message connector.
+Agent-owned scheduler, cron, heartbeat and background activity retain their
+existing PAO admission behavior.  Exact trusted `bridge-transfer:` and
+`bridge-fork:` ingress remains available to create the target Run; public API
+clients cannot assert those reserved sources.  Existing canonical
+`voice_message` content, including a caption, remains on its prior route and
+is outside this non-voice change.
+
+## Nightly HASHI1 connector contracts
+
+Remote desktop preflight uses the authenticated, compact
+/api/v1/instance/identity endpoint, never the unbounded health document.
+Unverified targets reject before input; uncertain submitted input is never
+replayed automatically. Telegram ingress uses a bounded durable sink with
+stage, exception, retry and recovery evidence. Read it through the authenticated
+Agent diagnostics endpoint; missing evidence remains unknown. See
+[diagnostics](HASHI_TELEGRAM_INGRESS_DIAGNOSTICS.md) and
+[same-Run question delivery](HASHI_RUN_QUESTIONS.md).
+The isolated HASHI1 Workbench consumes authoritative creation/Provider views,
+keeps future avatars by authenticated instance/Agent identity and stores the
+complete selected roster. Its private source/build/live evidence is separate
+from adoption of a shared Workbench.

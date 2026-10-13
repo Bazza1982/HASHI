@@ -37,20 +37,37 @@ class _Request:
 
 
 class _MultipartPart:
-    filename = None
-    headers = {}
-
-    def __init__(self, name: str, value: str):
+    def __init__(
+        self,
+        name: str,
+        value: str = "",
+        *,
+        filename: str | None = None,
+        payload: bytes = b"",
+        content_type: str = "",
+    ):
         self.name = name
         self._value = value
+        self.filename = filename
+        self.headers = {"Content-Type": content_type} if content_type else {}
+        self._payload = bytes(payload)
+        self._read = False
 
     async def text(self):
         return self._value
 
+    async def read_chunk(self):
+        if self._read:
+            return b""
+        self._read = True
+        return self._payload
+
 
 class _MultipartReader:
-    def __init__(self, fields: dict[str, str]):
-        self._parts = iter(_MultipartPart(key, value) for key, value in fields.items())
+    def __init__(self, fields: dict[str, str], uploads=None):
+        parts = [_MultipartPart(key, value) for key, value in fields.items()]
+        parts.extend(uploads or [])
+        self._parts = iter(parts)
 
     async def next(self):
         return next(self._parts, None)
@@ -59,12 +76,13 @@ class _MultipartReader:
 class _MultipartRequest(_Request):
     content_type = "multipart/form-data"
 
-    def __init__(self, fields: dict[str, str]):
+    def __init__(self, fields: dict[str, str], uploads=None):
         super().__init__()
         self._fields = fields
+        self._uploads = list(uploads or [])
 
     async def multipart(self):
-        return _MultipartReader(self._fields)
+        return _MultipartReader(self._fields, self._uploads)
 
 
 class _Runtime:
@@ -102,6 +120,13 @@ class _Runtime:
 
     def get_display_name(self):
         return "Lily"
+
+    async def cancel_session_run(self, *, owner_id, session_id, run_id, request_id, reason):
+        run = self.server.session_store.get_run(run_id, owner_id=owner_id)
+        assert (run["session_id"], run["request_id"]) == (session_id, request_id)
+        stopped = self.server.session_store.cancel_run(run_id, owner_id=owner_id, reason=reason)
+        return {"ok": True, "session_id": session_id, "run_id": run_id,
+                "request_id": request_id, "status": stopped["state"], "terminal": True}
 
     def _primary_chat_id(self):
         return 123
@@ -209,6 +234,97 @@ def _server(
     )
     runtime.server = server
     return server, runtime
+
+
+@pytest.mark.asyncio
+async def test_shared_chat_projection_reads_start_notice_without_fenced_worker(tmp_path):
+    server, runtime = _server(tmp_path)
+    owner = "user:7"
+    session = server.session_store.resolve_primary_session(owner_id=owner, agent_id="lily", establish=True)
+    notice = server.session_store.append_presentation_message(
+        session_id=session["session_id"], owner_id=owner, agent_id="lily",
+        role="assistant", text="Starting hot restart", source="telegram.runtime_notice",
+        idempotency_key="restart-start", history_eligible=False,
+    )
+    # A fenced worker must not be consulted to read already-durable messages.
+    def worker_unavailable(*_args, **_kwargs):
+        raise AssertionError("chat projection crossed the fenced Worker")
+    runtime.command = worker_unavailable
+    response = await server.handle_chat_projection(_Request(match_info={"name": "lily"}))
+    assert response.status == 200
+    assert response.headers["Cache-Control"] == "no-store"
+    projection = json.loads(response.text)["projection"]
+    assert any(row["message_id"] == notice["message_id"] and row["text"] == "Starting hot restart"
+               for row in projection["messages"])
+    assert runtime.enqueue_request_calls == 0
+    other = server.session_store.create_session(owner_id="user:8", agent_id="lily")
+    denied = await server.handle_chat_projection(_Request(
+        match_info={"name": "lily"}, query={"session_id": other["session_id"]}))
+    assert denied.status == 404
+    malformed = await server.handle_chat_projection(_Request(match_info={"name": "lily"}, query={"offset": "-1"}))
+    assert malformed.status == 400
+
+
+@pytest.mark.asyncio
+async def test_attachment_discard_is_owner_scoped_atomic_and_refuses_message_bound_assets(tmp_path):
+    server, runtime = _server(tmp_path)
+    store = server.session_store
+    session = store.create_session(owner_id='user:7', agent_id='lily')
+    session_id = session['session_id']
+    ids = []
+    for name in ('first.txt','second.txt'):
+        staged = store.stage_attachment(session_id=session_id,owner_id='user:7',filename=name,
+            media_type='text/plain',size_bytes=3,sha256=hashlib.sha256(b'one').hexdigest(),upload_required=True)
+        ids.append(staged['attachment_id'])
+        store.upload_attachment_bytes(session_id=session_id,owner_id='user:7',attachment_id=ids[-1],payload=b'one')
+        store.commit_attachment(session_id=session_id,owner_id='user:7',attachment_id=ids[-1])
+    admitted = await server.handle_v1_session_runs_create(_Request(
+        {'idempotency_key':'bound-intake','message':{'content':[{'type':'attachment','attachment_id':ids[0]}]}},
+        match_info={'session_id':session_id}))
+    assert admitted.status == 202, admitted.text
+    rejected = await server.handle_v1_attachment_discard(_Request(
+        {'attachment_ids':ids},match_info={'session_id':session_id}))
+    assert rejected.status == 409
+    for attachment_id in ids:
+        assert store.attachment_bytes(session_id=session_id,owner_id='user:7',attachment_id=attachment_id)[1] == b'one'
+    removed = await server.handle_v1_attachment_discard(_Request(
+        {'attachment_ids':[ids[1]]},match_info={'session_id':session_id}))
+    assert removed.status == 200
+    assert json.loads(removed.text)['attachment_ids'] == [ids[1]]
+    repeated = await server.handle_v1_attachment_discard(_Request(
+        {'attachment_ids':[ids[1]]},match_info={'session_id':session_id}))
+    assert json.loads(repeated.text)['attachment_ids'] == []
+    other = store.create_session(owner_id='user:8',agent_id='lily')
+    denied = await server.handle_v1_attachment_discard(_Request(
+        {'attachment_ids':ids},match_info={'session_id':other['session_id']}))
+    assert denied.status == 404
+    invalid = await server.handle_v1_attachment_discard(_Request(
+        {'attachment_ids':[]},match_info={'session_id':session_id}))
+    assert invalid.status == 400
+
+
+@pytest.mark.asyncio
+async def test_reboot_discovery_includes_telegram_and_recent_completion_only_for_owner(tmp_path):
+    from orchestrator.reboot_manager import RebootManager
+    import time
+
+    server, _runtime = _server(tmp_path)
+    manager = RebootManager(SimpleNamespace(paths=SimpleNamespace(bridge_home=tmp_path)), None)
+    server.orchestrator = SimpleNamespace(reboot_manager=manager)
+    def create(owner, surface):
+        return manager.receipts.create(source="lily", targets=["lily"], display_names={}, mode="max",
+            origin={"owner_id": owner, "actor_id": owner.split(":")[-1], "chat_id": 123, "surface": surface})
+    visible = create("user:7", "telegram")
+    create("user:8", "workbench")
+    old = create("user:7", "telegram")
+    manager.receipts.update(old["id"], status="succeeded", progress=[{
+        "sequence": 1, "phase": "online", "status": "succeeded", "created_at": time.time()-120}])
+    response = await server.handle_reboot_operations(_Request())
+    assert response.status == 200
+    assert [item["operation_id"] for item in json.loads(response.text)["operations"]] == [visible["id"]]
+    manager.receipts.update(visible["id"], status="succeeded")
+    recovered = await server.handle_reboot_operations(_Request())
+    assert json.loads(recovered.text)["operations"][0]["status"] == "completed"
 
 
 def test_live_phone_resolver_uses_authoritative_pcm_and_same_session_history(tmp_path):
@@ -1208,6 +1324,361 @@ async def test_legacy_chat_response_is_queue_ack_without_transport_receipt(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_transferred_chat_returns_canonical_409_without_model_run_or_telegram(
+    tmp_path,
+):
+    server, runtime = _server(tmp_path)
+    runtime._transfer_state = {
+        "status": "accepted",
+        "transfer_id": "trf-chat-1",
+        "target_agent": "akane",
+        "target_instance": "HASHI2",
+    }
+    request = _Request(
+        {
+            "agent": "lily",
+            "text": "must continue on the target",
+            "idempotency_key": "chat-after-transfer-1",
+        }
+    )
+    request.content_type = "application/json"
+
+    first = await server.handle_chat(request)
+    replay = await server.handle_chat(request)
+    conflicting_request = _Request(
+        {
+            "agent": "lily",
+            "text": "different content with the same key",
+            "idempotency_key": "chat-after-transfer-1",
+        }
+    )
+    conflicting_request.content_type = "application/json"
+    conflict = await server.handle_chat(conflicting_request)
+    first_payload = json.loads(first.text)
+    replay_payload = json.loads(replay.text)
+    conflict_payload = json.loads(conflict.text)
+
+    assert first.status == replay.status == 409
+    assert first_payload["ok"] is False
+    assert first_payload["accepted"] is False
+    assert first_payload["error_code"] == "session_transferred"
+    assert first_payload["transfer_id"] == "trf-chat-1"
+    assert first_payload["target_agent"] == "akane"
+    assert first_payload["target_instance"] == "HASHI2"
+    assert first_payload["admission"]["status"] == "rejected"
+    assert first_payload["admission"]["reason"] == "session_transferred"
+    assert replay_payload["admission"]["replayed"] is True
+    assert replay_payload["canonical_result"] == first_payload["canonical_result"]
+    assert conflict.status == 409
+    assert conflict_payload["error_code"] == "idempotency_conflict"
+    assert conflict_payload["admission"]["status"] == "conflict"
+    assert runtime.api_request_metadata == []
+
+    session_id = first_payload["session_id"]
+    assert server.session_store.recent_session_runs(
+        session_id, owner_id="user:7"
+    ) == []
+    messages = server.session_store.messages(session_id, owner_id="user:7")
+    assert len(messages) == 1
+    assert messages[0]["source"] == "workbench.transfer-redirect"
+    events = server.session_store.events(session_id, owner_id="user:7")
+    assert sum(event["kind"] == "frontend.command_result" for event in events) == 1
+    assert sum(event["kind"] == "frontend.message.recorded" for event in events) == 1
+    claims = server.session_store.claim_delivery_outbox(
+        session_id=session_id,
+        owner_id="user:7",
+        worker_id="test-transfer-redirect",
+        event_id=first_payload["canonical_result"]["message_event_id"],
+        connector_id="backend_api",
+        limit=1,
+    )
+    assert len(claims) == 1
+
+
+@pytest.mark.asyncio
+async def test_unknown_transfer_outcome_rejects_chat_without_claiming_redirect(tmp_path):
+    server, runtime = _server(tmp_path)
+    runtime._transfer_state = {
+        "status": "pending",
+        "outcome_unknown": True,
+        "transfer_id": "trf-chat-unknown",
+        "target_agent": "akane",
+        "target_instance": "HASHI2",
+    }
+    request = _Request(
+        {
+            "agent": "lily",
+            "text": "must not enter a new Run",
+            "idempotency_key": "chat-transfer-unknown-1",
+        }
+    )
+    request.content_type = "application/json"
+
+    response = await server.handle_chat(request)
+    payload = json.loads(response.text)
+
+    assert response.status == 409
+    assert payload["accepted"] is False
+    assert payload["error_code"] == "session_transfer_outcome_unknown"
+    assert payload["transfer_id"] == "trf-chat-unknown"
+    assert payload["admission"]["reason"] == "session_transfer_outcome_unknown"
+    assert "redirect" not in payload
+    assert runtime.api_request_metadata == []
+    assert server.session_store.recent_session_runs(
+        payload["session_id"], owner_id="user:7"
+    ) == []
+
+
+@pytest.mark.asyncio
+async def test_session_run_reads_unknown_transfer_fence_before_creating_run(tmp_path):
+    server, runtime = _server(tmp_path)
+    workspace = tmp_path / "lily"
+    workspace.mkdir()
+    runtime.workspace_dir = workspace
+    (workspace / "active_transfer.json").write_text(
+        json.dumps(
+            {
+                "status": "pending",
+                "outcome_unknown": True,
+                "transfer_id": "trf-session-unknown",
+                "target_agent": "akane",
+                "target_instance": "HASHI2",
+            }
+        ),
+        encoding="utf-8",
+    )
+    session = server.session_store.resolve_primary_session(
+        owner_id="user:7", agent_id="lily", establish=True
+    )
+
+    response = await server.handle_v1_session_runs_create(
+        _Request(
+            {
+                "idempotency_key": "session-transfer-unknown-1",
+                "surface": "workbench",
+                "client_id": "workbench-window-1",
+                "message_source": {"id": "scheduler"},
+                "request_metadata": {"voice_origin": True},
+                "message": {
+                    "content": [
+                        {"type": "text", "text": "must not create a Run"}
+                    ]
+                },
+            },
+            match_info={"session_id": session["session_id"]},
+        )
+    )
+    payload = json.loads(response.text)
+
+    assert response.status == 409
+    assert payload["accepted"] is False
+    assert payload["error_code"] == "session_transfer_outcome_unknown"
+    assert payload["transfer_id"] == "trf-session-unknown"
+    assert runtime.enqueue_request_calls == 0
+    assert server.session_store.recent_session_runs(
+        session["session_id"], owner_id="user:7"
+    ) == []
+    assert not any(
+        message["role"] == "user"
+        for message in server.session_store.messages(
+            session["session_id"], owner_id="user:7"
+        )
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("redirect", "error_code"),
+    [
+        (
+            {
+                "status": "accepted",
+                "transfer_id": "trf-worker-race-accepted",
+                "target_agent": "akane",
+                "target_instance": "HASHI3",
+            },
+            "session_transferred",
+        ),
+        (
+            {
+                "status": "unknown",
+                "transfer_id": "trf-worker-race-unknown",
+                "target_agent": "akane",
+                "target_instance": "HASHI3",
+            },
+            "session_transfer_outcome_unknown",
+        ),
+    ],
+)
+async def test_session_run_maps_worker_transfer_fence_to_canonical_409(
+    tmp_path, redirect, error_code
+):
+    from orchestrator.function_worker_protocol import FunctionWorkerRemoteError
+    from orchestrator.runtime_transfer import TransferRedirectRequired
+
+    server, runtime = _server(tmp_path)
+    runtime.workspace_dir = tmp_path / "lily"
+    runtime.workspace_dir.mkdir()
+    session = server.session_store.resolve_primary_session(
+        owner_id="user:7", agent_id="lily", establish=True
+    )
+
+    async def reject_after_worker_recheck(*_args, **_kwargs):
+        typed = TransferRedirectRequired(redirect)
+        raise FunctionWorkerRemoteError(
+            "runtime.enqueue_request",
+            {"type": "TransferRedirectRequired", "message": str(typed)},
+        )
+
+    runtime.enqueue_request = reject_after_worker_recheck
+    response = await server.handle_v1_session_runs_create(
+        _Request(
+            {
+                "idempotency_key": f"worker-race-{redirect['status']}",
+                "surface": "workbench",
+                "client_id": "workbench-window-race",
+                "message": {
+                    "content": [{"type": "text", "text": "must stay fenced"}]
+                },
+            },
+            match_info={"session_id": session["session_id"]},
+        )
+    )
+    payload = json.loads(response.text)
+
+    assert response.status == 409
+    assert payload["accepted"] is False
+    assert payload["error_code"] == error_code
+    assert payload["admission"]["run_id"] is None
+    assert payload["transfer_id"] == redirect["transfer_id"]
+    assert server.session_store.recent_session_runs(
+        session["session_id"], owner_id="user:7"
+    ) == []
+
+
+@pytest.mark.asyncio
+async def test_session_attachment_stage_rejects_transfer_before_staging(tmp_path):
+    server, runtime = _server(tmp_path)
+    workspace = tmp_path / "lily"
+    workspace.mkdir()
+    runtime.workspace_dir = workspace
+    runtime._transfer_state = {
+        "status": "accepted",
+        "transfer_id": "trf-session-attachment",
+        "target_agent": "akane",
+        "target_instance": "HASHI2",
+    }
+    session = server.session_store.resolve_primary_session(
+        owner_id="user:7", agent_id="lily", establish=True
+    )
+
+    response = await server.handle_v1_attachment_stage(
+        _Request(
+            {
+                "filename": "never-staged.txt",
+                "media_type": "text/plain",
+                "size_bytes": 8,
+                "sha256": hashlib.sha256(b"fixture").hexdigest(),
+                "idempotency_key": "attachment-transfer-1",
+            },
+            match_info={"session_id": session["session_id"]},
+        )
+    )
+    payload = json.loads(response.text)
+
+    assert response.status == 409
+    assert payload["error_code"] == "session_transferred"
+    assert runtime.enqueue_request_calls == 0
+    with server.session_store._connection() as connection:
+        attachment_count = connection.execute(
+            "SELECT COUNT(*) FROM session_attachments WHERE session_id=?",
+            (session["session_id"],),
+        ).fetchone()[0]
+    assert attachment_count == 0
+
+
+@pytest.mark.asyncio
+async def test_transferred_nonvoice_media_is_rejected_before_upload_is_written(
+    tmp_path,
+):
+    from orchestrator.frontend_delivery import tui_run_delivery_policy
+
+    server, runtime = _server(tmp_path)
+    runtime._transfer_state = {
+        "status": "accepted",
+        "transfer_id": "trf-media-1",
+        "target_agent": "akane",
+        "target_instance": "HASHI2",
+    }
+    content = b"\x89PNG\r\n\x1a\nnot-written"
+    request = _Request(
+        {
+            "agent": "lily",
+            "text": "inspect",
+            "source": "tui",
+            "client_id": "tui-transfer",
+            "delivery_policy": tui_run_delivery_policy(
+                telegram_mirror=False,
+                client_id="tui-transfer",
+            ),
+            "attachment": {
+                "filename": "image.png",
+                "media_type": "image/png",
+                "content_b64": base64.b64encode(content).decode("ascii"),
+                "size_bytes": len(content),
+                "sha256": hashlib.sha256(content).hexdigest(),
+            },
+            "idempotency_key": "media-after-transfer-1",
+        }
+    )
+    request.content_type = "application/json"
+
+    response = await server.handle_chat(request)
+    payload = json.loads(response.text)
+
+    assert response.status == 409
+    assert payload["error_code"] == "session_transferred"
+    assert runtime.api_media_calls == []
+    assert [path for path in runtime.media_dir.rglob("*") if path.is_file()] == []
+
+
+@pytest.mark.asyncio
+async def test_transferred_multipart_media_is_rejected_before_upload_is_written(
+    tmp_path,
+):
+    server, runtime = _server(tmp_path)
+    runtime._transfer_state = {
+        "status": "accepted",
+        "transfer_id": "trf-multipart-1",
+        "target_agent": "akane",
+        "target_instance": "HASHI2",
+    }
+    request = _MultipartRequest(
+        {
+            "agent": "lily",
+            "text": "inspect multipart",
+            "idempotency_key": "multipart-after-transfer-1",
+        },
+        uploads=[
+            _MultipartPart(
+                "file",
+                filename="image.png",
+                payload=b"\x89PNG\r\n\x1a\nnot-written",
+                content_type="image/png",
+            )
+        ],
+    )
+
+    response = await server.handle_chat(request)
+    payload = json.loads(response.text)
+
+    assert response.status == 409
+    assert payload["error_code"] == "session_transferred"
+    assert runtime.api_media_calls == []
+    assert [path for path in runtime.media_dir.rglob("*") if path.is_file()] == []
+
+
+@pytest.mark.asyncio
 async def test_protocol_hchat_attachments_enter_one_canonical_session_request(tmp_path):
     from orchestrator.hchat_attachment_contract import (
         HCHAT_ATTACHMENT_CLAIM_KEY,
@@ -1292,6 +1763,95 @@ async def test_protocol_hchat_attachments_enter_one_canonical_session_request(tm
     assert Path(media[0]["local_ref"]).is_relative_to(
         server.session_store.attachment_files_root
     )
+
+
+@pytest.mark.asyncio
+async def test_transferred_protocol_hchat_document_is_rejected_before_staging(tmp_path):
+    from orchestrator.hchat_attachment_contract import (
+        HCHAT_ATTACHMENT_CLAIM_KEY,
+        canonical_hchat_attachment_manifest,
+    )
+    from orchestrator.message_context import seal_connector_evidence
+
+    (tmp_path / "secrets.json").write_text(
+        json.dumps({"hashi_remote_shared_token": "test-network-secret"}),
+        encoding="utf-8",
+    )
+    server, runtime = _server(tmp_path)
+    runtime._transfer_state = {
+        "status": "accepted",
+        "transfer_id": "trf-hchat-document-1",
+        "target_agent": "akane",
+        "target_instance": "HASHI2",
+    }
+    content = b"%PDF-1.7 remote document"
+    received = (
+        tmp_path
+        / "state"
+        / "remote_attachments"
+        / "hashi1"
+        / "messages"
+        / "wire-transfer-document"
+        / "report.pdf"
+    )
+    received.parent.mkdir(parents=True)
+    received.write_bytes(content)
+    attachments = [
+        {
+            "attachment_id": "att-transfer-document",
+            "filename": "report.pdf",
+            "mime_type": "application/pdf",
+            "size_bytes": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "caption": "read after moving",
+            "stored_path": str(received),
+        }
+    ]
+    text = "System exchange message from testing@HASHI2:\ninspect this document"
+    claims = {
+        "_message_source_reserved": "hchat",
+        "_hchat_context": {
+            "from_agent": "testing",
+            "from_instance": "HASHI2",
+            "to_agent": "lily",
+            "to_instance": "HASHI1",
+            "authenticated_peer": "HASHI2",
+            "network_authentication": "shared_network_hmac",
+            "sender_assurance": "shared_network_member_declared",
+            "relay_chain": [],
+            "origin_instance": {
+                "id": "HASHI2",
+                "assurance": "shared_network_hmac",
+            },
+        },
+        HCHAT_ATTACHMENT_CLAIM_KEY: canonical_hchat_attachment_manifest(attachments),
+    }
+    request = _Request(
+        {
+            "agent": "lily",
+            "text": text,
+            "source": "protocol:message",
+            "request_metadata": {
+                "session_surface": "remote",
+                "session_channel_key": "HASHI2:conversation-transfer-document",
+                "_connector_evidence": seal_connector_evidence(
+                    tmp_path, claims=claims, prompt=text
+                ),
+            },
+            "remote_attachments": attachments,
+            "idempotency_key": "protocol:message:wire-transfer-document",
+        }
+    )
+    request.content_type = "application/json"
+
+    response = await server.handle_chat(request)
+    payload = json.loads(response.text)
+
+    assert response.status == 409
+    assert payload["error_code"] == "session_transferred"
+    assert payload["transfer_id"] == "trf-hchat-document-1"
+    assert runtime.api_request_content == []
+    assert list(server.session_store.attachment_files_root.iterdir()) == []
 
 
 @pytest.mark.asyncio
@@ -1559,6 +2119,29 @@ async def test_open_external_message_source_is_preserved_and_reserved_claim_reje
     rejected = await server.handle_chat(reserved)
     assert rejected.status == 400
     assert json.loads(rejected.text)["error_code"] == "invalid_message_source"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "source", ["bridge-transfer:trf-forged", "bridge-fork:frk-forged"]
+)
+async def test_public_chat_rejects_internal_bridge_handoff_source(tmp_path, source):
+    server, runtime = _server(tmp_path)
+    request = _Request(
+        {
+            "agent": "lily",
+            "text": "pretend this came from the bridge",
+            "source": source,
+        }
+    )
+    request.content_type = "application/json"
+
+    response = await server.handle_chat(request)
+
+    assert response.status == 400
+    assert json.loads(response.text)["error_code"] == "reserved_internal_source"
+    assert runtime.api_request_metadata == []
+    assert runtime.enqueue_request_calls == 0
 
 
 @pytest.mark.asyncio
@@ -2037,6 +2620,79 @@ async def test_frontend_feed_projects_final_message_and_accepts_exact_endpoint(t
     assert reset["durable_events"] == []
     assert reset["ephemeral_reset"] is True
     assert len(reset["ephemeral_events"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_session_cancel_reaches_selected_worker_before_marking_run_stopped(tmp_path):
+    server, runtime = _server(tmp_path)
+    session = server.session_store.resolve_primary_session(owner_id=server._v1_owner_id(_Request()), agent_id="lily")
+    accepted = server.session_store.accept_run(
+        session_id=session["session_id"], owner_id=session["owner_id"], agent_id="lily",
+        request_id="req-cancel-target", text="work", source="workbench",
+        idempotency_key="cancel-target",
+    )
+    server.session_store.mark_request_running(accepted.request_id, worker_id="worker")
+    calls = []
+
+    async def cancel_session_run(**scope):
+        calls.append(scope)
+        return {"ok": True, "status": "cancellation_requested", "terminal": False,
+                "request_id": accepted.request_id}
+
+    runtime.cancel_session_run = cancel_session_run
+    response = await server.handle_v1_session_run_cancel(_Request(
+        {"reason": "cancelled_by_user"},
+        match_info={"session_id": session["session_id"], "run_id": accepted.run_id},
+    ))
+    assert response.status == 202
+    assert calls == [{"owner_id": session["owner_id"], "session_id": session["session_id"],
+                      "run_id": accepted.run_id, "request_id": accepted.request_id,
+                      "reason": "cancelled_by_user"}]
+    assert server.session_store.get_run(accepted.run_id)["state"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_request_cancel_fences_session_and_run_before_worker_call(tmp_path):
+    server, runtime = _server(tmp_path)
+    session = server.session_store.resolve_primary_session(
+        owner_id=server._v1_owner_id(_Request()), agent_id="lily",
+    )
+    accepted = server.session_store.accept_run(
+        session_id=session["session_id"], owner_id=session["owner_id"], agent_id="lily",
+        request_id="req-scoped", text="work", source="workbench",
+        idempotency_key="scoped-cancel",
+    )
+    calls = []
+
+    async def cancel_session_run(**scope):
+        calls.append(scope)
+        return {"ok": True, "request_id": accepted.request_id,
+                "status": "cancellation_requested", "terminal": False}
+
+    runtime.cancel_session_run = cancel_session_run
+    target = {"name": "lily", "request_id": accepted.request_id}
+    missing_scope = await server.handle_request_cancel(_Request({}, match_info=target))
+    assert missing_scope.status == 400
+    assert calls == []
+    wrong = await server.handle_request_cancel(_Request(
+        {"session_id": session["session_id"], "run_id": "run-wrong"}, match_info=target,
+    ))
+    assert wrong.status == 404
+    assert calls == []
+    accepted_response = await server.handle_request_cancel(_Request(
+        {"session_id": session["session_id"], "run_id": accepted.run_id}, match_info=target,
+    ))
+    assert accepted_response.status == 202
+    assert len(calls) == 1
+    assert calls[0]["request_id"] == accepted.request_id
+    controls = [event for event in server.session_store.events(session["session_id"])
+                if event["kind"] == "run.control"]
+    assert [event["status"] for event in controls] == ["requested", "cancellation_requested"]
+    assert controls[-1]["detail"] == {
+        "action": "cancel", "actor_id": session["owner_id"], "source": "backend_api.request_cancel",
+        "agent_id": "lily", "session_id": session["session_id"], "run_id": accepted.run_id,
+        "request_id": accepted.request_id, "reason": "cancelled_by_user", "error_code": "",
+    }
 
 
 @pytest.mark.asyncio

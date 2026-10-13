@@ -184,8 +184,8 @@ class _CachedWorkers:
     def remember_generation(self, generation):
         self.remembered.append(generation)
 
-    async def prepare_generation(self, generation):
-        self.prepare_generation_calls.append(generation)
+    async def prepare_generation(self, generation, *, source_already_verified=False):
+        self.prepare_generation_calls.append((generation, source_already_verified))
         return generation, "generation-root"
 
     async def prepare_worker(self, name, generation, generation_root=None):
@@ -206,7 +206,7 @@ async def test_prepare_candidates_prefers_qualified_generation_cache():
 
     assert workers.qualified_calls == 1
     assert workers.qualify_calls == 0
-    assert workers.prepare_generation_calls == [workers.generation]
+    assert workers.prepare_generation_calls == [(workers.generation, True)]
     assert workers.prepare_worker_calls == [("zelda", "generation-root")]
     assert candidates == {"zelda": "client-zelda"}
 

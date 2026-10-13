@@ -183,8 +183,13 @@ class NativeDesktop:
         self.available()
         with self.dpi():
             if kind in {"move", "down", "wheel"}:
+                # Desktop-name size queries deliberately leave error 122. Do not
+                # report that stale error as the cause of a rejected input.
+                ctypes.set_last_error(0)
                 if not self.u.SetCursorPos(event["px"], event["py"]):
-                    raise ctypes.WinError(ctypes.get_last_error())
+                    failure = ctypes.WinError(ctypes.get_last_error())
+                    failure.desktop_diagnostics = self._input_desktop_diagnostics(event)
+                    raise failure
             if kind in {"down", "up"}:
                 button = event["button"]
                 if kind == "up" and button not in self.buttons: return
@@ -214,6 +219,35 @@ class NativeDesktop:
                     else:
                         items.extend([w._keyboard_input(scan=code, flags=4), w._keyboard_input(scan=code, flags=6)])
                 for i in range(0, len(items), 128): w._send_inputs(items[i:i+128])
+
+    def _input_desktop_diagnostics(self, event):
+        """Private bounded failure facts, never window titles or desktop names."""
+        try:
+            self.win32.kernel32.GetCurrentThreadId.argtypes = []
+            self.win32.kernel32.GetCurrentThreadId.restype = W.DWORD
+            self.u.GetThreadDesktop.argtypes = [W.DWORD]
+            self.u.GetThreadDesktop.restype = W.HANDLE
+            self.u.GetProcessWindowStation.argtypes = []
+            self.u.GetProcessWindowStation.restype = W.HANDLE
+            thread = self.u.GetThreadDesktop(self.win32.kernel32.GetCurrentThreadId())
+            station = self.u.GetProcessWindowStation()
+            required = W.DWORD()
+            name = ctypes.create_unicode_buffer(256)
+            thread_named = bool(self.u.GetUserObjectInformationW(
+                thread, 2, name, ctypes.sizeof(name), ctypes.byref(required)))
+            class Flags(ctypes.Structure):
+                _fields_ = [("inherit", W.BOOL), ("reserved", W.BOOL), ("flags", W.DWORD)]
+            flags = Flags()
+            station_known = bool(self.u.GetUserObjectInformationW(
+                station, 1, ctypes.byref(flags), ctypes.sizeof(flags), ctypes.byref(required)))
+            state = self.win32.get_desktop_state()
+            cursor = self.win32.get_cursor_position()
+            return {"input_desktop_interactive": bool(state.get("interactive")),
+                    "thread_on_input_desktop": thread_named and name.value == state.get("desktop_name"),
+                    "window_station_visible": bool(flags.flags & 1) if station_known else None,
+                    "cursor_at_requested_position": cursor["x"] == event["px"] and cursor["y"] == event["py"]}
+        except Exception:
+            return {}
 
     def reset(self):
         # Never call legacy reset_input_state(), which releases unowned input.

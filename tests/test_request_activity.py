@@ -81,6 +81,23 @@ def test_request_activity_poll_uses_sequence_cursor() -> None:
     assert result["latest_sequence"] == 2
 
 
+@pytest.mark.parametrize("is_error,expected", [(False, "success"), (True, "failed"), (None, "unknown")])
+def test_tool_outcome_survives_poll_without_private_result_metadata(is_error, expected):
+    store = RequestActivityStore()
+    store.start("receipt-outcome")
+    metadata = {"private_output": "not public"}
+    if is_error is not None:
+        metadata["is_error"] = is_error
+    store.publish_stream("receipt-outcome", SimpleNamespace(
+        kind="tool_end", summary='shell: {"error":null}', tool_name="shell", metadata=metadata,
+        delivery_class="technical", origin="hashi-api", timestamp=12.0,
+    ))
+    event = store.poll("receipt-outcome")["events"][-1]
+    assert event["outcome"] == expected
+    assert "metadata" not in event
+    assert "private_output" not in str(event)
+
+
 @pytest.mark.asyncio
 async def test_model_route_activity_exposes_only_bounded_typed_identity() -> None:
     store = RequestActivityStore()

@@ -98,7 +98,8 @@ def _backend_runtime_name(engine: str) -> str:
     names = {
         "codex-cli": "Codex",
         "claude-cli": "Claude CLI",
-        "gemini-cli": "Gemini CLI",
+        "gemini-cli": "Gemini CLI",  # Historical failures remain readable.
+        "antigravity-cli": "Antigravity CLI",
         "grok-cli": "Grok CLI",
         "her": "HASHI Engine Runtime (HER)",
         "her-v2": "HASHI Engine Runtime (HER)",
@@ -285,6 +286,10 @@ def telegram_reply_markup_for_event(
             button_data = dict(raw_button)
             button_data["text"] = str(block.get("label") or button_data.get("text") or "Action")
             button = InlineKeyboardButton.de_json(button_data, runtime.app.bot)
+        elif payload.get('kind') in {'run_question_answer', 'run_question_text'}:
+            from orchestrator.frontend_run_questions import telegram_button
+            button = telegram_button(block, ui_language.preferred_locale(runtime))
+            payload = {**payload, 'row': len(rows), 'column': 0}
         elif payload.get("url"):
             button = InlineKeyboardButton(
                 str(block.get("label") or "Action"),
@@ -538,10 +543,11 @@ def format_backend_error_for_user(
         )
     ]
 
-    error_code = str(context.get("error_code") or "").strip()
+    from orchestrator.frontend_contracts import normalize_public_error_code
+    error_code = normalize_public_error_code(context.get("error_code"))
     if not error_code:
         code_match = re.match(r"^\[([A-Z][A-Z0-9_]+)\]", exact)
-        error_code = code_match.group(1) if code_match else ""
+        error_code = normalize_public_error_code(code_match.group(1)) if code_match else ""
     if error_code and error_code not in exact:
         lines.append(ui_language.tr("error.code", locale=selected, code=error_code))
 
@@ -565,10 +571,19 @@ def format_backend_error_for_user(
         )
 
     reconciliation = context.get("effect_reconciliation")
+    replay_blocked = bool(context.get('side_effects_possible'))
     if isinstance(reconciliation, Mapping):
+        confirmed_reads = max(0, int(reconciliation.get("confirmed_read_count") or 0))
         confirmed = max(0, int(reconciliation.get("confirmed_write_count") or 0))
         unverified = max(0, int(reconciliation.get("unverified_action_count") or 0))
         completed_jobs = max(0, int(reconciliation.get("completed_background_job_count") or 0))
+        no_change = max(0, int(reconciliation.get('no_change_count') or 0))
+        if confirmed_reads:
+            lines.append(
+                ui_language.tr(
+                    "error.confirmed_reads", locale=selected, count=confirmed_reads
+                )
+            )
         if confirmed:
             lines.append(
                 ui_language.tr("error.confirmed_writes", locale=selected, count=confirmed)
@@ -577,13 +592,16 @@ def format_backend_error_for_user(
             lines.append(
                 ui_language.tr("error.completed_background_jobs", locale=selected, count=completed_jobs)
             )
+        if no_change:
+            lines.append(ui_language.tr('error.no_change_actions', locale=selected, count=no_change))
         if unverified:
             lines.append(
                 ui_language.tr("error.unverified_actions", locale=selected, count=unverified)
             )
         if reconciliation.get("evidence_limited") is True:
             lines.append(ui_language.tr("error.audit_incomplete", locale=selected))
-        if confirmed or completed_jobs or unverified:
+        replay_blocked = replay_blocked or bool(confirmed or completed_jobs or unverified or reconciliation.get('evidence_limited'))
+        if replay_blocked:
             lines.append(ui_language.tr("error.no_blind_retry", locale=selected))
     elif bool(context.get("side_effects_possible")):
         lines.append(
@@ -611,13 +629,38 @@ def format_backend_error_for_user(
         )
     elif error_code == "PROVIDER_BAD_REQUEST":
         lines.append(ui_language.tr("error.action_bad_request", locale=selected))
-    elif context.get("error_retryable") is True:
+    elif context.get("error_retryable") is True and not replay_blocked:
         lines.append(ui_language.tr("error.action_retryable", locale=selected))
 
     if exact != raw:
         lines.append("")
         lines.append(ui_language.tr("error.raw", locale=selected, error=raw))
     return "\n".join(lines).strip()
+
+
+def build_public_failure(engine: str, error_text: str, *, locale: str | None = None,
+                         error_context: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Build the one owner-defined terminal meaning consumed by every frontend."""
+    from orchestrator.bootstrap_logging import redact_log_text
+    from orchestrator.flexible_backend_registry import public_backend_engine
+    from orchestrator.frontend_contracts import normalize_public_failure
+    context = dict(error_context or {})
+    backend = public_backend_engine(context.get('backend') or engine)
+    effects = context.get('effect_reconciliation') or {}
+    effects = dict(effects) if isinstance(effects, Mapping) else {}
+    blocked = bool(context.get('side_effects_possible') or effects.get('confirmed_write_count')
+        or effects.get('unverified_action_count') or effects.get('pending_action_count')
+        or effects.get('completed_background_job_count') or effects.get('evidence_limited'))
+    action = 'verify_results' if blocked else 'retry' if context.get('error_retryable') is True else 'inspect_failure'
+    body = format_backend_error_for_user(backend, redact_log_text(str(error_text or '')),
+                                        locale=locale, error_context=context)
+    if len(body) > 12000:
+        body = body[:12000] + '\n' + ui_language.tr('error.truncated', locale=locale)
+    header = '❌ ' + ui_language.tr('error.backend_header', locale=locale, backend=backend)
+    return normalize_public_failure({'type':'hashi.public-failure', 'version':1,
+        'backend':backend, 'error_code':context.get('error_code'), 'error_retryable':context.get('error_retryable'),
+        'side_effects_possible':bool(context.get('side_effects_possible')), 'effects':effects,
+        'retry_action':action, 'text':header + '\n\n' + body})
 
 
 async def _send_long_message_transport(
@@ -635,6 +678,7 @@ async def _send_long_message_transport(
     frontend_owner_id: str | None = None,
     skip_local_capture: bool = False,
     outbox_outcome: dict[str, Any] | None = None,
+    reply_markup: Any = None,
 ):
     """Send Markdown or pre-rendered Telegram HTML with safe chunking."""
     from orchestrator.admin_local_testing import capture_local_command_output
@@ -861,21 +905,12 @@ async def _send_long_message_transport(
     if purpose == "error":
         locale = ui_language.preferred_locale(runtime, actor_id=chat_id)
         errors_path = str(getattr(runtime, "session_dir", runtime.workspace_dir) / "errors.log")
-        header = "❌ " + ui_language.tr(
-            "error.backend_header",
-            locale=locale,
-            backend=runtime.config.active_backend,
-        )
-        if request_id:
-            header += f" | {request_id}"
-
         max_excerpt = 2400
-        s = format_backend_error_for_user(
-            runtime.config.active_backend,
-            text,
-            locale=locale,
-            error_context=error_context,
-        )
+        public_failure = error_context.get('public_failure') if isinstance(error_context, Mapping) else None
+        if not isinstance(public_failure, Mapping):
+            public_failure = build_public_failure(runtime.config.active_backend, text,
+                                                  locale=locale, error_context=error_context)
+        s = public_failure['text']
         if len(s) > max_excerpt:
             head = s[:1200]
             tail = s[-800:]
@@ -895,7 +930,7 @@ async def _send_long_message_transport(
                     request_id=request_id,
                 )
             )
-        msg = f"{header}\n\n{excerpt}\n\n" + "\n".join(log_lines)
+        msg = f"{excerpt}\n\n" + "\n".join(log_lines)
         if len(msg) > tg_max_len:
             truncated = ui_language.tr("error.truncated", locale=locale)
             msg = msg[: tg_max_len - len(truncated) - 9] + f"\n... ({truncated})"
@@ -934,6 +969,7 @@ async def _send_long_message_transport(
     async def _send_chunk(
         chunk_raw: str, chunk_html: str, chunk_index: int, *, final_chunk: bool
     ):
+        buttons = {'reply_markup': reply_markup} if final_chunk and reply_markup is not None else {}
         notification_disabled = _safe_disable_notification(
             runtime,
             purpose=purpose,
@@ -946,6 +982,7 @@ async def _send_long_message_transport(
                 text=chunk_html,
                 parse_mode=constants.ParseMode.HTML,
                 disable_notification=notification_disabled,
+                **buttons,
             )
             if not sent:
                 return False
@@ -964,6 +1001,7 @@ async def _send_long_message_transport(
                     chat_id=chat_id,
                     text=chunk_raw,
                     disable_notification=notification_disabled,
+                    **buttons,
                 )
                 if not sent:
                     return False
@@ -975,6 +1013,7 @@ async def _send_long_message_transport(
                             chat_id=chat_id,
                             text=remain,
                             disable_notification=notification_disabled,
+                            **buttons,
                         )
                         return sent
                     split_at = remain.rfind("\n", 0, tg_max_len)
@@ -1075,6 +1114,7 @@ async def dispatch_claimed_telegram_event(
     canonical_text, canonical_parse_mode = _render_standard_event_for_telegram(
         standard_event
     )
+    canonical_markup = telegram_reply_markup_for_event(runtime, standard_event)
     if not include_text:
         canonical_text = ""
     media_refs = _standard_event_media_refs(standard_event)
@@ -1106,6 +1146,7 @@ async def dispatch_claimed_telegram_event(
                 frontend_owner_id=str(frontend_owner_id),
                 skip_local_capture=True,
                 outbox_outcome=outcome,
+                reply_markup=canonical_markup,
             )
             status = str(
                 outcome.get("status") or ("completed" if chunks else "failed")

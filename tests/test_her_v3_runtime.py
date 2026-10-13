@@ -6,12 +6,14 @@ import asyncio
 import pytest
 
 from orchestrator.her_v2.audit import DurableAuditLog
+from orchestrator.her_v2.commentary import PackagedCommentary, PersonaCommentaryPipeline
 from orchestrator.her_v2.config import HERv2Config
 from orchestrator.her_v2.interfaces import RecordingDelivery
 from orchestrator.her_v2.ledger import LedgerStore
 from orchestrator.her_v2.models import Stage, StageResponse, TerminalState
 from orchestrator.her_v2.presentation import FinalStyleResult
 from orchestrator.her_v2.runtime import HERv2Runtime
+from orchestrator.her_v2.turn_services import TurnServices
 
 
 class _MainProvider:
@@ -66,7 +68,15 @@ class _StyleRenderer:
 
 
 def _runtime(
-    tmp_path, provider, *, delivery=None, audit=None, config=None, final_style=None
+    tmp_path,
+    provider,
+    *,
+    delivery=None,
+    audit=None,
+    config=None,
+    final_style=None,
+    commentary=None,
+    turn_services=None,
 ):
     return HERv2Runtime(
         config=config
@@ -81,7 +91,50 @@ def _runtime(
         ),
         delivery=delivery or RecordingDelivery(),
         final_style=final_style,
+        commentary=commentary,
+        turn_services=turn_services,
     )
+
+
+class _TerminalBlockingPackager:
+    def __init__(self):
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.cancelled = asyncio.Event()
+
+    async def package(self, commentary):
+        self.started.set()
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+        return PackagedCommentary(
+            source_event_id=commentary.event_id,
+            stage=commentary.stage,
+            text=commentary.text,
+            provenance="controlled_packager",
+        )
+
+
+class _CommentaryDelivery:
+    def __init__(self):
+        self.calls = []
+
+    async def deliver_packaged_commentary(self, commentary):
+        self.calls.append(commentary)
+        return True
+
+
+class _TerminalRecordingDelivery(RecordingDelivery):
+    def __init__(self, commentary_cancelled):
+        super().__init__()
+        self.commentary_cancelled = commentary_cancelled
+
+    async def deliver(self, **kwargs):
+        if kwargs.get("kind") in {"final", "clarification"}:
+            assert self.commentary_cancelled.is_set()
+        return await super().deliver(**kwargs)
 
 
 @pytest.mark.asyncio
@@ -101,6 +154,41 @@ async def test_every_effort_uses_one_main_model_without_staged_calls(tmp_path, e
     profile, request = provider.calls[0]
     assert (profile.engine, profile.model) == ("fake-api", "main-model")
     assert request.stage is Stage.DIRECT
+
+
+@pytest.mark.asyncio
+async def test_final_delivery_cancels_pending_commentary_before_it_can_arrive_late(
+    tmp_path,
+):
+    provider = _MainProvider()
+    packager = _TerminalBlockingPackager()
+    commentary_delivery = _CommentaryDelivery()
+    pipeline = PersonaCommentaryPipeline(
+        packager=packager,
+        delivery=commentary_delivery,
+    )
+    services = TurnServices(turn_id="turn-terminal", downstream=pipeline)
+    services.tool_started("file_read", {"path": "a.txt"}, "call-read")
+    await packager.started.wait()
+    pending = tuple(services._tasks)
+    final_delivery = _TerminalRecordingDelivery(packager.cancelled)
+
+    result = await _runtime(
+        tmp_path,
+        provider,
+        delivery=final_delivery,
+        commentary=services,
+        turn_services=services,
+    ).run_turn("Answer the request", "request-terminal", effort="zero")
+    packager.release.set()
+    await asyncio.gather(*pending, return_exceptions=True)
+
+    assert result.terminal_state is TerminalState.COMPLETED
+    assert [(item.kind, item.text) for item in result.delivery_records] == [
+        ("final", "Main answer.")
+    ]
+    assert packager.cancelled.is_set()
+    assert commentary_delivery.calls == []
 
 
 @pytest.mark.asyncio

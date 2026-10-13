@@ -940,6 +940,7 @@ class SuccessfulResponse:
     display_text: str
     visible_text: str
     wrapper_result: Any
+    cancelled: bool = False
 
 
 @dataclass
@@ -1133,13 +1134,6 @@ def begin_queue_item(runtime, item) -> QueueItemStart:
 
 
 async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPrompt:
-    refresh_tool_context = getattr(
-        getattr(runtime, "backend_manager", None),
-        "_refresh_tool_runtime_context",
-        None,
-    )
-    if callable(refresh_tool_context):
-        refresh_tool_context(item.request_id)
     effective_prompt = runtime._consume_session_primer(item)
     backend = runtime.backend_manager.current_backend
     request_meta = request_meta_for(runtime, item.request_id)
@@ -1197,11 +1191,20 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
         if isinstance(item_metadata, dict)
         else None
     )
+    from orchestrator.phone_context_handoff import prepare_turn as prepare_phone_context
+    phone_sections, phone_audit = (
+        ([], {}) if isolated_activity_run else prepare_phone_context(runtime, item, incremental=incremental)
+    )
+    # The quoted Phone history has its own durable external-event watermark.
+    # Exclude the old lossy display timeline so post-cutoff speech cannot leak
+    # into a frozen action and stateless prompts cannot duplicate the transcript.
+    if phone_audit and session_history is not None:
+        session_history = [row for row in session_history if not str(row.get("exchange_id") or "").startswith("live:")]
     # This is a mandatory PAO -> PCM projection, not an optional observer.
     # Supplying the same fixed key on every Turn makes HER fixed-session
     # transport issue an upsert whenever the source or authorization changes,
     # including an explicit ``unknown``/``none`` reset.
-    extra_sections = [pcm_message_context_section(message_context)]
+    extra_sections = [pcm_message_context_section(message_context), *phone_sections]
     extra_sections += runtime._workzone_prompt_section()
     pre_turn_builder = runtime._build_pre_turn_context_sections
     pre_turn_kwargs = {"is_bridge_request": is_bridge_request}
@@ -1418,6 +1421,8 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
                 request_id=item.request_id,
             )
 
+    if phone_audit:
+        prompt_payload.setdefault("audit", {})["phone_context_handoff"] = phone_audit
     _canonical_record(
         runtime,
         "provider_request",
@@ -1434,6 +1439,8 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
     )
     final_prompt = prompt_payload["final_prompt"]
     prompt_audit = prompt_payload.get("audit", {})
+    if phone_audit:
+        prompt_audit["phone_context_handoff"] = phone_audit
     runtime._last_prompt_audit = prompt_audit
     runtime._thinking_chars_this_req = 0
     if runtime.config.active_backend != "her-v2":
@@ -1502,6 +1509,12 @@ async def run_backend_generation(
     on_stream_event,
     audit_active: bool,
 ) -> BackendGeneration:
+    from orchestrator.runtime_cancel import requested_ids
+
+    if item.request_id in requested_ids(runtime):
+        runtime.is_generating = False
+        return BackendGeneration(_cancelled_generation_response(), False, time.monotonic(), 0)
+
     extra = runtime.config.extra or {}
     background_mode_requested = (
         extra.get("background_mode", False)
@@ -1533,6 +1546,10 @@ async def run_backend_generation(
     # atomic and prevents a detached task from overwriting a later chat's
     # restored binding when it completes.
     background_mode = background_mode_requested and not provider_isolation.active
+    tasks = getattr(runtime, "_generation_tasks_by_request", None)
+    if not isinstance(tasks, dict):
+        tasks = {}
+        runtime._generation_tasks_by_request = tasks
     try:
         if background_mode:
             generation_task = asyncio.create_task(
@@ -1542,6 +1559,16 @@ async def run_backend_generation(
                     **generation_kwargs,
                 )
             )
+            tasks[item.request_id] = generation_task
+            def commit_detached_phone_context(completed):
+                if completed.cancelled():
+                    return
+                try:
+                    _commit_phone_context_safely(runtime, item, completed.result())
+                except Exception as exc:
+                    runtime.logger.warning("Phone context consumption checkpoint failed: %s", type(exc).__name__)
+            generation_task.add_done_callback(commit_detached_phone_context)
+            detached = False
             try:
                 response = await asyncio.wait_for(
                     asyncio.shield(generation_task),
@@ -1552,12 +1579,17 @@ async def run_backend_generation(
                 response = None
                 detached = True
             except asyncio.CancelledError:
-                generation_task.cancel()
-                try:
-                    await generation_task
-                except asyncio.CancelledError:
-                    pass
-                raise
+                if (item.request_id in requested_ids(runtime)
+                        and not asyncio.current_task().cancelling()):
+                    response = _cancelled_generation_response()
+                    detached = False
+                else:
+                    generation_task.cancel()
+                    try:
+                        await generation_task
+                    except asyncio.CancelledError:
+                        pass
+                    raise
             finally:
                 runtime.is_generating = False
                 if generation_task.done():
@@ -1576,6 +1608,8 @@ async def run_backend_generation(
                         )
 
                     generation_task.add_done_callback(_flush_detached_stream)
+                if not detached and tasks.get(item.request_id) is generation_task:
+                    tasks.pop(item.request_id, None)
             return BackendGeneration(
                 response=response,
                 detached=detached,
@@ -1585,16 +1619,18 @@ async def run_backend_generation(
             )
 
         try:
-            response = await runtime.backend_manager.generate_response(
-                final_prompt,
-                item.request_id,
-                **generation_kwargs,
+            response = await _await_targeted_generation(
+                runtime, item.request_id,
+                runtime.backend_manager.generate_response(
+                    final_prompt, item.request_id, **generation_kwargs,
+                ),
             )
         finally:
             runtime.is_generating = False
             _flush_canonical_stream_callback(
                 on_stream_event, reason="provider_request_end"
             )
+        _commit_phone_context_safely(runtime, item, response)
         return BackendGeneration(
             response=response,
             detached=False,
@@ -1609,6 +1645,48 @@ async def run_backend_generation(
         )
 
 
+def _commit_phone_context_safely(runtime, item, response):
+    from orchestrator.phone_context_handoff import commit_success
+    try:
+        commit_success(item, response)
+    except Exception as exc:
+        # The Provider may already have executed actions. A diagnostic/receipt
+        # write failure must never turn that result into an automatic replay.
+        runtime.logger.warning("Phone context consumption checkpoint failed: %s", type(exc).__name__)
+        runtime._log_maintenance(item, "phone_context_checkpoint_failed", error_type=type(exc).__name__)
+
+
+def _cancelled_generation_response():
+    from adapters.base import BackendResponse
+
+    return BackendResponse(text="", duration_ms=0, error="Cancelled by user", is_success=False)
+
+
+async def _await_targeted_generation(runtime, request_id: str, operation):
+    """Map a provider operation to its exact Run until it has settled."""
+    from orchestrator.runtime_cancel import requested_ids
+
+    if request_id in requested_ids(runtime):
+        operation.close()
+        return _cancelled_generation_response()
+    tasks = getattr(runtime, "_generation_tasks_by_request", None)
+    if not isinstance(tasks, dict):
+        tasks = {}
+        runtime._generation_tasks_by_request = tasks
+    task = asyncio.create_task(operation)
+    tasks[request_id] = task
+    try:
+        return await task
+    except asyncio.CancelledError:
+        if request_id in requested_ids(runtime) and not asyncio.current_task().cancelling():
+            return _cancelled_generation_response()
+        task.cancel()
+        raise
+    finally:
+        if tasks.get(request_id) is task:
+            tasks.pop(request_id, None)
+
+
 def log_backend_finished(
     runtime,
     item,
@@ -1617,6 +1695,7 @@ def log_backend_finished(
     backend_elapsed_s: float,
     final_prompt: str,
 ) -> None:
+    _commit_phone_context_safely(runtime, item, response)
     runtime.logger.info(
         f"Backend finished {item.request_id} via {runtime.config.active_backend} "
         f"(success={response.is_success}, elapsed_s={backend_elapsed_s:.2f}, "
@@ -2636,7 +2715,13 @@ async def setup_interactive_feedback(
     answer_stream_state = None
     verbose_display_state = None
     preference_event = None
-    delivery_requested = not item.silent and item.deliver_to_telegram
+    from orchestrator.frontend_call.context import is_call_request
+
+    # Call progress belongs to its calling frontend. Final mirror policy stays
+    # on the QueueItem; no Telegram presentation tasks join this call's path.
+    delivery_requested = (
+        not item.silent and item.deliver_to_telegram and not is_call_request(item)
+    )
     display_policy = telegram_stream_policy.get_display_policy(runtime)
     delivery_blocked = telegram_delivery_failover.is_delivery_blocked(runtime)
     typing_delivery_enabled = (
@@ -3165,8 +3250,13 @@ def _terminal_exchange_verbatim_text(item) -> str | None:
 
 
 async def prepare_successful_response(runtime, item, response, *, completion_path: str) -> SuccessfulResponse:
+    from orchestrator import runtime_cancel
+
     observe_terminal_response(runtime, item, response)
     if item.source == "bridge:hchat-draft" and hasattr(runtime, "_prepare_hchat_draft_success"):
+        if not await runtime_cancel.claim_final_result(runtime, item):
+            await runtime_cancel.finish_queued_request(runtime, item, error="Cancelled before final delivery")
+            return SuccessfulResponse("", "", None, cancelled=True)
         return await runtime._prepare_hchat_draft_success(
             item,
             core_raw=response.text,
@@ -3212,6 +3302,13 @@ async def prepare_successful_response(runtime, item, response, *, completion_pat
         )
         visible_text = normalize_user_visible_paths(visible_text)
     has_typed_audio = bool(audio_parts(getattr(response, "content", ())))
+    diagnostic_fields = backend_diagnostic_fields(response)
+    effect_reconciliation = await reconcile_backend_effects(runtime, item, response)
+    # Empty visible completion still settles as a terminal error downstream;
+    # an already accepted exact stop must win that publication as well.
+    if not await runtime_cancel.claim_final_result(runtime, item):
+        await runtime_cancel.finish_queued_request(runtime, item, error="Cancelled before final delivery")
+        return SuccessfulResponse(display_text, "", wrapper_result, cancelled=True)
     if not visible_text.strip() and not has_typed_audio:
         return SuccessfulResponse(
             display_text=display_text,
@@ -3246,6 +3343,12 @@ async def prepare_successful_response(runtime, item, response, *, completion_pat
                 for part in getattr(response, "content", ())
                 if isinstance(part, Mapping)
             ],
+            **diagnostic_fields,
+            **(
+                {"effect_reconciliation": effect_reconciliation}
+                if effect_reconciliation
+                else {}
+            ),
             **request_context_warning_fields(runtime, item.request_id),
             **runtime._wrapper_listener_fields(safe_core_raw, visible_text, wrapper_result),
         },
@@ -3653,6 +3756,10 @@ def backend_diagnostic_fields(response: Any) -> dict[str, Any]:
                 details = primary.get("details")
                 if isinstance(details, Mapping):
                     remember(response_ids, details.get("provider_response_id"))
+                    ids = details.get('provider_response_ids')
+                    if isinstance(ids, (list, tuple)):
+                        for value in ids:
+                            remember(response_ids, value)
                     refs = details.get("provider_wire_evidence_refs")
                     if isinstance(refs, (list, tuple)):
                         for ref in refs:
@@ -3724,6 +3831,95 @@ def backend_failure_diagnostics(response: Any) -> dict[str, Any]:
     return {}
 
 
+async def reconcile_backend_effects(
+    runtime: Any,
+    item: Any,
+    response: Any,
+) -> dict[str, Any] | None:
+    """Project existing typed effect evidence for one terminal response.
+
+    Execution owners remain the backend response and the existing tool audit
+    ledgers.  This function creates no receipt state and never infers effects
+    from model text.
+    """
+
+    from orchestrator.request_diagnostics import build_user_effect_reconciliation
+
+    diagnostic_fields = backend_diagnostic_fields(response)
+    try:
+        backend = getattr(
+            getattr(runtime, "backend_manager", None), "current_backend", None
+        )
+        registry = getattr(backend, "tool_registry", None)
+        tool_workspace = getattr(registry, "workspace_dir", None)
+        manager = getattr(runtime, "background_job_manager", None) or getattr(
+            getattr(runtime, "orchestrator", None), "background_job_manager", None
+        )
+        jobs = ()
+        job_query_failed = False
+        if manager is not None:
+            try:
+                import inspect
+                if inspect.iscoroutinefunction(manager.list):
+                    jobs = await manager.list(limit=50)
+                else:
+                    jobs = await asyncio.to_thread(manager.list, limit=50)
+                    if inspect.isawaitable(jobs):
+                        jobs = await jobs
+            except Exception as exc:
+                job_query_failed = True
+                runtime.logger.warning(
+                    'Effect reconciliation background_jobs.list unavailable for %s (%s): %s',
+                    item.request_id, type(exc).__name__, str(exc)[:500],
+                )
+        reconciliation = await asyncio.to_thread(
+            build_user_effect_reconciliation,
+            workspace_dir=runtime.workspace_dir,
+            request_id=item.request_id,
+            tool_call_count=int(diagnostic_fields.get("tool_call_count") or 0),
+            side_effects_possible=bool(
+                diagnostic_fields.get("side_effects_possible")
+            ),
+            additional_workspaces=((tool_workspace,) if tool_workspace else ()),
+            background_jobs=jobs,
+        )
+        if job_query_failed:
+            reconciliation['evidence_limited'] = True
+        if any(
+            (
+                reconciliation["confirmed_read_count"],
+                reconciliation["confirmed_write_count"],
+                reconciliation["observed_tool_count"],
+                reconciliation["unverified_action_count"],
+                reconciliation["completed_background_job_count"],
+                reconciliation["evidence_limited"],
+            )
+        ):
+            return reconciliation
+        return None
+    except Exception as exc:
+        runtime.logger.warning(
+            "Effect reconciliation unavailable for %s (%s): %s",
+            item.request_id,
+            type(exc).__name__,
+            str(exc)[:500],
+        )
+        tool_call_count = int(diagnostic_fields.get("tool_call_count") or 0)
+        if diagnostic_fields.get("side_effects_possible") or tool_call_count:
+            return {
+                "confirmed_read_count": 0,
+                "confirmed_write_count": 0,
+                "no_change_count": 0,
+                "completed_action_count": 0,
+                "pending_action_count": tool_call_count,
+                "observed_tool_count": tool_call_count,
+                "unverified_action_count": max(1, tool_call_count),
+                "completed_background_job_count": 0,
+                "evidence_limited": True,
+            }
+        return None
+
+
 def _typed_capacity_recovery_is_safe(response: Any) -> bool:
     if str(getattr(response, "error_code", "") or "") != "CONTEXT_CAPACITY_REJECTED":
         return False
@@ -3761,6 +3957,10 @@ async def recover_typed_context_capacity_rejection(
     """Compact and retry once only when a typed rejection proved side-effect free."""
 
     if not _typed_capacity_recovery_is_safe(response):
+        return None
+    from orchestrator.runtime_cancel import requested_ids
+
+    if item.request_id in requested_ids(runtime):
         return None
     states = getattr(runtime, "_context_compaction_prompt_states", None)
     state = states.get(item.request_id) if isinstance(states, dict) else None
@@ -3893,12 +4093,12 @@ async def recover_typed_context_capacity_rejection(
     )
     runtime.is_generating = True
     try:
-        retry_response = await runtime.backend_manager.generate_response(
-            retry_prompt,
-            item.request_id,
-            is_retry=True,
-            silent=item.silent,
-            on_stream_event=on_stream_event,
+        retry_response = await _await_targeted_generation(
+            runtime, item.request_id,
+            runtime.backend_manager.generate_response(
+                retry_prompt, item.request_id, is_retry=True,
+                silent=item.silent, on_stream_event=on_stream_event,
+            ),
         )
     finally:
         runtime.is_generating = False
@@ -4004,49 +4204,17 @@ async def handle_backend_error(
                 default=str,
             ),
         )
-    effect_reconciliation: dict[str, Any] | None = None
-    from orchestrator.request_diagnostics import build_user_effect_reconciliation
-
-    try:
-        backend = getattr(getattr(runtime, "backend_manager", None), "current_backend", None)
-        registry = getattr(backend, "tool_registry", None)
-        tool_workspace = getattr(registry, "workspace_dir", None)
-        manager = getattr(runtime, "background_job_manager", None) or getattr(
-            getattr(runtime, "orchestrator", None), "background_job_manager", None
-        )
-        jobs = await asyncio.to_thread(manager.list, limit=50) if manager is not None else ()
-        effect_reconciliation = await asyncio.to_thread(
-            build_user_effect_reconciliation,
-            workspace_dir=runtime.workspace_dir,
-            request_id=item.request_id,
-            tool_call_count=int(failure_fields.get("tool_call_count") or 0),
-            side_effects_possible=bool(failure_fields.get("side_effects_possible")),
-            additional_workspaces=((tool_workspace,) if tool_workspace else ()),
-            background_jobs=jobs,
-        )
-        if not (
-            effect_reconciliation["observed_tool_count"]
-            or effect_reconciliation["unverified_action_count"]
-            or effect_reconciliation["completed_background_job_count"]
-            or effect_reconciliation["evidence_limited"]
-        ):
-            effect_reconciliation = None
-    except Exception as exc:
-        runtime.logger.warning(
-            "Effect reconciliation unavailable for %s (%s)",
-            item.request_id,
-            type(exc).__name__,
-        )
-        if failure_fields.get("side_effects_possible") or failure_fields.get("tool_call_count"):
-            effect_reconciliation = {
-                "confirmed_write_count": 0,
-                "observed_tool_count": int(failure_fields.get("tool_call_count") or 0),
-                "unverified_action_count": max(1, int(failure_fields.get("tool_call_count") or 0)),
-                "completed_background_job_count": 0,
-                "evidence_limited": True,
-            }
+    effect_reconciliation = await reconcile_backend_effects(runtime, item, response)
     if runtime._should_buffer_during_transfer(item.request_id):
         runtime._record_suppressed_transfer_result(item, success=False, error=err_msg)
+    from orchestrator.runtime_delivery import build_public_failure
+    from orchestrator.flexible_backend_registry import public_backend_engine
+    failure_context = {**failure_fields, **diagnostic_fields,
+        'backend':public_backend_engine(runtime.config.active_backend),
+        **({'effect_reconciliation':effect_reconciliation} if effect_reconciliation else {})}
+    failure_context['public_failure'] = build_public_failure(runtime.config.active_backend, err_msg,
+        locale=ui_language.preferred_locale(runtime, actor_id=getattr(item, 'owner_id', None) or item.chat_id),
+        error_context=failure_context)
     await runtime._notify_request_listeners(
         item.request_id,
         {
@@ -4059,6 +4227,7 @@ async def handle_backend_error(
             **failure_fields,
             **({"effect_reconciliation": effect_reconciliation} if effect_reconciliation else {}),
             **diagnostic_fields,
+            'public_failure':failure_context['public_failure'],
             **request_context_warning_fields(runtime, item.request_id),
         },
     )
@@ -4103,10 +4272,7 @@ async def handle_backend_error(
         text=err_msg,
         request_id=item.request_id,
         purpose="error",
-        error_context={
-            **failure_fields,
-            **({"effect_reconciliation": effect_reconciliation} if effect_reconciliation else {}),
-        },
+        error_context=failure_context,
         frontend_outbox=True,
     )
     total_elapsed_s = (
@@ -4421,8 +4587,13 @@ async def handle_success_delivery(
         send_native_audio_parts,
     )
 
-    native_parts = audio_parts(getattr(response, "content", ()))
-    native_policy = native_reply_content_policy(runtime, item)
+    from orchestrator.frontend_call.context import is_call_request
+
+    # Call owns synthesis and in-call playback using its frozen media profile.
+    # Ordinary voice preferences must not create a second audio reply/mirror.
+    call_reply = is_call_request(item)
+    native_parts = [] if call_reply else audio_parts(getattr(response, "content", ()))
+    native_policy = "text_only" if call_reply else native_reply_content_policy(runtime, item)
     cos_handled = False
     safe_core_raw = extract_memory_plus_update_details(response.text).visible_text
     await runtime._send_wrapper_verbose_trace(item, safe_core_raw, visible_text, wrapper_result)
@@ -4658,7 +4829,7 @@ async def handle_success_delivery(
         delivered=bool(final_delivered or hchat_delivered),
         completion_path="foreground",
     )
-    if not native_parts:
+    if not native_parts and not call_reply:
         request_metadata = getattr(item, "request_metadata", None)
         voice_origin = bool(
             isinstance(request_metadata, Mapping)

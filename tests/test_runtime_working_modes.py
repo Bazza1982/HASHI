@@ -100,7 +100,7 @@ def test_working_mode_product_surface_is_exact() -> None:
         ("her-v2", "fixed"),
         ("her", "fixed"),
         ("antigravity-cli", "fixed"),
-        ("gemini-cli", "flex"),
+        ("ollama-api", "flex"),
         ("ollama", "flex"),
         ("xai-api", "flex"),
         (None, "flex"),
@@ -148,7 +148,7 @@ async def test_typed_fixed_rejects_stateless_backend_without_mutation(tmp_path) 
     runtime = _Runtime(
         tmp_path,
         mode="flex",
-        engine="gemini-cli",
+        engine="ollama-api",
         supports_sessions=False,
     )
 
@@ -163,7 +163,7 @@ async def test_typed_fixed_rejects_stateless_backend_without_mutation(tmp_path) 
     assert runtime.backend_manager.current_backend.session_mode_calls == []
     assert runtime.replies[-1][0] == ui_language.tr(
         "mode.fixed.requires_session",
-        backend="gemini-cli",
+        backend="ollama-api",
     )
 
 
@@ -232,7 +232,7 @@ async def test_callback_fixed_rejects_stateless_backend_without_mutation(
     runtime = _Runtime(
         tmp_path,
         mode="flex",
-        engine="gemini-cli",
+        engine="ollama-api",
         supports_sessions=False,
     )
     query = _Query()

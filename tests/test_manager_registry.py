@@ -25,6 +25,7 @@ def test_manager_registry_is_single_complete_manifest():
         "capability_broker",
         "skill_manager",
         "config_admin",
+        "agent_management",
         "backend_preflight",
         "agent_lifecycle",
         "agent_move_manager",

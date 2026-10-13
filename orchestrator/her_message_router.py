@@ -184,6 +184,8 @@ class HERMessageRouter:
         if not self.delivery_requested or self.delivery_blocked:
             return False
         if delivery_class == DELIVERY_TECHNICAL:
+            if event.kind == "tool_activity" and not (event.metadata or {}).get("visible_update"):
+                return False
             if self.verbose_enabled():
                 return await self._dispatch(
                     event,

@@ -145,6 +145,22 @@ echo "[4/5] Installing the pinned standard dependency generation..."
     -r "$BUILD_ROOT/constraints/standard-py312.lock"
 "$PYTHON_EXE" "$BUILD_ROOT/scripts/check_runtime_contract.py" --code-root "$BUILD_ROOT"
 
+# Relocatable helper interpreters keep native speech dependencies outside Core.
+mkdir -p "$BUILD_ROOT/media"
+for kind in transcription tts; do
+    cp -R "$BUILD_ROOT/python" "$BUILD_ROOT/media/$kind"
+    helper="$BUILD_ROOT/media/$kind/bin/python3"
+    "$helper" -m pip install --disable-pip-version-check --only-binary=:all: \
+        -r "$BUILD_ROOT/constraints/$kind-py312.lock"
+done
+export HF_HUB_CACHE="$BUILD_ROOT/media/model-cache"
+"$BUILD_ROOT/media/transcription/bin/python3" -I \
+    "$BUILD_ROOT/orchestrator/voice_transcription_worker.py" --prepare-model
+"$BUILD_ROOT/media/transcription/bin/python3" -I \
+    "$BUILD_ROOT/orchestrator/voice_transcription_worker.py" --check-model
+"$BUILD_ROOT/media/tts/bin/python3" -I \
+    "$BUILD_ROOT/orchestrator/voice_synthesis_worker.py" --probe
+
 echo "[5/5] Finalising the image..."
 mkdir -p "$BUILD_ROOT/logs"
 find "$BUILD_ROOT/mac" -type f \( -name '*.command' -o -name '*.sh' \) \

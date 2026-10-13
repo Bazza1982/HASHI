@@ -26,6 +26,7 @@ to the target agent(s) unchanged.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import logging
@@ -268,7 +269,17 @@ class WhatsAppTransport:
                     await self._handle_routing_command(chat_key, text.strip())
                     return
                 if first_word.lstrip("/") in WHATSAPP_LOCAL_COMMANDS:
-                    await self._handle_lifecycle_command(chat_key, text.strip())
+                    transport_id = str(
+                        getattr(getattr(msg, "Info", None), "ID", None)
+                        or getattr(getattr(msg, "Info", None), "MessageID", None)
+                        or ""
+                    ).strip()
+                    await self._handle_lifecycle_command(
+                        chat_key,
+                        text.strip(),
+                        transport_id=transport_id,
+                        actor_id=phone,
+                    )
                     return
 
             # Resolve target agents: persisted route → auto single-agent → prompt user
@@ -864,12 +875,123 @@ class WhatsAppTransport:
 
         return "\n".join(lines)
 
-    async def _handle_lifecycle_command(self, chat_key: str, text: str):
-        """Handle registered WhatsApp-local lifecycle commands."""
+    def _lifecycle_source_runtime(self, chat_key: str):
+        """Resolve one running runtime that owns the source WhatsApp Session."""
+        routed = [
+            runtime
+            for name in self._router.get_targets(chat_key)
+            if (runtime := self._get_runtime(name)) is not None
+        ]
+        if len(routed) == 1:
+            return routed[0]
+        if routed:
+            return None
+        running = list(self.orchestrator.runtimes)
+        return running[0] if len(running) == 1 else None
+
+    async def _publish_lifecycle_reply(
+        self,
+        runtime,
+        *,
+        chat_key: str,
+        request_id: str,
+        text: str,
+    ) -> dict:
+        """Publish and dispatch one lifecycle result through the canonical outbox."""
+        from orchestrator import runtime_session
+        from orchestrator.frontend_connector_registry import endpoint_id_for
+        from orchestrator.frontend_dispatch import (
+            FrontendDispatcher,
+            OutcomeConnectorAdapter,
+        )
+
+        publication_id = "wa_lifecycle_" + hashlib.sha256(
+            f"{request_id}\0{text}".encode("utf-8")
+        ).hexdigest()
+        publication = runtime_session.publish_frontend_message(
+            runtime,
+            role="assistant",
+            text=text,
+            source="whatsapp.lifecycle",
+            publication_id=publication_id,
+            surface="whatsapp",
+            channel_key=chat_key,
+            presentation_channel="command",
+        )
+        expected_endpoint = endpoint_id_for(
+            "whatsapp",
+            ingress_transport="whatsapp",
+            channel_key=chat_key,
+        )
+
+        async def send_standard_event(event, *, endpoint_id):
+            if endpoint_id != expected_endpoint:
+                raise ValueError("WhatsApp lifecycle endpoint changed before delivery")
+            rendered = "\n".join(
+                str(block.get("text") or "")
+                for block in event.get("content_blocks") or ()
+                if isinstance(block, dict) and block.get("type") == "text"
+            ).strip()
+            if not rendered:
+                raise ValueError("WhatsApp lifecycle result has no reply text")
+            sent = bool(await self._send_text(chat_key, rendered))
+            return {
+                "attempted": True,
+                "delivered": sent,
+                "state": "accepted" if sent else "failed",
+            }
+
+        dispatcher = FrontendDispatcher(
+            runtime.session_store,
+            worker_id=f"fc-whatsapp-lifecycle-{request_id}",
+            adapters={
+                "whatsapp": OutcomeConnectorAdapter(
+                    "whatsapp", send_standard_event
+                )
+            },
+        )
+        results = await dispatcher.dispatch_once(
+            str(publication["session_id"]),
+            str(publication["owner_id"]),
+            event_id=str(publication["delivery_event_id"]),
+            limit=1,
+        )
+        return results[0] if results else {"status": "already_completed"}
+
+    @staticmethod
+    def _lifecycle_result_text(command_name: str, agent_name: str, outcome: dict) -> str:
+        state = str(outcome.get("state") or "unknown").strip().casefold()
+        message = str(
+            outcome.get("message")
+            or outcome.get("error")
+            or "Agent lifecycle outcome is unknown."
+        ).strip()
+        if state == "starting":
+            return f"🚀 {agent_name}: {message}"
+        if state in {"accepted", "pending"}:
+            return f"⏳ /{command_name} {agent_name}: {message}"
+        if bool(outcome.get("ok")):
+            return f"✓ /{command_name} {agent_name}: {message}"
+        return f"✗ /{command_name} {agent_name}: {message}"
+
+    async def _handle_lifecycle_command(
+        self,
+        chat_key: str,
+        text: str,
+        *,
+        transport_id: str,
+        actor_id: str,
+    ):
+        """Route WhatsApp lifecycle controls through the shared typed PAO owner."""
         parts = text.split()
         cmd = parts[0].lower()
         command_name = cmd.lstrip("/") or "lifecycle"
-        require_connector_local_command("whatsapp", command_name)
+        from orchestrator.frontend_connector_registry import (
+            endpoint_id_for,
+            require_connector_operation,
+        )
+
+        require_connector_operation("whatsapp", "ingress", "control")
         session = self._whatsapp_command_session(
             chat_key,
             command_name,
@@ -877,92 +999,107 @@ class WhatsAppTransport:
             handler_kind="whatsapp_lifecycle",
         )
         try:
-            parts = text.split()
-            cmd = parts[0].lower()
-
             if cmd == "/restart":
-                from orchestrator.commands import api_restart
-
-                confirm = len(parts) > 1 and parts[1].lower() in {"confirm", "now"}
-                if not confirm:
-                    session.block("restart_confirm_required")
+                source_runtime = self._lifecycle_source_runtime(chat_key)
+                if source_runtime is None or not transport_id:
+                    session.block("lifecycle_admission_unavailable")
                     await self._send_text(
                         chat_key,
-                        "⚠️ Hard restart goes through WatchTower and can briefly stop HASHI.\n"
-                        "Reply `/restart confirm` to continue.",
+                        "Agent restart is unavailable: select exactly one running source Agent, "
+                        "then use /stop <agent> followed by /start <agent>.",
                     )
                     return
-                targets = self._router.get_targets(chat_key)
-                if not targets:
-                    running = [rt.name for rt in self.orchestrator.runtimes]
-                    if len(running) == 1:
-                        targets = running
-                if len(targets) != 1:
-                    await self._send_text(
-                        chat_key,
-                        "Human /restart needs exactly one routed agent.\nUse /agent <name> first.",
-                    )
-                    return
-                runtime = self._get_runtime(targets[0])
-                if runtime is None:
-                    await self._send_text(chat_key, f"Agent '{targets[0]}' is not running.")
-                    return
-                await self._send_text(chat_key, "🔁 Requesting hard restart via WatchTower...")
-                ok, message = await api_restart.request_whatsapp_restart(runtime)
-                if ok:
-                    await self._send_text(chat_key, "✅ Hard restart requested. Telegram will report when the restarted agent is back.")
-                else:
-                    await self._send_text(chat_key, f"❌ Hard restart failed: {message}")
+                restart_request_id = "wactl_" + hashlib.sha256(
+                    f"whatsapp.message\0{transport_id}".encode("utf-8")
+                ).hexdigest()[:40]
+                await self._publish_lifecycle_reply(
+                    source_runtime,
+                    chat_key=chat_key,
+                    request_id=restart_request_id,
+                    text=(
+                        "Agent restart is not a direct transport operation. "
+                        "Use /stop <agent> followed by /start <agent>."
+                    ),
+                )
                 return
 
-            if cmd == "/terminate":
-                if len(parts) < 2:
-                    running = [rt.name for rt in self.orchestrator.runtimes]
-                    if not running:
-                        await self._send_text(chat_key, "No agents are currently running.")
-                    else:
-                        await self._send_text(
-                            chat_key,
-                            f"Usage: /terminate <agent_name>\nRunning: {', '.join(running)}"
-                        )
-                    return
-                agent_name = parts[1]
-                ok, message = await self.orchestrator.stop_agent(agent_name)
-                await self._send_text(chat_key, f"{'✓' if ok else '✗'} {message}")
+            if cmd not in {"/start", "/stop", "/terminate"}:
+                return
+            source_runtime = self._lifecycle_source_runtime(chat_key)
+            if source_runtime is None or not transport_id or not str(actor_id).strip():
+                session.block("lifecycle_admission_unavailable")
+                await self._send_text(
+                    chat_key,
+                    "Agent lifecycle control needs exactly one running source Agent and a stable message identity.",
+                )
+                return
+            if len(parts) < 2:
+                request_id = "wactl_" + hashlib.sha256(
+                    f"whatsapp.message\0{transport_id}".encode("utf-8")
+                ).hexdigest()[:40]
+                await self._publish_lifecycle_reply(
+                    source_runtime,
+                    chat_key=chat_key,
+                    request_id=request_id,
+                    text=f"Usage: /{command_name} <agent_name>",
+                )
                 return
 
-            if cmd == "/start":
-                if len(parts) < 2:
-                    startable = self.orchestrator.get_startable_agent_names()
-                    if not startable:
-                        await self._send_text(chat_key, "All configured agents are already running.")
-                    else:
-                        await self._send_text(
-                            chat_key,
-                            f"Usage: /start <agent_name>\nAvailable: {', '.join(startable)}"
-                        )
-                    return
-                agent_name = parts[1]
-                await self._send_text(chat_key, f"🚀 Starting {agent_name}...")
-                ok, message = await self.orchestrator.start_agent(agent_name)
-                await self._send_text(chat_key, f"{'✓' if ok else '✗'} {message}")
-                return
+            from orchestrator import runtime_session
+            from orchestrator.agent_management import (
+                AgentManagementAction,
+                AgentManagementAdmission,
+            )
 
-            if cmd == "/stop":
-                if len(parts) < 2:
-                    running = [rt.name for rt in self.orchestrator.runtimes]
-                    if not running:
-                        await self._send_text(chat_key, "No agents are currently running.")
-                    else:
-                        await self._send_text(
-                            chat_key,
-                            f"Usage: /stop <agent_name>\nRunning: {', '.join(running)}"
-                        )
-                    return
-                agent_name = parts[1]
-                ok, message = await self.orchestrator.stop_agent(agent_name)
-                await self._send_text(chat_key, f"{'✓' if ok else '✗'} {message}")
-                return
+            current = runtime_session.current_session(
+                source_runtime,
+                surface="whatsapp",
+                channel_key=chat_key,
+            )
+            owner = runtime_session.owner_id(source_runtime)
+            endpoint_id = endpoint_id_for(
+                "whatsapp",
+                ingress_transport="whatsapp.message",
+                channel_key=chat_key,
+            )
+            identity_digest = hashlib.sha256(
+                f"whatsapp.message\0{transport_id}".encode("utf-8")
+            ).hexdigest()[:40]
+            request_id = f"wactl_{identity_digest}"
+            action = AgentManagementAction(
+                kind="control",
+                operation="lifecycle.set_active",
+                owner_id=owner,
+                connector_id="whatsapp",
+                agent_id=parts[1],
+                payload={
+                    "is_active": cmd == "/start",
+                    "reason": command_name,
+                    "source": "whatsapp.lifecycle",
+                },
+                admission=AgentManagementAdmission(
+                    session_id=str(current["session_id"]),
+                    context_generation=int(current["context_generation"]),
+                    request_id=request_id,
+                    client_id=f"whatsapp_native:{endpoint_id}",
+                    source_agent_id=str(source_runtime.name),
+                    actor_id=str(actor_id).strip(),
+                    endpoint_id=endpoint_id,
+                ),
+            )
+            manager = getattr(self.orchestrator, "agent_management", None)
+            if manager is None:
+                raise RuntimeError("Agent management owner is unavailable")
+            outcome = await manager.dispatch(
+                action,
+                session_store=source_runtime.session_store,
+            )
+            await self._publish_lifecycle_reply(
+                source_runtime,
+                chat_key=chat_key,
+                request_id=request_id,
+                text=self._lifecycle_result_text(command_name, parts[1], outcome),
+            )
 
         except Exception as exc:
             session.fail(exc)

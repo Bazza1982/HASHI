@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import logging
 import math
+import os
 from pathlib import Path
 import time
 from uuid import uuid4
@@ -27,7 +29,10 @@ LIFECYCLE_STATES = frozenset(
         "unconfirmed",
     }
 )
-RECEIPT_SCHEMA_VERSION = 3
+RECEIPT_SCHEMA_VERSION = 5
+MAX_PROGRESS_EVENTS = 32
+_WINDOWS_REPLACE_RETRY_DELAYS = (0.025, 0.075, 0.2, 0.5)
+logger = logging.getLogger("BridgeU.RebootReceipts")
 
 
 def _default_shared_replacement():
@@ -37,6 +42,44 @@ def _default_shared_replacement():
         "requested_at": None,
         "old_shared_pid": None,
         "generation_id": None,
+    }
+
+
+def _transient_windows_replace_denial(exc: PermissionError) -> bool:
+    return os.name == "nt" and getattr(exc, "winerror", None) in {5, 32}
+
+
+def _write_receipt_record(path: Path, payload: dict) -> None:
+    """Retry only transient Windows replace denials before commit."""
+
+    for attempt in range(len(_WINDOWS_REPLACE_RETRY_DELAYS) + 1):
+        try:
+            write_record(path, payload)
+            return
+        except PermissionError as exc:
+            if (
+                not _transient_windows_replace_denial(exc)
+                or attempt == len(_WINDOWS_REPLACE_RETRY_DELAYS)
+            ):
+                raise
+            time.sleep(_WINDOWS_REPLACE_RETRY_DELAYS[attempt])
+
+
+def _default_delivery(*, requested: bool = False):
+    return {
+        "status": "pending" if requested else "not_requested",
+        "attempts": 0,
+        "next_attempt_at": 0,
+    }
+
+
+def _default_presentation_ack(*, required: bool = False):
+    return {
+        "status": "pending" if required else "not_required",
+        "expected_sequence": 1 if required else None,
+        "sequence": None,
+        "message_id": None,
+        "confirmed_at": None,
     }
 
 
@@ -68,6 +111,14 @@ def _normalize_record(record):
     if isinstance(shared, dict):
         for key, value in _default_shared_replacement().items():
             shared.setdefault(key, deepcopy(value))
+    # Legacy receipts have no separately provable start-delivery event.  Do
+    # not infer one merely because their final origin was deliverable.
+    record.setdefault("start_delivery", _default_delivery())
+    # v1-v4 receipts predate browser-render confirmation.  Historical
+    # operations must remain readable, but must never be reinterpreted as
+    # having received a presentation acknowledgement.
+    record.setdefault("presentation_ack", _default_presentation_ack())
+    record.setdefault("progress", [])
     return record
 
 
@@ -80,13 +131,15 @@ def clean_origin(origin):
     if not isinstance(surface, str) or len(surface) > 32:
         raise ValueError("Invalid reboot frontend")
     result = {"surface": surface}
-    for key in ("actor_id", "chat_id", "thread_id"):
+    for key in ("owner_id", "actor_id", "chat_id", "thread_id"):
         value = origin.get(key)
         if value in (None, ""):
             result[key] = None
         elif isinstance(value, bool) or not isinstance(value, (str, int)):
             raise ValueError("Invalid reboot origin identifier")
-        elif key == "actor_id" or (key == "chat_id" and surface != "telegram"):
+        elif key in {"owner_id", "actor_id"} or (
+            key == "chat_id" and surface != "telegram"
+        ):
             if len(str(value)) > 200:
                 raise ValueError("Invalid reboot origin identifier")
             result[key] = str(value)
@@ -94,6 +147,10 @@ def clean_origin(origin):
             raise ValueError("Invalid reboot origin identifier")
         else:
             result[key] = int(value)
+    if result.get("owner_id") is None:
+        legacy_actor = str(result.get("actor_id") or "")
+        if legacy_actor.isdigit():
+            result["owner_id"] = f"user:{legacy_actor}"
     return result
 
 
@@ -201,8 +258,90 @@ def validate_record(record):
             and isinstance(record["delivery"]["attempts"], int)
             and 0 <= record["delivery"]["attempts"] <= MAX_DELIVERY_ATTEMPTS
             and math.isfinite(record["delivery"]["next_attempt_at"])
+            and record["start_delivery"]["status"]
+            in {"pending", "sent", "exhausted", "not_requested"}
+            and isinstance(record["start_delivery"]["attempts"], int)
+            and 0 <= record["start_delivery"]["attempts"] <= MAX_DELIVERY_ATTEMPTS
+            and math.isfinite(record["start_delivery"]["next_attempt_at"])
+            and record["presentation_ack"]["status"]
+            in {"not_required", "pending", "confirmed", "expired"}
+            and (
+                record["presentation_ack"].get("expected_sequence") is None
+                or (
+                    isinstance(
+                        record["presentation_ack"].get("expected_sequence"), int
+                    )
+                    and not isinstance(
+                        record["presentation_ack"].get("expected_sequence"), bool
+                    )
+                    and record["presentation_ack"]["expected_sequence"] > 0
+                )
+            )
+            and (
+                record["presentation_ack"].get("sequence") is None
+                or (
+                    isinstance(record["presentation_ack"].get("sequence"), int)
+                    and not isinstance(
+                        record["presentation_ack"].get("sequence"), bool
+                    )
+                    and record["presentation_ack"]["sequence"] > 0
+                )
+            )
+            and (
+                record["presentation_ack"].get("message_id") is None
+                or (
+                    isinstance(
+                        record["presentation_ack"].get("message_id"), str
+                    )
+                    and len(record["presentation_ack"]["message_id"]) <= 200
+                )
+            )
+            and (
+                record["presentation_ack"].get("confirmed_at") is None
+                or (
+                    isinstance(
+                        record["presentation_ack"].get("confirmed_at"),
+                        (int, float),
+                    )
+                    and not isinstance(
+                        record["presentation_ack"].get("confirmed_at"), bool
+                    )
+                    and math.isfinite(record["presentation_ack"]["confirmed_at"])
+                )
+            )
+            and isinstance(record["progress"], list)
+            and len(record["progress"]) <= MAX_PROGRESS_EVENTS
+            and all(
+                isinstance(event, dict)
+                and event.get("sequence") == index
+                and isinstance(event.get("phase"), str)
+                and bool(event.get("phase"))
+                and isinstance(event.get("status"), str)
+                and isinstance(event.get("created_at"), (int, float))
+                and not isinstance(event.get("created_at"), bool)
+                and math.isfinite(event["created_at"])
+                for index, event in enumerate(record["progress"], start=1)
+            )
         )
         clean_origin(record["origin"])
+        ack = record["presentation_ack"]
+        if ack["status"] == "not_required" and any(
+            ack.get(key) is not None
+            for key in ("expected_sequence", "sequence", "confirmed_at")
+        ):
+            valid = False
+        if ack["status"] in {"pending", "expired"} and (
+            ack.get("expected_sequence") is None
+            or ack.get("sequence") is not None
+            or ack.get("confirmed_at") is not None
+        ):
+            valid = False
+        if ack["status"] == "confirmed" and (
+            ack.get("expected_sequence") is None
+            or ack.get("sequence") != ack.get("expected_sequence")
+            or ack.get("confirmed_at") is None
+        ):
+            valid = False
         if not valid:
             raise ValueError("Invalid reboot receipt record")
     except (KeyError, TypeError, ValueError, OverflowError) as exc:
@@ -224,7 +363,8 @@ class RebootReceipts:
                 payload = json.loads(self.path.read_text(encoding="utf-8"))
                 if (
                     not isinstance(payload, dict)
-                    or payload.get("schema") not in {1, 2, RECEIPT_SCHEMA_VERSION}
+                    or payload.get("schema")
+                    not in {1, 2, 3, 4, RECEIPT_SCHEMA_VERSION}
                     or not isinstance(payload.get("records"), list)
                 ):
                     raise ValueError("Invalid reboot receipt storage")
@@ -243,6 +383,7 @@ class RebootReceipts:
             _normalize_record(record)
             validate_record(record)
         payload = {"schema": RECEIPT_SCHEMA_VERSION, "records": records}
+        expired_notices = []
         while (
             len(records) > MAX_RECORDS
             or len(json.dumps(payload, ensure_ascii=False).encode()) > MAX_BYTES
@@ -252,16 +393,24 @@ class RebootReceipts:
                     i
                     for i, r in enumerate(records[:-1])
                     if r["status"] not in ACTIVE
-                    and r["delivery"]["status"] != "pending"
                 ),
                 None,
             )
             if disposable is None:
                 raise ValueError("Reboot receipt storage is full of pending operations")
-            records.pop(disposable)
+            expired = records.pop(disposable)
+            if expired["delivery"]["status"] == "pending":
+                # Notification retries share bounded receipt retention, never
+                # operation capacity. Expiration is not a delivery success.
+                expired_notices.append(expired["id"])
         if self.path is not None:
-            write_record(self.path, payload)
+            _write_receipt_record(self.path, payload)
         self._records = deepcopy(records)
+        for operation_id in expired_notices:
+            logger.warning(
+                "Reboot receipt retention expired an undelivered notice: operation=%s",
+                operation_id,
+            )
 
     def get(self, operation_id):
         return next((r for r in self.records() if r["id"] == operation_id), None)
@@ -315,13 +464,19 @@ class RebootReceipts:
             "online": {},
             "workers": {},
             "shared_replacement": _default_shared_replacement(),
-            "delivery": {
-                "status": (
-                    "pending" if origin_delivery_requested(origin) else "not_requested"
-                ),
-                "attempts": 0,
-                "next_attempt_at": 0,
-            },
+            "start_delivery": _default_delivery(
+                requested=origin_delivery_requested(origin)
+            ),
+            "presentation_ack": _default_presentation_ack(),
+            "delivery": _default_delivery(requested=origin_delivery_requested(origin)),
+            "progress": [
+                {
+                    "sequence": 1,
+                    "phase": "accepted",
+                    "status": "accepted",
+                    "created_at": now,
+                }
+            ],
         }
         self._save([*self.records(), record])
         return deepcopy(record)
@@ -332,7 +487,24 @@ class RebootReceipts:
         if "status" in changes and "lifecycle_state" not in changes:
             projected = {**record, **changes}
             changes["lifecycle_state"] = _lifecycle_for(projected)
-        record.update(deepcopy(changes), updated_at=time.time())
+        now = time.time()
+        progress_message_id = changes.pop("progress_message_id", None)
+        next_phase = changes.get("phase")
+        if next_phase is not None and next_phase != record.get("phase"):
+            progress = list(record.get("progress") or [])
+            if len(progress) >= MAX_PROGRESS_EVENTS:
+                raise ValueError("Reboot progress exceeds its event limit")
+            event = {
+                "sequence": len(progress) + 1,
+                "phase": str(next_phase),
+                "status": str(changes.get("status", record.get("status") or "")),
+                "created_at": now,
+            }
+            if progress_message_id not in (None, ""):
+                event["message_id"] = str(progress_message_id)
+            progress.append(event)
+            changes["progress"] = progress
+        record.update(deepcopy(changes), updated_at=now)
         self._save(records)
         return deepcopy(record)
 

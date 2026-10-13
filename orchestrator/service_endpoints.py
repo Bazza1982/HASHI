@@ -1,4 +1,4 @@
-"""Core-owned publication and discovery for live HASHI service endpoints.
+"""PAO shared-Function publication and discovery for live service endpoints.
 
 Configured hosts and ports are inputs to service startup.  Consumers use the
 endpoint actually published by the running service, including the owning
@@ -227,7 +227,7 @@ class ServiceEndpoint:
 
 
 class ServiceEndpointRegistry:
-    """Authoritative in-process registry for services owned by one Core."""
+    """Authoritative in-process registry for one instance's shared Functions."""
 
     def __init__(self, kernel: Any) -> None:
         self.kernel = kernel
@@ -270,6 +270,8 @@ class ServiceEndpointRegistry:
         normalized_scheme = str(scheme or "").strip().casefold()
         if normalized_scheme not in {"http", "https"}:
             raise ServiceEndpointError("service endpoint scheme must be http or https")
+        previous_revision = self._revision
+        previous = self._services.get(name)
         self._revision += 1
         endpoint = ServiceEndpoint(
             service=name,
@@ -282,14 +284,29 @@ class ServiceEndpointRegistry:
             metadata=dict(metadata or {}),
         )
         self._services[name] = endpoint
-        self._persist()
+        try:
+            self._persist()
+        except Exception:
+            self._revision = previous_revision
+            if previous is None:
+                self._services.pop(name, None)
+            else:
+                self._services[name] = previous
+            raise
         return endpoint
 
     def unpublish(self, service: str) -> None:
         name = str(service or "").strip().casefold()
-        if self._services.pop(name, None) is not None:
+        previous = self._services.pop(name, None)
+        if previous is not None:
+            previous_revision = self._revision
             self._revision += 1
-            self._persist()
+            try:
+                self._persist()
+            except Exception:
+                self._revision = previous_revision
+                self._services[name] = previous
+                raise
 
     def resolve(
         self,
@@ -335,7 +352,19 @@ class ServiceEndpointRegistry:
                 stream.write(payload)
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(temporary, path)
+            # A Windows reader that did not share DELETE can briefly prevent
+            # atomic replacement. Retry only that pre-commit rename, with the
+            # same closed/fsynced candidate. No service startup or action is
+            # replayed, and permanent errors retain the prior live snapshot.
+            for attempt in range(10):
+                try:
+                    os.replace(temporary, path)
+                    break
+                except OSError as exc:
+                    if (os.name != "nt" or getattr(exc, "winerror", None) not in {5, 32, 33}
+                            or attempt == 9):
+                        raise
+                    time.sleep(.05)
             try:
                 path.chmod(0o600)
             except OSError:

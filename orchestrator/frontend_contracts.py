@@ -37,6 +37,44 @@ RELAY_ENVELOPE_VERSION = 1
 TOOL_INTERACTION_TYPE = "hashi.frontend-tool-interaction"
 TOOL_INTERACTION_VERSION = 1
 MAX_CONTENT_BLOCKS = 128
+_PUBLIC_ERROR_CODE = re.compile(r'^[A-Z][A-Z0-9_]{0,79}$')
+
+
+def normalize_public_error_code(value: Any) -> str:
+    """A public classification is a bounded code, never free-form diagnostics."""
+    return value if isinstance(value, str) and _PUBLIC_ERROR_CODE.fullmatch(value) else ""
+
+
+def normalize_public_failure(value: Any) -> dict[str, Any]:
+    raw = _object(value, 'public failure')
+    if raw.get('type') != 'hashi.public-failure' or raw.get('version') != 1:
+        raise ValueError('public failure version is invalid')
+    action = str(raw.get('retry_action') or 'inspect_failure')
+    if action not in {'retry', 'verify_results', 'inspect_failure'}:
+        raise ValueError('public failure recovery action is invalid')
+    text = raw.get('text')
+    if not isinstance(text, str) or not text.strip() or len(text) > 16000:
+        raise ValueError('public failure text is invalid')
+    result = {'type':'hashi.public-failure', 'version':1, 'retry_action':action, 'text':text}
+    backend = str(raw.get('backend') or '')
+    if backend and _CONNECTOR.fullmatch(backend):
+        result['backend'] = backend
+    code = normalize_public_error_code(raw.get('error_code'))
+    if code:
+        result['error_code'] = code
+    for key in ('error_retryable', 'side_effects_possible'):
+        if isinstance(raw.get(key), bool):
+            result[key] = raw[key]
+    effects = raw.get('effects')
+    if isinstance(effects, Mapping):
+        result['effects'] = {key: value for key, value in effects.items()
+            if key in {'confirmed_read_count', 'confirmed_write_count', 'no_change_count',
+                       'completed_action_count', 'pending_action_count', 'observed_tool_count',
+                       'unverified_action_count', 'completed_background_job_count'}
+            and isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 100000}
+        if isinstance(effects.get('evidence_limited'), bool):
+            result['effects']['evidence_limited'] = effects['evidence_limited']
+    return result
 
 
 def _object(value: Any, name: str) -> Mapping[str, Any]:
@@ -379,7 +417,7 @@ def normalize_delivery_intent(value: Any) -> dict[str, Any]:
         if role not in {"primary", "mirror", "subscriber"}:
             raise ValueError("delivery destination role is invalid")
         primary_count += role == "primary"
-        channel_key = _string(item.get("channel_key"), "channel_key")
+        _string(item.get("channel_key"), "channel_key")
         modes_raw = item.get("content_modes")
         if not isinstance(modes_raw, (list, tuple)) or not modes_raw:
             raise ValueError("content_modes must be a non-empty list")
@@ -792,6 +830,22 @@ def normalize_frontend_event(value: Any) -> dict[str, Any]:
     content_blocks = normalize_content_blocks(raw.get("content_blocks", []))
     created_at = _string(raw.get("created_at") or "", "created_at", maximum=64)
 
+    error_code = None
+    candidate_error_code = raw.get("error_code")
+    if (
+        semantic_kind == "error"
+        and presentation_channel == "error"
+        and interface_kind == "display"
+        and audience == "user"
+        and visibility == "public"
+        and normalize_public_error_code(candidate_error_code)
+    ):
+        error_code = candidate_error_code
+
+    public_failure = None
+    if semantic_kind == 'error' and visibility == 'public' and audience == 'user' and raw.get('public_failure'):
+        public_failure = normalize_public_failure(raw['public_failure'])
+
     return {
         "type": FRONTEND_EVENT_TYPE,
         "version": FRONTEND_EVENT_VERSION,
@@ -814,6 +868,8 @@ def normalize_frontend_event(value: Any) -> dict[str, Any]:
         "semantic_kind": semantic_kind,
         "presentation_channel": presentation_channel,
         "content_blocks": content_blocks,
+        **({"error_code": error_code} if error_code else {}),
+        **({'public_failure':public_failure} if public_failure else {}),
         "delivery_intent_ref": _token(raw.get("delivery_intent_ref"), "delivery_intent_ref")
         if raw.get("delivery_intent_ref")
         else None,

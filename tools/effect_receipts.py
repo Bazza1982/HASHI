@@ -7,15 +7,92 @@ from typing import Any
 from collections.abc import Mapping
 
 
+# Only tools whose implementation is observational belong here.  In particular,
+# ``verification_run`` is deliberately absent: its argv/recipe can execute
+# arbitrary workspace code even though SmartTools groups it under ``verify``.
+_READ_EFFECT_TOOLS = frozenset(
+    {
+        "file_read",
+        "log_query",
+        "media_read",
+        "vision_inspect",
+        "web_search",
+        "web_fetch",
+        "file_list",
+        "process_list",
+        "request_diagnostics",
+        "browser_active_tab",
+        "browser_get_media_state",
+        "browser_screenshot",
+        "browser_get_text",
+        "browser_get_html",
+        "browser_get_attribute",
+        "windows_screenshot",
+        "windows_info",
+        "windows_window_list",
+        "desktop_screenshot",
+        "desktop_info",
+        "desktop_window_list",
+        "hashi_scheduler_list",
+        "hashi_scheduler_run_history",
+        "hashi_superloop_list",
+        "hashi_superloop_get",
+        "obsidian_read_note",
+        "obsidian_list_folder",
+        "obsidian_search",
+        "obsidian_get_active",
+        "memory_search",
+        "workspace_inspect",
+    }
+)
+
+
+def is_verified_read_effect_receipt(
+    *,
+    tool_name: str,
+    tool_call_id: str,
+    receipt: Mapping[str, Any] | None,
+    completed: object,
+    status: object,
+) -> bool:
+    """Validate durable, exact evidence for one observational tool call.
+
+    This owner also rejects old receipts for tools that were previously
+    misclassified as read-only; consumers must not trust receipt shape alone.
+    """
+
+    name = str(tool_name or "")
+    call_id = str(tool_call_id or "")
+    if (
+        not name
+        or not call_id
+        or name not in _READ_EFFECT_TOOLS
+        or completed is not True
+        or str(status or "").casefold() != "success"
+        or not isinstance(receipt, Mapping)
+        or receipt.get("kind") != "read"
+        or str(receipt.get("tool_name") or "") != name
+    ):
+        return False
+    revision = str(receipt.get("revision") or "")
+    digest = revision.removeprefix("sha256:")
+    return bool(
+        revision.startswith("sha256:")
+        and len(digest) == 64
+        and all(character in "0123456789abcdef" for character in digest)
+        and str(receipt.get("evidence_ref") or "")
+        == f"tool:{call_id}:{revision}"
+    )
+
+
 def observe_tool_effect(*, tool_name: str, call_id: str, arguments: dict,
                         output: str, is_error: bool, workspace_dir: Path,
                         access_roots: tuple[Path, ...]) -> dict[str, Any] | None:
     if is_error:
         return None
-    from tools.smart_tools import smart_tool_spec
     from tools.tool_audit import sanitize_value
 
-    kind = "read" if smart_tool_spec(tool_name).profile in {"query", "verify"} else ""
+    kind = "read" if tool_name in _READ_EFFECT_TOOLS else ""
     target = str(arguments.get("path") or arguments.get("url") or arguments.get("query") or "")
     observed = str(output or "")
     digest = hashlib.sha256(observed.encode("utf-8")).hexdigest()

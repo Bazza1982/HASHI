@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import os
+import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,8 +13,14 @@ import pytest
 
 from adapters.base import BackendResponse
 from adapters.codex_cli import CodexCLIAdapter
-from adapters.stream_events import KIND_COMMENTARY, KIND_THINKING
+from adapters.stream_events import (
+    KIND_COMMENTARY,
+    KIND_THINKING,
+    KIND_TOOL_END,
+    KIND_TOOL_START,
+)
 from orchestrator.multimodal_contract import canonical_request_content
+from orchestrator.request_activity import RequestActivityStore
 from tests.mocks.mock_adapters import SimpleGlobalConfig, SimpleTestConfig
 from tools import model_capability_sources, pricing_sources
 
@@ -35,6 +42,20 @@ class _FakeStderr:
         self._proc = proc
 
     async def read(self, _size: int) -> bytes:
+        await self._proc.wait()
+        return b""
+
+
+class _BufferedStderr:
+    def __init__(self, proc: "_HangingProc", text: str):
+        self._proc = proc
+        self._payload = text.encode("utf-8")
+
+    async def read(self, _size: int) -> bytes:
+        if self._payload:
+            payload = self._payload
+            self._payload = b""
+            return payload
         await self._proc.wait()
         return b""
 
@@ -487,6 +508,193 @@ async def test_codex_only_emits_agent_messages_that_are_proven_intermediate(tmp_
     ]
 
 
+@pytest.mark.asyncio
+async def test_codex_mcp_lifecycle_projects_safe_activity_without_double_count(
+    tmp_path, monkeypatch
+):
+    adapter = _build_adapter(tmp_path)
+    item = {
+        "id": "mcp-call-1",
+        "type": "mcp_tool_call",
+        "server": "hashi_tools",
+        "tool": "frontend_send_attachments",
+    }
+    proc = _HangingProc(
+        [
+            json.dumps(
+                {
+                    "type": "item.started",
+                    "item": {
+                        **item,
+                        "arguments": {"token": "SECRET-ARGUMENT"},
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        **item,
+                        "result": {
+                            "content": "SECRET-RESULT",
+                            "is_error": False,
+                        },
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "Delivered."},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "turn.completed",
+                    "usage": {"input_tokens": 4, "output_tokens": 2},
+                }
+            ),
+        ]
+    )
+    events = []
+
+    async def collect(event):
+        events.append(event)
+
+    async def create_subprocess(*_args, **_kwargs):
+        async def finish():
+            await asyncio.sleep(0)
+            proc.finish(0)
+
+        asyncio.create_task(finish())
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+
+    response = await adapter.generate_response(
+        "deliver attachments",
+        "req-mcp-count",
+        on_stream_event=collect,
+    )
+    await asyncio.sleep(0)
+
+    assert response.is_success is True
+    assert response.tool_call_count == 1
+    assert [event.kind for event in events] == [KIND_TOOL_START, KIND_TOOL_END]
+    assert [event.tool_name for event in events] == [
+        "frontend_send_attachments",
+        "frontend_send_attachments",
+    ]
+    assert events[0].event_id != events[1].event_id
+    assert [dict(event.metadata) for event in events] == [
+        {"server": "hashi_tools", "tool": "frontend_send_attachments"},
+        {
+            "server": "hashi_tools",
+            "tool": "frontend_send_attachments",
+            "outcome": "success",
+            "is_error": False,
+        },
+    ]
+    assert "SECRET-ARGUMENT" not in repr(events)
+    assert "SECRET-RESULT" not in repr(events)
+
+    activity = RequestActivityStore()
+    activity.start("req-mcp")
+    for event in events:
+        activity.publish_stream("req-mcp", event)
+    projected = activity.poll("req-mcp")["events"][-2:]
+    assert [event["kind"] for event in projected] == [
+        KIND_TOOL_START,
+        KIND_TOOL_END,
+    ]
+    assert [event["status"] for event in projected] == ["running", "completed"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    (
+        "completion",
+        "expected_summary",
+        "expected_outcome",
+        "expected_status",
+        "expected_is_error",
+    ),
+    [
+        (
+            {"status": "failed", "error": {"message": "SECRET-FAILURE"}},
+            "Failed remote_check via hashi_tools",
+            "failed",
+            "failed",
+            True,
+        ),
+        (
+            {"result": {"content": "SECRET-ERROR", "is_error": True}},
+            "Failed remote_check via hashi_tools",
+            "failed",
+            "failed",
+            True,
+        ),
+        (
+            {"status": "future-provider-status", "result": "SECRET-UNKNOWN"},
+            "Finished remote_check via hashi_tools (outcome unknown)",
+            "unknown",
+            "unknown",
+            None,
+        ),
+    ],
+)
+async def test_codex_mcp_completion_projects_failed_and_unknown_without_payload(
+    tmp_path,
+    completion,
+    expected_summary,
+    expected_outcome,
+    expected_status,
+    expected_is_error,
+):
+    adapter = _build_adapter(tmp_path)
+    events = []
+
+    async def collect(event):
+        events.append(event)
+
+    item = {
+        "id": "mcp-call-terminal",
+        "type": "mcp_tool_call",
+        "server": "hashi_tools",
+        "tool": "remote_check",
+    }
+    adapter._parse_codex_event(
+        json.dumps({"type": "item.started", "item": item}),
+        collect,
+    )
+    adapter._parse_codex_event(
+        json.dumps(
+            {
+                "type": "item.completed",
+                "item": {**item, **completion},
+            }
+        ),
+        collect,
+    )
+    await asyncio.sleep(0)
+
+    assert [event.kind for event in events] == [KIND_TOOL_START, KIND_TOOL_END]
+    assert events[-1].summary == expected_summary
+    assert events[-1].metadata["outcome"] == expected_outcome
+    if expected_is_error is None:
+        assert "is_error" not in events[-1].metadata
+    else:
+        assert events[-1].metadata["is_error"] is expected_is_error
+    assert "SECRET-" not in repr(events)
+
+    activity = RequestActivityStore()
+    activity.start("req-mcp-terminal")
+    for event in events:
+        activity.publish_stream("req-mcp-terminal", event)
+    projected = activity.poll("req-mcp-terminal")["events"][-2:]
+    assert [event["status"] for event in projected] == ["running", expected_status]
+
+
 def test_codex_accepts_completed_turn_even_if_process_needs_forced_exit(tmp_path, monkeypatch: pytest.MonkeyPatch):
     adapter = _build_adapter(tmp_path)
     adapter.set_session_mode(True)
@@ -784,6 +992,142 @@ def test_codex_nonzero_exit_preserves_last_agent_message(tmp_path, monkeypatch: 
     )
     assert logged_message["redacted"] is True
     assert logged_message["chars"] == len("Latest progress before stop.")
+
+
+def test_codex_broken_top_level_workspace_link_fails_before_process_start(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    broken = tmp_path / "_hashi_workbench_v2"
+    try:
+        broken.symlink_to(tmp_path / "missing-workbench", target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable on this platform")
+    adapter = _build_adapter(tmp_path)
+    launches = []
+
+    async def _fake_create_subprocess_exec(*args, **kwargs):
+        launches.append((args, kwargs))
+        raise AssertionError("Codex must not start with a broken workspace link")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    response = asyncio.run(adapter.generate_response("hello", "req-broken-link"))
+
+    assert response.is_success is False
+    assert response.error_code == "CODEX_WORKSPACE_LINK_UNAVAILABLE"
+    assert response.error_retryable is False
+    assert "_hashi_workbench_v2" in (response.error or "")
+    assert launches == []
+
+
+def test_codex_workspace_link_preflight_is_bounded_and_reports_io_failures(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class _Entry:
+        def __init__(self, name: str, *, linked: bool, stat_error: OSError | None = None):
+            self.name = name
+            self.path = str(tmp_path / name)
+            self._linked = linked
+            self._stat_error = stat_error
+            self.stat_calls = 0
+
+        def is_symlink(self):
+            return self._linked
+
+        def stat(self, *, follow_symlinks: bool):
+            assert follow_symlinks is True
+            self.stat_calls += 1
+            if self._stat_error is not None:
+                raise self._stat_error
+            return SimpleNamespace()
+
+    class _Scandir:
+        def __init__(self, entries):
+            self._entries = entries
+
+        def __enter__(self):
+            return iter(self._entries)
+
+        def __exit__(self, *_args):
+            return False
+
+    ordinary = _Entry("ordinary", linked=False)
+    broken = _Entry(
+        "_hashi_workbench_v2",
+        linked=True,
+        stat_error=FileNotFoundError("missing target"),
+    )
+    monkeypatch.setattr(os, "scandir", lambda _path: _Scandir([ordinary, broken]))
+
+    failure = CodexCLIAdapter._workspace_preflight_failure(tmp_path)
+
+    assert failure is not None
+    assert failure[0] == "CODEX_WORKSPACE_LINK_UNAVAILABLE"
+    assert "_hashi_workbench_v2" in failure[1]
+    assert ordinary.stat_calls == 0
+    assert broken.stat_calls == 1
+
+    def _denied(_path):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(os, "scandir", _denied)
+    denied = CodexCLIAdapter._workspace_preflight_failure(tmp_path)
+    assert denied is not None
+    assert denied[0] == "CODEX_WORKSPACE_PREFLIGHT_FAILED"
+    assert "permissions" in denied[1]
+
+
+def test_codex_file_tool_exit_records_typed_failure_and_bounded_tool_receipt(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    adapter = _build_adapter(tmp_path)
+    command = "apply_patch update missing.py"
+    proc = _HangingProc(
+        [
+            json.dumps(
+                {
+                    "type": "item.started",
+                    "item": {
+                        "id": "item-apply-patch",
+                        "type": "command_execution",
+                        "command": command,
+                    },
+                }
+            )
+        ]
+    )
+    proc.stderr = _BufferedStderr(
+        proc,
+        "Failed to find expected lines in "
+        "C:\\Users\\example-user\\project\\missing.py",
+    )
+
+    async def _fake_create_subprocess_exec(*_args, **_kwargs):
+        proc.finish(1)
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    response = asyncio.run(adapter.generate_response("hello", "req-file-tool"))
+
+    assert response.is_success is False
+    assert response.error_code == "CODEX_FILE_TOOL_VALIDATION_FAILED"
+    assert response.side_effects_possible is True
+    assert response.stream_metadata["codex_process_exit_code"] == 1
+    assert response.stream_metadata["codex_last_tool"] == {
+        "event_type": "item.started",
+        "item_id": "item-apply-patch",
+        "item_type": "command_execution",
+        "status": "",
+        "exit_code": None,
+        "command_sha256": hashlib.sha256(command.encode("utf-8")).hexdigest(),
+        "command_chars": len(command),
+    }
+    assert "C:\\Users\\example-user" not in (response.error or "")
+    assert "%USERPROFILE%" in (response.error or "")
 
 
 @pytest.mark.asyncio
@@ -1134,6 +1478,76 @@ def test_codex_long_prompt_is_preserved_and_switched_to_stdin(tmp_path):
     assert adapter._sanitize_for_codex(prompt) == prompt
 
 
+def test_native_process_hook_is_owned_command_scoped_and_available_on_resume(tmp_path):
+    adapter = _build_adapter(tmp_path)
+    for resume in (False, True):
+        adapter._session_mode = resume
+        adapter._session_id = 'thread-owned' if resume else None
+        cmd = adapter._build_cmd('owned prompt', tmp_path/'out.txt', native_hook_receipt=tmp_path/'guard.json')
+        assert '--ignore-user-config' in cmd
+        assert '--dangerously-bypass-hook-trust' in cmd
+        assert any(value.startswith('hooks.PreToolUse=') for value in cmd)
+        assert not any(cmd[index:index+2] == ['--disable','hooks'] for index in range(len(cmd)))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport_type", ["stdio", "streamable_http"])
+@pytest.mark.parametrize("resume", [False, True])
+async def test_native_hook_fixed_gateway_keeps_disabled_mcp_transport_valid(
+    tmp_path, monkeypatch, transport_type, resume
+):
+    adapter = _build_adapter(tmp_path)
+    adapter._hashi_mcp_enabled = True
+    adapter._session_mode = resume
+    adapter._session_id = "thread-owned" if resume else None
+    transport = (
+        {"type": "stdio", "command": "external-server", "env": {"PRIVATE_TOKEN": "private-secret"}}
+        if transport_type == "stdio"
+        else {"type": "streamable_http", "url": "https://external.invalid/mcp", "http_headers": {"Authorization": "private-secret"}}
+    )
+
+    async def inventory(*_argv, **_kwargs):
+        return _CompletedProc(stdout=json.dumps([{"name": "external", "transport": transport}]).encode())
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", inventory)
+    adapter._external_mcp_server_names = await adapter._discover_mcp_servers()
+    monkeypatch.setattr(
+        "adapters.codex_cli.current_hashi_mcp_invocation",
+        lambda _adapter: {"name": "hashi_tools", "command": "owned-gateway", "args": [], "cwd": str(tmp_path)},
+    )
+    command = adapter._build_cmd(
+        "owned prompt", tmp_path / "out.txt", native_hook_receipt=tmp_path / "guard.json"
+    )
+    assert "--ignore-user-config" in command
+    overrides = [command[i + 1] for i, item in enumerate(command[:-1]) if item == "-c"]
+    assert "private-secret" not in " ".join(command)
+
+    # Ignored user configuration must not leave a transport-less disabled entry.
+    # A same-type project entry that remains loaded must not acquire the other
+    # transport (stdio command + HTTP URL is invalid in Codex).
+    for project_config in ({}, {"command": "project-server"} if transport_type == "stdio" else {"url": "https://project.invalid/mcp"}):
+        server = dict(project_config)
+        for override in overrides:
+            parsed = tomllib.loads(override).get("mcp_servers", {}).get("external")
+            if parsed:
+                server.update(parsed)
+        assert server.get("enabled") is False
+        assert bool(server.get("command")) != bool(server.get("url"))
+        assert ("command" in server) == (transport_type == "stdio")
+
+
+def test_native_hook_fixed_gateway_refuses_an_unqualified_mcp_transport(tmp_path, monkeypatch):
+    adapter = _build_adapter(tmp_path)
+    adapter._hashi_mcp_enabled = True
+    adapter._external_mcp_server_names = ("external",)
+    monkeypatch.setattr(
+        "adapters.codex_cli.current_hashi_mcp_invocation",
+        lambda _adapter: {"name": "hashi_tools", "command": "owned-gateway", "args": [], "cwd": str(tmp_path)},
+    )
+    with pytest.raises(RuntimeError, match="MCP transport"):
+        adapter._build_cmd("owned prompt", tmp_path / "out.txt", native_hook_receipt=tmp_path / "guard.json")
+
+
 def test_codex_resume_is_used_only_in_explicit_session_mode(tmp_path):
     adapter = _build_adapter(tmp_path)
     adapter._session_id = "thread-existing"
@@ -1148,6 +1562,34 @@ def test_codex_resume_is_used_only_in_explicit_session_mode(tmp_path):
 
     adapter.set_session_mode(False)
     assert adapter._session_id is None
+
+
+@pytest.mark.asyncio
+async def test_codex_fixed_generate_fails_before_launch_without_request_gateway(
+    tmp_path, monkeypatch
+):
+    adapter = _build_adapter(tmp_path)
+    adapter._hashi_mcp_enabled = True
+    stale_output = tmp_path / ".codex_last_req-missing-gateway.txt"
+    stale_output.write_text("prior diagnostic", encoding="utf-8")
+
+    async def unexpected_inventory():
+        raise AssertionError("MCP inventory must not run without a request gateway")
+
+    async def unexpected_launch(*_args, **_kwargs):
+        raise AssertionError("Codex must not launch without a request gateway")
+
+    monkeypatch.setattr(adapter, "_discover_mcp_servers", unexpected_inventory)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", unexpected_launch)
+
+    response = await adapter.generate_response("hello", "req-missing-gateway")
+
+    assert response.is_success is False
+    assert response.error_code == "CODEX_TOOL_GATEWAY_UNAVAILABLE"
+    assert response.error_retryable is False
+    assert response.side_effects_possible is False
+    assert "request-scoped" in response.error
+    assert stale_output.read_text(encoding="utf-8") == "prior diagnostic"
 
 
 @pytest.mark.parametrize("reasoning_effort", ["max", "ultra"])

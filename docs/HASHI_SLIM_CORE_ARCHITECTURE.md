@@ -136,6 +136,14 @@ qualification remains a separately reported platform check.
 ## Startup presentation and Connector health
 
 PAO startup and Frontend Connector status belong to the shared Functions process.
+Cold Function qualification carries measured phase durations from the isolated
+candidate probe through artifact preparation into the shared startup log. The
+record includes wall-clock start time and monotonic durations for source-manifest
+work, source-commit checks, isolated imports, generation verification, artifact
+materialization, and cache persistence. It lets an operator separate these costs
+from the Core-to-qualifier launch gap without editing protected Core. A future
+shared Function adoption is required before a running instance emits these new
+records; source and offline checks alone do not measure its live startup.
 Worker preparation can finish before shared commit opens Telegram intake. During
 that interval health remains `connecting`/not ready, and the final startup table
 is deferred. A prepared Worker does not prove a connected transport. After
@@ -144,6 +152,11 @@ connection state. Failed connectors retain degraded health and automatic retry;
 successful retries and later polling recovery clear only Connector-owned issues.
 Unrelated service and Agent failures remain visible. Recovery is logged and the
 startup table is refreshed when the derived state changes.
+
+Telegram start schedules its supervised connection loop without waiting for
+network readiness. The shared commit receipt derives `degraded` from the same
+reconciled startup health, not merely from exceptions raised by start. Connection
+retry stays with the ingress; the host retries only connector activation errors.
 
 Agent Worker logging has no independent console handler. Each Worker retains
 diagnostics in `logs/function-workers/worker-<pid>.log` and relays warning/error

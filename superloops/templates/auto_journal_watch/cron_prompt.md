@@ -34,44 +34,45 @@ SOP, use that documented canonical file and record the substitution.
 
 ## Mandatory Preflight
 
-Before starting discovery, create a new loop from the local template root:
+Before starting discovery, use the existing same-quarter `auto_journal_watch` loop when one exists: resume it if paused, or continue it if active. Create a loop from the local template root only when no active or completed loop exists for that quarter. Never create a duplicate quarterly loop.
 
 ```text
 <hashi_root>/superloops/templates/auto_journal_watch
 ```
 
-Then run and record preflight evidence for:
+Then run and record discovery-stage preflight evidence for:
 
 1. HASHI scheduler context:
    - task id: `auto_journal_watch`
    - agent: `sakura`
    - schedule: `0 9 2 1,4,7,10 *`
-2. HASHI API / Gateway availability:
-   - test `/v1/models`
-   - test a minimal `/v1/chat/completions`
-   - prefer the configured HASHI/API gateway base URL if available
-   - if running from WSL and `127.0.0.1` fails, test the known WSL bridge host
-     routes before declaring failure
-3. Required SOP files:
+2. Required SOP files:
    - Journal Watch SOP
    - Ex-portario SOP
    - platform route registry
    - Okta authentication SOP
-4. Approved role mapping:
+3. Approved role mapping:
    - orchestrator: `sakura`
    - librarian: `kurage`
    - reviewer: `momo`
-   - human approver: configured by the run charter
-5. Existing-loop guard:
-   - do not start a duplicate run if an active or completed
-     `auto_journal_watch` loop already exists for the same quarter
-6. Browser/auth readiness:
-   - if the configured library route requires MFA, create a human wait and stop retries
+   - establish the human selection route for the later `Y` gate; its absence does not block discovery
+4. Existing-loop guard:
+   - use or resume the same-quarter loop; never create a duplicate
+5. Browser/auth readiness:
+   - authenticate before browser discovery; if the configured library route requires MFA, create a human wait and stop retries
    - do not keep clicking through auth loops
 
-If the HASHI API / Gateway validation fails, stop at preflight, open a blocker
-issue in the loop, and report the exact endpoint, status, and error. Do not
-continue into discovery with a broken API layer.
+HASHI API / Gateway availability is not a discovery precondition. Immediately
+before AI triage, test `/v1/models` and a minimal `/v1/chat/completions` request,
+preferring the configured HASHI/API gateway base URL. If running from WSL and
+`127.0.0.1` fails, test the known WSL bridge routes before declaring failure.
+If that check fails, preserve completed discovery, cleaning, and Crossref
+artifacts; open a blocker issue with the exact endpoint, status, and error, and
+stop before AI triage. Do not restart or invalidate upstream work.
+
+Other failures stop only the stage that depends on the failed gate. Preserve
+all completed upstream artifacts and continue independent work where the SOP
+allows it.
 
 ## Execution Rules
 
@@ -92,25 +93,22 @@ Hard rules:
 - Before acquisition, run the final selected-set normalized duplicate audit.
 - Always report both selected-row coverage and unique-paper/PDF coverage.
 
-## Default Automation Policy
+## Human Selection and Stage-Local Failure
 
-The goal is unattended end-to-end automation where the SOP permits it.
+Use the current Journal Watch SOP for the selection contract:
 
-Default selection policy:
+- prepare the AI-triaged reviewer bundle for the user;
+- the user selects rows by marking `selected_for_ex_portario = Y`;
+- never auto-select a top-N set, including a default top 50;
+- do not create an acquisition manifest or download any paper until the user
+  has marked `Y` and the final normalized duplicate audit has passed.
 
-- rank candidates using the current Journal Watch keyword/topic list and SOP
-  scoring rules;
-- prepare a locked selected manifest;
-- default to the current SOP's acquisition target count if specified;
-- otherwise use top 50 candidates and record that default explicitly.
-
-Pause for the configured human approver only when:
-
-- the SOP requires explicit human approval;
-- access/authentication requires human action;
-- platform policy or route safety is ambiguous;
-- counts do not reconcile;
-- no valid selection policy can be found.
+The HASHI API / Gateway check belongs immediately before AI triage only. It
+must not block journal-period discovery, raw capture, deterministic metadata
+cleanup, or Crossref enrichment. A failure at any gate blocks the next
+dependent stage, opens an issue, and preserves completed upstream work.
+Authentication, captcha, route-policy, and count-reconciliation failures are
+handled at the stage where they occur; they do not erase earlier evidence.
 
 ## Required Closeout
 

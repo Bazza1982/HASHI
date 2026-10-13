@@ -358,6 +358,39 @@ async def test_non_her_agent_uses_allowed_tool_free_api_renderer(tmp_path):
     assert "Call the user Commander" in call["prompt"]
 
 
+@pytest.mark.asyncio
+async def test_quiesce_invalidates_a_late_render_even_after_resume(tmp_path):
+    persona_path = tmp_path / "agent.md"
+    _write_pcm(persona_path, "Call the user Commander.")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_renderer(**_kwargs):
+        entered.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            # Model an optional Provider that completes despite cancellation.
+            await release.wait()
+        return SimpleNamespace(is_success=True, text="Commander, I'll return soon.")
+
+    renderer = AsyncMock(side_effect=slow_renderer)
+    runtime = _runtime(persona_path, renderer)
+    old_task = runtime_background_status.prepare(runtime, _item())
+    await entered.wait()
+    runtime_background_status.cancel_for_quiesce(runtime)
+    assert runtime_background_status.prepare(runtime, _item()) is None
+    await asyncio.sleep(0)
+    runtime._persona_background_status_paused = False
+    release.set()
+    assert await old_task is None
+    assert getattr(runtime, "_persona_background_status_cache", None) is None
+    new_task = runtime_background_status.prepare(runtime, _item(request_id="req-new"))
+    assert await new_task is not None
+    assert renderer.await_count == 2
+    assert runtime.sent == []
+
+
 def test_legacy_status_templates_are_not_a_persona_fallback(tmp_path):
     missing = tmp_path / "missing-agent.md"
     renderer = AsyncMock()

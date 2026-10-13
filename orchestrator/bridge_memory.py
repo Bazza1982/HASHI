@@ -1330,7 +1330,6 @@ class BridgeContextAssembler:
     DEFAULT_PROMPT_TOKEN_BUDGET: ClassVar[int] = 64_000
     PROMPT_TOKEN_BUDGETS: ClassVar[dict[str, int]] = {
         "codex-cli": DEFAULT_PROMPT_TOKEN_BUDGET,
-        "gemini-cli": DEFAULT_PROMPT_TOKEN_BUDGET,
         "claude-cli": DEFAULT_PROMPT_TOKEN_BUDGET,
         "grok-cli": DEFAULT_PROMPT_TOKEN_BUDGET,
         "openrouter-api": DEFAULT_PROMPT_TOKEN_BUDGET,
@@ -1896,6 +1895,13 @@ class BridgeContextAssembler:
                 item_count=len(active_runtime),
             )
 
+        from orchestrator.frontend_call.context import CallMessageContextSection, CALL_INTERACTION_GUIDANCE
+
+        if not any(isinstance(section, CallMessageContextSection) for section in extra_sections or []):
+            # Fixed Sessions treat an omitted section as unchanged. Current-input
+            # call policy therefore needs an explicit, narrowly scoped tombstone.
+            removed_section_keys.append("call_interaction_policy")
+
         for raw_section in extra_sections or []:
             if len(raw_section) < 2:
                 continue
@@ -1911,6 +1917,10 @@ class BridgeContextAssembler:
             section_key = str(
                 options.pop("key", f"extra:{str(title).lower().replace(' ', '_')}")
             )
+            # A mandatory external transcript remains history even when it
+            # must survive budgeting; protection never elevates its authority.
+            if options.pop("authority", None) == "history":
+                authority = "history"
             protected = bool(options.pop("protected", False))
             add_section(
                 section_key,
@@ -1921,6 +1931,19 @@ class BridgeContextAssembler:
                 item_count=1,
                 metadata=options,
             )
+            if isinstance(raw_section, CallMessageContextSection):
+                # Application-owned presentation policy must reach the model's
+                # instruction channel. Camera facts remain the runtime-data
+                # section above. JSON metadata cannot mint this typed marker.
+                add_section(
+                    "call_interaction_policy",
+                    "CURRENT CALL INTERACTION",
+                    CALL_INTERACTION_GUIDANCE,
+                    "local_system",
+                    protected=True,
+                    item_count=1,
+                    metadata={"schema": "hashi.call-interaction-policy", "version": 1},
+                )
 
         skill_lines = self._catalogue_lines(self.skill_catalog_provider)
         if skill_lines:

@@ -221,3 +221,40 @@ outcomes never re-execute. The Session result event explicitly reports that
 Telegram transport delivery was not observed, so it is not a delivery receipt.
 Workbench callbacks retain their Workbench fence and do not pass through this
 Telegram-native wrapper.
+
+
+## Command discovery and derived Runs (2026-10-05)
+
+CommandSpec `menu_visible` controls the compact Telegram bot menu.
+`picker_visible` is an optional independent discovery choice for authenticated
+client command pickers; when absent it follows menu_visible. `/move` and
+`/clone` explicitly opt into picker discovery with handler-aligned usage while
+remaining absent from Telegram's compact menu. Runtime support, dynamic
+registration overrides and command authorization still decide availability;
+visibility never grants execution. Retired aliases, terminal-only logo and
+the existing hidden token/wipe/reset commands are not exposed by this change.
+The client selection inserts text and does not submit a migration or clone.
+
+`command_request_context` owns trusted PAO command-to-Run handoff. An authenticated
+local adapter supplies its verified Connector identity; native Telegram supplies
+its transport Update, never a guessed chat-ID identity. Derived commands resolve
+the same actual owner/Agent/Session, fence its context generation, preserve the
+original channel and carry explicit ingress transport into queue admission.
+The queue independently freezes its delivery route from this trusted metadata.
+`wiki:query` remains a business source label and is not an internal bypass.
+Wiki adds only its retrieval tool allowlist and provider identity. Stable command
+invocation/transport IDs scope the derived Run idempotency key to Session and
+context generation, preserving command replay without duplicate queueing.
+
+The local command executor and command bridge preserve classified failure codes
+and `request_outcome` (`not_admitted`, `accepted`, `unknown`) instead of collapsing
+every failure into command_menu_command_failed. Accepted Wiki replies include
+derived_request_id. Unknown enqueue outcomes cannot justify automatic retry.
+Missing/untrusted Connector or stale Session is rejected before enqueue; clients
+retain the draft and explain the actual submission state using their locale.
+
+Red/green evidence used the real local command executor, Frontend Connector
+admission and SessionStore for Workbench-compatible API, Telegram and TUI routes.
+Picker support/catalogue tests proved move/clone were supported but missing,
+then discovered according to policy without widening Telegram's menu. Source
+and offline qualification do not assert a client screenshot or running adoption.

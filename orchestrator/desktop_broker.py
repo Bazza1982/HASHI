@@ -41,7 +41,10 @@ class ManualDesktopBroker:
 
     def desktop_targets(self):
         status = self.status()
-        return [{k: item[k] for k in PIN_FIELDS} for item in status["capabilities"]
+        return [{**{k: item[k] for k in PIN_FIELDS},
+                 **({"physical_host_id": item["physical_host_id"], "interactive_session_id": item["interactive_session_id"]}
+                    if item.get("physical_host_id") and item.get("interactive_session_id") else {})}
+                for item in status["capabilities"]
                 if item["capability_kind"] == "computer_control" and item["platform"].lower() == "windows"
                 and ACTIONS.issubset(item["supported_actions"])]
 

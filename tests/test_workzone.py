@@ -45,7 +45,7 @@ def test_workzone_set_and_clear(tmp_path: Path):
     assert section is not None
     assert section[0] == "WORKZONE"
     assert str(zone.resolve()) in section[1]
-    assert "Ignore the agent home workspace" in section[1]
+    assert str(workspace.resolve()) in section[1]
     assert "does not currently have filesystem tools" not in section[1]
 
     clear_workzone(workspace)

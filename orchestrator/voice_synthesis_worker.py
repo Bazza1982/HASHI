@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 RESULT_PREFIX = "HASHI_TTS_RESULT="
-REQUIRED_DISTRIBUTIONS = ("edge-tts", "aiohttp")
+REQUIRED_DISTRIBUTIONS = ("edge-tts", "aiohttp", "imageio-ffmpeg")
 
 
 def _package_versions() -> dict[str, str]:
@@ -30,10 +30,17 @@ def _package_versions() -> dict[str, str]:
 
 
 def probe_runtime() -> dict[str, Any]:
+    import imageio_ffmpeg
+    import subprocess
+
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    subprocess.run([ffmpeg, "-version"], check=True, timeout=30,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return {
         "status": "ok",
         "python": ".".join(str(item) for item in sys.version_info[:3]),
         "packages": _package_versions(),
+        "ffmpeg": ffmpeg,
     }
 
 
@@ -73,6 +80,10 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    # The parent writes UTF-8. Isolated mode ignores Python encoding environment
+    # variables, so Windows pipes otherwise use the machine's legacy code page.
+    sys.stdin.reconfigure(encoding="utf-8", errors="strict")
+    sys.stdout.reconfigure(encoding="utf-8", errors="strict")
     try:
         if args.probe:
             payload = probe_runtime()

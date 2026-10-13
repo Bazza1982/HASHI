@@ -3,6 +3,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from orchestrator.media_runtime import configured_media_executable
+
 
 @dataclass
 class VoiceAsset:
@@ -18,6 +20,15 @@ def _strip_invalid_unicode(text: str) -> str:
     # Some model replies can contain lone surrogate code points from upstream
     # decode paths or malformed emoji fragments. TTS engines reject them.
     return "".join(ch for ch in text if not 0xD800 <= ord(ch) <= 0xDFFF)
+
+
+def spoken_text_language(text: str) -> str:
+    """Shared EN/Chinese/Japanese default voice hint; explicit voices win."""
+    if any("\u3040" <= character <= "\u30ff" for character in text):
+        return "ja"
+    if any("\u3400" <= character <= "\u9fff" for character in text):
+        return "zh"
+    return "en"
 
 
 def prepare_spoken_text(text: str, max_chars: int = 1200) -> str:
@@ -36,8 +47,9 @@ def prepare_spoken_text(text: str, max_chars: int = 1200) -> str:
 
 
 async def convert_audio_to_ogg(ffmpeg_cmd: str, input_path: Path, ogg_path: Path):
+    converter = configured_media_executable("ffmpeg") or ffmpeg_cmd
     proc = await asyncio.create_subprocess_exec(
-        ffmpeg_cmd,
+        converter,
         "-y",
         "-i",
         str(input_path),

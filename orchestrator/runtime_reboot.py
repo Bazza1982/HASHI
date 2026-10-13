@@ -9,7 +9,8 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from orchestrator import ui_language
 from orchestrator.command_ui import card_title, refresh_label
-from orchestrator.reboot_ui import render_status
+from orchestrator.reboot_ui import render_menu_status, render_status
+from orchestrator import runtime_session
 
 
 def origin_from_update(runtime, update):
@@ -17,9 +18,21 @@ def origin_from_update(runtime, update):
     query = getattr(update, "callback_query", None)
     if message is None and query is not None:
         message = getattr(query, "message", None)
+    actor_id = ui_language.actor_id_from_update(update)
+    explicit_owner = getattr(update, "_hashi_owner_id", None) or getattr(
+        update, "_hashi_session_owner_id", None
+    )
+    if explicit_owner:
+        owner_id = str(explicit_owner)
+    elif runtime is not None:
+        owner_id = runtime_session.owner_id(runtime)
+    else:
+        actor_text = str(actor_id or "")
+        owner_id = f"user:{actor_text}" if actor_text.isdigit() else None
     return {
         "surface": getattr(update, "_hashi_session_surface", None) or "telegram",
-        "actor_id": ui_language.actor_id_from_update(update),
+        "owner_id": owner_id,
+        "actor_id": actor_id,
         "chat_id": ui_language.chat_id_from_update(update),
         "thread_id": getattr(message, "message_thread_id", None),
     }
@@ -50,6 +63,13 @@ async def submit(runtime, update, *, mode, number=None, targets=None, query=None
     except Exception:
         # A lost acknowledgement cannot establish that the request was rejected.
         text = ui_language.tr("reboot.ack_unknown")
+        result = {
+            "action": "reboot",
+            "accepted": False,
+            "status": "unknown",
+            "terminal": False,
+            "reason": "ack_unknown",
+        }
     else:
         if result.get("duplicate"):
             text = render_status(
@@ -66,14 +86,14 @@ async def submit(runtime, update, *, mode, number=None, targets=None, query=None
         await query.edit_message_text(text, parse_mode="HTML")
     else:
         await runtime._reply_text(update, text, parse_mode="HTML")
-    return None
+    return result
 
 
 async def show_menu(runtime, update, *, status_only=False, query=None):
     orchestrator = runtime.orchestrator
     try:
         record = await latest(runtime, update)
-        status = render_status(
+        status = render_menu_status(
             record, locale=ui_language.preferred_locale(runtime, update)
         )
     except Exception:
@@ -128,9 +148,11 @@ async def choose(runtime, update, value, *, query=None):
         await show_menu(runtime, update, status_only=value == "status", query=query)
         return
     if value in {"min", "same", "max"}:
-        await submit(runtime, update, mode=value, query=query)
+        return await submit(runtime, update, mode=value, query=query)
     elif value.isdigit():
-        await submit(runtime, update, mode="number", number=int(value), query=query)
+        return await submit(
+            runtime, update, mode="number", number=int(value), query=query
+        )
     else:
         text = ui_language.tr("reboot.invalid_target")
         if query is not None:
@@ -145,9 +167,11 @@ async def command(runtime, update, context):
     if getattr(runtime, "orchestrator", None) is None:
         await runtime._reply_text(update, ui_language.tr("reboot.unavailable"))
         return
-    await choose(runtime, update, " ".join(context.args or []).strip().lower())
+    return await choose(
+        runtime, update, " ".join(context.args or []).strip().lower()
+    )
 
 
 async def callback(runtime, update, query, value):
     await query.answer()
-    await choose(runtime, update, value, query=query)
+    return await choose(runtime, update, value, query=query)

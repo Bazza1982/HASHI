@@ -563,3 +563,23 @@ This work is complete when:
 - validation aliases no longer pollute normal operator views;
 - WatchTower service health and controlled HASHI health are reported separately;
 - the cross-platform test matrix is part of the release gate.
+
+## Idle runtime repair decisions (2026-10-05)
+
+Owner: PAO for Remote routing; platform configuration for the Windows/WSL
+launcher. A successful authenticated loopback candidate already owned by the
+same-machine peer/profile planner must not be re-advertised as an address
+correction on every handshake. A genuine unknown fallback still registers;
+LAN metadata, identity checks and ordinary registry heartbeats remain intact.
+
+Hidden Windows WSL user-runtime launchers redirect stdin from a validated empty
+regular file. They must not inherit a console input handle whose wait state can
+remain signaled with no queued records. Unsafe/nonempty input paths fail without
+overwrite, while native exit status and stdout/stderr logging remain authoritative.
+The correction belongs in the launcher, not Core or the application input loop.
+
+HASHI2 Exchange was disabled through its revision-checked instance configuration
+at the user's explicit request; this is not a shared default for other instances.
+Local LAN Remote remains independent. See the separate source checks, actual
+restart/adoption and remaining Exchange limitations in
+[the idle CPU repair](repairs/REMOTE_IDLE_CPU_REPAIR_2026-10-05.md).

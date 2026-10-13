@@ -1,5 +1,17 @@
 # HERV3 upgrade: JEV experiment and simplified routing
 
+The 2026-10-04 [scoped-search Function change](HERV3_SCOPED_SEARCH.md) retains
+the single model/tool loop and direct Shell use. Execution facts drive technical
+verbose activity independently of commentary; AC heartbeat is not actual progress.
+The owning decision separates source verification from live adoption.
+
+Voice-message uploads use the Worker-owned local transcript in the current
+Execution loop and text-only Direct route, rather than relying on retired
+Triage to consume it. Safe Voice confirmation precedes the model call; an
+unavailable or discarded transcript starts no model action. The explicitly
+selected native-audio route retains raw audio. Other attachments remain bound
+to their original identity and media route.
+
 ## Decision and scope
 
 HERV3 is the current HASHI Engine Runtime upgrade and the canonical
@@ -58,6 +70,65 @@ before HTTP with the existing typed capacity code. Unknown capacities and
 native-media accounting still depend on Provider rejection; the preflight
 does not promise that every request will fit. A capacity rejection after tool
 activity remains non-replayable without user reconciliation.
+
+### Completed-tool checkpoint provider-call continuation
+
+HERV3 may make a bounded transport retry of only the unfinished physical Model
+Provider call after tool activity. Every executed tool must have either an exact
+verified read receipt, or a completed durable HERV3 operation checkpoint binding
+the invocation/attempt, Tool name, call ID, terminal status and returned output
+digest. A completed write or shell checkpoint permits continuing the model call;
+it neither verifies the business effect nor authorizes re-executing that tool.
+An unrecorded, pending or mismatched result blocks continuation. A registry
+`read_only` declaration, successful shell exit or model prose is not proof.
+The effect-receipt owner maintains the observational-tool allowlist;
+`verification_run` is excluded because even a successful verification argv or
+recipe may execute subprocesses and modify the workspace.
+
+The continuation reuses the already assembled Provider messages, including the
+existing tool results. It does not execute a Tool again, restart the HER Turn,
+or mark the whole PAO Run safe to replay. Provider text emitted by a
+tool-enabled HERV3 stage remains internal until its final result, so an
+incomplete draft may be discarded before this same-call continuation. The
+existing no-Tool rule remains stricter: once an answer preview may have become
+user-visible, an incomplete call is not retried in place.
+
+Missing or incomplete checkpoints, mismatched identity/output or an uncertain
+in-flight tool block this continuation. Terminal failures distinguish completed
+operations from verified business effects, retaining reads, readback writes,
+proved no-change failures and unverified effects. Async Worker queries are
+awaited; a failed background query does not erase existing write receipts. Missing,
+corrupt or bounded-away evidence is explicitly incomplete. Provider-call
+continuations share the existing bounded local recovery budget; they never
+authorize replay of a prior Tool call or user request.
+
+The meaningful-output stream inactivity limit is 300 seconds regardless of
+whether fallback models are configured. It counts provider read wait, excluding
+local tools. Transport diagnostics retain bounded exception causes, actual
+httpcore phase timings and private wire references through the stage boundary.
+One versioned PAO/public failure supplies the Engine name, counts and recovery
+decision to every frontend; Workbench preserves it across transcript refreshes.
+These 2026-10-06 changes are scoped to the HASHI3 development repair; qualification
+and adoption receipts are recorded in [the batch journal](repairs/NIGHTLY_20261006_HASHI3.md).
+
+### Terminal commentary fence
+
+Progress commentary is request-local and must quiesce before a required Final
+or Clarification delivery starts. `TurnServices` serializes commentary in
+source order and reserves the rate-limit interval before awaiting Persona
+packaging or transport, so fast Tool start/completion events cannot launch
+competing deliveries. The request-local Persona commentary pipeline retains
+one attempt per event ID and never replays an attempt whose transport outcome
+may be ambiguous.
+
+At the terminal boundary, `TurnServices.close()` first rejects new progress,
+cancels its observers, and then closes the Persona pipeline. Closing the
+pipeline cancels the real package/delivery tasks even when callers were waiting
+through a shield. Pending optional commentary is discarded before the Final or
+Clarification is delivered; an already-started transport is not retried.
+Execution drafts and required terminal messages keep their existing typed
+delivery and replacement contracts. The adapter-level close remains an
+idempotent cleanup fallback, not the ordering barrier.
 
 ## Foreground path
 
@@ -175,6 +246,22 @@ The main model may produce commentary naturally. HASHI rate-limits user-visible 
 to roughly 2-3 minutes and only forwards substantive progress. On the first real tool
 operation HASHI may emit one initial acknowledgement. Commentary never becomes task
 instructions and never counts as task progress.
+
+The 2026-10-08 HASHI3 repair removes Tool-completion-authored updates. Raw
+output differences, timestamps and errors still inform activity/AC observations,
+but cannot claim that new task evidence or successful progress was found. The
+foreground model authors findings, consequences, changed approaches, results
+and blockers; its prompt explicitly excludes generic reassurance and repetition.
+
+Request-local delivery deduplicates event IDs and normalized exact wording over
+the latest 128 updates. Updates within the rate-limit window are queued and
+combined at the next available window, rather than discarded. The queue retains
+the newest complete updates within the existing 4,000-character bound. Persona
+packaging and its one-attempt transport fence remain unchanged. Closing the
+request cancels the timer and discards pending optional progress before Final
+or Clarification; it never retries an ambiguous delivery. Source/offline and
+running Worker/client verification are recorded separately in
+[the nightly repair journal](repairs/NIGHTLY_20261008_HASHI3.md).
 
 ## Optional final style check — HASHI1 pilot, 2026-09-28
 

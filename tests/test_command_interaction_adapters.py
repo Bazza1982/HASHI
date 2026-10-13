@@ -46,6 +46,51 @@ def test_local_command_update_carries_frontend_invocation_identity():
     assert update.update_id == "cmd_meter_status_001"
 
 
+def test_local_command_update_preserves_trusted_enterprise_owner_for_reboot_and_session():
+    from orchestrator.runtime_reboot import origin_from_update
+
+    update = _FakeUpdate(
+        7,
+        7,
+        _CaptureStore(messages=[]),
+        "/reboot min",
+        session_metadata={
+            "_hashi_owner_id": "enterprise:trusted-user",
+            "owner_id": "enterprise:forged-user",
+            "session_surface": "workbench",
+        },
+    )
+    runtime = NS(global_config=NS(authorized_id=7))
+
+    assert update._hashi_owner_id == "enterprise:trusted-user"
+    assert update._hashi_session_owner_id == "enterprise:trusted-user"
+    assert origin_from_update(runtime, update)["owner_id"] == (
+        "enterprise:trusted-user"
+    )
+
+
+def test_reboot_origin_preserves_bound_source_session_owner_without_command_override():
+    from orchestrator.runtime_reboot import origin_from_update
+
+    update = _FakeUpdate(
+        7,
+        7,
+        _CaptureStore(messages=[]),
+        "/reboot min",
+        session_metadata={
+            "owner_id": "enterprise:session-user",
+            "session_surface": "workbench",
+        },
+    )
+    runtime = NS(global_config=NS(authorized_id=7))
+
+    assert update._hashi_owner_id is None
+    assert update._hashi_session_owner_id == "enterprise:session-user"
+    assert origin_from_update(runtime, update)["owner_id"] == (
+        "enterprise:session-user"
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("surface", "channel_key", "connector_id"),
@@ -242,7 +287,7 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
                 SlashCommandAuditSession=Audit, bind_slash_command_audit_session=lambda x: nullcontext()),
             'orchestrator.runtime_command_binding': module('orchestrator.runtime_command_binding',
                 CALLBACK_BINDINGS=[NS(pattern='^example:', method_name='callback_example')],
-                get_flexible_bot_commands=lambda runtime, locale: [NS(command='example', description='Example from the registry'),
+                get_flexible_picker_commands=lambda runtime, locale: [NS(command='example', description='Example from the registry'),
                                                                   NS(command='restart', description='Human-only')]),
             'orchestrator.command_registry': module('orchestrator.command_registry',
                 load_runtime_callbacks=lambda: [], runtime_command_map=lambda: {}),
@@ -512,3 +557,17 @@ async def test_runtime_reply_records_command_ui_context_and_binds_the_canonical_
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def test_picker_can_discover_move_clone_without_widening_telegram_menu():
+    runtime = NS(cmd_move=lambda: None, cmd_clone=lambda: None,
+                 global_config=NS(project_root=Path("/none"), instance_id="QA"),
+                 _is_command_allowed=lambda command: command != "clone")
+    result = bridge._catalogue(runtime, "en")
+    rows = {row["name"]: row for row in result["commands"]}
+    assert rows["move"]["enabled"] is True
+    assert rows["clone"]["enabled"] is False
+    assert rows["move"]["usage"].startswith("/move")
+    from orchestrator.runtime_command_binding import get_flexible_bot_commands
+    assert not {"move", "clone"} & {cmd.command for cmd in get_flexible_bot_commands(runtime)}
+    assert not {"logo", "wipe", "reset", "token"} & rows.keys()

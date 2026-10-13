@@ -43,7 +43,11 @@ def test_bash_schema_exposes_only_an_optional_positive_timeout():
     assert parameters["required"] == ["command"]
     assert timeout["type"] == "number"
     assert timeout["exclusiveMinimum"] == 0
-    assert "instance safety deadline" in timeout["description"]
+    from jsonschema import Draft7Validator
+    validator = Draft7Validator(parameters)
+    assert validator.is_valid({"command": "true"})
+    assert validator.is_valid({"command": "true", "timeout": .1})
+    assert not validator.is_valid({"command": "true", "timeout": 0})
 
 
 def test_shell_schema_declares_platform_default_and_explicit_selectors():
@@ -297,12 +301,13 @@ async def test_tool_registry_task_local_audit_context_does_not_mutate_base(tmp_p
     )
 
     assert result.is_error is False
-    record = json.loads(
-        (workspace / "tool_action_audit.jsonl").read_text(encoding="utf-8")
-    )
-    assert record["agent"] == "arale"
-    assert record["safety_mode"] == "read_only"
-    assert record["authority_mode"] == "her_v2_shadow"
+    records = [json.loads(line) for line in
+        (workspace / "tool_action_audit.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [record["status"] for record in records] == ["started", "success"]
+    for record in records:
+        assert record["agent"] == "arale"
+        assert record["safety_mode"] == "read_only"
+        assert record["authority_mode"] == "her_v2_shadow"
     assert registry.audit_context["safety_mode"] == "read_write"
 
 

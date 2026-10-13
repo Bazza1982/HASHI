@@ -7,7 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from orchestrator import runtime_session
+from orchestrator import runtime_session, runtime_transfer
 from orchestrator import runtime_cross_session, runtime_delivery_order
 from orchestrator.frontend_delivery import RUN_DELIVERY_ROUTE_METADATA_KEY
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
@@ -50,7 +50,9 @@ async def test_legacy_hidden_request_is_admitted_as_visible(tmp_path, monkeypatc
         {"session_id": "session-visible", "context_generation": 1},
         "user:123", "workbench", "default",
     ))
-    monkeypatch.setattr(runtime_session, "session_workzone_state", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        runtime_session, "session_workzone_state", lambda *args, **kwargs: {}
+    )
 
     result = await runtime.enqueue_request(
         123, "Visible work", source, "Visible work",
@@ -75,6 +77,206 @@ async def test_legacy_hidden_request_is_admitted_as_visible(tmp_path, monkeypatc
     assert item.request_metadata["message_context_snapshot"]["message_source"][
         "id"
     ] == expected_source
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["bridge-transfer:trf-red", "bridge-fork:frk-red"])
+async def test_transfer_bridge_request_uses_internal_connector(
+    tmp_path, monkeypatch, source
+):
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.name = "target"
+    runtime.global_config = SimpleNamespace(project_root=None, instance_id="HASHI3")
+    runtime.next_request_id = lambda: "req-transfer"
+    runtime.session_store = SimpleNamespace(session_workspace=lambda *args: tmp_path)
+    runtime.message_logger = Mock()
+    runtime.request_activity = Mock()
+    runtime.queue = asyncio.Queue()
+    runtime._transfer_state = {
+        "status": "accepted",
+        "transfer_id": "trf-existing-source-fence",
+        "target_agent": "target",
+        "target_instance": "HASHI3",
+    }
+    monkeypatch.setattr(
+        runtime_session,
+        "accept_request",
+        lambda *args, **kwargs: (
+            {"session_id": "session-target", "context_generation": 1},
+            SimpleNamespace(
+                replayed=False,
+                run_id="run-transfer",
+                message_id="message-transfer",
+                request_id="req-transfer",
+            ),
+            "user:123",
+            "bridge",
+            "default",
+        ),
+    )
+    monkeypatch.setattr(
+        runtime_session,
+        "resolve_request_session",
+        lambda *args, **kwargs: (
+            {"session_id": "session-target", "context_generation": 1},
+            "user:123",
+            "bridge",
+            "default",
+        ),
+    )
+    monkeypatch.setattr(runtime_session, "session_workzone_state", lambda *args, **kwargs: {})
+
+    result = await runtime.enqueue_request(
+        123,
+        "Continue transferred work",
+        source,
+        "Transfer",
+        deliver_to_telegram=True,
+    )
+
+    item = runtime.queue.get_nowait()
+    assert result == item.request_id == "req-transfer"
+    context = item.request_metadata["message_context_snapshot"]
+    assert context["message_source"]["id"] == "hashi.internal"
+    assert context["frontend_ingress"]["connector"]["id"] == "internal"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "transfer_state",
+    [
+        {
+            "status": "accepted",
+            "transfer_id": "trf-worker-accepted",
+            "target_agent": "target",
+            "target_instance": "HASHI3",
+        },
+        {
+            "status": "pending",
+            "outcome_unknown": True,
+            "transfer_id": "trf-worker-unknown",
+            "target_agent": "target",
+            "target_instance": "HASHI3",
+        },
+    ],
+)
+async def test_worker_nonvoice_ingress_rechecks_transfer_fence_before_run(
+    tmp_path, monkeypatch, transfer_state
+):
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.name = "source"
+    runtime.global_config = SimpleNamespace(project_root=None, instance_id="HASHI2")
+    runtime.next_request_id = lambda: "req-fenced"
+    runtime.session_store = SimpleNamespace(session_workspace=lambda *args: tmp_path)
+    runtime.message_logger = Mock()
+    runtime.request_activity = Mock()
+    runtime.queue = asyncio.Queue()
+    runtime._persist_transfer_state = Mock()
+    runtime._transfer_state = {
+        "status": "pending",
+        "transfer_id": transfer_state["transfer_id"],
+        "target_agent": transfer_state["target_agent"],
+        "target_instance": transfer_state["target_instance"],
+    }
+    accept_request = Mock(side_effect=AssertionError("Run writer must not execute"))
+
+    if transfer_state["status"] == "accepted":
+        runtime_transfer.record_transfer_accepted(
+            runtime,
+            transfer_id=transfer_state["transfer_id"],
+            target_status="accepted",
+        )
+    else:
+        runtime_transfer.record_transfer_outcome_unknown(
+            runtime,
+            transfer_id=transfer_state["transfer_id"],
+            error=RuntimeError("signed receiver outcome was not observed"),
+        )
+
+    monkeypatch.setattr(runtime_session, "accept_request", accept_request)
+    monkeypatch.setattr(
+        runtime_session,
+        "resolve_request_session",
+        lambda *args, **kwargs: (
+            {"session_id": "session-fenced", "context_generation": 1},
+            "user:123",
+            "workbench",
+            "default",
+        ),
+    )
+    monkeypatch.setattr(
+        runtime_session, "session_workzone_state", lambda *args, **kwargs: {}
+    )
+
+    with pytest.raises(runtime_transfer.TransferRedirectRequired) as captured:
+        await runtime.enqueue_request(
+            123,
+            "must not create a Run",
+            "session-api",
+            "fenced request",
+            request_metadata={"voice_origin": True},
+        )
+
+    assert captured.value.redirect["transfer_id"] == transfer_state["transfer_id"]
+    accept_request.assert_not_called()
+    assert runtime.queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_worker_nonvoice_ingress_preserves_complete_pending_transfer(tmp_path, monkeypatch):
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.name = "source"
+    runtime.global_config = SimpleNamespace(project_root=None, instance_id="HASHI2")
+    runtime.next_request_id = lambda: "req-pending"
+    runtime.session_store = SimpleNamespace(session_workspace=lambda *args: tmp_path)
+    runtime.message_logger = Mock()
+    runtime.request_activity = Mock()
+    runtime.queue = asyncio.Queue()
+    runtime._transfer_state = {
+        "status": "pending",
+        "transfer_id": "trf-worker-pending",
+        "target_agent": "target",
+        "target_instance": "HASHI3",
+    }
+    monkeypatch.setattr(
+        runtime_session,
+        "accept_request",
+        lambda *args, **kwargs: (
+            {"session_id": "session-pending", "context_generation": 1},
+            SimpleNamespace(
+                replayed=False,
+                run_id="run-pending",
+                message_id="message-pending",
+                request_id="req-pending",
+            ),
+            "user:123",
+            "workbench",
+            "default",
+        ),
+    )
+    monkeypatch.setattr(
+        runtime_session,
+        "resolve_request_session",
+        lambda *args, **kwargs: (
+            {"session_id": "session-pending", "context_generation": 1},
+            "user:123",
+            "workbench",
+            "default",
+        ),
+    )
+    monkeypatch.setattr(
+        runtime_session, "session_workzone_state", lambda *args, **kwargs: {}
+    )
+
+    request_id = await runtime.enqueue_request(
+        123,
+        "admitted before transfer outcome",
+        "session-api",
+        "pending request",
+    )
+
+    assert request_id == "req-pending"
+    assert runtime.queue.get_nowait().request_id == "req-pending"
 
 
 @pytest.mark.asyncio
@@ -409,6 +611,13 @@ async def test_pao_persists_the_same_route_projected_into_pcm(
     runtime.message_logger = Mock()
     runtime.request_activity = Mock()
     runtime.queue = asyncio.Queue()
+    if source == "background-job-event":
+        runtime._transfer_state = {
+            "status": "accepted",
+            "transfer_id": "trf-automation-unchanged",
+            "target_agent": "target",
+            "target_instance": "HASHI3",
+        }
     monkeypatch.setattr(
         runtime_session, "session_workzone_state", lambda *args, **kwargs: {}
     )

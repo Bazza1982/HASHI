@@ -185,6 +185,14 @@ def resolve_request_session(
             raise SessionConflict("Agent activity Session changed during admission")
         if session.get("session_kind") != SESSION_KIND_AGENT_ACTIVITY:
             raise SessionConflict("Agent activity resolved to a conversation Session")
+    elif explicit_session_id is not None and surface == "workbench" and str(source or "").strip().casefold() == "session-api":
+        # The authenticated Session API validates owner, Agent and generation.
+        # Its selected Workbench view need not change the shared primary binding.
+        session = store.resolve_session(
+            owner_id=resolved_owner, agent_id=runtime.name, surface=surface,
+            channel_key=channel_key, explicit_session_id=explicit_session_id,
+            default_only=False,
+        )
     elif (
         surface in _SHARED_PRIMARY_SURFACES
         or str(source or "").strip().casefold()
@@ -1215,6 +1223,7 @@ def finish_request_from_listener(runtime: Any, request_id: str, payload: Mapping
                 "error_code", "error_retryable", "http_status",
                 "provider_request_id", "retry_after_s", "side_effects_possible",
                 "effect_reconciliation",
+                'public_failure',
             )
             if key in payload
         }

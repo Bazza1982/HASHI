@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
 import logging
 import time
@@ -27,7 +28,7 @@ from tools.smart_tools import SmartToolRuntime
 # Models can still *call* any allowed tool; tiers only control which
 # schemas are included in the API payload.
 TOOL_TIERS: dict[str, list[str]] = {
-    "core": ["shell", "log_query", "file_read", "file_write", "file_list"],
+    "core": ["ask_user", "get_user_answer", "shell", "file_search", "log_query", "file_read", "file_write", "file_list"],
     "vision": ["vision_inspect"],
     "system": ["process_list", "process_kill", "apply_patch"],
     "verification": ["workspace_inspect", "verification_run", "request_diagnostics"],
@@ -80,6 +81,7 @@ TOOL_TIERS: dict[str, list[str]] = {
 # built-in defaults remain fail-closed for every mutating or unknown action.
 READ_ONLY_TOOL_NAMES = frozenset(
     {
+        "get_user_answer",
         "background_job_list",
         "background_job_status",
         "background_job_tail",
@@ -91,6 +93,7 @@ READ_ONLY_TOOL_NAMES = frozenset(
         "desktop_screenshot",
         "file_list",
         "file_read",
+        "file_search",
         "hashi_scheduler_list",
         "hashi_scheduler_run_history",
         "hashi_scheduler_status",
@@ -114,6 +117,29 @@ READ_ONLY_TOOL_NAMES = frozenset(
 _BROWSER_ACTION_OVERRIDES = {
     "browser_get_media_state": "media_state",
     "browser_play": "media_play",
+}
+
+_BRIDGE_BROWSER_DESCRIPTIONS = {
+    "browser_active_tab": (
+        "Read the selected connected browser's active tab, URL, title, and window state. "
+        "Omit url to inspect without navigating."
+    ),
+    "browser_open_play_verify": (
+        "Open a selected video in the connected browser, start playback if needed, "
+        "and verify that playback time advances."
+    ),
+    "browser_screenshot": (
+        "Navigate the selected connected browser to a URL and return a screenshot "
+        "as model-visible image content."
+    ),
+    "browser_get_text": (
+        "Navigate the selected connected browser to a URL and return visible page text, "
+        "including JavaScript-rendered content."
+    ),
+    "browser_type_text": (
+        "Type text into a contenteditable element in the selected connected browser. "
+        "This triggers browser input events for editors such as React composers."
+    ),
 }
 
 
@@ -239,6 +265,7 @@ class ToolRegistry:
         media_roots: Optional[list[Path]] = None,
         canonical_audit: Any = None,
         access_roots: Optional[list[Path]] = None,
+        search_scope: Optional[dict] = None,
     ):
         self.logger = logging.getLogger("Tools.Registry")
         roots: list[Path] = []
@@ -255,6 +282,10 @@ class ToolRegistry:
         self.max_loops = None
         self.agents_config = agents_config or []
         self.audit_context = audit_context or {}
+        self._device_request_scope = uuid4().hex
+        self.set_search_scope(search_scope)
+        from tools.file_search import Continuations
+        self.search_continuations = Continuations()
         self._hchat_attachment_selections: dict[str, dict[str, Any]] = {}
         self._live_runtime_policy_cache_key: tuple | None = None
         self._live_runtime_policy_cache = None
@@ -265,6 +296,9 @@ class ToolRegistry:
         )
         self.media_roots = [Path(root) for root in (media_roots or [])]
         smart_options = self.tool_options.get("smart_registry", {})
+        smart_options = dict(smart_options) if isinstance(smart_options, dict) else {}
+        if self.search_scope and not smart_options.get("ledger_path"):
+            smart_options["ledger_path"] = str(Path(self.search_scope["agent_home"]) / "tool_ledger.jsonl")
         self.smart_tools = SmartToolRuntime(
             self.workspace_dir,
             smart_options if isinstance(smart_options, dict) else {},
@@ -298,6 +332,18 @@ class ToolRegistry:
 
     def is_allowed(self, tool_name: str) -> bool:
         return tool_name in self._allowed
+
+    def set_search_scope(self, scope: dict | None) -> None:
+        """Install PAO's frozen read capability, separately from write roots."""
+        self.search_scope = dict(scope or {})
+        self.read_access_roots = self.access_roots
+        if self.search_scope:
+            agent = str(self.audit_context.get("agent_name") or "")
+            if not agent or self.search_scope.get("agent_id") != agent:
+                raise ValueError("search scope Agent binding mismatch")
+            home = Path(self.search_scope["agent_home"]).expanduser().resolve()
+            if (self.tool_options.get("file_search") or {}).get("enabled") is not False:
+                self.read_access_roots = tuple(dict.fromkeys((*self.access_roots, home)))
 
     def allowed_tool_names(self) -> tuple[str, ...]:
         """Expose names only; permission and execution remain registry-owned."""
@@ -354,6 +400,20 @@ class ToolRegistry:
         override = self._audit_context_override.get()
         return override if override is not None else self.audit_context
 
+    def _read_scope(self):
+        context = self._effective_audit_context()
+        return (tuple(Path(root) for root in context.get("_read_access_roots", self.read_access_roots)),
+                context.get("_search_scope_snapshot", self.search_scope),
+                Path(context.get("_execution_cwd") or self.workspace_dir))
+
+    def _search_options(self):
+        options = dict(self.tool_options.get("file_search") or {})
+        if "timeout_seconds" not in options and self.smart_tools.enabled:
+            timeout = self.smart_tools.foreground_timeout_seconds
+            if timeout is not None:
+                options["timeout_seconds"] = timeout
+        return options
+
     async def execute_with_audit_context(
         self,
         tool_name: str,
@@ -366,6 +426,9 @@ class ToolRegistry:
 
         scoped_context = dict(self._effective_audit_context())
         scoped_context.update(dict(audit_context or {}))
+        scoped_context.setdefault("_search_scope_snapshot", copy.deepcopy(self.search_scope))
+        scoped_context.setdefault("_read_access_roots", self.read_access_roots)
+        scoped_context.setdefault("_execution_cwd", str(self.workspace_dir))
         token = self._audit_context_override.set(scoped_context)
         try:
             return await self.execute(tool_name, arguments, tool_call_id)
@@ -458,6 +521,48 @@ class ToolRegistry:
             for name in ALL_TOOL_NAMES
             if name in available
         ]
+        if any(item["function"]["name"].startswith("browser_") for item in definitions):
+            snapshot = self._capability_status_snapshot() or {}
+            browsers = [
+                row for row in snapshot.get("capabilities") or []
+                if isinstance(row, dict)
+                and row.get("capability_kind") == "browser_control"
+                and isinstance(row.get("expires_at"), (int, float))
+                and row["expires_at"] > time.time()
+            ]
+            choices = ", ".join(
+                f"{row.get('browser_name') or 'Browser'} "
+                f"[{row.get('browser_id') or row.get('capability_id')}]"
+                for row in browsers
+            )
+            if choices:
+                for definition in definitions:
+                    function = definition.get("function") or {}
+                    if str(function.get("name") or "").startswith("browser_"):
+                        name = str(function["name"])
+                        parameters = function.get("parameters") or {}
+                        properties = parameters.get("properties") or {}
+                        # Standalone/CDP options cannot select the connected
+                        # extension Worker and are rejected by that Worker.
+                        properties.pop("cdp_url", None)
+                        properties.pop("headed", None)
+                        for property_schema in properties.values():
+                            if isinstance(property_schema, dict):
+                                description = property_schema.get("description")
+                                if isinstance(description, str):
+                                    property_schema["description"] = description.replace(
+                                        "Chrome", "selected browser"
+                                    )
+                        function["description"] = (
+                            _BRIDGE_BROWSER_DESCRIPTIONS.get(
+                                name, str(function.get("description") or "").rstrip()
+                            )
+                            + " Uses the HASHI extension bridge and the browser's "
+                            "existing login state."
+                            + f" Connected browser choices: {choices}. "
+                            "If the user did not specify a browser, omit browser_target; "
+                            "HASHI selects one and keeps it for this task."
+                        )
         if unavailable_browser:
             for definition in definitions:
                 function = definition.get("function") or {}
@@ -517,6 +622,8 @@ class ToolRegistry:
         return copy.deepcopy(status)
 
     def tool_availability(self, tool_name: str) -> dict[str, Any]:
+        if tool_name == "file_search" and (self.tool_options.get("file_search") or {}).get("enabled") is False:
+            return {"available": False, "code": "capability_unavailable", "reason": "scoped_search_disabled"}
         requirement = _device_tool_requirement(tool_name)
         if requirement is None:
             return {"available": True, "source": "local_executor"}
@@ -524,7 +631,9 @@ class ToolRegistry:
         status = self._capability_status_snapshot()
         if status is None:
             return {"available": True, "source": "standalone_legacy_executor"}
-        if self._function_worker_capability_facade() is None:
+        proxy = self._effective_audit_context().get("browser_gateway_proxy")
+        gateway_browser = kind == "browser_control" and isinstance(proxy, dict)
+        if self._function_worker_capability_facade() is None and not gateway_browser:
             return {
                 "available": False,
                 "code": "capability_unavailable",
@@ -614,6 +723,13 @@ class ToolRegistry:
             return None
         if reason:
             availability["reason"] = reason
+        if reason == "bound_browser_disconnected":
+            availability["next_step"] = (
+                "Reconnect the selected browser and retry, or start a new "
+                "browser task to choose another connected browser."
+            )
+        elif reason == "requested_browser_not_connected":
+            availability["next_step"] = "Choose a connected browser target shown by HASHI."
         return ToolResult(
             tool_call_id=tool_call_id,
             output=(
@@ -765,6 +881,11 @@ class ToolRegistry:
                 runtime_prefix=runtime_prefix,
             )
             self._live_runtime_policy_cache_key = cache_key
+        if tool_name == "file_search":
+            for root in arguments.get("roots") or []:
+                denial = self._check_live_runtime_gate("file_read", {"path": root}, tool_call_id=tool_call_id)
+                if denial is not None:
+                    return denial
         decision = evaluate_live_runtime_request(
             self._live_runtime_policy_cache,
             tool_name=tool_name,
@@ -889,11 +1010,13 @@ class ToolRegistry:
             return admission_denial
 
         try:
-            dispatched = await self._dispatch(
-                tool_name,
-                arguments,
-                tool_call_id=effective_call_id,
-            )
+            from orchestrator.execution_resources import tool_resource
+            async with tool_resource(self, tool_name, arguments) as resource_wait_ms:
+                dispatched = await self._dispatch_observed(
+                    tool_name,
+                    arguments,
+                    tool_call_id=effective_call_id,
+                )
         except asyncio.CancelledError as exc:
             details = dict(getattr(exc, "hashi_tool_details", {}) or {})
             cleanup = dict(details.get("foreground_cleanup") or {})
@@ -919,6 +1042,34 @@ class ToolRegistry:
             raise
         except Exception as e:
             remote = getattr(e, "error", None)
+            broker_error = (
+                type(e).__name__ == "CapabilityBrokerError"
+                or (isinstance(remote, dict) and remote.get("type") == "CapabilityBrokerError")
+                or "CapabilityBrokerError:" in str(e)
+            )
+            if (
+                broker_error
+                and str(tool_name).startswith("browser_")
+                and "browser target is fixed for this task" in str(e)
+            ):
+                result = ToolResult(
+                    tool_call_id=effective_call_id,
+                    output=(
+                        "Error: browser target is fixed for this task. "
+                        "Continue with the selected browser, or start a new task to switch."
+                    ),
+                    is_error=True,
+                    details={
+                        "code": "browser_target_locked",
+                        "control_disposition": "denied",
+                        "retryable": False,
+                    },
+                )
+                result = self._finalize_tool_result(
+                    tool_name, arguments, result, started
+                )
+                self._record_tool_audit(tool_name, arguments, result, started)
+                return result
             unavailable_type = (
                 type(e).__name__ == "CapabilityUnavailableError"
                 or (
@@ -927,28 +1078,46 @@ class ToolRegistry:
                 )
             )
             if unavailable_type and _device_tool_requirement(tool_name) is not None:
+                broker_reason = next(
+                    (
+                        code for code in (
+                            "requested_browser_not_connected",
+                            "bound_browser_disconnected",
+                        )
+                        if code in str(e)
+                    ),
+                    "disappeared_before_execution",
+                )
                 result = self._capability_unavailable_result(
                     tool_name,
                     tool_call_id=effective_call_id,
-                    reason="disappeared_before_execution",
+                    reason=broker_reason,
                 )
                 if result is None:
                     # The catalogue may already contain a newly recovered
                     # registration; the failed invocation remains unavailable.
                     kind, action = _device_tool_requirement(tool_name) or ("device", "action")
+                    next_step = (
+                        "Reconnect the selected browser and retry, or start a new "
+                        "browser task to choose another connected browser."
+                        if broker_reason == "bound_browser_disconnected"
+                        else "Choose a connected browser target shown by HASHI."
+                        if broker_reason == "requested_browser_not_connected"
+                        else "Refresh the capability catalogue and choose another tool."
+                    )
                     result = ToolResult(
                         tool_call_id=effective_call_id,
                         output=(
                             "Error: capability_unavailable: "
-                            f"{kind}/{action} disappeared before execution. "
-                            "Refresh the capability catalogue and choose another tool."
+                            f"{kind}/{action} failed ({broker_reason}). "
+                            f"{next_step}"
                         ),
                         is_error=True,
                         details={
                             "available": False,
                             "code": "capability_unavailable",
-                            "reason": "disappeared_before_execution",
-                            "next_step": "Refresh the capability catalogue and choose another tool.",
+                            "reason": broker_reason,
+                            "next_step": next_step,
                             "capability_kind": kind,
                             "action": action,
                             "control_disposition": "unavailable",
@@ -987,6 +1156,8 @@ class ToolRegistry:
             output = dispatched
             content = None
         content, content_truncated = _bound_structured_text(content)
+        if resource_wait_ms >= 50:
+            details = {**(details or {}), "resource_wait_ms":resource_wait_ms}
         if content_truncated:
             details = {**(details or {}), "content_text_truncated": True}
         if (
@@ -1007,7 +1178,7 @@ class ToolRegistry:
                 "output_truncated": True,
                 "output_original_chars": original_chars,
             }
-        is_error = output.startswith("Error:")
+        is_error = output.startswith("Error:") or (details or {}).get("search_outcome") in {"failed", "unavailable"}
         result = ToolResult(
             tool_call_id=effective_call_id,
             output=output,
@@ -1075,6 +1246,7 @@ class ToolRegistry:
         tool_call_id: str,
     ) -> ToolResult | None:
         if tool_name not in {
+            "file_search",
             "file_read",
             "file_write",
             "file_list",
@@ -1087,6 +1259,17 @@ class ToolRegistry:
         org_id = str(context.get("org_id") or "").strip()
         project_id = str(context.get("project_id") or "").strip()
         if not org_id or not project_id:
+            return None
+        if tool_name == "file_search":
+            raw_roots = arguments.get("roots")
+            if raw_roots is None:
+                raw_roots = [item["path"] for item in self._read_scope()[1].get("preferred_roots", [])]
+            if isinstance(raw_roots, list):
+                for raw_root in raw_roots:
+                    denial = self._check_enterprise_path_gate(
+                        "file_read", {"path": raw_root}, tool_call_id=tool_call_id)
+                    if denial is not None:
+                        return denial
             return None
         path_key = "image_ref" if tool_name == "vision_inspect" else "path"
         raw_path = str((arguments or {}).get(path_key) or "").strip()
@@ -1282,7 +1465,7 @@ class ToolRegistry:
             if artifact_id:
                 audit_context["artifact_id"] = artifact_id
             record_tool_action(
-                workspace_dir=self.workspace_dir,
+                workspace_dir=Path(self._read_scope()[1].get("agent_home") or self.workspace_dir),
                 tool_name=tool_name,
                 tool_call_id=result.tool_call_id,
                 arguments=arguments,
@@ -1367,19 +1550,167 @@ class ToolRegistry:
             or tool_call_id
             or f"tool-{uuid4().hex}"
         )
+        # CLI MCP counters restart for each request. Preserve replay detection
+        # within a call, while separating calls from different request/Agent
+        # scopes. Arguments/actions deliberately do not create a new identity.
+        request_id = None
+        if tool_call_id:
+            scope = [
+                "hashi.device-tool-call.v1",
+                str(context.get("agent_name") or ""),
+                str(context.get("request_id") or context.get("task_id")
+                    or self._device_request_scope),
+                task_id,
+                str(tool_call_id),
+            ]
+            request_id = "tool-" + hashlib.sha256(
+                json.dumps(scope, ensure_ascii=False).encode("utf-8")
+            ).hexdigest()
         payload = dict(arguments)
+        if capability_kind == "browser_control":
+            target = str(payload.pop("browser_target", "") or "").strip()
+            if target:
+                payload["_browser_target"] = target
         payload["_authorized_roots"] = [str(self.access_root)]
         result = await facade.invoke_capability(
             capability_kind,
             action,
             payload,
             task_id=task_id,
-            request_id=tool_call_id or None,
+            request_id=request_id,
             authorization="tool_registry",
         )
         if isinstance(result, str):
             return result
         return json.dumps(result, ensure_ascii=False, sort_keys=True)
+
+    async def _dispatch_gateway_browser(
+        self, tool_name: str, arguments: dict, *, tool_call_id: str
+    ) -> str:
+        """Relay a CLI tool call to its owning Function Worker, then Core RPC."""
+        from urllib.parse import urlsplit
+
+        proxy = self._effective_audit_context().get("browser_gateway_proxy")
+        if not isinstance(proxy, dict):
+            return "Error: browser capability gateway is unavailable"
+        url = str(proxy.get("url") or "")
+        token = str(proxy.get("token") or "")
+        parsed = urlsplit(url)
+        if (
+            parsed.scheme != "http"
+            or parsed.hostname != "127.0.0.1"
+            or parsed.path != "/browser-tool"
+            or not parsed.port
+            or not token
+        ):
+            return "Error: browser capability gateway configuration is invalid"
+        payload = json.dumps(
+            {
+                "tool_name": tool_name,
+                "arguments": arguments,
+                "tool_call_id": tool_call_id,
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+
+        def request_proxy() -> str:
+            request = urllib_request.Request(
+                url,
+                data=payload,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            try:
+                with urllib_request.urlopen(request, timeout=80.0) as response:
+                    raw = response.read(48 * 1024 * 1024 + 1)
+                if len(raw) > 48 * 1024 * 1024:
+                    return "Error: browser capability result exceeds gateway limit"
+                result = json.loads(raw.decode("utf-8"))
+                output = str(result.get("output") or "")
+                if result.get("is_error") and not output.startswith("Error:"):
+                    return "Error: " + output
+                return output
+            except Exception as exc:
+                return f"Error: browser capability gateway failed ({type(exc).__name__})"
+
+        return await asyncio.to_thread(request_proxy)
+
+    async def _dispatch_observed(self, tool_name, arguments, *, tool_call_id=""):
+        if tool_name not in {"file_search", "file_list", "log_query", "shell", "bash"}:
+            return await self._dispatch(tool_name, arguments, tool_call_id=tool_call_id)
+        from tools.tool_activity import ToolActivity, broad_scope_advisory, command_search_roots
+        from tools.builtins import BuiltinExecutionResult
+        if tool_name in {"file_search", "file_list", "log_query"}:
+            # Audit is an existing runtime-owned writer. Establish its file
+            # before the directory snapshot; appending a receipt must not make
+            # every next page stale by creating a new directory entry.
+            from tools.tool_audit import default_audit_path
+            audit_path = (self.smart_tools.ledger_path if self.smart_tools.enabled else
+                default_audit_path(Path(self._read_scope()[1].get("agent_home") or self.workspace_dir)))
+            try:
+                audit_path.parent.mkdir(parents=True, exist_ok=True)
+                with audit_path.open("a", encoding="utf-8"):
+                    pass
+            except OSError:
+                self.logger.warning("Search audit path could not be prepared")
+
+        context = {**self._effective_audit_context(),
+                   "_tool_audit_start": self._record_search_start}
+        async with ToolActivity(tool_name, tool_call_id, context,
+                                self.tool_options.get("tool_activity") or {}) as activity:
+            if tool_name in {"shell", "bash"}:
+                declared = arguments.get("search_roots")
+                if declared is None:
+                    declared = command_search_roots(str(arguments.get("command") or ""))
+                if isinstance(declared, list) and all(isinstance(root, str) for root in declared):
+                    activity.update(selected_roots=declared[:32], scope_provenance="declared",
+                                    operation_type="declared_shell_search")
+                    if broad_scope_advisory(declared):
+                        activity.update(scope_advisory="Broad declared roots; existing permissions still apply")
+            result = await self._dispatch(tool_name, arguments, tool_call_id=tool_call_id)
+            details = dict(result.details) if isinstance(result, BuiltinExecutionResult) else {}
+            output = result.output if isinstance(result, BuiltinExecutionResult) else str(result)
+            status = details.get("search_outcome")
+            failed = status in {"failed", "unavailable"} or output.startswith("Error:") or details.get("exit_code", 0) not in {0, None}
+            cleanup = details.get("foreground_cleanup", {})
+            cleanup_pending = (cleanup.get("status") == "cleanup_failed" or
+                               cleanup.get("group_alive") is True or
+                               cleanup.get("process_reaped") is False)
+            await activity.finish("cleanup_pending" if cleanup_pending else "failed" if failed else "completed",
+                                  partial=status == "partial",
+                                  coverage_complete=details.get("coverage_complete"),
+                                  stop_reason=details.get("stop_reason", "completed"),
+                                  cleanup=cleanup)
+            if isinstance(result, BuiltinExecutionResult):
+                advisory = activity.snapshot.get("scope_advisory")
+                if advisory:
+                    output += "\n[scope advisory] " + advisory
+                return BuiltinExecutionResult(output, {**details, "activity_observer_failures": activity.failures,
+                    "scope_advisory": advisory,
+                    "elapsed_ms": int((time.monotonic()-activity.monotonic)*1000),
+                    "last_output_at": activity.snapshot["last_output"],
+                    "output_counters": activity.snapshot["counters"]})
+            return result
+
+    def _record_search_start(self, facts):
+        """One bounded start receipt through the existing audit owner."""
+        context = self._effective_audit_context()
+        if self.canonical_audit is not None:
+            self.canonical_audit.record("tool_execution_started", facts,
+                request_id=str(context.get("request_id") or context.get("task_id") or ""),
+                provenance={"source": "hashi_tool_registry"})
+            return
+        from tools.tool_audit import (append_tool_audit_record, build_tool_audit_record,
+                                      default_audit_path)
+        record = build_tool_audit_record(tool_name=facts['tool'],
+            tool_call_id=facts['tool_call_id'], arguments={}, output='', is_error=False,
+            duration_ms=0, audit_context=context, details=facts)
+        record.update(event_type="tool_execution_started", status="started")
+        append_tool_audit_record(default_audit_path(Path(
+            self._read_scope()[1].get("agent_home") or self.workspace_dir)), record)
 
     async def _dispatch(
         self,
@@ -1415,6 +1746,19 @@ class ToolRegistry:
         )
 
         opts = self.tool_options
+        read_roots, search_scope, read_cwd = self._read_scope()
+        if tool_name == "file_search":
+            from tools.file_search import execute_file_search
+            context = self._effective_audit_context()
+            policy = self._live_runtime_policy_cache
+            roots = read_roots
+            if context.get("org_id") and context.get("project_id"):
+                root = context.get("enterprise_workspace_root") or context.get("project_workspace_root") or self.access_root
+                roots = (Path(root).resolve(),)
+            return await execute_file_search(arguments, read_roots=roots,
+                cwd=read_cwd, search_scope=search_scope, audit_context=context,
+                continuations=self.search_continuations, options=self._search_options(),
+                protected_read_paths=getattr(policy, "protected_read_paths", ()))
 
         if tool_name in {"bash", "shell"}:
             bash_opts = dict(opts.get("bash", {}) or {})
@@ -1442,15 +1786,17 @@ class ToolRegistry:
         if tool_name == "log_query":
             return await execute_log_query(
                 arguments,
-                access_root=self.access_roots,
-                workspace_dir=self.workspace_dir,
+                access_root=read_roots,
+                workspace_dir=read_cwd,
+                continuations=self.search_continuations, search_scope=search_scope,
+                audit_context=self._effective_audit_context(), options=self._search_options(),
             )
 
         if tool_name == "file_read":
             return await execute_file_read(
                 arguments,
-                access_root=self.access_roots,
-                workspace_dir=self.workspace_dir,
+                access_root=read_roots,
+                workspace_dir=read_cwd,
             )
 
         if tool_name == "media_read":
@@ -1487,8 +1833,10 @@ class ToolRegistry:
         if tool_name == "file_list":
             return await execute_file_list(
                 arguments,
-                access_root=self.access_roots,
-                workspace_dir=self.workspace_dir,
+                access_root=read_roots,
+                workspace_dir=read_cwd,
+                continuations=self.search_continuations, search_scope=search_scope,
+                audit_context=self._effective_audit_context(), options=self._search_options(),
             )
 
         if tool_name == "apply_patch":
@@ -1514,6 +1862,12 @@ class ToolRegistry:
                 workspace_dir=self.workspace_dir,
                 options=opts.get("verification_run", {}),
             )
+
+        if tool_name in {"ask_user", "get_user_answer"}:
+            from tools.run_questions import execute_run_question_tool
+            return await execute_run_question_tool(tool_name, arguments,
+                audit_context=self._effective_audit_context(), secrets=self.secrets,
+                tool_call_id=tool_call_id)
 
         if tool_name == "request_diagnostics":
             return await execute_request_diagnostics(
@@ -1676,6 +2030,12 @@ class ToolRegistry:
                     "browser_control",
                     action,
                     browser_args,
+                    tool_call_id=tool_call_id,
+                )
+            if isinstance(self._effective_audit_context().get("browser_gateway_proxy"), dict):
+                return await self._dispatch_gateway_browser(
+                    tool_name,
+                    arguments,
                     tool_call_id=tool_call_id,
                 )
             requested_provider = str(

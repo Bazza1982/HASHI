@@ -349,6 +349,17 @@ def _backend_response_error(
         "attachment_id": metadata.get("attachment_id"),
         "media_routing": list(metadata.get("multimodal_routing") or []),
     }
+    meter = metadata.get('meter')
+    calls = meter.get('provider_calls', []) if isinstance(meter, Mapping) else []
+    calls = calls if isinstance(calls, (list, tuple)) else []
+    details['provider_wire_evidence_refs'] = list(dict.fromkeys(
+        str(ref) for call in calls if isinstance(call, Mapping)
+        for ref in call.get('provider_wire_evidence_refs', []) if ref
+    ))[-64:]
+    details['provider_response_ids'] = list(dict.fromkeys(
+        str(call['provider_response_id']) for call in calls
+        if isinstance(call, Mapping) and call.get('provider_response_id')
+    ))[-64:]
     for key in (
         "provider_http_failure",
         "provider_protocol",
@@ -356,6 +367,7 @@ def _backend_response_error(
         "provider_local_recovery_count",
         "provider_local_recovery_limit",
         "provider_local_recovery_exhausted",
+        "provider_stream_inactivity",
         "transport_audit_path",
         "gateway_continuation",
     ):
@@ -992,6 +1004,7 @@ class _EvidenceRecordingToolRegistry:
         model: str = "",
         provider: str = "",
         audit_log: DurableAuditLog | None = None,
+        on_tool_activity: Any = None,
     ):
         self._base = base
         self._request = request
@@ -1000,6 +1013,13 @@ class _EvidenceRecordingToolRegistry:
             "stage": request.stage.value,
             "model": str(model or ""),
         }
+        if callable(on_tool_activity):
+            self._audit_context["tool_activity_observer"] = on_tool_activity
+        scope = getattr(base, "search_scope", None)
+        if isinstance(scope, dict):
+            self._audit_context["_search_scope_snapshot"] = copy.deepcopy(scope)
+            self._audit_context["_read_access_roots"] = tuple(getattr(base, "read_access_roots", ()))
+            self._audit_context["_execution_cwd"] = str(getattr(base, "workspace_dir", ""))
         self._receipts: list[ToolEvidenceReceipt] = []
         self._provider = str(provider or "")
         self._model = str(model or "")
@@ -1178,12 +1198,13 @@ class _EvidenceRecordingToolRegistry:
             attachment_ids=matched_attachment_ids,
         )
         self._receipts.append(receipt)
-        self._record_recovery_receipt(receipt)
-        return self._attach_receipt(result, receipt, fallback_call_id=tool_call_id)
+        checkpoint_ref = self._record_recovery_receipt(receipt)
+        return self._attach_receipt(result, receipt, fallback_call_id=tool_call_id,
+                                    checkpoint_ref=checkpoint_ref)
 
-    def _record_recovery_receipt(self, receipt: ToolEvidenceReceipt) -> None:
+    def _record_recovery_receipt(self, receipt: ToolEvidenceReceipt) -> str | None:
         if self._audit_log is None:
-            return
+            return None
         payload = {
             "evidence_ref": receipt.evidence_ref,
             "stage": receipt.stage.value,
@@ -1202,7 +1223,7 @@ class _EvidenceRecordingToolRegistry:
             f"tool:{receipt.tool_call_id}"
         )
         payload["operation_id"] = operation_id
-        self._audit_log.append(
+        return self._audit_log.append(
             event_id=(
                 f"{self._request.invocation_id or self._request.turn_id}:"
                 f"attempt:{self._request.attempt}:"
@@ -1302,13 +1323,22 @@ class _EvidenceRecordingToolRegistry:
 
     @staticmethod
     def _attach_receipt(
-        result: Any, receipt: ToolEvidenceReceipt, *, fallback_call_id: str
+        result: Any, receipt: ToolEvidenceReceipt, *, fallback_call_id: str,
+        checkpoint_ref: str | None = None,
     ):
         from tools.registry import ToolResult
 
         details = dict(getattr(result, "details", None) or {})
         output = str(getattr(result, "output", "") or "")
-        if not details.get("smart_result"):
+        if receipt.tool_name == "file_search" and details.get("search_outcome"):
+            # Native scoped-search uses a structured envelope even when the
+            # optional Smart Registry is off. Preserve that JSON at HERV3's
+            # model boundary instead of appending an out-of-envelope footer.
+            envelope = json.loads(output)
+            if isinstance(envelope.get("data"), dict):
+                envelope["data"]["evidence_ref"] = receipt.evidence_ref
+            output = json.dumps(envelope, ensure_ascii=False, separators=(",", ":"))
+        elif not details.get("smart_result"):
             output += f"\n\nHASHI_EVIDENCE_RECEIPT: {receipt.evidence_ref}"
         details.update(
             {
@@ -1317,6 +1347,16 @@ class _EvidenceRecordingToolRegistry:
                 "receipt_completed": receipt.completed,
             }
         )
+        if checkpoint_ref and receipt.completed:
+            details['continuation_checkpoint'] = {
+                'type': 'hashi.tool-checkpoint', 'version': 1,
+                'evidence_ref': checkpoint_ref,
+                'operation_id': f'{receipt.invocation_id}:attempt:{receipt.attempt}:tool:{receipt.tool_call_id}',
+                'tool_call_id': receipt.tool_call_id,
+                'tool_name': receipt.tool_name,
+                'status': receipt.status.value,
+                'output_sha256': hashlib.sha256(output.encode('utf-8')).hexdigest(),
+            }
         return ToolResult(
             tool_call_id=str(getattr(result, "tool_call_id", "") or fallback_call_id),
             output=output,
@@ -3454,6 +3494,7 @@ class HashiStageProvider(StageProvider):
                 model=profile.model,
                 provider=profile.engine,
                 audit_log=self.audit_log,
+                on_tool_activity=lambda event: _capture(event),
             )
             selected_registry = evidence_registry
             if request.checkpoint_coordinator is not None:
@@ -3494,14 +3535,14 @@ class HashiStageProvider(StageProvider):
             if request.allow_tools
             else frozenset()
         )
-        if request.stage is Stage.TRIAGE and request_content_is_voice_origin(
+        if not native_audio_stage and request_content_is_voice_origin(
             request.request_content
         ):
             triage_input_policy = (
                 str(profile.options.get("_voice_triage_input_policy") or "auto")
                 .strip()
                 .casefold()
-            )
+            ) if request.stage is Stage.TRIAGE else "transcript"
             capability_resolver = getattr(backend, "resolve_input_capability", None)
             triage_capability = (
                 capability_resolver()
@@ -3560,6 +3601,17 @@ class HashiStageProvider(StageProvider):
                     )
                     self._untrack_active_backend(backend)
                     await backend.shutdown()
+                    if request.stage is not Stage.TRIAGE:
+                        raise StageInvocationError(
+                            f"Voice transcript was not released: {transcript_state}",
+                            retryable=False,
+                            code=ProviderFailureCode.INPUT_MODALITY_CONVERSION_FAILED,
+                            human_description=(
+                                "The recording could not be transcribed or its transcript "
+                                "was not confirmed; no model action was started."
+                            ),
+                            details={"transcript_state": transcript_state},
+                        )
                     return StageResponse(
                         data={
                             "classification": "DIRECT_RESPONSE",
@@ -3586,27 +3638,48 @@ class HashiStageProvider(StageProvider):
                     )
             if needs_text_transcript:
                 original_manifest = tuple(request.attachment_manifest)
+                remaining_ids = {
+                    str(item.get("attachment_id") or "")
+                    for item in original_manifest
+                    if str(item.get("semantic_role") or "") != "voice_message"
+                }
+                remaining_content = (
+                    subset_request_content(request.request_content, remaining_ids)
+                    if remaining_ids else None
+                )
                 media_routing = tuple(
                     {
                         "attachment_id": str(item.get("attachment_id") or ""),
                         "item_index": item.get("item_index"),
                         "modality": str(item.get("modality") or "audio"),
                         "route": "local_transcript",
-                        "reason": "text_triage_uses_released_local_stt",
+                        "reason": "text_stage_uses_released_local_stt",
                         "transport": None,
                     }
                     for item in original_manifest
+                    if str(item.get("semantic_role") or "") == "voice_message"
                 )
+                projected_goal = (
+                    f"[Local voice transcription]\n{transcript}\n\n"
+                    f"[Original user caption/request]\n{request.goal}"
+                )
+                projected_context = dict(request.context)
+                pcm_input = projected_context.get("pcm_input")
+                if projected_context.get("her_v3") and isinstance(pcm_input, Mapping):
+                    # HERV3 compiles the typed current request instead of the
+                    # fallback goal. Project the authorized transcript into that
+                    # same user layer; leave trusted sections/history untouched.
+                    projected_context["pcm_input"] = {
+                        **dict(pcm_input), "current_request": projected_goal,
+                    }
                 request = replace(
                     request,
-                    goal=(
-                        f"[Local voice transcription]\n{transcript}\n\n"
-                        f"[Original user caption/request]\n{request.goal}"
-                    ),
-                    request_content=None,
-                    attachment_manifest=(),
+                    goal=projected_goal,
+                    context=projected_context,
+                    request_content=remaining_content,
+                    attachment_manifest=attachment_manifest(remaining_content),
                 )
-                provider_request_content = None
+                provider_request_content = remaining_content
         if request.attachment_manifest:
             try:
                 canonical_manifest = attachment_manifest(request.request_content)
@@ -3674,7 +3747,7 @@ class HashiStageProvider(StageProvider):
                     capability,
                     fallback_modalities=local_fallback_modalities,
                 )
-                media_routing = routing_decisions_payload(decisions)
+                media_routing = (*media_routing, *routing_decisions_payload(decisions))
                 force_local_unavailable = False
                 if request.force_local_media_fallback:
                     can_force_local = (
@@ -3812,6 +3885,8 @@ class HashiStageProvider(StageProvider):
             nonlocal provider_replay_activity
             nonlocal provider_text_activity
             nonlocal provider_tool_activity
+            if event.kind == "tool_activity" and self._turn_services is not None:
+                self._turn_services.observe_tool_activity(event.metadata or {})
             content = str(event.raw_delta or event.summary or "")
             if content or event.tool_name:
                 provider_replay_activity = True

@@ -8,7 +8,10 @@ from adapters.xai_oauth_credentials import (
     xai_api_credentials_available,
 )
 from orchestrator.pathing import resolve_agy_executable
-from orchestrator.flexible_backend_registry import get_secret_lookup_order
+from orchestrator.flexible_backend_registry import (
+    get_secret_lookup_order,
+    removed_backend_reason,
+)
 
 main_logger = logging.getLogger("BridgeU.Orchestrator")
 
@@ -50,7 +53,6 @@ class BackendPreflight:
 
         result = {}
         cli_map = {
-            "gemini-cli": global_cfg.gemini_cmd,
             "claude-cli": global_cfg.claude_cmd,
             "codex-cli": global_cfg.codex_cmd,
             "antigravity-cli": resolve_agy_executable(
@@ -62,7 +64,9 @@ class BackendPreflight:
             getattr(global_cfg, "agy_launch_mode", "direct") or "direct"
         ).strip().casefold()
         for engine in engines:
-            if engine in cli_map:
+            if reason := removed_backend_reason(engine):
+                result[engine] = (False, reason)
+            elif engine in cli_map:
                 cmd = cli_map[engine]
                 found = shutil.which(cmd)
                 if not found:

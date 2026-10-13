@@ -2,6 +2,9 @@
   "global": {
     "authorized_id": 0,
     "ui_language": "en",
+    "persistent_session_v1": true,
+    "native_audio_chat_v1": true,
+    "live_voice_v1": true,
     "workbench_port": 18802,
     "default_tools": {
       "allowed": ["*", "vision_inspect"],
@@ -60,8 +63,8 @@
       "model": "claude-sonnet-4-6",
       "allowed_backends": [
         {
-          "engine": "gemini-cli",
-          "model": "gemini-3.1-pro-preview"
+          "engine": "antigravity-cli",
+          "model": "gemini-3.8-flash-high"
         },
         {
           "engine": "claude-cli",
@@ -150,8 +153,8 @@
       "model": "claude-sonnet-4-6",
       "allowed_backends": [
         {
-          "engine": "gemini-cli",
-          "model": "gemini-3.1-pro-preview"
+          "engine": "antigravity-cli",
+          "model": "gemini-3.8-flash-high"
         },
         {
           "engine": "claude-cli",
@@ -182,8 +185,8 @@
       "model": "claude-sonnet-4-6",
       "allowed_backends": [
         {
-          "engine": "gemini-cli",
-          "model": "gemini-3.1-pro-preview"
+          "engine": "antigravity-cli",
+          "model": "gemini-3.8-flash-high"
         },
         {
           "engine": "claude-cli",
@@ -214,8 +217,8 @@
       "model": "claude-sonnet-4-6",
       "allowed_backends": [
         {
-          "engine": "gemini-cli",
-          "model": "gemini-3.1-pro-preview"
+          "engine": "antigravity-cli",
+          "model": "gemini-3.8-flash-high"
         },
         {
           "engine": "claude-cli",
@@ -246,8 +249,8 @@
       "model": "claude-sonnet-4-6",
       "allowed_backends": [
         {
-          "engine": "gemini-cli",
-          "model": "gemini-3.1-pro-preview"
+          "engine": "antigravity-cli",
+          "model": "gemini-3.8-flash-high"
         },
         {
           "engine": "claude-cli",
@@ -278,8 +281,8 @@
       "model": "claude-sonnet-4-6",
       "allowed_backends": [
         {
-          "engine": "gemini-cli",
-          "model": "gemini-3.1-pro-preview"
+          "engine": "antigravity-cli",
+          "model": "gemini-3.8-flash-high"
         },
         {
           "engine": "claude-cli",
@@ -310,8 +313,8 @@
       "model": "claude-sonnet-4-6",
       "allowed_backends": [
         {
-          "engine": "gemini-cli",
-          "model": "gemini-3.1-pro-preview"
+          "engine": "antigravity-cli",
+          "model": "gemini-3.8-flash-high"
         },
         {
           "engine": "claude-cli",
@@ -348,8 +351,8 @@
       "model": "claude-sonnet-4-6",
       "allowed_backends": [
         {
-          "engine": "gemini-cli",
-          "model": "gemini-3.1-pro-preview"
+          "engine": "antigravity-cli",
+          "model": "gemini-3.8-flash-high"
         },
         {
           "engine": "claude-cli",
@@ -381,8 +384,8 @@
       "model": "deepseek/deepseek-v4-pro",
       "allowed_backends": [
         {
-          "engine": "gemini-cli",
-          "model": "gemini-3.1-pro-preview"
+          "engine": "antigravity-cli",
+          "model": "gemini-3.8-flash-high"
         },
         {
           "engine": "claude-cli",

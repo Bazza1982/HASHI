@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -178,6 +179,8 @@ async def test_hchat_attachment_selection_uses_hchat_limits_and_streaming_file_c
     assert part["local_ref"]
 
 
+@pytest.mark.platform
+@pytest.mark.skipif(os.name == "nt", reason="WSL attachment paths require a POSIX filesystem")
 def test_wsl_drive_scope_translates_windows_attachment_path_without_widening_default_scope(
     tmp_path, monkeypatch
 ):
@@ -201,6 +204,16 @@ def test_wsl_drive_scope_translates_windows_attachment_path_without_widening_def
     )
 
     assert resolved == Path("/mnt/c/Users/Example/Downloads/review.xlsx")
+
+
+def test_native_windows_drive_optin_does_not_widen_attachment_scope(tmp_path, monkeypatch):
+    from tools import builtins
+
+    monkeypatch.setattr(builtins, "is_wsl", lambda: False)
+    outside = tmp_path.parent / "outside-attachment.txt"
+    with pytest.raises(ValueError, match="outside the allowed access scopes"):
+        builtins._resolve_path(str(outside), tmp_path, tmp_path,
+                               allow_wsl_windows_drive_paths=True)
 
 
 @pytest.mark.asyncio

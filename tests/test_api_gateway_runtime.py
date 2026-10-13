@@ -106,6 +106,52 @@ async def test_api_gateway_pool_isolates_models_and_request_locks(tmp_path: Path
     assert second.shutdown_called is True
 
 
+@pytest.mark.asyncio
+async def test_same_model_adapter_leases_overlap_and_bound_third_request(tmp_path):
+    import asyncio
+
+    pool = _AdapterPool(SimpleNamespace(project_root=tmp_path), secrets={}, workspace_root=tmp_path)
+    created = []
+    async def create(engine, model):
+        adapter = SimpleNamespace(config=SimpleNamespace(model=model))
+        async def shutdown():
+            adapter.closed = True
+        adapter.shutdown = shutdown
+        created.append(adapter)
+        return adapter
+    pool._create = create
+    entered = [asyncio.Event() for _ in range(3)]
+    release = [asyncio.Event() for _ in range(3)]
+    observed = []
+    async def invoke(index):
+        async with pool.lease("codex-cli", "same-model") as adapter:
+            observed.append((index, adapter))
+            entered[index].set()
+            await release[index].wait()
+    tasks = []
+    try:
+        tasks.append(asyncio.create_task(invoke(0)))
+        await asyncio.wait_for(entered[0].wait(), 1)
+        tasks.append(asyncio.create_task(invoke(1)))
+        await asyncio.wait_for(entered[1].wait(), 1)
+        assert observed[0][1] is not observed[1][1]
+        tasks.append(asyncio.create_task(invoke(2)))
+        await asyncio.sleep(0)
+        assert not entered[2].is_set()
+        tasks[1].cancel()
+        await asyncio.gather(tasks[1], return_exceptions=True)
+        await asyncio.wait_for(entered[2].wait(), 1)
+        assert observed[2][1] is observed[1][1]
+        assert not tasks[0].done()
+        assert len(created) == 2
+    finally:
+        for event in release:
+            event.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await pool.shutdown()
+    assert all(adapter.closed for adapter in created)
+
+
 def test_gateway_request_context_uses_typed_aiohttp_keys_when_available():
     from orchestrator import api_gateway
 
@@ -117,3 +163,38 @@ def test_gateway_request_context_uses_typed_aiohttp_keys_when_available():
             api_gateway._GATEWAY_REQUEST_ID_FIELD,
             api_gateway._GATEWAY_VALIDATION_STAGE_FIELD,
         }
+
+
+@pytest.mark.asyncio
+async def test_gateway_engine_and_total_quotas_bound_different_models_without_losing_cancelled_slots(tmp_path):
+    import asyncio
+    pool = _AdapterPool(SimpleNamespace(project_root=tmp_path), {}, tmp_path,
+                        capacity=2, total_capacity=2, engine_capacity=1)
+    async def create(engine, model):
+        return SimpleNamespace(config=SimpleNamespace(model=model))
+    pool._create = create
+    entered = {key:asyncio.Event() for key in ('A','B','C','D')}
+    release = {key:asyncio.Event() for key in entered}
+    async def call(key, engine):
+        async with pool.lease(engine, key):
+            entered[key].set()
+            await release[key].wait()
+    tasks = []
+    try:
+        tasks.append(asyncio.create_task(call('A','codex-cli')))
+        await asyncio.wait_for(entered['A'].wait(),1)
+        tasks.append(asyncio.create_task(call('B','codex-cli')))
+        tasks.append(asyncio.create_task(call('C','other')))
+        await asyncio.wait_for(entered['C'].wait(),1)
+        tasks.append(asyncio.create_task(call('D','third')))
+        await asyncio.sleep(.05)
+        assert not entered['B'].is_set() and not entered['D'].is_set()
+        tasks[1].cancel()
+        await asyncio.gather(tasks[1],return_exceptions=True)
+        release['C'].set()
+        await asyncio.wait_for(entered['D'].wait(),1)
+        assert not tasks[0].done()
+    finally:
+        for event in release.values():event.set()
+        await asyncio.gather(*tasks,return_exceptions=True)
+    assert not pool._busy

@@ -23,6 +23,8 @@ async def test_connector_commit_health_and_recovery_follow_real_ingress(tmp_path
     from orchestrator.function_worker_supervisor import AgentRuntimeHandle, FunctionWorkerSupervisor
 
     monkeypatch.setattr("orchestrator.runtime_app_host.CONNECTOR_RETRY_SECONDS", 0.01)
+    monkeypatch.setattr("orchestrator.telegram_ingress.TELEGRAM_RETRY_SECONDS", 0.01)
+    recovery_allowed = asyncio.Event()
     handles = {}
     class WorkerClient:
         def __init__(self, name):
@@ -40,7 +42,7 @@ async def test_connector_commit_health_and_recovery_follow_real_ingress(tmp_path
         def __init__(self, name): self.name, self.attempts, self.polls = name, 0, 0
         async def initialize(self):
             self.attempts += 1
-            if self.name == "alpha" and (persistent or self.attempts == 1):
+            if self.name == "alpha" and (persistent or not recovery_allowed.is_set()):
                 raise OSError("connection unavailable")
         async def delete_webhook(self, **kwargs): pass
         async def shutdown(self): pass
@@ -103,8 +105,11 @@ async def test_connector_commit_health_and_recovery_follow_real_ingress(tmp_path
             assert not app.startup_status["ready"]
             assert app.startup_status["degraded"]
         else:
-            await asyncio.wait_for(host.connector_task, timeout=2)
+            # The ingress owns connection recovery after nonblocking start;
+            # activation retry is reserved for failure to start a connector.
+            recovery_allowed.set()
             await wait_connected("alpha")
+            assert ingress["alpha"].bot.attempts >= 2
             payload = json.loads((await server.handle_health(_FakeRequest())).text)
             assert payload["ready"] and not payload["degraded"] and not payload["issues"]
             assert all(item["connected"] and item["running"] for item in reports[-1].values())

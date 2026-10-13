@@ -8,6 +8,7 @@ import shutil
 import sqlite3
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -180,6 +181,8 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         self.assertTrue(result["capability"]["available"])
         self.assertEqual(result["capability"]["phone"]["voice"], "willow")
         self.assertEqual(result["capability"]["phone"]["voice_presentation"], "feminine")
+        self.assertEqual(result["capability"]["phone"]["billing"]["usd_per_minute"], 0.05)
+        self.assertIn("backend_text_model", result["capability"]["phone"]["billing"]["excludes"])
 
     def test_append_fragment_deduplication(self):
         frag = Fragment(provider_event_id="evt-1", speaker="user", text="hello world", start_ms=0, end_ms=500)
@@ -830,6 +833,64 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         ]
         closed = next(item for item in records if item["event"] == "provider.session_closed")
         self.assertEqual(closed["detail"]["provider_reason"], "connection_lost")
+
+    def test_provider_content_close_fails_call_and_releases_foreground(self):
+        class ProviderSocket:
+            closed = False
+
+            def __init__(self):
+                self.messages = iter((
+                    type("Message", (), {
+                        "type": aiohttp.WSMsgType.TEXT,
+                        "data": json.dumps({
+                            "type": "error",
+                            "event_id": "provider-content-error-1",
+                            "error": {"code": "content_filter"},
+                        }),
+                    })(),
+                    type("Message", (), {
+                        "type": aiohttp.WSMsgType.TEXT,
+                        "data": json.dumps({
+                            "type": "session.closed",
+                            "event_id": "provider-content-close-1",
+                            "session": {"reason": "content"},
+                        }),
+                    })(),
+                ))
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                try:
+                    return next(self.messages)
+                except StopIteration as exc:
+                    raise StopAsyncIteration from exc
+
+            async def close(self):
+                self.closed = True
+
+        @asynccontextmanager
+        async def fake_http():
+            yield object()
+
+        async def fake_attach(_http, *, key, provider_session_id):
+            return ProviderSocket()
+
+        with patch("orchestrator.frontend_live_voice.openai_live.provider_http_session", fake_http), \
+             patch("orchestrator.frontend_live_voice.openai_live.attach_provider", fake_attach):
+            asyncio.run(self.manager._run_sideband(self.binding, "sk-test-fake", "prov-1"))
+
+        snapshot = asyncio.run(self.manager._op_snapshot(self.owner_id, self.scope))["snapshot"]
+        self.assertEqual(snapshot["phase"], "failed")
+        self.assertFalse(snapshot["resume_required"])
+        self.assertFalse(self.manager.has_foreground_call(self.owner_id))
+        events = asyncio.run(self.manager._op_events(self.owner_id, self.scope))["events"]
+        failed = next(
+            item for item in events
+            if item["kind"] == "call.state" and item["detail"].get("phase") == "failed"
+        )
+        self.assertEqual(failed["detail"]["error_code"], "live_provider_content_filtered")
 
     def test_sideband_keeps_reading_close_while_provider_event_persistence_retries(self):
         class ProviderSocket:
@@ -1907,6 +1968,24 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
             )
         provider_calls = []
 
+        # Register the real Call consumer with a previously saved /call choice.
+        # /phone must still use its own provider and never rewrite this file.
+        from orchestrator.frontend_call.routes import register_call_api
+        root = Path(self.temp_dir)
+        common = {"adapter": "openai_compatible", "location": "local",
+                  "base_url": "http://127.0.0.1:19000/v1", "model": "fixture"}
+        config_path = root / "call_profiles.json"
+        config_path.write_text(json.dumps({"version": 1, "enabled": True,
+            "targets": [{**common, "id": "ears", "kind": "stt"},
+                        {**common, "id": "mouth", "kind": "tts", "voices": ["warm"]}],
+            "default_profile": {"stt": {"target_id": "ears", "options": {}},
+                "tts": {"target_id": "mouth", "voice_id": "warm", "options": {}}, "vision": None}}))
+        service = register_call_api(SimpleNamespace(app=web.Application(),
+            config_path=root / "agents.json", live_voice_manager=self.manager))
+        context = service.config.context(self.owner_id, self.agent_id)
+        service.config.select_route(self.owner_id, self.agent_id, context["revision"], "call")
+        config_before = config_path.read_bytes()
+
         class FakeContent:
             async def iter_chunked(self, _size):
                 yield b'{"input_tokens":42}'
@@ -1957,6 +2036,7 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         self.assertEqual(first["sdp_answer"], "v=0\r\nanswer")
         self.assertEqual(first["binding"]["call_id"], first["call_id"])
         self.assertEqual(replay["call_id"], first["call_id"])
+        self.assertEqual(config_path.read_bytes(), config_before)
         with self.store._lock, self.store._connection() as conn:
             attempt = conn.execute(
                 """SELECT outcome_json, phone_config_json

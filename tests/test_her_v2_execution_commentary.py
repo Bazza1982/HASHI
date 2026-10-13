@@ -194,6 +194,7 @@ async def test_openrouter_emits_interim_commentary_before_tool_calls(tmp_path):
                 "content": '{"result": "ok"}',
             }
         )
+        return ()
 
     adapter._run_tool_calls = run_tool_calls
 

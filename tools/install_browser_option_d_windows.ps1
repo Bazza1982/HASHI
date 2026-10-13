@@ -1,6 +1,7 @@
 param(
     [string]$RepoRoot = (Split-Path -Parent $PSScriptRoot),
     [string]$PythonExe = "",
+    [ValidateSet("Chrome", "Edge")][string]$Browser = "Chrome",
     [switch]$ValidateOnly
 )
 
@@ -32,28 +33,46 @@ if (-not $PythonExe) {
 $PythonExe = (Resolve-Path -LiteralPath $PythonExe).Path
 
 $PreviousPythonPath = $env:PYTHONPATH
+$PreviousInstanceId = $env:HASHI_INSTANCE_ID
+$PreviousBridgeHome = $env:BRIDGE_HOME
 try {
     $env:PYTHONPATH = $RepoRoot
+    # The explicit installation target owns identity, regardless of the caller's instance.
+    $env:HASHI_INSTANCE_ID = ""
+    $env:BRIDGE_HOME = $RepoRoot
     $DefaultsJson = & $PythonExe -c "import json; from tools.browser_bridge_transport import BRIDGE_NAMESPACE, DEFAULT_WINDOWS_AUTH_FILE, DEFAULT_WINDOWS_PIPE; from tools.browser_native_host import DEFAULT_LOG_PATH; print(json.dumps({'namespace': BRIDGE_NAMESPACE, 'endpoint': str(DEFAULT_WINDOWS_PIPE), 'auth_file': str(DEFAULT_WINDOWS_AUTH_FILE), 'log_file': str(DEFAULT_LOG_PATH)}))"
 }
 finally {
     $env:PYTHONPATH = $PreviousPythonPath
+    $env:HASHI_INSTANCE_ID = $PreviousInstanceId
+    $env:BRIDGE_HOME = $PreviousBridgeHome
 }
 $BridgeDefaults = $DefaultsJson | ConvertFrom-Json
 $BridgeEndpoint = [string]$BridgeDefaults.endpoint
 $BridgeAuthFile = [string]$BridgeDefaults.auth_file
 $BridgeLogFile = [string]$BridgeDefaults.log_file
 $BridgeNamespace = [string]$BridgeDefaults.namespace
+if ($Browser -eq "Edge") {
+    $BridgeNamespace += "-edge"
+    $BridgeEndpoint += "-edge"
+    $BridgeAuthFile = Join-Path (Join-Path $InstallBase $BridgeNamespace) "bridge-auth.key"
+    $BridgeLogFile = Join-Path (Join-Path $InstallBase $BridgeNamespace) "logs\native-host.log"
+}
 if ([string]::IsNullOrWhiteSpace($BridgeNamespace)) {
     throw "Python did not return an instance-scoped Browser Bridge namespace"
 }
 $HostSuffix = ($BridgeNamespace.ToLowerInvariant() -replace "[^a-z0-9_]", "_")
 $HostName = "com.hashi.browser_bridge.$HostSuffix"
 $InstallRoot = Join-Path $InstallBase $BridgeNamespace
+$BridgeLogFile = Join-Path $InstallRoot "logs\native-host.log"
 $ExtensionInstallDir = Join-Path $InstallRoot "extension"
 $LauncherPath = Join-Path $InstallRoot "hashi_browser_bridge_host.exe"
 $ManifestPath = Join-Path $InstallRoot "$HostName.json"
-$RegistryPath = "HKCU:\Software\Google\Chrome\NativeMessagingHosts\$HostName"
+$RegistryPath = if ($Browser -eq "Edge") {
+    "HKCU:\Software\Microsoft\Edge\NativeMessagingHosts\$HostName"
+} else {
+    "HKCU:\Software\Google\Chrome\NativeMessagingHosts\$HostName"
+}
 
 $IdentityStateDir = $InstallRoot
 $TemporaryIdentityDir = $null
@@ -99,6 +118,7 @@ $RepoLiteral = ConvertTo-CSharpVerbatimLiteral $RepoRoot
 $EndpointLiteral = ConvertTo-CSharpVerbatimLiteral $BridgeEndpoint
 $AuthLiteral = ConvertTo-CSharpVerbatimLiteral $BridgeAuthFile
 $LogLiteral = ConvertTo-CSharpVerbatimLiteral $BridgeLogFile
+$OriginLiteral = ConvertTo-CSharpVerbatimLiteral ("chrome-extension://$ExtensionId/")
 $LauncherSource = @"
 using System;
 using System.Diagnostics;
@@ -113,6 +133,7 @@ internal static class HashiBrowserBridgeLauncher
     private const string Endpoint = @"$EndpointLiteral";
     private const string AuthFile = @"$AuthLiteral";
     private const string LogFile = @"$LogLiteral";
+    private const string ExpectedOrigin = @"$OriginLiteral";
 
     private static string Quote(string value)
     {
@@ -133,8 +154,15 @@ internal static class HashiBrowserBridgeLauncher
     {
         try
         {
-            source.CopyTo(destination);
-            destination.Flush();
+            // Native messaging keeps stdin/stdout open between requests.
+            // Flush every available chunk instead of waiting for stream EOF.
+            var buffer = new byte[81920];
+            int count;
+            while ((count = source.Read(buffer, 0, buffer.Length)) > 0)
+            {
+                destination.Write(buffer, 0, count);
+                destination.Flush();
+            }
         }
         catch { }
         finally
@@ -156,6 +184,7 @@ internal static class HashiBrowserBridgeLauncher
             WorkingDirectory = RepoRoot,
             Arguments = "-m tools.browser_native_host --stdio --endpoint " + Quote(Endpoint)
                 + " --auth-file " + Quote(AuthFile) + " --log-file " + Quote(LogFile)
+                + " --expected-origin " + Quote(ExpectedOrigin)
                 + (forwarded.Length > 0 ? " " + forwarded : ""),
             UseShellExecute = false,
             CreateNoWindow = true,
@@ -224,6 +253,7 @@ if ($ValidateOnly) {
 }
 Write-Log "Built windowless native host launcher: $LauncherPath"
 Write-Log "Using instance-scoped endpoint: $BridgeEndpoint"
+Write-Log "Using instance-scoped auth file: $BridgeAuthFile"
 
 $Manifest = @{
     name = $HostName
@@ -239,8 +269,9 @@ Set-Item -Path $RegistryPath -Value $ManifestPath
 Write-Log "Registered native host in $RegistryPath"
 
 Write-Host ""
-Write-Host "Chrome setup:"
-Write-Host "1. Open chrome://extensions"
+Write-Host "$Browser setup:"
+$ExtensionsUrl = if ($Browser -eq "Edge") { "edge://extensions" } else { "chrome://extensions" }
+Write-Host "1. Open $ExtensionsUrl"
 Write-Host "2. Enable Developer mode"
 Write-Host "3. Click 'Load unpacked'"
 Write-Host "4. Select: $ExtensionInstallDir"

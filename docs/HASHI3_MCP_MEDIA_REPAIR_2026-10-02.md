@@ -33,6 +33,35 @@ Remote remained running. The registered exact-instance runtime task points to
 this checkout's bridge controller with start/resume. Startup is distinct from
 hot reboot and must be reported accurately.
 
+## Required Fixed Codex gateway follow-up (2026-10-03)
+
+The request-scoped `hashi_tools` MCP server is a required part of Fixed Codex,
+not an optional enhancement. Both new and resumed `codex exec` invocations set
+`mcp_servers.hashi_tools.required=true`. Codex CLI therefore rejects the
+session before a model Turn when this enabled server cannot initialize, as
+defined by the official OpenAI configuration reference:
+<https://learn.chatgpt.com/docs/config-file/config-reference>.
+
+HASHI also fails before MCP inventory or subprocess launch when Fixed Codex is
+enabled but its request-local gateway descriptor is absent. It returns the
+non-retryable `CODEX_TOOL_GATEWAY_UNAVAILABLE` adapter result with no possible
+side effects; it does not silently run a model without the advertised HASHI
+tools and does not automatically replay the request.
+
+Codex JSONL `mcp_tool_call` start and completion items are projected into the
+existing `tool_start`/`tool_end` activity contract. The projection includes
+only bounded server and tool names; raw MCP arguments and results never enter
+the user-visible activity stream. Start/end events share a hashed provider-item
+identity with distinct lifecycle suffixes, so repeated transport delivery is
+deduplicated while one completed call remains one terminal
+`BackendResponse.tool_call_count`. Frontend activity views therefore report the
+real operation instead of incorrectly describing the response as tool-free.
+MCP completion status is derived only from typed provider status, error, and
+`result.is_error` fields. Explicit failures project as failed, explicit success
+projects as completed, and an unrecognised terminal shape remains unknown; no
+raw arguments, result content, or error payload is exposed, and an unknown
+outcome is never presented as success.
+
 ## Runtime verification
 
 The exact-instance runtime task recovered HASHI3. Its adopted generation is

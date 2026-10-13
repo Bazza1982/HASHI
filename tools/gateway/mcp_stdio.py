@@ -176,7 +176,8 @@ class ToolGateway:
             )
         return definitions
 
-    async def call(self, name: str, arguments: dict[str, Any], call_id: str) -> dict[str, Any]:
+    async def call(self, name: str, arguments: dict[str, Any], call_id: str,
+                   *, on_tool_activity=None) -> dict[str, Any]:
         self.call_count += 1
         if self.context.enforce_legacy_limits and self.call_count > self.context.max_calls:
             return self._result(
@@ -222,7 +223,12 @@ class ToolGateway:
             )
 
         internal_name = _GATEWAY_INTERNAL_TOOL_NAMES.get(name, name)
-        result = await self.registry.execute(internal_name, arguments, tool_call_id=call_id)
+        if callable(on_tool_activity):
+            result = await self.registry.execute_with_audit_context(
+                internal_name, arguments, tool_call_id=call_id,
+                audit_context={"tool_activity_observer": on_tool_activity})
+        else:
+            result = await self.registry.execute(internal_name, arguments, tool_call_id=call_id)
         if not result.is_error and self._reports_state_change(result.output):
             self.fingerprints[fingerprint] = 0
         else:
@@ -349,23 +355,70 @@ def _error(request_id: Any, code: int, message: str) -> dict[str, Any]:
 
 async def serve(context_path: Path, stdin: BinaryIO, stdout: BinaryIO) -> None:
     gateway = ToolGateway(load_gateway_context(context_path))
-    while True:
+    pending: dict[str, asyncio.Task] = {}
+    write_lock = asyncio.Lock()
+
+    async def send(response, transport):
+        async with write_lock:
+            await asyncio.to_thread(_write_frame, stdout, response, transport=transport)
+
+    async def handle(request, transport):
+        request_id = request.get("id")
         try:
-            request = await asyncio.to_thread(_read_frame, stdin)
+            if request.get("method") == "tools/call":
+                params = request.get("params") or {}
+                token = (params.get("_meta") or {}).get("progressToken")
+                async def progress(event):
+                    if token is None or not (event.metadata or {}).get("visible_update"):
+                        return
+                    from orchestrator.request_activity import _tool_activity_fields
+                    facts = _tool_activity_fields(event.metadata)
+                    if facts is None:
+                        return
+                    await send({"jsonrpc": "2.0", "method": "notifications/progress", "params": {
+                        "progressToken": token, "progress": facts["elapsed_ms"] / 1000,
+                        "message": facts["display_summary"], "_meta": {"tool_activity": facts}}}, transport)
+                arguments = params.get("arguments") or {}
+                if not isinstance(arguments, dict):
+                    response = _error(request_id, -32602, "tools/call arguments must be an object")
+                else:
+                    result = await gateway.call(str(params.get("name") or ""), arguments,
+                                                str(request_id), on_tool_activity=progress)
+                    response = {"jsonrpc": "2.0", "id": request_id, "result": result}
+            else:
+                response = await _dispatch(gateway, request)
+        except asyncio.CancelledError:
+            response = _error(request_id, -32800, "request cancelled; foreground cleanup completed or reported")
         except Exception as exc:
-            logging.error("MCP frame error: %s", exc)
-            return
-        if request is None:
-            return
-        transport = str(request.pop("_hashi_stdio_transport", "content_length"))
-        try:
-            response = await _dispatch(gateway, request)
-        except Exception as exc:
-            response = _error(request.get("id"), -32603, f"internal gateway error: {exc}")
+            response = _error(request_id, -32603, f"internal gateway error: {exc}")
         if response is not None:
-            await asyncio.to_thread(
-                _write_frame, stdout, response, transport=transport
-            )
+            await send(response, transport)
+
+    try:
+        while True:
+            request = await asyncio.to_thread(_read_frame, stdin)
+            if request is None:
+                break
+            transport = str(request.pop("_hashi_stdio_transport", "content_length"))
+            if request.get("method") == "notifications/cancelled":
+                target = pending.get(str((request.get("params") or {}).get("requestId")))
+                if target:
+                    target.cancel()
+                continue
+            key = str(request.get("id"))
+            if key in pending or len(pending) >= 8:
+                await send(_error(request.get("id"), -32600, "duplicate request or gateway concurrency limit"), transport)
+                continue
+            task = asyncio.create_task(handle(request, transport))
+            pending[key] = task
+            task.add_done_callback(lambda done, key=key: pending.pop(key, None))
+        if pending:
+            await asyncio.gather(*tuple(pending.values()))
+    finally:
+        for task in tuple(pending.values()):
+            task.cancel()
+        if pending:
+            await asyncio.gather(*tuple(pending.values()), return_exceptions=True)
 
 
 def main() -> int:

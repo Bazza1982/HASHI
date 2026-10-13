@@ -57,6 +57,8 @@ def test_npm_tarball_contains_runtime_closure_without_local_state(tmp_path) -> N
         "scripts/provision_transcription_runtime.py",
         "scripts/provision_privacy_runtime.py",
         "privacy-runtime.js",
+        "transcription-runtime.js",
+        "orchestrator/voice_transcription_worker.py",
         "tools/privacy_filter_sidecar.py",
         "tools/pii_model_probe.py",
         "docs/INSTALL.md",

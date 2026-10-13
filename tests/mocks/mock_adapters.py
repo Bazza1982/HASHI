@@ -196,7 +196,7 @@ class SimpleGlobalConfig:
     """Simple global config for testing."""
     def __init__(self):
         self.project_root = Path("/tmp/test")
-        self.gemini_cmd = "gemini"
+        self.agy_cmd = "agy"
         self.claude_cmd = "claude"
         self.codex_cmd = "codex"
         self.grok_cmd = "grok"

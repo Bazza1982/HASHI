@@ -511,7 +511,7 @@ def _disable_action_rows(menu: Menu, reason: str) -> None:
 async def perform_action(store: MenuStore, binding: Binding, payload: Mapping,
                          capture: Capture, *, actor_id: int,
                          authorize: Callable[[str], bool],
-                         invoke: Callable[[tuple, CapturedQuery], Awaitable[None]]) -> dict:
+                         invoke: Callable[[tuple, CapturedQuery], Awaitable[Any]]) -> dict:
     """Called inside once(); reserve the revision before invoking any callback."""
     menu = store.require(payload.get("menu_id"), binding, payload.get("revision"))
     if menu.closed:
@@ -531,9 +531,12 @@ async def perform_action(store: MenuStore, binding: Binding, payload: Mapping,
     capture._record(menu)
     query = CapturedQuery(capture, menu, data, actor_id)
     try:
-        await invoke(resolved, query)
+        handler_result = await invoke(resolved, query)
     except BaseException:
         _disable_action_rows(menu, "outcome_unknown")
         capture._record(menu)
         raise
-    return capture.result()
+    extra = {}
+    if isinstance(handler_result, Mapping):
+        extra["result"] = copy.deepcopy(dict(handler_result))
+    return capture.result(**extra)

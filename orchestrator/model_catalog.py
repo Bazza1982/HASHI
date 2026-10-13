@@ -13,7 +13,6 @@ from orchestrator.flexible_backend_registry import (
 )
 
 
-AVAILABLE_GEMINI_MODELS = get_gateway_models("gemini-cli")
 AVAILABLE_OPENROUTER_MODELS = get_available_models("openrouter-api")
 AVAILABLE_CLAUDE_MODELS = get_gateway_models("claude-cli")
 CLAUDE_MODEL_ALIASES = dict(_CLAUDE_MODEL_ALIASES)

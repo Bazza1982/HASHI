@@ -16,6 +16,7 @@ created by the current attempt and never touches pre-existing data.
 from __future__ import annotations
 
 import logging
+from copy import deepcopy
 import os
 import re
 import time
@@ -32,13 +33,11 @@ from orchestrator.flexible_backend_registry import (
     REMOVED_ENGINE_IDS,
     apply_backend_policy_defaults,
     canonical_backend_engine,
-    get_available_efforts,
     get_available_models,
     get_backend_entry,
     get_default_model,
     get_provider_reasoning_efforts,
     is_selectable_backend,
-    normalize_effort,
     public_backend_engine,
 )
 from orchestrator.her_v2.v3_config import (
@@ -46,6 +45,12 @@ from orchestrator.her_v2.v3_config import (
     build_v3_provider_options,
 )
 from orchestrator.pathing import BridgePaths
+from orchestrator.runtime_effort_options import (
+    get_available_models as runtime_available_models,
+    model_is_allowed,
+    get_available_efforts,
+    normalize_effort,
+)
 
 logger = logging.getLogger("BridgeU.AgentCreation")
 
@@ -62,6 +67,10 @@ class AgentCreationError(Exception):
     error_code = "creation_failed"
 
 
+class CreationPolicyError(AgentCreationError):
+    error_code = "creation_policy_invalid"
+
+
 class InvalidAgentNameError(AgentCreationError):
     error_code = "invalid_agent_name"
 
@@ -76,6 +85,10 @@ class InvalidBackendError(AgentCreationError):
 
 class InvalidModelError(AgentCreationError):
     error_code = "invalid_model"
+
+
+class InvalidProviderError(AgentCreationError):
+    error_code = "invalid_provider"
 
 
 class InvalidEffortError(AgentCreationError):
@@ -108,6 +121,8 @@ class AgentCreationSpec:
     model: str | None = None
     effort: str | None = None
     is_active: bool = False
+    provider: str | None = None
+    restricted: bool = False
 
 
 @dataclass(frozen=True)
@@ -119,6 +134,7 @@ class AgentCreationResult:
     workspace_created: bool
     config_published: bool
     durability_warning: bool = False
+    config_revision: str | None = None
 
 
 def validate_agent_name(name: str) -> str:
@@ -212,6 +228,7 @@ def build_her_backend_row(
     effort: str,
     provider_profiles: dict[str, dict[str, Any]],
     model: str | None = None,
+    provider: str | None = None,
 ) -> dict:
     """Build a HERV3 row with one Provider, model and reasoning effort."""
 
@@ -220,17 +237,26 @@ def build_her_backend_row(
     seed = HERv3ModelTarget(engine, pro_model)
     options = build_v3_provider_options([], provider_profiles, seed)
     selected = seed
+    requested_provider = canonical_backend_engine(str(provider or "").strip())
+    available = [option for option in options if option.get("available")]
+    if requested_provider:
+        available = [option for option in available if option["engine"] == requested_provider]
+        if not available:
+            raise InvalidProviderError("the selected HERV3 Provider is not available")
+        selected = HERv3ModelTarget(requested_provider, str(available[0]["default_model"]))
     requested_model = str(model or "").strip()
     if requested_model:
         matches = [
             option
-            for option in options
-            if option.get("available") and requested_model in option.get("models", [])
+            for option in available
+            if requested_model in option.get("models", [])
         ]
         if not matches:
             raise InvalidModelError(
                 f"model {requested_model!r} is not available from a configured HERV3 Provider"
             )
+        if len(matches) != 1:
+            raise InvalidProviderError("this model is available from multiple Providers; select one explicitly")
         selected = HERv3ModelTarget(str(matches[0]["engine"]), requested_model)
 
     choices = [
@@ -267,9 +293,9 @@ def build_her_backend_row(
 
 
 def build_ordinary_backend_row(backend: str, model: str | None, effort: str | None) -> dict:
-    """Build an ordinary backend row validated against the registry."""
+    """Build a backend row validated against the effective model catalogue."""
     entry = get_backend_entry(backend)
-    models = list(entry.get("models") or [])
+    models = runtime_available_models(backend)
     custom_allowed = bool(entry.get("allow_custom_models"))
 
     resolved_model: str | None = None
@@ -317,7 +343,7 @@ def build_ordinary_backend_row(backend: str, model: str | None, effort: str | No
     return row
 
 
-def build_agent_config(spec: AgentCreationSpec, provider_profiles: dict) -> dict:
+def build_agent_config(spec: AgentCreationSpec, provider_profiles: dict, *, creation_rows=None, catalogue=None, grant_mode="selected") -> dict:
     """Convert a validated creation intent into the internal agent row."""
     backend = canonical_backend_engine(str(spec.backend or "").strip())
     if backend in REMOVED_ENGINE_IDS:
@@ -326,13 +352,18 @@ def build_agent_config(spec: AgentCreationSpec, provider_profiles: dict) -> dict
         )
     if not is_selectable_backend(backend):
         raise InvalidBackendError(f"backend {spec.backend!r} is not selectable")
-    if backend == HER_V2_ENGINE:
+    if creation_rows is not None:
+        backend_row = _build_policy_backend_row(spec, creation_rows, catalogue or {})
+    elif backend == HER_V2_ENGINE:
         backend_row = build_her_backend_row(
             str(spec.effort or DEFAULT_HER_EFFORT).strip(),
             provider_profiles,
             model=spec.model,
+            provider=spec.provider,
         )
     else:
+        if spec.provider:
+            raise InvalidProviderError("provider is only supported for HERV3 creation")
         backend_row = build_ordinary_backend_row(backend, spec.model, spec.effort)
     return {
         "name": spec.name,
@@ -341,18 +372,144 @@ def build_agent_config(spec: AgentCreationSpec, provider_profiles: dict) -> dict
         "workspace_dir": f"workspaces/{spec.name}",
         "is_active": bool(spec.is_active),
         "active_backend": backend,
-        "allowed_backends": [backend_row],
+        "allowed_backends": (
+            _granted_policy_rows(spec, creation_rows, catalogue or {}, backend_row)
+            if creation_rows is not None and grant_mode == "template" and not spec.restricted
+            else _selected_policy_rows(creation_rows or [], backend_row)
+        ),
         "default_mode": default_agent_mode_for_backend(backend),
     }
+
+
+def _selected_policy_rows(rows, selected):
+    result = [selected]
+    providers = (selected.get("her_v2") or {}).get("v3_provider_allowlist", [])
+    result.extend(deepcopy(row) for row in rows if row["engine"] in providers and not is_selectable_backend(row["engine"]))
+    return result
+
+
+def _granted_policy_rows(spec, rows, catalogue, selected):
+    result = []
+    active = canonical_backend_engine(spec.backend)
+    for row in rows:
+        engine = row["engine"]
+        entry = catalogue.get(public_backend_engine(engine))
+        if not entry or not entry.get("available"):
+            continue
+        if engine == active:
+            result.append(deepcopy(selected))
+        elif engine == HER_V2_ENGINE:
+            providers = entry["providers"]
+            configured = (row.get("her_v2") or {}).get("main", {}).get("provider")
+            provider = configured if providers.get(configured, {}).get("available") else next(key for key, value in providers.items() if value.get("available"))
+            result.append(_build_policy_backend_row(AgentCreationSpec(
+                name=spec.name, backend=engine, provider=provider,
+            ), rows, catalogue))
+        else:
+            result.append(deepcopy(row))
+    # Provider-only rows contain concrete model/effort policy, never top-level
+    # Engine choices. Preserve those only for explicitly granted HERV3 Providers.
+    granted_providers = set()
+    for row in result:
+        if row["engine"] == HER_V2_ENGINE:
+            granted_providers.update(row["her_v2"]["v3_provider_allowlist"])
+    result.extend(deepcopy(row) for row in rows if row["engine"] in granted_providers and not is_selectable_backend(row["engine"]))
+    return result
+
+
+def _build_policy_backend_row(spec, rows, catalogue):
+    engine = canonical_backend_engine(spec.backend)
+    entry = catalogue.get(public_backend_engine(engine))
+    if not entry or not entry.get("available"):
+        raise InvalidBackendError("backend is not allowed or available in the creation template")
+    source = next(row for row in rows if row["engine"] == engine)
+    result = deepcopy(source)
+    if engine == HER_V2_ENGINE:
+        providers = entry["providers"]
+        default_provider = (result.get("her_v2") or {}).get("main", {}).get("provider")
+        provider = canonical_backend_engine(spec.provider or default_provider)
+        option = providers.get(provider)
+        if not option or not option.get("available"):
+            raise InvalidBackendError("HERV3 Provider is not allowed or available in the creation template")
+        model = str(spec.model or option.get("default_model") or "").strip()
+        if model not in option["models"]:
+            raise InvalidModelError("model is not available from the selected HERV3 Provider")
+        choices = option["model_efforts"].get(model, [])
+        result["her_v2"]["main"] = {"provider": provider, "model": model}
+        # Freeze the effective granted Provider set, including credentials and privacy.
+        result["her_v2"]["v3_provider_allowlist"] = [key for key, value in providers.items() if value.get("available")]
+    else:
+        model = str(spec.model or entry.get("default_model") or "").strip()
+        if engine == "claude-cli":
+            model = CLAUDE_MODEL_ALIASES.get(model.casefold(), model)
+        if not model_is_allowed(engine, model, backend=source):
+            raise InvalidModelError("model is not allowed by the creation template")
+        choices = entry["model_efforts"].get(model, entry.get("efforts") or [])
+    result["model"] = model
+    result["default_model"] = model
+    requested = str(spec.effort or source.get("effort") or entry.get("default_effort") or "").casefold()
+    requested = {"extra": "xhigh", "extra_high": "xhigh", "zero": "off"}.get(requested, requested)
+    if requested == "none" and "off" in choices:
+        requested = "off"
+    if spec.effort and requested not in choices:
+        raise InvalidEffortError("effort is not allowed for the selected model")
+    if choices:
+        result["effort"] = requested if requested in choices else ("high" if "high" in choices else choices[0])
+    else:
+        result.pop("effort", None)
+    return result
 
 
 class AgentCreationService:
     """Safe public creation path.  See module docstring for the contract."""
 
-    def __init__(self, paths: BridgePaths, global_config: Any = None):
+    def __init__(
+        self,
+        paths: BridgePaths,
+        global_config: Any = None,
+        *,
+        admin: ConfigAdmin | None = None,
+    ):
         self.paths = paths
         self.global_config = global_config
-        self.admin = ConfigAdmin(paths)
+        self.admin = admin or ConfigAdmin(paths)
+
+    def _creation_view(self, raw, *, agent_name=""):
+        from orchestrator.agent_creation_policy import (
+            resolve_creation_policy, creation_availability, build_effective_backend_catalogue,
+        )
+        from orchestrator.config_json import read_config_json
+        try:
+            policy = resolve_creation_policy(raw)
+        except (ValueError, TypeError, KeyError) as exc:
+            raise CreationPolicyError(str(exc)) from exc
+        profiles = _provider_profiles((raw.get("global") or {})) or _provider_profiles(self.global_config)
+        rows = policy["rows"]
+        if rows is None:
+            from orchestrator.flexible_backend_registry import BACKEND_REGISTRY
+            rows = [{"engine": engine} for engine in BACKEND_REGISTRY if is_selectable_backend(engine) and engine != HER_V2_ENGINE]
+            if profiles:
+                rows.append(build_her_backend_row(DEFAULT_HER_EFFORT, profiles))
+        secrets = read_config_json(self.paths.secrets_path) if self.paths.secrets_path.exists() else {}
+        global_values = dict(raw.get("global") or {})
+        if self.global_config is not None:
+            base = dict(self.global_config) if isinstance(self.global_config, dict) else vars(self.global_config)
+            global_values = {**base, **global_values}
+        try:
+            availability = creation_availability(global_values, rows, profiles, secrets, agent_name=agent_name)
+            backends = build_effective_backend_catalogue(rows, profiles, availability=availability)
+        except (ValueError, TypeError, KeyError) as exc:
+            raise CreationPolicyError("creation template model policy is invalid") from exc
+        view = {key: value for key, value in policy.items() if key != "rows"}
+        view.update(ok=True, backends=backends,
+                    allowed_backends=[engine for engine, entry in backends.items() if entry.get("available")])
+        return policy, profiles, view
+
+    def creation_catalogue(self):
+        try:
+            return self._creation_view(self.admin.load_raw_config())[2]
+        except AgentCreationError as exc:
+            return {"ok": False, "error_code": exc.error_code, "backends": {}, "allowed_backends": []}
 
     def _name_collides(self, raw: dict, name: str) -> bool:
         existing = [
@@ -427,23 +584,31 @@ class AgentCreationService:
                 f"workspace 'workspaces/{name}' already exists"
             )
 
-        provider_profiles = _provider_profiles(self.global_config)
+        policy, provider_profiles, view = self._creation_view(raw, agent_name=name)
+        available_entry = view["backends"].get(public_backend_engine(backend))
+        if not available_entry or not available_entry.get("available"):
+            raise InvalidBackendError("backend is not installed, allowed, or available for creation")
         agent_cfg = build_agent_config(
             AgentCreationSpec(
                 name=name,
                 backend=backend,
                 display_name=display_name,
                 model=spec.model,
+                provider=spec.provider,
                 effort=spec.effort,
                 is_active=spec.is_active,
+                restricted=spec.restricted,
             ),
             provider_profiles,
+            creation_rows=policy["rows"],
+            catalogue=view["backends"],
+            grant_mode=policy["grant_mode"],
         )
         logger.info("agent_create.config_built agent_name=%s", name)
 
         agent_md_preexisted = (ws_dir / "agent.md").exists()
         try:
-            published = self.admin.add_agent_to_config(name, agent_cfg)
+            published = self.admin.add_agent_to_config(name, agent_cfg, raw_config=raw)
         except ConfigConflictError as exc:
             if self._agent_row_exists(name):
                 raise ConfigConflictCreationError(
@@ -473,6 +638,7 @@ class AgentCreationService:
                     workspace_created=True,
                     config_published=True,
                     durability_warning=True,
+                    config_revision=self.admin.load_raw_config().revision,
                 )
             raise CreationFailedError(
                 "configuration publication could not be confirmed"
@@ -497,4 +663,5 @@ class AgentCreationService:
             active_backend=public_backend_engine(backend),
             workspace_created=True,
             config_published=True,
+            config_revision=self.admin.load_raw_config().revision,
         )

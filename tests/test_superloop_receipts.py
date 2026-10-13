@@ -85,6 +85,88 @@ def test_reply_admission_enqueues_separate_controller_review(receipt_case):
     assert store.load_loop_json_list(store.loop_dir("sl-review") / "taskboard.json")[0]["status"] == "in_progress"
 
 
+def test_unrelated_historical_receipts_read_each_loop_only_once(receipt_case, monkeypatch):
+    from orchestrator.superloop_receipts import SuperloopReceiptService
+    manager, store, calls, payload = receipt_case
+    receipt = dict(payload, state="reply_delivered_locally", request_id="req-reply")
+    receipt["in_reply_to"] = "not-a-dispatch"
+    reads = []
+    original = store.load_loop_state
+    monkeypatch.setattr(store, "load_loop_state", lambda loop_id: reads.append(loop_id) or original(loop_id))
+    service = SuperloopReceiptService(store, local_instance="HASHI2")
+    service.process([dict(receipt, message_id=f"old-{i}") for i in range(100)], lambda _p: None, lambda *_a: None)
+    assert reads == ["sl-review"]
+    assert not calls
+
+
+def test_disabled_loop_cache_refreshes_when_receipt_continuation_is_enabled(receipt_case, monkeypatch):
+    from orchestrator.superloop_receipts import SuperloopReceiptService
+    manager, store, calls, payload = receipt_case
+    state = store.load_loop_state("sl-review")
+    state["receipt_continuation_enabled"] = False
+    store.save_loop_state("sl-review", state)
+    receipt = dict(payload, state="reply_delivered_locally", request_id="req-reply")
+    service = SuperloopReceiptService(store, local_instance="HASHI2")
+    reads = []
+    original = store.load_loop_state
+    monkeypatch.setattr(store, "load_loop_state", lambda loop_id: reads.append(loop_id) or original(loop_id))
+    admitted = []
+    for _ in range(3):
+        service.process([receipt], lambda p: admitted.append(p) or "req-review", lambda *_a: "ses-manager")
+    assert reads == ["sl-review"]
+    assert not admitted
+    state["receipt_continuation_enabled"] = True
+    store.save_loop_state("sl-review", state)
+    service.process([receipt], lambda p: admitted.append(p) or "req-review", lambda *_a: "ses-manager")
+    assert len(admitted) == 1
+
+
+def test_remote_keeps_receipt_service_and_skips_reads_for_queued_history(receipt_case, monkeypatch):
+    from pathlib import Path
+    manager, store, calls, payload = receipt_case
+    asyncio.run(manager._handle_agent_reply(payload))
+    asyncio.run(manager._process_inflight_once())
+    path = store.loop_dir("sl-review") / "receipt_reviews.json"
+    rows = store.load_loop_json_list(path)
+    rows[0]["check_after"] = 10**12
+    store.save_loop_json_list(path, rows)
+    # Warm revised metadata once, then observe real file reads, not CPU timing.
+    asyncio.run(manager._process_inflight_once())
+    reads = []
+    original = Path.read_text
+    def read_text(path, *args, **kwargs):
+        if path.is_relative_to(store.loops_dir):
+            reads.append(path.name)
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "read_text", read_text)
+    for _ in range(3):
+        asyncio.run(manager._process_inflight_once())
+    assert reads == []
+    assert len(calls) == 2
+
+
+def test_receipt_cache_invalidates_new_dispatch_and_fails_closed_on_corruption(receipt_case):
+    from orchestrator.superloop_receipts import SuperloopReceiptService
+    manager, store, calls, payload = receipt_case
+    receipt = dict(payload, state="reply_delivered_locally", request_id="req-reply", in_reply_to="msg-new")
+    service = SuperloopReceiptService(store, local_instance="HASHI2")
+    admitted = []
+    enqueue = lambda p: admitted.append(p) or "req-review"
+    service.process([receipt], enqueue, lambda *_a: "ses-manager")
+    assert not admitted
+    SuperloopDispatchLedger(store).record_started(
+        "sl-review", task_id="fix", dispatch_instance_id="msg-new", request_id="req-new",
+    )
+    board = store.loop_dir("sl-review") / "taskboard.json"
+    valid = board.read_text(encoding="utf-8")
+    board.write_text("not json", encoding="utf-8")
+    service.process([receipt], enqueue, lambda *_a: "ses-manager")
+    assert not admitted
+    board.write_text(valid, encoding="utf-8")
+    service.process([receipt], enqueue, lambda *_a: "ses-manager")
+    assert len(admitted) == 1
+
+
 @pytest.mark.parametrize("change", ["opt_out", "paused", "stopped", "pause_file", "sender", "instance", "recipient", "uncorrelated", "conversation", "collected", "bad_controller", "completed_task"])
 def test_unrelated_or_blocked_reply_does_not_wake_controller(receipt_case, change):
     manager, store, calls, payload = receipt_case

@@ -49,12 +49,14 @@ def test_parse_codex_detail_only_bad_request_from_real_cli_shape():
 
 
 def test_parse_codex_auth_error_extracts_request_id():
+    synthetic_key = "sk-" + "example0123456789"
     failure = parse_codex_failure(
         {
             "type": "turn.failed",
             "error": {
                 "message": (
-                    "unexpected status 401 Unauthorized: Missing bearer authentication, "
+                    "unexpected status 401 Unauthorized: Incorrect API key provided: "
+                    f"{synthetic_key}, "
                     "request id: req_abc123"
                 )
             },
@@ -65,6 +67,8 @@ def test_parse_codex_auth_error_extracts_request_id():
     assert failure.http_status == 401
     assert failure.provider_request_id == "req_abc123"
     assert failure.retryable is False
+    assert synthetic_key not in failure.message
+    assert "[REDACTED]" in failure.message
 
 
 def test_parse_codex_rate_limit_honours_numeric_retry_after():
@@ -125,6 +129,23 @@ def test_parse_codex_quota_reset_without_numeric_delay_blocks_immediate_retry():
     assert failure.code == "PROVIDER_QUOTA_EXHAUSTED"
     assert failure.retry_after_s is None
     assert failure.retryable is False
+
+
+def test_parse_codex_file_tool_validation_failure_is_not_provider_unknown():
+    failure = parse_codex_failure(
+        fallback_message=(
+            "Failed to read file to update "
+            "`C:\\Users\\example-user\\project\\missing.py`: "
+            "The system cannot find the file specified (os error 2)"
+        )
+    )
+
+    assert failure.code == "CODEX_FILE_TOOL_VALIDATION_FAILED"
+    assert failure.retryable is False
+    assert failure.http_status is None
+    assert "Failed to read file to update" in failure.message
+    assert "C:\\Users\\example-user" not in failure.message
+    assert "%USERPROFILE%" in failure.message
 
 
 def test_codex_event_sanitizer_redacts_credentials_and_personal_paths():

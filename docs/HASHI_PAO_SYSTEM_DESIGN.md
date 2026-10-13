@@ -9,9 +9,38 @@
 
 ## 1. Definition
 
+Device Tool request IDs are deterministically scoped to the canonical request,
+Agent and tool call. CLI-local counters are never sent as globally unique Worker
+request IDs. Within one scope, changing arguments/action does not disguise a
+replay; the Device Worker's replay guard stays unchanged. A registry-local nonce
+separates diagnostic registries that lack a canonical request scope, without
+deriving Agent identity from workspace paths. Original call IDs remain in Tool
+audit records and task/browser binding is unchanged.
+
 Codex MCP isolation inventories standalone servers with plugins disabled, matching
 both CLI execution and the app-server bridge. Plugin-provided transports must
 not become enabled-only top-level MCP overrides after their plugin is disabled.
+Fixed CLI's owned native hook ignores user configuration. Its disabled MCP
+entries therefore retain a valid, same-type transport skeleton derived from
+the current inventory; neither credentials nor executable arguments are copied.
+Unknown transport types fail before launch. Disabled entries are never started
+or contacted, and the request-scoped HASHI gateway remains required. The
+app-server bridge retains its separate configuration/disabled-server policy.
+
+On qualified Codex CLI 0.160+, an owned command-scoped native shell hook routes
+process termination to HASHI's managed process tools. It ignores user config,
+installs no persistent profile and preserves ordinary coding/inspection commands.
+Managed termination protects the current Function and all runtime ancestors.
+The hook is a guardrail; specialized native programs and vendor hook failure
+behavior do not constitute an OS enforcement boundary. HASHI3 qualification
+includes an actual denied native termination with a surviving canary process.
+
+Terminal errors carry one bounded versioned public failure result through Session
+persistence and Frontend Connector projection. It carries the canonical Engine,
+observable effect counts and the owner's recovery decision. Completed tool calls
+and verified effects remain separate. Unknown effects never suggest replay;
+unknown future public error codes remain visible. See the [2026-10-06 repair](repairs/NIGHTLY_20261006_HASHI3.md)
+for source, offline checks and runtime adoption recorded separately.
 
 Provider-Agnostic Orchestration (PAO) is HASHI's outer control plane. It turns
 an authenticated user or system request into a governed HASHI Run, selects an
@@ -44,6 +73,15 @@ PAO owns the following product domains.
 - Fixed/Flex working-mode policy, retired outer-composition migration, and any
   future runtime composition that spans Engines.
 
+Reboot admission and outcome belong to PAO Functions. Persisted operation
+progress, exact target scope, qualified source, Worker readiness and transaction
+recovery remain authoritative. Chat delivery and browser-render acknowledgements
+are observations, never reboot permissions. Optional Persona status rendering
+is cancelled on quiesce and cannot hold the real Run drain boundary. Terminal
+receipt retention also bounds notification retries; stale undelivered notices
+cannot consume active-operation capacity. See [reboot receipts](HASHI_REBOOT_RECEIPTS.md)
+and the [HASHI3 repair](repairs/REBOOT_NONBLOCKING_NOTICES_20261008.md).
+
 Agent deletion is a PAO-owned lifecycle operation in shared Functions. A
 Function generation that implements the preview, confirmation, cleanup, and
 receipt contract advertises `agent_deletion` as supported by default; there is
@@ -51,7 +89,9 @@ no separate per-instance opt-in. Frontends derive availability from the
 authenticated capability response and hide the action when the capability is
 absent. Active or running Agents and other reported blockers remain protected.
 
-Agent creation is also a PAO-owned lifecycle operation. Creating an Agent with
+Agent creation is also a PAO-owned lifecycle operation. Its explicit Instance
+Configuration template and effective selection/publication contract are defined
+in [Agent creation policy](HASHI_AGENT_CREATION_POLICY.md). Creating an Agent with
 `is_active=false` publishes only its validated configuration and workspace.
 Creating one with `is_active=true` succeeds only after the isolated Function
 Worker start contract accepts it. If startup fails, the created Agent remains
@@ -75,6 +115,10 @@ The current working-mode contract is defined in
 
 ### 2.2 HASHI Conversation Sessions
 
+[Asynchronous Run questions](HASHI_RUN_QUESTIONS.md) defines PAO-owned,
+authenticated clarification/preference questions that remain in one active Run.
+Answers provide data and never confer tool or side-effect authorization.
+
 PAO is the sole owner of:
 
 - HASHI Conversation Session identity and authenticated ownership;
@@ -85,6 +129,16 @@ PAO is the sole owner of:
 
 An Engine may own its internal Engine Session but must not become a second
 owner of the enclosing Conversation Session.
+
+Cancelling one reply is a PAO Run control operation in shared Functions. The
+caller supplies its exact owner, Agent, Session, Run, and request identity; the
+Agent Worker removes only that ready item or interrupts only its matching live
+provider task. A queued Run cancelled between admission and queue insertion is
+durably fenced before the later item can start. An accepted interrupt is pending
+until the Worker settles the Run as stopped; a Run that finishes first retains
+its actual terminal state. Frontend Connectors must show that state and never
+translate a failed or slow Run cancellation into an Agent lifecycle stop or a
+session-wide `/stop`. Prior side effects remain separate from the stop result.
 
 Workzone configuration is Agent control state, not Conversation Session state.
 `/new`, `/use`, `/fresh`, and `/archive` therefore cannot replace it. PAO freezes
@@ -153,6 +207,14 @@ runtime fault. PAO and FC first recover or replace that transport epoch; an
 unrecoverable case terminates as `failed` or `interrupted`, never as a user
 hang-up. Provider duration limits therefore require pre-expiry rollover, not a
 normal logical-call ending.
+
+A provider-declared terminal policy closure is not a transport outage. In
+particular, a session closed for `content` after a `content_filter` rejection
+terminates the logical Phone call as `failed`, records the public
+`live_provider_content_filtered` reason, and immediately releases foreground
+admission. FC presents that reason to the caller. It must not reconnect the
+same rejected context or leave Phone and Call controls disabled behind a false
+service-unavailable state.
 
 Each logical call has an append-only diagnostic timeline independent of the
 ordinary Session-event sequence. It correlates PAO Runs, FC/browser states,
@@ -363,6 +425,14 @@ Live topology takes precedence over compatibility snapshots; configured ports,
 wildcard hosts, stale snapshots, and endpoints published by another instance
 must never be guessed or accepted as substitutes.
 
+Shared Functions publish live endpoint state atomically. On Windows, a reader
+that temporarily denies rename/delete sharing may block that pre-commit rename;
+only the same closed, fsynced candidate is retried, within a bounded half-second
+window. This does not replay service startup, a Run or an action. Permanent
+write errors preserve both the previous durable receipt and the previous
+in-memory services/revision, and remain visible to startup. No stale address,
+cross-instance endpoint or guessed port becomes a fallback.
+
 ### 2.4 Skills, Tools, permissions, and execution
 
 PAO owns the HASHI-level capability registry and execution authority:
@@ -377,6 +447,18 @@ PAO owns the HASHI-level capability registry and execution authority:
 PCM projects the authorised catalogue into an Engine request. HERV3 decides
 when to request an available Tool during its Turn and preserves HER-level Tool
 evidence. Neither PCM nor HER may grant a capability withheld by PAO.
+
+Scoped local discovery is a PAO Functions capability. Admission derives exact
+preferred Workzone roots, Agent home, execution cwd and Workzone revision from
+the same Run snapshot. Tool Registry has a separate, owner/Agent-bound home
+read projection for `file_search`, `file_read`, `file_list` and `log_query`;
+it never appends that grant to writable `access_roots`. Enterprise/privacy and
+live-runtime read denials override it. A default search does not use a broad
+configured access root. Explicit selected roots replace defaults. Cursor state
+is bounded, ephemeral and bound to Run identity, query, scope and generation.
+Registry/Gateway, HERV3 observer and Connector projection share factual progress;
+elapsed time and heartbeat are not evidence of scanning work. Details and
+rollout boundaries are in [HERV3 scoped search](HERV3_SCOPED_SEARCH.md).
 
 Personal HASHI instances use an open Tool Registry default: when
 `global.default_tools` is absent, `allowed` resolves to `["*"]`, and new-instance
@@ -637,12 +719,16 @@ that raced with `/stop`; another Session's already-running user request remains
 untouched. Delayed records are preserved, not silently consumed. A failed
 fence-state read fails closed for new admissions.
 
-Terminal failures with possible tool effects now attach a bounded reconciliation
-to the existing Session failure and terminal diagnostic projection. A file
-write is called confirmed only when its Tool receipt includes a readback;
-other tool actions and untyped CLI exits remain uncertain. User error text
-separates those categories and warns against blind replay. Audit-log truncation
-is disclosed; absence of an audit row never proves absence of an effect.
+Terminal completions with observed tool effects attach a bounded reconciliation
+to the existing Session result and terminal diagnostic projection. The outer
+`BackendResponse` supplies the observed count/effect flag; the existing Tool
+audit, Smart Tool ledger, and BackgroundJob receipts remain the evidence
+owners for both success and failure. A file write is called confirmed only when
+its Tool receipt includes a readback; other tool actions and untyped CLI exits
+remain uncertain. User error text separates those categories and warns against
+blind replay. Audit-log truncation is disclosed; absence of an audit row never
+proves absence of an effect. Successful reconciliation is diagnostic only and
+does not change execution, continuation, or retry admission.
 
 ### HASHI1 automatic debug-reporting trial (2026-09-13)
 
@@ -785,3 +871,35 @@ failure. After startup, health reads reconcile through StartupManager: removed
 successful Worker entries leave the projection, while failed/pending startup
 entries and unrelated service failures remain visible. Reads must not reconcile
 across startup or a shared Functions handoff. This does not alter Core lifecycle.
+
+
+### 2026-10-06 Session execution leases (HASHI3 candidate)
+
+PAO retains one Agent queue, admission sequence, configuration writer, Run fences
+and canonical delivery owners. The default execution budget is two persistent
+Sessions (Agent extra `max_concurrent_sessions`, integer 1..8). SessionQueue keeps
+waiting turns in the existing visible queue, selects the earliest eligible turn,
+and holds a Session slot through detached completion. One Session remains FIFO.
+
+Execution ContextVars isolate turn metadata, native adapter, frozen configuration,
+Workzone state and prompt/stream buffers. SessionBackendManager reads an admitted
+snapshot; it cannot write Agent configuration or run state migration. Control
+threads receive the exact caller-bound adapter instead of reading it later.
+HERV3 handles share the Worker's durable/recovery/learning services without
+reconciling or shutting them down on every Session initialization. Idle handles
+are bounded and retired without closing durable conversation epochs.
+
+Approved: nightly implementation/testing in HASHI3 and test Workbench. Focused
+queue overlap/FIFO/capacity, native-object isolation, cross-thread control, and
+HERV3 lifecycle checks pass. Provider and frontend live adoption remain pending.
+
+2026-10-07 HASHI3 live checks demonstrated same-model overlapping native Codex,
+HERV3 through HASHI API and direct API calls. PAO's candidate resource layer adds
+process-safe instance/engine Run quotas plus a separately bounded API invocation
+pool. No auxiliary call reacquires its owning Run's quota. The same queue derives
+selected-request wait reasons; cancellation releases a capacity waiter and
+settles its queue item once. Canonical filesystem intent leases protect nested
+workspace mutations without serializing independent file writes or model work.
+Failed attachment intake uses owner-scoped atomic unbound discard; uncertain
+admission keeps the existing idempotency identity and assets. See the nightly
+repair record for limits, focused red/green and separate adoption evidence.

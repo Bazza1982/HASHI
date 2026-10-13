@@ -13,6 +13,8 @@ import argparse
 import gzip
 import hashlib
 import json
+import os
+import re
 import shutil
 import sqlite3
 import sys
@@ -21,23 +23,54 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-try:
-    from scripts.wiki.fetcher import has_private_content, has_sensitive_content
-except Exception:  # pragma: no cover - keeps remote package usable before wiki deps import cleanly
-    PRIVATE_FALLBACK_TERMS = ("亲一下", "好想你", "想念你", "我爱你", "relationship", "romantic", "intimate")
+# Remote export has its own privacy boundary. Keep these checks available when
+# this standalone script is deployed outside the HASHI source checkout.
+PRIVATE_CONTENT_PATTERNS = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"爱的拥抱",
+        r"深情的吻",
+        r"亲一下",
+        r"好想你",
+        r"想念你",
+        r"喜欢你",
+        r"我爱你",
+        r"(?i)\bintimate\b",
+        r"(?i)\bromantic\b",
+        r"(?i)\bpersonal life\b",
+        r"(?i)\brelationship\b",
+    )
+)
+SENSITIVE_PATTERNS = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"[A-Za-z0-9_\-]{20,}:[A-Za-z0-9_\-]{30,}",
+        r"sk-[A-Za-z0-9]{32,}",
+        r"eyJ[A-Za-z0-9+/]{40,}",
+        r"(?i)(password|passwd|secret|api.?key)\s*[=:]\s*\S+",
+    )
+)
 
-    def has_private_content(content: str) -> bool:
-        lowered = (content or "").lower()
-        return any(term in lowered for term in PRIVATE_FALLBACK_TERMS)
 
-    def has_sensitive_content(content: str) -> bool:
-        lowered = (content or "").lower()
-        return any(term in lowered for term in ("password=", "passwd=", "secret=", "api_key="))
+def has_private_content(content: str) -> bool:
+    return any(pattern.search(content or "") for pattern in PRIVATE_CONTENT_PATTERNS)
+
+
+def has_sensitive_content(content: str) -> bool:
+    return any(pattern.search(content or "") for pattern in SENSITIVE_PATTERNS)
 
 
 SCHEMA_VERSION = 1
 DEFAULT_CONFIG = Path("private/remote_memory_config.json")
 GENERATED_ZONE_NAMES = ("10_GENERATED_TOPICS", "30_GENERATED_INDEXES", "00_SYSTEM")
+WINDOWS_RESERVED_NAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{number}" for number in range(1, 10)),
+    *(f"LPT{number}" for number in range(1, 10)),
+}
 
 
 def utc_now() -> str:
@@ -84,7 +117,9 @@ def dump_json(path: Path, payload: dict[str, Any]) -> None:
 class RemoteConfig:
     root: Path
     export_root: Path
+    incoming_root: Path
     inbox_root: Path
+    import_ack_root: Path
     accepted_store: Path
     quarantine_root: Path
     logs_root: Path
@@ -115,9 +150,17 @@ class RemoteConfig:
                 args.export_root or data.get("export_root"),
                 base_private / "remote_memory_export",
             ),
+            incoming_root=resolve_path(
+                args.incoming_root or data.get("incoming_root"),
+                base_private / "remote_memory_incoming",
+            ),
             inbox_root=resolve_path(
                 args.inbox_root or data.get("inbox_root"),
                 base_private / "remote_memory_inbox",
+            ),
+            import_ack_root=resolve_path(
+                data.get("import_ack_root"),
+                base_private / "remote_memory_import_ack",
             ),
             accepted_store=resolve_path(
                 args.accepted_store or data.get("accepted_store"),
@@ -282,6 +325,10 @@ def cmd_import(args: argparse.Namespace) -> int:
     cfg = RemoteConfig.from_args(args)
     print_header("import", cfg, args)
     log_path = cfg.logs_root / "remote_memory_import.jsonl"
+    ack_log_path = cfg.logs_root / "remote_memory_import_ack.jsonl"
+    if args.acknowledge and not args.destination_instance_id:
+        print("[remote-memory] ERROR --acknowledge requires --destination-instance-id", file=sys.stderr)
+        return 2
     if args.check:
         print(f"[remote-memory] consolidated_db_exists={cfg.consolidated_db.exists()}")
         print("[remote-memory] check_result=ok")
@@ -292,23 +339,70 @@ def cmd_import(args: argparse.Namespace) -> int:
     if args.batch_dir:
         batch_dirs = [Path(args.batch_dir).resolve()]
     stats = {"batches": 0, "accepted": 0, "duplicates": 0, "quarantined": 0, "failed": 0}
+    if args.acknowledge:
+        stats.update({"acknowledged": 0, "ack_failed": 0})
     for batch_dir in batch_dirs:
         stats["batches"] += 1
         try:
             result = import_batch(cfg, batch_dir, dry_run=args.dry_run)
-            for key in ("accepted", "duplicates"):
-                stats[key] += int(result.get(key, 0))
-            print(f"[remote-memory] imported batch={batch_dir.name} result={result}")
         except Exception as exc:
             stats["failed"] += 1
             stats["quarantined"] += 1
             print(f"[remote-memory] ERROR batch={batch_dir} error={exc}", file=sys.stderr)
             if not args.dry_run:
                 quarantine_batch(cfg, batch_dir, str(exc))
-    log_event(log_path, {"mode": "import", "dry_run": args.dry_run, "ok": stats["failed"] == 0, **stats})
+            continue
+
+        for key in ("accepted", "duplicates"):
+            stats[key] += int(result.get(key, 0))
+        print(f"[remote-memory] imported batch={batch_dir.name} result={result}")
+        if args.acknowledge and not args.dry_run:
+            try:
+                receipt, receipt_status = write_import_ack(
+                    cfg,
+                    batch_dir,
+                    result,
+                    destination_instance_id=args.destination_instance_id,
+                )
+                stats["acknowledged"] += 1
+                print(
+                    f"[remote-memory] import_ack={receipt_status} "
+                    f"batch={batch_dir.name} path="
+                    f"{cfg.import_ack_root / receipt['source_instance_id'] / (receipt['batch_id'] + '.json')}"
+                )
+                log_event(
+                    ack_log_path,
+                    {
+                        "mode": "import-ack",
+                        "ok": True,
+                        "source_instance_id": receipt["source_instance_id"],
+                        "destination_instance_id": receipt["destination_instance_id"],
+                        "batch_id": receipt["batch_id"],
+                        "payload_sha256": receipt["payload_sha256"],
+                        "manifest_sha256": receipt["manifest_sha256"],
+                        "record_count": receipt["record_count"],
+                        "accepted": receipt["accepted"],
+                        "duplicates": receipt["duplicates"],
+                        "receipt_status": receipt_status,
+                    },
+                )
+            except Exception as exc:
+                stats["ack_failed"] += 1
+                print(
+                    f"[remote-memory] ERROR import_ack batch={batch_dir.name} error={exc}",
+                    file=sys.stderr,
+                )
+        elif args.acknowledge:
+            print(
+                f"[remote-memory] dry-run would acknowledge batch={batch_dir.name} "
+                "after a durable import"
+            )
+
+    ok = stats["failed"] == 0 and stats.get("ack_failed", 0) == 0
+    log_event(log_path, {"mode": "import", "dry_run": args.dry_run, "ok": ok, **stats})
     print(f"[remote-memory] summary={stats}")
-    print(f"[remote-memory] success={stats['failed'] == 0}")
-    return 0 if stats["failed"] == 0 else 3
+    print(f"[remote-memory] success={ok}")
+    return 0 if ok else 3
 
 
 def import_batch(cfg: RemoteConfig, batch_dir: Path, *, dry_run: bool) -> dict[str, int]:
@@ -347,6 +441,73 @@ def import_batch(cfg: RemoteConfig, batch_dir: Path, *, dry_run: bool) -> dict[s
     return {"accepted": accepted, "duplicates": duplicates}
 
 
+def write_import_ack(
+    cfg: RemoteConfig,
+    batch_dir: Path,
+    result: dict[str, int],
+    *,
+    destination_instance_id: str,
+) -> tuple[dict[str, Any], str]:
+    """Persist a per-batch receipt only after import_batch committed successfully."""
+    manifest_path = batch_dir / "manifest.json"
+    manifest_bytes = manifest_path.read_bytes()
+    manifest = load_json(manifest_path)
+    validate_manifest(manifest)
+    payload_path = batch_dir / str(manifest["payload_file"])
+    payload_bytes = payload_path.read_bytes()
+    payload_sha256 = sha256_bytes(payload_bytes)
+    if payload_sha256 != manifest["payload_sha256"]:
+        raise ValueError("cannot acknowledge a payload whose checksum no longer matches")
+
+    record_count = int(manifest["record_count"])
+    imported_count = int(result.get("accepted", 0)) + int(result.get("duplicates", 0))
+    if imported_count != record_count:
+        raise ValueError(
+            f"cannot acknowledge incomplete import: records={record_count} imported={imported_count}"
+        )
+
+    source_instance_id = safe_path_component(manifest["instance_id"], "manifest instance_id").upper()
+    batch_id = safe_path_component(manifest["batch_id"], "manifest batch_id")
+    destination_instance_id = safe_path_component(
+        destination_instance_id.strip(), "destination_instance_id"
+    ).upper()
+
+    receipt: dict[str, Any] = {
+        "format": "hashi-remote-memory-import-ack-v1",
+        "status": "imported" if int(result.get("accepted", 0)) else "already_present",
+        "acknowledged_at": utc_now(),
+        "source_instance_id": source_instance_id,
+        "destination_instance_id": destination_instance_id,
+        "batch_id": batch_id,
+        "manifest_sha256": sha256_bytes(manifest_bytes),
+        "payload_sha256": payload_sha256,
+        "record_count": record_count,
+        "accepted": int(result.get("accepted", 0)),
+        "duplicates": int(result.get("duplicates", 0)),
+    }
+    receipt_path = cfg.import_ack_root / receipt["source_instance_id"] / f"{receipt['batch_id']}.json"
+    immutable_fields = (
+        "format",
+        "source_instance_id",
+        "destination_instance_id",
+        "batch_id",
+        "manifest_sha256",
+        "payload_sha256",
+        "record_count",
+    )
+    if receipt_path.exists():
+        previous = load_json(receipt_path)
+        conflicts = [field for field in immutable_fields if previous.get(field) != receipt.get(field)]
+        if conflicts:
+            raise ValueError(
+                f"existing import acknowledgement conflicts on immutable fields: {conflicts}"
+            )
+        return previous, "already_acknowledged"
+
+    dump_json(receipt_path, receipt)
+    return receipt, "created"
+
+
 def validate_manifest(manifest: dict[str, Any]) -> None:
     required = ("schema_version", "batch_id", "instance_id", "payload_file", "payload_sha256", "record_count")
     missing = [key for key in required if key not in manifest]
@@ -359,6 +520,264 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     privacy = manifest.get("privacy_scan")
     if not isinstance(privacy, dict) or privacy.get("status") != "passed":
         raise ValueError("manifest privacy_scan.status must be passed")
+
+
+@dataclass(frozen=True)
+class ValidatedPromotion:
+    source: Path
+    target: Path
+    manifest: dict[str, Any]
+    manifest_bytes: bytes
+    payload_bytes: bytes
+
+
+def safe_path_component(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not value or value in {".", ".."}:
+        raise ValueError(f"{field} must be a non-empty safe path component")
+    if value != value.strip() or value.endswith((".", " ")):
+        raise ValueError(f"{field} is not a safe path component: {value!r}")
+    if any(character in value for character in '<>:"/\\|?*\x00'):
+        raise ValueError(f"{field} is not a safe path component: {value!r}")
+    if any(ord(character) < 32 for character in value) or value.split(".", 1)[0].upper() in WINDOWS_RESERVED_NAMES:
+        raise ValueError(f"{field} is not a safe path component: {value!r}")
+    return value
+
+
+def promotion_source(cfg: RemoteConfig, batch_dir: Path) -> tuple[Path, str, str]:
+    candidate = batch_dir if batch_dir.is_absolute() else cfg.root / batch_dir
+    if candidate.is_symlink() or candidate.parent.is_symlink():
+        raise ValueError(f"batch directory or instance directory is a symlink: {candidate}")
+    source = candidate.resolve()
+    incoming_root = cfg.incoming_root.resolve()
+    try:
+        relative = source.relative_to(incoming_root)
+    except ValueError as exc:
+        raise ValueError(f"batch directory is outside incoming_root: {source}") from exc
+    if len(relative.parts) != 2:
+        raise ValueError(f"batch directory must be incoming_root/<INSTANCE>/<batch_id>: {source}")
+    directory_instance = safe_path_component(relative.parts[0], "directory instance")
+    directory_batch = safe_path_component(relative.parts[1], "directory batch_id")
+    if not source.is_dir() or source.is_symlink():
+        raise ValueError(f"batch directory is missing or is a symlink: {source}")
+    return source, directory_instance, directory_batch
+
+
+def validate_promotion_batch(cfg: RemoteConfig, batch_dir: Path) -> ValidatedPromotion:
+    source, directory_instance, directory_batch = promotion_source(cfg, batch_dir)
+    manifest_path = source / "manifest.json"
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise ValueError(f"manifest is missing or is a symlink: {manifest_path}")
+    manifest_bytes = manifest_path.read_bytes()
+    try:
+        decoded_manifest = json.loads(manifest_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"manifest is not readable UTF-8 JSON: {manifest_path}") from exc
+    if not isinstance(decoded_manifest, dict):
+        raise ValueError(f"Expected JSON object: {manifest_path}")
+    manifest = decoded_manifest
+    validate_manifest(manifest)
+
+    if not isinstance(manifest["schema_version"], int) or isinstance(manifest["schema_version"], bool):
+        raise ValueError("manifest schema_version must be an integer")
+    instance_id = safe_path_component(manifest["instance_id"], "manifest instance_id")
+    batch_id = safe_path_component(manifest["batch_id"], "manifest batch_id")
+    if instance_id != directory_instance or batch_id != directory_batch:
+        raise ValueError(
+            "manifest identity does not match incoming directory "
+            f"(directory={directory_instance}/{directory_batch}, manifest={instance_id}/{batch_id})"
+        )
+
+    agent_ids = manifest.get("agent_ids")
+    if not isinstance(agent_ids, list) or not agent_ids:
+        raise ValueError("manifest agent_ids must be a non-empty list")
+    safe_agent_ids = [safe_path_component(agent_id, "manifest agent_id") for agent_id in agent_ids]
+    if len(set(safe_agent_ids)) != len(safe_agent_ids):
+        raise ValueError("manifest agent_ids must not contain duplicates")
+    agent_component = safe_agent_ids[0] if len(safe_agent_ids) == 1 else "multi"
+
+    payload_name = safe_path_component(manifest["payload_file"], "manifest payload_file")
+    payload_path = source / payload_name
+    if payload_path.is_symlink() or not payload_path.is_file():
+        raise ValueError(f"payload is missing or is a symlink: {payload_path}")
+    expected_entries = {"manifest.json", payload_name}
+    actual_entries = {path.name for path in source.iterdir()}
+    if actual_entries != expected_entries:
+        raise ValueError(
+            "incoming batch must contain exactly manifest.json and its declared payload "
+            f"(expected={sorted(expected_entries)}, actual={sorted(actual_entries)})"
+        )
+    payload_bytes = payload_path.read_bytes()
+    expected_hash = manifest["payload_sha256"]
+    if (
+        not isinstance(expected_hash, str)
+        or len(expected_hash) != 64
+        or any(character not in "0123456789abcdefABCDEF" for character in expected_hash)
+    ):
+        raise ValueError("manifest payload_sha256 must be a 64-character hexadecimal SHA256")
+    actual_hash = sha256_bytes(payload_bytes)
+    if actual_hash != expected_hash.lower():
+        raise ValueError(f"checksum mismatch expected={expected_hash} actual={actual_hash}")
+
+    record_count = manifest["record_count"]
+    if not isinstance(record_count, int) or isinstance(record_count, bool) or record_count < 0:
+        raise ValueError("manifest record_count must be a non-negative integer")
+    try:
+        payload_text = gzip.decompress(payload_bytes).decode("utf-8")
+        records = [json.loads(line) for line in payload_text.splitlines() if line.strip()]
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("payload must be readable gzip-compressed UTF-8 JSONL") from exc
+    if any(not isinstance(record, dict) for record in records):
+        raise ValueError("payload JSONL records must be objects")
+    if len(records) != record_count:
+        raise ValueError(f"record_count mismatch manifest={record_count} actual={len(records)}")
+    _, privacy = privacy_filter(records)
+    if privacy["private_skipped"]:
+        raise ValueError(f"privacy scan rejected {privacy['private_skipped']} private records")
+
+    target = (cfg.inbox_root / instance_id / agent_component / batch_id).resolve()
+    try:
+        target.relative_to(cfg.inbox_root.resolve())
+    except ValueError as exc:
+        raise ValueError(f"derived promotion target escapes inbox_root: {target}") from exc
+    return ValidatedPromotion(
+        source=source,
+        target=target,
+        manifest=manifest,
+        manifest_bytes=manifest_bytes,
+        payload_bytes=payload_bytes,
+    )
+
+
+def existing_ancestor(path: Path) -> Path:
+    candidate = path
+    while not candidate.exists():
+        parent = candidate.parent
+        if parent == candidate:
+            raise ValueError(f"no existing ancestor for target: {path}")
+        candidate = parent
+    return candidate
+
+
+def promotion_target_is_identical(batch: ValidatedPromotion, target: Path | None = None) -> bool:
+    target = target or batch.target
+    if not target.is_dir():
+        return False
+    manifest_path = target / "manifest.json"
+    payload_path = target / str(batch.manifest["payload_file"])
+    expected_entries = {"manifest.json", str(batch.manifest["payload_file"])}
+    if {path.name for path in target.iterdir()} != expected_entries:
+        return False
+    if (
+        manifest_path.is_symlink()
+        or payload_path.is_symlink()
+        or not manifest_path.is_file()
+        or not payload_path.is_file()
+    ):
+        return False
+    return manifest_path.read_bytes() == batch.manifest_bytes and payload_path.read_bytes() == batch.payload_bytes
+
+
+def cmd_promote_incoming(args: argparse.Namespace) -> int:
+    cfg = RemoteConfig.from_args(args)
+    print_header("promote-incoming", cfg, args)
+    print(f"[remote-memory] incoming_root={cfg.incoming_root}")
+    log_path = cfg.logs_root / "remote_memory_promotion.jsonl"
+    if args.batch_dir:
+        selected = Path(args.batch_dir)
+        batch_dirs = [selected if selected.is_absolute() else cfg.root / selected]
+    else:
+        batch_dirs = sorted(path for path in cfg.incoming_root.glob("*/*") if path.is_dir())
+    stats: dict[str, Any] = {
+        "batches": len(batch_dirs),
+        "promoted": 0,
+        "already_present": 0,
+        "validated": 0,
+        "failed": 0,
+    }
+    results: list[dict[str, Any]] = []
+
+    for batch_dir in batch_dirs:
+        source = batch_dir.resolve()
+        target: Path | None = None
+        try:
+            batch = validate_promotion_batch(cfg, batch_dir)
+            source = batch.source
+            target = batch.target
+            legacy_target = (
+                cfg.inbox_root
+                / str(batch.manifest["instance_id"])
+                / "all"
+                / str(batch.manifest["batch_id"])
+            ).resolve()
+            existing_targets = [
+                candidate
+                for candidate in dict.fromkeys((target, legacy_target))
+                if candidate.exists()
+            ]
+            if existing_targets:
+                conflicting_targets = [
+                    candidate
+                    for candidate in existing_targets
+                    if not promotion_target_is_identical(batch, candidate)
+                ]
+                if conflicting_targets:
+                    raise FileExistsError(
+                        "promotion target exists with different or unexpected bytes: "
+                        + ", ".join(str(candidate) for candidate in conflicting_targets)
+                    )
+                target = existing_targets[0]
+                status = "already_present"
+                stats["already_present"] += 1
+            elif args.check:
+                status = "valid"
+                stats["validated"] += 1
+            elif args.dry_run:
+                status = "dry_run"
+                stats["validated"] += 1
+            else:
+                target_ancestor = existing_ancestor(target.parent)
+                if batch.source.stat().st_dev != target_ancestor.stat().st_dev:
+                    raise OSError("incoming and inbox targets are on different volumes; atomic rename is unavailable")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if target.exists():
+                    raise FileExistsError(f"promotion target appeared before rename: {target}")
+                os.rename(batch.source, target)
+                status = "promoted"
+                stats["promoted"] += 1
+            result = {"source": str(source), "target": str(target), "status": status, "ok": True}
+            results.append(result)
+            print(f"[remote-memory] source={source} target={target} status={status} success=true")
+        except Exception as exc:
+            stats["failed"] += 1
+            result = {
+                "source": str(source),
+                "target": str(target) if target is not None else None,
+                "status": "failed",
+                "ok": False,
+                "error": str(exc),
+            }
+            results.append(result)
+            print(
+                f"[remote-memory] source={source} target={target or 'unresolved'} status=failed error={exc}",
+                file=sys.stderr,
+            )
+
+    ok = stats["failed"] == 0
+    summary = {
+        "mode": "check" if args.check else "dry-run" if args.dry_run else "promote-incoming",
+        "dry_run": args.dry_run,
+        "check": args.check,
+        "ok": ok,
+        "incoming_root": str(cfg.incoming_root),
+        "inbox_root": str(cfg.inbox_root),
+        **stats,
+        "results": results,
+    }
+    if not args.check and not args.dry_run:
+        log_event(log_path, summary)
+    print(f"[remote-memory] summary={json.dumps(summary, ensure_ascii=False, sort_keys=True)}")
+    print(f"[remote-memory] success={str(ok).lower()}")
+    return 0 if ok else 5
 
 
 def cmd_deliver(args: argparse.Namespace) -> int:
@@ -524,6 +943,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--root", default=".", help="HASHI repo root")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="Optional private config JSON")
     parser.add_argument("--export-root")
+    parser.add_argument("--incoming-root")
     parser.add_argument("--inbox-root")
     parser.add_argument("--accepted-store")
     parser.add_argument("--quarantine-root")
@@ -548,10 +968,18 @@ def build_parser() -> argparse.ArgumentParser:
     deliver.add_argument("--check", action="store_true")
     deliver.set_defaults(func=cmd_deliver)
 
+    promote = sub.add_parser("promote-incoming", help="Validate and atomically promote incoming batches")
+    promote.add_argument("--batch-dir", help="One batch directory under incoming_root; defaults to all batches")
+    promote.add_argument("--dry-run", action="store_true")
+    promote.add_argument("--check", action="store_true")
+    promote.set_defaults(func=cmd_promote_incoming)
+
     imp = sub.add_parser("import", help="Import central inbox batches")
     imp.add_argument("--batch-dir")
     imp.add_argument("--dry-run", action="store_true")
     imp.add_argument("--check", action="store_true")
+    imp.add_argument("--acknowledge", action="store_true")
+    imp.add_argument("--destination-instance-id")
     imp.set_defaults(func=cmd_import)
 
     sync = sub.add_parser("sync-wiki", help="Copy generated wiki zones to read-only mirror/cache")

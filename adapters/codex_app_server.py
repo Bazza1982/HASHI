@@ -407,11 +407,22 @@ def _toml_key_segment(value: str) -> str:
     return value
 
 
-def disabled_mcp_override(server_name: str) -> str:
+def disabled_mcp_override(server_name: str, *, transport_type: str | None = None) -> str:
     # Disable the configured server without changing its transport.  A synthetic
     # HTTP ``url`` is invalid when Codex combines the override with an existing
     # stdio ``command`` (for example the built-in node_repl server).
     key = _toml_key_segment(server_name)
+    # Fixed CLI's owned hooks ignore user config. An enabled-only override
+    # would then create an invalid server with no transport. Supply a disabled
+    # same-type skeleton; never copy credentials or launch/contact this server.
+    # Matching the inventoried type also preserves validity when a project
+    # configuration still supplies that transport.
+    if transport_type == "stdio":
+        return f'mcp_servers.{key}={{command="hashi-disabled-mcp",enabled=false}}'
+    if transport_type == "streamable_http":
+        return f'mcp_servers.{key}={{url="http://127.0.0.1:9",enabled=false}}'
+    if transport_type is not None:
+        raise CodexAppServerError("configured MCP transport cannot be safely isolated")
     return f"mcp_servers.{key}.enabled=false"
 
 

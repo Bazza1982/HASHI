@@ -3,6 +3,7 @@ from __future__ import annotations
 # ruff: noqa: E402 -- Core must enforce its runtime before project imports.
 
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -299,6 +300,12 @@ class UniversalOrchestrator:
         self.secrets = secrets
         self.lifecycle_state.state_path = global_cfg.base_logs_dir / "orchestrator_state.json"
         bridge_logger.info("=== Bridge starting ===")
+        qualification_timing = getattr(self, "function_release_timing", None)
+        if qualification_timing:
+            bridge_logger.info(
+                "Function qualification timing: %s",
+                json.dumps(qualification_timing, sort_keys=True),
+            )
         previous_state, unexpected_previous_exit = self.lifecycle_state.mark_started(os.getpid())
         if unexpected_previous_exit:
             bridge_logger.error(

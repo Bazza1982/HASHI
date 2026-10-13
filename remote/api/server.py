@@ -112,6 +112,139 @@ from ..terminal.executor import AuthLevel, TerminalExecutor
 
 logger = logging.getLogger(__name__)
 
+_WORKBENCH_GATEWAY_LOG_TOKEN = re.compile(r"[A-Za-z0-9_./:-]{1,200}\Z")
+
+
+def _workbench_gateway_token(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text if _WORKBENCH_GATEWAY_LOG_TOKEN.fullmatch(text) else None
+
+
+def _workbench_gateway_error_facts(exc: BaseException) -> dict[str, Any]:
+    """Project transport identity without logging endpoint or exception text."""
+    reason = getattr(exc, "reason", None)
+    cause = reason if isinstance(reason, BaseException) else exc.__cause__
+    source = cause or exc
+    errno = getattr(source, "errno", None)
+    return {
+        "exception_type": type(exc).__name__,
+        "cause_type": type(cause).__name__ if cause else None,
+        "cause_code": _workbench_gateway_token(getattr(source, "code", None)),
+        "cause_errno": errno if isinstance(errno, int) else None,
+        "cause_syscall": _workbench_gateway_token(getattr(source, "syscall", None)),
+    }
+
+
+def _workbench_gateway_log(event: str, **facts: Any) -> None:
+    """Best-effort, content-free lifecycle evidence for the loopback relay."""
+    try:
+        record = {"event": event, **{key: value for key, value in facts.items() if value is not None}}
+        logger.info("workbench gateway %s", json.dumps(record, ensure_ascii=True, sort_keys=True))
+    except Exception:
+        return
+
+
+def _workbench_gateway_trace_facts(headers: dict[str, str]) -> dict[str, Any]:
+    return {
+        "correlation_id": _workbench_gateway_token(headers.get("x-hashi-correlation-id")),
+        "trace_id": _workbench_gateway_token(headers.get("x-hashi-trace-id")),
+        "span_id": _workbench_gateway_token(headers.get("x-hashi-span-id")),
+        "interaction_id": _workbench_gateway_token(headers.get("x-hashi-interaction-id")),
+    }
+
+
+def _workbench_gateway_trace_headers(headers: dict[str, str]) -> dict[str, str]:
+    forwarded = {}
+    for source, target in (
+        ("x-hashi-correlation-id", "x-hashi-correlation-id"),
+        ("x-hashi-trace-id", "x-hashi-trace-id"),
+    ):
+        value = _workbench_gateway_token(headers.get(source))
+        if value:
+            forwarded[target] = value
+    return forwarded
+
+
+class WorkbenchGatewayTransportMiddleware:
+    """Observe the Remote socket boundary without reading or copying payloads."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        path = str(scope.get("path") or "")
+        if scope.get("type") != "http" or not path.startswith("/workbench/v1/proxy/api/"):
+            return await self.app(scope, receive, send)
+        raw_headers = {
+            key.decode("latin-1").lower(): value.decode("latin-1")
+            for key, value in scope.get("headers") or ()
+        }
+        trace_facts = _workbench_gateway_trace_facts(raw_headers)
+        method = str(scope.get("method") or "")
+        api_path = _workbench_gateway_token(path.removeprefix("/workbench/v1/proxy/api/"))
+        started = time.monotonic()
+        status = None
+        response_bytes = 0
+        terminal = False
+
+        async def observed_receive():
+            message = await receive()
+            if message.get("type") == "http.disconnect":
+                _workbench_gateway_log(
+                    "asgi_client_disconnected", **trace_facts, method=method,
+                    api_path=api_path, status=status,
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                )
+            return message
+
+        async def observed_send(message):
+            nonlocal status, response_bytes, terminal
+            if message.get("type") == "http.response.start":
+                status = int(message.get("status") or 0)
+                _workbench_gateway_log(
+                    "asgi_response_started", **trace_facts, method=method,
+                    api_path=api_path, status=status,
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                )
+            if message.get("type") == "http.response.body":
+                response_bytes += len(message.get("body") or b"")
+            try:
+                await send(message)
+            except BaseException as exc:
+                if not terminal:
+                    terminal = True
+                    _workbench_gateway_log(
+                        "asgi_response_send_failed", **trace_facts, method=method,
+                        api_path=api_path, status=status, response_bytes=response_bytes,
+                        duration_ms=int((time.monotonic() - started) * 1000),
+                        **_workbench_gateway_error_facts(exc),
+                    )
+                raise
+            if (
+                message.get("type") == "http.response.body"
+                and not message.get("more_body", False)
+                and not terminal
+            ):
+                terminal = True
+                _workbench_gateway_log(
+                    "asgi_response_completed", **trace_facts, method=method,
+                    api_path=api_path, status=status, response_bytes=response_bytes,
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                )
+
+        try:
+            return await self.app(scope, observed_receive, observed_send)
+        except BaseException as exc:
+            if not terminal:
+                terminal = True
+                _workbench_gateway_log(
+                    "asgi_request_failed", **trace_facts, method=method,
+                    api_path=api_path, status=status, response_bytes=response_bytes,
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                    **_workbench_gateway_error_facts(exc),
+                )
+            raise
+
 # These are set by main.py after startup
 _instance_info: dict = {}
 _peer_registry = None
@@ -138,6 +271,7 @@ API_PROTOCOL_CAPABILITIES = [
 ]
 
 _WORKBENCH_GATEWAY_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE"})
+_BRIDGE_HANDOFF_PROXY_TIMEOUT_SECONDS = 3590.0
 _WORKBENCH_GATEWAY_REQUEST_HEADERS = frozenset(
     {
         "accept",
@@ -145,6 +279,10 @@ _WORKBENCH_GATEWAY_REQUEST_HEADERS = frozenset(
         "content-type",
         "if-match",
         "if-none-match",
+        "x-hashi-correlation-id",
+        "x-hashi-interaction-id",
+        "x-hashi-span-id",
+        "x-hashi-trace-id",
         "x-workbench-session",
     }
 )
@@ -157,6 +295,10 @@ _WORKBENCH_GATEWAY_RESPONSE_HEADERS = frozenset(
         "etag",
         "last-modified",
         "x-desktop-meta",
+        "x-hashi-correlation-id",
+        "x-hashi-gateway-request-id",
+        "x-hashi-span-id",
+        "x-hashi-trace-id",
     }
 )
 
@@ -520,6 +662,7 @@ def _shared_token_response(
     content: dict[str, Any],
     *,
     status_code: int = 200,
+    headers: dict[str, str] | None = None,
 ) -> JSONResponse:
     """Authenticate a receiver response against its request nonce."""
 
@@ -532,7 +675,7 @@ def _shared_token_response(
             request_nonce=request_nonce,
             payload=payload,
         )
-    return JSONResponse(status_code=status_code, content=payload)
+    return JSONResponse(status_code=status_code, content=payload, headers=headers)
 
 
 def _agent_move_response(
@@ -1924,6 +2067,11 @@ def _workbench_gateway_route_timeout(
     *, method: str, api_path: str
 ) -> float | None:
     normalized_path = str(api_path or "").strip().strip("/")
+    if str(method or "").upper() == "POST" and normalized_path in {
+        "bridge/transfer",
+        "bridge/fork",
+    }:
+        return _BRIDGE_HANDOFF_PROXY_TIMEOUT_SECONDS
     if str(method or "").upper() == "POST" and re.fullmatch(
         r"agents/[^/]+/active", normalized_path
     ):
@@ -1956,31 +2104,34 @@ def _validate_workbench_gateway_path(api_path: str) -> str:
     return f"/api/{value}"
 
 
-@lru_cache(maxsize=8)
-def _desktop_workbench_host(instance_id: str, port: int) -> str:
-    """Pick the local API before sending a desktop request that cannot be replayed."""
+class WorkbenchGatewayError(ConnectionError):
+    def __init__(self, code: str, *, accepted: bool | None, retryable: bool, status: int):
+        self.code, self.accepted, self.retryable, self.status = code, accepted, retryable, status
+        super().__init__(code)
 
+
+def _desktop_workbench_host(instance_id: str, port: int) -> str:
+    """Authenticate a bounded identity projection before non-replayable input."""
+    token = _workbench_admin_token()
+    if not token:
+        raise WorkbenchGatewayError("local_workbench_identity_unverified", accepted=False, retryable=True, status=503)
     for host in local_http_hosts():
-        health_url = local_http_url(port, "/api/health", host=host)
+        identity_url = local_http_url(port, "/api/v1/instance/identity", host=host)
         try:
-            request = urllib_request.Request(health_url, method="GET")
+            request = urllib_request.Request(identity_url, method="GET", headers={"X-Workbench-Token": token})
             with urllib_request.urlopen(request, timeout=1.0) as response:
-                if response.status != 200:
-                    continue
-                raw = response.read(8193)
-            if len(raw) > 8192:
-                continue
-            health = json.loads(raw)
+                if response.status != 200: continue
+                raw = response.read(1025)
+            if len(raw) > 1024: continue
+            identity = json.loads(raw)
         except (URLError, TimeoutError, OSError, ValueError):
             continue
-        if (
-            isinstance(health, dict)
-            and health.get("ok") is True
-            and health.get("instance_id") == instance_id
-            and health.get("workbench_port") == port
-        ):
+        if (isinstance(identity, dict) and identity.get("ok") is True
+            and identity.get("protocol") == "hashi-instance-identity-v1"
+            and identity.get("instance_id") == instance_id
+            and identity.get("workbench_port") == port):
             return host
-    raise ConnectionError("local Workbench API is unavailable")
+    raise WorkbenchGatewayError("local_workbench_identity_unverified", accepted=False, retryable=True, status=503)
 
 
 def _forward_workbench_gateway_request(
@@ -2000,6 +2151,8 @@ def _forward_workbench_gateway_request(
     if query:
         upstream_path = f"{upstream_path}?{query}"
 
+    trace_facts = _workbench_gateway_trace_facts(request_headers)
+    route_path = upstream_path.split("?", 1)[0]
     headers = {
         name: value
         for name, value in request_headers.items()
@@ -2017,8 +2170,19 @@ def _forward_workbench_gateway_request(
         if desktop_request
         else local_http_hosts()
     )
+    total_started = time.monotonic()
+    _workbench_gateway_log(
+        "forward_started",
+        **trace_facts,
+        method=normalized_method,
+        api_path=_workbench_gateway_token(route_path),
+        request_bytes=len(body_bytes),
+        attempt_count=len(hosts),
+        timeout_ms=int(1000 * (_workbench_gateway_timeout() if timeout is None else timeout)),
+    )
     last_error: Exception | None = None
-    for host in hosts:
+    for attempt, host in enumerate(hosts, start=1):
+        attempt_started = time.monotonic()
         url = local_http_url(_workbench_port, upstream_path, host=host)
         request_data = body_bytes if normalized_method != "GET" else None
         upstream = urllib_request.Request(
@@ -2027,35 +2191,164 @@ def _forward_workbench_gateway_request(
             headers=headers,
             method=normalized_method,
         )
+        host_kind = "loopback_ipv6" if ":" in host else "loopback_ipv4" if host == "127.0.0.1" else "local_alias"
+        _workbench_gateway_log(
+            "local_request_started",
+            **trace_facts,
+            method=normalized_method,
+            api_path=_workbench_gateway_token(route_path),
+            attempt=attempt,
+            host_kind=host_kind,
+        )
         try:
             with urllib_request.urlopen(
                 upstream,
                 timeout=_workbench_gateway_timeout() if timeout is None else timeout,
             ) as response:
+                _workbench_gateway_log(
+                    "local_response_headers",
+                    **trace_facts,
+                    method=normalized_method,
+                    api_path=_workbench_gateway_token(route_path),
+                    attempt=attempt,
+                    status=response.status,
+                    response_producer="local_workbench",
+                    duration_ms=int((time.monotonic() - attempt_started) * 1000),
+                )
                 response_headers = {
                     name.lower(): value
                     for name, value in response.headers.items()
                     if name.lower() in _WORKBENCH_GATEWAY_RESPONSE_HEADERS
                 }
-                return response.status, response.read(), response_headers
+                _workbench_gateway_log(
+                    "local_response_body_started",
+                    **trace_facts,
+                    method=normalized_method,
+                    api_path=_workbench_gateway_token(route_path),
+                    attempt=attempt,
+                    status=response.status,
+                )
+                content = response.read()
+                _workbench_gateway_log(
+                    "local_response_body_completed",
+                    **trace_facts,
+                    method=normalized_method,
+                    api_path=_workbench_gateway_token(route_path),
+                    attempt=attempt,
+                    status=response.status,
+                    response_bytes=len(content),
+                    duration_ms=int((time.monotonic() - attempt_started) * 1000),
+                    response_producer="local_workbench",
+                )
+                return response.status, content, response_headers
         except HTTPError as exc:
+            _workbench_gateway_log(
+                "local_response_headers",
+                **trace_facts,
+                method=normalized_method,
+                api_path=_workbench_gateway_token(route_path),
+                attempt=attempt,
+                status=exc.code,
+                response_producer="local_workbench",
+                duration_ms=int((time.monotonic() - attempt_started) * 1000),
+            )
             response_headers = {
                 name.lower(): value
-                for name, value in exc.headers.items()
+                for name, value in (exc.headers or {}).items()
                 if name.lower() in _WORKBENCH_GATEWAY_RESPONSE_HEADERS
             }
-            return exc.code, exc.read(), response_headers
+            _workbench_gateway_log(
+                "local_response_body_started",
+                **trace_facts,
+                method=normalized_method,
+                api_path=_workbench_gateway_token(route_path),
+                attempt=attempt,
+                status=exc.code,
+            )
+            content = exc.read()
+            _workbench_gateway_log(
+                "local_response_body_completed",
+                **trace_facts,
+                method=normalized_method,
+                api_path=_workbench_gateway_token(route_path),
+                attempt=attempt,
+                status=exc.code,
+                response_bytes=len(content),
+                duration_ms=int((time.monotonic() - attempt_started) * 1000),
+                response_producer="local_workbench",
+            )
+            return exc.code, content, response_headers
         except (URLError, TimeoutError, OSError) as exc:
             last_error = exc
+            _workbench_gateway_log(
+                "local_request_failed",
+                **trace_facts,
+                method=normalized_method,
+                api_path=_workbench_gateway_token(route_path),
+                attempt=attempt,
+                duration_ms=int((time.monotonic() - attempt_started) * 1000),
+                **_workbench_gateway_error_facts(exc),
+            )
             # A lost desktop input response is an unknown outcome, not permission
             # to replay a click/text against a fallback loopback address.
             if desktop_request:
                 # A later request may discover a replacement listener. Never
                 # replay this request when its outcome is uncertain.
-                _desktop_workbench_host.cache_clear()
                 break
             continue
+    if desktop_request:
+        _workbench_gateway_log(
+            "forward_failed",
+            **trace_facts,
+            method=normalized_method,
+            api_path=_workbench_gateway_token(route_path),
+            duration_ms=int((time.monotonic() - total_started) * 1000),
+            error_code="request_outcome_unknown",
+            response_producer="remote_gateway",
+        )
+        raise WorkbenchGatewayError("request_outcome_unknown", accepted=None, retryable=False, status=502)
+    _workbench_gateway_log(
+        "forward_failed",
+        **trace_facts,
+        method=normalized_method,
+        api_path=_workbench_gateway_token(route_path),
+        duration_ms=int((time.monotonic() - total_started) * 1000),
+        error_code="local_workbench_unavailable",
+        response_producer="remote_gateway",
+        **(_workbench_gateway_error_facts(last_error) if last_error else {}),
+    )
     raise ConnectionError(str(last_error or "local Workbench API is unavailable"))
+
+
+def _observe_detached_workbench_gateway(
+    task: asyncio.Task,
+    *,
+    trace_facts: dict[str, Any],
+    method: str,
+    api_path: str | None,
+    started: float,
+) -> None:
+    """Record how the loopback hop ended after its remote caller disappeared."""
+    try:
+        status, content, _headers = task.result()
+    except asyncio.CancelledError:
+        _workbench_gateway_log(
+            "detached_forward_cancelled", **trace_facts, method=method,
+            api_path=api_path, duration_ms=int((time.monotonic() - started) * 1000),
+        )
+    except Exception as exc:
+        _workbench_gateway_log(
+            "detached_forward_failed", **trace_facts, method=method,
+            api_path=api_path, duration_ms=int((time.monotonic() - started) * 1000),
+            **_workbench_gateway_error_facts(exc),
+        )
+    else:
+        _workbench_gateway_log(
+            "detached_forward_completed", **trace_facts, method=method,
+            api_path=api_path, status=status, response_bytes=len(content),
+            duration_ms=int((time.monotonic() - started) * 1000),
+            response_producer="local_workbench",
+        )
 
 
 def _restart_failure_notice(record: dict[str, Any]) -> tuple[str, str]:
@@ -2349,7 +2642,6 @@ def create_app(
     _protocol_manager = protocol_manager
     _exchange_transport = exchange_transport
     _workbench_port = workbench_port
-    _desktop_workbench_host.cache_clear()
     _hashi_root = hashi_root
     _control_hashi_root = control_hashi_root or hashi_root
     _attachment_store = AttachmentStore(
@@ -2374,6 +2666,7 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.add_middleware(WorkbenchGatewayTransportMiddleware)
 
     # ── Health ──────────────────────────────────────────────
 
@@ -2497,7 +2790,7 @@ def create_app(
             detail = "Shared token required" if reason == "auth_required" else "Invalid or expired shared token"
             raise HTTPException(status_code=401, detail=detail)
         health = await asyncio.to_thread(_fetch_workbench_health, 1.0)
-        return {
+        return _shared_token_response(request, {
             "ok": True,
             "gateway": "workbench_v1",
             "authenticated_instance": authenticated_instance,
@@ -2511,49 +2804,139 @@ def create_app(
             },
             "workbench_online": health is not None,
             "workbench_health": health,
-        }
+        })
 
     @app.api_route(
         "/workbench/v1/proxy/api/{api_path:path}",
         methods=sorted(_WORKBENCH_GATEWAY_METHODS),
     )
     async def workbench_gateway_proxy(request: Request, api_path: str):
+        route_started = time.monotonic()
         body_bytes = await request.body()
+        request_headers = {name.lower(): value for name, value in request.headers.items()}
+        trace_facts = _workbench_gateway_trace_facts(request_headers)
+        trace_headers = _workbench_gateway_trace_headers(request_headers)
+        safe_api_path = _workbench_gateway_token(str(api_path or "").strip().strip("/"))
+        _workbench_gateway_log(
+            "proxy_received", **trace_facts, method=request.method,
+            api_path=safe_api_path, request_bytes=len(body_bytes),
+        )
         ok, reason, _authenticated_instance = verify_protocol_request(
             request,
             body_bytes=body_bytes,
         )
         if not ok:
+            _workbench_gateway_log(
+                "proxy_auth_failed", **trace_facts, method=request.method,
+                api_path=safe_api_path, duration_ms=int((time.monotonic() - route_started) * 1000),
+                error_code="auth_required" if reason == "auth_required" else "auth_invalid",
+                response_producer="remote_gateway",
+            )
             detail = "Shared token required" if reason == "auth_required" else "Invalid or expired shared token"
             raise HTTPException(status_code=401, detail=detail)
-        try:
-            status, content, headers = await asyncio.to_thread(
-                _forward_workbench_gateway_request,
+        _workbench_gateway_log(
+            "proxy_authenticated", **trace_facts, method=request.method,
+            api_path=safe_api_path,
+        )
+        forward_task = asyncio.create_task(asyncio.to_thread(
+            _forward_workbench_gateway_request,
+            method=request.method,
+            api_path=api_path,
+            query=request.url.query,
+            body_bytes=body_bytes,
+            request_headers=request_headers,
+            timeout=_workbench_gateway_route_timeout(
                 method=request.method,
                 api_path=api_path,
-                query=request.url.query,
-                body_bytes=body_bytes,
-                request_headers={name.lower(): value for name, value in request.headers.items()},
-                timeout=_workbench_gateway_route_timeout(
-                    method=request.method,
-                    api_path=api_path,
-                ),
+            ),
+        ))
+        try:
+            status, content, headers = await asyncio.shield(forward_task)
+        except asyncio.CancelledError:
+            _workbench_gateway_log(
+                "proxy_client_cancelled", **trace_facts, method=request.method,
+                api_path=safe_api_path, duration_ms=int((time.monotonic() - route_started) * 1000),
+                response_producer="client_transport",
             )
+            forward_task.add_done_callback(
+                lambda completed: _observe_detached_workbench_gateway(
+                    completed,
+                    trace_facts=trace_facts,
+                    method=request.method,
+                    api_path=safe_api_path,
+                    started=route_started,
+                )
+            )
+            raise
         except ValueError as exc:
+            _workbench_gateway_log(
+                "proxy_response_ready", **trace_facts, method=request.method,
+                api_path=safe_api_path, status=400,
+                duration_ms=int((time.monotonic() - route_started) * 1000),
+                error_code="invalid_request", response_producer="remote_gateway",
+            )
             return JSONResponse(
                 status_code=400,
                 content={"ok": False, "error": str(exc)},
+                headers=trace_headers,
             )
+        except WorkbenchGatewayError as exc:
+            _workbench_gateway_log(
+                "proxy_response_ready", **trace_facts, method=request.method,
+                api_path=safe_api_path, status=exc.status,
+                duration_ms=int((time.monotonic() - route_started) * 1000),
+                error_code=exc.code, response_producer="remote_gateway",
+            )
+            return JSONResponse(status_code=exc.status, content={
+                "ok": False, "code": exc.code, "error": exc.code,
+                "accepted": exc.accepted, "retryable": exc.retryable,
+            }, headers=trace_headers)
         except ConnectionError as exc:
-            logger.warning("Workbench gateway upstream unavailable: %s", exc)
+            logger.warning(
+                "Workbench gateway upstream unavailable: type=%s",
+                type(exc).__name__,
+            )
+            _workbench_gateway_log(
+                "proxy_response_ready", **trace_facts, method=request.method,
+                api_path=safe_api_path, status=503,
+                duration_ms=int((time.monotonic() - route_started) * 1000),
+                error_code="local_workbench_unavailable", response_producer="remote_gateway",
+            )
             return JSONResponse(
                 status_code=503,
                 content={
                     "ok": False,
                     "error": "Local Workbench API unavailable",
-                    "detail": str(exc),
+                    "detail": "local_workbench_unavailable",
                 },
+                headers=trace_headers,
             )
+        headers = {**trace_headers, **headers}
+        _workbench_gateway_log(
+            "proxy_response_ready", **trace_facts, method=request.method,
+            api_path=safe_api_path, status=status, response_bytes=len(content),
+            duration_ms=int((time.monotonic() - route_started) * 1000),
+            response_producer="local_workbench",
+        )
+        normalized_api_path = str(api_path or "").strip().strip("/")
+        if normalized_api_path in {"bridge/transfer", "bridge/fork"}:
+            try:
+                payload = json.loads(content.decode("utf-8")) if content else {}
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return _shared_token_response(
+                    request,
+                    {"ok": False, "error": "Local Workbench returned invalid JSON"},
+                    status_code=502,
+                    headers=trace_headers,
+                )
+            if not isinstance(payload, dict):
+                return _shared_token_response(
+                    request,
+                    {"ok": False, "error": "Local Workbench returned invalid JSON"},
+                    status_code=502,
+                    headers=trace_headers,
+                )
+            return _shared_token_response(request, payload, status_code=status, headers=trace_headers)
         return Response(content=content, status_code=status, headers=headers)
 
     # ── Peers ────────────────────────────────────────────────

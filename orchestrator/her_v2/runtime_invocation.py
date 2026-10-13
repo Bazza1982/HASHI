@@ -202,8 +202,6 @@ class RuntimeInvocationMixin:
         selected_model_class = fallback_model_class(self.config, selected)
         provider_stream_inactivity_timeout_s = (
             FALLBACK_MEANINGFUL_OUTPUT_TIMEOUT_S
-            if self.config.fallback_enabled and self.config.fallback_targets
-            else None
         )
         invocation_plan_id = (
             str(bound_plan_id) if bound_plan_id is not None else state.ledger.plan_id

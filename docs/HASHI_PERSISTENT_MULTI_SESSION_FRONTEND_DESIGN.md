@@ -245,3 +245,21 @@ HASHI publishes only the generic protocol, implementation, tests and
 qualification tooling. Product-specific revisions, packaging instructions,
 device paths, defect journals, compatibility records and release locks belong
 in the integrator's private repository.
+
+
+### 2026-10-06 nightly candidate
+
+Simple Session selection reads an explicit owner-checked PAO projection. It does
+not issue `/use` or mutate primary/Engine bindings. Unsupported old projection
+services fail safely rather than using a primary-session command fallback.
+Browser Session views are separated by connection endpoint, authenticated
+instance, authorization namespace, Agent, Session and context generation. Known
+background views retain their activity and answer feeds. Optimistic admission
+receipts remain attached to their original view after selection changes.
+
+The shared PAO projection is readable during Worker fencing, allowing the
+durable reboot-start notice to appear before cutover. Reboot discovery is
+owner-scoped regardless of Telegram/Workbench origin. Terminal success waits
+for restored connectivity and disappears after four visible seconds. Failure
+and unknown outcomes remain visible. Theme semantics provide border, icon,
+primary text and a subtle background tint. Real theme/live evidence is pending.

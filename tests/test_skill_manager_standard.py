@@ -37,7 +37,7 @@ def test_repository_catalog_contains_only_publishable_standard_templates():
         "claude",
         "codex",
         "debug",
-        "gemini",
+        "antigravity",
         "inspect-images",
         "memory-search",
         "msn",

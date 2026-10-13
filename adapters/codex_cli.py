@@ -3,6 +3,7 @@ import os
 import json
 import time
 import asyncio
+import hashlib
 import logging
 import sqlite3
 from collections.abc import Mapping
@@ -26,7 +27,7 @@ from adapters.codex_usage import (
 from adapters.stream_io import iter_stream_lines
 from adapters.stream_events import (
     StreamCallback, StreamEvent,
-    KIND_TOOL_END,
+    KIND_TOOL_END, KIND_TOOL_START,
     KIND_FILE_EDIT, KIND_SHELL_EXEC, KIND_PROGRESS,
 )
 from orchestrator.multimodal_contract import (
@@ -43,7 +44,7 @@ from orchestrator.process_execution import (
     process_group_kwargs,
     resolve_argv_invocation,
 )
-from adapters.hashi_mcp import prepare_hashi_mcp
+from adapters.hashi_mcp import current_hashi_mcp_invocation, prepare_hashi_mcp
 
 _CODEX_REQUEST_REASONING_EFFORTS = frozenset(
     {"none", "low", "medium", "high", "xhigh", "max", "ultra"}
@@ -81,6 +82,7 @@ class CodexCLIAdapter(BaseBackend):
     MAX_STDERR_CAPTURE_BYTES = 256 * 1024
     MCP_INVENTORY_TIMEOUT_SEC = 30
     MCP_INVENTORY_MAX_ATTEMPTS = 2
+    WORKSPACE_PREFLIGHT_MAX_ENTRIES = 4096
 
     def _define_capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(
@@ -106,6 +108,7 @@ class CodexCLIAdapter(BaseBackend):
         self._active_read_tasks: list[asyncio.Task] = []
         self._external_tool_processes: set[object] = set()
         self._external_mcp_server_names: tuple[str, ...] | None = None
+        self._external_mcp_server_transport_types: dict[str, str] = {}
         self.effort = ((self.config.extra or {}).get("effort") or "medium").lower()
         self.cmd_base = self.global_config.codex_cmd
         self.access_root = str(self.config.resolve_access_root())
@@ -163,7 +166,7 @@ class CodexCLIAdapter(BaseBackend):
         self._last_cumulative_usage: TokenUsage | None = None
         self.tool_registry = None
         self._hashi_mcp_enabled = False
-        self._hashi_mcp_descriptor = None
+        self._native_hook_supported = False
 
     def _should_use_stdin_transport(self, prompt: str) -> bool:
         if (
@@ -202,7 +205,14 @@ class CodexCLIAdapter(BaseBackend):
                 return False
             version = stdout.decode(errors="replace").strip()
             self.logger.info(f"Codex CLI version: {version}")
-            prepare_hashi_mcp(self, backend="codex-cli")
+            import re
+            match = re.search(r"\b(\d+)\.(\d+)\.(\d+)\b", version)
+            self._native_hook_supported = bool(match and tuple(map(int, match.groups())) >= (0, 160, 0))
+            if not self._native_hook_supported:
+                self.logger.warning("Codex native process guard requires the qualified CLI 0.160.0 or newer; unavailable for %s", version)
+            descriptor = prepare_hashi_mcp(self, backend="codex-cli")
+            if descriptor is not None:
+                descriptor.close()
             return True
         except Exception as e:
             self.logger.error(f"Codex CLI not accessible: {e}")
@@ -272,6 +282,13 @@ class CodexCLIAdapter(BaseBackend):
             str(item.get("name") or "").strip()
             for item in payload
             if isinstance(item, dict) and str(item.get("name") or "").strip()
+        }
+        self._external_mcp_server_transport_types = {
+            str(item.get("name") or "").strip(): str(item["transport"].get("type") or "")
+            for item in payload
+            if isinstance(item, dict)
+            and str(item.get("name") or "").strip()
+            and isinstance(item.get("transport"), dict)
         }
         return tuple(sorted(names))
 
@@ -506,6 +523,39 @@ class CodexCLIAdapter(BaseBackend):
             return "Running command"
         return f"Running: {cmd[:100]}"
 
+    @staticmethod
+    def _mcp_completion_outcome(item: Mapping[str, object]) -> str:
+        """Classify only typed MCP terminal evidence; never inspect result text."""
+
+        status = str(item.get("status") or "").strip().casefold()
+        result = item.get("result")
+        result_is_error = (
+            result.get("is_error") if isinstance(result, Mapping) else None
+        )
+        error = item.get("error")
+        if (
+            result_is_error is True
+            or error not in (None, "", {}, [])
+            or status
+            in {
+                "failed",
+                "failure",
+                "error",
+                "declined",
+                "cancelled",
+                "canceled",
+            }
+        ):
+            return "failed"
+        if result_is_error is False or status in {
+            "completed",
+            "complete",
+            "success",
+            "succeeded",
+        }:
+            return "success"
+        return "unknown"
+
     def _summarize_file_change(self, item: dict) -> tuple[str, str, tuple[str, ...]]:
         changes = item.get("changes")
         if isinstance(changes, list) and changes:
@@ -608,6 +658,67 @@ class CodexCLIAdapter(BaseBackend):
                     "exit_code": exit_code,
                 },
             )
+        elif (
+            etype in {"item.started", "item.completed"}
+            and item_type == "mcp_tool_call"
+        ):
+            raw_server = item.get("server")
+            raw_tool = item.get("tool") or item.get("name")
+            server_name = (
+                " ".join(raw_server.split())[:80]
+                if isinstance(raw_server, str)
+                else ""
+            )
+            tool_name = (
+                " ".join(raw_tool.split())[:160]
+                if isinstance(raw_tool, str)
+                else ""
+            )
+            display_name = tool_name or "MCP tool"
+            server_suffix = f" via {server_name}" if server_name else ""
+            phase = "start" if etype == "item.started" else "end"
+            raw_item_id = item.get("id")
+            item_id = raw_item_id.strip() if isinstance(raw_item_id, str) else ""
+            event_id = (
+                "codex:mcp:"
+                f"{hashlib.sha256(item_id.encode('utf-8')).hexdigest()[:24]}:{phase}"
+                if item_id
+                else ""
+            )
+            outcome = (
+                self._mcp_completion_outcome(item)
+                if etype == "item.completed"
+                else ""
+            )
+            if outcome == "failed":
+                summary = f"Failed {display_name}{server_suffix}"
+            elif outcome == "success":
+                summary = f"Completed {display_name}{server_suffix}"
+            elif outcome == "unknown":
+                summary = f"Finished {display_name}{server_suffix} (outcome unknown)"
+            else:
+                summary = f"Calling {display_name}{server_suffix}"
+            metadata = {
+                key: value
+                for key, value in (
+                    ("server", server_name),
+                    ("tool", tool_name),
+                    ("outcome", outcome),
+                )
+                if value
+            }
+            if outcome in {"success", "failed"}:
+                metadata["is_error"] = outcome == "failed"
+            se = StreamEvent(
+                kind=(KIND_TOOL_START if etype == "item.started" else KIND_TOOL_END),
+                summary=summary,
+                tool_name=tool_name or "MCP",
+                event_id=event_id,
+                origin="codex-cli:mcp",
+                phase="execution",
+                provenance="provider_returned",
+                metadata=metadata,
+            )
         elif etype == "item.completed" and item_type == "file_change":
             summary, path, paths = self._summarize_file_change(item)
             se = StreamEvent(
@@ -631,6 +742,7 @@ class CodexCLIAdapter(BaseBackend):
         *,
         reasoning_effort: str | None = None,
         image_paths: tuple[Path, ...] = (),
+        native_hook_receipt: Path | None = None,
     ) -> list[str]:
         """Build the codex exec command. Uses 'resume' sub-command if a session exists.
 
@@ -653,7 +765,13 @@ class CodexCLIAdapter(BaseBackend):
             base_flags += ["-c", f'model_reasoning_effort="{selected_effort}"']
         for image_path in image_paths:
             base_flags += ["--image", str(image_path)]
-        descriptor = self._hashi_mcp_descriptor if self._hashi_mcp_enabled else None
+        descriptor = None
+        if self._hashi_mcp_enabled:
+            descriptor = current_hashi_mcp_invocation(self)
+            if descriptor is None:
+                raise RuntimeError(
+                    "Codex Fixed Tool Gateway request-scoped invocation is missing"
+                )
         if descriptor:
             # A Fixed CLI request must expose exactly the request-scoped HASHI
             # Gateway plus Codex's ordinary local coding surface. Disable every
@@ -666,24 +784,34 @@ class CodexCLIAdapter(BaseBackend):
                 "browser_use",
                 "computer_use",
                 "image_generation",
-                "hooks",
             ):
                 base_flags += ["--disable", feature]
             base_flags += ["-c", 'web_search="disabled"']
             for server_name in self._external_mcp_server_names or ():
-                base_flags += ["-c", disabled_mcp_override(server_name)]
+                transport_type = None
+                if native_hook_receipt is not None:
+                    transport_type = self._external_mcp_server_transport_types.get(server_name)
+                    if transport_type not in {"stdio", "streamable_http"}:
+                        raise RuntimeError("configured MCP transport cannot be safely isolated")
+                base_flags += ["-c", disabled_mcp_override(server_name, transport_type=transport_type)]
             command_value = json.dumps(str(descriptor["command"]), ensure_ascii=False)
             args_value = json.dumps(list(descriptor["args"]), ensure_ascii=False)
             cwd_value = json.dumps(str(descriptor["cwd"]), ensure_ascii=False)
             server_name = str(descriptor["name"])
             mcp_value = (
                 f"mcp_servers.{server_name}={{command={command_value},"
-                f"args={args_value},cwd={cwd_value},enabled=true}}"
+                f"args={args_value},cwd={cwd_value},enabled=true,required=true}}"
             )
             base_flags += [
                 "-c",
                 mcp_value,
             ]
+
+        if native_hook_receipt is not None:
+            from orchestrator.codex_native_hooks import hook_overrides
+            base_flags += hook_overrides(receipt_path=native_hook_receipt)
+        else:
+            base_flags += ["--disable", "hooks"]
 
         if self._session_mode and self._session_id:
             # Resume existing session — access root already set in session, no --add-dir needed
@@ -709,6 +837,25 @@ class CodexCLIAdapter(BaseBackend):
             return response
         return str(fallback or "").strip()
 
+    def _run_question_service(self, request_id):
+        """Interactive transport is only meaningful for a canonical, active PAO Run.
+
+        Provider-only callers retain exec semantics. Questions cannot be attached
+        to an invented Session or to a different Agent's task.
+        """
+        if not self._hashi_mcp_enabled:
+            return None
+        from orchestrator.session_store import SessionStore, SessionNotFound
+        from orchestrator.run_questions import RunQuestions
+        store = SessionStore.from_global_config(self.global_config)
+        try:
+            run = store.get_run_by_request(request_id)
+        except SessionNotFound:
+            return None
+        if run['agent_id'] != str(self.config.name).lower() or run['state'] != 'running':
+            raise ValueError('Codex question Run scope is not active')
+        return RunQuestions(store)
+
     def _event_log_writer(self) -> CodexEventLogWriter:
         return CodexEventLogWriter(
             self.events_log_path,
@@ -724,6 +871,55 @@ class CodexCLIAdapter(BaseBackend):
             return prefix
         return f"{prefix}\n\nLast Codex message before exit:\n{response}"
 
+    @classmethod
+    def _workspace_preflight_failure(
+        cls,
+        workspace: Path,
+    ) -> tuple[str, str] | None:
+        """Inspect only top-level link health before launching Codex.
+
+        The preflight never walks ordinary directories or reads target file
+        content.  It follows a top-level link only far enough to stat its
+        target, which catches the broken project aliases that otherwise make a
+        coding turn fail after tool activity has already begun.
+        """
+
+        try:
+            with os.scandir(workspace) as entries:
+                for index, entry in enumerate(entries):
+                    if index >= cls.WORKSPACE_PREFLIGHT_MAX_ENTRIES:
+                        return (
+                            "CODEX_WORKSPACE_PREFLIGHT_FAILED",
+                            "Codex workspace preflight exceeded the bounded "
+                            f"top-level entry limit ({cls.WORKSPACE_PREFLIGHT_MAX_ENTRIES}); "
+                            "reduce the workspace root entry count before retrying.",
+                        )
+                    try:
+                        linked = entry.is_symlink()
+                        if not linked and os.name == "nt":
+                            junction_check = getattr(Path(entry.path), "is_junction", None)
+                            linked = bool(
+                                callable(junction_check) and junction_check()
+                            )
+                        if not linked:
+                            continue
+                        entry.stat(follow_symlinks=True)
+                    except OSError as exc:
+                        return (
+                            "CODEX_WORKSPACE_LINK_UNAVAILABLE",
+                            "Codex workspace link "
+                            f"{entry.name!r} is unavailable ({type(exc).__name__}); "
+                            "repair or remove the link before starting this coding session.",
+                        )
+        except OSError as exc:
+            return (
+                "CODEX_WORKSPACE_PREFLIGHT_FAILED",
+                "Codex workspace preflight could not inspect the configured "
+                f"workspace root ({type(exc).__name__}); verify workspace permissions "
+                "and availability before retrying.",
+            )
+        return None
+
     def _failure_response(
         self,
         failure: CodexFailure,
@@ -734,9 +930,23 @@ class CodexCLIAdapter(BaseBackend):
         side_effect_item_ids: set[str] | None = None,
         provider_activity_observed: bool = False,
         unobserved_effects_possible: bool = False,
+        process_exit_code: int | None = None,
+        last_tool: Mapping[str, object] | None = None,
     ) -> BackendResponse:
         tool_ids = set(tool_item_ids or ())
         side_effect_ids = set(side_effect_item_ids or ())
+        stream_metadata: dict[str, object] = {
+            "provider_failure_description": failure.description,
+            "provider_activity_observed": bool(
+                provider_activity_observed or tool_ids or last_message
+            ),
+            "codex_tool_item_ids": sorted(tool_ids),
+            "codex_side_effect_item_ids": sorted(side_effect_ids),
+        }
+        if process_exit_code is not None:
+            stream_metadata["codex_process_exit_code"] = int(process_exit_code)
+        if last_tool:
+            stream_metadata["codex_last_tool"] = dict(last_tool)
         return BackendResponse(
             text="",
             duration_ms=duration_ms,
@@ -750,14 +960,7 @@ class CodexCLIAdapter(BaseBackend):
             provider_request_id=failure.provider_request_id,
             retry_after_s=failure.retry_after_s,
             side_effects_possible=bool(side_effect_ids or unobserved_effects_possible),
-            stream_metadata={
-                "provider_failure_description": failure.description,
-                "provider_activity_observed": bool(
-                    provider_activity_observed or tool_ids or last_message
-                ),
-                "codex_tool_item_ids": sorted(tool_ids),
-                "codex_side_effect_item_ids": sorted(side_effect_ids),
-            },
+            stream_metadata=stream_metadata,
         )
 
     async def generate_response(
@@ -786,6 +989,7 @@ class CodexCLIAdapter(BaseBackend):
         # Reset per-request usage tracking
         self._last_usage = None
         self._last_cumulative_usage = None
+        interactive = None
 
         try:
             normalized_request_content = normalize_request_content(request_content)
@@ -805,6 +1009,9 @@ class CodexCLIAdapter(BaseBackend):
         local_fallback_descriptors: tuple[str, ...] = ()
 
         def with_media_metadata(response: BackendResponse) -> BackendResponse:
+            if interactive is not None:
+                response.stream_metadata = {**dict(response.stream_metadata or {}),
+                    'codex_transport': 'app-server', 'native_shell': 'disabled_managed_gateway_only'}
             if media_routing:
                 metadata = dict(response.stream_metadata or {})
                 metadata["multimodal_routing"] = list(media_routing)
@@ -909,6 +1116,43 @@ class CodexCLIAdapter(BaseBackend):
                 )
 
         started = time.perf_counter()
+        if (
+            self._hashi_mcp_enabled
+            and current_hashi_mcp_invocation(self) is None
+        ):
+            return with_media_metadata(
+                BackendResponse(
+                    text="",
+                    duration_ms=round((time.perf_counter() - started) * 1000, 2),
+                    error=(
+                        "Codex Fixed Tool Gateway is unavailable because its "
+                        "request-scoped invocation is missing."
+                    ),
+                    is_success=False,
+                    error_code="CODEX_TOOL_GATEWAY_UNAVAILABLE",
+                    error_retryable=False,
+                    side_effects_possible=False,
+                    stream_metadata={"provider_activity_observed": False},
+                )
+            )
+
+        workspace_preflight = self._workspace_preflight_failure(
+            self.effective_workdir
+        )
+        if workspace_preflight is not None:
+            error_code, error_message = workspace_preflight
+            return with_media_metadata(
+                BackendResponse(
+                    text="",
+                    duration_ms=round((time.perf_counter() - started) * 1000, 2),
+                    error=error_message,
+                    is_success=False,
+                    error_code=error_code,
+                    error_retryable=False,
+                    side_effects_possible=False,
+                    stream_metadata={"provider_activity_observed": False},
+                )
+            )
         output_path = self.config.workspace_dir / f".codex_last_{request_id}.txt"
         if output_path.exists():
             output_path.unlink()
@@ -960,12 +1204,27 @@ class CodexCLIAdapter(BaseBackend):
                     )
                 )
 
+        native_hook_receipt = None
+        if self._native_hook_supported:
+            from orchestrator.request_diagnostics import safe_request_id
+            native_hook_receipt = self.config.workspace_dir / "backend_state" / "native_shell_guard" / (safe_request_id(request_id) + ".json")
+            native_hook_receipt.unlink(missing_ok=True)
         cmd = self._build_cmd(
             prompt_arg,
             output_path,
             reasoning_effort=reasoning_effort,
             image_paths=native_image_paths,
+            native_hook_receipt=native_hook_receipt,
         )
+        question_service = self._run_question_service(request_id)
+        if question_service is not None:
+            from adapters.codex_interactive import InteractiveTurn, app_server_command
+            interactive = InteractiveTurn(self, question_service, request_id, built_prompt, native_image_paths)
+            cmd = app_server_command(cmd)
+            # app-server has no invocation-scoped hook trust. Native shell is
+            # disabled there; the managed Gateway enforces process protection.
+            native_hook_receipt = None
+            stdin_data = None
         session_mode = "resume" if self._session_id else "new"
         resumed_thread_id = self._session_id if self._session_mode else None
         logged_usage_baseline = None
@@ -1004,6 +1263,7 @@ class CodexCLIAdapter(BaseBackend):
         tool_item_ids: set[str] = set()
         side_effect_item_ids: set[str] = set()
         provider_activity_observed = False
+        last_tool_receipt: dict[str, object] | None = None
 
         try:
             try:
@@ -1036,7 +1296,7 @@ class CodexCLIAdapter(BaseBackend):
             invocation = resolve_argv_invocation(cmd)
             self.current_proc = await asyncio.create_subprocess_exec(
                 *invocation.argv,
-                stdin=asyncio.subprocess.PIPE if stdin_data is not None else None,
+                stdin=asyncio.subprocess.PIPE if stdin_data is not None or interactive is not None else None,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(effective_workdir),
@@ -1063,7 +1323,10 @@ class CodexCLIAdapter(BaseBackend):
                 nonlocal terminal_event_at
                 nonlocal terminal_event_type
                 nonlocal terminal_failure
-                async for line in iter_stream_lines(proc.stdout):
+                nonlocal last_tool_receipt
+                lines = (interactive.lines(proc, self._request_reasoning_effort(reasoning_effort=reasoning_effort))
+                         if interactive is not None else iter_stream_lines(proc.stdout))
+                async for line in lines:
                     self._touch_activity()
                     decoded = line.decode(errors="replace")
                     stdout_line_count += 1
@@ -1117,6 +1380,35 @@ class CodexCLIAdapter(BaseBackend):
                             ):
                                 tool_item_ids.add(item_id)
                                 provider_activity_observed = True
+                                raw_command = item.get("command")
+                                if raw_command in (None, ""):
+                                    command_text = ""
+                                elif isinstance(raw_command, str):
+                                    command_text = raw_command
+                                else:
+                                    command_text = json.dumps(
+                                        raw_command,
+                                        ensure_ascii=False,
+                                        sort_keys=True,
+                                        separators=(",", ":"),
+                                    )
+                                last_tool_receipt = {
+                                    "event_type": event_type,
+                                    "item_id": item_id,
+                                    "item_type": item_type,
+                                    "status": str(item.get("status") or ""),
+                                    "exit_code": item.get("exit_code"),
+                                    "command_sha256": (
+                                        hashlib.sha256(
+                                            command_text.encode(
+                                                "utf-8", errors="replace"
+                                            )
+                                        ).hexdigest()
+                                        if command_text
+                                        else None
+                                    ),
+                                    "command_chars": len(command_text),
+                                }
                             if (
                                 event_type in {"item.started", "item.completed"}
                                 and side_effect_item
@@ -1370,6 +1662,21 @@ class CodexCLIAdapter(BaseBackend):
                         request_id,
                     )
 
+            if native_hook_receipt is not None and terminal_event_type == "turn.completed":
+                try:
+                    loaded = json.loads(native_hook_receipt.read_text(encoding="utf-8"))
+                    guard_loaded = loaded.get("type") == "hashi.native-shell-guard" and loaded.get("version") == 1 and loaded.get("loaded") is True
+                except (OSError, ValueError, AttributeError):
+                    guard_loaded = False
+                if not guard_loaded:
+                    return with_media_metadata(BackendResponse(
+                        text="", duration_ms=round((time.perf_counter() - started) * 1000, 2), is_success=False,
+                        error="Codex native process protection did not load; the result cannot be accepted. Check completed operations before repeating this request.",
+                        error_code="CODEX_NATIVE_GUARD_UNAVAILABLE", error_retryable=False,
+                        tool_call_count=len(tool_item_ids), side_effects_possible=bool(side_effect_item_ids),
+                        stream_metadata={"native_process_guard":{"loaded":False}, "provider_activity_observed":provider_activity_observed},
+                    ))
+
             if terminal_failure is not None:
                 if (
                     terminal_failure.code == "CONTEXT_CAPACITY_REJECTED"
@@ -1449,6 +1756,8 @@ class CodexCLIAdapter(BaseBackend):
                         side_effect_item_ids=side_effect_item_ids,
                         provider_activity_observed=provider_activity_observed,
                         unobserved_effects_possible=True,
+                        process_exit_code=returncode,
+                        last_tool=last_tool_receipt,
                     )
                 )
             if returncode != 0 and terminal_event_type == "turn.completed":

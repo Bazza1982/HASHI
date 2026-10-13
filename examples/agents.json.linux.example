@@ -1,7 +1,7 @@
 {
   "global": {
     "project_root": "~/projects",
-    "gemini_cmd": "gemini",
+    "agy_cmd": "agy",
     "claude_cmd": "claude",
     "codex_cmd": "codex",
     "workbench_port": 18800,
@@ -15,7 +15,7 @@
       "type": "flex",
       "display_name": "Sakura",
       "workspace_dir": "~/projects/hashi/workspaces/sakura",
-      "allowed_backends": ["claude-cli", "gemini-cli", "codex-cli", "openrouter-api"],
+      "allowed_backends": ["claude-cli", "antigravity-cli", "codex-cli", "openrouter-api"],
       "active_backend": "claude-cli",
       "is_active": true
     }

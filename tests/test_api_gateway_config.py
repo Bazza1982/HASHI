@@ -32,12 +32,13 @@ def _saved(path):
 def test_missing_config_has_read_only_defaults_and_explicit_save_contract(cfg):
     assert gateway.load_api_gateway_config(cfg) == {
         "enabled": False, "default_model": gateway.default_api_model(),
+        "max_parallel_per_model": 2,
         "updated_at": "", "updated_by": "",
     }
     assert not cfg.bridge_home.exists()
     saved = gateway.save_api_gateway_config(cfg, enabled=True, default_model="GPT-5.5", updated_by="test")
     assert saved["enabled"] is True and saved["default_model"] == "gpt-5.5"
-    assert set(saved) == {"enabled", "default_model", "updated_at", "updated_by"}
+    assert set(saved) == {"enabled", "default_model", "max_parallel_per_model", "updated_at", "updated_by"}
     assert _saved(gateway.config_path_for(cfg)) == saved
     assert gateway.load_api_gateway_config(cfg) == saved
     assert not cfg.project_root.exists()
@@ -56,7 +57,7 @@ def test_bom_read_is_non_mutating_and_save_preserves_unowned_fields(cfg):
     assert not raw.startswith(b"\xef\xbb\xbf") and b"\r\n" not in raw and raw.endswith(b"\n")
     assert _saved(path)["future"] == extension["future"]
     assert _saved(path)["default_model"] == "gpt-5.5"
-    assert set(result) == {"enabled", "default_model", "updated_at", "updated_by"}
+    assert set(result) == {"enabled", "default_model", "max_parallel_per_model", "updated_at", "updated_by"}
 
 
 @pytest.mark.parametrize("bad", [b'{"enabled":', b'[]', b'null', b'\xff', b''])

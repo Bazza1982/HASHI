@@ -14,6 +14,8 @@ from types import SimpleNamespace
 import pytest
 from telegram.error import BadRequest, RetryAfter
 
+from adapters.codex_cli import CodexCLIAdapter
+from adapters.hashi_mcp import current_hashi_mcp_invocation
 from adapters.stream_events import (
     DELIVERY_CONTROL,
     DELIVERY_FINAL,
@@ -31,6 +33,7 @@ from adapters.stream_events import (
 )
 from orchestrator import (
     runtime_cross_session,
+    runtime_debug_reporting,
     runtime_pipeline,
     runtime_retry,
     runtime_session,
@@ -43,8 +46,10 @@ from orchestrator.canonical_audit import (
     CanonicalAuditStore,
 )
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+from orchestrator.flexible_backend_manager import FlexibleBackendManager
 from orchestrator.session_store import SessionStore
 from tools.tool_audit import record_tool_action
+from tools.registry import ToolRegistry
 
 
 class _Logger:
@@ -420,6 +425,63 @@ def _set_stream_policy(runtime, **values):
         telegram_stream_policy.set_policy_value(runtime, name, enabled)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["codex-cli", "her-v2"])
+@pytest.mark.parametrize("trusted_call", [True, False])
+async def test_call_feedback_keeps_local_activity_without_telegram_progress(backend, trusted_call):
+    from orchestrator.message_context import (
+        MESSAGE_CONTEXT_METADATA_KEY, build_message_context_snapshot,
+    )
+    from orchestrator.request_activity import RequestActivityStore
+
+    runtime = _runtime()
+    runtime.config.active_backend = backend
+    runtime._verbose = runtime._think = True
+    runtime._commentary = True
+    runtime.request_activity = RequestActivityStore()
+    runtime.request_activity.start("req-1")
+    sent = []
+    async def flush_thinking(*args, **kwargs):
+        pass
+    runtime._flush_thinking = flush_thinking
+    async def send_text(*args, **kwargs):
+        sent.append((args, kwargs))
+    runtime._send_text = send_text
+    item = _item(source="session-api", session_surface="session-api")
+    snapshot = build_message_context_snapshot(runtime, source=item.source,
+        chat_id=item.chat_id, prompt=item.prompt,
+        metadata={"call_media": {"version": 2, "call_id": "call-1",
+            "turn_id": "turn-1", "mode": "voice"}})
+    item.request_metadata = (
+        {MESSAGE_CONTEXT_METADATA_KEY: snapshot} if trusted_call
+        else {"call_media": {"version": 2, "call_id": "call-1", "turn_id": "turn-1", "mode": "voice"}}
+    )
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime, item, audit_active=False, audit_collector=None)
+    try:
+        if not trusted_call:
+            assert feedback.placeholder is not None
+            assert feedback.typing_task is not None
+            return
+        assert feedback.placeholder is None
+        assert feedback.typing_task is None and feedback.escalation_task is None
+        assert feedback.think_flush_task is None and feedback.preference_event is None
+        await feedback.on_stream_event(StreamEvent(kind=KIND_COMMENTARY,
+            summary="Progress stays on the calling frontend.", event_id="req-1:c:1",
+            delivery_class=DELIVERY_USER_COMMENTARY, origin="her_v2", phase="execution"))
+        assert any(event.get("summary") == "Progress stays on the calling frontend."
+                   for event in runtime.request_activity.poll("req-1")["events"])
+        assert item.deliver_to_telegram is True  # Final delivery policy is unchanged.
+    finally:
+        await runtime_pipeline.cleanup_interactive_feedback(runtime, item,
+            stop_typing=feedback.stop_typing, typing_task=feedback.typing_task,
+            escalation_task=feedback.escalation_task,
+            think_flush_task=feedback.think_flush_task, placeholder=feedback.placeholder,
+            verbose_display_state=feedback.verbose_display_state,
+            preference_event=feedback.preference_event)
+    assert not sent and not runtime.app.bot.sent and not runtime.app.bot.edits and not runtime.app.bot.deleted
+
+
 def test_begin_queue_item_records_processing_metadata():
     runtime = _runtime()
     item = _item(source="bridge:api")
@@ -769,6 +831,103 @@ async def test_build_turn_prompt_collects_context_sections_and_updates_audit_sta
     assert "codex-cli" in prompt.final_prompt
     assert runtime._thinking_chars_this_req == 0
     assert runtime._last_full_prompt_tokens == len(prompt.final_prompt) // 4
+
+
+@pytest.mark.asyncio
+async def test_build_turn_prompt_defers_fixed_gateway_until_backend_launch(tmp_path):
+    runtime = _runtime()
+    runtime.global_config.project_root = Path(__file__).resolve().parents[1]
+    runtime.global_config.api_host = "127.0.0.1"
+    runtime.global_config.workbench_port = 18800
+    runtime.global_config.central_memory = {}
+    runtime.global_config.wiki_provider = {}
+    runtime.global_config.codex_cmd = "codex"
+
+    access_root = tmp_path / "access"
+    workspace = access_root / "workzone"
+    workspace.mkdir(parents=True)
+
+    def resolve_service_endpoint(service, *, expected_instance=None):
+        assert service == "workbench"
+        assert expected_instance == runtime.global_config.instance_id
+        return {
+            "service": service,
+            "instance_id": expected_instance,
+            "base_url": "http://127.0.0.1:18800",
+        }
+
+    backend_config = SimpleNamespace(
+        name="zelda",
+        model="gpt-test",
+        workspace_dir=workspace,
+        system_md=workspace / "agent.md",
+        extra={},
+        resolve_access_root=lambda: access_root,
+    )
+    backend = CodexCLIAdapter(backend_config, runtime.global_config)
+    backend.tool_registry = ToolRegistry(
+        allowed_tools=["file_read"],
+        access_root=access_root,
+        workspace_dir=workspace,
+        secrets={},
+        audit_context={
+            "agent_name": runtime.name,
+            "global_config": runtime.global_config,
+            "_kernel": SimpleNamespace(
+                resolve_service_endpoint=resolve_service_endpoint
+            ),
+        },
+    )
+    backend._hashi_mcp_enabled = True
+    backend._external_mcp_server_names = ()
+
+    manager = FlexibleBackendManager.__new__(FlexibleBackendManager)
+    manager.config = runtime.config
+    manager.current_backend = backend
+    manager.runtime = runtime
+    manager.agent_mode = "fixed"
+    runtime.backend_manager = manager
+
+    observed = []
+
+    async def fake_generate_response(prompt, request_id, **_kwargs):
+        invocation = current_hashi_mcp_invocation(backend)
+        assert invocation is not None
+        context_path = Path(invocation["context_path"])
+        command = backend._build_cmd(prompt, workspace / f"{request_id}.txt")
+        observed.append((request_id, context_path, command))
+        return SimpleNamespace(is_success=True, text=request_id)
+
+    backend.generate_response = fake_generate_response
+
+    for request_id in ("req-fixed-a", "req-fixed-b"):
+        item = _item(request_id=request_id)
+        runtime_pipeline.begin_queue_item(runtime, item)
+        turn = await runtime_pipeline.build_turn_prompt(
+            runtime,
+            item,
+            is_bridge_request=False,
+        )
+
+        assert current_hashi_mcp_invocation(backend) is None
+        assert not list((workspace / "backend_state").glob("*-hashi-mcp-*.json"))
+
+        response = await manager.generate_response(turn.final_prompt, request_id)
+
+        assert response.text == request_id
+        assert current_hashi_mcp_invocation(backend) is None
+        assert backend._active_hashi_mcp_invocations == {}
+
+    assert observed[0][1] != observed[1][1]
+    assert all(not context_path.exists() for _, context_path, _ in observed)
+    for _, _, command in observed:
+        overrides = [
+            command[index + 1]
+            for index, value in enumerate(command[:-1])
+            if value == "-c"
+            and command[index + 1].startswith("mcp_servers.hashi_tools=")
+        ]
+        assert len(overrides) == 1
 
 
 def test_begin_queue_item_marks_typed_scheduled_jobs_isolated():
@@ -3325,6 +3484,36 @@ async def test_handle_empty_success_response_buffers_transfer():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("wrapped_text", ["completed provider output", ""])
+async def test_stop_during_final_wrapper_never_publishes_success(wrapped_text):
+    from orchestrator import runtime_cancel
+
+    runtime = _runtime()
+    item = _item()
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def wrapper(_item, text):
+        entered.set()
+        await release.wait()
+        return wrapped_text, None
+
+    runtime._apply_wrapper_to_visible_text = wrapper
+    pending = asyncio.create_task(runtime_pipeline.prepare_successful_response(
+        runtime, item, SimpleNamespace(text="completed provider output"), completion_path="foreground"
+    ))
+    await entered.wait()
+    runtime_cancel.requested_ids(runtime).add(item.request_id)
+    release.set()
+    result = await pending
+    assert result.cancelled
+    assert not runtime.success_marked
+    assert runtime.transcripts == []
+    assert len(runtime.listener_payloads) == 1
+    assert runtime.listener_payloads[0]["interrupted"]
+    assert not runtime.listener_payloads[0]["success"]
+
+
+@pytest.mark.asyncio
 async def test_prepare_successful_response_applies_wrapper_and_notifies_listeners():
     runtime = _runtime()
     item = _item()
@@ -3350,6 +3539,103 @@ async def test_prepare_successful_response_applies_wrapper_and_notifies_listener
     ]
     assert runtime.listener_payloads[0]["text"] == "wrapped:core text"
     assert runtime.listener_payloads[0]["wrapped"] is True
+
+
+@pytest.mark.asyncio
+async def test_prepare_successful_response_projects_one_verified_read_without_double_count():
+    runtime = _runtime()
+    item = _item(request_id="req-success-read")
+    digest = "a" * 64
+    details = {
+        "receipt_completed": True,
+        "receipt_status": "success",
+        "effect_receipt": {
+            "kind": "read",
+            "tool_name": "file_read",
+            "evidence_ref": f"tool:call-read:sha256:{digest}",
+            "revision": f"sha256:{digest}",
+        },
+    }
+    for _ in range(2):
+        record_tool_action(
+            workspace_dir=runtime.workspace_dir,
+            tool_name="file_read",
+            tool_call_id="call-read",
+            arguments={"path": "qa-final-read.txt"},
+            output="synthetic fixture",
+            is_error=False,
+            duration_ms=1,
+            audit_context={"request_id": item.request_id},
+            details=details,
+        )
+    response = SimpleNamespace(
+        text="read complete",
+        tool_call_count=1,
+        side_effects_possible=False,
+        stream_metadata={},
+    )
+
+    await runtime_pipeline.prepare_successful_response(
+        runtime, item, response, completion_path="foreground"
+    )
+
+    payload = runtime.listener_payloads[0]
+    assert payload["tool_call_count"] == 1
+    assert payload["effect_reconciliation"] == {
+        "confirmed_read_count": 1,
+        "confirmed_write_count": 0,
+        "no_change_count": 0,
+        "completed_action_count": 1,
+        "pending_action_count": 0,
+        "observed_tool_count": 1,
+        "unverified_action_count": 0,
+        "completed_background_job_count": 0,
+        "evidence_limited": False,
+    }
+    assert runtime_debug_reporting.safe_retry_evidence(payload)["status"] == "not_applicable"
+    projection_path = runtime_debug_reporting.persist_terminal_diagnostic(
+        runtime, item.request_id, payload
+    )
+    assert projection_path is not None
+    projection = json.loads(projection_path.read_text(encoding="utf-8"))
+    assert projection["effects"]["tool_call_count"] == 1
+    assert projection["effects"]["reconciliation"] == payload["effect_reconciliation"]
+    assert projection["safe_retry_evidence"]["status"] == "not_applicable"
+
+
+@pytest.mark.asyncio
+async def test_prepare_successful_response_projects_write_and_unknown_effects():
+    runtime = _runtime()
+    item = _item(request_id="req-success-effects")
+    record_tool_action(
+        workspace_dir=runtime.workspace_dir,
+        tool_name="file_write",
+        tool_call_id="call-write",
+        arguments={},
+        output="ok",
+        is_error=False,
+        duration_ms=1,
+        audit_context={"request_id": item.request_id},
+        details={"effect_receipt": {"kind": "write", "readback": True}},
+    )
+    response = SimpleNamespace(
+        text="write complete",
+        tool_call_count=2,
+        side_effects_possible=True,
+        stream_metadata={},
+    )
+
+    await runtime_pipeline.prepare_successful_response(
+        runtime, item, response, completion_path="foreground"
+    )
+
+    payload = runtime.listener_payloads[0]
+    assert payload["tool_call_count"] == 2
+    assert payload["side_effects_possible"] is True
+    assert payload["effect_reconciliation"]["confirmed_write_count"] == 1
+    assert payload["effect_reconciliation"]["observed_tool_count"] == 2
+    assert payload["effect_reconciliation"]["unverified_action_count"] == 1
+    assert runtime_debug_reporting.safe_retry_evidence(payload)["status"] == "not_applicable"
 
 
 @pytest.mark.asyncio
@@ -3754,7 +4040,11 @@ async def test_handle_backend_error_exposes_typed_failure_metadata_to_listeners(
     assert payload["side_effects_possible"] is True
     assert payload["effect_reconciliation"]["unverified_action_count"] == 3
     assert runtime.sent_message["text"] == response.error
-    assert runtime.sent_message["error_context"] == {
+    context = runtime.sent_message["error_context"]
+    assert {key: context[key] for key in (
+        "error_code", "error_retryable", "http_status", "provider_request_id",
+        "retry_after_s", "tool_call_count", "side_effects_possible", "effect_reconciliation",
+    )} == {
         "error_code": "PROVIDER_CAPACITY_UNAVAILABLE",
         "error_retryable": True,
         "http_status": 503,
@@ -3763,13 +4053,23 @@ async def test_handle_backend_error_exposes_typed_failure_metadata_to_listeners(
         "tool_call_count": 3,
         "side_effects_possible": True,
         "effect_reconciliation": {
+            "confirmed_read_count": 0,
             "confirmed_write_count": 0,
+            "no_change_count": 0,
+            "completed_action_count": 0,
+            "pending_action_count": 0,
             "observed_tool_count": 3,
             "unverified_action_count": 3,
             "completed_background_job_count": 0,
-            "evidence_limited": False,
+            "evidence_limited": True,
         },
     }
+    assert context["backend"] == "codex-cli"
+    assert context["provider_request_ids"] == ["req_provider_1"]
+    assert context["public_failure"] == payload["public_failure"]
+    assert context["public_failure"]["retry_action"] == "verify_results"
+    assert context["public_failure"]["effects"]["unverified_action_count"] == 3
+    assert "retry the request" not in context["public_failure"]["text"].lower()
     diagnostic_log = next(
         message
         for message in runtime.error_logger.messages
@@ -3901,9 +4201,22 @@ async def test_handle_backend_error_buffers_transfer_without_delivery():
 
 
 @pytest.mark.asyncio
-async def test_handle_success_delivery_sends_response_and_routes_hchat(monkeypatch):
+@pytest.mark.parametrize("trusted_call", [False, True])
+async def test_handle_success_delivery_sends_response_and_routes_hchat(monkeypatch, trusted_call):
+    from orchestrator.message_context import (
+        MESSAGE_CONTEXT_METADATA_KEY, build_message_context_snapshot,
+    )
+
     runtime = _runtime()
     item = _item(prompt="user text")
+    call_media = {"version": 2, "call_id": "call-1", "turn_id": "turn-1", "mode": "voice"}
+    # An unsealed caller hint must not suppress ordinary voice preferences.
+    item.request_metadata = {"call_media": call_media}
+    if trusted_call:
+        item.request_metadata[MESSAGE_CONTEXT_METADATA_KEY] = build_message_context_snapshot(
+            runtime, source="session-api", chat_id=item.chat_id, prompt=item.prompt,
+            metadata={"call_media": call_media},
+        )
     response = SimpleNamespace(text="core text")
     delivery_outcomes = []
     monkeypatch.setattr(
@@ -3930,7 +4243,7 @@ async def test_handle_success_delivery_sends_response_and_routes_hchat(monkeypat
 
     assert runtime.last_response["text"] == "visible text"
     assert runtime.sent_message["text"] == "visible text"
-    assert runtime.voice_replies == [(123, "visible text", "req-1")]
+    assert runtime.voice_replies == ([] if trusted_call else [(123, "visible text", "req-1")])
     assert runtime.audit_followups[0]["audit_collector"] == "audit"
     assert runtime.hchat_routes == [("req-1", "visible text")]
     assert runtime.maintenance_events[-1][0] == "send_success"

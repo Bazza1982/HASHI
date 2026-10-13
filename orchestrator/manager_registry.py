@@ -34,6 +34,12 @@ FUNCTION_MANAGER_SPECS: tuple[ManagerSpec, ...] = (
     ),
     ManagerSpec("skill_manager", "orchestrator.skill_manager", "SkillManager", "skill"),
     ManagerSpec("config_admin", "orchestrator.config_admin", "ConfigAdmin", "paths"),
+    ManagerSpec(
+        "agent_management",
+        "orchestrator.agent_management",
+        "AgentManagementManager",
+        "kernel",
+    ),
     ManagerSpec("backend_preflight", "orchestrator.backend_preflight", "BackendPreflight", "empty"),
     ManagerSpec("agent_lifecycle", "orchestrator.agent_lifecycle", "AgentLifecycleManager", "kernel"),
     ManagerSpec("agent_move_manager", "orchestrator.agent_move.manager", "AgentMoveManager", "kernel"),

@@ -22,6 +22,24 @@ ALLOWED_RESTART_SOURCES = {"telegram", "whatsapp", "tui", "agent"}
 _RESTART_INFLIGHT_ATTR = "_restart_inflight"
 
 
+def _cold_restart_result(
+    *, accepted: bool, reason: str | None = None
+) -> dict[str, Any]:
+    """Return immediate command admission, never a fabricated terminal receipt."""
+
+    result: dict[str, Any] = {
+        "action": "restart",
+        "kind": "cold",
+        "accepted": bool(accepted),
+        "status": "accepted" if accepted else "rejected",
+        "terminal": False,
+        "outcome": "unknown" if accepted else "rejected",
+    }
+    if reason:
+        result["reason"] = str(reason)
+    return result
+
+
 def _global_config(runtime: Any) -> Any:
     global_config = getattr(runtime, "global_config", None)
     if global_config is None:
@@ -356,12 +374,16 @@ def _restart_status_keyboard(confirm: bool = False, *, available: bool = True) -
     )
 
 
-async def restart_command(runtime: Any, update: Any, context: Any) -> None:
+async def restart_command(
+    runtime: Any, update: Any, context: Any
+) -> dict[str, Any] | None:
     if not _authorized(runtime, update):
         return
     if getattr(runtime, _RESTART_INFLIGHT_ATTR, False):
         await runtime._reply_text(update, ui_language.tr("api.restart.in_progress"))
-        return
+        return _cold_restart_result(
+            accepted=False, reason="restart_already_in_progress"
+        )
     available, error, _payload = await _restart_available(runtime)
     if not available:
         await runtime._reply_text(
@@ -372,7 +394,9 @@ async def restart_command(runtime: Any, update: Any, context: Any) -> None:
             ),
             parse_mode="HTML",
         )
-        return
+        return _cold_restart_result(
+            accepted=False, reason=error or "remote_unavailable"
+        )
     try:
         request_source = _restart_request_source(context)
         request_payload = _build_restart_payload(
@@ -389,7 +413,9 @@ async def restart_command(runtime: Any, update: Any, context: Any) -> None:
             ),
             parse_mode="HTML",
         )
-        return
+        return _cold_restart_result(
+            accepted=False, reason=f"{type(exc).__name__}: {exc}"
+        )
     setattr(runtime, _RESTART_INFLIGHT_ATTR, True)
     chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
     await runtime._reply_text(
@@ -399,6 +425,7 @@ async def restart_command(runtime: Any, update: Any, context: Any) -> None:
         ),
     )
     asyncio.create_task(_dispatch_restart(runtime, chat_id, request_payload))
+    return _cold_restart_result(accepted=True)
 
 
 async def _restart_available(

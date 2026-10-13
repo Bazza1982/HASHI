@@ -122,3 +122,50 @@ def test_backend_catalogue_route_is_registered(tmp_path):
     }
     assert ("GET", "/api/backends/catalogue") in routes
     assert ("POST", "/api/admin/add-agent") in routes
+
+
+@pytest.mark.asyncio
+async def test_catalogue_and_agent_creation_inherit_visible_native_codex_models(tmp_path, monkeypatch):
+    from orchestrator.agent_creation import build_ordinary_backend_row
+
+    codex_home = tmp_path / "codex"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    (codex_home / "models_cache.json").write_text(json.dumps({
+        "identity": "must-not-be-exposed",
+        "models": [
+            {"slug": "gpt-6.1-sol", "visibility": "list",
+             "supported_reasoning_levels": [{"effort": "max"}, {"effort": "ultra"}]},
+            {"slug": "internal-review", "visibility": "hide"},
+        ],
+    }), encoding="utf-8")
+    server = _server(tmp_path)
+    response = await server.handle_backend_catalogue(object())
+    row = json.loads(response.text)["backends"]["codex-cli"]
+    assert "gpt-6.1-sol" in row["models"]
+    assert "internal-review" not in row["models"]
+    assert row["model_efforts"]["gpt-6.1-sol"] == ["max", "ultra"]
+    assert "must-not-be-exposed" not in response.text
+    assert build_ordinary_backend_row("codex-cli", "gpt-6.1-sol", "ultra") == {
+        "engine": "codex-cli", "model": "gpt-6.1-sol", "effort": "ultra",
+    }
+
+    from orchestrator.runtime_effort_options import get_available_models
+    assert get_available_models("codex-cli", backend={"available_models": []}) == []
+    with pytest.raises(ValueError):
+        get_available_models("codex-cli", backend={"available_models": "all"})
+    # A new cache revision is observed without restarting the Functions.
+    (codex_home / "models_cache.json").write_text(json.dumps({"models": [
+        {"slug": "next-cli-model", "visibility": "list"},
+    ]}), encoding="utf-8")
+    response = await server.handle_backend_catalogue(object())
+    refreshed = json.loads(response.text)["backends"]["codex-cli"]["models"]
+    assert "next-cli-model" in refreshed
+    assert "gpt-6.1-sol" not in refreshed
+    # Partial/malformed/missing cache falls back to qualified compatibility.
+    for content in ("{", "[]", '{"models": [null, {"slug": "hidden", "visibility": "hide"}]}'):
+        (codex_home / "models_cache.json").write_text(content, encoding="utf-8")
+        assert "gpt-6-sol" in get_available_models("codex-cli")
+        assert "hidden" not in get_available_models("codex-cli")
+    (codex_home / "models_cache.json").unlink()
+    assert "gpt-6-sol" in get_available_models("codex-cli")

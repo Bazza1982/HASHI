@@ -27,6 +27,7 @@ class ControlLaneResult:
 class _InterruptRequest:
     reason: str
     future: concurrent.futures.Future[ControlLaneResult]
+    backend: Any = None
 
 
 class AgentControlLane:
@@ -49,7 +50,9 @@ class AgentControlLane:
         future: concurrent.futures.Future[ControlLaneResult] = (
             concurrent.futures.Future()
         )
-        self._queue.put(_InterruptRequest(str(reason or "USER_STOP"), future))
+        # Freeze the caller's Session adapter before crossing the daemon-thread
+        # boundary; that thread has no asyncio execution ContextVar.
+        self._queue.put(_InterruptRequest(str(reason or "USER_STOP"), future, self._active_backend()))
         return await asyncio.wrap_future(future)
 
     def close(self, timeout_s: float = 5.0) -> None:
@@ -75,7 +78,7 @@ class AgentControlLane:
             if request.future.cancelled():
                 continue
             try:
-                backend = self._active_backend()
+                backend = request.backend
                 interrupt = getattr(backend, "interrupt_nowait", None)
                 count = (
                     int(interrupt(request.reason) or 0)

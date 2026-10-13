@@ -153,6 +153,7 @@ async def _maybe_execute_extension_bridge(action: str, args: dict) -> Optional[s
     # endpoint and key-file path as private execution metadata.  Remove those
     # values before building the extension payload or audit record.
     bridge_args = dict(args)
+    bridge_args.pop("_bound_browser_worker", None)
     bridge_endpoint = str(bridge_args.pop("_bridge_endpoint", "") or "").strip()
     bridge_auth_raw = str(bridge_args.pop("_bridge_auth_file", "") or "").strip()
     bridge_auth_file = Path(bridge_auth_raw).expanduser() if bridge_auth_raw else None
@@ -178,7 +179,7 @@ async def _maybe_execute_extension_bridge(action: str, args: dict) -> Optional[s
         if mode in _EXTENSION_BACKENDS:
             return (
                 "Error: HASHI browser extension bridge is not connected. "
-                "Install the Option D bridge and ensure Chrome is running."
+                "Check the selected browser and its Option D bridge."
             )
         return None
 
@@ -362,6 +363,8 @@ async def execute_browser_open_play_verify(args: dict) -> str:
     stages: list[dict] = []
     health = await _wait_for_extension_connection(0.6)
     if not health.get("connected"):
+        if args.get("_bound_browser_worker"):
+            return "Error: the selected browser bridge disconnected; HASHI will not switch browsers"
         if platform.system() != "Windows":
             return json.dumps(
                 {

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import html
 import logging
+from types import SimpleNamespace
 from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -257,6 +258,38 @@ async def _reply(runtime: Any, update: Any, text: str, **kwargs: Any) -> Any:
     if callable(helper):
         return await helper(update, text, **kwargs)
     return await update.message.reply_text(text, **kwargs)
+
+
+async def _reply_from_callback(
+    runtime: Any,
+    update: Any,
+    query: Any,
+    text: str,
+    **kwargs: Any,
+) -> Any:
+    """Project a callback follow-up through the canonical reply owner."""
+
+    helper = getattr(runtime, "_reply_text", None)
+    if not callable(helper):
+        return await query.message.reply_text(text, **kwargs)
+    projected = SimpleNamespace(
+        update_id=getattr(update, "update_id", None),
+        effective_user=getattr(update, "effective_user", None)
+        or getattr(query, "from_user", None),
+        effective_chat=getattr(update, "effective_chat", None)
+        or getattr(query.message, "chat", None),
+        message=query.message,
+    )
+    for attribute in (
+        "_hashi_session_surface",
+        "_hashi_session_channel_key",
+        "_hashi_session_id",
+        "_hashi_session_owner_id",
+        "_hashi_ui_locale",
+    ):
+        if hasattr(update, attribute):
+            setattr(projected, attribute, getattr(update, attribute))
+    return await helper(projected, text, **kwargs)
 
 
 async def _reply_slots(runtime: Any, update: Any, scope: str) -> None:
@@ -559,7 +592,10 @@ async def callback_sys(runtime: Any, update: Any, context: Any) -> None:
         await _edit_slot(runtime, query, scope, slot)
     elif action == "output":
         text = str(manager.get_slot(slot).get("text") or "")
-        await query.message.reply_text(
+        await _reply_from_callback(
+            runtime,
+            update,
+            query,
             text if text else ui_language.tr("common.empty"), parse_mode=None
         )
     elif action == "on":

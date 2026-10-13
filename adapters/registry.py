@@ -5,11 +5,13 @@ from __future__ import annotations
 import importlib
 import importlib.util
 
-from orchestrator.flexible_backend_registry import canonical_backend_engine
+from orchestrator.flexible_backend_registry import (
+    canonical_backend_engine,
+    removed_backend_reason,
+)
 
 
 _BACKEND_ADAPTER_TARGETS: dict[str, tuple[str, str]] = {
-    "gemini-cli": ("adapters.gemini_cli", "GeminiCLIAdapter"),
     "antigravity-cli": ("adapters.antigravity_cli", "AntigravityCLIAdapter"),
     "openrouter-api": ("adapters.openrouter_api", "OpenRouterAdapter"),
     "deepseek-api": ("adapters.deepseek_api", "DeepSeekAdapter"),
@@ -44,6 +46,8 @@ def packaged_backend_engines() -> frozenset[str]:
 
 
 def get_backend_class(engine_name: str):
+    if reason := removed_backend_reason(engine_name):
+        raise ValueError(reason)
     engine = canonical_backend_engine(engine_name)
     try:
         module_name, class_name = _BACKEND_ADAPTER_TARGETS[engine]

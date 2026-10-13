@@ -13,7 +13,11 @@ from adapters.stream_events import (
     KIND_FILE_READ, KIND_FILE_EDIT, KIND_SHELL_EXEC,
     KIND_TEXT_DELTA, KIND_PROGRESS,
 )
-from adapters.hashi_mcp import prepare_hashi_mcp, write_claude_mcp_config
+from adapters.hashi_mcp import (
+    current_hashi_mcp_invocation,
+    prepare_hashi_mcp,
+    write_claude_mcp_config,
+)
 from orchestrator.process_execution import (
     process_group_kwargs,
     resolve_argv_invocation,
@@ -53,8 +57,6 @@ class ClaudeCLIAdapter(BaseBackend):
         self._last_cost_usd: float | None = None
         self.tool_registry = None
         self._hashi_mcp_enabled = False
-        self._hashi_mcp_descriptor = None
-        self._hashi_mcp_config_path: Path | None = None
 
     def _resolve_system_prompt_source(self) -> Path | None:
         candidate = self.config.workspace_dir / "agent.md"
@@ -84,9 +86,7 @@ class ClaudeCLIAdapter(BaseBackend):
             self.logger.info(f"Claude CLI version: {version}")
             descriptor = prepare_hashi_mcp(self, backend="claude-cli")
             if descriptor:
-                self._hashi_mcp_config_path = write_claude_mcp_config(
-                    self, descriptor
-                )
+                descriptor.close()
             return True
         except Exception as e:
             self.logger.error(f"Claude CLI not accessible: {e}")
@@ -304,11 +304,21 @@ class ClaudeCLIAdapter(BaseBackend):
         ]
         for directory in self.effective_add_dirs:
             cmd.extend(["--add-dir", str(directory)])
-        if self._hashi_mcp_enabled and self._hashi_mcp_config_path is not None:
+        descriptor = (
+            current_hashi_mcp_invocation(self)
+            if self._hashi_mcp_enabled
+            else None
+        )
+        request_mcp_config = (
+            write_claude_mcp_config(self, descriptor)
+            if descriptor is not None
+            else None
+        )
+        if request_mcp_config is not None:
             cmd.extend(
                 [
                     "--mcp-config",
-                    str(self._hashi_mcp_config_path),
+                    str(request_mcp_config),
                     "--strict-mcp-config",
                 ]
             )

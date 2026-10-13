@@ -179,6 +179,7 @@ def test_hashi_api_rejects_cross_instance_topology(tmp_path):
         ("gpt-5.6-luna", "high", "high"),
         ("gpt-5.6-sol", "max", "max"),
         ("gpt-5.6-luna", "off", "none"),
+        ("gpt-5.6-luna", "default", "low"),
     ],
 )
 def test_hashi_api_sends_gateway_reasoning_effort_not_openrouter_reasoning(
@@ -216,6 +217,53 @@ async def test_hashi_api_initializes_without_a_provider_secret(tmp_path):
     }
 
     await adapter.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_phone_judgment_uses_hashi_gateway_without_tools_or_old_context(tmp_path):
+    from orchestrator.frontend_live_voice.worker_actions import invoke_phone_judgment
+
+    adapter = _adapter(tmp_path)
+    adapter.tool_registry = _MediaFallbackRegistry()
+    adapter.sys_prompt = "PREVIOUS_REQUEST_CONTEXT"
+    requests = []
+    decision = {"route": "incomplete", "actions": []}
+
+    def receive(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json={
+            "id": "phone-provider-receipt",
+            "choices": [{"message": {"role": "assistant", "content": json.dumps(decision)},
+                         "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 30, "completion_tokens": 6},
+        })
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(receive))
+    adapter.client = client
+    manager = SimpleNamespace(
+        config=SimpleNamespace(active_backend="her-v2"),
+        current_backend=SimpleNamespace(_v2_config=SimpleNamespace(profiles={
+            "auxiliary": SimpleNamespace(engine="hashi-api", model="gpt-5.6-luna")}),
+        ),
+        create_ephemeral_backend=lambda engine, target_model: adapter,
+    )
+    usage = []
+    result = await invoke_phone_judgment(SimpleNamespace(backend_manager=manager),
+                                        {"utterance": "Wait for the next instruction"},
+                                        observe_usage=usage.append)
+    assert result == decision
+    assert len(requests) == 1
+    payload = requests[0]
+    assert payload["model"] == "gpt-5.6-luna"
+    assert payload["reasoning_effort"] == "none"
+    assert not payload.get("tools")
+    assert "session_id" not in payload
+    assert "PREVIOUS_REQUEST_CONTEXT" not in json.dumps(payload)
+    assert "Wait for the next instruction" in json.dumps(payload)
+    assert adapter.tool_registry is None
+    assert usage[0]["status"] == "completed"
+    assert usage[0]["input"] == 30 and usage[0]["output"] == 6
+    assert client.is_closed
 
 
 @pytest.mark.asyncio
@@ -666,6 +714,108 @@ async def test_hashi_api_tool_loop_sends_full_prompt_once_then_only_tool_delta(
         2,
         1,
     ]
+
+
+@pytest.mark.asyncio
+async def test_hashi_api_inline_image_tool_rounds_keep_complete_conversation(
+    tmp_path,
+):
+    image = tmp_path / "photo.png"
+    image_bytes = b"\x89PNG\r\n\x1a\nmultiround"
+    image.write_bytes(image_bytes)
+    content = canonical_request_content(
+        [
+            {"type": "text", "item_index": 1, "text": "Inspect these files."},
+            {
+                "type": "media",
+                "item_index": 2,
+                "attachment_id": "image-1",
+                "modality": "image",
+                "kind": "photo",
+                "mime_type": "image/png",
+                "filename": image.name,
+                "local_ref": str(image),
+                "size_bytes": len(image_bytes),
+                "sha256": hashlib.sha256(image_bytes).hexdigest(),
+                "transport": {},
+            },
+        ]
+    )
+    adapter = _adapter(tmp_path)
+    adapter.tool_registry = SimpleNamespace(
+        get_tool_definitions=lambda tiers=None: []
+    )
+    calls = [
+        {
+            "id": f"read-{number}",
+            "type": "function",
+            "function": {
+                "name": "file_read",
+                "arguments": json.dumps({"path": f"file-{number}.txt"}),
+            },
+        }
+        for number in (1, 2)
+    ]
+    requests = []
+
+    async def handler(request):
+        body = json.loads(request.content)
+        requests.append((body, dict(request.headers)))
+        index = len(requests) - 1
+        message = {"role": "assistant", "content": "files inspected"}
+        if index < 2:
+            message["tool_calls"] = [calls[index]]
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": message,
+                        "finish_reason": "tool_calls" if index < 2 else "stop",
+                    }
+                ],
+            },
+        )
+
+    async def run_tool_calls(tool_calls, messages, _callback, **_kwargs):
+        for call in tool_calls:
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call["id"],
+                    "content": f"contents for {call['id']}",
+                }
+            )
+
+    adapter.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    adapter._run_tool_calls = run_tool_calls
+    try:
+        response = await adapter.generate_response(
+            "Inspect these files.", "request-image-tools", request_content=content
+        )
+        assert response.is_success is True
+        assert len(requests) == 3
+        initial_messages = requests[0][0]["messages"]
+        for index, (body, headers) in enumerate(requests):
+            assert "session_id" not in body
+            assert "x-hashi-external-tool-session" not in headers
+            assert body["messages"][:2] == initial_messages
+            assert [message["role"] for message in body["messages"]] == (
+                ["system", "user"] + ["assistant", "tool"] * index
+            )
+            for round_index in range(index):
+                assistant, result = body["messages"][2 + round_index * 2 :][:2]
+                assert assistant["tool_calls"] == [calls[round_index]]
+                assert result["tool_call_id"] == calls[round_index]["id"]
+                assert result["content"] == f"contents for read-{round_index + 1}"
+        image_url = initial_messages[1]["content"][1]["image_url"]["url"]
+        assert base64.b64decode(image_url.partition(",")[2]) == image_bytes
+        continuation = response.stream_metadata["gateway_continuation"]
+        assert continuation["enabled"] is False
+        assert continuation["full_prompt_send_count"] == 3
+        assert all(not call["incremental"] for call in continuation["transport_calls"])
+    finally:
+        await adapter.shutdown()
 
 
 @pytest.mark.asyncio

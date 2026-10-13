@@ -1,8 +1,9 @@
-"""Cache-backed exact model capability facts for PAO media routing.
+"""Durable exact model capability facts for PAO media routing.
 
 The message path is cache-only.  Network refresh is asynchronous and shares
-only bounded HTTP evidence with pricing discovery; capability validation,
-freshness, persistence, and failure state remain independent.
+only bounded HTTP evidence with pricing discovery; capability validation and
+persistence remain independent.  Verified model facts do not expire with time;
+only unverified lookup failures have a retry interval.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ import re
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
@@ -33,7 +34,6 @@ from tools.pricing_sources import (
 
 CACHE_SCHEMA_VERSION = 2
 ADAPTER_REVISION = "openrouter-model-capability.v3"
-SUCCESS_TTL = timedelta(hours=24)
 NEGATIVE_TTL = timedelta(minutes=15)
 LOCK_WAIT_SECONDS = 20.0
 LOCK_STALE_SECONDS = 60.0
@@ -75,7 +75,7 @@ class CapabilityFact:
     source_url: str | None
     source_kind: str | None
     fetched_at: str
-    expires_at: str
+    expires_at: str | None
     source_revision: str | None
     revision_kind: str | None
     evidence_sha256: str | None
@@ -363,6 +363,12 @@ def _unknown_fact(
 
 
 def _fact_is_fresh(fact: CapabilityFact, now: datetime) -> bool:
+    # A verified exact-model capability is stable until replaced by new
+    # verified evidence or an explicit identity/adapter revision change.
+    # The timestamp on legacy known facts was a lookup deadline, not a
+    # change in the model's ability, so it must not revoke media routing.
+    if fact.status == "known":
+        return True
     try:
         return _parse_time(fact.expires_at) > _utc(now)
     except (TypeError, ValueError):
@@ -399,10 +405,20 @@ def _valid_cached_fact(fact: CapabilityFact, engine: str, model: str) -> bool:
         return False
     try:
         fetched_at = _parse_time(fact.fetched_at)
-        expires_at = _parse_time(fact.expires_at)
+        # Old known entries remain readable without making their historical
+        # expiry timestamp an eligibility condition.  Newly verified entries
+        # have no expiry.  Unknown entries still carry a short retry deadline.
+        expires_at = (
+            _parse_time(fact.expires_at)
+            if fact.expires_at is not None
+            else None
+        )
     except (TypeError, ValueError):
         return False
-    if expires_at <= fetched_at:
+    if fact.status == "known":
+        if expires_at is not None and expires_at <= fetched_at:
+            return False
+    elif expires_at is None or expires_at <= fetched_at:
         return False
 
     if fact.status == "known":
@@ -486,7 +502,23 @@ def _cached_fact(
         fact = CapabilityFact.from_dict(payload.get("facts", {}).get(key))
     except (TypeError, ValueError):
         return None
-    return fact if _valid_cached_fact(fact, engine, model) else None
+    if not _valid_cached_fact(fact, engine, model):
+        return None
+    # Do not expose a misleading expired deadline from a legacy verified fact.
+    return replace(fact, expires_at=None) if fact.status == "known" else fact
+
+
+def _retained_known_fact(
+    fact: CapabilityFact | None,
+    *,
+    source_model_id: str | None = None,
+) -> CapabilityFact | None:
+    if fact is None or fact.status != "known":
+        return None
+    # A newly resolved source identity must not inherit the old model's fact.
+    if source_model_id is not None and fact.source_model_id != source_model_id:
+        return None
+    return fact
 
 
 def get_cached_capability_fact(
@@ -496,7 +528,7 @@ def get_cached_capability_fact(
     cache_path: Path | str | None = None,
     now: datetime | None = None,
 ) -> CapabilityFact:
-    """Read one exact fact without network I/O; stale data grants no route."""
+    """Read one exact fact without network I/O; unverified facts grant no route."""
 
     selected_now = _utc(now)
     payload = _read_cache(_selected_cache_path(cache_path))
@@ -608,7 +640,7 @@ def _openrouter_fact(
         source_url=evidence.url,
         source_kind=OPENROUTER_SOURCE_KIND,
         fetched_at=_iso(evidence.fetched_at),
-        expires_at=_iso(now + SUCCESS_TTL),
+        expires_at=None,
         source_revision=f"openrouter-capability:sha256:{evidence_hash}",
         revision_kind="content_sha256",
         evidence_sha256=evidence_hash,
@@ -653,6 +685,9 @@ def refresh_capability_fact(
                 engine,
                 model,
             )
+            retained = _retained_known_fact(previous)
+            if retained is not None:
+                return retained
             return _unknown_fact(
                 engine,
                 model,
@@ -667,6 +702,9 @@ def refresh_capability_fact(
                 engine,
                 model,
             )
+            retained = _retained_known_fact(previous)
+            if retained is not None:
+                return retained
             return _unknown_fact(
                 engine,
                 model,
@@ -729,6 +767,12 @@ def refresh_capability_fact(
                 ):
                     return latest
                 if fact is None:
+                    retained = _retained_known_fact(
+                        latest or previous,
+                        source_model_id=source_model_id,
+                    )
+                    if retained is not None:
+                        return retained
                     fact = _unknown_fact(
                         engine,
                         model,
@@ -742,6 +786,12 @@ def refresh_capability_fact(
                 _write_cache(path, payload)
                 return fact
         except CapabilitySourceError as exc:
+            retained = _retained_known_fact(
+                _cached_fact(_read_cache(path), key, engine, model) or previous,
+                source_model_id=source_model_id,
+            )
+            if retained is not None:
+                return retained
             return _unknown_fact(
                 engine,
                 model,
@@ -758,6 +808,12 @@ def refresh_capability_fact(
                 source_url=url,
             )
         except OSError:
+            retained = _retained_known_fact(
+                previous,
+                source_model_id=source_model_id,
+            )
+            if retained is not None:
+                return retained
             return _unknown_fact(
                 engine,
                 model,

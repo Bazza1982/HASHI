@@ -24,7 +24,7 @@ See [Fixed and Flex Working Modes](FIXED_FLEX_WORKING_MODES.md) for the
 configuration, transition, migration, and regression contract.
 
 - **Memory+ continuity:** an independent optional layer that can stay enabled in any execution mode.
-- **Selectable Engine Providers:** `gemini-cli`, `claude-cli`, `codex-cli`, `grok-cli`,
+- **Selectable Engine Providers:** `antigravity-cli`, `claude-cli`, `codex-cli`, `grok-cli`,
   `her-v3` (with `her` as a migration alias), `ollama-api`, and `xai-api`.
   Persisted configuration may still use the internal compatibility ID `her-v2`;
   `/backend`, Backend API projections, and user-facing cards expose only `her-v3`.
@@ -269,7 +269,7 @@ Use `/browser` when the operator wants to choose the internet route explicitly:
 | Route | Command | Intended path |
 |---:|---|---|
 | `1` | `/browser 1 <task>` | HASHI standalone/headless browser tools for public or JavaScript-heavy pages |
-| `2` | `/browser 2 <task>` | CLI backend native browsing/search where supported by Codex CLI, Claude CLI, or Gemini CLI |
+| `2` | `/browser 2 <task>` | CLI backend native browsing/search where supported by Codex CLI or Claude CLI |
 | `3` | `/browser 3 <task>` | Brave Search (`web_search`) plus public page fetches (`web_fetch`) |
 | `4` | `/browser 4 <task>` | HASHI browser extension bridge for the logged-in Windows browser |
 
@@ -304,7 +304,7 @@ google-chrome --remote-debugging-port=9222 --user-data-dir=~/.chrome-hashi
 
 ### Usage by Backend Type
 
-**CLI backends (Claude CLI, Gemini CLI, Codex CLI)** — call via `bash` tool:
+**CLI backends (Claude CLI, Antigravity CLI, Codex CLI)** — call via the platform shell tool:
 ```bash
 python tools/browser_cli.py screenshot --url https://example.com --out /tmp/shot.png
 python tools/browser_cli.py get_text   --url http://localhost:3000 --cdp-url http://localhost:9222
@@ -627,7 +627,7 @@ Recommended protocol for Windows UI work:
 | Grok CLI | `thought`, `thinking`, or reasoning events when emitted by Grok | Generic progress plus mapped shell, file, search, tool-start, and tool-result events; result detail depends on the CLI payload |
 | HER | Actual reasoning text, explicit redaction notices, or legacy reasoning summaries when `stream-json` is supported | Task start, tool start/end, usage summary; JSON fallback can still report completed tool use but not live reasoning |
 | Claude CLI | Actual `thinking_delta` content when the model emits it | Tool/file/shell start, streamed tool input, and completion markers; result output is not always exposed |
-| Gemini CLI | Not currently exposed by Gemini's parsed stream schema | Task start, tool use, short tool-result previews, and errors |
+| Antigravity CLI | Not exposed by its parsed stream schema | Task start, tool use, short tool-result previews, and errors |
 | OpenRouter provider adapter | `reasoning` or `reasoning_details`, model/provider dependent | HASHI tool-gateway start/action/end events, short output previews, policy blocks, and tool-loop warnings |
 | DeepSeek provider adapter | `reasoning_content` and reported reasoning-token usage on reasoning models | Same HASHI tool-gateway summaries as OpenRouter |
 | xAI API | Provider reasoning fields when the selected model/endpoint returns them | HASHI tool-gateway summaries where local tool execution is used |

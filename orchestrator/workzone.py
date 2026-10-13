@@ -202,6 +202,7 @@ def build_workzone_prompt(
     zone: Path | Mapping[str, Any] | None,
     workspace_dir: Path,
     can_access_files: bool = True,
+    scoped_search_enabled: bool = True,
 ) -> tuple[str, str] | None:
     if zone is None:
         return None
@@ -242,19 +243,21 @@ def build_workzone_prompt(
             else:
                 lines.append(
                     "Use the available attached Workzones for task files. The Agent home "
-                    "workspace is only the execution fallback while Workzones remain active."
+                    "workspace is also a relevant read-only search candidate."
                 )
         else:
             lines.append(
                 "This backend does not currently have filesystem tools for direct access; "
                 "treat these paths as context only and do not claim to inspect files."
             )
-        lines.append(
-            "While one or more Workzones are active, use the Agent home workspace for "
-            "task files only when the user explicitly requests Agent memory, identity, "
-            "logs, or workspace-state work. When every Workzone is off, HASHI omits this "
-            "section and the Agent home workspace becomes the normal task workspace."
-        )
+        lines.append((
+            "For local discovery without a specified location, prefer relevant enabled "
+            "Workzones and this Agent's own workspace. An explicit user location takes "
+            "precedence; do not append other roots. Search preferences do not grant write "
+            "access or override permissions. Do not default to searching the whole machine."
+        ) if scoped_search_enabled else
+            "Scoped search is disabled. Use enabled Workzones for task discovery; "
+            "Agent home access follows the original tool/backend permissions, without an extra read grant.")
         return ("WORKZONES", "\n".join(lines))
     if not can_access_files:
         return (
@@ -265,7 +268,7 @@ def build_workzone_prompt(
                     f"Agent home workspace: {workspace_dir}",
                     "Treat the active workzone as conversation context and the intended project location.",
                     "This backend does not currently have filesystem tools for direct access; do not claim to inspect files unless the user provides content or switches to a tool-capable backend.",
-                    "Ignore the agent home workspace for task files unless the user explicitly asks for agent memory, identity, logs, or workspace state.",
+                    "For locating local material, prefer the explicit user location within available permissions.",
                 ]
             ),
         )
@@ -276,7 +279,8 @@ def build_workzone_prompt(
                 f"Active workzone: {zone}",
                 f"Agent home workspace: {workspace_dir}",
                 "Use the active workzone as the working directory and first place to inspect.",
-                "Ignore the agent home workspace for task files unless the user explicitly asks for agent memory, identity, logs, or workspace state.",
+                ("For locating local material, the active Workzone and this Agent's own workspace are relevant candidates; an explicit user location takes precedence. Home search access is read-only and does not extend write permissions."
+                 if scoped_search_enabled else "Scoped search is disabled; use Workzone and original tool/backend permissions."),
             ]
         ),
     )
@@ -321,3 +325,30 @@ def access_roots_for_workzones(
     if not roots:
         roots.append(Path(workspace_dir).expanduser().resolve())
     return tuple(roots)
+
+
+def build_search_scope(
+    state: Mapping[str, Any] | None, *, owner_id: str, agent_id: str,
+    agent_home: Path, execution_cwd: Path, access_roots: tuple[Path, ...],
+) -> dict[str, Any]:
+    """PAO-derived, Run-frozen read projection; never a writable root writer.
+
+    Identity comes from admission/configuration, never tool arguments. Keep the
+    exact Workzone roots and the Agent's own home separate from execution cwd.
+    """
+    normalized = normalize_workzone_state(state)
+    home = str(Path(agent_home).expanduser().resolve())
+    preferred = [
+        {"path": item["path"], "provenance": "run-workzone", "slot": item["slot_id"],
+         "available": bool(item["available"])}
+        for item in active_workzone_slots(normalized)
+    ]
+    if not any(item["path"] == home for item in preferred):
+        preferred.append({"path": home, "provenance": "agent-home", "available": True})
+    return {
+        "version": 1, "owner_id": str(owner_id), "agent_id": str(agent_id),
+        "agent_home": home, "execution_cwd": str(execution_cwd),
+        "workzone_revision": int(normalized["revision"]),
+        "preferred_roots": preferred,
+        "authorized_roots": [str(root) for root in access_roots],
+    }

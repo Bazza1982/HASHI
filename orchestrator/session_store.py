@@ -363,7 +363,7 @@ class SessionStore:
     per-Session working files are derived state used by Memory+ and Compact.
     """
 
-    SCHEMA_VERSION = 22
+    SCHEMA_VERSION = 23
 
     def __init__(
         self,
@@ -1214,6 +1214,8 @@ class SessionStore:
                     ON live_fragments(call_id, call_epoch, start_ms);
                 """
             )
+            from orchestrator.phone_context_handoff import initialize_schema as initialize_phone_context_schema
+            initialize_phone_context_schema(connection)
             # Upgrade older split inboxes into one sequence so transcript and
             # delegation replay keeps the Provider's per-call receive order.
             connection.execute(
@@ -1822,13 +1824,30 @@ class SessionStore:
             ).fetchone()
         if row is None:
             raise SessionConflict("live_voice_origin_invalid")
-        return {
+        normalized = {
             "call_id": call_id,
             "call_epoch": call_epoch,
             "delegation_id": delegation_id,
             "proposal_version": proposal_version,
             "proposal_digest": proposal_digest,
         }
+        handoff_id = value.get("phone_context_handoff_id")
+        if handoff_id is not None:
+            from orchestrator.phone_context_handoff import PhoneContextError, load_handoff
+
+            if not isinstance(handoff_id, str) or not handoff_id:
+                raise SessionConflict("live_voice_origin_invalid")
+            try:
+                snapshot = load_handoff(self, handoff_id, owner_id=owner_id,
+                    agent_id=agent_id, session_id=session_id,
+                    context_generation=context_generation)
+            except PhoneContextError as exc:
+                raise SessionConflict("live_voice_origin_invalid") from exc
+            if any(str(snapshot.get(key)) != str(expected)
+                   for key, expected in normalized.items()):
+                raise SessionConflict("live_voice_origin_invalid")
+            normalized["phone_context_handoff_id"] = handoff_id
+        return normalized
 
     def stage_live_provider_fragment(
         self, *, owner_id: str, provider_event_id: str, call_id: str,
@@ -2729,6 +2748,8 @@ class SessionStore:
                     run_ids,
                 )
             for table in (
+                "phone_context_handoffs",
+                "phone_context_consumption",
                 "voice_transcripts",
                 "runtime_event_correlations",
                 "run_approvals",
@@ -3991,6 +4012,9 @@ class SessionStore:
         now = _utc_now()
         public_error_context: dict[str, Any] = {}
         if isinstance(error_context, Mapping):
+            if isinstance(error_context.get('public_failure'), Mapping):
+                from orchestrator.frontend_contracts import normalize_public_failure
+                public_error_context['public_failure'] = normalize_public_failure(error_context['public_failure'])
             for key in ("error_code", "provider_request_id", "backend", "diagnostic_log"):
                 value = error_context.get(key)
                 if isinstance(value, str) and value.strip():
@@ -4007,10 +4031,12 @@ class SessionStore:
             if isinstance(reconciliation, Mapping):
                 safe_summary: dict[str, Any] = {}
                 for key in (
+                    "confirmed_read_count",
                     "confirmed_write_count",
                     "observed_tool_count",
                     "unverified_action_count",
                     "completed_background_job_count",
+                    'no_change_count', 'completed_action_count', 'pending_action_count',
                 ):
                     value = reconciliation.get(key)
                     if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 100_000:
@@ -4458,6 +4484,29 @@ class SessionStore:
                 (str(session_id), self.instance_id, route_phase),
             ).fetchone()
         return row is not None
+
+    def record_run_control(
+        self, run_id: str, *, owner_id: str, source: str, status: str,
+        reason: str = "", error_code: str = "",
+    ) -> dict[str, Any]:
+        """Audit a scoped stop through the existing canonical Session event log."""
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            run = connection.execute(
+                """SELECT r.* FROM runs r JOIN sessions s ON s.session_id=r.session_id
+                   WHERE r.run_id=? AND s.instance_id=? AND s.owner_id=?""",
+                (str(run_id), self.instance_id, str(owner_id)),
+            ).fetchone()
+            if run is None:
+                raise SessionNotFound(str(run_id))
+            return self._append_event(
+                connection, session_id=str(run["session_id"]), run_id=str(run_id),
+                kind="run.control", status=str(status), phase="control", summary="Stop selected Run",
+                detail={"action": "cancel", "actor_id": str(owner_id), "source": str(source),
+                        "agent_id": str(run["agent_id"]), "session_id": str(run["session_id"]),
+                        "run_id": str(run_id), "request_id": str(run["request_id"]),
+                        "reason": str(reason)[:160], "error_code": str(error_code)},
+            )
 
     def cancel_run(
         self, run_id: str, *, owner_id: str, reason: str = "cancelled_by_user"

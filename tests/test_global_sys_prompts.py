@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from unittest.mock import AsyncMock
 
 from orchestrator import runtime_sys_prompts
 from orchestrator.bridge_memory import (
@@ -332,6 +333,28 @@ async def test_sys_callback_honors_limited_agent_command_policy(tmp_path: Path) 
 
     assert query.edits == []
     assert query.answers == [("/sys is disabled for this Agent.", True)]
+
+
+@pytest.mark.asyncio
+async def test_sys_output_callback_uses_canonical_frontend_reply_owner(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    runtime.sys_prompt_manager.save("1", "Private prompt content.")
+    runtime._reply_text = AsyncMock()
+    query = _Query("sys:output:local:1")
+    update = SimpleNamespace(
+        update_id=901,
+        effective_user=query.from_user,
+        effective_chat=SimpleNamespace(id=456),
+        callback_query=query,
+    )
+
+    await runtime_sys_prompts.callback_sys(runtime, update, SimpleNamespace())
+
+    runtime._reply_text.assert_awaited_once()
+    assert runtime._reply_text.await_args.args[1] == "Private prompt content."
+    assert query.message.replies == []
 
 
 @pytest.mark.asyncio

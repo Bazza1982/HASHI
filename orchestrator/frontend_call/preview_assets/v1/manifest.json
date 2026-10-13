@@ -1,0 +1,1034 @@
+{
+  "schema_version": 1,
+  "version": "v1",
+  "adapter": "openai_compatible",
+  "base_url": "https://openrouter.ai/api/v1",
+  "model": "google/gemini-3.8-flash-lite-tts",
+  "text": {
+    "zh-CN": "您好，这是我的通话声音。我们可以用自然的语气，慢慢聊您感兴趣的事情。",
+    "en": "Hello, this is my call voice. We can take our time and talk about what interests you."
+  },
+  "options": {},
+  "entries": [
+    {
+      "locale": "en",
+      "profile": "Achernar",
+      "renderer": "call",
+      "path": "en/Achernar/call.ogg",
+      "size_bytes": 61141,
+      "sha256": "a93ff942c5a5acdb19ea2bb3bba82ef08dc15d3efab501ecb4c7a0cfe88de888"
+    },
+    {
+      "locale": "en",
+      "profile": "Achernar",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "en/Achernar/call_mp3.mp3",
+      "size_bytes": 76364,
+      "sha256": "a52c9abcad749eb1250f68ae5096f819d9e963f4d5612b7dc884b95046c3fd10"
+    },
+    {
+      "locale": "en",
+      "profile": "Achird",
+      "renderer": "call",
+      "path": "en/Achird/call.ogg",
+      "size_bytes": 64693,
+      "sha256": "6bc7a93cf35a6480bbfb245dc11846a2d2cdc5d7bff1953c4904a6c95e3e3d46"
+    },
+    {
+      "locale": "en",
+      "profile": "Achird",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "en/Achird/call_mp3.mp3",
+      "size_bytes": 79244,
+      "sha256": "ded43581895b00aa4df5e89d089b3398d2a34c21a5bce60ea8d12589bc0f2855"
+    },
+    {
+      "locale": "en",
+      "profile": "Algenib",
+      "renderer": "call",
+      "path": "en/Algenib/call.ogg",
+      "size_bytes": 63263,
+      "sha256": "d250f9b1eca7aede5c1e6e2a56972c4eb175a69d455f2deccfdec656f21e035f"
+    },
+    {
+      "locale": "en",
+      "profile": "Algenib",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "en/Algenib/call_mp3.mp3",
+      "size_bytes": 85868,
+      "sha256": "3e4134818a2da4e6cfd12af3fc0e67d88613166ec39a65c6f1727be37befc014"
+    },
+    {
+      "locale": "en",
+      "profile": "Algieba",
+      "renderer": "call",
+      "path": "en/Algieba/call.ogg",
+      "size_bytes": 59094,
+      "sha256": "3b5977c01dd78c1a5061d0ef2e87fa6deb331f1929f88b512443f102b1ef8143"
+    },
+    {
+      "locale": "en",
+      "profile": "Algieba",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "en/Algieba/call_mp3.mp3",
+      "size_bytes": 71180,
+      "sha256": "1e1de3027fbb618f93bdb1becad9dbe504a31b1189896b3843169ae541c37e5b"
+    },
+    {
+      "locale": "en",
+      "profile": "Alnilam",
+      "renderer": "call",
+      "path": "en/Alnilam/call.ogg",
+      "size_bytes": 57868,
+      "sha256": "7ae1e988e8006962d7df9419d48777600d43b1377bd9b769b89f0ca5ef792710"
+    },
+    {
+      "locale": "en",
+      "profile": "Alnilam",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "en/Alnilam/call_mp3.mp3",
+      "size_bytes": 80108,
+      "sha256": "880a238c121974e95c891f3fda7e455aaf379521a91e8f66bf901b0c8a20c1b3"
+    },
+    {
+      "locale": "en",
+      "profile": "Aoede",
+      "renderer": "call",
+      "path": "en/Aoede/call.ogg",
+      "size_bytes": 62815,
+      "sha256": "e6dd23bd3c53573d7ec58b1667ac5de92203e8c445207605dcce4b36e67dbfd8"
+    },
+    {
+      "locale": "en",
+      "profile": "Aoede",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "en/Aoede/call_mp3.mp3",
+      "size_bytes": 76940,
+      "sha256": "f293703f22f06532ea9eef8df4e251c4dd536cbf895f5cee929be130f01382bd"
+    },
+    {
+      "locale": "en",
+      "profile": "Autonoe",
+      "renderer": "call",
+      "path": "en/Autonoe/call.ogg",
+      "size_bytes": 62512,
+      "sha256": "5bd90434cd2218f98e0362a6978b25f31737bc94912ec5b8724abc0ebd04b268"
+    },
+    {
+      "locale": "en",
+      "profile": "Autonoe",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "en/Autonoe/call_mp3.mp3",
+      "size_bytes": 83564,
+      "sha256": "af1613cced8c55e262f4fc287e2ff65e8860c7cb247bc4cf3902308601d6e27e"
+    },
+    {
+      "locale": "en",
+      "profile": "Callirrhoe",
+      "renderer": "call",
+      "path": "en/Callirrhoe/call.ogg",
+      "size_bytes": 59156,
+      "sha256": "414515cfba09965e2e3849283bd5cef6a3130a5ddc4b49fdebeecc57e0b37fc8"
+    },
+    {
+      "locale": "en",
+      "profile": "Callirrhoe",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "en/Callirrhoe/call_mp3.mp3",
+      "size_bytes": 81548,
+      "sha256": "7e41f0d38145daba205074eecb0f9c9610b16871f1197fd5909e1a9022dd016d"
+    },
+    {
+      "locale": "en",
+      "profile": "Charon",
+      "renderer": "call",
+      "path": "en/Charon/call.ogg",
+      "size_bytes": 64874,
+      "sha256": "c9616f25922da8609ac6ad0221fe31b8c63c19d4569719fdaf349ba4d0172297"
+    },
+    {
+      "locale": "en",
+      "profile": "Charon",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "en/Charon/call_mp3.mp3",
+      "size_bytes": 75788,
+      "sha256": "43130ea108e4d52aba61082b89f00ae042fc079c19ce5f3fddd68f6fbf4b764f"
+    },
+    {
+      "locale": "en",
+      "profile": "Despina",
+      "renderer": "call",
+      "path": "en/Despina/call.ogg",
+      "size_bytes": 59626,
+      "sha256": "05ec9ccf7544ad2d0950c15fccd4156bffab34e297ecbae17b48f56a7225bff5"
+    },
+    {
+      "locale": "en",
+      "profile": "Despina",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "en/Despina/call_mp3.mp3",
+      "size_bytes": 84140,
+      "sha256": "126e950e02f3b11385e99c1375bd2886541941a54d4bed169aaca60612e5e99b"
+    },
+    {
+      "locale": "en",
+      "profile": "Enceladus",
+      "renderer": "call",
+      "path": "en/Enceladus/call.ogg",
+      "size_bytes": 58916,
+      "sha256": "62c70e1b47bc6af8d606600883b02b47069309d348e2615fa6a88adeca3c8db6"
+    },
+    {
+      "locale": "en",
+      "profile": "Enceladus",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "en/Enceladus/call_mp3.mp3",
+      "size_bytes": 76364,
+      "sha256": "b5a17d3635d3cf418e5d3bb707f4613fa7b32816c1c2dcc95837011be56cb22a"
+    },
+    {
+      "locale": "en",
+      "profile": "Erinome",
+      "renderer": "call",
+      "path": "en/Erinome/call.ogg",
+      "size_bytes": 62084,
+      "sha256": "e813ad093bcbef7d252271386c6274ecc60cd413b9bb03b9d29487322fe0555b"
+    },
+    {
+      "locale": "en",
+      "profile": "Erinome",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "en/Erinome/call_mp3.mp3",
+      "size_bytes": 83564,
+      "sha256": "8c14fd95fe64ff048014ae20f78b431fa8a8157d3898c06c8ffbd43376f236d9"
+    },
+    {
+      "locale": "en",
+      "profile": "Fenrir",
+      "renderer": "call",
+      "path": "en/Fenrir/call.ogg",
+      "size_bytes": 54581,
+      "sha256": "742a7d3d74a87cf7152700028460d6d83f4da569f93eea89f714cff5ebdf544a"
+    },
+    {
+      "locale": "en",
+      "profile": "Fenrir",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "en/Fenrir/call_mp3.mp3",
+      "size_bytes": 66860,
+      "sha256": "b81037fa077d5ecaff053983f1a6c168886ac86d7c6d37fed4d1862cdb7ea05b"
+    },
+    {
+      "locale": "en",
+      "profile": "Gacrux",
+      "renderer": "call",
+      "path": "en/Gacrux/call.ogg",
+      "size_bytes": 62040,
+      "sha256": "4f2e365c91da6b681a6317d48826e6160da1a4c0b8612e629361663939deeca1"
+    },
+    {
+      "locale": "en",
+      "profile": "Gacrux",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "en/Gacrux/call_mp3.mp3",
+      "size_bytes": 84428,
+      "sha256": "60ad03d5247859dbddf6790a5ae388074fd06ec90a1bdefdda0dca19c9853514"
+    },
+    {
+      "locale": "en",
+      "profile": "Iapetus",
+      "renderer": "call",
+      "path": "en/Iapetus/call.ogg",
+      "size_bytes": 57048,
+      "sha256": "0056dce6716f72e5be604d479ee810dbc546ad0bed8aa4dab6fec0558c90d2c5"
+    },
+    {
+      "locale": "en",
+      "profile": "Iapetus",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "en/Iapetus/call_mp3.mp3",
+      "size_bytes": 72044,
+      "sha256": "f3d7456f0c2d2fc8b26c6774dd0c6bead8ac3938030e9e58846d02502788a145"
+    },
+    {
+      "locale": "en",
+      "profile": "Kore",
+      "renderer": "call",
+      "path": "en/Kore/call.ogg",
+      "size_bytes": 61194,
+      "sha256": "01ff7f2295c09e706aacb10465a2c87b60b647bde18bc20153eef4c68bafc0a0"
+    },
+    {
+      "locale": "en",
+      "profile": "Kore",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "en/Kore/call_mp3.mp3",
+      "size_bytes": 79820,
+      "sha256": "4ee51528324292192e1d5071248011d077972f9fb49bf63f6f929a78a2ea32e1"
+    },
+    {
+      "locale": "en",
+      "profile": "Laomedeia",
+      "renderer": "call",
+      "path": "en/Laomedeia/call.ogg",
+      "size_bytes": 63928,
+      "sha256": "02f8da410caf077078f6a7f5143c3c982eb0c5ea6e33d1bcecd2cf0719269d8c"
+    },
+    {
+      "locale": "en",
+      "profile": "Laomedeia",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "en/Laomedeia/call_mp3.mp3",
+      "size_bytes": 82988,
+      "sha256": "b8abdef35255ebc3e083717f4c9b2a93b5526ad4be9e354c414ae008c6fc00b1"
+    },
+    {
+      "locale": "en",
+      "profile": "Leda",
+      "renderer": "call",
+      "path": "en/Leda/call.ogg",
+      "size_bytes": 56923,
+      "sha256": "14987424269ef6a00888361edba15953fdf842b36e42d057b9401d9d998c61fa"
+    },
+    {
+      "locale": "en",
+      "profile": "Leda",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "en/Leda/call_mp3.mp3",
+      "size_bytes": 77804,
+      "sha256": "3163bd9bd7feaea3f52be93b1f5b2e6074d9456ecc43fa62e505089e2ecb4e96"
+    },
+    {
+      "locale": "en",
+      "profile": "Orus",
+      "renderer": "call",
+      "path": "en/Orus/call.ogg",
+      "size_bytes": 58640,
+      "sha256": "2749436350b0305d4ccb71c138b24e844c39fd1ae63b37c50822ec5a44425aff"
+    },
+    {
+      "locale": "en",
+      "profile": "Orus",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "en/Orus/call_mp3.mp3",
+      "size_bytes": 77228,
+      "sha256": "a0e638119201acef8157c337aa28b21037b1e893bd120abd4b53dba00bff4f4d"
+    },
+    {
+      "locale": "en",
+      "profile": "Puck",
+      "renderer": "call",
+      "path": "en/Puck/call.ogg",
+      "size_bytes": 65423,
+      "sha256": "4452b30142e7b0e1957a8273a58af06ddc9ea38038e131269cee4321f43226c1"
+    },
+    {
+      "locale": "en",
+      "profile": "Puck",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "en/Puck/call_mp3.mp3",
+      "size_bytes": 80108,
+      "sha256": "a3470f524ede60bb7f96de09a20cf2eec2f3f8c85ff40c32f81373e824818623"
+    },
+    {
+      "locale": "en",
+      "profile": "Pulcherrima",
+      "renderer": "call",
+      "path": "en/Pulcherrima/call.ogg",
+      "size_bytes": 59595,
+      "sha256": "e2f085fa557b70dd343dd8805ee9c47e33366079c9530c8d7159b6577308a7f9"
+    },
+    {
+      "locale": "en",
+      "profile": "Pulcherrima",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "en/Pulcherrima/call_mp3.mp3",
+      "size_bytes": 75500,
+      "sha256": "37f1ef5f9d5ccb40e0c3ed23bc65e1cc49a2829e0a30ab36c291a0cb5524303a"
+    },
+    {
+      "locale": "en",
+      "profile": "Rasalgethi",
+      "renderer": "call",
+      "path": "en/Rasalgethi/call.ogg",
+      "size_bytes": 56838,
+      "sha256": "8fc84ced4d2cab8cb6e76c72b2d7a3a2f1cb72ebcd7c453f88b2d6374849ff65"
+    },
+    {
+      "locale": "en",
+      "profile": "Rasalgethi",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "en/Rasalgethi/call_mp3.mp3",
+      "size_bytes": 72044,
+      "sha256": "5a5f1eff985a7e18f36ffd3a460d7c66344475f28d73c76d396c2a67b668df82"
+    },
+    {
+      "locale": "en",
+      "profile": "Sadachbia",
+      "renderer": "call",
+      "path": "en/Sadachbia/call.ogg",
+      "size_bytes": 61677,
+      "sha256": "c8f9345d1c611552672c568b7789cb1c6bf58ac3910a077784ebf060c48b228b"
+    },
+    {
+      "locale": "en",
+      "profile": "Sadachbia",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "en/Sadachbia/call_mp3.mp3",
+      "size_bytes": 88460,
+      "sha256": "43e4e8d3477d33bcecaa6735c486e838dbea6425a68e6d2eccc4ddf8c7512ec7"
+    },
+    {
+      "locale": "en",
+      "profile": "Sadaltager",
+      "renderer": "call",
+      "path": "en/Sadaltager/call.ogg",
+      "size_bytes": 61600,
+      "sha256": "59572833574282bf1716bba3f2d1e8c623d4761db1de0b8e8a7c49bd4868e49a"
+    },
+    {
+      "locale": "en",
+      "profile": "Sadaltager",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "en/Sadaltager/call_mp3.mp3",
+      "size_bytes": 75788,
+      "sha256": "d7281337d4cf6fc55f89e77cde37fdc6285993f41f6c874557228223e66d422e"
+    },
+    {
+      "locale": "en",
+      "profile": "Schedar",
+      "renderer": "call",
+      "path": "en/Schedar/call.ogg",
+      "size_bytes": 55727,
+      "sha256": "e595e07da6c49a418207ec401361f0c94e16d5a47db594a2ac4e74c745dbcc87"
+    },
+    {
+      "locale": "en",
+      "profile": "Schedar",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "en/Schedar/call_mp3.mp3",
+      "size_bytes": 70028,
+      "sha256": "1338222e1be054a28f25fc9fbb8bf4e18845782cc529bdd622ece27ee36b4239"
+    },
+    {
+      "locale": "en",
+      "profile": "Sulafat",
+      "renderer": "call",
+      "path": "en/Sulafat/call.ogg",
+      "size_bytes": 63511,
+      "sha256": "ac9f3748dfb8277a6501cb2321fcabff580be6468aaf386eb4d5ab91a2b34ca0"
+    },
+    {
+      "locale": "en",
+      "profile": "Sulafat",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "en/Sulafat/call_mp3.mp3",
+      "size_bytes": 87020,
+      "sha256": "41ba65b85b063d8cd82c82296aa1d48da69bd590735d5b4bee7084f246a00db3"
+    },
+    {
+      "locale": "en",
+      "profile": "Umbriel",
+      "renderer": "call",
+      "path": "en/Umbriel/call.ogg",
+      "size_bytes": 61917,
+      "sha256": "2f21dfdb817714c4705215640822591e8a373dbab379a7c1c94f083768e5d1e5"
+    },
+    {
+      "locale": "en",
+      "profile": "Umbriel",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "en/Umbriel/call_mp3.mp3",
+      "size_bytes": 79244,
+      "sha256": "af3572993a4e4cc88a04b8370ccdb009bca047dc98ba0a162103ea5f8b46f430"
+    },
+    {
+      "locale": "en",
+      "profile": "Vindemiatrix",
+      "renderer": "call",
+      "path": "en/Vindemiatrix/call.ogg",
+      "size_bytes": 66078,
+      "sha256": "297b2d99007c260be9b991f251d470729f9afac1f81bf1cb3d7d0a2993b88949"
+    },
+    {
+      "locale": "en",
+      "profile": "Vindemiatrix",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "en/Vindemiatrix/call_mp3.mp3",
+      "size_bytes": 86444,
+      "sha256": "48cf1e9300ba6c1b0dee43c7fdb66552eb543b582e3b751fbda82b33a85f9743"
+    },
+    {
+      "locale": "en",
+      "profile": "Zephyr",
+      "renderer": "call",
+      "path": "en/Zephyr/call.ogg",
+      "size_bytes": 54480,
+      "sha256": "d25ef0d45cdd0985971be818a92aed118b97bba3f03a9c5c71f91ec2935efdc4"
+    },
+    {
+      "locale": "en",
+      "profile": "Zephyr",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "en/Zephyr/call_mp3.mp3",
+      "size_bytes": 72044,
+      "sha256": "bd6107f933b9b5487cb83e0029a24caf813147f51f0677e59d73007603434a12"
+    },
+    {
+      "locale": "en",
+      "profile": "Zubenelgenubi",
+      "renderer": "call",
+      "path": "en/Zubenelgenubi/call.ogg",
+      "size_bytes": 60176,
+      "sha256": "7b9c587203f2287c62c396f943bd6b31d189e3d0cf913d3417dc30f59444697a"
+    },
+    {
+      "locale": "en",
+      "profile": "Zubenelgenubi",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "en/Zubenelgenubi/call_mp3.mp3",
+      "size_bytes": 75788,
+      "sha256": "25ce7186f2e95804599aa33b537f44f44f88c3e16876d1579e3cd64cee6d59e1"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Achernar",
+      "renderer": "call",
+      "path": "zh-CN/Achernar/call.ogg",
+      "size_bytes": 72146,
+      "sha256": "546b1a3dfb6ef35a2f9389e20342be01cad6daa384c71230e03368b5c94894d3"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Achernar",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "zh-CN/Achernar/call_mp3.mp3",
+      "size_bytes": 90188,
+      "sha256": "aee793a355f9aec001420f413901459e927d329f5906d5695240102b4857e5ff"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Achird",
+      "renderer": "call",
+      "path": "zh-CN/Achird/call.ogg",
+      "size_bytes": 69915,
+      "sha256": "5173429105602dc70cd7e750a3b7908eb1d0aa4ce317aa495fca6d639ff41572"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Achird",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "zh-CN/Achird/call_mp3.mp3",
+      "size_bytes": 85580,
+      "sha256": "7e1fbed3979d4da2df4e1bb01048f7df1062881f6f2aa46901a7e86c48543ec0"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Algenib",
+      "renderer": "call",
+      "path": "zh-CN/Algenib/call.ogg",
+      "size_bytes": 65573,
+      "sha256": "12cc584db2378ffd7aa72b928205f7bf91ea7ae0bf29eaa96a4ee51f7bed2334"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Algenib",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "zh-CN/Algenib/call_mp3.mp3",
+      "size_bytes": 82988,
+      "sha256": "1c97bc0cde5e8148f2cebfb582bd2ca04c8a26ffadaef79be746d52b7c4feb3a"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Algieba",
+      "renderer": "call",
+      "path": "zh-CN/Algieba/call.ogg",
+      "size_bytes": 68280,
+      "sha256": "8e3faa694ae2cb2d551c8a154cf073cccac658b21e44288c02191b0b08c3f4f7"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Algieba",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "zh-CN/Algieba/call_mp3.mp3",
+      "size_bytes": 82124,
+      "sha256": "8d892b4690aa98c01c86286a6f168485404af23bf2a717a9fd5a38bf6b623587"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Alnilam",
+      "renderer": "call",
+      "path": "zh-CN/Alnilam/call.ogg",
+      "size_bytes": 69163,
+      "sha256": "2359df405fcd5a0276ac117baea93e7021087e6f31df590e1129108648c6294c"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Alnilam",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "zh-CN/Alnilam/call_mp3.mp3",
+      "size_bytes": 81260,
+      "sha256": "f7bd39f15c3ec3ec3902d9105d82b70a4f467f6a8cec0b983b8705f226475713"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Aoede",
+      "renderer": "call",
+      "path": "zh-CN/Aoede/call.ogg",
+      "size_bytes": 66162,
+      "sha256": "4e8bd45afcc213b994a663df0dc24aba5594b4167924e9517ad6dfc17f0f03ec"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Aoede",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "zh-CN/Aoede/call_mp3.mp3",
+      "size_bytes": 83564,
+      "sha256": "9fc99ad9ac82b6b3f5e4e6a7ed691606f2c83b53ded6bbf36351ac9a96dc049b"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Autonoe",
+      "renderer": "call",
+      "path": "zh-CN/Autonoe/call.ogg",
+      "size_bytes": 70105,
+      "sha256": "b7000b1702f9553fb2f4051553057f73c6dc847daf9ca8bcac48fe404e725060"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Autonoe",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "zh-CN/Autonoe/call_mp3.mp3",
+      "size_bytes": 89324,
+      "sha256": "339b684d7cf44f98d5a39023de6a2f4eaba764f239c9e690f655b39cdfc92448"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Callirrhoe",
+      "renderer": "call",
+      "path": "zh-CN/Callirrhoe/call.ogg",
+      "size_bytes": 72662,
+      "sha256": "7bc9357dcbb6b98d7c1bc29c670935a6b4b7dcb6fda14067c8572fb91d406af7"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Callirrhoe",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "zh-CN/Callirrhoe/call_mp3.mp3",
+      "size_bytes": 91340,
+      "sha256": "9b3ee8e63556138d0673c22480a27e9b0f4d9d253670329394d73e6a4800341b"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Charon",
+      "renderer": "call",
+      "path": "zh-CN/Charon/call.ogg",
+      "size_bytes": 70345,
+      "sha256": "ece8ded657721fce5457a455078e356b14d63f0b3a9c0640562e42a86872516a"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Charon",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "zh-CN/Charon/call_mp3.mp3",
+      "size_bytes": 83564,
+      "sha256": "d913b837c44059117057350630f8f5da775b675c5ac5ed28b2bdadbb9ca81e87"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Despina",
+      "renderer": "call",
+      "path": "zh-CN/Despina/call.ogg",
+      "size_bytes": 70457,
+      "sha256": "13a0e47b3e11344f4b60c14b916d0cf47273976e697a472296f2d247d874b1d1"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Despina",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "zh-CN/Despina/call_mp3.mp3",
+      "size_bytes": 92204,
+      "sha256": "10b2d8ac6b2990517e8d9cf8aa8c95dbf473bdca7955fb4b294b2607c7a941a1"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Enceladus",
+      "renderer": "call",
+      "path": "zh-CN/Enceladus/call.ogg",
+      "size_bytes": 65136,
+      "sha256": "06fc5263a1affac82c097420d13ef304fcf62a5872b9b67cfc0fac57486e8898"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Enceladus",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "zh-CN/Enceladus/call_mp3.mp3",
+      "size_bytes": 80684,
+      "sha256": "8768d8de55da7e2260b32ae97e4639b01894a9082d963282f3990b621b43c0f3"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Erinome",
+      "renderer": "call",
+      "path": "zh-CN/Erinome/call.ogg",
+      "size_bytes": 71292,
+      "sha256": "b0282acdfd9ee4616d3bc1a56eda267a2364e43164633ee90b520782080476d0"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Erinome",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "zh-CN/Erinome/call_mp3.mp3",
+      "size_bytes": 96524,
+      "sha256": "ce9803ceea23d11e4a0c7982fe0ebac751cd422eafbd579fbbb4ef6ac729283a"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Fenrir",
+      "renderer": "call",
+      "path": "zh-CN/Fenrir/call.ogg",
+      "size_bytes": 65454,
+      "sha256": "52ee861861092e3e240f58d176740f3a890077cf0d372505bc9e9eac07a0470c"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Fenrir",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "zh-CN/Fenrir/call_mp3.mp3",
+      "size_bytes": 80108,
+      "sha256": "a52c9f522c183f6a26b0df0d60df65473e2ea92379c857dba002e5a1d3d8f801"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Gacrux",
+      "renderer": "call",
+      "path": "zh-CN/Gacrux/call.ogg",
+      "size_bytes": 69515,
+      "sha256": "44ff104a8d19c49fea74e443bfd370ad932c0cc5bb04bab495f8586069d5f5fc"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Gacrux",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "zh-CN/Gacrux/call_mp3.mp3",
+      "size_bytes": 86444,
+      "sha256": "e0a44a1a656444d6c23adda8e13b56af46f8aa642a4e889c76e5329bc8fb7a26"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Iapetus",
+      "renderer": "call",
+      "path": "zh-CN/Iapetus/call.ogg",
+      "size_bytes": 68832,
+      "sha256": "acf976bf0ecf3b87f03dcf116967c6efff53fade3e0344dca3be6741085b9941"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Iapetus",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "zh-CN/Iapetus/call_mp3.mp3",
+      "size_bytes": 88748,
+      "sha256": "680f5956cf492017f023b602d08e65f2930cad72a8fafa989acaca940db47cfd"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Kore",
+      "renderer": "call",
+      "path": "zh-CN/Kore/call.ogg",
+      "size_bytes": 71954,
+      "sha256": "2b92a0b96c848d752d5539da827e2e41df8435776e2407007c550ec27c97148b"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Kore",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "zh-CN/Kore/call_mp3.mp3",
+      "size_bytes": 91628,
+      "sha256": "5ae3effbe947d5fc198954b3ed2022be7bd51736dbdd28572efccb0dbc559996"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Laomedeia",
+      "renderer": "call",
+      "path": "zh-CN/Laomedeia/call.ogg",
+      "size_bytes": 58753,
+      "sha256": "1291fd8af2d54192cbf29cfd58885765bec831da72300472d962d6a71141fff2"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Laomedeia",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "zh-CN/Laomedeia/call_mp3.mp3",
+      "size_bytes": 76940,
+      "sha256": "81528174212c830ec601ad0a19ebb9574bfe07a726d6a5e8bab16aac89c3235a"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Leda",
+      "renderer": "call",
+      "path": "zh-CN/Leda/call.ogg",
+      "size_bytes": 58310,
+      "sha256": "dd677f659cbe1d23b682bd90b6c85b8747760370894a4cb24bebbd1e3af87e98"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Leda",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "zh-CN/Leda/call_mp3.mp3",
+      "size_bytes": 80684,
+      "sha256": "ceeffd19a94a8bd7d6dfa001e59ab995a72177cfff7b4453d45fa970b4bbc4ae"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Orus",
+      "renderer": "call",
+      "path": "zh-CN/Orus/call.ogg",
+      "size_bytes": 56480,
+      "sha256": "ea1dde72f748c9620c8c47f0930d409ffe66c405ecde50eae09dcd99d4338bb0"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Orus",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "zh-CN/Orus/call_mp3.mp3",
+      "size_bytes": 72908,
+      "sha256": "0168724206839b10f0eb556b68571c95244f8bae2b515dd76974b2c6b2977823"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Puck",
+      "renderer": "call",
+      "path": "zh-CN/Puck/call.ogg",
+      "size_bytes": 65713,
+      "sha256": "ac579ff9a214e81d52838ad65309092b5732e19cbe592627ae022fe0495b076b"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Puck",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "zh-CN/Puck/call_mp3.mp3",
+      "size_bytes": 78668,
+      "sha256": "3848470e6ea14a3c0e94e5acdb808b6488fa6f423470f113ee074ebaad27bd82"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Pulcherrima",
+      "renderer": "call",
+      "path": "zh-CN/Pulcherrima/call.ogg",
+      "size_bytes": 75564,
+      "sha256": "6749f6b331451596cc120af13af14f9a7e3a2d5fd33cfe1da87662d2617752a6"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Pulcherrima",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "zh-CN/Pulcherrima/call_mp3.mp3",
+      "size_bytes": 85868,
+      "sha256": "e287227c9ae079e500d3e220c7a8b00fb184cf95aa8a6a58eeeff331d100bbc8"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Rasalgethi",
+      "renderer": "call",
+      "path": "zh-CN/Rasalgethi/call.ogg",
+      "size_bytes": 69345,
+      "sha256": "2b6d35b03f43d381787e00b89ac1cecb988462315d9aa31e477ed1e6b1492734"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Rasalgethi",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "zh-CN/Rasalgethi/call_mp3.mp3",
+      "size_bytes": 85868,
+      "sha256": "ad082a381fb9bafd1e7320462edc0054238aa62043f6f7d464b899f9857e6986"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Sadachbia",
+      "renderer": "call",
+      "path": "zh-CN/Sadachbia/call.ogg",
+      "size_bytes": 66880,
+      "sha256": "7b4eff0f69647b19c37766b26848fb5dea17d6df6daba6aa7775116da71c06aa"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Sadachbia",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "zh-CN/Sadachbia/call_mp3.mp3",
+      "size_bytes": 80684,
+      "sha256": "e2b905055e7a2c756bbe051f3098b2d2b2a74242023140e0434718b4bf9343c5"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Sadaltager",
+      "renderer": "call",
+      "path": "zh-CN/Sadaltager/call.ogg",
+      "size_bytes": 68708,
+      "sha256": "c407150eb87a0d8338731e06151f6f1a7eb6118928c7795a313b5fa1905343d3"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Sadaltager",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "zh-CN/Sadaltager/call_mp3.mp3",
+      "size_bytes": 80684,
+      "sha256": "e48c1e33ad2e63c39d48b7daa8055f7fa34824f3de94c67406b6a3389f86467f"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Schedar",
+      "renderer": "call",
+      "path": "zh-CN/Schedar/call.ogg",
+      "size_bytes": 64003,
+      "sha256": "851101e50dfb99e74da67cb410b79ffe5f6a73c117ad5c33b3db6c7458fdaf59"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Schedar",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "zh-CN/Schedar/call_mp3.mp3",
+      "size_bytes": 77228,
+      "sha256": "a6270e33e2da4d00abc1491742f1b7a2673f22cac17b9e1d85a6135cbc2e16ad"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Sulafat",
+      "renderer": "call",
+      "path": "zh-CN/Sulafat/call.ogg",
+      "size_bytes": 63747,
+      "sha256": "bcab175eedd0ba941ae5e2e92d973a57f767673e46e24c874c45d3186e97620e"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Sulafat",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "zh-CN/Sulafat/call_mp3.mp3",
+      "size_bytes": 81548,
+      "sha256": "56a547a33e14d27065c65a24f804bc290fadb9b32b363d37091d441a50ff9982"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Umbriel",
+      "renderer": "call",
+      "path": "zh-CN/Umbriel/call.ogg",
+      "size_bytes": 68131,
+      "sha256": "c7b8914763d0401855a8a77d02f15a7f40cf9406ddff11244e2ae4e59d072f66"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Umbriel",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "zh-CN/Umbriel/call_mp3.mp3",
+      "size_bytes": 87884,
+      "sha256": "e123f5194c9e380cd6c83df03b8be6f9d8bf1ae9c533c37665e3307bd734f4aa"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Vindemiatrix",
+      "renderer": "call",
+      "path": "zh-CN/Vindemiatrix/call.ogg",
+      "size_bytes": 65078,
+      "sha256": "dde509c8ec182a0bde7cfd30eecab5dffa248afd9af757eee0b77f20cf4fc4cf"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Vindemiatrix",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "zh-CN/Vindemiatrix/call_mp3.mp3",
+      "size_bytes": 85868,
+      "sha256": "c7f619cfe835a63b16660ff4f54438abff29579e600eb5a011a1f70b81d5ba33"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Zephyr",
+      "renderer": "call",
+      "path": "zh-CN/Zephyr/call.ogg",
+      "size_bytes": 64125,
+      "sha256": "098f47610c2a9a7c94a67664937177b1c7fde5c2e34f5f6a3d8159924ed1d852"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Zephyr",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "zh-CN/Zephyr/call_mp3.mp3",
+      "size_bytes": 83564,
+      "sha256": "936b42189590b3f39239dcbbc07b1a6417201176d45b3e62efbd31c545d428ca"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Zubenelgenubi",
+      "renderer": "call",
+      "path": "zh-CN/Zubenelgenubi/call.ogg",
+      "size_bytes": 73203,
+      "sha256": "31ae688c27124a2ecf30d67f3cfced7f9475821b1a8b67dc9f176b104de57b8c"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "Zubenelgenubi",
+      "renderer": "call_mp3",
+      "format": "mp3",
+      "path": "zh-CN/Zubenelgenubi/call_mp3.mp3",
+      "size_bytes": 87884,
+      "sha256": "75ce55c88daa9ce530e24579ad710cd50be0c4739e9e33fa60f8fc939076fb0c"
+    }
+  ]
+}
