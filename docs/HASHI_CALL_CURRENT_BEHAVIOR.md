@@ -41,9 +41,11 @@ numeric response-length requirements are retired.
   and the device permission request proceed during ringback. A video Call waits
   for the local camera preflight before asking the Agent to answer.
 - **CALL-MEDIA-02** — Media acquired while the Agent opening is pending is held
-  for that call. The first frame is sent while ringback continues, and the
-  once-only opening waits up to eight seconds for a usable Agent observation.
-  Caller speech is not admitted until that opening has completed.
+  for that call. The first frame is sent while ringback continues. If no frame
+  reaches HASHI during the startup window, the same call falls back to voice.
+  Once a frame is accepted, ringback waits for the in-flight observation rather
+  than treating slow vision inference as camera loss. Caller speech is not
+  admitted until the once-only opening has completed.
 - **CALL-MEDIA-03** — Camera denial, absence, preview failure, or local device
   failure, or failure to establish a usable Agent observation degrades the same
   call to audio-only. It does not end, duplicate, rebind, or pause the voice
@@ -52,15 +54,20 @@ numeric response-length requirements are retired.
   confirmed camera-off transaction before ordinary voice admission resumes.
 - **CALL-MEDIA-05** — The caller can turn the camera off and on at any time in
   the same call. Camera changes preserve the call ID, Session binding, microphone
-  state, and audio conversation.
+  state, and audio conversation. When multiple cameras are available, a separate
+  preview action replaces only the active source; startup still opens one
+  default camera and a missing camera still degrades to voice.
 - **CALL-MEDIA-06** — Muting, unmuting, camera changes, backgrounding, network
   recovery, and hangup cannot resurrect stale tracks or admit audio from an old
   call.
 - **CALL-MEDIA-07** — Agent-visible camera state, not local device success, is
   authoritative. An observation is current through 12 seconds, visibly delayed
-  from 12 to 20 seconds, and unusable after 20 seconds. Expiry disables local
-  preview and continues by voice. A single failed upload or observation does not
-  erase the last still-usable observation or send extra frames.
+  afterward while accepted frames prove that camera ingress is alive. Observation
+  expiry alone does not turn off a continuously uploading camera. No accepted
+  startup frame, a stopped frame stream, or a confirmed first-observation
+  failure disables local preview and continues by voice. A single failed upload
+  or later observation does not erase the last still-usable observation or send
+  extra frames.
 
 ## Connection sound and opening
 
@@ -174,6 +181,10 @@ numeric response-length requirements are retired.
   Agent may see an earlier image; current state confirms availability. If the
   visual path falls back, preview turns off and a localized notice says that the
   same call is continuing by voice and the camera can be retried.
+- **CALL-UI-09** — Multi-camera switching uses a recognizable camera-and-swap
+  icon on a restrained translucent preview control. Its accessible name and
+  44×44 touch target remain intact; it is not added to the three primary
+  bottom-row controls.
 
 ## Voice-media billing
 
@@ -198,6 +209,8 @@ numeric response-length requirements are retired.
   the correct opening, speech, or listening phase without replaying mutations.
 - **CALL-SAFE-03** — Background/foreground recovery, camera permission races,
   power/session changes, and stale async work cannot cross call generations.
+  In particular, a snapshot requested before a camera transition cannot apply
+  its older camera-off state after the new source is ready.
 - **CALL-SAFE-04** — Hangup settles the exact call ID. A pending start is ended
   after it resolves; an unconfirmed end remains retryable and cannot start a new
   call over the old binding.
@@ -210,8 +223,10 @@ numeric response-length requirements are retired.
   Function records carry the same bounded correlation/trace identity. Logs
   distinguish request start, response headers, body completion, producer-made
   502, caller abort, socket cause, TTS completion, speech-cache publication and
-  client retrieval. They never contain audio, transcript, answer, credentials,
-  full query strings, or native exception messages.
+  client retrieval. Camera evidence includes authoritative state, epoch,
+  fallback reason, last-frame age, and ignored stale responses. It never
+  contains image data. Logs never contain audio, transcript, answer,
+  credentials, full query strings, or native exception messages.
 
 ## Release and evidence gate
 

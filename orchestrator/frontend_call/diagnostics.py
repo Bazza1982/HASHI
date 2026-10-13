@@ -55,6 +55,7 @@ _choices = {
         "explicit_end", "lease_expired", "max_duration", "service_shutdown", "camera_enabled",
         "camera_disabled", "call_ended", "task_cancelled", "turn_changed", "stale_frame",
         "epoch_changed", "newer_observation", "rate_limit", "interval", "camera_unavailable",
+        "startup_unavailable", "observation_unavailable", "frame_unavailable",
         "non_speech_annotation", "no_speech", "user_input_priority", "sequential_input",
     },
     "verification": {"verified", "unverified"},

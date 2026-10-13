@@ -58,6 +58,23 @@ def test_incremental_speech_diagnostics_keep_timing_facts_without_text(caplog):
     assert "PRIVATE_COMMENTARY" not in caplog.text and "PRIVATE_ACTIVITY" not in caplog.text
 
 
+def test_camera_fallback_reasons_survive_the_diagnostic_allowlist(caplog):
+    caplog.set_level(logging.INFO, logger=diagnostics.logger.name)
+    for epoch, reason in enumerate(
+        ("startup_unavailable", "observation_unavailable", "frame_unavailable"),
+        start=1,
+    ):
+        diagnostics.emit(
+            "camera_changed", call_id="call-1", camera_epoch=epoch,
+            camera_enabled=False, reason=reason,
+        )
+
+    rows = events(caplog, "camera_changed")
+    assert [row.get("reason") for row in rows[-3:]] == [
+        "startup_unavailable", "observation_unavailable", "frame_unavailable"
+    ]
+
+
 async def test_shared_call_diagnostics_reach_existing_durable_bridge_journal(tmp_path):
     from orchestrator.bootstrap_logging import setup_bridge_file_logging
 

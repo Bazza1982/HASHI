@@ -293,6 +293,166 @@ async def test_video_start_timeout_falls_back_to_voice_without_ending_call(tmp_p
     await service.close()
 
 
+async def test_video_start_keeps_camera_while_an_accepted_first_frame_is_processing(tmp_path):
+    service, ports, adapters, base, _ = setup(
+        tmp_path, startup_video_timeout=0.01
+    )
+    context = service.config.context("owner", base["agent_id"])
+    context["profile"]["vision"] = {"target_id": "eyes", "options": {}}
+    service.config.save(
+        "owner", base["agent_id"], context["revision"], context["profile"]
+    )
+    began, release = asyncio.Event(), asyncio.Event()
+    openings = []
+
+    async def observe(*_args):
+        began.set()
+        await release.wait()
+        return "A book is visible."
+
+    async def opening(owner, binding, profile, targets, visual_context=None):
+        openings.append(visual_context)
+        return "您好，请讲。"
+
+    adapters.observe = observe
+    ports.opening = opening
+    try:
+        binding, _, _ = await start(service, base, video_requested=True)
+        captured_at = datetime.now(timezone.utc).isoformat()
+        image = base64.b64encode(
+            bytes.fromhex("ffd8ffc00008080010001000ffd9")
+        ).decode()
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "observe",
+                "frame_sequence": 1,
+                "image_b64": image,
+                "captured_at": captured_at,
+            },
+        )
+        await asyncio.wait_for(began.wait(), 1)
+        await asyncio.sleep(0.03)
+
+        pending = await service.invoke(
+            "owner", {**binding, "operation": "snapshot"}
+        )
+        assert pending["camera"]["enabled"] is True
+        assert pending["camera"]["state"] == "pending"
+        assert openings == []
+
+        release.set()
+        await service.calls["call-1"].task
+        final = await service.invoke(
+            "owner", {**binding, "operation": "snapshot"}
+        )
+        assert final["camera"]["state"] == "fresh"
+        assert openings[0]["observation"] == "A book is visible."
+    finally:
+        release.set()
+        await service.close()
+
+
+async def test_recent_accepted_frame_keeps_stale_observation_delayed(tmp_path):
+    service, _ports, adapters, base, clock = setup(tmp_path)
+    context = service.config.context("owner", base["agent_id"])
+    context["profile"]["vision"] = {"target_id": "eyes", "options": {}}
+    service.config.save(
+        "owner", base["agent_id"], context["revision"], context["profile"]
+    )
+    binding, _, _ = await start(service, base, video_requested=True)
+    call = service.calls["call-1"]
+    call.camera_had_observation = True
+    call.observation = {
+        "text": "An earlier image.",
+        "epoch": call.camera_epoch,
+        "frame_sequence": 1,
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+        "captured_unix": datetime.now(timezone.utc).timestamp() - 21,
+        "image_digest": "old",
+    }
+    clock[0] += 30
+    began, release = asyncio.Event(), asyncio.Event()
+
+    async def observe(*_args):
+        began.set()
+        await release.wait()
+        return "A current image."
+
+    adapters.observe = observe
+    try:
+        response = await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "observe",
+                "frame_sequence": 2,
+                "image_b64": base64.b64encode(
+                    bytes.fromhex("ffd8ffc00008080010001000ffd9")
+                ).decode(),
+                "captured_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        assert response["camera"]["enabled"] is True
+        assert response["camera"]["state"] == "delayed"
+        await asyncio.wait_for(began.wait(), 1)
+        release.set()
+        await call.vision_task
+        final = await service.invoke(
+            "owner", {**binding, "operation": "snapshot"}
+        )
+        assert final["camera"]["state"] == "fresh"
+    finally:
+        release.set()
+        await service.close()
+
+
+async def test_camera_falls_back_when_frame_ingress_really_stops(tmp_path):
+    service, _ports, adapters, base, clock = setup(tmp_path)
+    context = service.config.context("owner", base["agent_id"])
+    context["profile"]["vision"] = {"target_id": "eyes", "options": {}}
+    service.config.save(
+        "owner", base["agent_id"], context["revision"], context["profile"]
+    )
+    binding, _, _ = await start(service, base, video_requested=True)
+    began, release = asyncio.Event(), asyncio.Event()
+
+    async def observe(*_args):
+        began.set()
+        await release.wait()
+        return "A current image."
+
+    adapters.observe = observe
+    try:
+        accepted = await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "observe",
+                "frame_sequence": 1,
+                "image_b64": base64.b64encode(
+                    bytes.fromhex("ffd8ffc00008080010001000ffd9")
+                ).decode(),
+                "captured_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        assert accepted["camera"]["state"] == "pending"
+        await asyncio.wait_for(began.wait(), 1)
+        clock[0] += service.calls["call-1"].video_policy["freshness_seconds"] + 1
+
+        result = await service.invoke(
+            "owner", {**binding, "operation": "snapshot"}
+        )
+
+        assert result["phase"] == "active"
+        assert result["camera"]["enabled"] is False
+        assert result["camera"]["reason"] == "frame_unavailable"
+    finally:
+        release.set()
+        await service.close()
+
+
 def test_settings_redact_endpoints_credentials_and_check_revision(tmp_path):
     service, *_ = setup(tmp_path)
     public = service.config.context("owner", "agent-a")

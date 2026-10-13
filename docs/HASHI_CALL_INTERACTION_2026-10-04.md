@@ -1,20 +1,50 @@
 # Phone and Call interaction decision
 
+## 2026-10-13 multi-camera continuity and diagnostics correction
+
+The user approved the multiple-camera implementation and then reported that its
+switch action was visually poor and that a live camera repeatedly fell back to
+voice. Correlated HASHI4 evidence established two causes: Call equated a slow or
+stale completed vision observation with failed camera ingress, and a Workbench
+snapshot started before camera enable could arrive afterward and cancel the new
+preview. There was no browser track-ended event, frame-upload failure, or
+bandwidth failure during the observed interruptions.
+
+Camera liveness is now owned by accepted frame ingress, separately from vision
+inference freshness. The startup window still falls back when no first frame
+arrives. Once a frame is accepted, ringback may wait for the in-flight first
+observation; later slow inference shows pending/delayed state while fresh frames
+continue. The camera falls back only when frame ingress actually stops for the
+freshness window or the first observation explicitly fails. Voice, Call
+binding, frame cadence, and one-default-camera startup remain unchanged.
+
+Workbench fences camera state from requests that predate a local camera
+transition. It records ignored stale responses and authoritative fallback
+state/reason/epoch. The Function journal now preserves startup, observation,
+and frame-unavailable reasons plus last-frame age; no media content is logged.
+The switch action keeps its 44×44 accessible target but uses a recognizable
+camera-and-swap glyph on a quieter translucent surface. Protected Core is
+unchanged.
+
 ## 2026-10-13 Agent-visible video readiness and conversational use
 
 The user approved making Agent-usable vision, rather than a successful local
 camera preview, the source of truth. Video Call now opens the camera during
 ringback, waits for local readiness before starting the Agent opening, and sends
-the first frame while ringback continues. The opening waits at most eight
-seconds for a completed observation. If that does not arrive, the same Call
-continues by voice, local preview turns off, and the camera control remains an
-explicit retry. This is not a cross-transport fallback to Phone.
+the first frame while ringback continues. The startup window requires an
+accepted frame, not a completed provider observation. If no frame arrives, the
+same Call continues by voice, local preview turns off, and the camera control
+remains an explicit retry. If a frame is accepted, ringback can continue while
+the first observation completes. This is not a cross-transport fallback to
+Phone.
 
 The visible state machine is preparing, current, delayed, or voice-only.
-Observations are current through 12 seconds and remain usable with a visible
-delay warning through 20 seconds. After that, the camera is disabled until the
-caller retries. One transient upload/provider failure retains the last usable
-observation; increasing frame cadence is explicitly not the remedy.
+Observations are current through 12 seconds and then carry a visible delay
+warning. Observation age does not disable a camera while new frames continue to
+reach HASHI. A stopped frame stream or confirmed first-observation failure
+disables the camera until the caller retries. One transient upload/provider
+failure retains the last usable observation; increasing frame cadence is
+explicitly not the remedy.
 
 The first observation is untrusted silent context for the natural once-only
 greeting. The Agent must not default to “video connected”/“I can see you” or

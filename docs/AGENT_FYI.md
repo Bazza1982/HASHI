@@ -1,20 +1,20 @@
 # HASHI Agent FYI
 
-October 13 Call video-readiness decision: local preview is not proof that the
-Agent can see. Video Call now prepares the camera during ringback, sends the
-first frame before the once-only opening, and waits up to eight seconds for an
-Agent-usable observation. If unavailable, preview turns off and the same call
-continues by voice; the user can retry the camera. UI overlays distinguish
-preparing, current, and delayed vision. Observations are current through 12
-seconds, usable with a delay warning through 20 seconds, then expire. A single
-upload/provider failure preserves the last usable observation and does not
-increase frame cadence. Camera content is silent context: never announce video
-or ordinary appearance by default; mention it unprompted only when
-exceptionally noticeable, directly relevant, and socially natural. Protected
-Core, Phone, models, reasoning, STT/TTS and Session ownership are unchanged.
-Offline evidence is 224 HASHI3 Call cases, 113 Workbench Call cases, plus the
-production build. HASHI4 source deployment and the user's reboot remain
-separate from runtime/physical acceptance.
+October 13 Call camera decision: local preview is not proof that the Agent can
+see, but slow vision inference is also not proof that the camera failed. Video
+Call prepares one default camera during ringback and falls back to voice when no
+first frame reaches HASHI. Once frames are accepted, pending/delayed inference
+keeps the camera live; only stopped frame ingress or a confirmed initial vision
+failure disables it. Older snapshot responses cannot cancel a newer camera
+transition. Multi-camera users can replace the active source on the same Call
+through a 44×44 camera-and-swap action; no-camera startup still uses voice.
+Diagnostics retain state, epoch, fallback reason, frame age, and ignored stale
+responses without image content. Camera content remains silent context: never
+announce video or ordinary appearance by default; mention it unprompted only
+when exceptionally noticeable, directly relevant, and socially natural.
+Protected Core, Phone, models, reasoning, STT/TTS and Session ownership are
+unchanged. HASHI4 source deployment, the user's reboot, and its live acceptance
+remain separate.
 
 Earlier October 11-12 Call, microphone, restart and hangup checkpoints are
 preserved in [history](AGENT_FYI_HISTORY_2026-10-13.md). The current Call

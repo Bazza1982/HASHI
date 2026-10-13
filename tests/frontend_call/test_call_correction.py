@@ -185,7 +185,7 @@ async def test_one_failed_observation_keeps_the_last_usable_agent_view(tmp_path)
     await service.close()
 
 
-async def test_agent_view_reports_delay_then_falls_back_to_voice_when_it_expires(tmp_path):
+async def test_agent_view_reports_delay_then_falls_back_when_frame_ingress_stops(tmp_path):
     service, _, _, base, clock = setup(tmp_path)
     info = service.config.context('owner', 'agent-a')
     info['profile']['vision'] = {'target_id': 'eyes', 'options': {}}
@@ -210,5 +210,5 @@ async def test_agent_view_reports_delay_then_falls_back_to_voice_when_it_expires
     view = await service.invoke('owner', {**binding, 'operation': 'snapshot'})
     assert view['phase'] == 'active'
     assert view['camera']['state'] == 'off'
-    assert view['camera']['reason'] == 'observation_unavailable'
+    assert view['camera']['reason'] == 'frame_unavailable'
     await service.close()
