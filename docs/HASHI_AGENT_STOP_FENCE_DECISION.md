@@ -6,8 +6,14 @@ Approval: the user approved this Agent-level stop design on 2026-10-14.
 
 Implementation: HASHI3 branch `debug-stop`; PAO and its Function consumers.
 
-Live verification: not performed. This branch has not been adopted by a
-running instance and no HASHI instance was restarted for source validation.
+Live verification: HASHI3 adopted implementation commit `6c12e927` through
+`/reboot max` on 2026-10-14. The shared Function and all eleven Workers moved
+to the new generation while protected Core stayed live. A real Backend API
+canary created one enabled heartbeat and one FUTURE delayed message for an
+otherwise idle test Agent. `/stop` removed the delayed message, retained the
+heartbeat definition as enabled, and advanced the Agent-level stop. The
+temporary heartbeat was then deleted and the test Agent returned to zero
+scheduler jobs.
 
 Owner: PAO runtime control with Frontend Connector, Scheduler, and
 BackgroundJobManager consumers. HER v2 continues to own its Turn internals;
