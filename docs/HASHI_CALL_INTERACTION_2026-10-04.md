@@ -1,5 +1,21 @@
 # Phone and Call interaction decision
 
+## 2026-10-13 complete debug-call reconciliation
+
+The user requests that all correct HASHI3/HASHI4 repairs be preserved together,
+without a new branch or worktree. Integration stays on HASHI3's existing
+`debug-call`; one reviewed merge retains both histories and the complete
+65-path inventory in the [reconciliation record](repairs/DEBUG_CALL_RECONCILIATION_20261013.md).
+
+PAO Functions preserve the once-only canonical opening, all opening-segment TTS
+ordering, terminal Phone attempt cleanup and durable safe provider errors. PCM
+retains relevant spoken-turn timestamp guidance and main's independent memory
+privacy/atomic-import/ACK implementation. Both desktop regression sets remain.
+Historical records below retain their original scope: a selected-file match
+was not proof of full-tree equality, and an earlier deployment receipt is not
+current adoption evidence. Source synchronization in this repair authorizes no
+reboot or new physical Call; Protected Core remains unchanged.
+
 ## 2026-10-13 multi-camera continuity and diagnostics correction
 
 The user approved the multiple-camera implementation and then reported that its
@@ -88,11 +104,14 @@ it does not retroactively identify which layer closed an earlier connection.
 The user-approved current behavior is
 [HASHI /call Current Behavior Contract](HASHI_CALL_CURRENT_BEHAVIOR.md).
 It is the release checklist for the clean `debug-call` branch and supersedes
-every conflicting behavior below. The fixed Phone control starts or returns only
-legacy `/phone`; the fixed video control starts or returns only direct `/call`
-and requests microphone and camera together. Neither falls back to or retargets
-the other. Camera failure degrades the direct Call to audio-only. The former
-camera-off startup rule and fixed sentence/character answer limits are retired.
+every conflicting behavior below. The two fixed controls keep independent
+ownership: Phone starts or returns legacy `/phone`, while video starts or returns
+direct `/call`. A video click requests microphone and camera together, and
+camera failure degrades that direct Call to audio-only. An unresolved direct
+route is refreshed on foreground and rechecked only from the video click.
+Neither route may fall back to the other. The former camera-off direct startup
+rule and fixed sentence/character answer limits are retired; separate
+entry-route assertions are required.
 
 Frontend Connector owns Workbench media, controls, captions, and connection
 sounds. PAO Call Function owns the bound Call, opening, typed speech projection,
@@ -129,13 +148,13 @@ release facts.
 The candidate passes the focused Workbench Call and Phone/live checks,
 143/143 HASHI3 Frontend Call checks, the complete Workbench server suite,
 production build, and protected-Core check. Physical HASHI3 acceptance verified
-both fixed launch entries, immediate microphone/camera startup, same-call camera
-off/on, microphone mute/unmute, once-only opening, visible two-sided captions,
-natural Agent speech without stage directions, completed TTS playback, ringback
-termination after connection, hangup, and ended camera tracks. The physical
-Phone-entry test was repeated after the final HASHI3 restart integration and
-again passed video-first startup, reversible controls, natural opening, and
-media release.
+direct Call's immediate microphone/camera startup, same-call camera off/on,
+microphone mute/unmute, once-only opening, visible two-sided captions, natural
+Agent speech without stage directions, completed TTS playback, ringback
+termination after connection, hangup, and ended camera tracks. The tests that
+opened video-first direct Call from the Phone control are now classified as the
+entry-routing regression. They remain direct Call evidence but do not prove the
+required Phone-to-`/phone` mapping.
 
 HASHI4 `debug-call` carries the exact candidate product blobs and its isolated
 tree passes 143/143 Frontend Call checks. Live acceptance against the existing
@@ -151,8 +170,27 @@ running service identity, and the code loaded by the Electron renderer. The
 service reported the exact candidate, but an already-open renderer still held
 the old launcher until Workbench was relaunched through its official launcher.
 The newly created renderer emitted the expected direct Call route request and
-then passed the physical Phone-entry video-first test. A service restart or
-source hash alone is therefore not renderer-adoption evidence.
+then reproduced the incorrect Phone-to-direct mapping. That observation proves
+renderer adoption while simultaneously failing entry routing. A service restart
+or source hash alone is therefore not renderer-adoption evidence; current
+acceptance also needs separate Phone and video route receipts.
+
+That entry-routing gate passed after the Workbench repair at
+`d76fbc0949f21e19fb2c13eede70b0398dea77d6`. The remaining deployment
+fault was an ignored local Workbench allow-list that admitted direct Call only
+for HASHI2. Its scoped value now names HASHI2, HASHI3, and HASHI4, and the
+managed Workbench reload reports direct Call available for HASHI4. This local
+configuration correction did not restart HASHI4.
+
+Physical HASHI4 checks then distinguished the two fixed controls. Video opened
+direct `/call`, displayed stable live camera, retained the Agent avatar, and
+used one rolling transcript. A spoken question received a visible answer while
+the panel showed active speech. It identified the session as video and correctly
+described the chair in the camera frame. No
+legacy Phone audit appeared. Phone then opened the audio-only
+`/phone` panel, showed that video was unsupported, and created a new legacy
+attempt/call audit pair. Both calls hung up and released their active media.
+These are separate route receipts and close the Workbench entry-routing gate.
 
 ## 2026-10-11 sentence-streamed speech and rolling captions
 
@@ -745,3 +783,48 @@ present, and a qualified STT/TTS catalogue estimate otherwise. Provider cost
 receipts take precedence over estimates. Backend text-model usage remains in
 `/metre`; vision is excluded from the Call voice-media total. Estimates are
 labelled and missing catalogue prices remain incomplete rather than zero.
+
+## 2026-10-12 HASHI4 listening endpoint, opening record, and time continuity
+
+The user's physical HASHI4 report explicitly authorizes this Call defect repair
+on the matching `debug-call` HASHI and Workbench branches. It does not authorize
+a HASHI4 lifecycle action. PAO Call Function owns opening persistence, spoken
+context, and TTS scheduling; Frontend Connector owns browser capture endpointing.
+Protected Core remains unchanged.
+
+The correlated Feiyan trace separates the regression from backend reasoning.
+The two Agent Runs completed in about 2.8 and 4.4 seconds. STT completed in
+about 1.8 and 2.4 seconds, but the second browser recording stayed open for the
+59.8-second hard limit. A history audit found that the approved
+Aptenra-inspired local detector path had been replaced by the later HASHI2-only
+amplitude/cloud experiment and had not actually been reconnected on the
+ordinary branch despite the restoration record. A separate opening trace
+showed low-priority filler preparation starting while a later opening segment
+still used the same TTS provider. The audible opening had no canonical
+presentation row, and Call guidance exposed timestamps without telling the
+Agent to compare them when relative dates or elapsed time mattered.
+
+The earlier peak-and-stable-tail repair was a separate symptom heuristic and is
+superseded; it is not considered better than the established design. The
+browser now again warms and reuses local speech detection with the moving
+idle-noise baseline, onset pre-roll, the ordinary 800 ms quiet endpoint, and the
+59.8-second continuous-speech safety bound. Speech never trains its own
+rejection floor, and detector failure is explicit rather than silently
+degrading to amplitude-only capture.
+
+The Function persists the generated opening once through SessionStore with a
+Call-scoped idempotency key before exposing its audio. It is visible in the
+conversation record and explicitly excluded from model history because no user
+Turn created it. Filler preparation waits for every opening speech segment.
+Spoken-turn guidance uses `call.valid_at` and existing exchange timestamps to
+compare relative dates and real gaps only when relevant.
+
+Red checks reproduced the one-minute capture, missing opening row, absent time
+guidance, and TTS contention. The restored browser gate also passes the retained
+acoustic replay: noise and Call tones produce no turn, normal/quiet speech retain
+the same segments, and detector frame p95 is 1.1 ms. The complete Workbench Call
+suite passes 95/95, its production build passes, the matching HASHI Function
+suite passes 158/158, and Protected Core remains clean. These are source and
+deterministic-browser checks. Post-fix HASHI4 Function adoption, a fresh
+renderer, and physical acoustic acceptance remain separate and pending the
+user's lifecycle action.

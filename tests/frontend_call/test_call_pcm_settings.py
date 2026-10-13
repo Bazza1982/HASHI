@@ -31,6 +31,9 @@ def test_call_presentation_is_spoken_without_a_short_answer_limit():
     assert "without headings, bullet lists, Markdown" in CALL_INTERACTION_GUIDANCE
     assert "stage directions" in CALL_INTERACTION_GUIDANCE
     assert "（小声）" in CALL_INTERACTION_GUIDANCE
+    assert "call.valid_at" in CALL_INTERACTION_GUIDANCE
+    assert "elapsed time" in CALL_INTERACTION_GUIDANCE
+    assert "Do not mention time unless it is relevant" in CALL_INTERACTION_GUIDANCE
     assert "silent context" in CALL_INTERACTION_GUIDANCE
     assert "exceptionally noticeable" in CALL_INTERACTION_GUIDANCE
     assert "ordinary appearance" in CALL_INTERACTION_GUIDANCE
