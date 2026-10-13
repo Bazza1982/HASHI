@@ -79,6 +79,7 @@ class Call:
     camera_enabled_at: float | None = None
     camera_reason: str = ""
     camera_had_observation: bool = False
+    camera_last_frame_at: float | None = None
     frame_sequence: int = 0
     frame_digest: str = ""
     vision_task: asyncio.Task | None = None
@@ -255,14 +256,20 @@ class CallService:
     def _camera_off(self, call, reason="camera_disabled"):
         changed = call.camera_enabled or bool(call.vision_pending) or bool(call.observation)
         previous_epoch = call.camera_epoch
+        frame_age_ms = (
+            max(0, int((self.clock() - call.camera_last_frame_at) * 1000))
+            if call.camera_last_frame_at is not None else None
+        )
         call.camera_enabled = False
         call.camera_epoch += 1
         call.camera_enabled_at = None
         call.camera_reason = reason
         call.camera_had_observation = False
+        call.camera_last_frame_at = None
         if changed:
             emit("camera_changed", **self._facts(call), camera_enabled=False,
-                 camera_epoch=call.camera_epoch, reason=reason)
+                 camera_epoch=call.camera_epoch, frame_sequence=call.frame_sequence,
+                 frame_age_ms=frame_age_ms, reason=reason)
         call.vision_pending.clear()
         call.observation.clear()
         call.vision_error = ""
@@ -279,6 +286,7 @@ class CallService:
         call.camera_enabled_at = self.clock()
         call.camera_reason = ""
         call.camera_had_observation = False
+        call.camera_last_frame_at = None
         call.vision_error = ""
         emit("camera_changed", **self._facts(call), camera_enabled=True,
              camera_epoch=call.camera_epoch, reason=reason)
@@ -358,11 +366,18 @@ class CallService:
                 age = max(0.0, time.time() - fresh["captured_unix"])
                 state = ("fresh" if age <= call.video_policy["responsive_seconds"]
                          else "delayed")
+            elif call.camera_last_frame_at is not None:
+                frame_age = max(0.0, self.clock() - call.camera_last_frame_at)
+                if frame_age < call.video_policy["freshness_seconds"]:
+                    # Accepted ingress proves that the camera path is alive.
+                    # Vision inference may legitimately take longer than the
+                    # startup/current-observation window.
+                    state = "delayed" if call.camera_had_observation else "pending"
+                else:
+                    self._camera_off(call, reason="frame_unavailable")
             elif (call.camera_enabled_at is not None
                   and self.clock() - call.camera_enabled_at >= self._startup_timeout(call)):
-                reason = ("observation_unavailable" if call.camera_had_observation
-                          else "startup_unavailable")
-                self._camera_off(call, reason=reason)
+                self._camera_off(call, reason="startup_unavailable")
             else:
                 state = "pending"
         return {"state": state, "enabled": call.camera_enabled,
@@ -669,6 +684,7 @@ class CallService:
             image = decode_jpeg(body.get("image_b64"))
             pending_replaced = bool(call.vision_pending)
             call.frame_sequence, call.frame_digest = sequence, fingerprint
+            call.camera_last_frame_at = self.clock()
             call.vision_pending = {"image": image, "image_digest": hashlib.sha256(image).hexdigest(),
                                    "frame_sequence": sequence, "captured_at": body["captured_at"], "captured_unix": captured}
             emit("frame_accepted", **self._facts(call), camera_epoch=call.camera_epoch,
@@ -1004,37 +1020,42 @@ class CallService:
     async def _opening_visual_context(self, call):
         if not call.camera_enabled:
             return None
-        try:
-            async with asyncio.timeout(self._startup_timeout(call)):
-                while call.phase == "active" and call.camera_enabled:
-                    current = self._fresh_observation(call)
-                    if current:
-                        return {
-                            "type": "hashi.call-opening-visual",
-                            "version": 1,
-                            "source": "user_shared_camera",
-                            "observation_authority": "untrusted_data",
-                            "captured_at": current.get("captured_at"),
-                            "observation": current.get("text", ""),
-                        }
-                    call.observation_changed.clear()
-                    if self._fresh_observation(call):
-                        continue
+        startup_deadline = (
+            asyncio.get_running_loop().time() + self._startup_timeout(call)
+        )
+        while call.phase == "active" and call.camera_enabled:
+            current = self._fresh_observation(call)
+            if current:
+                return {
+                    "type": "hashi.call-opening-visual",
+                    "version": 1,
+                    "source": "user_shared_camera",
+                    "observation_authority": "untrusted_data",
+                    "captured_at": current.get("captured_at"),
+                    "observation": current.get("text", ""),
+                }
+            if call.vision_error:
+                self._camera_off(call, reason="observation_unavailable")
+                return None
+            if call.camera_last_frame_at is None:
+                remaining = startup_deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    self._camera_off(call, reason="startup_unavailable")
+                    return None
+            else:
+                frame_age = max(0.0, self.clock() - call.camera_last_frame_at)
+                remaining = call.video_policy["freshness_seconds"] - frame_age
+                if remaining <= 0:
+                    self._camera_off(call, reason="frame_unavailable")
+                    return None
+            call.observation_changed.clear()
+            if self._fresh_observation(call) or call.vision_error:
+                continue
+            try:
+                async with asyncio.timeout(max(0.01, remaining)):
                     await call.observation_changed.wait()
-        except TimeoutError:
-            pass
-        current = self._fresh_observation(call)
-        if current:
-            return {
-                "type": "hashi.call-opening-visual",
-                "version": 1,
-                "source": "user_shared_camera",
-                "observation_authority": "untrusted_data",
-                "captured_at": current.get("captured_at"),
-                "observation": current.get("text", ""),
-            }
-        if call.phase == "active" and call.camera_enabled:
-            self._camera_off(call, reason="startup_unavailable")
+            except TimeoutError:
+                continue
         return None
 
     async def _open(self, call):
