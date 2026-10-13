@@ -2524,6 +2524,7 @@
     "reboot.reason.shared_replacement_failed": "共享 Functions 替换失败，上一代际仍然有效。",
     "reboot.reason.shared_generation_mismatch": "当前共享 Functions 代际与 Core 的替换回执不一致。",
     "reboot.reason.target_busy": "代理仍有任务或排队消息，请完成或停止后重试。",
+    "reboot.busy_targets": "正在处理任务的代理：{agents}。",
     "reboot.reason.activity_unavailable": "无法确认代理状态，请稍后重试。",
     "reboot.reason.route_busy": "代理仍在处理请求，请稍后重试。",
     "reboot.reason.drain_failed": "当前任务未能及时结束。",

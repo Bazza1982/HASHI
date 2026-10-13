@@ -2524,6 +2524,7 @@
     "reboot.reason.shared_replacement_failed": "Shared Function replacement failed and the previous generation remained authoritative.",
     "reboot.reason.shared_generation_mismatch": "The active shared Function generation does not match Core's replacement receipt.",
     "reboot.reason.target_busy": "The agent has active or queued work; finish or stop it before retrying.",
+    "reboot.busy_targets": "Busy Agents: {agents}.",
     "reboot.reason.activity_unavailable": "Agent activity is unavailable; retry later.",
     "reboot.reason.route_busy": "The agent is handling a request; retry later.",
     "reboot.reason.drain_failed": "Current work did not finish in time.",

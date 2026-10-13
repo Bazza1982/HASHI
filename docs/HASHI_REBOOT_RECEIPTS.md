@@ -219,6 +219,23 @@ switch reason and missing actionable status guidance), then passed. Real manager
 route gate, persistent receipts and renderer are exercised with deterministic
 process boundaries. Live restart and terminal delivery remain separate acceptance.
 
+## Broad reboot busy preflight correction (2026-10-13)
+
+The live HASHI4 incident showed that `/reboot max` bypassed the activity
+preflight described above. A long Sakura Run remained active throughout the
+shared handoff's 120-second drain budget, so Core correctly rolled back, but the
+ordinary result could report only a generic shared-Functions replacement
+failure. The Run completed six seconds after rollback.
+
+PAO now reads live activity for every selected Worker before a broad replacement
+request is published, just as it already does for targeted reboot modes. Any
+busy or queued Worker rejects the operation before routes, Core, or candidates
+are touched. The receipt retains `busy_targets`, and Frontend rendering names
+those Agents. This remains an observation rather than an idle reservation; the
+existing fenced transactional drain still handles the race after preflight.
+There is no forced cancellation, automatic retry, timeout extension, or Core
+change.
+
 ## HASHI1 notification diagnosis (2026-09-27)
 
 On HASHI1, two of the latest three Telegram broad-reboot final notices used a
