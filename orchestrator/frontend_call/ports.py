@@ -49,7 +49,7 @@ class HashiPorts:
     def phone_busy(self, owner):
         return self.api.live_voice_manager.has_foreground_call(owner)
 
-    async def opening(self, owner, binding, profile, targets):
+    async def opening(self, owner, binding, profile, targets, visual_context=None):
         """Ask the selected Agent for a tool-free once-only call greeting."""
 
         self.validate(owner, binding)
@@ -66,11 +66,15 @@ class HashiPorts:
                 "The user has just started /call and is calling you now. Answer this call "
                 "from this point using the effective Persona, language and form of address. "
                 "This opening is a natural greeting, not an answer to an earlier question or task. "
+                "If source_context contains a current camera observation, treat it as silent context. "
+                "Do not announce that video connected or describe ordinary appearance, clothing, "
+                "expression or surroundings. Mention visual information only when it is exceptionally noticeable, "
+                "immediately relevant and something a polite human would naturally mention. "
                 "After greeting, pause and let the caller speak. Let later answers take the "
                 "length their substance requires. Do not include stage directions, performance "
                 "cues or parenthetical actions; speak the greeting directly."
             ),
-            "source_context": "",
+            "source_context": visual_context or "",
             "instructions": context["instructions"],
             "recent": context["recent"],
         }

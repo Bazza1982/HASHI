@@ -222,16 +222,27 @@ class CallConfig:
     def video_policy(self, doc=None):
         if doc is None:
             doc, _ = self.read()
-        policy = {"interval_ms": 2000, "freshness_seconds": 8,
+        policy = {"interval_ms": 2000, "freshness_seconds": 20,
+                  "responsive_seconds": 12, "startup_timeout_seconds": 8,
                   "max_observations_per_minute": 20}
         supplied = doc.get("video_policy", {})
         if not isinstance(supplied, dict) or set(supplied) - set(policy):
             raise CallError("call_video_policy_invalid", 503)
         policy.update(supplied)
+        # Configurations saved before the readiness states existed may have a
+        # shorter explicit freshness window. Preserve them without making the
+        # derived responsive window invalid.
+        if "responsive_seconds" not in supplied:
+            policy["responsive_seconds"] = min(
+                policy["responsive_seconds"], policy["freshness_seconds"]
+            )
         bounds = {"interval_ms": (1000, 10000), "freshness_seconds": (3, 30),
+                  "responsive_seconds": (3, 30), "startup_timeout_seconds": (3, 20),
                   "max_observations_per_minute": (1, 60)}
         if any(type(policy[k]) is not int or not low <= policy[k] <= high
                for k, (low, high) in bounds.items()):
+            raise CallError("call_video_policy_invalid", 503)
+        if policy["responsive_seconds"] > policy["freshness_seconds"]:
             raise CallError("call_video_policy_invalid", 503)
         return policy
 

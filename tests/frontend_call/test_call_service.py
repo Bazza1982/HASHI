@@ -1,5 +1,7 @@
 import asyncio
+import base64
 import json
+from datetime import datetime, timezone
 import pytest
 from orchestrator.frontend_call.config import CallConfig, validate_target
 from orchestrator.frontend_call.contract import CallError
@@ -132,15 +134,19 @@ class Adapters:
         }
 
 
-def setup(tmp_path, location="local"):
+def setup(tmp_path, location="local", *, startup_video_timeout=None):
     path = tmp_path / "call_profiles.json"
     path.write_text(json.dumps(document(location)))
     config = CallConfig(path)
     ports = Ports()
     adapters = Adapters()
     clock = [100.0]
+    options = {}
+    if startup_video_timeout is not None:
+        options["startup_video_timeout"] = startup_video_timeout
     service = CallService(
-        config, ports, adapters, clock=lambda: clock[0], poll_seconds=0.001
+        config, ports, adapters, clock=lambda: clock[0], poll_seconds=0.001,
+        **options,
     )
     base = {
         "client_id": "client-1",
@@ -151,7 +157,7 @@ def setup(tmp_path, location="local"):
     return service, ports, adapters, base, clock
 
 
-async def start(service, base, cloud=False):
+async def start(service, base, cloud=False, *, video_requested=False):
     info = await service.invoke("owner", {**base, "operation": "context"})
     body = {
         **base,
@@ -160,6 +166,7 @@ async def start(service, base, cloud=False):
         "generation": info["generation"],
         "revision": info["revision"],
         "allow_cloud": cloud,
+        **({"video_requested": True} if video_requested else {}),
     }
     result = await service.invoke("owner", body)
     return {**base, "call_id": "call-1", "generation": info["generation"]}, body, result
@@ -187,8 +194,8 @@ async def test_start_generates_exactly_one_agent_opening_before_first_user_turn(
     released = asyncio.Event()
     openings = []
 
-    async def opening(owner, binding, profile, targets):
-        openings.append((owner, dict(binding), dict(profile), dict(targets)))
+    async def opening(owner, binding, profile, targets, visual_context=None):
+        openings.append((owner, dict(binding), dict(profile), dict(targets), visual_context))
         await released.wait()
         return "（小声）您好，我接到您的电话了。请讲。"
 
@@ -217,6 +224,72 @@ async def test_start_generates_exactly_one_agent_opening_before_first_user_turn(
         "turn_id": "opening-call-1",
     }]
     assert adapters.stt == 0
+    await service.close()
+
+
+async def test_video_start_waits_for_first_observation_before_agent_opening(tmp_path):
+    service, ports, _adapters, base, _ = setup(tmp_path)
+    context = service.config.context("owner", base["agent_id"])
+    context["profile"]["vision"] = {"target_id": "eyes", "options": {}}
+    service.config.save("owner", base["agent_id"], context["revision"], context["profile"])
+    openings = []
+
+    async def opening(owner, binding, profile, targets, visual_context=None):
+        openings.append(visual_context)
+        return "您好，请讲。"
+
+    ports.opening = opening
+    binding, _, first = await start(service, base, video_requested=True)
+    assert first["camera"]["state"] == "pending"
+    assert first["camera"]["enabled"] is True
+    await asyncio.sleep(0)
+    assert openings == [], "the greeting waits while ringback covers first-frame preparation"
+
+    captured_at = datetime.now(timezone.utc).isoformat()
+    image = base64.b64encode(bytes.fromhex("ffd8ffc00008080010001000ffd9")).decode()
+    await service.invoke("owner", {
+        **binding,
+        "operation": "observe",
+        "frame_sequence": 1,
+        "image_b64": image,
+        "captured_at": captured_at,
+    })
+    await service.calls["call-1"].task
+
+    assert len(openings) == 1
+    assert openings[0]["type"] == "hashi.call-opening-visual"
+    assert openings[0]["observation"] == "A book is visible."
+    assert openings[0]["captured_at"] == captured_at
+    final = await service.invoke("owner", {**binding, "operation": "snapshot"})
+    assert final["turn"]["phase"] == "complete"
+    assert final["camera"]["state"] == "fresh"
+    await service.close()
+
+
+async def test_video_start_timeout_falls_back_to_voice_without_ending_call(tmp_path):
+    service, ports, _adapters, base, _ = setup(
+        tmp_path, startup_video_timeout=0.01
+    )
+    context = service.config.context("owner", base["agent_id"])
+    context["profile"]["vision"] = {"target_id": "eyes", "options": {}}
+    service.config.save("owner", base["agent_id"], context["revision"], context["profile"])
+    openings = []
+
+    async def opening(owner, binding, profile, targets, visual_context=None):
+        openings.append(visual_context)
+        return "您好，请讲。"
+
+    ports.opening = opening
+    binding, _, _ = await start(service, base, video_requested=True)
+    await service.calls["call-1"].task
+    final = await service.invoke("owner", {**binding, "operation": "snapshot"})
+
+    assert openings == [None]
+    assert final["phase"] == "active"
+    assert final["turn"]["phase"] == "complete"
+    assert final["camera"]["state"] == "off"
+    assert final["camera"]["enabled"] is False
+    assert final["camera"]["reason"] == "startup_unavailable"
     await service.close()
 
 

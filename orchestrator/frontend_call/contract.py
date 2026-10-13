@@ -67,7 +67,7 @@ OPERATIONS = {
     "route": set(),
     "context": set(),
     "save_profile": {"revision", "profile"},
-    "start": {"generation", "revision", "call_id", "allow_cloud", "locale"},
+    "start": {"generation", "revision", "call_id", "allow_cloud", "locale", "video_requested"},
     "turn": {
         "generation",
         "call_id",

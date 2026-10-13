@@ -177,8 +177,17 @@ async def test_call_opening_uses_typed_tool_free_speech_without_creating_a_user_
         "call_id": "call-1",
         "client_id": "client-1",
     }
+    visual_context = {
+        "type": "hashi.call-opening-visual",
+        "version": 1,
+        "source": "user_shared_camera",
+        "observation_authority": "untrusted_data",
+        "captured_at": "2026-10-13T00:00:00Z",
+        "observation": "A person is seated in front of the camera.",
+    }
     text = await HashiPorts(api).opening(
-        "owner", binding, {"tts": {}}, {"tts": {"model": "fixture-tts"}}
+        "owner", binding, {"tts": {}}, {"tts": {"model": "fixture-tts"}},
+        visual_context,
     )
     assert text == "您好，我接到您的电话了。请讲。"
     assert len(store.messages(session["session_id"], owner_id="owner")) == 0
@@ -186,6 +195,9 @@ async def test_call_opening_uses_typed_tool_free_speech_without_creating_a_user_
     assert operation == "call_speak"
     assert payload["scope"]["type"] == "hashi.call-speech-scope"
     assert payload["state"]["instructions"] == "effective PCM"
+    assert payload["state"]["source_context"] == visual_context
+    assert "silent context" in payload["state"]["goal"]
+    assert "exceptionally noticeable" in payload["state"]["goal"]
     assert "earlier question" in payload["state"]["goal"]
     assert "short reply" not in payload["state"]["goal"]
 

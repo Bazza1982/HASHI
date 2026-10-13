@@ -76,6 +76,9 @@ class Call:
     rows: list = field(default_factory=list)
     camera_enabled: bool = False
     camera_epoch: int = 0
+    camera_enabled_at: float | None = None
+    camera_reason: str = ""
+    camera_had_observation: bool = False
     frame_sequence: int = 0
     frame_digest: str = ""
     vision_task: asyncio.Task | None = None
@@ -91,11 +94,15 @@ class Call:
 class CallService:
     def __init__(
         self, config, ports, adapters, *, clock=time.monotonic, poll_seconds=0.7,
-        filler_warm_seconds=2.0,
+        filler_warm_seconds=2.0, startup_video_timeout=None,
     ):
         self.config, self.ports, self.adapters = config, ports, adapters
         self.clock, self.poll_seconds = clock, poll_seconds
         self.filler_warm_seconds = filler_warm_seconds
+        self.startup_video_timeout = (
+            max(0.01, float(startup_video_timeout))
+            if startup_video_timeout is not None else None
+        )
         self._filler_cache = {}
         self.generation = uuid4().hex
         self.calls = {}
@@ -250,6 +257,9 @@ class CallService:
         previous_epoch = call.camera_epoch
         call.camera_enabled = False
         call.camera_epoch += 1
+        call.camera_enabled_at = None
+        call.camera_reason = reason
+        call.camera_had_observation = False
         if changed:
             emit("camera_changed", **self._facts(call), camera_enabled=False,
                  camera_epoch=call.camera_epoch, reason=reason)
@@ -258,8 +268,24 @@ class CallService:
         call.vision_error = ""
         call.observation_changed.set()
         if call.vision_task:
-            if call.vision_task.cancel():
+            if call.vision_task is not asyncio.current_task() and call.vision_task.cancel():
                 emit("vision_cancel_requested", **self._facts(call), reason=reason, camera_epoch=previous_epoch)
+
+    def _camera_on(self, call, reason="camera_enabled"):
+        if call.camera_enabled:
+            return
+        call.camera_enabled = True
+        call.camera_epoch += 1
+        call.camera_enabled_at = self.clock()
+        call.camera_reason = ""
+        call.camera_had_observation = False
+        call.vision_error = ""
+        emit("camera_changed", **self._facts(call), camera_enabled=True,
+             camera_epoch=call.camera_epoch, reason=reason)
+
+    def _startup_timeout(self, call):
+        return (self.startup_video_timeout if self.startup_video_timeout is not None
+                else call.video_policy["startup_timeout_seconds"])
 
     async def close(self):
         tasks = []
@@ -328,14 +354,23 @@ class CallService:
         fresh = self._fresh_observation(call)
         state = "off"
         if call.camera_enabled:
-            state = "fresh" if fresh else "pending" if call.vision_task and not call.vision_task.done() else "unavailable"
-            if call.vision_error:
-                state = "unavailable"
+            if fresh:
+                age = max(0.0, time.time() - fresh["captured_unix"])
+                state = ("fresh" if age <= call.video_policy["responsive_seconds"]
+                         else "delayed")
+            elif (call.camera_enabled_at is not None
+                  and self.clock() - call.camera_enabled_at >= self._startup_timeout(call)):
+                reason = ("observation_unavailable" if call.camera_had_observation
+                          else "startup_unavailable")
+                self._camera_off(call, reason=reason)
+            else:
+                state = "pending"
         return {"state": state, "enabled": call.camera_enabled,
                 "epoch": call.camera_epoch, "frame_sequence": call.frame_sequence,
                 "observed_sequence": fresh.get("frame_sequence"),
                 "captured_at": fresh.get("captured_at"),
-                "error": call.vision_error or None}
+                "error": call.vision_error or None,
+                "reason": call.camera_reason or None}
 
     def _fresh_observation(self, call):
         value = call.observation
@@ -424,6 +459,7 @@ class CallService:
                     continue
                 call.observation = {k: v for k, v in frame.items() if k != "image"}
                 call.observation.update(text=str(observation)[:2400], epoch=epoch)
+                call.camera_had_observation = True
                 call.vision_error = ""
                 call.observation_changed.set()
         except asyncio.CancelledError:
@@ -436,7 +472,6 @@ class CallService:
                  duration_ms=elapsed_ms(self.clock, started), stage="vision", **error_facts(exc, "call_observation_failed"))
             if call.camera_enabled and epoch == call.camera_epoch:
                 call.vision_error = exc.code if isinstance(exc, CallError) else "call_observation_failed"
-                call.observation.clear()
         finally:
             call.observation_changed.set()
 
@@ -569,8 +604,16 @@ class CallService:
                 locale=call_locale(body.get("locale")),
             )
             call.video_policy = context["video_policy"]
+            video_requested = body.get("video_requested", False)
+            if type(video_requested) is not bool:
+                raise CallError("call_camera_state_invalid")
             for kind in ("stt", "tts", "vision"):
                 self._privacy(call, kind)
+            if video_requested:
+                if call.targets["vision"]:
+                    self._camera_on(call, reason="startup_requested")
+                else:
+                    call.camera_reason = "vision_not_configured"
             # No awaits between busy check and reservation (one event-loop owner).
             self.calls[call_id] = call
             emit("call_started", **self._facts(call), phase=call.phase)
@@ -603,10 +646,7 @@ class CallService:
                 if not call.targets["vision"]:
                     raise CallError("call_vision_not_configured", 409)
                 self._privacy(call, "vision")
-                call.camera_enabled = True
-                call.camera_epoch += 1
-                emit("camera_changed", **self._facts(call), camera_enabled=True,
-                     camera_epoch=call.camera_epoch, reason="camera_enabled")
+                self._camera_on(call)
             return self._view(call)
         if op == "observe":
             if not call.camera_enabled:
@@ -950,6 +990,42 @@ class CallService:
             > MAX_SPEECH_SEGMENTS
         )
 
+    async def _opening_visual_context(self, call):
+        if not call.camera_enabled:
+            return None
+        try:
+            async with asyncio.timeout(self._startup_timeout(call)):
+                while call.phase == "active" and call.camera_enabled:
+                    current = self._fresh_observation(call)
+                    if current:
+                        return {
+                            "type": "hashi.call-opening-visual",
+                            "version": 1,
+                            "source": "user_shared_camera",
+                            "observation_authority": "untrusted_data",
+                            "captured_at": current.get("captured_at"),
+                            "observation": current.get("text", ""),
+                        }
+                    call.observation_changed.clear()
+                    if self._fresh_observation(call):
+                        continue
+                    await call.observation_changed.wait()
+        except TimeoutError:
+            pass
+        current = self._fresh_observation(call)
+        if current:
+            return {
+                "type": "hashi.call-opening-visual",
+                "version": 1,
+                "source": "user_shared_camera",
+                "observation_authority": "untrusted_data",
+                "captured_at": current.get("captured_at"),
+                "observation": current.get("text", ""),
+            }
+        if call.phase == "active" and call.camera_enabled:
+            self._camera_off(call, reason="startup_unavailable")
+        return None
+
     async def _open(self, call):
         """Generate one Agent-owned greeting without fabricating a user turn."""
         turn = call.turn
@@ -957,10 +1033,12 @@ class CallService:
         try:
             emit("opening_started", **self._facts(call, turn), stage="opening")
             self.ports.validate(call.owner, call.binding)
+            visual_context = await self._opening_visual_context(call)
             async with asyncio.timeout(8):
                 with diagnostic_context(**self._facts(call, turn), stage="opening"):
                     answer = await self.ports.opening(
-                        call.owner, call.binding, call.profile, call.targets
+                        call.owner, call.binding, call.profile, call.targets,
+                        visual_context,
                     )
             if call.phase != "active" or call.turn is not turn:
                 emit(

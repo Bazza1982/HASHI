@@ -1,7 +1,7 @@
 # HASHI /call Current Behavior Contract
 
 Status: **Authoritative current behavior**
-Approved scope: user-directed `debug-call` recovery through 2026-10-12
+Approved scope: user-directed `debug-call` recovery through 2026-10-13
 Owners: Frontend Connector (Workbench presentation/media) and PAO Call Function
 Engineering layers: external Workbench plus replaceable Layer 2 Functions
 Protected Core: unchanged
@@ -37,15 +37,17 @@ numeric response-length requirements are retired.
 - **CALL-MEDIA-01** — Either fixed launch control immediately displays
   Connecting and begins its own media acquisition in that same user action.
   Phone acquires its WebRTC microphone; video Call acquires microphone and
-  camera. Camera is part of video Call startup, not Phone. Context and server
-  startup may proceed concurrently; they must not postpone the applicable
-  device permission request.
+  camera. Camera is part of video Call startup, not Phone. Context acquisition
+  and the device permission request proceed during ringback. A video Call waits
+  for the local camera preflight before asking the Agent to answer.
 - **CALL-MEDIA-02** — Media acquired while the Agent opening is pending is held
-  for that call and does not admit caller speech until the once-only opening has
-  completed.
+  for that call. The first frame is sent while ringback continues, and the
+  once-only opening waits up to eight seconds for a usable Agent observation.
+  Caller speech is not admitted until that opening has completed.
 - **CALL-MEDIA-03** — Camera denial, absence, preview failure, or local device
-  failure degrades the same call to audio-only. It does not end, duplicate,
-  rebind, or pause the voice call.
+  failure, or failure to establish a usable Agent observation degrades the same
+  call to audio-only. It does not end, duplicate, rebind, or pause the voice
+  call. The camera control remains available for an explicit retry.
 - **CALL-MEDIA-04** — A server-side camera-enable failure is reconciled with a
   confirmed camera-off transaction before ordinary voice admission resumes.
 - **CALL-MEDIA-05** — The caller can turn the camera off and on at any time in
@@ -54,6 +56,11 @@ numeric response-length requirements are retired.
 - **CALL-MEDIA-06** — Muting, unmuting, camera changes, backgrounding, network
   recovery, and hangup cannot resurrect stale tracks or admit audio from an old
   call.
+- **CALL-MEDIA-07** — Agent-visible camera state, not local device success, is
+  authoritative. An observation is current through 12 seconds, visibly delayed
+  from 12 to 20 seconds, and unusable after 20 seconds. Expiry disables local
+  preview and continues by voice. A single failed upload or observation does not
+  erase the last still-usable observation or send extra frames.
 
 ## Connection sound and opening
 
@@ -71,6 +78,12 @@ numeric response-length requirements are retired.
   playback begins, the same confirmed barge-in rule as other Agent speech may
   stop its presentation and admit the caller's new input. If the opening fails,
   the call recovers to voice listening without inventing a successful opening.
+- **CALL-OPEN-03** — A usable first camera observation enters the opening as
+  untrusted silent context. The Agent does not announce that video connected or
+  comment on ordinary appearance, clothing, expression, or surroundings. It may
+  mention an unprompted visual only when exceptionally noticeable, directly
+  relevant, and natural for a polite human; otherwise it responds to visual
+  details only when the caller asks or refers to them.
 
 ## Spoken response and streaming
 
@@ -156,6 +169,11 @@ numeric response-length requirements are retired.
 - **CALL-UI-07** — Context actions sit outside the clipped flexible media/body
   region. At 390×640 with video and rolling captions, Stop speaking remains
   fully visible and its complete hit target remains clickable.
+- **CALL-UI-08** — Preview status describes what the Agent can use: preparing
+  overlays say the Agent cannot see the image yet; delayed overlays say the
+  Agent may see an earlier image; current state confirms availability. If the
+  visual path falls back, preview turns off and a localized notice says that the
+  same call is continuing by voice and the camera can be retried.
 
 ## Voice-media billing
 
@@ -209,8 +227,8 @@ numeric response-length requirements are retired.
   relevant broader checks, a production build, and real Workbench acceptance
   with microphone, camera, speaker/ring, captions, toggles, and hangup.
 - **CALL-REL-04** — Only that exact verified candidate may be loaded into
-  HASHI4. HASHI4 adoption and live observations must be recorded separately;
-  no HASHI4 reboot is authorized for this recovery.
+  HASHI4. HASHI4 source deployment, the user's later reboot, and live
+  observations are recorded separately; the implementer does not reboot HASHI4.
 - **CALL-REL-05** — All recovery work stays on the clean `debug-call` branch
   until the complete candidate is verified and deliberately merged back to
   main.
@@ -230,11 +248,11 @@ older commit or renderer cannot be carried forward.
 | --- | --- |
 | Entry/binding | launcher and route-policy tests |
 | Immediate devices | controller/media tests with delayed context/start and denied camera |
-| Camera lifecycle | enable, disable, re-enable, denial, server failure, background race |
-| Ring/opening | timing/order tests and live speaker observation |
+| Camera lifecycle | enable, disable, re-enable, denial, first-frame timeout, delayed/expired observation, server failure, background race |
+| Ring/opening | camera preflight/first-frame ordering tests, silent-visual policy, and live speaker observation |
 | Spoken style | PCM guidance and deterministic Call-cleaning tests |
 | Streaming/fillers | FIFO, complete-sentence, cancellation, no-duplicate tests |
-| Captions/UI | single rolling transcript, stable mirrored preview, retained Agent identity, smart-follow, visible/clickable contextual actions, visual/browser tests |
+| Captions/UI | single rolling transcript, Agent-visible preparing/delayed/current states, voice-only fallback, retained Agent identity, smart-follow, visible/clickable contextual actions, visual/browser tests |
 | Voice cost | Phone per-minute and Call STT/TTS projections, exact/estimate boundary, backend text and vision exclusions |
 | Recovery/hangup | existing noise, network, lifecycle, and settlement regressions |
 | H3 live | versioned frontend acceptance receipt plus real media observations |
