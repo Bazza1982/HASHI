@@ -1197,12 +1197,22 @@ class FunctionWorkerHost:
         # new request, fence durable queued/running Runs left by the previous
         # Worker process.  The Agent filter is essential: another Agent's live
         # Worker may be serving the same Session database concurrently.
-        from orchestrator import runtime_session
+        from orchestrator import agent_stop_fence, runtime_session
 
         session_store = runtime_session.ensure_store(runtime)
+        user_stopped_at = None
+        user_stop_request_id = None
+        fence_store = agent_stop_fence.store_for_runtime(runtime)
+        if fence_store is not None:
+            fence = fence_store.current(self.agent_name)
+            if fence.reason == "user_stop" and fence.stopped_at:
+                user_stopped_at = fence.stopped_at
+                user_stop_request_id = fence.request_id or None
         reconciled = await asyncio.to_thread(
             session_store.reconcile_incomplete_runs,
             agent_id=self.agent_name,
+            user_stopped_at=user_stopped_at,
+            user_stop_request_id=user_stop_request_id,
         )
         if reconciled:
             logger.warning(

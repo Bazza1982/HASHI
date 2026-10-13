@@ -37,6 +37,15 @@ it starts. A completion, retry, or callback from an older epoch is retained as
 audit evidence but cannot enqueue a new Agent request, deliver a completion
 notification, or disable a current nudge definition.
 
+Cancelling an active Session execution must pass through the canonical terminal
+writer before its in-memory metadata is removed. The Run becomes `stopped`,
+the `run.stopped` event and projection are committed, and a Workbench refresh
+or reopen reads the terminal state. On Worker adoption, the latest durable
+user-stop receipt also repairs legacy queued/running Runs admitted before its
+stop time; the receipt's named request remains authoritative when timestamps
+share the same clock tick. Requests admitted after the stop retain normal
+restart reconciliation.
+
 The stop operation removes only work admitted before the new epoch. A genuine
 new request or background job admitted after the fence is not consumed by the
 still-finishing cancellation pass. Interrupted-task snapshots remain scoped to
@@ -64,8 +73,9 @@ definitions and never stops another Agent.
 
 Focused tests cover cross-Session stop, READY/FUTURE removal, detached request
 markers, managed-job cancellation, stale completion suppression, nudge lease
-mutual exclusion, stop-epoch persistence/recovery, quiet WIP, and existing HER
-Turn ownership conflicts. Protected Core checks remain mandatory.
+mutual exclusion, stop-epoch persistence/recovery, terminal state after
+refresh/reopen, legacy non-terminal repair, quiet WIP, and existing HER Turn
+ownership conflicts. Protected Core checks remain mandatory.
 
 ## Independent pre-merge review (2026-10-14)
 

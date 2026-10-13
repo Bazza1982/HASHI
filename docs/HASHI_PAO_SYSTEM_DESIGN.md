@@ -735,10 +735,14 @@ On HASHI3, `/stop` also persists an Agent-wide autonomous-wakeup fence in the
 existing workspace state. Scheduler, nudge, delayed-message, startup, and
 background-completion admissions are blocked until a later explicit user
 request resumes new admissions. Completed background outcomes remain in job
-records and are not automatically replayed. The stop generation invalidates in-flight admissions
-that raced with `/stop`; another Session's already-running user request remains
-untouched. Delayed records are preserved, not silently consumed. A failed
-fence-state read fails closed for new admissions.
+records and are not automatically replayed. The stop generation invalidates
+in-flight admissions that raced with `/stop` and stops every already-running
+Session request owned by that Agent. Each affected Run persists the terminal
+`stopped` state and event before execution cleanup. Worker adoption uses the
+durable stop receipt to repair older pre-fence Runs that were left
+non-terminal, while post-fence Runs retain normal restart handling. Delayed
+records are preserved, not silently consumed. A failed fence-state read fails
+closed for new admissions.
 
 Terminal completions with observed tool effects attach a bounded reconciliation
 to the existing Session result and terminal diagnostic projection. The outer

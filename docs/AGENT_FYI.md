@@ -104,6 +104,10 @@ callbacks from starting more work. Cron, heartbeat, and nudge definitions stay
 enabled. In-flight process launches stay owned until cancelled and reaped;
 stop covers every owned job, not one list page. See
 [Agent stop fence](HASHI_AGENT_STOP_FENCE_DECISION.md).
+Each cancelled Session Run commits `stopped` and a terminal event before its
+in-memory execution is cleaned up, so refresh and reopen cannot restore a
+false running state. Worker adoption repairs pre-fence legacy remnants from
+the durable stop receipt before accepting new work.
 
 Media bind one draft/instance/Agent/Run; Remote sends managed bytes. HERV3 gains no wider authority. Safe Voice uses typed confirm/discard; missing idempotency blocks upload and stale media is discarded. /voice uses a validated Function bundle/local media; Workbench gets Session audio, Telegram its voice renderer.
 
