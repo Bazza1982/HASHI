@@ -125,6 +125,24 @@ def render_notice(
             locale=language,
             reason=ui_language.tr("reboot.reason." + reason, locale=language),
         )
+    if reason == "target_busy" and record.get("busy_targets"):
+        busy_targets = list(dict.fromkeys(record["busy_targets"]))
+        busy_names = [
+            escape(str(names.get(name) or name)) for name in busy_targets[:6]
+        ]
+        if len(busy_targets) > 6:
+            busy_names.append(
+                ui_language.tr(
+                    "reboot.more_targets",
+                    locale=language,
+                    count=len(busy_targets) - 6,
+                )
+            )
+        text += "\n" + ui_language.tr(
+            "reboot.busy_targets",
+            locale=language,
+            agents=", ".join(busy_names),
+        )
     if sender and sender != record.get("source_agent"):
         text += "\n" + ui_language.tr(
             "reboot.sent_by",

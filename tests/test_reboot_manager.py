@@ -1087,7 +1087,35 @@ async def test_max_reboot_submits_one_shared_function_replacement(tmp_path):
         ).read_text(encoding="utf-8")
     )
     assert request == {"id": record["id"]}
-    assert kernel.events == []
+    assert kernel.events == [
+        "zelda:101:worker.metadata",
+        "sunny:102:worker.metadata",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_max_reboot_rejects_busy_worker_before_shared_handoff(tmp_path):
+    kernel = _Kernel()
+    kernel.paths = SimpleNamespace(bridge_home=tmp_path)
+    kernel._runtime_map()["sunny"].client.metadata["is_generating"] = True
+    manager = RebootManager(kernel, None)
+
+    result = await manager.hot_restart({"mode": "max", "agent_name": "zelda"})
+
+    assert result is False
+    record = manager.receipts.records()[-1]
+    assert (record["status"], record["reason"]) == ("rejected", "target_busy")
+    assert record["busy_targets"] == ["sunny"]
+    assert not any(handle._cutover for handle in kernel.runtimes)
+    assert not (
+        tmp_path / "state" / "instance" / "kernel-requests" / f"{record['id']}.json"
+    ).exists()
+    assert kernel.events == [
+        "zelda:101:worker.metadata",
+        "sunny:102:worker.metadata",
+    ]
+    assert "Busy Agents: sunny." in render_notice(record, locale="en")
+    assert "正在处理任务的代理：sunny。" in render_notice(record, locale="zh-CN")
 
 
 @pytest.mark.asyncio

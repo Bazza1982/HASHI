@@ -1053,6 +1053,72 @@ class RebootManager:
             )
         return handles
 
+    async def _preflight_target_activity(
+        self,
+        selected_targets: tuple[str, ...],
+        handles: Mapping[str, AgentRuntimeHandle],
+        record: Mapping[str, Any],
+    ) -> bool:
+        """Reject a reboot before cutover when live Worker work cannot drain."""
+
+        # Read the owning Workers, not asynchronously updated route caches.
+        # This is an observation, not an idle reservation: the transactional
+        # route fence and drain still handle work arriving after this check.
+        observations = await asyncio.gather(
+            *(
+                handles[name].client.call("worker.metadata", timeout=10)
+                for name in selected_targets
+            ),
+            return_exceptions=True,
+        )
+        unavailable_targets: list[str] = []
+        busy_targets: list[str] = []
+        activity_by_target: dict[str, tuple[bool, int]] = {}
+        for name, state in zip(selected_targets, observations, strict=True):
+            if (
+                not isinstance(state, dict)
+                or type(state.get("is_generating")) is not bool
+                or type(state.get("queue_depth")) is not int
+                or state["queue_depth"] < 0
+            ):
+                unavailable_targets.append(name)
+                continue
+            generating = state["is_generating"]
+            queue_depth = state["queue_depth"]
+            activity_by_target[name] = (generating, queue_depth)
+            if generating or queue_depth:
+                busy_targets.append(name)
+
+        if unavailable_targets:
+            for name in unavailable_targets:
+                bridge_logger.warning(
+                    "Reboot activity unavailable: target=%s", name
+                )
+            self._finish(
+                record,
+                "rejected",
+                reason="activity_unavailable",
+                activity_targets=unavailable_targets,
+            )
+            return False
+        if busy_targets:
+            for name in busy_targets:
+                generating, queue_depth = activity_by_target[name]
+                bridge_logger.info(
+                    "Reboot target busy: target=%s generating=%s queued=%s",
+                    name,
+                    generating,
+                    queue_depth,
+                )
+            self._finish(
+                record,
+                "rejected",
+                reason="target_busy",
+                busy_targets=busy_targets,
+            )
+            return False
+        return True
+
     async def _release_reboot_fences(self, record: Mapping[str, Any]) -> None:
         runtime_map = self.kernel._runtime_map()
         await asyncio.gather(
@@ -1214,9 +1280,23 @@ class RebootManager:
             record = self._record_start_delivery(record, start_result)
             self.receipts.update(record["id"], phase="preparing")
             if str(restart.get("mode") or "same") in BROAD_REBOOT_MODES:
-                self._fence_reboot_routes(record)
-                staged_shared = self._stage_shared_replacement(record)
-                result = True
+                selected_targets = tuple(record["targets"])
+                try:
+                    handles = self._target_handles(selected_targets)
+                except ValueError as exc:
+                    bridge_logger.error(
+                        "Shared Function reboot scope rejected: %s", exc
+                    )
+                    self._finish(record, "rejected", reason="invalid_scope")
+                    result = False
+                else:
+                    idle = await self._preflight_target_activity(
+                        selected_targets, handles, record
+                    )
+                    if idle:
+                        self._fence_reboot_routes(record)
+                        staged_shared = self._stage_shared_replacement(record)
+                        result = True
             else:
                 result = await self._perform_restart(restart, record)
         except asyncio.CancelledError:
@@ -1271,30 +1351,10 @@ class RebootManager:
             self._finish(record, "rejected", reason="invalid_scope")
             return False
 
-        # Read the owning Worker, not the asynchronously updated route cache.
-        # This is a preflight, not an idle reservation: the transactional drain
-        # below still handles work arriving after this observation.
-        observations = await asyncio.gather(
-            *(handle.client.call("worker.metadata", timeout=10) for handle in handles.values()),
-            return_exceptions=True,
-        )
-        for name, state in zip(selected_targets, observations, strict=True):
-            if (
-                not isinstance(state, dict)
-                or type(state.get("is_generating")) is not bool
-                or type(state.get("queue_depth")) is not int
-                or state["queue_depth"] < 0
-            ):
-                bridge_logger.warning("Reboot activity unavailable: target=%s", name)
-                self._finish(record, "rejected", reason="activity_unavailable")
-                return False
-            if state["is_generating"] or state["queue_depth"]:
-                bridge_logger.info(
-                    "Reboot target busy: target=%s generating=%s queued=%s",
-                    name, state["is_generating"], state["queue_depth"],
-                )
-                self._finish(record, "rejected", reason="target_busy")
-                return False
+        if not await self._preflight_target_activity(
+            selected_targets, handles, record
+        ):
+            return False
 
         try:
             candidates = await self._prepare_candidates(selected_targets)
