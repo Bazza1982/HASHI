@@ -98,19 +98,12 @@ Phone failures retain a safe durable cause: content policy, authentication, quot
 
 Renderers/catalogs own UI text. /language changes shared UI, /tui language local TUI; neither translates replies/IDs. TUI switches freeze generation/Agent/capabilities/Session. Remote authenticates. /telegram off and /whatsapp off disable future mirrors, preserving origin replies. /think and /commentary are independent.
 
-`/stop` is Agent-wide across Sessions. It advances a durable stop epoch,
-cancels work admitted before that epoch, and blocks stale background or nudge
-callbacks from starting more work. Cron, heartbeat, and nudge definitions stay
-enabled. In-flight process launches stay owned until cancelled and reaped;
-stop covers every owned job, not one list page. See
-[Agent stop fence](HASHI_AGENT_STOP_FENCE_DECISION.md).
-Each cancelled Session Run commits `stopped` and a terminal event before its
-in-memory execution is cleaned up, so refresh and reopen cannot restore a
-false running state. Worker adoption repairs pre-fence legacy remnants from
-the durable stop receipt before accepting new work.
-Stop success additionally requires canonical terminal readback. Missing or
-unreadable Runs and failed pre-commit writes stay unconfirmed; report a warning
-and never blindly retry a possibly committed terminal write.
+`/stop` durably fences all Agent Sessions: cancel/reap every owned job and
+launch; clear pre-fence one-shots; reject stale callbacks. Periodic definitions
+stay enabled. Runs save `stopped` and a terminal event before cleanup; adoption
+repairs pre-fence remnants. Confirm canonical state before success. Failed,
+missing or unreadable saves stay unconfirmed; never blindly retry. DB handles
+close after commit/rollback. See [stop contract](HASHI_AGENT_STOP_FENCE_DECISION.md).
 
 Media bind one draft/instance/Agent/Run; Remote sends managed bytes. HERV3 gains no wider authority. Safe Voice uses typed confirm/discard; missing idempotency blocks upload and stale media is discarded. /voice uses a validated Function bundle/local media; Workbench gets Session audio, Telegram its voice renderer.
 

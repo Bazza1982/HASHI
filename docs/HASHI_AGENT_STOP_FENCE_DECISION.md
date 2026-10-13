@@ -52,6 +52,11 @@ the command reports that stop is unconfirmed instead of claiming success. A
 write that reports an error after commit is read back without retrying it;
 only a confirmed `stopped` record permits the normal success receipt.
 
+The stop-fence store closes each SQLite connection after its transaction,
+including initialization, reads and failed writes. Transaction rollback alone
+does not release a connection; cleanup cannot rely on Python garbage collection
+to release a Windows database handle.
+
 The stop operation removes only work admitted before the new epoch. A genuine
 new request or background job admitted after the fence is not consumed by the
 still-finishing cancellation pass. Interrupted-task snapshots remain scoped to

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,7 +44,7 @@ class AgentStopFenceStore:
     def __init__(self, path: str | Path):
         self.path = Path(path).expanduser().resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS agent_stop_fences (
@@ -82,7 +83,7 @@ class AgentStopFenceStore:
         name = str(agent or "").strip()
         if not name:
             raise ValueError("agent stop fence requires an agent name")
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             row = conn.execute(
                 "SELECT * FROM agent_stop_fences WHERE agent = ?",
                 (name,),
@@ -102,7 +103,7 @@ class AgentStopFenceStore:
             raise ValueError("agent stop fence requires an agent name")
         stopped_at = datetime.now(timezone.utc).isoformat()
         receipt_id = f"stop-{uuid4().hex[:16]}"
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 "SELECT epoch FROM agent_stop_fences WHERE agent = ?",
