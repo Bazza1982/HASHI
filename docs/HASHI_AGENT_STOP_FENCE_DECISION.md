@@ -90,7 +90,11 @@ the added stop guidance does not truncate unrelated engineering guidance.
 
 Initial curated Core-gate run: 811 passed, 1 skipped, 3 failed because the
 Function qualification checks correctly rejected the uncommitted review fix.
-The committed candidate must pass the gate before merge and deployment.
+Committed implementation `48d1764d` then passed the curated Core gate:
+814 passed, 1 skipped (the POSIX permission-mode case is inapplicable on
+Windows). This includes Function generation, Worker supervision, shared
+handoff and real isolated product preparation. Lint also passed. The three
+uncommitted-source failures were cleared without weakening the gate.
 The final focused run passed 118 cases, including four new regressions and
 the restored event assertions. Protected Core and whitespace checks also
 passed.
