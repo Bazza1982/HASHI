@@ -731,18 +731,22 @@ wire references, observed writes/effects, final state, and whether safe retry
 evidence is present, absent, or unknown. It never retries work, changes HERV3
 control flow, or makes diagnostic persistence a completion condition.
 
-On HASHI3, `/stop` also persists an Agent-wide autonomous-wakeup fence in the
-existing workspace state. Scheduler, nudge, delayed-message, startup, and
-background-completion admissions are blocked until a later explicit user
-request resumes new admissions. Completed background outcomes remain in job
-records and are not automatically replayed. The stop generation invalidates
-in-flight admissions that raced with `/stop` and stops every already-running
-Session request owned by that Agent. Each affected Run persists the terminal
-`stopped` state and event before execution cleanup. Worker adoption uses the
-durable stop receipt to repair older pre-fence Runs that were left
-non-terminal, while post-fence Runs retain normal restart handling. Delayed
-records are preserved, not silently consumed. A failed fence-state read fails
-closed for new admissions.
+`/stop` persists an Agent-wide stop epoch through the existing
+`agent_stop_fence` owner. It cancels foreground and detached work admitted
+before that epoch, clears READY/FUTURE work including one-shot delays, and
+blocks stale callbacks from reviving it. Cron, heartbeat and nudge definitions
+remain enabled; a genuinely new scheduled invocation has a new request identity
+and does not restore the stopped Run. Completed background outcomes remain in
+job records and are not automatically replayed.
+
+Every affected Session Run commits `stopped` and its terminal event before
+execution cleanup. The stop command reads canonical Run state before claiming
+success. A failed write, missing Run, or failed readback remains unconfirmed and
+produces a warning instead of a false success; it does not blindly retry a
+possibly committed write. Worker adoption uses the durable stop receipt to
+repair older pre-fence Runs left non-terminal, while post-fence Runs retain
+normal restart handling. A failed fence-state read fails closed for new
+admissions. See [Agent stop fence](HASHI_AGENT_STOP_FENCE_DECISION.md).
 
 Terminal completions with observed tool effects attach a bounded reconciliation
 to the existing Session result and terminal diagnostic projection. The outer

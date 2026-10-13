@@ -108,6 +108,9 @@ Each cancelled Session Run commits `stopped` and a terminal event before its
 in-memory execution is cleaned up, so refresh and reopen cannot restore a
 false running state. Worker adoption repairs pre-fence legacy remnants from
 the durable stop receipt before accepting new work.
+Stop success additionally requires canonical terminal readback. Missing or
+unreadable Runs and failed pre-commit writes stay unconfirmed; report a warning
+and never blindly retry a possibly committed terminal write.
 
 Media bind one draft/instance/Agent/Run; Remote sends managed bytes. HERV3 gains no wider authority. Safe Voice uses typed confirm/discard; missing idempotency blocks upload and stale media is discarded. /voice uses a validated Function bundle/local media; Workbench gets Session audio, Telegram its voice renderer.
 

@@ -60,16 +60,19 @@ async def test_prompt_failure_finishes_durable_run_and_visible_activity(tmp_path
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "terminal_fault", [None, "before_commit", "after_commit", "readback", "missing_run"]
+)
 async def test_user_stop_cancellation_persists_stopped_run_for_refresh(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, terminal_fault
 ):
     from types import MethodType
     from unittest.mock import AsyncMock
 
-    from orchestrator import runtime_control
+    from orchestrator import runtime_control, ui_language
     from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
     from orchestrator.request_activity import RequestActivityStore
-    from orchestrator.session_store import SessionStore
+    from orchestrator.session_store import SessionNotFound, SessionStore
     from tests.test_runtime_pipeline import _item, _runtime
 
     runtime = _runtime()
@@ -159,13 +162,45 @@ async def test_user_stop_cancellation_persists_stopped_run_for_refresh(
         effective_message=message,
         message=message,
     )
+    write_attempts = []
+    if terminal_fault in {"before_commit", "after_commit"}:
+        original_finish = runtime.session_store.finish_request
+
+        def finish_with_fault(*args, **kwargs):
+            write_attempts.append(1)
+            if terminal_fault == "before_commit":
+                raise OSError("isolated terminal write failed before commit")
+            original_finish(*args, **kwargs)
+            raise OSError("isolated terminal write reported an error after commit")
+
+        monkeypatch.setattr(runtime.session_store, "finish_request", finish_with_fault)
+    elif terminal_fault in {"readback", "missing_run"}:
+
+        def readback_with_fault(*args, **kwargs):
+            if terminal_fault == "missing_run":
+                raise SessionNotFound("isolated Run could not be found")
+            raise OSError("isolated terminal readback failed")
+
+        monkeypatch.setattr(runtime.session_store, "get_run_by_request", readback_with_fault)
     await runtime_control.cmd_stop(runtime, update, SimpleNamespace(args=[]))
 
     assert execution_task.done()
     reopened = SessionStore(database, instance_id="HASHI1")
-    assert reopened.get_run(accepted.run_id, owner_id=owner)["state"] == "stopped"
+    expected_state = "running" if terminal_fault == "before_commit" else "stopped"
+    assert reopened.get_run(accepted.run_id, owner_id=owner)["state"] == expected_state
     events = reopened.events(session["session_id"], owner_id=owner)
-    assert [event["kind"] for event in events].count("run.stopped") == 1
+    assert [event["kind"] for event in events].count("run.stopped") == (
+        0 if terminal_fault == "before_commit" else 1
+    )
+    reply = runtime._reply_text.await_args.args[1]
+    unconfirmed = ui_language.tr("control.stop.unconfirmed", count=1)
+    if terminal_fault in {"before_commit", "readback", "missing_run"}:
+        assert reply == unconfirmed
+    else:
+        assert reply != unconfirmed
+        assert ui_language.tr("control.stop.stopped", count=0) in reply
+    if terminal_fault in {"before_commit", "after_commit"}:
+        assert len(write_attempts) == 1
 
 
 class _Logger:

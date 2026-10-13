@@ -46,6 +46,12 @@ stop time; the receipt's named request remains authoritative when timestamps
 share the same clock tick. Requests admitted after the stop retain normal
 restart reconciliation.
 
+Stop success also requires canonical readback of affected Session Runs. If a
+terminal write fails before commit, the Run cannot be found, or readback fails,
+the command reports that stop is unconfirmed instead of claiming success. A
+write that reports an error after commit is read back without retrying it;
+only a confirmed `stopped` record permits the normal success receipt.
+
 The stop operation removes only work admitted before the new epoch. A genuine
 new request or background job admitted after the fence is not consumed by the
 still-finishing cancellation pass. Interrupted-task snapshots remain scoped to

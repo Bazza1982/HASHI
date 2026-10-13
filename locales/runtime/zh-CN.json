@@ -2323,6 +2323,7 @@
     "control.retry_starting": "正在开始恢复重试……",
     "control.stop.stopped": "已停止此代理的执行，清除 {count} 项待处理工作，并终止其当前活动。",
     "control.stop.cleared_idle": "已应用代理级停止并清除 {count} 项待处理工作；当时没有请求正在运行。",
+    "control.stop.unconfirmed": "停止操作尚未完整确认：{count} 项请求未能确认已保存为“已停止”。请检查当前状态，再决定后续操作。",
     "control.stop.continuation_saved": " 未完成的任务已保存；发送“继续”即可恢复。",
     "long.previous_finalizing": "⏳ 上一个 /long 批次仍在完成媒体接收。",
     "long.already_here": "⏳ 已处于 /long 模式；发送 /end 即可完成。",

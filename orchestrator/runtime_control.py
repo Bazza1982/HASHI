@@ -590,6 +590,31 @@ def _capture_original_prompt(
     return ""
 
 
+def _unconfirmed_stopped_requests(runtime: Any, request_ids: set[str]) -> tuple[str, ...]:
+    """Confirm accepted Runs through their owner before reporting stop success."""
+    from orchestrator.session_store import SessionStore
+
+    store = getattr(runtime, "session_store", None)
+    if not isinstance(store, SessionStore):
+        # Legacy requests have no canonical Run to confirm.
+        return ()
+    unconfirmed: list[str] = []
+    for request_id in sorted(request_ids):
+        try:
+            run = store.get_run_by_request(request_id, agent_id=runtime.name)
+        except Exception as exc:
+            runtime.logger.warning(
+                "User-stop terminal readback failed for %s (%s)",
+                request_id,
+                type(exc).__name__,
+            )
+            unconfirmed.append(request_id)
+        else:
+            if run["state"] != "stopped":
+                unconfirmed.append(request_id)
+    return tuple(unconfirmed)
+
+
 async def cmd_stop(runtime: Any, update: Any, context: Any) -> None:
     if not runtime._is_authorized_user(update.effective_user.id):
         return
@@ -693,6 +718,17 @@ async def cmd_stop(runtime: Any, update: Any, context: Any) -> None:
         ),
     )
     dropped = removed.total
+
+    unconfirmed = await asyncio.to_thread(
+        _unconfirmed_stopped_requests, runtime, stopped_request_ids
+    )
+    if unconfirmed:
+        runtime.logger.warning("Agent stop not confirmed for %s", unconfirmed)
+        await runtime._reply_text(
+            update,
+            ui_language.tr("control.stop.unconfirmed", count=len(unconfirmed)),
+        )
+        return
 
     continuation_note = (
         ui_language.tr("control.stop.continuation_saved")
