@@ -61,7 +61,11 @@ def _state(tmp_path: Path) -> DeviceWorkerState:
 def test_locked_desktop_is_capability_state_not_failed_worker_health(tmp_path, monkeypatch):
     state = _state(tmp_path)
     state.capability_kind = 'computer_control'
-    monkeypatch.setattr(device_worker.os, 'name', 'nt')
+    # Isolate the Windows branch without changing pathlib's host platform.
+    monkeypatch.setattr(
+        device_worker, 'os',
+        types.SimpleNamespace(name='nt', environ=os.environ, getpid=os.getpid),
+    )
     monkeypatch.setattr(windows_win32, 'get_desktop_state', lambda: {
         'available': False, 'interactive': False, 'locked': True,
         'desktop_name': None, 'error': 'access denied on secure desktop',
@@ -474,6 +478,10 @@ def test_computer_worker_health_is_truthful_about_platform(tmp_path):
 def test_unknown_desktop_failure_is_not_a_healthy_locked_worker(tmp_path, monkeypatch):
     state = _state(tmp_path)
     state.capability_kind = "computer_control"
+    monkeypatch.setattr(
+        device_worker, 'os',
+        types.SimpleNamespace(name='nt', environ=os.environ, getpid=os.getpid),
+    )
     monkeypatch.setattr(windows_win32, "get_desktop_state", lambda: {
         "available": False, "interactive": False, "locked": None,
     })

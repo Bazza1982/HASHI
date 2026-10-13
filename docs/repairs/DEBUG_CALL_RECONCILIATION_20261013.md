@@ -54,8 +54,22 @@ failures or skips. This exercises both retained security behavior and restored
 Call/Phone behavior, not live providers. The pre-existing isolated development
 interpreter is used without installing dependencies into a live runtime.
 
-Core gate, static checks and publication receipts are recorded separately as
-completed. Source alignment requires both original heads to be ancestors of the
+The committed integration passes the core gate (`python -m pytest -q -ra`):
+**814 passed, 1 skipped**; the skip is the POSIX file-mode contract on Windows.
+The earlier uncommitted attempt passed 811, skipped 1 and rejected three real
+qualification checks because Function sources must first be committed. No
+qualification guard was bypassed. Call lint/format, protected-Core checks and
+whitespace checks pass. The bounded FYI reader passes all 3 checks.
+
+The first Linux desktop CI exposed an inherited test defect: global `os.name`
+mutation made pathlib treat a Linux source path as Windows. Red: 1 failed,
+87 passed. Both locked/unknown desktop health cases now simulate Windows only
+inside the device-worker module, preserving native filesystem behavior and
+exercising the Windows branch even on Linux. The revised Windows desktop gate
+passes 87 with 1 WSL-only skip; Linux revalidation is required before merge.
+No runtime implementation changes in this follow-up.
+
+Source alignment requires both original heads to be ancestors of the
 final commit and matching complete HEAD/tree IDs in HASHI3, HASHI4 and GitHub.
 No lifecycle action is part of this repair; running Function adoption and
 physical microphone/camera/speaker acceptance remain separate.
@@ -124,7 +138,7 @@ physical microphone/camera/speaker acceptance remain separate.
 | `tests/frontend_call/test_call_voice_preview.py` | Main | Equivalent import spelling; keep main formatting. |
 | `tests/frontend_call/test_conversation_scope.py` | Main | AST-equivalent implementation; retain main formatting. |
 | `tests/test_desktop_session.py` | Combine | Keep both selected-monitor position and size changes, plus H4 unrelated-monitor wake/sleep cases. |
-| `tests/test_device_control_worker.py` | H4 | Retain H4's behavioral regression coverage. |
+| `tests/test_device_control_worker.py` | Combine | Retain H4 health cases; scope Windows simulation to this module so Linux pathlib stays native. |
 | `tests/test_live_voice.py` | H4 | Retain H4's behavioral regression coverage. |
 | `tests/test_live_voice_integration.py` | H4 | Retain H4's behavioral regression coverage. |
 | `tests/test_remote_memory_consolidation.py` | Main | Keep the complete import, privacy, conflict, path and ACK regression coverage. |
