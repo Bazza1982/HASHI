@@ -1,8 +1,8 @@
 # HASHI Agent FYI
 
-October 13 `debug-call` reconciliation preserves H4 Call/Phone repairs and
-main's memory safety together. The [65-file record](repairs/DEBUG_CALL_RECONCILIATION_20261013.md)
-separates complete source alignment from runtime adoption.
+October 13: HASHI3/HASHI4 and Workbench use GitHub `main`; continue there,
+without new branches/worktrees. [Reconciliation](repairs/DEBUG_CALL_RECONCILIATION_20261013.md)
+preserves the repairs; source and runtime adoption remain separate.
 
 October 13 Call camera decision: local preview is not proof that the Agent can
 see, but slow vision inference is also not proof that the camera failed. Video

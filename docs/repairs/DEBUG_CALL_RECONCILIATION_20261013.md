@@ -1,10 +1,47 @@
 # Complete debug-call reconciliation — 2026-10-13
 
-## Scope and source facts
+## Main closeout — 2026-10-13
 
-The current user requests immediate reconciliation of all correct recent HASHI3
-and HASHI4 repairs, with no new branch or worktree. Construction uses HASHI3's
-existing `debug-call`. This is source integration and synchronization authority,
+The subsequent user instruction requires HASHI3, HASHI4 and Workbench to use
+their existing `main` branches for all continuing work, without a new branch
+or worktree. It supersedes the initial `debug-call` construction scope below.
+
+- [HASHI PR #79](https://github.com/Bazza1982/HASHI/pull/79) merged as
+  `2028db092ca36b76bb8fd8886fa8b6a7d6f3e24a`. All five candidate CI checks passed,
+  including the corrected Linux desktop gate.
+- Workbench PR #6 merged as `9e382da31cbfa122905e48526b24864070bb0f26`, with
+  both candidate CI checks passed. Its mobile header/menu and reboot-notice
+  repairs are included.
+- Both original HASHI histories and the reconciliation commits are ancestors
+  of `main`. Full tracked-file comparisons passed: 2,066 blobs in each HASHI
+  checkout and 1,596 in Workbench, with the recorded vendor gitlink unchanged.
+- All three primary checkouts are on `main`, clean, and match their respective
+  GitHub `main`. The task's local and remote `debug-call` references, the
+  unauthorized camera-fix branch, and the redundant test worktree are removed.
+- The closeout audit found all 41 registered worktrees across these three
+  repositories clean. Older historical branches/worktrees remain; this is not
+  a claim that all historical Git references have been deleted or every old
+  experiment belongs in `main`. No branch-owned local or remote commits since
+  October 10 remain outside `main`.
+- Recent reflog-only backend speech-gap drafts have identical runtime/test
+  changes in their amended main ancestors. The four former Workbench
+  media/streaming/prefetch drafts are superseded by its consolidated Call
+  baseline; their useful behavior and regression coverage are retained.
+  Reapplying those drafts would restore obsolete startup/caption assumptions.
+
+These are source and repository facts. No reboot, service restart, renderer
+reload, or physical-media acceptance was performed during reconciliation or
+closeout. Documentation-only follow-ups descend from the source identities
+above without changing their tested runtime files. Local verification receipts
+remain in ignored state; approved operational and physical acceptance are
+separate.
+
+## Initial scope and source facts
+
+The initial user request required immediate reconciliation of all correct recent
+HASHI3 and HASHI4 repairs, with no new branch or worktree. Integration used
+HASHI3's existing `debug-call` before the later main-only closeout. This was
+source integration and synchronization authority,
 not permission to reboot either instance, modify Protected Core, change local
 configuration, or claim physical media acceptance.
 
@@ -66,8 +103,9 @@ mutation made pathlib treat a Linux source path as Windows. Red: 1 failed,
 87 passed. Both locked/unknown desktop health cases now simulate Windows only
 inside the device-worker module, preserving native filesystem behavior and
 exercising the Windows branch even on Linux. The revised Windows desktop gate
-passes 87 with 1 WSL-only skip; Linux revalidation is required before merge.
-No runtime implementation changes in this follow-up.
+passes 87 with 1 WSL-only skip. The corrected Linux desktop CI subsequently
+passed before PR #79 merged, together with all four other candidate checks.
+No runtime implementation changes were made in this follow-up.
 
 Source alignment requires both original heads to be ancestors of the
 final commit and matching complete HEAD/tree IDs in HASHI3, HASHI4 and GitHub.
