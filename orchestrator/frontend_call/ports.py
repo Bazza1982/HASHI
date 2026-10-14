@@ -64,6 +64,9 @@ class HashiPorts:
             "goal": (
                 "The user has just started /call and is calling you now. Answer this call "
                 "from this point using the effective Persona, language and form of address. "
+                "Use time_context to respond appropriately and naturally, together with the "
+                "existing Persona, relationship, language and recent conversation context. "
+                "Do not mention the timestamps unless they are naturally relevant. "
                 "This opening is a natural greeting, not an answer to an earlier question or task. "
                 "If source_context contains a current camera observation, treat it as silent context. "
                 "Do not announce that video connected or describe ordinary appearance, clothing, "
@@ -73,6 +76,7 @@ class HashiPorts:
                 "length their substance requires. Do not include stage directions, performance "
                 "cues or parenthetical actions; speak the greeting directly."
             ),
+            "time_context": context["time_context"],
             "source_context": visual_context or "",
             "instructions": context["instructions"],
             "recent": context["recent"],

@@ -1,10 +1,36 @@
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 import pytest
 from orchestrator.session_store import SessionStore
 from orchestrator.frontend_call.ports import HashiPorts
 from orchestrator.frontend_call.contract import CallError
+from orchestrator.frontend_call.spoken_context import build_call_time_context
 from orchestrator.frontend_live_voice.manager import LiveVoiceManager
 from orchestrator.frontend_live_voice.protocol import LiveVoiceError
+
+
+def test_call_time_context_uses_now_and_last_user_message_from_the_session():
+    now = datetime(
+        2026,
+        10,
+        14,
+        22,
+        8,
+        59,
+        tzinfo=timezone(timedelta(hours=11), "AEDT"),
+    )
+    context = build_call_time_context(
+        [
+            {"role": "user", "created_at": "2026-10-13T21:00:00Z"},
+            {"role": "user", "created_at": "2026-10-14T08:55:00Z"},
+            {"role": "assistant", "created_at": "2026-10-14T09:00:00Z"},
+        ],
+        now=now,
+    )
+    assert "2026-10-14T22:08:59+11:00 (AEDT)" in context
+    assert "2026-10-14T19:55:00+11:00 (AEDT)" in context
+    assert "2026-10-13T21:00:00Z" not in context
+    assert "2026-10-14T09:00:00Z" not in context
 
 
 @pytest.mark.anyio
@@ -207,6 +233,12 @@ async def test_call_opening_uses_typed_tool_free_speech_and_persists_one_assista
         lambda *_args: {
             "instructions": "effective PCM",
             "recent": [{"role": "user", "content": "earlier"}],
+            "time_context": (
+                "The user is calling you now.\n"
+                "Current local date and time: 2026-10-14T22:08:59+11:00 (AEDT).\n"
+                "The last user message in this Conversation Session was at "
+                "2026-10-14T19:55:00+11:00 (AEDT)."
+            ),
         },
     )
     binding = {
@@ -245,6 +277,11 @@ async def test_call_opening_uses_typed_tool_free_speech_and_persists_one_assista
     assert payload["scope"]["type"] == "hashi.call-speech-scope"
     assert payload["state"]["instructions"] == "effective PCM"
     assert payload["state"]["source_context"] == visual_context
+    assert payload["state"]["time_context"].startswith("The user is calling you now.")
+    assert "2026-10-14T22:08:59+11:00" in payload["state"]["time_context"]
+    assert "2026-10-14T19:55:00+11:00" in payload["state"]["time_context"]
+    assert "time_context" in payload["state"]["goal"]
+    assert "appropriately and naturally" in payload["state"]["goal"]
     assert "silent context" in payload["state"]["goal"]
     assert "exceptionally noticeable" in payload["state"]["goal"]
     assert "earlier question" in payload["state"]["goal"]

@@ -1,5 +1,31 @@
 # Phone and Call interaction decision
 
+## 2026-10-14 call-time context and multilingual filler variation
+
+The Call opening remains a separate, tool-free Agent utterance built from the
+typed PCM voice projection. That narrow projection intentionally does not pass
+every general PCM section, and had omitted the ordinary PCM time section. The
+opening now receives two explicit facts from the Call Function: the current
+local date/time and the timestamp of the latest user message in the same HASHI
+Conversation Session. The model is told to respond appropriately and naturally
+with those facts and its existing Persona, relationship, language and recent
+conversation context. This supplies context only: it does not force a greeting,
+calculate a daypart, validate wording, or require the timestamps to be spoken.
+
+Each supported Call locale (en, zh-CN, zh-TW, and ja) now has ten short, ten
+medium and ten long conversational fillers. Slots 0–9, 10–19 and 20–29 are the
+respective tiers. Workbench keeps the existing latency stages, rotates within
+each tier without an immediate repeat, and varies the starting position by
+Call. The server prepares only a filler the client actually asks for and caches
+the resulting voice asset; opening a Call no longer synthesizes an unused
+catalogue. Fillers remain presentation-only audio and never become a Message,
+transcript row or Agent answer.
+
+PCM and the PAO Call Function own the opening context and localized catalogue.
+The Frontend Connector owns tier selection, rotation and playback. Protected
+Core, selected models, reasoning, speech endpointing and Session authority are
+unchanged.
+
 ## 2026-10-13 complete debug-call reconciliation
 
 The user requested preservation of all correct HASHI3/HASHI4 repairs, then

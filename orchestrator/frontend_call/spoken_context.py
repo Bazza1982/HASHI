@@ -2,9 +2,62 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .contract import CallError
+
+
+def _parse_timestamp(value) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith("Z") else text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _display_timestamp(value: datetime) -> str:
+    zone = value.tzname()
+    rendered = value.isoformat(timespec="seconds")
+    return f"{rendered} ({zone})" if zone else rendered
+
+
+def build_call_time_context(recent_history, *, now: datetime | None = None) -> str:
+    """Describe call time and the last same-Session user message without policy."""
+
+    supplied_now = now is not None
+    current = now or datetime.now().astimezone()
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    current = current.astimezone(current.tzinfo if supplied_now else None)
+    previous = next(
+        (
+            _parse_timestamp(item.get("created_at"))
+            for item in reversed(recent_history or [])
+            if item.get("role") == "user"
+        ),
+        None,
+    )
+    lines = [
+        "The user is calling you now.",
+        f"Current local date and time: {_display_timestamp(current)}.",
+    ]
+    if previous is None:
+        lines.append(
+            "There is no earlier user message in this Conversation Session."
+        )
+    else:
+        previous = previous.astimezone(current.tzinfo if supplied_now else None)
+        lines.append(
+            "The last user message in this Conversation Session was at "
+            f"{_display_timestamp(previous)}."
+        )
+    return "\n".join(lines)
 
 
 def resolve_call_spoken_context(api, owner: str, binding: dict, model: str) -> dict:
@@ -107,6 +160,7 @@ def resolve_call_spoken_context(api, owner: str, binding: dict, model: str) -> d
         return {
             "instructions": instructions,
             "recent": recent[-4:],
+            "time_context": build_call_time_context(recent_history),
             "context_audit": context_audit,
         }
     except CallError:
