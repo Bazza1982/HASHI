@@ -543,7 +543,11 @@ artifact 创建提交之间来回切换、反复触发完整资格检查的问�
 改为“精确 Function 内容 + runtime”，提交号只作为当前资格来源：HEAD 改变但
 内容相同时只精确复核一次字节并刷新回执，不再跑隔离 probe；任何 Function
 字节变化仍 fail closed。artifact 的创建来源保持不可变，不再反向覆盖当前
-资格回执。修复后的真实 FC 现场数据必须在提交并采用后另行记录。
+资格回执。发布构建也改为从临时 Git `HEAD` 导出中完成，不再改写运行目录里的
+Python 分发元数据。上述修复已通过标准 Workbench FC 命令链采用并复验：首次
+新 generation 的 `max` 为 108.0 秒，其中一次隔离资格检查为 49.9 秒；随后同
+generation 的 `min → max → min` 分别为 5.4、21.1、5.2 秒，全部为
+`succeeded` + `confirmed`。
 
 - 第一次 `max` 由旧 Functions 发起，仅作为采用运行；62.8 秒后加载提交
   `731592ad` 对应的新 generation；
@@ -561,6 +565,16 @@ artifact 创建提交之间来回切换、反复触发完整资格检查的问�
   一次，没有重复补跑或待处理恢复批次；验收后已禁用；
 - 候选拒绝、drain 失败、组回滚和第二活动门采用确定性注入测试复核为 4/4。
   没有为了现场造故障而给运行代码添加测试开关或失败后门。
+- 最终标准 FC 序列由 Workbench 提交 `/reboot max → min → max → min`。首次
+  `max` 加载提交 `7aedf642` 对应 generation
+  `sha256:22774b7e5c4852a8f9a262a41787258393df340f1ed132e39dc3b18df33b3458`，
+  11/11 在线；稳定序列的两个 `min` 只启动一个候选 Worker，完整资格和完整
+  闭包导入均为零；稳定 `max` 启动 11 个候选，每个仅保留一次受保护 bootstrap
+  制品验证，完整资格和完整闭包导入均为零；
+- 两次 `min` 的新旧 Worker nonce、启动时间、generation、Agent 身份、路由、
+  backend readiness 和旧进程退出均由权威回执确认，PID 只保留作诊断；
+- 最终现场 Core PID 仍为 12824，Remote child PID 仍为 20204；HASHI4 未修改、
+  未重启，全程没有使用 `/restart`。
 
 HASHI3 当前只有 11 个 Worker，因此上述实机结果不能冒充 26-Worker p95。
 26-Worker 的重复资格工作已由计数回归证明不会随 Worker 数量倍增；生产规模

@@ -123,3 +123,34 @@ live result proves the RebootManager lifecycle and 11-Worker process timings,
 not the follow-up FC entry correction and not a 26-Worker p95 sample. The
 offline count regression still proves that full-closure work is not multiplied
 by Worker count. HASHI4 was neither modified nor rebooted.
+
+## Final standard-FC adoption after deployment correction
+
+The running Core environment was restored to its launch-time distribution
+identity without installing, removing or upgrading a package. Release builds
+now run from a temporary exact Git `HEAD` export and cannot regenerate project
+metadata in the live checkout. The corrected Function generation was then
+adopted exclusively through Workbench `/reboot`; `/restart` was never used.
+
+The first standard-FC `max` loaded source commit `7aedf642` as generation
+`sha256:22774b7e5c4852a8f9a262a41787258393df340f1ed132e39dc3b18df33b3458`.
+It completed with 11/11 Agents online in 108.0 s. This was an unseen-generation
+adoption, including one 49.9 s isolated qualification, and is retained as the
+cold-generation measurement rather than presented as the steady-state result.
+
+The same-generation standard-FC sequence then completed as follows:
+
+- `min`: 5.4 s, one candidate, `succeeded` + `confirmed`;
+- `max`: 21.1 s, 11/11 online, `succeeded` + `confirmed`;
+- `min`: 5.2 s, one candidate, `succeeded` + `confirmed`.
+
+Both targeted receipts confirmed the expected Worker nonce, generation, Agent
+identity, start/adoption time, active route, backend readiness and old-process
+exit. PID was diagnostic only. The warm `min` and `max` runs performed no full
+qualification, no materialization and no full-closure import; each candidate
+kept its protected bootstrap artifact verification. Start notices were visible
+before disconnection and final messages stated an unambiguous outcome.
+
+Core PID 12824 and Remote child PID 20204 remained unchanged. HASHI4 was not
+modified or rebooted. The final affected regression set passed 108/108 and the
+Protected Core check passed.
