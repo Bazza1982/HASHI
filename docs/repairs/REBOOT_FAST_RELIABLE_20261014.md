@@ -56,6 +56,41 @@ delivery evidence.
 
 ## Live HASHI3 verification
 
-Pending. Record targeted and broad hot-reboot receipts, stage timings, Core and
-Remote invariants, heartbeat behavior and user-facing start/final messages here
-after the authorized HASHI3-only runs. HASHI4 must remain untouched.
+Authorized HASHI3-only adoption completed on 2026-10-14. The first broad reboot
+was an adoption run initiated by the old Functions generation, so its 62.8 s
+duration is recorded but is not used as the corrected-path benchmark. It loaded
+source commit `731592adfe9afd6e0a1716bc99ef527b9bb2aaef` as generation
+`sha256:edd9fde514e6aa27c0879cdf936ec35518298b5df2da0d1c39644ea91c86b2ad`.
+
+Observed corrected-path evidence:
+
+- five same-generation `min` runs completed in 5.5, 5.2, 4.6, 4.9 and 5.0 s;
+  interpolated p95 was 5.4 s and the observed maximum was 5.5 s, below the 15 s
+  gate. Every receipt was `succeeded` + `confirmed`, with no warnings;
+- same-generation `min` recorded one candidate Worker, zero full-closure imports
+  and zero qualification work. After the first warm-up seal, each run recorded
+  one necessary manifest hash rather than one full generation scan;
+- corrected-path `max` runs completed in 20.6 and 20.7 s with 11/11 Workers
+  online. Qualification, materialization and full-closure import counts were
+  zero; each of the 11 new process bootstraps verified its own artifact once;
+- during the instrumented `max`, Workbench/API unavailability was 0.83 s. The
+  start notice was visible before the disconnect and the final message reported
+  an unambiguous success, elapsed time and 11 online Agents;
+- Core PID 12824 and the two Windows launcher/child Remote process identities
+  (19984 and 20204) remained unchanged. Shared Functions and Worker identities
+  changed, as required;
+- a temporary, initially disabled heartbeat was enabled only for boundary
+  acceptance. Preparation-time occurrences completed normally. The occurrence
+  due across handoff completed exactly once after recovery, with no pending
+  recovery batch, and the job was disabled before closeout. It remained disabled
+  for more than one Scheduler interval with no additional run;
+- deterministic candidate rejection, drain failure, atomic group rollback and
+  second activity-gate cases passed 4/4 after live adoption. No production fault
+  injection switch or test backdoor was added merely to manufacture a live
+  failure.
+
+The HASHI3 topology has 11 Workers, not the production topology's 26. The live
+result therefore proves the corrected lifecycle and the 11-Worker timings; it
+does not pretend to be a 26-Worker p95 sample. The offline count regression
+still proves that full-closure work is not multiplied by Worker count. HASHI4
+was neither modified nor rebooted.

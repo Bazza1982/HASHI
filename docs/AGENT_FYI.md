@@ -11,6 +11,13 @@ checks. Start notification remains before any possible Workbench disconnect.
 `/restart`, Core and Remote behavior are unchanged. See
 [reboot decision](HASHI_REBOOT_FAST_RELIABLE_PLAN_2026-10-14.md).
 
+HASHI3 live adoption on October 14 measured five same-generation single-Agent
+reboots at 4.6-5.5 seconds and corrected-path 11-Worker `max` at 20.6-20.7
+seconds; observed Workbench/API cutover unavailability was 0.83 seconds. Start
+notice preceded disconnect, Core/Remote identities stayed fixed, and a heartbeat
+due across handoff completed once after recovery. HASHI3 has 11 Workers, so this
+is not a 26-Worker p95 claim. The detailed evidence is in the repair record.
+
 October 13: HASHI3/HASHI4 and Workbench use GitHub `main`; continue there,
 without new branches/worktrees. [Reconciliation](repairs/DEBUG_CALL_RECONCILIATION_20261013.md)
 preserves the repairs; source and runtime adoption remain separate.

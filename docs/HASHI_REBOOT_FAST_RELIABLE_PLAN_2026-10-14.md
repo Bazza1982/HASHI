@@ -1,6 +1,6 @@
 # HASHI 热重启提速、可靠性与回执修复方案
 
-状态：实施中；实现与离线聚焦验证完成，HASHI3 现场验收待执行
+状态：实现与 HASHI3 现场验收完成；准备提交 PR（现场拓扑为 11 Workers）
 日期：2026-10-14
 开发分支：`debug-reboot`（仅 HASHI3）
 功能所有者：PAO；用户消息由 Frontend Connector Functions 所有
@@ -472,8 +472,8 @@ HASHI3 提交整体推广，禁止 cherry-pick 部分修复。
 实施检查点 `6021be54` 已在 `debug-reboot` 完成。先建立的错误断言与红灯覆盖
 PID 复用、身份错配、部分成功、提交后未确认、过早封锁、重复散列/导入及
 heartbeat 恢复；随后实现转绿。干净提交上的相关聚焦回归为 219/219 通过，
-Ruff、Python 编译、locale JSON 和 Protected Core 检查通过。此处只证明离线
-实现；HASHI3 运行采用、耗时和真实前端通知仍须在现场验收后单独报告。
+curated Core gate 为 833 passed、1 skipped，Ruff、Python 编译、locale JSON 和
+Protected Core 检查通过。现场采用结果见 14.4，并与离线事实分别记录。
 
 ### 14.1 必须先红后绿的回归用例
 
@@ -525,6 +525,31 @@ Ruff、Python 编译、locale JSON 和 Protected Core 检查通过。此处只�
 6. 核对 Core PID、Remote 生命周期和无关 Agent 未被错误替换；
 7. 核对阶段计时、检查次数和最终用户消息；
 8. 最终再次核对源代码、制品和运行 Worker 是三个分别确认的事实。
+
+### 14.4 HASHI3 现场验收结果
+
+2026-10-14 获得仅限 HASHI3 的明确授权后完成：
+
+- 第一次 `max` 由旧 Functions 发起，仅作为采用运行；62.8 秒后加载提交
+  `731592ad` 对应的新 generation；
+- 新运行代连续五次 `min` 为 5.5、5.2、4.6、4.9、5.0 秒，插值 p95 约
+  5.4 秒，五次均为 `succeeded` + `confirmed`，无警告；
+- 新运行代两次 `max` 为 20.6 和 20.7 秒，11/11 在线；一次精细观测到
+  Workbench/API 中断约 0.83 秒；
+- `min` 的 qualification/full-closure import 均为零；稳定缓存后仅有 1 次
+  必要清单封印检查。`max` 对 11 个候选只保留每个进程一次 bootstrap 制品
+  验证，没有 11 次完整闭包导入；
+- Workbench 每次先显示开始通知，最终消息明确显示成功、耗时及在线数量；
+- Core PID 与 Remote 进程身份始终不变；Functions/Workers 按预期替换；
+- 临时 heartbeat 在准备阶段正常执行，切换边界到期的一次在恢复后恰好执行
+  一次，没有重复补跑或待处理恢复批次；验收后已禁用；
+- 候选拒绝、drain 失败、组回滚和第二活动门采用确定性注入测试复核为 4/4。
+  没有为了现场造故障而给运行代码添加测试开关或失败后门。
+
+HASHI3 当前只有 11 个 Worker，因此上述实机结果不能冒充 26-Worker p95。
+26-Worker 的重复资格工作已由计数回归证明不会随 Worker 数量倍增；生产规模
+实测必须在后续明确授权的非生产同等拓扑完成，不能先拿 HASHI4 冒险。HASHI4
+在本次施工和验收中未修改、未重启。
 
 ## 15. 风险控制
 
