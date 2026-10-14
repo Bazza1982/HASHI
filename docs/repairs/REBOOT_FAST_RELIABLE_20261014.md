@@ -1,0 +1,224 @@
+# Fast, reliable and truthful hot reboot
+
+## Scope and authority
+
+On 2026-10-14 the user authorized implementation and operational testing only
+on HASHI3 branch `debug-reboot`. HASHI4, `/restart`, Remote and Protected Core
+are outside scope. PAO owns the lifecycle and receipts; Frontend Connector
+Functions own localized result wording. The user required incorrect assertions
+to be corrected and observed red before implementation.
+
+## Implemented correction
+
+- Replacement identity is Agent + expected Worker nonce + target generation,
+  backed by the Supervisor route and process handle. PID and timestamps remain
+  diagnostic, so Windows PID reuse cannot manufacture failure.
+- Receipts use canonical outcome plus independent observation confidence and
+  retain one bounded evidence record per target. Partial and unconfirmed results
+  name only affected Agents and their failed checks. Non-disruptive post-commit
+  warnings state the actual failed follow-up step.
+- Targeted reboot prepares candidates while old routes remain online, checks
+  activity a second time, then fences only the exact targets for drain and
+  atomic pointer commit. Broad reboot no longer fences routes before publishing
+  the existing Core handoff request.
+- A qualified generation cache hit uses a Git/runtime seal. A new generation
+  performs one isolated full-closure probe and one artifact materialization.
+  Function Worker Host no longer repeats two artifact scans and a complete
+  import/contract validation already owned by the probe. The protected
+  bootstrap verification and real per-Worker backend startup remain.
+- Receipts record stage timings and counts for candidate Workers, manifest
+  passes and full-closure imports. These diagnostics do not lengthen user
+  messages.
+- Scheduler behavior was not replaced: old Functions continues running during
+  preparation, and the existing durable startup recovery emits one due
+  heartbeat once with recovery identity after the short handoff.
+
+## Red/green and offline evidence
+
+The tests-first checkpoint is `26ca3642`. Before correction, focused cases
+failed on PID inequality, nonce mismatch being hidden by PID change, premature
+broad fencing, duplicate generation/Worker validation, missing two-axis result,
+and loss of failed-Agent detail. Additional review cases failed on a remaining
+legacy cutover full scan, hard-coded work counts, ambiguous 19/20 messaging and
+terminal recovery records without an outcome.
+
+Implementation checkpoint `6021be54` then passed:
+
+- 137/137 directly affected reboot, Worker, receipt, UI and Scheduler tests;
+- 219/219 clean-checkout focused lifecycle, generation, runtime, protocol,
+  adoption and release tests;
+- project Ruff gate for every changed Python file;
+- Python compilation and both locale JSON parses;
+- `scripts/check_protected_core_changes.py` with no Core change.
+
+These are offline implementation facts, not running adoption or user-visible
+delivery evidence.
+
+## Live HASHI3 verification
+
+Authorized HASHI3-only adoption completed on 2026-10-14. The first broad reboot
+was an adoption run initiated by the old Functions generation, so its 62.8 s
+duration is recorded but is not used as the corrected-path benchmark. It loaded
+source commit `731592adfe9afd6e0a1716bc99ef527b9bb2aaef` as generation
+`sha256:edd9fde514e6aa27c0879cdf936ec35518298b5df2da0d1c39644ea91c86b2ad`.
+
+Observed pre-follow-up lifecycle evidence:
+
+Evidence correction: the five 4.6-5.5 s `min` runs and two 20.6-20.7 s
+`max` runs below were submitted through the legacy Workbench administration
+endpoint. That endpoint reached the same RebootManager but called PAO directly
+instead of entering through the standard Frontend Connector slash-command RPC.
+The timings remain valid process-replacement evidence, but they are not
+end-to-end FC latency or frontend-parity evidence; the earlier 5.4 s p95 claim
+is withdrawn. Real Telegram runs of 44.8 s and 37.7 s for `min`, followed by
+49.5 s for `max`, exposed a qualification-cache provenance loop.
+
+The follow-up repair sends the Workbench administration action through the same
+`/reboot min` FC-to-Worker command path, removes its duplicate activity query,
+and leaves PAO's one authoritative preflight intact. A clean new Git commit with
+identical Function bytes now performs one exact byte revalidation and refreshes
+the qualification receipt without an isolated probe. Immutable artifact
+creation provenance remains historical and can no longer overwrite the current
+qualification commit during a broad handoff. Changed Function bytes still fail
+closed. Fresh end-to-end FC results are recorded only after committed-source
+adoption.
+
+The first follow-up FC `max` correctly reached all 11 targets but rolled back
+before cutover. The runtime contract named a dependency-digest mismatch. No
+package had changed: a release build had regenerated ignored root
+`hashi_bridge.egg-info` from version `4.0.0a2` to `4.0.0b1` after Core launch.
+Because Python distribution discovery reads that metadata, the packaging side
+effect manufactured runtime drift. Cold restart is not a Function deployment
+or recovery path. Python packages now build from an exact temporary Git `HEAD`
+export, leaving the live checkout unchanged; HASHI3 restores the exact
+launch-time metadata before retrying adoption through `/reboot` only.
+
+- five same-generation `min` runs completed in 5.5, 5.2, 4.6, 4.9 and 5.0 s;
+  every receipt was `succeeded` + `confirmed`, with no warnings. These are
+  retained as RebootManager/Worker measurements only;
+- same-generation `min` recorded one candidate Worker, zero full-closure imports
+  and zero qualification work. After the first warm-up seal, each run recorded
+  one necessary manifest hash rather than one full generation scan;
+- RebootManager-level `max` runs completed in 20.6 and 20.7 s with 11/11 Workers
+  online. Qualification, materialization and full-closure import counts were
+  zero; each of the 11 new process bootstraps verified its own artifact once;
+- during the instrumented `max`, Workbench/API unavailability was 0.83 s. The
+  start notice was visible before the disconnect and the final message reported
+  an unambiguous success, elapsed time and 11 online Agents;
+- Core PID 12824 and the two Windows launcher/child Remote process identities
+  (19984 and 20204) remained unchanged. Shared Functions and Worker identities
+  changed, as required;
+- a temporary, initially disabled heartbeat was enabled only for boundary
+  acceptance. Preparation-time occurrences completed normally. The occurrence
+  due across handoff completed exactly once after recovery, with no pending
+  recovery batch, and the job was disabled before closeout. It remained disabled
+  for more than one Scheduler interval with no additional run;
+- deterministic candidate rejection, drain failure, atomic group rollback and
+  second activity-gate cases passed 4/4 after live adoption. No production fault
+  injection switch or test backdoor was added merely to manufacture a live
+  failure.
+
+The HASHI3 topology has 11 Workers, not the production topology's 26. The prior
+live result proves the RebootManager lifecycle and 11-Worker process timings,
+not the follow-up FC entry correction and not a 26-Worker p95 sample. The
+offline count regression still proves that full-closure work is not multiplied
+by Worker count. HASHI4 was neither modified nor rebooted.
+
+## Final standard-FC adoption after deployment correction
+
+The running Core environment was restored to its launch-time distribution
+identity without installing, removing or upgrading a package. Release builds
+now run from a temporary exact Git `HEAD` export and cannot regenerate project
+metadata in the live checkout. The corrected Function generation was then
+adopted exclusively through Workbench `/reboot`; `/restart` was never used.
+
+The first standard-FC `max` loaded source commit `7aedf642` as generation
+`sha256:22774b7e5c4852a8f9a262a41787258393df340f1ed132e39dc3b18df33b3458`.
+It completed with 11/11 Agents online in 108.0 s. This was an unseen-generation
+adoption, including one 49.9 s isolated qualification, and is retained as the
+cold-generation measurement rather than presented as the steady-state result.
+
+The same-generation standard-FC sequence then completed as follows:
+
+- `min`: 5.4 s, one candidate, `succeeded` + `confirmed`;
+- `max`: 21.1 s, 11/11 online, `succeeded` + `confirmed`;
+- `min`: 5.2 s, one candidate, `succeeded` + `confirmed`.
+
+Both targeted receipts confirmed the expected Worker nonce, generation, Agent
+identity, start/adoption time, active route, backend readiness and old-process
+exit. PID was diagnostic only. The warm `min` and `max` runs performed no full
+qualification, no materialization and no full-closure import; each candidate
+kept its protected bootstrap artifact verification. Start notices were visible
+before disconnection and final messages stated an unambiguous outcome.
+
+Core PID 12824 and Remote child PID 20204 remained unchanged. HASHI4 was not
+modified or rebooted. The final affected regression set passed 108/108 and the
+Protected Core check passed.
+
+## Post-acceptance deployment correction
+
+Commit `dc758d6e` changed only documentation. It did not change Function bytes
+or generation, so no live adoption was required. An additional `max` was
+nevertheless submitted. The candidate reused generation
+`sha256:22774b7e5c4852a8f9a262a41787258393df340f1ed132e39dc3b18df33b3458`,
+started the new shared Functions and reached 11/11 Workers. Before the final
+connector recovery and receipt, Core PID 12824 terminated abnormally along
+with its Function process tree. Its PID file remained stale and Windows
+recorded no Python crash or resource-exhaustion event. Available evidence does
+not identify the terminating actor, but this was not a normal Core exit and is
+not evidence that Function adoption needs a cold restart.
+
+Subsequent diagnosis identified the terminating mechanism. HASHI3 was still
+managed by a legacy task launcher that redirected native Python stderr through
+PowerShell `*>>` while `ErrorActionPreference` was `Stop`. A background
+prewarm-thread diagnostic became `NativeCommandError`, terminated the launcher,
+and its Windows Job cleanup then removed the Core/Functions process tree. The
+HASHI3 user task now uses the repository's standard launcher, which separates
+stdout/stderr and treats the Python child exit code as authoritative.
+
+The deployment rule remains: committed Function-byte changes adopt only through
+standard-FC `/reboot` with the narrowest valid scope; documentation, test and
+release-note-only commits execute no runtime adoption command. Source commit,
+Function generation and current runtime availability remain separate facts. A
+missing Core is a separate operational failure and is never converted into a
+Function `/restart` requirement. HASHI4 was untouched.
+
+## Offline recovery and final truthful acceptance
+
+The standard launcher brought the already-offline HASHI3 instance back under
+its user-level scheduled task without `/restart`. It used the same Python
+3.12.13 executable and the same 63-package environment; no dependency was
+installed, removed or upgraded. All subsequent Function adoption used
+Workbench's standard Frontend Connector `/reboot` path.
+
+Cold startup exposed a second correctness defect: an interrupted broad receipt
+could be promoted to success merely because the requested generation and all
+Workers were currently online. Red evidence preceded both repairs. Commit
+`5fbbcbca` rejects cold-start confirmation and records the inherited operation
+as interrupted/unconfirmed. The first live adoption then showed that the
+temporary candidate marker was cleared before the receipt watcher observed it.
+Commit `2af77d58` preserves a successor-process continuity witness across the
+commit. Neither change touches Protected Core.
+
+Commit `2af77d58` was adopted by a standard-FC `/reboot max` in 47.0 s with
+11/11 Agents online. The final same-generation FC sequence was:
+
+- `min`: 4.6 s, exact target `agent1`, succeeded + confirmed;
+- `max`: 18.5 s, all 11 targets, succeeded + confirmed;
+- `min`: 4.7 s, exact target `agent1`, succeeded + confirmed.
+
+The targeted operations did not request or replace shared Functions. The broad
+operation committed shared PID 14664 to 29432. Core PID 13944 and Remote child
+PID 20204 remained unchanged; API and Gateway stayed healthy and all 11 Workers
+were online after every terminal receipt. Python version, executable digest and
+63-package digest matched the recovery baseline exactly.
+
+The final affected regression set passed 236/236, the curated Core gate passed
+839 with 1 skipped, Windows launcher tests passed 12/12, and Protected Core
+checks passed for both the worktree and the branch relative to `main`. HASHI3
+is online. HASHI4 was neither modified nor rebooted.
+
+User acceptance is recorded separately from implementation and system evidence:
+after the final live sequence, the user reported on 2026-10-14 that the observed
+result was very good. This approves the verified HASHI3 behavior for PR review;
+it is not evidence that HASHI4 has adopted or loaded the change.

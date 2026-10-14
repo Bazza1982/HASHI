@@ -95,26 +95,61 @@ async def test_reboot_operation_uses_authenticated_owner_and_fixed_agent_scope(t
 
 @pytest.mark.asyncio
 async def test_admin_min_reboot_preserves_trusted_owner_and_operation(tmp_path, monkeypatch):
-    calls = []
+    slash_calls = []
     operation = {"operation_id": "b" * 32, "mode": "min", "status": "accepted"}
 
-    async def metadata(*args, **kwargs):
-        return {"is_generating": False, "queue_depth": 0}
+    async def reject_direct_submit(**_kwargs):
+        raise AssertionError("Workbench reboot must enter through the FC slash-command path")
 
-    async def submit(**kwargs):
-        calls.append(kwargs)
-        return {"accepted": True, "record": {"id": "b" * 32, "status": "accepted"},
-                "operation": operation}
+    async def reject_duplicate_preflight(*_args, **_kwargs):
+        raise AssertionError("RebootManager owns the single target-activity preflight")
 
-    server = _server(tmp_path, orchestrator=SimpleNamespace(
-        request_reboot=submit, runtimes=[SimpleNamespace(
-            name="lily", is_function_worker_proxy=True, client=SimpleNamespace(call=metadata))]))
+    async def execute_slash(runtime, text, **kwargs):
+        slash_calls.append((runtime, text, kwargs))
+        return {
+            "ok": True,
+            "command": "reboot",
+            "args": ["min"],
+            "messages": [],
+            "result": {
+                "accepted": True,
+                "record": {"id": "b" * 32, "status": "accepted"},
+                "operation": operation,
+            },
+        }
+
+    runtime = SimpleNamespace(
+        name="lily",
+        is_function_worker_proxy=True,
+        client=SimpleNamespace(call=reject_duplicate_preflight),
+    )
+    server = _server(
+        tmp_path,
+        orchestrator=SimpleNamespace(
+            request_reboot=reject_direct_submit,
+            runtimes=[runtime],
+        ),
+    )
     monkeypatch.setattr(server, "_check_admin_auth", lambda request: True)
     monkeypatch.setattr(server, "_v1_owner_id", lambda request: "enterprise:trusted")
+    monkeypatch.setattr(workbench_module, "try_execute_slash_command_text", execute_slash)
     response = await server.handle_admin_reboot_agent(_Request(payload={
-        "agent": "lily", "request_key": "config-save", "owner_id": "attacker"}))
+        "agent": "lily", "request_key": "config-save", "owner_id": "attacker",
+        "locale": "zh-CN",
+    }))
+
     assert response.status == 200
-    assert calls[0]["origin"] == {"surface": "workbench", "owner_id": "enterprise:trusted"}
+    assert slash_calls == [(runtime, "/reboot min", {
+        "source_channel": "api_chat",
+        "session_metadata": {
+            "_hashi_owner_id": "enterprise:trusted",
+            "owner_id": "enterprise:trusted",
+            "session_surface": "workbench",
+            "session_channel_key": "default",
+            "frontend_invocation_id": "config-save",
+            "ui_locale": "zh-CN",
+        },
+    })]
     assert json.loads(response.text)["operation"] == operation
 
 

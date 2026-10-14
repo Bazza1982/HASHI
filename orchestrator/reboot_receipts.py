@@ -18,6 +18,17 @@ MAX_BYTES = 128 * 1024
 MAX_DELIVERY_ATTEMPTS = 4
 ACTIVE = frozenset({"accepted", "running"})
 TERMINAL = frozenset({"succeeded", "failed", "rejected", "unconfirmed"})
+OUTCOMES = frozenset(
+    {
+        "succeeded",
+        "succeeded_with_warning",
+        "partial",
+        "rejected",
+        "rolled_back",
+        "failed",
+    }
+)
+OBSERVATION_CONFIDENCE = frozenset({"confirmed", "unconfirmed"})
 LIFECYCLE_STATES = frozenset(
     {
         "accepted",
@@ -29,8 +40,24 @@ LIFECYCLE_STATES = frozenset(
         "unconfirmed",
     }
 )
-RECEIPT_SCHEMA_VERSION = 5
+RECEIPT_SCHEMA_VERSION = 6
 MAX_PROGRESS_EVENTS = 32
+REBOOT_TIMING_STAGES = (
+    "start_notice",
+    "activity_preflight",
+    "generation_cache_lookup",
+    "qualification",
+    "materialization",
+    "candidate_start",
+    "cutover",
+    "final_observation",
+    "notification_enqueue",
+)
+REBOOT_WORK_COUNTS = (
+    "candidate_worker_count",
+    "manifest_hash_count",
+    "full_closure_import_count",
+)
 _WINDOWS_REPLACE_RETRY_DELAYS = (0.025, 0.075, 0.2, 0.5)
 logger = logging.getLogger("BridgeU.RebootReceipts")
 
@@ -119,6 +146,35 @@ def _normalize_record(record):
     # having received a presentation acknowledgement.
     record.setdefault("presentation_ack", _default_presentation_ack())
     record.setdefault("progress", [])
+    if "outcome" not in record:
+        status = record.get("status")
+        if status in ACTIVE:
+            record["outcome"] = None
+        elif status == "succeeded":
+            record["outcome"] = "succeeded"
+        elif status == "rejected":
+            record["outcome"] = "rejected"
+        elif status == "failed" and record.get("restored"):
+            record["outcome"] = "rolled_back"
+        elif status == "unconfirmed" and any(
+            bool(value) for value in (record.get("online") or {}).values()
+        ):
+            record["outcome"] = "partial"
+        else:
+            record["outcome"] = "failed"
+    record.setdefault(
+        "observation_confidence",
+        "unconfirmed" if record.get("status") == "unconfirmed" else "confirmed",
+    )
+    record.setdefault("warnings", [])
+    timings = record.setdefault("stage_timings_ms", {})
+    if isinstance(timings, dict):
+        for name in REBOOT_TIMING_STAGES:
+            timings.setdefault(name, 0.0)
+    counts = record.setdefault("work_counts", {})
+    if isinstance(counts, dict):
+        for name in REBOOT_WORK_COUNTS:
+            counts.setdefault(name, 0)
     return record
 
 
@@ -183,6 +239,28 @@ def validate_record(record):
             and isinstance(record["display_names"], dict)
             and isinstance(record["mode"], str)
             and record["status"] in ACTIVE | TERMINAL
+            and (record.get("outcome") is None or record.get("outcome") in OUTCOMES)
+            and record.get("observation_confidence") in OBSERVATION_CONFIDENCE
+            and isinstance(record.get("warnings"), list)
+            and len(record.get("warnings")) <= 100
+            and all(isinstance(item, str) for item in record.get("warnings"))
+            and isinstance(record.get("stage_timings_ms"), dict)
+            and set(record.get("stage_timings_ms")) == set(REBOOT_TIMING_STAGES)
+            and all(
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+                and value >= 0
+                for value in record.get("stage_timings_ms").values()
+            )
+            and isinstance(record.get("work_counts"), dict)
+            and set(record.get("work_counts")) == set(REBOOT_WORK_COUNTS)
+            and all(
+                isinstance(value, int)
+                and not isinstance(value, bool)
+                and value >= 0
+                for value in record.get("work_counts").values()
+            )
             and record["lifecycle_state"] in LIFECYCLE_STATES
             and isinstance(record["workers"], dict)
             and isinstance(record["shared_replacement"], dict)
@@ -364,7 +442,7 @@ class RebootReceipts:
                 if (
                     not isinstance(payload, dict)
                     or payload.get("schema")
-                    not in {1, 2, 3, 4, RECEIPT_SCHEMA_VERSION}
+                    not in {1, 2, 3, 4, 5, RECEIPT_SCHEMA_VERSION}
                     or not isinstance(payload.get("records"), list)
                 ):
                     raise ValueError("Invalid reboot receipt storage")
@@ -456,6 +534,13 @@ class RebootReceipts:
             "created_at": now,
             "updated_at": now,
             "status": "accepted",
+            "outcome": None,
+            "observation_confidence": "unconfirmed",
+            "warnings": [],
+            "stage_timings_ms": {
+                name: 0.0 for name in REBOOT_TIMING_STAGES
+            },
+            "work_counts": {name: 0 for name in REBOOT_WORK_COUNTS},
             "phase": "accepted",
             "lifecycle_state": "accepted",
             "committed": False,
@@ -522,6 +607,8 @@ class RebootReceipts:
             if record["status"] in ACTIVE and not pending_shared:
                 changes.update(
                     status="unconfirmed",
+                    outcome="failed",
+                    observation_confidence="unconfirmed",
                     phase="interrupted",
                     lifecycle_state="unconfirmed",
                     reason="interrupted",

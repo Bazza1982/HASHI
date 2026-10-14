@@ -8,7 +8,6 @@ Agent runtime class into the live Core module space.
 from __future__ import annotations
 
 import asyncio
-import importlib
 import logging
 import os
 import sys
@@ -23,15 +22,12 @@ from orchestrator.kernel_artifact import GenerationModuleFinder
 from orchestrator.function_generation import (
     FUNCTION_GENERATION_SCHEMA_VERSION,
     SourceManifest,
-    candidate_import_guard,
-    verify_qualified_manifest_bytes,
 )
 from orchestrator.function_worker_protocol import (
     FUNCTION_WORKER_PROTOCOL_VERSION,
     JsonConnectionPeer,
     json_value,
 )
-from orchestrator.function_contract import validate_function_contract
 from orchestrator.pathing import build_bridge_paths
 from orchestrator.reboot_adoption_bridge import bridge_legacy_broad_reboot
 from orchestrator import runtime_background_status
@@ -827,19 +823,6 @@ class FunctionWorkerHost:
                 "Function generation schema implementation does not match Core policy"
             )
         self._install_generation_import_paths()
-        verify_qualified_manifest_bytes(
-            self.manifest,
-            code_root=self.generation_root,
-        )
-
-        with candidate_import_guard():
-            for entry in self.manifest.entries:
-                importlib.import_module(entry.module)
-            validate_function_contract()
-        verify_qualified_manifest_bytes(
-            self.manifest,
-            code_root=self.generation_root,
-        )
 
         from orchestrator.config import ConfigManager
         from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime

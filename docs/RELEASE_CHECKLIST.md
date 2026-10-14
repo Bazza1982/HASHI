@@ -25,7 +25,9 @@
   - `python -m pytest -q tests/test_runtime_contract.py tests/test_function_generation.py tests/test_reboot_manager.py`
 - Core gate: `python -m pytest -q`
 - Offline product suite for the release candidate: `python -m pytest -q tests -m "not contract and not live and not platform and not real_wall_clock"`
-- Python source distribution and wheel: `python -m build`
+- Python source distribution and wheel:
+  `python scripts/build_python_release.py`. It builds committed `HEAD` in a
+  temporary export; never run the packaging backend in a live runtime checkout.
 - npm publication boundary: `npm pack --dry-run --json` and
   `python -m pytest -q tests/contract/test_npm_package_contract.py`
   - the user guides and their local navigation targets are present in the
@@ -70,6 +72,14 @@
 - Backend API health: `curl http://127.0.0.1:<backend_api_port>/api/health`
 - API Gateway health when enabled: `curl http://127.0.0.1:<api_gateway_port>/health`
 - Live reboot smoke:
+  - classify the committed diff before live adoption: only Function-byte
+    changes require a runtime command; documentation, tests and release notes
+    alone require none
+  - adopt every Function-byte change through the standard Frontend Connector
+    `/reboot` path with the narrowest valid scope; never substitute a cold
+    process restart
+  - attach acceptance to an already-running Core; never launch or retain Core
+    under a temporary test, verification or foreground command executor
   - `/reboot min`
   - `/reboot max`
   - while at least one other Agent remains online, adopt a disposable public
@@ -274,7 +284,7 @@ rollout.
 
 ### Package
 
-- Build artifacts: `python -m build`
+- Build artifacts: `python scripts/build_python_release.py`
 - Fresh install smoke: install the built wheel into a clean environment
 - CLI smoke: `nagare run tests/fixtures/smoke_test.yaml --yes --silent --smoke-handler`
 - Contract tests: `pytest -q tests/contract`

@@ -1,5 +1,9 @@
 # Agent reboot receipts
 
+Current revision: 2026-10-14. The fast, reliable reboot correction supersedes
+the older PID-change success rule and admission-time route fencing. See the
+[scoped implementation record](repairs/REBOOT_FAST_RELIABLE_20261014.md).
+
 ## Decision and ownership
 
 Approved for HASHI2 on 2026-09-07. Implementation branch:
@@ -34,13 +38,14 @@ See [Function Adoption and Remote Restart](HASHI3_FUNCTION_ADOPTION_AND_REMOTE_R
 3. Runtime attempts one concise start notice and delivers one final outcome; the command
    path does not add a redundant acceptance reply. Multi-Agent success notices
    show counts instead of name lists, while failures retain actionable target
-   names and success includes elapsed seconds. Admission closes only selected
-   Agent routes. During `min|same` other Agents continue on their old Workers;
-   during `max` all Agent routes close until the successor commits. No new
-   message reaches an old Worker after admission. During `max`, new requests
-   into the old shared process are rejected for retry; Telegram leaves new
-   updates queued at its server. Telegram's idle long poll is interrupted
-   immediately, while already accepted updates finish and checkpoint.
+   names and failed checks. The old routes remain available during qualification,
+   artifact preparation and candidate startup. A second live-activity gate runs
+   immediately before the short cutover. Targeted modes then fence only selected
+   Agents; `max` leaves all old routes and the Scheduler available until Core's
+   existing handoff reaches its quiesce/commit window. Telegram leaves updates
+   queued only during that window. A heartbeat due during shared-process handoff
+   is recovered once with the existing Scheduler recovery identity rather than
+   being silently lost or duplicated.
 Workbench's Connector keeps the last verified Agent list and conversation
 projection while the shared API is briefly unavailable, marks cached Agents
 offline, and replaces the list on reconnection. A deliberate instance switch
@@ -48,14 +53,21 @@ clears this cache so one instance cannot display another's Agents.
 4. The terminal outcome is saved before notification delivery. Delivery never
    changes that outcome and never runs the operation again.
 
-| Outcome | Required evidence | User meaning |
+| Lifecycle state | Required evidence | User meaning |
 |---|---|---|
 | `accepted` | Request and exact target set persisted | Work has not switched yet |
 | `candidate_rejected` | Qualification, committed-source, dependency, probe or READY preparation failed before cutover | Reboot was not performed |
 | `committed` | Atomic route-pointer exchange completed | New route exists, final health is still pending |
 | `rolled_back` | Cutover failed; every previous Worker resumed and passed readiness | Original state restored |
-| `online` | Old PID exited; new PID differs; exact Agent/runtime/generation reports ACTIVE, accepting, backend ready and startup successful | Selected Agents are verified online |
+| `online` | Supervisor route points to the expected Worker nonce, Agent and generation; its process is alive and reports ACTIVE, accepting, backend ready and startup successful | Selected Agents are verified online |
 | `unconfirmed` | Observation was interrupted, a rollback was incomplete, or a committed switch lacks verified readiness | Result must not be claimed as success or rollback |
+
+Schema 6 additionally separates the operation conclusion from observation
+confidence. Canonical `outcome` is one of `succeeded`,
+`succeeded_with_warning`, `partial`, `rejected`, `rolled_back` or `failed`.
+`observation_confidence` is independently `confirmed` or `unconfirmed`. Thus a
+committed 25/26 switch with one interrupted status read retains 25 confirmed
+successes instead of collapsing the whole result into a meaningless failure.
 
 Broad receipts additionally persist the shared request identity, old/new shared
 process evidence, committed generation, and per-Worker evidence. Remote health
@@ -64,9 +76,16 @@ reboot success.
 
 The compatibility `status` field remains for existing clients, while
 `lifecycle_state` carries the precise state above. Each committed/final receipt
-also stores per-target old/new and observed PID, Agent identity, runtime ID,
-generation ID, source commit and health booleans. Raw exceptions remain in logs,
-not in the bounded user-queryable receipt.
+also stores per-target expected/observed nonce, Agent identity, runtime ID,
+generation ID, start/adoption time, diagnostic PID, source commit, state and
+failed checks. PID is diagnostic only: Windows PID reuse is valid and cannot
+decide success. The old `Process` handle proves exit. A healthy new route with
+delayed old-process cleanup is `succeeded_with_warning`, not failure. Raw
+exceptions remain in logs, not in the bounded user-queryable receipt.
+
+Receipts also store exact stage timings and work counts for qualification,
+materialization, candidate startup, cutover and final observation. These fields
+are diagnostic and never enter ordinary user messages.
 
 Readiness is a Worker lifecycle check, not a provider/model conversation probe.
 A failure publishing diagnostics after route commit must not destroy the new
@@ -79,6 +98,8 @@ Chinese examples (runtime messages have no persona greeting):
 - `🔄 开始热重启…`
 - `✅ 月如热重启成功，耗时3秒。`
 - `✅ 完整热重启成功，耗时12秒，20个代理在线。`
+- `⚠️ 完整热重启部分成功：19/20 个代理已切换并在线；月如：后端尚未就绪。`
+- `⚠️ 完整热重启已完成切换，但结果尚未完全确认：19/20 个代理已确认在线；月如：状态读取失败。`
 - `❌ 系统最小热重启失败，月如已恢复原状态。`
 - `❌ 系统最小热重启失败，月如暂未恢复在线。`
 
@@ -119,10 +140,13 @@ Storage filled by active operations, or invalid/unwritable storage, still reject
 a new reboot without interrupting healthy services.
 
 On shared-process recovery, an inherited broad receipt with a published handoff
-request remains active so the successor can reconcile Core and Worker evidence.
-Other inherited accepted/running receipts become unconfirmed. Pending terminal
-notices retain their delivery budget without an extra delayed-result label.
-Recovery does not rerun a targeted reboot or infer success
+request remains active only in the successor shared process prepared by that
+same live Core handoff. A normal cold/recovery startup marks the inherited
+transaction interrupted and unconfirmed, even when it observes the requested
+generation and every Worker online; cold availability is not continuity of the
+hot transaction. Other inherited accepted/running receipts become unconfirmed.
+Pending terminal notices retain their delivery budget without an extra
+delayed-result label. Recovery does not rerun a targeted reboot or infer success
 merely because an Agent is online.
 
 For the one-generation transition from legacy Worker-only `same|max`, a newly
@@ -147,6 +171,24 @@ already be verified. Runtime, network or Telegram delivery can be unavailable.
 The saved status is the recovery/query path when available.
 
 ## Implementation and validation status
+
+The 2026-10-14 HASHI3 correction keeps preparation online, uses Worker
+nonce/Agent/generation and existing lifecycle receipts instead of PID inequality,
+and removes repeated full-closure work from each Worker. The isolated probe owns
+one full import/contract qualification per new generation; the protected
+bootstrap still verifies the actual artifact once per process; each Worker still
+performs real configuration and backend initialization. Focused offline tests,
+live HASHI3 adoption and performance evidence are recorded separately in the
+[scoped implementation record](repairs/REBOOT_FAST_RELIABLE_20261014.md).
+
+The follow-up correction routes the Workbench administration action through the
+same Frontend Connector slash-command RPC as ordinary Backend API and Telegram
+commands. It no longer calls PAO's reboot method directly and no longer performs
+a second activity query before PAO's authoritative preflight. A
+content-identical Function generation can reuse its immutable artifact after a
+documentation-only commit: exact bytes are revalidated once, the current
+qualification receipt gets the new source commit, and artifact-creation
+provenance remains unchanged. The final pre-cutover seal is still strict.
 
 The 2026-10-08 HASHI3 repair supersedes browser-display/start-delivery prerequisites
 and terminal-notice retention blocking. Start delivery has a two-second head
@@ -182,15 +224,16 @@ and isolated shared Functions/minimal-Core tests are required by
 [Testing Policy](TESTING_POLICY.md). Verification counts are recorded in the
 implementation commit. These checks are not live acceptance evidence.
 
-## Receipt precision hardening (2026-09-17)
+## Receipt precision hardening (2026-09-17; PID rule superseded 2026-10-14)
 
 PAO and Frontend Connector Functions now persist and render the explicit
 `accepted`, `candidate_rejected`, `committed`, `rolled_back`, `online` and
-`unconfirmed` lifecycle. Final success requires a different new PID, confirmed
-old-process exit, exact Agent/runtime/generation identity, ACTIVE/accepting and
-backend/startup readiness. Schema-1 records are read compatibly and normalized;
-new writes use schema 2. This change does not add a retry, timeout, Core restart
-or notification dependency to the transaction.
+`unconfirmed` lifecycle. The former requirement that a new PID differ from the
+old PID is no longer authoritative. Current success uses exact
+Agent/nonce/generation identity, the Supervisor route pointer, process handle,
+ACTIVE/accepting and backend/startup readiness. Historical records remain
+readable and normalized; new writes use schema 6. This change adds no retry,
+timeout, Core restart or notification dependency to the transaction.
 
 
 ## Interactive recovery feedback (2026-09-08)

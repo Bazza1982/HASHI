@@ -9,7 +9,13 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from orchestrator.reboot_receipts import RebootReceipts, ACTIVE, MAX_DELIVERY_ATTEMPTS
+from orchestrator.reboot_receipts import (
+    ACTIVE,
+    MAX_DELIVERY_ATTEMPTS,
+    REBOOT_TIMING_STAGES,
+    REBOOT_WORK_COUNTS,
+    RebootReceipts,
+)
 from orchestrator.reboot_ui import render_notice
 from orchestrator import runtime_session, ui_language
 from orchestrator.telegram_delivery_failover import send_runtime_notice
@@ -95,6 +101,44 @@ class RebootManager:
         self.delivery_lock = asyncio.Lock()
         self.receipt_fault = False
         self._delivery_wake = asyncio.Event()
+        self._operation_metrics: dict[str, dict[str, dict[str, float | int]]] = {}
+
+    def _metrics_for(self, record: Mapping[str, Any]) -> dict[str, dict[str, float | int]]:
+        operation_id = str(record["id"])
+        return self._operation_metrics.setdefault(
+            operation_id,
+            {
+                "stage_timings_ms": {
+                    name: float((record.get("stage_timings_ms") or {}).get(name, 0.0))
+                    for name in REBOOT_TIMING_STAGES
+                },
+                "work_counts": {
+                    name: int((record.get("work_counts") or {}).get(name, 0))
+                    for name in REBOOT_WORK_COUNTS
+                },
+            },
+        )
+
+    def _record_stage(
+        self,
+        record: Mapping[str, Any],
+        name: str,
+        started: float,
+    ) -> None:
+        metrics = self._metrics_for(record)
+        timings = metrics["stage_timings_ms"]
+        timings[name] = round(
+            float(timings.get(name, 0.0))
+            + max(0.0, (time.perf_counter() - started) * 1000),
+            1,
+        )
+
+    def _metrics_snapshot(self, record: Mapping[str, Any]) -> dict[str, Any]:
+        metrics = self._metrics_for(record)
+        return {
+            "stage_timings_ms": dict(metrics["stage_timings_ms"]),
+            "work_counts": dict(metrics["work_counts"]),
+        }
 
     def _new_receipt(self, restart, targets=None):
         if targets is None:
@@ -544,6 +588,12 @@ class RebootManager:
         workers = {
             handle.name: {
                 "old_pid": handle.worker_pid,
+                "old_worker_nonce": str(
+                    getattr(handle.client, "nonce", "")
+                    or handle.metadata.get("worker_nonce")
+                    or ""
+                ),
+                "old_worker_started_at": handle.metadata.get("worker_started_at"),
                 "generation_id": handle.generation_id,
             }
             for handle in self.kernel.runtimes
@@ -563,6 +613,7 @@ class RebootManager:
             lifecycle_state="accepted",
             workers=workers,
             shared_replacement=shared,
+            **self._metrics_snapshot(record),
         )
         return shared
 
@@ -587,20 +638,21 @@ class RebootManager:
         *,
         expected_generation: str,
     ) -> dict[str, Any]:
-        evidence = await self._online_evidence(handle.client)
-        old_pid = previous.get("old_pid")
-        new_pid = evidence.get("new_pid")
-        evidence.update(
-            old_pid=old_pid,
-            pid_changed=old_pid is None or new_pid != old_pid,
-            old_exited=old_pid is None or new_pid != old_pid,
+        evidence = await self._online_evidence(
+            handle.client,
+            previous=previous,
+            route_client=handle.client,
         )
-        evidence["online"] = bool(
-            evidence.get("online")
-            and evidence["pid_changed"]
-            and evidence.get("generation_id") == expected_generation
-            and evidence.get("observed_generation_id") == expected_generation
-        )
+        if (
+            evidence.get("generation_id") != expected_generation
+            or evidence.get("observed_generation_id") != expected_generation
+        ):
+            failed_checks = list(evidence.get("failed_checks") or ())
+            if "generation_mismatch" not in failed_checks:
+                failed_checks.append("generation_mismatch")
+            evidence["failed_checks"] = failed_checks
+            evidence["online"] = False
+            evidence["state"] = "unavailable"
         return evidence
 
     async def reconcile_shared_replacements(self, *, now: float | None = None) -> None:
@@ -619,6 +671,26 @@ class RebootManager:
                 record.get("status") not in ACTIVE
                 or shared.get("status") != "requested"
             ):
+                continue
+            if record.get("recovered") and not getattr(
+                self.kernel, "_shared_replacement_continuity", False
+            ):
+                # A normal cold/recovery startup may observe the same committed
+                # generation and online Workers after the previous Core died.
+                # That is not continuity of the original hot transaction. Only
+                # the shared process prepared by the live Core handoff may
+                # confirm an inherited broad reboot receipt.
+                await self._release_reboot_fences(record)
+                interrupted = {
+                    **shared,
+                    "status": "unconfirmed",
+                }
+                self._finish(
+                    record,
+                    "unconfirmed",
+                    reason="interrupted",
+                    shared_replacement=interrupted,
+                )
                 continue
             request_id = str(shared.get("request_id") or "")
             receipt_path = state_dir / f"replacement-{request_id}.json"
@@ -720,6 +792,59 @@ class RebootManager:
             handles = self.kernel._runtime_map()
             missing = [name for name in record["targets"] if name not in handles]
             evidence = {}
+            metrics = self._metrics_for(record)
+            qualification_stats = dict(
+                getattr(
+                    self.kernel.function_workers,
+                    "last_qualification_stats",
+                    {},
+                )
+                or {}
+            )
+            materialization_stats = dict(
+                getattr(
+                    self.kernel.function_workers,
+                    "last_materialization_stats",
+                    {},
+                )
+                or {}
+            )
+            qualification_stage = (
+                "generation_cache_lookup"
+                if qualification_stats.get("source")
+                in {"memory_cache", "disk_cache"}
+                else "qualification"
+            )
+            metrics["stage_timings_ms"][qualification_stage] = float(
+                qualification_stats.get("duration_ms", 0.0)
+            )
+            metrics["stage_timings_ms"]["materialization"] = float(
+                materialization_stats.get("duration_ms", 0.0)
+            )
+            candidate_timings = dict(
+                getattr(
+                    self.kernel.function_workers,
+                    "candidate_prepare_timings_ms",
+                    {},
+                )
+                or {}
+            )
+            metrics["stage_timings_ms"]["candidate_start"] = max(
+                (float(candidate_timings.get(name, 0.0)) for name in record["targets"]),
+                default=0.0,
+            )
+            metrics["work_counts"]["candidate_worker_count"] = len(
+                record["targets"]
+            )
+            metrics["work_counts"]["manifest_hash_count"] = (
+                int(qualification_stats.get("manifest_hash_count", 0))
+                + int(materialization_stats.get("manifest_hash_count", 0))
+                + len(record["targets"])
+            )
+            metrics["work_counts"]["full_closure_import_count"] = int(
+                qualification_stats.get("full_closure_import_count", 0)
+            )
+            observation_started = time.perf_counter()
             try:
                 if not missing:
                     evidence = dict(
@@ -744,18 +869,31 @@ class RebootManager:
                     request_id,
                 )
                 missing = list(record["targets"])
-            online = {name: bool(item.get("online")) for name, item in evidence.items()}
-            adopted = (
-                not missing
-                and len(evidence) == len(record["targets"])
-                and all(online.values())
-                and os.getpid() != shared.get("old_shared_pid")
+            for name in record["targets"]:
+                if name not in evidence:
+                    evidence[name] = {
+                        "state": "unconfirmed",
+                        "failed_checks": ["status_read_failed"],
+                        "observation_confidence": "unconfirmed",
+                        "online": False,
+                    }
+            self._record_stage(record, "final_observation", observation_started)
+            online = {
+                name: bool(evidence[name].get("online"))
+                for name in record["targets"]
+            }
+            confirmed = all(
+                evidence[name].get("observation_confidence") == "confirmed"
+                for name in record["targets"]
             )
-            if adopted:
+            online_count = sum(online.values())
+            if online_count == len(record["targets"]):
                 self._finish(
                     record,
                     "succeeded",
                     lifecycle_state="online",
+                    outcome="succeeded",
+                    observation_confidence="confirmed",
                     committed=True,
                     reason="",
                     online=online,
@@ -764,14 +902,18 @@ class RebootManager:
                     shared_replacement=shared_result,
                 )
             else:
+                outcome = "partial" if online_count else "failed"
                 self._finish(
                     record,
                     "unconfirmed",
                     committed=True,
+                    lifecycle_state=("committed" if online_count else "unconfirmed"),
+                    outcome=outcome,
+                    observation_confidence="confirmed" if confirmed else "unconfirmed",
                     reason="readiness",
                     online=online,
                     workers=evidence,
-                    shared_replacement={**shared_result, "status": "unconfirmed"},
+                    shared_replacement=shared_result,
                 )
 
     def _promote_legacy_shared_replacements(self, state_dir: Path) -> None:
@@ -923,6 +1065,30 @@ class RebootManager:
             1,
         )
         lifecycle_state = fields.pop("lifecycle_state", None)
+        warnings = list(dict.fromkeys(fields.get("warnings") or ()))
+        fields["warnings"] = warnings
+        outcome = fields.pop("outcome", None)
+        if outcome is None:
+            if status == "succeeded":
+                outcome = "succeeded_with_warning" if warnings else "succeeded"
+            elif status == "rejected":
+                outcome = "rejected"
+            elif status == "failed" and fields.get("restored"):
+                outcome = "rolled_back"
+            elif status == "unconfirmed" and any(
+                bool(value) for value in (fields.get("online") or {}).values()
+            ):
+                outcome = "partial"
+            else:
+                outcome = "failed"
+        observation_confidence = fields.pop("observation_confidence", None)
+        if observation_confidence is None:
+            observation_confidence = (
+                "unconfirmed" if status == "unconfirmed" else "confirmed"
+            )
+        metrics = self._metrics_snapshot(record)
+        fields.setdefault("stage_timings_ms", metrics["stage_timings_ms"])
+        fields.setdefault("work_counts", metrics["work_counts"])
         if lifecycle_state is None:
             if status == "succeeded":
                 lifecycle_state = "online"
@@ -940,6 +1106,8 @@ class RebootManager:
                 status=status,
                 phase="finished",
                 lifecycle_state=lifecycle_state,
+                outcome=outcome,
+                observation_confidence=observation_confidence,
                 finished_at=finished_at,
                 duration_seconds=duration_seconds,
                 **fields,
@@ -957,23 +1125,55 @@ class RebootManager:
             )
 
     @staticmethod
-    async def _online_evidence(client, *, old_client=None):
+    async def _online_evidence(
+        client,
+        *,
+        old_client=None,
+        previous: Mapping[str, Any] | None = None,
+        route_client=None,
+    ):
         generation = getattr(client, "generation", None)
         receipt = getattr(generation, "receipt", None)
         expected_runtime = str(
             getattr(getattr(receipt, "runtime", None), "runtime_id", "") or ""
         )
         source_commit = str(getattr(receipt, "source_commit", "") or "")
-        old_pid = getattr(old_client, "pid", None)
+        prior = dict(previous or {})
+        old_pid = getattr(old_client, "pid", prior.get("old_pid"))
         new_pid = getattr(client, "pid", None)
+        expected_nonce = str(
+            getattr(client, "nonce", "")
+            or getattr(client, "metadata", {}).get("worker_nonce")
+            or ""
+        )
+        old_nonce = str(
+            getattr(old_client, "nonce", "")
+            or prior.get("old_worker_nonce")
+            or ""
+        )
+        old_started_at = (
+            getattr(old_client, "metadata", {}).get("worker_started_at")
+            if old_client is not None
+            else prior.get("old_worker_started_at")
+        )
         process_alive = bool(client.process.is_alive())
-        old_exited = old_client is None or not old_client.process.is_alive()
+        old_exited = (
+            not old_client.process.is_alive() if old_client is not None else None
+        )
+        worker_identity_changed = not old_nonce or expected_nonce != old_nonce
         evidence = {
             "old_pid": old_pid,
             "new_pid": new_pid,
             "observed_pid": None,
             "pid_changed": old_pid is None or new_pid != old_pid,
             "old_exited": old_exited,
+            "old_worker_nonce": old_nonce or None,
+            "expected_worker_nonce": expected_nonce or None,
+            "observed_worker_nonce": None,
+            "worker_identity_changed": worker_identity_changed,
+            "old_worker_started_at": old_started_at,
+            "worker_started_at": None,
+            "worker_adopted_at": None,
             "generation_id": str(getattr(client, "generation_id", "") or ""),
             "observed_generation_id": None,
             "source_commit": source_commit or None,
@@ -986,14 +1186,21 @@ class RebootManager:
             "accepting": False,
             "backend_ready": False,
             "startup_success": False,
+            "state": "unavailable",
+            "failed_checks": [],
+            "observation_confidence": "confirmed",
             "online": False,
         }
         if not process_alive:
+            evidence["failed_checks"] = ["candidate_exited"]
             return evidence
         try:
             metadata = await client.call("worker.metadata", timeout=10)
             evidence.update(
                 observed_pid=metadata.get("worker_pid"),
+                observed_worker_nonce=metadata.get("worker_nonce"),
+                worker_started_at=metadata.get("worker_started_at"),
+                worker_adopted_at=metadata.get("worker_adopted_at"),
                 observed_generation_id=metadata.get("generation_id"),
                 observed_runtime_id=metadata.get("runtime_id"),
                 observed_agent=metadata.get("name"),
@@ -1003,23 +1210,35 @@ class RebootManager:
                 backend_ready=bool(metadata.get("backend_ready")),
                 startup_success=bool(metadata.get("startup_success")),
             )
-            evidence["online"] = bool(
-                evidence["pid_changed"]
-                and evidence["old_exited"]
-                and evidence["agent_matches"]
-                and evidence["active"]
-                and evidence["accepting"]
-                and evidence["backend_ready"]
-                and evidence["startup_success"]
-                and evidence["observed_pid"] == new_pid
-                and evidence["observed_generation_id"] == evidence["generation_id"]
-                and (
-                    not expected_runtime
-                    or evidence["observed_runtime_id"] == expected_runtime
-                )
-            )
-        except Exception:
-            pass
+            failed_checks = []
+            if (
+                not evidence["agent_matches"]
+                or evidence["observed_pid"] != new_pid
+                or not expected_nonce
+                or evidence["observed_worker_nonce"] != expected_nonce
+                or not worker_identity_changed
+            ):
+                failed_checks.append("identity_mismatch")
+            if evidence["observed_generation_id"] != evidence["generation_id"]:
+                failed_checks.append("generation_mismatch")
+            if expected_runtime and evidence["observed_runtime_id"] != expected_runtime:
+                failed_checks.append("runtime_mismatch")
+            if not evidence["active"] or not evidence["accepting"]:
+                failed_checks.append("route_not_accepting")
+            if not evidence["backend_ready"]:
+                failed_checks.append("backend_not_ready")
+            if not evidence["startup_success"]:
+                failed_checks.append("startup_failed")
+            if route_client is not None and route_client is not client:
+                failed_checks.append("old_route_not_retired")
+            evidence["failed_checks"] = list(dict.fromkeys(failed_checks))
+            evidence["online"] = not evidence["failed_checks"]
+            evidence["state"] = "online_new" if evidence["online"] else "unavailable"
+        except Exception as exc:
+            evidence["failed_checks"] = ["status_read_failed"]
+            evidence["state"] = "unconfirmed"
+            evidence["observation_confidence"] = "unconfirmed"
+            evidence["status_error"] = type(exc).__name__
         return evidence
 
     @staticmethod
@@ -1058,9 +1277,13 @@ class RebootManager:
         selected_targets: tuple[str, ...],
         handles: Mapping[str, AgentRuntimeHandle],
         record: Mapping[str, Any],
+        *,
+        busy_reason: str = "target_busy",
+        unavailable_reason: str = "activity_unavailable",
     ) -> bool:
         """Reject a reboot before cutover when live Worker work cannot drain."""
 
+        started = time.perf_counter()
         # Read the owning Workers, not asynchronously updated route caches.
         # This is an observation, not an idle reservation: the transactional
         # route fence and drain still handle work arriving after this check.
@@ -1089,6 +1312,8 @@ class RebootManager:
             if generating or queue_depth:
                 busy_targets.append(name)
 
+        self._record_stage(record, "activity_preflight", started)
+
         if unavailable_targets:
             for name in unavailable_targets:
                 bridge_logger.warning(
@@ -1097,7 +1322,7 @@ class RebootManager:
             self._finish(
                 record,
                 "rejected",
-                reason="activity_unavailable",
+                reason=unavailable_reason,
                 activity_targets=unavailable_targets,
             )
             return False
@@ -1113,7 +1338,7 @@ class RebootManager:
             self._finish(
                 record,
                 "rejected",
-                reason="target_busy",
+                reason=busy_reason,
                 busy_targets=busy_targets,
             )
             return False
@@ -1138,7 +1363,10 @@ class RebootManager:
     async def _prepare_candidates(
         self,
         targets: tuple[str, ...],
+        *,
+        record: Mapping[str, Any] | None = None,
     ) -> dict[str, FunctionWorkerClient]:
+        qualification_started = time.perf_counter()
         qualified_generation = getattr(
             self.kernel.function_workers, "qualified_generation", None
         )
@@ -1148,12 +1376,36 @@ class RebootManager:
             generation = await asyncio.to_thread(
                 self.kernel.function_workers.qualify_generation
             )
+        if record is not None:
+            qualification_stats = dict(
+                getattr(
+                    self.kernel.function_workers,
+                    "last_qualification_stats",
+                    {},
+                )
+                or {}
+            )
+            source = qualification_stats.get("source")
+            stage = (
+                "generation_cache_lookup"
+                if source in {"memory_cache", "disk_cache"}
+                else "qualification"
+            )
+            self._record_stage(record, stage, qualification_started)
+            counts = self._metrics_for(record)["work_counts"]
+            counts["manifest_hash_count"] = int(
+                qualification_stats.get("manifest_hash_count", 0)
+            )
+            counts["full_closure_import_count"] = int(
+                qualification_stats.get("full_closure_import_count", 0)
+            )
         self.kernel.function_workers.remember_generation(generation)
         prepare_generation = getattr(
             self.kernel.function_workers,
             "prepare_generation",
             None,
         )
+        materialization_started = time.perf_counter()
         if callable(prepare_generation):
             generation, generation_root = await prepare_generation(
                 generation,
@@ -1161,6 +1413,20 @@ class RebootManager:
             )
         else:
             generation_root = None
+        if record is not None:
+            self._record_stage(record, "materialization", materialization_started)
+            materialization_stats = dict(
+                getattr(
+                    self.kernel.function_workers,
+                    "last_materialization_stats",
+                    {},
+                )
+                or {}
+            )
+            counts = self._metrics_for(record)["work_counts"]
+            counts["manifest_hash_count"] = int(
+                counts.get("manifest_hash_count", 0)
+            ) + int(materialization_stats.get("manifest_hash_count", 0))
         bridge_logger.info(
             "Function generation verified before cutover: generation=%s "
             "modules=%s probe_pid=%s runtime=%s",
@@ -1186,6 +1452,7 @@ class RebootManager:
             )
             for name in targets
         }
+        candidate_started = time.perf_counter()
         try:
             results = await asyncio.gather(*tasks.values(), return_exceptions=True)
         except asyncio.CancelledError:
@@ -1212,6 +1479,14 @@ class RebootManager:
                 return_exceptions=True,
             )
             raise FunctionWorkerError("; ".join(failures))
+        if record is not None:
+            self._record_stage(record, "candidate_start", candidate_started)
+            counts = self._metrics_for(record)["work_counts"]
+            counts["candidate_worker_count"] = len(candidates)
+            # Protected bootstrap verifies the actual artifact once per Worker.
+            counts["manifest_hash_count"] = int(
+                counts.get("manifest_hash_count", 0)
+            ) + len(candidates)
         return candidates
 
     @staticmethod
@@ -1263,12 +1538,14 @@ class RebootManager:
         if record["status"] not in ACTIVE:
             return record["status"] == "succeeded"
         self.active_operation = record["id"]
+        self._metrics_for(record)
         staged_shared = None
         result = False
         try:
             record = self.receipts.update(
                 record["id"], status="running", phase="announcing"
             )
+            notice_started = time.perf_counter()
             try:
                 async with asyncio.timeout(REBOOT_START_NOTICE_TIMEOUT_SECONDS):
                     start_result = await self._deliver(record, starting=True)
@@ -1278,6 +1555,7 @@ class RebootManager:
                 )
                 start_result = {"sent": False}
             record = self._record_start_delivery(record, start_result)
+            self._record_stage(record, "start_notice", notice_started)
             self.receipts.update(record["id"], phase="preparing")
             if str(restart.get("mode") or "same") in BROAD_REBOOT_MODES:
                 selected_targets = tuple(record["targets"])
@@ -1294,7 +1572,6 @@ class RebootManager:
                         selected_targets, handles, record
                     )
                     if idle:
-                        self._fence_reboot_routes(record)
                         staged_shared = self._stage_shared_replacement(record)
                         result = True
             else:
@@ -1330,7 +1607,15 @@ class RebootManager:
                 await self._release_reboot_fences(record)
             # The independent watcher owns retry I/O. A backlog must not keep
             # the lifecycle loop inside this reboot or delay the next command.
+            enqueue_started = time.perf_counter()
             self._delivery_wake.set()
+            self._record_stage(record, "notification_enqueue", enqueue_started)
+            try:
+                self.receipts.update(record["id"], **self._metrics_snapshot(record))
+            except (OSError, ValueError):
+                self.receipt_fault = True
+                bridge_logger.exception("Reboot timing receipt could not be persisted")
+            self._operation_metrics.pop(record["id"], None)
         return result
 
     async def _perform_restart(self, restart, record) -> bool:
@@ -1357,7 +1642,10 @@ class RebootManager:
             return False
 
         try:
-            candidates = await self._prepare_candidates(selected_targets)
+            candidates = await self._prepare_candidates(
+                selected_targets,
+                record=record,
+            )
         except Exception as exc:
             main_logger.error("Function Worker generation rejected: %s", exc)
             bridge_logger.error(
@@ -1380,9 +1668,23 @@ class RebootManager:
             )
             return False
 
+        if not await self._preflight_target_activity(
+            selected_targets,
+            handles,
+            record,
+            busy_reason="target_became_busy",
+            unavailable_reason="activity_became_unavailable",
+        ):
+            await asyncio.gather(
+                *(candidate.shutdown(force=True) for candidate in candidates.values()),
+                return_exceptions=True,
+            )
+            return False
+
         old_clients: dict[str, FunctionWorkerClient] = {}
         quiesced: set[str] = set()
         failure_reason = "route_busy"
+        cutover_started = time.perf_counter()
         try:
             self._fence_reboot_routes(record)
             self.receipts.update(record["id"], phase="switching")
@@ -1421,8 +1723,8 @@ class RebootManager:
             generation = next(iter(candidates.values())).generation
             verify = getattr(
                 generation,
-                "verify_qualified_source",
-                generation.verify,
+                "verify_qualification_seal",
+                getattr(generation, "verify_qualified_source", generation.verify),
             )
             await asyncio.to_thread(verify, self.kernel.runtime_fingerprint)
 
@@ -1461,7 +1763,9 @@ class RebootManager:
                     for name in selected_targets
                 }
             )
+            self._record_stage(record, "cutover", cutover_started)
         except (Exception, asyncio.CancelledError) as exc:
+            self._record_stage(record, "cutover", cutover_started)
             main_logger.error("Function Worker cutover rolled back: %s", exc)
             bridge_logger.error("Function Worker cutover rolled back: %s", exc)
             await asyncio.gather(
@@ -1533,9 +1837,11 @@ class RebootManager:
         # The route-pointer exchange above is the transaction commit point.
         # Diagnostic publication cannot turn a completed commit into a false
         # rollback after active handles already reference the new Workers.
+        warnings: list[str] = []
         try:
             self._publish_generation_state()
         except Exception as exc:
+            warnings.append("generation_state_publish_failed")
             main_logger.exception(
                 "Function Worker generation state publication failed after commit: %s",
                 exc,
@@ -1547,11 +1853,14 @@ class RebootManager:
         try:
             await self.kernel.function_workers.broadcast_topology()
         except Exception:
+            warnings.append("topology_publish_failed")
             bridge_logger.exception("Topology notification failed after reboot commit")
-        await asyncio.gather(
+        shutdown_results = await asyncio.gather(
             *(client.shutdown(force=True) for client in old_clients.values()),
             return_exceptions=True,
         )
+        if any(isinstance(result, BaseException) for result in shutdown_results):
+            warnings.append("old_worker_exit_pending")
         worker_summary = ", ".join(
             f"{name}=pid:{handles[name].worker_pid}/{handles[name].generation_id[7:19]}"
             for name in selected_targets
@@ -1573,6 +1882,7 @@ class RebootManager:
             f"{len(selected_targets)} isolated Worker(s) switched\033[0m\n",
             flush=True,
         )
+        observation_started = time.perf_counter()
         evidence = dict(
             zip(
                 selected_targets,
@@ -1581,6 +1891,7 @@ class RebootManager:
                         self._online_evidence(
                             handles[name].client,
                             old_client=old_clients[name],
+                            route_client=handles[name].client,
                         )
                         for name in selected_targets
                     )
@@ -1589,13 +1900,41 @@ class RebootManager:
             )
         )
         states = {name: bool(item["online"]) for name, item in evidence.items()}
+        self._record_stage(record, "final_observation", observation_started)
+        if any(item.get("old_exited") is False for item in evidence.values()):
+            warnings.append("old_worker_exit_pending")
+        warnings = list(dict.fromkeys(warnings))
+        observation_confidence = (
+            "confirmed"
+            if all(
+                item.get("observation_confidence") == "confirmed"
+                for item in evidence.values()
+            )
+            else "unconfirmed"
+        )
+        online_count = sum(states.values())
+        if online_count == len(states):
+            legacy_status = "succeeded"
+            lifecycle_state = "online"
+            outcome = "succeeded_with_warning" if warnings else "succeeded"
+        elif online_count:
+            legacy_status = "unconfirmed"
+            lifecycle_state = "committed"
+            outcome = "partial"
+        else:
+            legacy_status = "unconfirmed"
+            lifecycle_state = "unconfirmed"
+            outcome = "failed"
         committed["workers"] = evidence
         self._finish(
             record,
-            "succeeded" if all(states.values()) else "unconfirmed",
-            lifecycle_state="online" if all(states.values()) else "unconfirmed",
+            legacy_status,
+            lifecycle_state=lifecycle_state,
+            outcome=outcome,
+            observation_confidence=observation_confidence,
+            warnings=warnings,
             online=states,
             **committed,
-            reason="" if all(states.values()) else "readiness",
+            reason="" if online_count == len(states) else "readiness",
         )
         return True

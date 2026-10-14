@@ -11,6 +11,7 @@ import multiprocessing
 import os
 import shutil
 import stat
+import time
 from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
@@ -169,24 +170,24 @@ def materialize_generation_artifact(
     try:
         for entry in generation.manifest.entries:
             source = generation.code_root / entry.relative_path
-            if _file_sha256(source) != entry.sha256:
-                raise FunctionWorkerError(
-                    f"Function source changed while building artifact: {entry.module}"
-                )
             target = temporary / entry.relative_path
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, target)
+            if _file_sha256(target) != entry.sha256:
+                raise FunctionWorkerError(
+                    f"Function source changed while building artifact: {entry.module}"
+                )
 
         for asset in generation.manifest.assets:
             source = generation.code_root / asset.relative_path
-            if _file_sha256(source) != asset.sha256:
+            target = temporary / asset.relative_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+            if _file_sha256(target) != asset.sha256:
                 raise FunctionWorkerError(
                     "Function asset changed while building artifact: "
                     f"{asset.relative_path}"
                 )
-            target = temporary / asset.relative_path
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, target)
             if asset.executable:
                 target.chmod(target.stat().st_mode | stat.S_IXUSR)
 
@@ -210,7 +211,6 @@ def materialize_generation_artifact(
             json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
-        verify_generation_artifact(temporary, generation)
         temporary.replace(destination)
         if os.name != "nt":
             for path in destination.rglob("*"):
@@ -265,11 +265,9 @@ def _read_qualified_generation_cache(
     if str(payload.get("artifact_slug") or "") != slug:
         return None
     artifact = cache_path.parent / slug
-    if (
-        generation_artifact_source_commit(artifact, generation.manifest)
-        != generation.receipt.source_commit
-    ):
-        return None
+    # The artifact is content-addressed.  Its stored commit records when those
+    # exact bytes were first materialized; a later equivalent qualification
+    # can legitimately bind the same bytes to a newer checkout commit.
     verify_generation_artifact(artifact, generation)
     return generation, artifact
 
@@ -317,7 +315,22 @@ def load_qualified_generation_cache(
         if cached is None:
             return None
         generation, artifact = cached
-        generation.verify_qualified_source(expected_runtime)
+        refreshed = generation.refresh_qualification_seal(expected_runtime)
+        if refreshed is not generation:
+            try:
+                persist_qualified_generation_cache(
+                    bridge_home,
+                    refreshed,
+                    artifact,
+                )
+            except Exception as exc:
+                bridge_logger.warning(
+                    "Equivalent Function generation was accepted but its refreshed "
+                    "cache receipt could not be saved: %s: %s",
+                    type(exc).__name__,
+                    exc,
+                )
+        generation = refreshed
         return generation, artifact
     except Exception as exc:
         bridge_logger.info(
@@ -1234,6 +1247,9 @@ class FunctionWorkerSupervisor:
         self._artifact_lock = asyncio.Lock()
         self._cached_generation: VerifiedFunctionGeneration | None = None
         self._cached_artifact: tuple[str, Path] | None = None
+        self.last_qualification_stats: dict[str, Any] = {}
+        self.last_materialization_stats: dict[str, Any] = {}
+        self.candidate_prepare_timings_ms: dict[str, float] = {}
         self._telegram_ingress: dict[str, CoreTelegramIngress] = {}
         self._telegram_ingress_diagnostics: dict[str, TelegramIngressDiagnostics] = {}
         self._telegram_status_failures: dict[str, tuple[str, str]] = {}
@@ -1243,21 +1259,59 @@ class FunctionWorkerSupervisor:
         ) = None
 
     def qualify_generation(self) -> VerifiedFunctionGeneration:
-        return probe_function_generation(self.kernel)
+        started = time.perf_counter()
+        observed_stages: list[str] = []
+
+        def observe_stage(name: str, _elapsed_ms: float) -> None:
+            observed_stages.append(name)
+
+        generation = probe_function_generation(
+            self.kernel,
+            timing_callback=observe_stage,
+        )
+        self.last_qualification_stats = {
+            "source": "probe",
+            "manifest_hash_count": sum(
+                name
+                in {
+                    "initial_manifest",
+                    "final_manifest",
+                    "isolated_probe.manifest",
+                }
+                for name in observed_stages
+            ),
+            "full_closure_import_count": observed_stages.count(
+                "isolated_probe.imports_contract"
+            ),
+            "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+        }
+        return generation
 
     async def qualified_generation(self) -> VerifiedFunctionGeneration:
+        lookup_started = time.perf_counter()
         async with self._qualification_lock:
             cached = self._cached_generation
             if cached is not None:
                 try:
-                    cached.verify_qualified_source(self.kernel.runtime_fingerprint)
-                    if not configured_observers_are_qualified(self.kernel, cached):
+                    refreshed = cached.refresh_qualification_seal(
+                        self.kernel.runtime_fingerprint
+                    )
+                    if not configured_observers_are_qualified(self.kernel, refreshed):
                         raise ValueError("Enabled observers require a new Function generation")
                 except Exception:
                     self._cached_generation = None
                     self._cached_artifact = None
                 else:
-                    return cached
+                    self._cached_generation = refreshed
+                    self.last_qualification_stats = {
+                        "source": "memory_cache",
+                        "manifest_hash_count": int(refreshed is not cached),
+                        "full_closure_import_count": 0,
+                        "duration_ms": round(
+                            (time.perf_counter() - lookup_started) * 1000, 1
+                        ),
+                    }
+                    return refreshed
             disk_cached = await asyncio.to_thread(
                 load_qualified_generation_cache,
                 self.kernel.paths.bridge_home,
@@ -1278,6 +1332,14 @@ class FunctionWorkerSupervisor:
                     len(generation.manifest.entries),
                     artifact,
                 )
+                self.last_qualification_stats = {
+                    "source": "disk_cache",
+                    "manifest_hash_count": 1,
+                    "full_closure_import_count": 0,
+                    "duration_ms": round(
+                        (time.perf_counter() - lookup_started) * 1000, 1
+                    ),
+                }
                 return generation
             generation = await asyncio.to_thread(self.qualify_generation)
             self._cached_generation = generation
@@ -1305,6 +1367,7 @@ class FunctionWorkerSupervisor:
         ``qualified_generation()`` in the same reboot preparation flow.
         """
 
+        preparation_started = time.perf_counter()
         if generation is None:
             generation = await self.qualified_generation()
             source_already_verified = True
@@ -1322,6 +1385,13 @@ class FunctionWorkerSupervisor:
                 and cached[1].exists()
             ):
                 artifact = cached[1]
+                self.last_materialization_stats = {
+                    "reused": True,
+                    "manifest_hash_count": 0,
+                    "duration_ms": round(
+                        (time.perf_counter() - preparation_started) * 1000, 1
+                    ),
+                }
             else:
                 artifact = await asyncio.to_thread(
                     materialize_generation_artifact,
@@ -1329,6 +1399,13 @@ class FunctionWorkerSupervisor:
                     generation,
                 )
                 self._cached_artifact = (generation_id, artifact)
+                self.last_materialization_stats = {
+                    "reused": False,
+                    "manifest_hash_count": 1,
+                    "duration_ms": round(
+                        (time.perf_counter() - preparation_started) * 1000, 1
+                    ),
+                }
             await asyncio.to_thread(
                 persist_qualified_generation_cache,
                 self.kernel.paths.bridge_home,
@@ -1654,6 +1731,7 @@ class FunctionWorkerSupervisor:
         *,
         generation_root: Path | None = None,
     ) -> FunctionWorkerClient:
+        preparation_started = time.perf_counter()
         if generation_root is None:
             generation, artifact = await self.prepare_generation(generation)
         else:
@@ -1709,6 +1787,10 @@ class FunctionWorkerSupervisor:
             await client.shutdown(force=True)
             self._candidates.discard(client)
             raise
+        self.candidate_prepare_timings_ms[agent_name] = round(
+            (time.perf_counter() - preparation_started) * 1000,
+            1,
+        )
         return client
 
     async def activate_new_worker(
@@ -1760,10 +1842,12 @@ class FunctionWorkerSupervisor:
                 timeout=float(drain_timeout) + 10.0,
             )
             old_quiesced = True
-            await asyncio.to_thread(
+            verify = getattr(
+                candidate.generation,
+                "verify_qualification_seal",
                 candidate.generation.verify_qualified_source,
-                self.kernel.runtime_fingerprint,
             )
+            await asyncio.to_thread(verify, self.kernel.runtime_fingerprint)
             metadata = await self.activate_new_worker(candidate)
             await handle.commit_cutover(candidate, metadata)
             return old, metadata

@@ -19,7 +19,14 @@ def render_notice(
     total_count = len(all_targets)
     targets = all_targets
     recovered_targets = []
-    if not starting and record["status"] == "failed" and not record.get("restored"):
+    outcome = record.get("outcome")
+    confidence = record.get("observation_confidence")
+    if not starting and outcome in {"partial", "failed"}:
+        recovered_targets = [
+            name for name in targets if record.get("online", {}).get(name)
+        ]
+        targets = [name for name in targets if name not in recovered_targets]
+    elif not starting and record["status"] == "failed" and not record.get("restored"):
         recovered_targets = [
             name for name in targets if record.get("online", {}).get(name)
         ]
@@ -35,11 +42,23 @@ def render_notice(
         str(names.get(record.get("source_agent")) or record.get("source_agent") or "")
     )
     lifecycle = record.get("lifecycle_state")
-    partial = bool(recovered_targets and targets)
+    partial = outcome == "partial" or bool(recovered_targets and targets)
     if starting:
         status = "starting"
+    elif partial and confidence == "unconfirmed":
+        status = "partial_unconfirmed"
     elif partial:
         status = "partial"
+    elif outcome == "succeeded_with_warning":
+        status = "succeeded_with_warning"
+    elif outcome == "rolled_back":
+        status = "rolled_back"
+    elif outcome == "failed":
+        status = "unconfirmed" if confidence == "unconfirmed" else "unavailable"
+    elif outcome == "rejected":
+        status = "rejected"
+    elif outcome == "succeeded":
+        status = "online"
     elif lifecycle == "unconfirmed" and record.get("status") == "failed":
         status = "unavailable"
     elif lifecycle in {
@@ -68,14 +87,21 @@ def render_notice(
         "rolled_back",
         "online",
         "succeeded",
+        "succeeded_with_warning",
         "partial",
+        "partial_unconfirmed",
         "rejected",
         "restored",
         "unavailable",
         "unconfirmed",
     }:
         key += "_broad"
-    elif total_count == 1 and status in {"starting", "online", "succeeded"}:
+    elif total_count == 1 and status in {
+        "starting",
+        "online",
+        "succeeded",
+        "succeeded_with_warning",
+    }:
         key += "_single"
     adoption = (record.get("shared_replacement") or {}).get("adoption") or {}
     fallback = adoption.get("status") == "fallback"
@@ -89,11 +115,7 @@ def render_notice(
         locale=language,
         scope=scope,
         agents=target,
-        count=(
-            sum(bool(value) for value in record.get("online", {}).values())
-            if not starting and record.get("status") == "succeeded" and record.get("online")
-            else total_count
-        ),
+        count=total_count,
         duration=(
             f"{float(record.get('duration_seconds') or 0):.1f}".rstrip("0").rstrip(".")
         ),
@@ -119,7 +141,47 @@ def render_notice(
                 escape(str(names.get(name) or name)) for name in recovered_targets[:6]
             ),
         )
-    if reason and not starting and not source_update_incomplete:
+    failure_details = []
+    workers = record.get("workers") or {}
+    for name in targets[:6]:
+        checks = list((workers.get(name) or {}).get("failed_checks") or ())
+        if not checks:
+            continue
+        check_text = ", ".join(
+            ui_language.tr("reboot.check." + check, locale=language)
+            for check in checks[:3]
+        )
+        failure_details.append(
+            ui_language.tr(
+                "reboot.failed_target",
+                locale=language,
+                agent=escape(str(names.get(name) or name)),
+                checks=check_text,
+            )
+        )
+    if failure_details:
+        text += "\n" + "\n".join(failure_details)
+    if confidence == "unconfirmed" and outcome in {"partial", "failed"}:
+        text += "\n" + ui_language.tr(
+            "reboot.observation_unconfirmed", locale=language
+        )
+    warning_keys = {
+        "old_worker_exit_pending",
+        "topology_publish_failed",
+        "generation_state_publish_failed",
+    }
+    for warning in record.get("warnings") or ():
+        warning_key = warning if warning in warning_keys else "followup_incomplete"
+        text += "\n" + ui_language.tr(
+            "reboot.warning." + warning_key,
+            locale=language,
+        )
+    if (
+        reason
+        and not starting
+        and not source_update_incomplete
+        and not (reason == "readiness" and failure_details)
+    ):
         text += "\n" + ui_language.tr(
             "reboot.reason",
             locale=language,

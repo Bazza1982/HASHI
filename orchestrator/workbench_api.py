@@ -11401,21 +11401,47 @@ class WorkbenchApiServer:
         runtime = self._runtime_map().get(name)
         if runtime is None or not request_key or len(request_key) > 200:
             return web.json_response({"ok": False, "error": "invalid agent or request key"}, status=400)
-        submit = getattr(self.orchestrator, "request_reboot", None)
-        if not callable(submit) or not getattr(runtime, "is_function_worker_proxy", False):
+        if not getattr(runtime, "is_function_worker_proxy", False):
             return web.json_response({"ok": False, "error": "reboot unavailable"}, status=503)
         try:
-            state = await runtime.client.call("worker.metadata", timeout=10)
+            slash_response = await try_execute_slash_command_text(
+                runtime,
+                "/reboot min",
+                source_channel="api_chat",
+                session_metadata={
+                    "_hashi_owner_id": owner,
+                    "owner_id": owner,
+                    "session_surface": "workbench",
+                    "session_channel_key": "default",
+                    "frontend_invocation_id": request_key,
+                    "ui_locale": str(payload.get("locale") or "en"),
+                },
+            )
         except Exception:
-            return web.json_response({"ok": False, "error": "activity unavailable"}, status=503)
-        if (not isinstance(state, dict) or type(state.get("is_generating")) is not bool
-                or type(state.get("queue_depth")) is not int or state["queue_depth"] < 0):
-            return web.json_response({"ok": False, "error": "activity unavailable"}, status=503)
-        if state["is_generating"] or state["queue_depth"]:
-            return web.json_response({"ok": False, "error": "AGENT_BUSY"}, status=409)
-        result = await submit(mode="min", agent_name=name, request_key=request_key,
-            origin={"surface": "workbench", "owner_id": owner},
-            locale=str(payload.get("locale") or "en"))
+            return web.json_response(
+                {"ok": False, "accepted": False, "error": "reboot unavailable"},
+                status=503,
+            )
+        if not isinstance(slash_response, dict) or slash_response.get("ok") is not True:
+            error = (
+                slash_response.get("error")
+                if isinstance(slash_response, dict)
+                else None
+            )
+            return web.json_response(
+                {
+                    "ok": False,
+                    "accepted": False,
+                    "error": error or "reboot command unavailable",
+                },
+                status=409 if isinstance(slash_response, dict) else 503,
+            )
+        result = slash_response.get("result")
+        if not isinstance(result, dict):
+            return web.json_response(
+                {"ok": False, "accepted": False, "error": "reboot receipt unavailable"},
+                status=503,
+            )
         record = result.get("record") or {}
         accepted = result.get("accepted") is True and record.get("status") in {"accepted", "running", "succeeded"}
         return web.json_response({"ok": accepted, "accepted": accepted,

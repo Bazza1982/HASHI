@@ -138,7 +138,10 @@ def test_recovery_retains_mixed_agent_versions_selected_set_and_latest_offsets(
 
 
 @pytest.mark.asyncio
-async def test_runtime_host_retains_artifact_source_commit(tmp_path, monkeypatch):
+async def test_runtime_host_retains_qualified_source_commit_when_artifact_is_older(
+    tmp_path,
+    monkeypatch,
+):
     from orchestrator import (
         bootstrap_logging,
         onboarding_gate,
@@ -150,6 +153,8 @@ async def test_runtime_host_retains_artifact_source_commit(tmp_path, monkeypatch
     home = tmp_path / "instance"
     runtime = enforce_runtime_contract(ROOT)
     qualified = generation(tmp_path, home, "qualified", runtime)
+    current_source_commit = "f" * 40
+    assert current_source_commit != qualified.generation.receipt.source_commit
     app = SimpleNamespace(
         global_cfg=SimpleNamespace(project_root=tmp_path),
         shutdown_manager=SimpleNamespace(start_exit_watchdog=lambda: None),
@@ -181,6 +186,7 @@ async def test_runtime_host_retains_artifact_source_commit(tmp_path, monkeypatch
             "code_root": str(qualified.generation.code_root),
             "bridge_home": str(home),
             "runtime": runtime.to_dict(),
+            "source_commit": current_source_commit,
             "kernel_pid": 123,
             "arguments": {},
             "qualification_timing": {
@@ -197,10 +203,7 @@ async def test_runtime_host_retains_artifact_source_commit(tmp_path, monkeypatch
     assert app.function_release_timing["phases_ms"]["isolated_probe"] == 800.0
     startup_generation, startup_root = app._startup_artifact
     assert startup_root == qualified.generation_root
-    assert (
-        startup_generation.receipt.source_commit
-        == qualified.generation.receipt.source_commit
-    )
+    assert startup_generation.receipt.source_commit == current_source_commit
 
 
 @pytest.mark.asyncio
@@ -238,6 +241,7 @@ async def test_transient_connector_failure_retries_without_blocking_other_connec
         runtimes=[],
         shared_generation_id="generation-a",
         _handoff_draining=True,
+        _shared_replacement_candidate=True,
         startup_status={"issues": []},
         api_gateway=None,
         whatsapp=None,
@@ -256,6 +260,8 @@ async def test_transient_connector_failure_retries_without_blocking_other_connec
     try:
         result = await host.commit()
         assert result["committed"] and result["degraded"]
+        assert app._shared_replacement_candidate is False
+        assert app._shared_replacement_continuity is True
         assert healthy.is_running and whatsapp_calls
         await asyncio.wait_for(host.connector_task, timeout=1)
         assert flaky.is_running and flaky.calls == 2

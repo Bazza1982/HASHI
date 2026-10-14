@@ -23,6 +23,16 @@ class _Manifest:
         }
 
 
+SOURCE_COMMIT = "c" * 40
+
+
+def _generation():
+    return SimpleNamespace(
+        manifest=_Manifest(),
+        receipt=SimpleNamespace(source_commit=SOURCE_COMMIT),
+    )
+
+
 def _payload(bridge_home: Path) -> dict:
     runtime = RuntimeFingerprint(
         implementation="cpython",
@@ -57,7 +67,7 @@ def test_cold_release_uses_last_verified_generation_when_candidate_fails(
     monkeypatch,
 ):
     artifact = tmp_path / "bridge" / "state" / "function_generations" / ("a" * 64)
-    generation = SimpleNamespace(manifest=_Manifest())
+    generation = _generation()
     candidate_error = RuntimeError("new candidate is unavailable")
     monkeypatch.setattr(
         runtime_release,
@@ -74,12 +84,13 @@ def test_cold_release_uses_last_verified_generation_when_candidate_fails(
 
     assert release["generation_root"] == str(artifact)
     assert release["manifest"] == generation.manifest.to_dict()
+    assert release["source_commit"] == SOURCE_COMMIT
     assert release["adoption"] == {"status": "fallback", "reason_code": "qualification_failed"}
 
 
 def test_cold_release_identifies_uncommitted_source_fallback(tmp_path, monkeypatch):
     artifact = tmp_path / "bridge" / "state" / "function_generations" / ("a" * 64)
-    generation = SimpleNamespace(manifest=_Manifest())
+    generation = _generation()
     monkeypatch.setattr(
         runtime_release,
         "probe_function_generation",
@@ -104,7 +115,7 @@ def test_cold_release_saves_new_verified_generation_for_future_boots(
 ):
     bridge_home = tmp_path / "bridge"
     artifact = bridge_home / "state" / "function_generations" / ("a" * 64)
-    generation = SimpleNamespace(manifest=_Manifest())
+    generation = _generation()
     persisted = []
 
     def probe_with_timing(*_args, timing_callback, **_kwargs):
@@ -128,6 +139,7 @@ def test_cold_release_saves_new_verified_generation_for_future_boots(
     release = runtime_release.qualify_release(_payload(bridge_home))
 
     assert release["generation_root"] == str(artifact)
+    assert release["source_commit"] == SOURCE_COMMIT
     assert persisted == [(bridge_home.resolve(), generation, artifact)]
     assert release["adoption"] == {"status": "qualified", "reason_code": None}
     timing = release["qualification_timing"]
@@ -144,7 +156,7 @@ def test_cold_release_reuses_unchanged_qualified_generation(
 ):
     bridge_home = tmp_path / "bridge"
     artifact = bridge_home / "state" / "function_generations" / ("a" * 64)
-    generation = SimpleNamespace(manifest=_Manifest())
+    generation = _generation()
     probed = []
     persisted = []
 
@@ -179,6 +191,7 @@ def test_cold_release_reuses_unchanged_qualified_generation(
     release = runtime_release.qualify_release(_payload(bridge_home))
 
     assert release["generation_root"] == str(artifact)
+    assert release["source_commit"] == SOURCE_COMMIT
     assert release["adoption"] == {
         "status": "qualified",
         "reason_code": None,

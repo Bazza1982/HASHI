@@ -22,7 +22,7 @@ decision supersedes them wherever behavior differs.
 
 PCM owns Persona, Context and Memory; PAO owns Agents, Sessions, Runs, jobs, Workzones and delivery; HERV3 owns Engine Turns, model/tool loop and cost; Frontend Connectors authenticate and render. Use the narrowest Function/configuration owner. Core has no product policy/imports. Protected Core requires explicit major-migration authorization, version bump, label and independent review; flags grant nothing.
 
-Source, running Workers and delivery need separate proof. Agent tools cannot edit live Core/Python, read secrets, kill Core or grant authority. /reboot min|same replaces one Worker; max adopts shared Functions and Workers, leaving Core and Remote live. Every reboot mode reads live Worker activity before cutover; max rejects and names busy Agents before publishing a shared replacement. Check identity, generation, receipts and idle window. Windows restart needs exact actuator and exit code.
+Source, Workers and delivery need separate proof. Tools cannot edit/kill live Core/Python, read secrets or grant authority. Frontends use FC→PAO `/reboot`: `min|same` replaces one exact Worker; `max` shared Functions/Workers, never Core/Remote. Only same-live-Core successors confirm inherited broad receipts; cold startup records interrupted/unconfirmed. Function code adopts by reboot; docs do not. Windows restart needs exact actuator/exit code. [Decision](HASHI_REBOOT_FAST_RELIABLE_PLAN_2026-10-14.md).
 
 ## Configuration, identity, and persistence
 

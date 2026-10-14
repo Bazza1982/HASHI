@@ -2,7 +2,8 @@
 
 Status: Core API 3 accepted for HASHI2; source/offline verification and live cold adoption are separate
 
-Decision date: 2026-09-03; revised for Function Workers on 2026-09-04
+Decision date: 2026-09-03; revised for Function Workers on 2026-09-04 and fast
+transactional reboot on 2026-10-14
 
 Owners: HASHI Core maintainers
 
@@ -100,6 +101,14 @@ and `uv sync` must not implicitly create or synchronize that environment.
 Diagnostics use the existing approved interpreter directly; isolated helpers
 use `uv run --no-project` or an explicitly separate environment.
 
+Python release packaging is isolated for the same reason. Setuptools may
+rewrite project-local `*.egg-info` metadata even when no dependency changes.
+Release artifacts therefore use `scripts/build_python_release.py`, which builds
+an exact Git `HEAD` export in a temporary directory. A packaging command must
+never run against a checkout owned by a live Core: ignored metadata is still
+visible to Python distribution discovery and can otherwise manufacture a false
+runtime drift that blocks Function `/reboot`.
+
 Windows has no system IANA timezone database. The standard dependency contract
 therefore installs the hash-locked `tzdata` package on Windows only, so
 timezone-sensitive Scheduler and Wiki evidence uses the same named zones as
@@ -143,10 +152,14 @@ BOOTING -> READY -> ACTIVATING -> ACTIVE -> DRAINING -> QUIESCED -> STOPPED
               \-------------------------------- failure ------------> discarded
 ```
 
-READY means the Worker has matched the Core runtime, verified the immutable
-artifact, imported the complete functional closure, validated public
-cross-module identities, constructed the real Agent runtime and initialized
-its backend. It does not yet own the active shared Function route.
+Qualification and process readiness have distinct owners. The disposable
+isolated probe imports the complete functional closure and validates the public
+cross-module contract once per new generation. The protected bootstrap verifies
+the immutable artifact bytes once for each actual process. After that boundary,
+READY means the Worker has matched the runtime, loaded its natural runtime
+closure, constructed the real Agent runtime and initialized its backend. It does
+not repeat the generation-wide import/contract test or full artifact scan, and
+does not yet own the active shared Function route.
 
 Telegram `getUpdates` offset and long polling live in shared Functions. Each update is
 converted to JSON and delivered through the stable handle. While a route gate
@@ -161,22 +174,29 @@ For `min`, a number, `same`, or an explicit group, the shared Function superviso
 2. Require every file in the Function manifest to be clean in local Git HEAD,
    record that exact source commit, then qualify the generation in an isolated
    process. Dirty files outside the manifest do not block qualification.
-3. Materialize and verify a content-addressed immutable artifact carrying that
-   source commit and the probe receipt.
-4. Fence only selected route gates at admission; unrelated Agents keep working.
-   Spawn one READY candidate Worker for every selected Agent.
-5. Wait for previously accepted shared route calls to finish.
-6. Quiesce the selected old Workers and their Agent-local ingress.
-7. Reverify runtime, Core and generation fingerprints.
-8. Activate all candidates and require their health receipts.
+3. Reuse a sealed qualified generation and content-addressed artifact when its
+   runtime and exact Function bytes still match. If clean Git HEAD moved while
+   those bytes stayed identical, re-hash the accepted manifest once and bind a
+   refreshed receipt to the current commit; do not repeat the isolated probe.
+   The artifact retains its original creation provenance.
+4. Keep old routes open while spawning one READY candidate Worker for every
+   selected Agent.
+5. Re-read live activity. If a target became busy, discard candidates and keep
+   the old routes unchanged.
+6. Fence only selected routes, wait for accepted calls and quiesce the selected
+   old Workers.
+7. Check the lightweight generation seal immediately before activation.
+8. Activate all candidates and require their identity and health receipts.
 9. Acquire every selected route lock, replace all Worker pointers without an
    await point, then open the gates together.
 10. Publish topology and retire the old Workers after commit.
 
-`/reboot max` instead fences every Agent route and uses Core's existing shared
-Functions handoff. New requests cannot enter old Workers; Telegram retains
-unaccepted updates for the successor. It replaces shared Functions and the
-running Agent Workers while Core and Remote keep their own lifecycles.
+`/reboot max` publishes one shared replacement request while every old Agent
+route, API and Scheduler remains available. Core's existing handoff qualifies
+and prepares the candidate first, then performs the short quiesce/commit window.
+Only in that window are new requests held for the successor. It replaces shared
+Functions and running Agent Workers while Core and Remote keep their own
+lifecycles.
 
 Before step 9, any failure terminates all candidates and resumes every old
 Worker that was quiesced, then reopens only the selected routes. Core objects, unselected Agents, services and route
@@ -246,6 +266,12 @@ assertions include:
 13. Workbench health exposes Core contract plus per-Agent Worker PID,
     generation, phase, acceptance and liveness;
 14. two live HASHI3 `/reboot` switches succeed under the same Core PID.
+15. unchanged-generation cache hits perform no isolated probe, materialization
+    or full-closure import;
+16. PID reuse with a new nonce and exact Agent/generation remains a valid
+    replacement, while a nonce or route mismatch fails closed;
+17. heartbeat execution remains available during broad preparation and startup
+    recovery emits a due heartbeat at most once.
 
 Tests of `importlib.reload()` order, partial module replacement, rebuilt Core
 Managers, warm-service recreation or legacy mixed-class repair are obsolete

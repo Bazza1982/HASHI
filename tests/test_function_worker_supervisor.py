@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import hashlib
+import inspect
 import json
 import logging
 import multiprocessing
 import subprocess
+import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -48,6 +51,27 @@ from orchestrator.runtime_contract import (
 from orchestrator.scheduler import TaskScheduler
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_live_worker_prepare_does_not_repeat_probe_or_bootstrap_generation_checks():
+    tree = ast.parse(textwrap.dedent(inspect.getsource(FunctionWorkerHost.prepare)))
+    called = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name):
+            called.add(node.func.id)
+        elif isinstance(node.func, ast.Attribute):
+            owner = node.func.value
+            if isinstance(owner, ast.Name):
+                called.add(f"{owner.id}.{node.func.attr}")
+
+    # The isolated probe owns full-closure import/contract validation.  The
+    # protected bootstrap owns one actual artifact-byte verification per new
+    # process.  Repeating either in the live Host adds cost but no evidence.
+    assert "verify_qualified_manifest_bytes" not in called
+    assert "validate_function_contract" not in called
+    assert "importlib.import_module" not in called
 
 
 class _Process:
@@ -924,6 +948,30 @@ def test_generation_artifact_tamper_is_rejected_before_worker_spawn(tmp_path):
         verify_generation_artifact(artifact, generation)
 
 
+def test_new_artifact_materialization_hashes_each_output_once_without_tree_rescan(
+    tmp_path,
+    monkeypatch,
+):
+    source_root = tmp_path / "source"
+    generation = _verified_generation(source_root)
+    rescans = []
+    original = verify_generation_artifact
+
+    def record_rescan(root, candidate):
+        rescans.append(Path(root))
+        return original(root, candidate)
+
+    monkeypatch.setattr(
+        "orchestrator.function_worker_supervisor.verify_generation_artifact",
+        record_rescan,
+    )
+
+    artifact = materialize_generation_artifact(tmp_path / "bridge", generation)
+
+    assert artifact.is_dir()
+    assert rescans == []
+
+
 def test_qualified_byte_verification_does_not_rebuild_dependency_graph(
     tmp_path,
     monkeypatch,
@@ -987,8 +1035,14 @@ def test_qualified_generation_cache_round_trip_and_tamper_rejection(
     persist_qualified_generation_cache(bridge_home, generation, artifact)
     monkeypatch.setattr(
         VerifiedFunctionGeneration,
-        "verify_qualified_source",
+        "verify_qualification_seal",
         lambda self, expected_runtime: None,
+    )
+    monkeypatch.setattr(
+        VerifiedFunctionGeneration,
+        "refresh_qualification_seal",
+        lambda self, expected_runtime: self,
+        raising=False,
     )
 
     loaded = load_qualified_generation_cache(
@@ -1015,6 +1069,87 @@ def test_qualified_generation_cache_round_trip_and_tamper_rejection(
         )
         is None
     )
+
+
+def test_qualified_cache_reuses_content_artifact_after_docs_only_commit(
+    tmp_path,
+    monkeypatch,
+):
+    source_root = tmp_path / "source"
+    bridge_home = tmp_path / "bridge"
+    generation = _verified_generation(source_root)
+    artifact = materialize_generation_artifact(bridge_home, generation)
+    persist_qualified_generation_cache(bridge_home, generation, artifact)
+    artifact_metadata = json.loads(
+        (artifact / "function-generation.json").read_text(encoding="utf-8")
+    )
+    artifact_creation_commit = artifact_metadata["source_commit"]
+
+    (source_root / "README.md").write_text(
+        "Documentation-only commit must not invalidate identical Function bytes.\n",
+        encoding="utf-8",
+    )
+    subprocess.run(
+        ["git", "-C", str(source_root), "add", "README.md"],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source_root),
+            "-c",
+            "user.name=HASHI Test",
+            "-c",
+            "user.email=hashi-test@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "docs only",
+        ],
+        check=True,
+    )
+    current_commit = subprocess.run(
+        ["git", "-C", str(source_root), "rev-parse", "HEAD"],
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout.strip()
+    monkeypatch.setattr(
+        "orchestrator.function_generation.load_runtime_policy",
+        lambda _root: object(),
+    )
+    monkeypatch.setattr(
+        "orchestrator.function_generation.cached_current_runtime_fingerprint",
+        lambda *_args, **_kwargs: generation.receipt.runtime,
+    )
+    monkeypatch.setattr(
+        "orchestrator.function_generation.compare_function_candidate_runtime",
+        lambda *_args, **_kwargs: None,
+    )
+
+    loaded = load_qualified_generation_cache(
+        bridge_home,
+        source_root,
+        generation.receipt.runtime,
+    )
+
+    assert loaded is not None
+    loaded_generation, loaded_artifact = loaded
+    assert loaded_artifact == artifact
+    assert loaded_generation.manifest.generation_id == generation.manifest.generation_id
+    assert loaded_generation.receipt.source_commit == current_commit
+    assert artifact_creation_commit == generation.receipt.source_commit
+    assert artifact_creation_commit != current_commit
+    cache_payload = json.loads(
+        (
+            bridge_home
+            / "state"
+            / "function_generations"
+            / "qualified-generation.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert cache_payload["generation"]["receipt"]["source_commit"] == current_commit
 
 
 @pytest.mark.asyncio
@@ -1057,6 +1192,65 @@ async def test_prepare_generation_skips_only_preverified_source_scan(
         artifact,
     )
     assert verifications == [kernel.runtime_fingerprint]
+
+
+@pytest.mark.asyncio
+async def test_in_memory_generation_cache_uses_lightweight_seal_not_full_byte_scan(
+    monkeypatch,
+):
+    kernel = _Kernel()
+    kernel.paths = SimpleNamespace()
+    seal_checks = []
+
+    def full_scan(_runtime):
+        raise AssertionError("cache hit must not re-hash the complete source closure")
+
+    class _CachedGeneration:
+        manifest = SimpleNamespace(module_names=("orchestrator.worker_demo",))
+        verify_qualified_source = staticmethod(full_scan)
+
+        def refresh_qualification_seal(self, runtime):
+            seal_checks.append(runtime)
+            return self
+
+        def verify_qualification_seal(self, _runtime):
+            raise AssertionError("cache admission must use the refreshable seal")
+
+    generation = _CachedGeneration()
+    supervisor = FunctionWorkerSupervisor(kernel)
+    supervisor._cached_generation = generation
+    monkeypatch.setattr(
+        "orchestrator.function_worker_supervisor.configured_observers_are_qualified",
+        lambda _kernel, _generation: True,
+    )
+
+    assert await supervisor.qualified_generation() is generation
+    assert seal_checks == [kernel.runtime_fingerprint]
+
+
+def test_qualification_work_counts_come_from_observed_stages(monkeypatch):
+    kernel = _Kernel()
+    supervisor = FunctionWorkerSupervisor(kernel)
+    generation = _Generation("q")
+
+    def qualify(_kernel, *, timing_callback):
+        for stage in (
+            "initial_manifest",
+            "isolated_probe.imports_contract",
+            "isolated_probe.manifest",
+            "final_manifest",
+        ):
+            timing_callback(stage, 1.0)
+        return generation
+
+    monkeypatch.setattr(
+        "orchestrator.function_worker_supervisor.probe_function_generation",
+        qualify,
+    )
+
+    assert supervisor.qualify_generation() is generation
+    assert supervisor.last_qualification_stats["manifest_hash_count"] == 3
+    assert supervisor.last_qualification_stats["full_closure_import_count"] == 1
 
 
 def test_boot_cache_keeps_last_verified_generation_when_checkout_is_broken(
@@ -1135,6 +1329,38 @@ async def test_route_gate_drains_inflight_then_holds_new_work_until_commit():
     assert await waiting == "request-202"
     assert old.calls == ["runtime.enqueue_api_text"]
     assert new.calls == ["runtime.enqueue_api_text"]
+
+
+@pytest.mark.asyncio
+async def test_legacy_cutover_helper_uses_lightweight_generation_seal(monkeypatch):
+    kernel = _Kernel()
+    old = _Client("alpha", 101)
+    handle = _handle(kernel, old)
+    kernel.runtimes.append(handle)
+    seal_checks = []
+
+    def full_scan(_runtime):
+        raise AssertionError("cutover must not re-hash the complete source closure")
+
+    generation = SimpleNamespace(
+        manifest=SimpleNamespace(generation_id="sha256:" + "b" * 64),
+        verify_qualification_seal=lambda runtime: seal_checks.append(runtime),
+        verify_qualified_source=full_scan,
+    )
+    candidate = _Client("alpha", 202, generation=generation)
+    supervisor = FunctionWorkerSupervisor(kernel)
+
+    async def activate(client):
+        return _metadata(client.agent_name, client.pid)
+
+    monkeypatch.setattr(supervisor, "activate_new_worker", activate)
+
+    retired, metadata = await supervisor.cutover_handle(handle, candidate)
+
+    assert retired is old
+    assert metadata["worker_pid"] == 202
+    assert handle.client is candidate
+    assert seal_checks == [kernel.runtime_fingerprint]
 
 
 @pytest.mark.asyncio
