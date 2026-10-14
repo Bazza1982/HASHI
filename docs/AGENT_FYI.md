@@ -24,6 +24,10 @@ Source/Worker/delivery require proof. Tools cannot edit/kill Core/Python, read s
 
 Configuration owns identity, ports, Workzones, endpoints and models. Ignore secrets/machine paths. Instance models use allowed_backends and runtime effort options; shared compatibility uses the qualified registry. Explicit choices persist; unknown capabilities/prices are neither unsupported nor zero cost.
 
+Agent display name and Emoji come from revisioned instance configuration. Live
+runtime metadata supplies dynamic status only and cannot overwrite identity;
+Worker refresh after a save is best-effort and never reverses durable success.
+
 Verified exact-model capabilities never expire. Unknown lookup failures can back off; refresh failures cannot erase verified facts. Changed model/adapter identity or validated source revisions may replace them. Pricing freshness is separate. See [capabilities](HASHI_MODEL_CAPABILITY_DISCOVERY.md).
 
 Portable carries no credentials; PAO starts Workers. Private experiments stay private. Tool wildcard grants permission, not capability; naming a path grants nothing. Runs freeze enabled Workzone roots/revision; reload is idle-only. Exclude secrets/media bytes/remote paths from PCM, logs, chat and Git.

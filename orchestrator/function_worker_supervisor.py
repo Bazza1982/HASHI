@@ -855,6 +855,20 @@ class AgentRuntimeHandle:
                 if self._route_inflight == 0:
                     self._condition.notify_all()
 
+    async def refresh_identity_metadata(
+        self,
+        *,
+        display_name: str,
+        emoji: str,
+    ) -> None:
+        await self._route(
+            "worker.identity.refresh",
+            {
+                "display_name": str(display_name),
+                "emoji": str(emoji),
+            },
+        )
+
     async def enqueue_request(
         self,
         chat_id: int,

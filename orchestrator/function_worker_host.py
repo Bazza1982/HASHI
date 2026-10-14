@@ -1402,6 +1402,14 @@ class FunctionWorkerHost:
             runtime.telegram_connected = bool(params.get("connected"))
             await self.emit_metadata()
             return {"ok": True, "metadata": self.metadata()}
+        if method == "worker.identity.refresh":
+            runtime = self._require_runtime()
+            extra = dict(getattr(runtime.config, "extra", None) or {})
+            extra["display_name"] = str(params["display_name"])
+            extra["emoji"] = str(params["emoji"])
+            runtime.config.extra = extra
+            await self.emit_metadata()
+            return {"ok": True}
 
         runtime = self._require_runtime()
         if self.phase != "ACTIVE" or not self.accepting:
