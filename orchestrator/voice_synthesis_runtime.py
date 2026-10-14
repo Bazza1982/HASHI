@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from orchestrator import voice_synthesis_worker
+from orchestrator.voice_synthesizer import safe_voice_error_detail
 
 logger = logging.getLogger("VoiceSynthesisRuntime")
 
@@ -21,6 +22,17 @@ DEFAULT_TIMEOUT_SECONDS = 120.0
 
 class TTSRuntimeError(RuntimeError):
     """The isolated speech runtime is unavailable or returned no result."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "tts_runtime_failed",
+        retryable: bool = False,
+    ):
+        super().__init__(message)
+        self.code = str(code)
+        self.retryable = bool(retryable)
 
 
 def _absolute_path(value: str | os.PathLike[str]) -> Path:
@@ -105,7 +117,11 @@ def _result_payload(completed: subprocess.CompletedProcess[str]) -> dict[str, An
         raise TTSRuntimeError("Isolated TTS worker returned an invalid result")
     if completed.returncode != 0 or payload.get("status") == "error":
         detail = str(payload.get("error") or "isolated TTS worker failed")
-        raise TTSRuntimeError(detail[:500])
+        raise TTSRuntimeError(
+            detail[:500],
+            code=str(payload.get("error_code") or "tts_runtime_failed"),
+            retryable=bool(payload.get("retryable", False)),
+        )
     return payload
 
 
@@ -153,13 +169,18 @@ def synthesize_edge_to_mp3(
     except subprocess.TimeoutExpired as exc:
         output_path.unlink(missing_ok=True)
         raise TTSRuntimeError(
-            f"Speech synthesis exceeded the {timeout_seconds:g} second limit"
+            f"Speech synthesis exceeded the {timeout_seconds:g} second limit",
+            code="tts_timeout",
+            retryable=True,
         ) from exc
     except OSError as exc:
         output_path.unlink(missing_ok=True)
         raise TTSRuntimeError("Isolated TTS worker could not start") from exc
     if completed.stderr.strip():
-        logger.debug("Isolated TTS worker stderr: %s", completed.stderr.strip()[-2000:])
+        logger.debug(
+            "Isolated TTS worker stderr: %s",
+            safe_voice_error_detail(completed.stderr, max_chars=500),
+        )
     _result_payload(completed)
     if not output_path.is_file() or output_path.stat().st_size < 100:
         output_path.unlink(missing_ok=True)

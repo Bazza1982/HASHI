@@ -2,6 +2,7 @@ import asyncio
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable
 
 from orchestrator.media_runtime import configured_media_executable
 
@@ -14,6 +15,58 @@ class VoiceAsset:
     wav_path: Path | None
     ogg_path: Path
     mime_type: str = "audio/ogg"
+    fallback_from: str | None = None
+    fallback_reason_code: str | None = None
+    fallback_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class VoiceProviderFailure:
+    provider: str
+    code: str
+    reason: str
+    retryable: bool = False
+
+    def as_dict(self) -> dict[str, str | bool]:
+        return {
+            "provider": self.provider,
+            "code": self.code,
+            "reason": self.reason,
+            "retryable": self.retryable,
+        }
+
+
+class VoiceSynthesisError(RuntimeError):
+    """A user-safe speech failure with stable machine-readable evidence."""
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        failures: Iterable[VoiceProviderFailure] = (),
+    ):
+        super().__init__(message)
+        self.code = str(code)
+        self.failures = tuple(failures)
+
+
+def safe_voice_error_detail(value: object, *, max_chars: int = 500) -> str:
+    """Keep a useful reason while removing service URLs and common secret pairs."""
+
+    text = re.sub(
+        r"\b(?:https?|wss?)://[^\s'\"<>]+",
+        "[service URL omitted]",
+        str(value or ""),
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"(?i)\b(token|key|secret|signature|sig|authorization|sec-ms-gec)\s*[=:]\s*[^\s,;'\" ]+",
+        r"\1=[redacted]",
+        text,
+    )
+    text = re.sub(r"\s+", " ", text).strip()
+    return (text or "Speech provider failed.")[: max(1, int(max_chars))]
 
 
 def _strip_invalid_unicode(text: str) -> str:

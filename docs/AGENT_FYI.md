@@ -133,6 +133,12 @@ Commands follow the [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md), retain Session 
 
 `/say` reads the latest final reply, `/say 2`–`/say 4` that many, `/say 1-3` the latest three oldest first. Skip cost/command/progress. Telegram needs confirmed chat delivery; Workbench/TUI play locally. Reboot receipts never prove playback.
 
+Manual Workbench Read Aloud accepts its own typed reason. Edge speech runs in
+the isolated TTS runtime; on Windows, a failed Edge provider falls back to SAPI
+without reusing the Edge voice name. Success and failure retain safe provider,
+fallback and cause metadata, while service URLs and credentials are removed.
+See [voice fallback repair](repairs/VOICE_PROVIDER_FALLBACK_REPAIR_20261014.md).
+
 Historical call checkpoints are superseded by the current [call decision](HASHI_CALL_INTERACTION_2026-10-04.md); physical audio, camera, accuracy and latency acceptance remain separate.
 The October 9 HASHI3 repair binds Call availability/start to the page's registered
 connection instead of another device's selection. Daily frontend adoption and

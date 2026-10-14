@@ -12,12 +12,56 @@ import asyncio
 import importlib.metadata
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
 
 RESULT_PREFIX = "HASHI_TTS_RESULT="
 REQUIRED_DISTRIBUTIONS = ("edge-tts", "aiohttp", "imageio-ffmpeg")
+
+
+def _safe_error_payload(exc: Exception) -> dict[str, Any]:
+    """Return actionable worker evidence without leaking signed service URLs."""
+
+    name = type(exc).__name__
+    raw = str(exc or "")
+    status = getattr(exc, "status", None)
+    if status == 403 or (name == "WSServerHandshakeError" and re.search(r"\b403\b", raw)):
+        return {
+            "status": "error",
+            "error_code": "tts_protocol_rejected",
+            "error": (
+                "Edge TTS rejected the speech request (HTTP 403). "
+                "The installed Edge speech protocol may be out of date."
+            ),
+            "retryable": False,
+        }
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+        return {
+            "status": "error",
+            "error_code": "tts_timeout",
+            "error": "Edge TTS did not respond before the request timed out.",
+            "retryable": True,
+        }
+    detail = re.sub(
+        r"\b(?:https?|wss?)://[^\s'\"<>]+",
+        "[service URL omitted]",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    detail = re.sub(
+        r"(?i)\b(token|key|secret|signature|sig|authorization|sec-ms-gec)\s*[=:]\s*[^\s,;'\" ]+",
+        r"\1=[redacted]",
+        detail,
+    )
+    detail = re.sub(r"\s+", " ", detail).strip()
+    return {
+        "status": "error",
+        "error_code": "tts_provider_failed",
+        "error": f"{name}: {detail or 'Edge TTS failed.'}"[:500],
+        "retryable": True,
+    }
 
 
 def _package_versions() -> dict[str, str]:
@@ -105,10 +149,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         return_code = 0
     except Exception as exc:
-        payload = {
-            "status": "error",
-            "error": f"{type(exc).__name__}: {str(exc)[:400]}",
-        }
+        payload = _safe_error_payload(exc)
         return_code = 1
     print(RESULT_PREFIX + json.dumps(payload, ensure_ascii=False), flush=True)
     return return_code

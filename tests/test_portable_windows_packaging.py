@@ -709,13 +709,13 @@ def test_portable_dependency_generation_rejects_a_drifted_direct_input(tmp_path)
     shutil.copy2(ROOT / "requirements.txt", source / "requirements.txt")
     shutil.copy2(ROOT / "constraints" / "standard-py312.lock", standard)
     requirements = (PORTABLE / "requirements.in").read_text(encoding="utf-8")
-    requirements = requirements.replace("edge-tts==7.2.7", "edge-tts==0.0.0", 1)
+    requirements = requirements.replace("edge-tts==7.3.1", "edge-tts==0.0.0", 1)
     (portable / "requirements.in").write_text(requirements, encoding="utf-8")
     shutil.copy2(PORTABLE / "requirements.lock", portable / "requirements.lock")
 
     with pytest.raises(
         RuntimeError,
-        match=r"edge-tts: lock=7\.2\.7, input=0\.0\.0",
+        match=r"edge-tts: lock=7\.3\.1, input=0\.0\.0",
     ):
         builder.validate_portable_dependency_generation(
             source_root=source,
@@ -796,7 +796,7 @@ def test_portable_dependency_lock_keeps_requested_compact_capabilities():
     for name in ("pymupdf", "textual", "zeroconf"):
         assert f"{name}=={standard[name]}" in lock
     for required in (
-        "edge-tts==7.2.7",
+        "edge-tts==7.3.1",
         "playwright==1.58.0",
         "psutil==7.2.2",
     ):

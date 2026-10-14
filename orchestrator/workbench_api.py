@@ -165,6 +165,7 @@ from orchestrator.session_store import (
     SessionStore,
 )
 from orchestrator.transfer_store import TransferStore
+from orchestrator.voice_synthesizer import VoiceSynthesisError, safe_voice_error_detail
 from orchestrator.voice_transcript_gate import state_after_transcription
 
 logger = logging.getLogger("BridgeU.WorkbenchAPI")
@@ -8115,14 +8116,34 @@ class WorkbenchApiServer:
             result = method(text, request_id)
             if inspect.isawaitable(result):
                 result = await result
-        except Exception as exc:
+        except VoiceSynthesisError as exc:
             logging.getLogger("BridgeU.Workbench").warning(
-                "TUI speech generation failed: agent=%s error=%s",
+                "TUI speech generation failed: agent=%s code=%s reason=%s",
                 getattr(runtime, "name", "unknown"),
-                exc,
+                exc.code,
+                safe_voice_error_detail(exc),
             )
             return web.json_response(
-                {"ok": False, "code": "tts_generation_failed", "error": str(exc)},
+                {
+                    "ok": False,
+                    "code": exc.code,
+                    "error": safe_voice_error_detail(exc),
+                    "provider_failures": [
+                        failure.as_dict() for failure in exc.failures
+                    ],
+                },
+                status=503,
+            )
+        except Exception as exc:
+            detail = safe_voice_error_detail(exc)
+            logging.getLogger("BridgeU.Workbench").warning(
+                "TUI speech generation failed: agent=%s error_type=%s reason=%s",
+                getattr(runtime, "name", "unknown"),
+                type(exc).__name__,
+                detail,
+            )
+            return web.json_response(
+                {"ok": False, "code": "tts_generation_failed", "error": detail},
                 status=503,
             )
         response = dict(result or {})

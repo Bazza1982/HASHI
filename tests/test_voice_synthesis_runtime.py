@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from pathlib import Path
 
@@ -69,6 +70,67 @@ def test_synthesize_edge_to_mp3_uses_isolated_worker_stdin(tmp_path, monkeypatch
     assert "private words" not in captured["command"]
     assert captured["command"][0] == str(helper)
     assert "-I" in captured["command"]
+
+
+def test_isolated_worker_error_keeps_stable_code_and_retry_policy():
+    completed = subprocess.CompletedProcess(
+        ["python", "worker.py"],
+        1,
+        stdout=voice_synthesis_runtime.TTS_RESULT_PREFIX
+        + json.dumps(
+            {
+                "status": "error",
+                "error_code": "tts_protocol_rejected",
+                "error": "Edge TTS rejected the speech request (HTTP 403).",
+                "retryable": False,
+            }
+        ),
+        stderr="",
+    )
+
+    with pytest.raises(voice_synthesis_runtime.TTSRuntimeError) as raised:
+        voice_synthesis_runtime._result_payload(completed)
+
+    assert raised.value.code == "tts_protocol_rejected"
+    assert raised.value.retryable is False
+    assert "HTTP 403" in str(raised.value)
+
+
+def test_isolated_worker_debug_log_removes_service_url_and_signature(
+    tmp_path, monkeypatch, caplog
+):
+    helper = tmp_path / "isolated" / "python"
+    helper.parent.mkdir()
+    helper.write_bytes(b"python")
+    output = tmp_path / "voice.mp3"
+    monkeypatch.setattr(voice_synthesis_runtime, "resolve_tts_python", lambda: helper)
+
+    def fake_run(command, **_kwargs):
+        output.write_bytes(b"ID3" + b"a" * 128)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=voice_synthesis_runtime.TTS_RESULT_PREFIX
+            + json.dumps({"status": "ok", "size_bytes": 131}),
+            stderr=(
+                "warning wss://speech.example.test/path?token=private "
+                "sec-ms-gec=private-signature"
+            ),
+        )
+
+    monkeypatch.setattr(voice_synthesis_runtime.subprocess, "run", fake_run)
+    caplog.set_level(logging.DEBUG, logger="VoiceSynthesisRuntime")
+
+    voice_synthesis_runtime.synthesize_edge_to_mp3(
+        "private words",
+        output_path=output,
+        voice="en-US-EmmaNeural",
+        rate="+0%",
+    )
+
+    assert "speech.example.test" not in caplog.text
+    assert "private-signature" not in caplog.text
+    assert "[service URL omitted]" in caplog.text
 
 
 @pytest.mark.asyncio

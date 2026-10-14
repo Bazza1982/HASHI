@@ -46,3 +46,27 @@ def test_worker_rejects_invalid_or_excessive_input_before_synthesis(tmp_path, mo
     result = json.loads(output.getvalue().decode("utf-8").removeprefix(worker.RESULT_PREFIX))
     assert result["status"] == "error"
     assert error in result["error"]
+
+
+def test_worker_classifies_protocol_rejection_without_exposing_signed_url():
+    class HandshakeError(RuntimeError):
+        status = 403
+
+    payload = worker._safe_error_payload(
+        HandshakeError(
+            "WSServerHandshakeError: 403, "
+            "url='wss://speech.invalid/path?Sec-MS-GEC=not-a-real-secret'"
+        )
+    )
+
+    assert payload == {
+        "status": "error",
+        "error_code": "tts_protocol_rejected",
+        "error": (
+            "Edge TTS rejected the speech request (HTTP 403). "
+            "The installed Edge speech protocol may be out of date."
+        ),
+        "retryable": False,
+    }
+    assert "speech.invalid" not in payload["error"]
+    assert "Sec-MS-GEC" not in payload["error"]

@@ -2971,6 +2971,10 @@ class FlexibleAgentRuntime:
             "sha256": hashlib.sha256(content).hexdigest(),
             "media_type": "audio/ogg",
             "profile": self.voice_manager.get_voice_profile_id(),
+            "provider": asset.provider,
+            "fallback_from": asset.fallback_from,
+            "fallback_reason_code": asset.fallback_reason_code,
+            "fallback_reason": asset.fallback_reason,
             "request_id": str(request_id or ""),
         }
 

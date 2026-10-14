@@ -558,3 +558,114 @@ async def test_semantic_profile_drives_language_aware_tts_synthesis(
     await manager.synthesize_reply("arale", "req-voice", "任务完成。")
 
     assert calls[0]["voice_name"] == "zh-CN-YunxiNeural"
+
+
+@pytest.mark.asyncio
+async def test_edge_protocol_rejection_falls_back_to_windows_without_reusing_edge_voice(
+    tmp_path, monkeypatch
+):
+    manager = _manager(tmp_path)
+    state = {
+        **VoiceManager.DEFAULT_STATE,
+        "enabled": True,
+        "provider": "edge",
+        "voice_name": "zh-CN-XiaoxiaoNeural",
+        "provider_options": {"voice": "zh-CN-XiaoxiaoNeural"},
+    }
+    monkeypatch.setattr(manager, "_load", lambda: state)
+    monkeypatch.setattr(voice_manager_module, "_default_tts_provider", lambda: "windows")
+    built = []
+    edge_calls = []
+    windows_calls = []
+    fallback_asset = VoiceAsset(
+        provider="windows",
+        text="任务完成。",
+        spoken_text="任务完成。",
+        wav_path=tmp_path / "voice.wav",
+        ogg_path=tmp_path / "voice.ogg",
+    )
+
+    class EdgeProvider:
+        async def synthesize(self, **kwargs):
+            edge_calls.append(kwargs)
+            raise RuntimeError(
+                "WSServerHandshakeError: 403, url='wss://speech.invalid/path?token=not-a-real-secret'"
+            )
+
+    class WindowsProvider:
+        async def synthesize(self, **kwargs):
+            windows_calls.append(kwargs)
+            return fallback_asset
+
+    def provider(name, **_kwargs):
+        built.append(name)
+        return EdgeProvider() if name == "edge" else WindowsProvider()
+
+    monkeypatch.setattr(voice_manager_module, "build_provider", provider)
+
+    asset = await manager.synthesize_reply(
+        "arale", "req-fallback", "任务完成。", max_retries=2, force=True
+    )
+
+    assert built == ["edge", "windows"]
+    assert len(edge_calls) == 1
+    assert len(windows_calls) == 1
+    assert windows_calls[0]["voice_name"] is None
+    assert windows_calls[0]["provider_options"] == {}
+    assert asset.provider == "windows"
+    assert asset.fallback_from == "edge"
+    assert asset.fallback_reason_code == "tts_protocol_rejected"
+    assert "HTTP 403" in asset.fallback_reason
+    assert "token=" not in asset.fallback_reason
+
+    second = await manager.synthesize_reply(
+        "arale", "req-cooldown", "任务完成。", max_retries=2, force=True
+    )
+    assert built == ["edge", "windows", "windows"]
+    assert len(edge_calls) == 1
+    assert len(windows_calls) == 2
+    assert second.fallback_reason_code == "tts_protocol_rejected"
+    assert "temporarily bypassed" in second.fallback_reason
+
+
+@pytest.mark.asyncio
+async def test_voice_failure_reports_primary_and_windows_fallback_without_secrets(
+    tmp_path, monkeypatch
+):
+    manager = _manager(tmp_path)
+    state = {
+        **VoiceManager.DEFAULT_STATE,
+        "enabled": True,
+        "provider": "edge",
+        "voice_name": "ja-JP-NanamiNeural",
+        "provider_options": {},
+    }
+    monkeypatch.setattr(manager, "_load", lambda: state)
+    monkeypatch.setattr(voice_manager_module, "_default_tts_provider", lambda: "windows")
+
+    class Provider:
+        def __init__(self, name):
+            self.name = name
+
+        async def synthesize(self, **_kwargs):
+            if self.name == "edge":
+                raise RuntimeError(
+                    "WSServerHandshakeError: 403, url='wss://speech.invalid/path?token=not-a-real-secret'"
+                )
+            raise RuntimeError("No installed Windows TTS voice for language: ja.")
+
+    monkeypatch.setattr(
+        voice_manager_module,
+        "build_provider",
+        lambda name, **_kwargs: Provider(name),
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        await manager.synthesize_reply(
+            "arale", "req-all-failed", "終わりました。", max_retries=2, force=True
+        )
+
+    error = raised.value
+    assert getattr(error, "code", None) == "tts_all_providers_failed"
+    assert "Edge TTS" in str(error)
+    assert "HTTP 403" in str(error)

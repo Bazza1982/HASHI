@@ -2,9 +2,13 @@ from __future__ import annotations
 import copy
 import html
 import importlib.util
+import logging
 import os
+import re
 import shutil
 import sys
+import time
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -19,7 +23,13 @@ from orchestrator.voice_preview_bundle import (
     validate_voice_preview_bundle,
 )
 from orchestrator.voice_synthesis_runtime import isolated_tts_configured
-from orchestrator.voice_synthesizer import VoiceAsset, spoken_text_language
+from orchestrator.voice_synthesizer import (
+    VoiceAsset,
+    VoiceProviderFailure,
+    VoiceSynthesisError,
+    safe_voice_error_detail,
+    spoken_text_language,
+)
 from orchestrator.command_ui import setting_card
 
 
@@ -31,7 +41,91 @@ def _default_tts_provider() -> str:
     return "edge"
 
 
+def _provider_label(provider_name: str) -> str:
+    return {
+        "edge": "Edge TTS",
+        "windows": "Windows TTS",
+        "macos": "macOS TTS",
+        "piper": "Piper TTS",
+        "kokoro": "Kokoro TTS",
+        "coqui": "Coqui TTS",
+    }.get(str(provider_name or "").strip().casefold(), f"{provider_name or 'TTS'} provider")
+
+
+def _provider_failure(provider_name: str, exc: Exception) -> VoiceProviderFailure:
+    provider = str(provider_name or "unknown").strip().casefold() or "unknown"
+    label = _provider_label(provider)
+    detail = safe_voice_error_detail(exc)
+    lowered = detail.casefold()
+    declared_code = str(getattr(exc, "code", "") or "").strip().casefold()
+    declared_retryable = getattr(exc, "retryable", None)
+    status = getattr(exc, "status", None)
+
+    if (
+        declared_code == "tts_protocol_rejected"
+        or status == 403
+        or ("wsserverhandshakeerror" in lowered and re.search(r"\b403\b", lowered))
+    ):
+        return VoiceProviderFailure(
+            provider,
+            "tts_protocol_rejected",
+            f"{label} rejected the speech request (HTTP 403).",
+            False,
+        )
+    if declared_code == "tts_timeout" or "timed out" in lowered or "second limit" in lowered:
+        return VoiceProviderFailure(
+            provider,
+            "tts_timeout",
+            f"{label} did not respond before the speech request timed out.",
+            True,
+        )
+    if "no installed windows tts voice for language" in lowered:
+        language = re.search(r"language:\s*([a-z-]+)", detail, flags=re.IGNORECASE)
+        suffix = f" for language: {language.group(1)}" if language else ""
+        return VoiceProviderFailure(
+            provider,
+            "tts_voice_unavailable",
+            f"{label} has no installed voice{suffix}.",
+            False,
+        )
+    if "configured windows tts voice is unavailable" in lowered:
+        return VoiceProviderFailure(
+            provider,
+            "tts_voice_unavailable",
+            f"{label} cannot find the configured voice.",
+            False,
+        )
+    if "isolated tts runtime" in lowered or declared_code == "tts_runtime_failed":
+        return VoiceProviderFailure(
+            provider,
+            "tts_runtime_unavailable",
+            f"{label} runtime is unavailable or misconfigured: {detail}",
+            False,
+        )
+    if "no spoken text" in lowered or "speech text is required" in lowered:
+        return VoiceProviderFailure(
+            provider,
+            "tts_text_invalid",
+            f"{label} received no speakable text.",
+            False,
+        )
+    if "ffmpeg" in lowered or "malformed ogg" in lowered:
+        return VoiceProviderFailure(
+            provider,
+            "tts_audio_conversion_failed",
+            f"{label} generated audio, but conversion to a playable file failed: {detail}",
+            False,
+        )
+    return VoiceProviderFailure(
+        provider,
+        declared_code or "tts_provider_failed",
+        detail if detail.casefold().startswith(label.casefold()) else f"{label} failed: {detail}",
+        bool(declared_retryable) if declared_retryable is not None else True,
+    )
+
+
 class VoiceManager:
+    PROVIDER_FAILURE_COOLDOWN_SECONDS = 300.0
     PROJECT_ROOT = Path(
         os.environ.get("HASHI_SOURCE_ROOT")
         or os.environ.get("BRIDGE_HOME")
@@ -261,6 +355,29 @@ class VoiceManager:
         self._secrets = secrets or {}
         self._native_capabilities = tuple(
             dict(item) for item in (native_capabilities or ()) if isinstance(item, dict)
+        )
+        self._provider_cooldowns: dict[str, tuple[float, VoiceProviderFailure]] = {}
+
+    def _active_provider_failure(self, provider_name: str) -> VoiceProviderFailure | None:
+        name = str(provider_name or "").strip().casefold()
+        current = self._provider_cooldowns.get(name)
+        if current is None:
+            return None
+        unavailable_until, failure = current
+        if time.monotonic() >= unavailable_until:
+            self._provider_cooldowns.pop(name, None)
+            return None
+        return VoiceProviderFailure(
+            name,
+            failure.code,
+            f"{failure.reason} {_provider_label(name)} is temporarily bypassed after that failure.",
+            False,
+        )
+
+    def _remember_provider_failure(self, failure: VoiceProviderFailure) -> None:
+        self._provider_cooldowns[failure.provider] = (
+            time.monotonic() + self.PROVIDER_FAILURE_COOLDOWN_SECONDS,
+            failure,
         )
 
     def _default_piper_exe(self) -> str:
@@ -1180,39 +1297,106 @@ class VoiceManager:
         max_chars_override: int | None = None,
     ) -> VoiceAsset | None:
         import asyncio
-        import logging
         logger = logging.getLogger(f"Runtime.{agent_name}.voice")
 
         state = self._load()
         if not force and not state.get("enabled"):
             return None
 
-        last_err = None
-        for attempt in range(max_retries + 1):
-            try:
-                stem = f"{agent_name}_{request_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{attempt}"
-                provider_name = state.get("provider", "windows")
-                provider = build_provider(provider_name, ffmpeg_cmd=self.ffmpeg_cmd)
-                voice_name = state.get("voice_name")
-                profile_id = str(state.get("voice_profile") or "").strip().casefold()
-                if provider_name == "edge" and profile_id in self.VOICE_PROFILES:
-                    voice_name = self._tts_voice_for_profile(profile_id, text)
-                return await provider.synthesize(
-                    text=text,
-                    output_dir=self.output_dir,
-                    stem=stem,
-                    voice_name=voice_name,
-                    rate=int(state.get("rate", 0)),
-                    max_chars=(
-                        max(1, int(max_chars_override))
-                        if max_chars_override is not None
-                        else int(state.get("max_chars", 1200))
-                    ),
-                    provider_options=state.get("provider_options") or {},
-                )
-            except Exception as e:
-                last_err = e
-                if attempt < max_retries:
-                    logger.warning(f"Voice synthesis attempt {attempt + 1}/{max_retries + 1} failed: {e}. Retrying...")
+        primary_name = str(state.get("provider") or _default_tts_provider()).strip().casefold()
+        max_attempts = max(0, int(max_retries)) + 1
+        max_chars = (
+            max(1, int(max_chars_override))
+            if max_chars_override is not None
+            else int(state.get("max_chars", 1200))
+        )
+
+        async def synthesize_with(
+            provider_name: str,
+            *,
+            attempt: int,
+            is_fallback: bool,
+        ) -> VoiceAsset:
+            stem = (
+                f"{agent_name}_{request_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                f"_{provider_name}_{attempt}"
+            )
+            provider = build_provider(provider_name, ffmpeg_cmd=self.ffmpeg_cmd)
+            voice_name = None if is_fallback else state.get("voice_name")
+            profile_id = str(state.get("voice_profile") or "").strip().casefold()
+            if not is_fallback and provider_name == "edge" and profile_id in self.VOICE_PROFILES:
+                voice_name = self._tts_voice_for_profile(profile_id, text)
+            return await provider.synthesize(
+                text=text,
+                output_dir=self.output_dir,
+                stem=stem,
+                voice_name=voice_name,
+                rate=int(state.get("rate", 0)),
+                max_chars=max_chars,
+                provider_options={} if is_fallback else (state.get("provider_options") or {}),
+            )
+
+        primary_failure = self._active_provider_failure(primary_name)
+        if primary_failure is None:
+            for attempt in range(max_attempts):
+                try:
+                    asset = await synthesize_with(
+                        primary_name,
+                        attempt=attempt,
+                        is_fallback=False,
+                    )
+                    self._provider_cooldowns.pop(primary_name, None)
+                    return asset
+                except Exception as exc:
+                    primary_failure = _provider_failure(primary_name, exc)
+                    if not primary_failure.retryable or attempt + 1 >= max_attempts:
+                        break
+                    logger.warning(
+                        "Voice synthesis attempt %s/%s failed: %s [%s]. Retrying...",
+                        attempt + 1,
+                        max_attempts,
+                        primary_failure.reason,
+                        primary_failure.code,
+                    )
                     await asyncio.sleep(1.5 * (attempt + 1))
-        raise last_err
+
+        assert primary_failure is not None
+        self._remember_provider_failure(primary_failure)
+        fallback_name = _default_tts_provider()
+        if fallback_name == primary_name:
+            raise VoiceSynthesisError(
+                primary_failure.code,
+                primary_failure.reason,
+                failures=(primary_failure,),
+            )
+
+        logger.warning(
+            "Voice provider %s failed: %s [%s]. Falling back to %s.",
+            primary_name,
+            primary_failure.reason,
+            primary_failure.code,
+            fallback_name,
+        )
+        try:
+            fallback_asset = await synthesize_with(
+                fallback_name,
+                attempt=0,
+                is_fallback=True,
+            )
+        except Exception as exc:
+            fallback_failure = _provider_failure(fallback_name, exc)
+            raise VoiceSynthesisError(
+                "tts_all_providers_failed",
+                (
+                    f"{primary_failure.reason} Automatic {_provider_label(fallback_name)} "
+                    f"fallback also failed: {fallback_failure.reason}"
+                ),
+                failures=(primary_failure, fallback_failure),
+            ) from None
+
+        return replace(
+            fallback_asset,
+            fallback_from=primary_name,
+            fallback_reason_code=primary_failure.code,
+            fallback_reason=primary_failure.reason,
+        )
