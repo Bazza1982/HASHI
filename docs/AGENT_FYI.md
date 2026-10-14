@@ -14,15 +14,11 @@ noticeable, directly relevant and socially natural. Phone, model, reasoning,
 STT/TTS and Session ownership remain unchanged. See
 [Call decision](HASHI_CALL_INTERACTION_2026-10-04.md) for the complete contract.
 
-Earlier October 11-12 Call, microphone, restart and hangup checkpoints are
-preserved in [history](AGENT_FYI_HISTORY_2026-10-13.md). The current Call
-decision supersedes them wherever behavior differs.
-
 ## Authority and ownership
 
 PCM owns Persona, Context and Memory; PAO owns Agents, Sessions, Runs, jobs, Workzones and delivery; HERV3 owns Engine Turns, model/tool loop and cost; Frontend Connectors authenticate and render. Use the narrowest Function/configuration owner. Core has no product policy/imports. Protected Core requires explicit major-migration authorization, version bump, label and independent review; flags grant nothing.
 
-Source, Workers and delivery need separate proof. Tools cannot edit/kill live Core/Python, read secrets or grant authority. Frontends use FC→PAO `/reboot`: `min|same` replaces one exact Worker; `max` shared Functions/Workers, never Core/Remote. Only same-live-Core successors confirm inherited broad receipts; cold startup records interrupted/unconfirmed. Function code adopts by reboot; docs do not. Windows restart needs exact actuator/exit code. [Decision](HASHI_REBOOT_FAST_RELIABLE_PLAN_2026-10-14.md).
+Source/Worker/delivery require proof. Tools cannot edit/kill Core/Python, read secrets or grant authority. FC→PAO `/reboot`: `min|same` one Worker; `max` shared Functions/Workers, never Core/Remote. Safety rejection keeps reason/blockers: command delivered, not chat failure. Only a same-live-Core successor confirms inherited broad receipts; cold startup is unconfirmed. Function code adopts by reboot; docs do not. Windows restart needs exact actuator/exit code. [Decision](HASHI_REBOOT_FAST_RELIABLE_PLAN_2026-10-14.md).
 
 ## Configuration, identity, and persistence
 
@@ -89,6 +85,10 @@ Tool batches before effects. /stop, /retry, /resend and /steer differ; recovery
 cannot restore revoked authority. Show typed progress, not private reasoning.
 
 ## UI, media, and Phone
+
+Manual Desktop stale input is unexecuted: keep its lease, pause for a fresh
+frame and never replay. Other failures release control. See
+[desktop](HASHI_CROSS_PLATFORM_DEVICE_CONTROL_PLAN.md).
 
 Local cascade speech is an opt-in Function sidecar. Synthetic evidence does not establish physical audio acceptance. See [local Phone](HASHI_PHONE_LOCAL_CASCADE_GATE2.md).
 

@@ -300,6 +300,49 @@ async def test_service_binds_actor_and_target_without_agent_run(desktop,tmp_path
     assert c.owner is None and not b._leases
 
 
+async def test_stale_worker_input_keeps_manual_broker_lease(desktop, tmp_path):
+    controller, native, now = desktop
+    broker, _ = make_broker(tmp_path, controller)
+    pin = broker.desktop_targets()[0]
+    await broker.invoke_desktop(
+        pin, actor_id='owner-a', session_id='session-a',
+        operation='desktop_frame', args={},
+    )
+    acquired = await broker.invoke_desktop(
+        pin, actor_id='owner-a', session_id='session-a',
+        operation='desktop_control', args={'mode': 'acquire'},
+    )
+    lease_id = acquired['lease_id']
+    now[0] += 3.1
+    with pytest.raises(DesktopError, match='desktop_stale_frame'):
+        await broker.invoke_desktop(
+            pin, actor_id='owner-a', session_id='session-a',
+            operation='desktop_input',
+            args={'lease_id': lease_id, 'event': event(controller)},
+        )
+    assert lease_id in broker._leases
+    heartbeat = await broker.invoke_desktop(
+        pin, actor_id='owner-a', session_id='session-a',
+        operation='desktop_control', args={'mode': 'heartbeat', 'lease_id': lease_id},
+    )
+    await broker.invoke_desktop(
+        pin, actor_id='owner-a', session_id='session-a',
+        operation='desktop_frame', args={},
+    )
+    def denied(_event):
+        raise DesktopError('desktop_locked', 423)
+    native.inject = denied
+    with pytest.raises(DesktopError, match='desktop_locked'):
+        await broker.invoke_desktop(
+            pin, actor_id='owner-a', session_id='session-a',
+            operation='desktop_input',
+            args={'lease_id': lease_id, 'event': event(controller)},
+        )
+    assert heartbeat['controlling'] is True
+    assert lease_id not in broker._leases
+    assert controller.owner is None
+
+
 async def test_pinned_worker_generation_never_reroutes(desktop,tmp_path):
     c,n,t=desktop;b,r=make_broker(tmp_path,c)
     pin=b.desktop_targets()[0]

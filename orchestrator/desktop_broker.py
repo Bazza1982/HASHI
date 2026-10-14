@@ -110,8 +110,11 @@ class ManualDesktopBroker:
                 self._audit("desktop_operation", actor_type="user", actor_id=actor_id, session_id=session_id,
                             capability_id=pin["capability_id"], operation=operation)
             return result
-        except DesktopError:
-            failed = True
+        except DesktopError as exc:
+            # A stale picture proves that this input was not injected. Keep the
+            # healthy control lease so the client can discard it, fetch a fresh
+            # picture and continue without another takeover.
+            failed = not (operation == "desktop_input" and exc.code == "desktop_stale_frame")
             raise
         except Exception as exc:
             failed = True

@@ -50,6 +50,11 @@ Workbench's Connector keeps the last verified Agent list and conversation
 projection while the shared API is briefly unavailable, marks cached Agents
 offline, and replaces the list on reconnection. A deliberate instance switch
 clears this cache so one instance cannot display another's Agents.
+Terminal operation projections retain the stable `reason` and expose
+`blocking_targets` as bounded Agent ID/display-name pairs when live activity is
+busy or cannot be read safely. Workbench renders that exact blocker with a
+useful retry condition. A terminal safety rejection is the delivered command's
+outcome; it must not turn the submitted command row into a chat send failure.
 4. The terminal outcome is saved before notification delivery. Delivery never
    changes that outcome and never runs the operation again.
 
@@ -189,6 +194,13 @@ content-identical Function generation can reuse its immutable artifact after a
 documentation-only commit: exact bytes are revalidated once, the current
 qualification receipt gets the new source commit, and artifact-creation
 provenance remains unchanged. The final pre-cutover seal is still strict.
+
+The rejection-presentation follow-up closes a separate Frontend Connector gap:
+the backend projection now carries the exact busy/unreadable Agent identities,
+and Workbench distinguishes a delivered `/reboot` rejection from a failed chat
+send. Tests first reproduced both the generic banner and the false send-failure
+state, then passed with localized actionable wording. This changes no reboot
+scope, retry policy, Python environment or Core behavior.
 
 The 2026-10-08 HASHI3 repair supersedes browser-display/start-delivery prerequisites
 and terminal-notice retention blocking. Start delivery has a two-second head

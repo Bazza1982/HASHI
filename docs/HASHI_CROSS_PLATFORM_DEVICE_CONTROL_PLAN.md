@@ -271,6 +271,13 @@ The following rules are mandatory:
 - timeout, cancellation, Agent reboot, Worker crash, or task completion releases
   the lease and performs best-effort input-state cleanup.
 
+A `desktop_stale_frame` rejection for manual input is a confirmed non-injection
+outcome. The Broker therefore keeps an otherwise healthy manual-control lease
+while the frontend discards that action, pauses further mutation, requests a
+fresh frame, and resumes automatically. It may send release/reset cleanup while
+paused, but it never replays the rejected action. Any other input failure or
+unknown outcome still releases the lease.
+
 Representative handoff:
 
 ```text

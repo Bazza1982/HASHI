@@ -280,6 +280,24 @@ class RebootManager:
             (int(event.get("sequence") or 0) for event in record.get("progress") or ()),
             default=0,
         )
+        reason = str(record.get("reason") or "")
+        if reason in {"target_busy", "target_became_busy"}:
+            blocking_ids = record.get("busy_targets") or ()
+        elif reason in {"activity_unavailable", "activity_became_unavailable"}:
+            blocking_ids = record.get("activity_targets") or ()
+        else:
+            blocking_ids = ()
+        raw_display_names = record.get("display_names") or {}
+        display_names = raw_display_names if isinstance(raw_display_names, Mapping) else {}
+        blocking_targets = [
+            {
+                "agent_id": agent_id,
+                "display_name": str(display_names.get(agent_id) or agent_id),
+            }
+            for agent_id in dict.fromkeys(
+                str(value) for value in blocking_ids if str(value)
+            )
+        ]
         presentation_ack = record.get("presentation_ack") or {}
         return {
             "operation_id": record["id"],
@@ -293,7 +311,8 @@ class RebootManager:
             "source_agent": record.get("source_agent"),
             "start_message": dict((record.get("start_delivery") or {}).get("presentation_message") or {}),
             "lifecycle_state": record.get("lifecycle_state"),
-            "reason": record.get("reason") or "",
+            "reason": reason,
+            "blocking_targets": blocking_targets,
             "presentation_ack": {
                 "required": False,
                 "status": presentation_ack.get("status") or "not_required",
