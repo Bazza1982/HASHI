@@ -1,5 +1,16 @@
 # HASHI Agent FYI
 
+October 14 reboot decision: `/reboot` preparation keeps old routes, API and
+Scheduler online; only the final cutover is fenced. A new generation is fully
+qualified once by the isolated probe, while the protected bootstrap verifies
+each process artifact once and each Worker still performs real backend startup.
+Final identity uses Agent + worker nonce + generation and the authoritative
+route/process handle; PID is diagnostic. Receipts separately state outcome and
+observation confidence, preserve partial success, and name failed Agents and
+checks. Start notification remains before any possible Workbench disconnect.
+`/restart`, Core and Remote behavior are unchanged. See
+[reboot decision](HASHI_REBOOT_FAST_RELIABLE_PLAN_2026-10-14.md).
+
 October 13: HASHI3/HASHI4 and Workbench use GitHub `main`; continue there,
 without new branches/worktrees. [Reconciliation](repairs/DEBUG_CALL_RECONCILIATION_20261013.md)
 preserves the repairs; source and runtime adoption remain separate.
