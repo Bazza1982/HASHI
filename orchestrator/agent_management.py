@@ -518,8 +518,8 @@ class AgentManagementManager:
         if callable(refresh):
             try:
                 await refresh(
-                    display_name=str(row["display_name"]),
-                    emoji=str(row["emoji"]),
+                    display_name=str(row.get("display_name", row["name"])),
+                    emoji=str(row.get("emoji", "🤖")),
                 )
             except Exception:
                 logger.warning(
