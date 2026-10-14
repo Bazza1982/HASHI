@@ -4517,6 +4517,7 @@ class FlexibleAgentRuntime:
         render_view = "main"
         preview_profile: str | None = None
         preview_renderers: tuple[str, ...] = ()
+        preview_preset: str | None = None
         if action == "view" and value == "voices":
             await query.edit_message_text(
                 self.voice_manager.voice_choice_menu_text(),
@@ -4555,6 +4556,7 @@ class FlexibleAgentRuntime:
             elif action == "use":
                 message = self.voice_manager.apply_voice_preset(value)
                 render_view = "voices"
+                preview_preset = value
         except Exception as e:
             await query.answer(str(e), show_alert=True)
             return
@@ -4567,6 +4569,17 @@ class FlexibleAgentRuntime:
             )
             if len(preview_assets) != len(preview_renderers):
                 preview_assets = ()
+        tts_preview_assets: tuple[tuple[str, Path], ...] = ()
+        tts_preview_telegram = False
+        if preview_preset:
+            surface = str(
+                getattr(update, "_hashi_session_surface", None) or "telegram"
+            ).strip().casefold()
+            tts_preview_telegram = surface == "telegram"
+            tts_preview_assets = self.voice_manager.get_tts_voice_preview_assets(
+                preview_preset,
+                telegram=tts_preview_telegram,
+            )
         text = (
             self.voice_manager.voice_choice_menu_text()
             if render_view == "voices"
@@ -4580,13 +4593,38 @@ class FlexibleAgentRuntime:
         callback_notice = message or ui_language.tr("common.updated")
         if preview_profile and not preview_assets:
             callback_notice = ui_language.tr("voice.preview.unavailable")
-        await query.answer(callback_notice)
+        if preview_preset and not tts_preview_assets:
+            callback_notice = ui_language.tr("voice.tts.preview.unavailable")
+            await query.answer(callback_notice, show_alert=True)
+        else:
+            await query.answer(callback_notice)
         if preview_profile and preview_assets:
             await self._send_voice_profile_previews(
                 update,
                 preview_profile,
                 preview_assets,
             )
+        if preview_preset and tts_preview_assets:
+            sent = await self._send_voice_profile_previews(
+                update,
+                f"tts:{preview_preset}",
+                tts_preview_assets,
+                caption_override=self.voice_manager.tts_voice_preview_caption(
+                    preview_preset
+                ),
+                media_type_override=(
+                    "audio/ogg" if tts_preview_telegram else "audio/mpeg"
+                ),
+                filename_override=(
+                    f"{preview_preset}{tts_preview_assets[0][1].suffix}"
+                ),
+                preview_id=str(getattr(query, "id", "")),
+            )
+            if not sent:
+                await self._reply_text(
+                    update,
+                    ui_language.tr("voice.tts.preview.unavailable"),
+                )
 
     async def callback_call(self, update: Update, context: Any):
         from orchestrator.frontend_call.settings import callback

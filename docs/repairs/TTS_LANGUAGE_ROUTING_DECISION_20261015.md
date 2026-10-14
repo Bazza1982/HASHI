@@ -1,6 +1,7 @@
 # TTS Language Routing and Degradation Decision (2026-10-15)
 
-Status: implemented on HASHI3 `debug-voice`; offline validation complete; live adoption pending.
+Status: language routing adopted on HASHI3 `debug-voice`; concrete `/voice`
+preview extension implemented and offline-verified; its live adoption is pending.
 
 ## Ownership and boundary
 
@@ -36,8 +37,21 @@ present returned evidence; they do not maintain their own language or fallback r
 7. Any temporary voice adaptation or provider fallback is returned as structured
    evidence. Workbench shows it beside the player and Telegram places it with the voice
    message, so a fallback voice cannot be mistaken for the configured normal voice.
-8. Voice buttons use short language annotations, for example
-   `晓晓（简中 · Edge）` and `七海（日语 · Edge）`.
+8. Voice buttons use short language, gender, and provider annotations, for
+   example `晓晓（简中 · 女声 · Edge）` and `七海（日语 · 女声 · Edge）`.
+9. Selecting a concrete `/voice` TTS preset saves it and immediately publishes
+   a prerecorded sample synthesized with that exact provider, voice, and native
+   language. Telegram receives OGG/Opus and browser Frontend Connectors receive
+   MP3. Selection never invokes live TTS and never substitutes a different
+   voice. A missing, corrupt, or provenance-mismatched sample leaves the saved
+   selection intact and gives the user a clear unavailable notice.
+
+Preview assets use a versioned manifest containing the preset alias, provider,
+stable voice identity, locale, fixed script, byte size, and SHA-256 digest.
+HASHI validates that provenance before publication. The generated bundle covers
+all 18 non-macOS presets. macOS-native samples must be generated and verified on
+macOS; until then those selections fail safely with the same visible notice.
+The independent `/call` voice menu and previews are unchanged.
 
 ## Audit contract
 
@@ -69,6 +83,14 @@ Green evidence after implementation:
 - complete Workbench UI policy suite: 744 passed;
 - Workbench production build: passed;
 - protected Core check: passed.
+
+The concrete `/voice` preview extension additionally recorded four focused
+failures before implementation. Green evidence covers exact preset provenance,
+gender/locale metadata, Telegram publication, browser MP3 publication,
+missing-preview behavior, `/call` isolation, locale catalogs, routing/runtime,
+and portable packaging: 71 pytest checks passed. All 36 bundled OGG/MP3 files
+decoded successfully; Python compilation, focused Ruff checks, patch hygiene,
+and the protected Core check also passed.
 
 Live HASHI3 and Workbench validation is recorded separately after hot adoption. User
 acceptance remains a separate final state.

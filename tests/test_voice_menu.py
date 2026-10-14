@@ -12,6 +12,7 @@ from orchestrator import voice_manager as voice_manager_module
 from orchestrator.config_json import read_config_json, write_config_json
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.session_store import SessionStore
+from orchestrator.tts_voice_previews import TTS_VOICE_PREVIEW_TEXT
 from orchestrator.voice_manager import VoiceManager
 from orchestrator.voice_synthesizer import VoiceAsset
 
@@ -67,6 +68,59 @@ def _prepare_runtime_for_fc(runtime, tmp_path: Path) -> None:
     runtime.telegram_connected = True
     runtime._notify_enabled = False
     runtime.token = "test-token"
+
+
+def _write_tts_voice_preview_bundle(
+    root: Path,
+    *,
+    alias: str,
+    preset: dict,
+    locale: str,
+) -> dict[str, Path]:
+    version_root = root / "v1"
+    voice = str(preset["voice_name"])
+    if preset["provider"] == "piper":
+        voice = Path(voice).name
+    paths = {
+        "tts": version_root / locale / alias / "tts.ogg",
+        "tts_mp3": version_root / locale / alias / "tts_mp3.mp3",
+    }
+    payloads = {
+        "tts": b"OggS-" + alias.encode("ascii"),
+        "tts_mp3": b"ID3-" + alias.encode("ascii"),
+    }
+    entries = []
+    for renderer, path in paths.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payloads[renderer])
+        audio_format = "mp3" if renderer == "tts_mp3" else "ogg"
+        entries.append(
+            {
+                "locale": locale,
+                "profile": alias,
+                "renderer": renderer,
+                "format": audio_format,
+                "path": path.relative_to(version_root).as_posix(),
+                "size_bytes": len(payloads[renderer]),
+                "sha256": hashlib.sha256(payloads[renderer]).hexdigest(),
+                "provider": preset["provider"],
+                "voice": voice,
+                "script": TTS_VOICE_PREVIEW_TEXT[locale],
+            }
+        )
+    (version_root / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "version": "v1",
+                "kind": "tts_voice_presets",
+                "text": TTS_VOICE_PREVIEW_TEXT,
+                "entries": entries,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return paths
 
 
 def test_piper_preset_uses_standalone_executable_without_python_module(
@@ -160,6 +214,62 @@ def test_voice_preview_assets_fall_back_to_the_versioned_product_bundle(tmp_path
     assert manager.get_voice_preview_assets(
         "warm_female", renderers=("tts",), locale="en"
     ) == (("tts", local),)
+
+
+def test_tts_voice_preview_assets_are_prerecorded_and_match_preset_provenance(
+    tmp_path,
+):
+    bundle_root = tmp_path / "tts_voice_preview_assets"
+    preset = VoiceManager.VOICE_PRESETS["ecn"]
+    paths = _write_tts_voice_preview_bundle(
+        bundle_root,
+        alias="ecn",
+        preset=preset,
+        locale="zh-CN",
+    )
+    manager = VoiceManager(
+        tmp_path / "workspace",
+        tmp_path / "media",
+        tts_preview_asset_root=bundle_root,
+    )
+
+    assert manager.get_tts_voice_preview_assets("ecn", telegram=True) == (
+        ("tts", paths["tts"]),
+    )
+    assert manager.get_tts_voice_preview_assets("ecn", telegram=False) == (
+        ("tts_mp3", paths["tts_mp3"]),
+    )
+
+    manifest_path = bundle_root / "v1" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["entries"][0]["voice"] = "zh-CN-NotXiaoxiaoNeural"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert manager.get_tts_voice_preview_assets("ecn", telegram=True) == ()
+
+
+def test_tts_voice_catalog_declares_locale_and_gender_for_every_preset():
+    presets = {**VoiceManager.VOICE_PRESETS, **VoiceManager.MACOS_VOICE_PRESETS}
+
+    assert presets
+    assert all(preset.get("locale") in TTS_VOICE_PREVIEW_TEXT for preset in presets.values())
+    assert all(preset.get("gender") in {"female", "male"} for preset in presets.values())
+    assert VoiceManager.VOICE_PRESETS["us"]["gender"] == "female"
+    assert VoiceManager.VOICE_PRESETS["uk"]["gender"] == "female"
+    assert VoiceManager.VOICE_PRESETS["pcn"]["gender"] == "female"
+
+
+def test_packaged_tts_voice_preview_bundle_covers_non_macos_presets(tmp_path):
+    manager = _manager(tmp_path)
+    aliases = [
+        alias
+        for alias, preset in VoiceManager.VOICE_PRESETS.items()
+        if preset["provider"] != "macos"
+    ]
+
+    assert len(aliases) == 18
+    for alias in aliases:
+        assert manager.get_tts_voice_preview_assets(alias, telegram=True)
+        assert manager.get_tts_voice_preview_assets(alias, telegram=False)
 
 
 def test_voice_state_writer_normalizes_legacy_bytes_and_preserves_unknown_fields(tmp_path):
@@ -393,6 +503,194 @@ async def test_voice_profile_callback_updates_both_renderers_without_growing_men
 
 
 @pytest.mark.asyncio
+async def test_tts_voice_selection_saves_and_publishes_matching_prerecorded_preview(
+    tmp_path,
+):
+    bundle_root = tmp_path / "tts_voice_preview_assets"
+    preset = VoiceManager.VOICE_PRESETS["ecn"]
+    paths = _write_tts_voice_preview_bundle(
+        bundle_root,
+        alias="ecn",
+        preset=preset,
+        locale="zh-CN",
+    )
+    manager = VoiceManager(
+        tmp_path / "workspace",
+        tmp_path / "media",
+        tts_preview_asset_root=bundle_root,
+    )
+    runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
+    runtime.voice_manager = manager
+    runtime._is_authorized_user = lambda _user_id: True
+    _prepare_runtime_for_fc(runtime, tmp_path)
+    sent_previews = []
+
+    class Bot:
+        async def send_voice(self, **kwargs):
+            sent_previews.append(
+                {
+                    **kwargs,
+                    "payload": kwargs["voice"].read(),
+                }
+            )
+
+    runtime.app = SimpleNamespace(bot=Bot())
+    runtime.telegram_logger = SimpleNamespace(warning=lambda *_args: None)
+    preview_errors = []
+    runtime.error_logger = SimpleNamespace(
+        error=lambda *args: preview_errors.append(args)
+    )
+    runtime._reply_text = AsyncMock()
+
+    class Query:
+        id = "tts-voice-selection"
+        data = "voice:use:ecn"
+        from_user = SimpleNamespace(id=7)
+        message = SimpleNamespace(chat_id=99)
+
+        def __init__(self):
+            self.answers = []
+
+        async def edit_message_text(self, *_args, **_kwargs):
+            return None
+
+        async def answer(self, text=None, **kwargs):
+            self.answers.append((text, kwargs))
+
+    query = Query()
+    await runtime.callback_voice(
+        SimpleNamespace(callback_query=query), SimpleNamespace()
+    )
+
+    assert manager.get_active_preset_alias() == "ecn"
+    assert query.answers[0][1].get("show_alert") is not True
+    assert len(sent_previews) == 1, preview_errors
+    assert sent_previews[0]["payload"] == paths["tts"].read_bytes()
+    assert sent_previews[0]["caption"] == (
+        "🎧 TTS voice preview · Xiaoxiao "
+        "(Simplified Chinese · Female · Edge)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_workbench_tts_voice_selection_publishes_browser_mp3_preview(tmp_path):
+    bundle_root = tmp_path / "tts_voice_preview_assets"
+    preset = VoiceManager.VOICE_PRESETS["ecn"]
+    paths = _write_tts_voice_preview_bundle(
+        bundle_root,
+        alias="ecn",
+        preset=preset,
+        locale="zh-CN",
+    )
+    manager = VoiceManager(
+        tmp_path / "workspace",
+        tmp_path / "media",
+        tts_preview_asset_root=bundle_root,
+    )
+    runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
+    runtime.voice_manager = manager
+    runtime._is_authorized_user = lambda _user_id: True
+    _prepare_runtime_for_fc(runtime, tmp_path)
+    owner_id = SessionStore.owner_id_for(runtime.global_config)
+    session = runtime.session_store.create_session(
+        owner_id=owner_id,
+        agent_id=runtime.name,
+        title="Workbench TTS voice preview",
+        is_default=True,
+    )
+    runtime.default_session_id = session["session_id"]
+    runtime.error_logger = SimpleNamespace(error=lambda *_args: None)
+
+    class Query:
+        id = "workbench-tts-voice-selection"
+        data = "voice:use:ecn"
+        from_user = SimpleNamespace(id=7)
+        message = SimpleNamespace(chat_id=7)
+
+        async def edit_message_text(self, *_args, **_kwargs):
+            return None
+
+        async def answer(self, *_args, **_kwargs):
+            return None
+
+    update = SimpleNamespace(
+        callback_query=Query(),
+        _hashi_session_surface="workbench",
+        _hashi_session_channel_key="default",
+        _hashi_session_owner_id=owner_id,
+        _hashi_session_id=session["session_id"],
+        _hashi_session_context_generation=session["context_generation"],
+    )
+
+    await runtime.callback_voice(update, SimpleNamespace())
+
+    previews = [
+        message
+        for message in runtime.session_store.messages(
+            session["session_id"], owner_id=owner_id
+        )
+        if message["source"] == "workbench.explicit-media"
+    ]
+    assert len(previews) == 1
+    part = previews[0]["content"][0]
+    assert part["mime_type"] == "audio/mpeg"
+    assert part["filename"] == "ecn.mp3"
+    assert part["semantic_role"] == "audio_attachment"
+    _attachment, payload = runtime.session_store.attachment_bytes(
+        session_id=session["session_id"],
+        owner_id=owner_id,
+        attachment_id=part["attachment_id"],
+    )
+    assert payload == paths["tts_mp3"].read_bytes()
+
+
+@pytest.mark.asyncio
+async def test_missing_tts_voice_preview_does_not_rollback_saved_selection(tmp_path):
+    manager = VoiceManager(
+        tmp_path / "workspace",
+        tmp_path / "media",
+        tts_preview_asset_root=tmp_path / "missing-preview-bundle",
+    )
+    runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
+    runtime.voice_manager = manager
+    runtime._is_authorized_user = lambda _user_id: True
+    _prepare_runtime_for_fc(runtime, tmp_path)
+    send_voice = AsyncMock()
+    runtime.app = SimpleNamespace(bot=SimpleNamespace(send_voice=send_voice))
+    runtime.telegram_logger = SimpleNamespace(warning=lambda *_args: None)
+    runtime.error_logger = SimpleNamespace(error=lambda *_args: None)
+
+    class Query:
+        id = "missing-tts-preview"
+        data = "voice:use:eja"
+        from_user = SimpleNamespace(id=7)
+        message = SimpleNamespace(chat_id=99)
+
+        def __init__(self):
+            self.answers = []
+
+        async def edit_message_text(self, *_args, **_kwargs):
+            return None
+
+        async def answer(self, text=None, **kwargs):
+            self.answers.append((text, kwargs))
+
+    query = Query()
+    await runtime.callback_voice(
+        SimpleNamespace(callback_query=query), SimpleNamespace()
+    )
+
+    assert manager.get_active_preset_alias() == "eja"
+    send_voice.assert_not_awaited()
+    assert query.answers == [
+        (
+            "Voice saved, but its prerecorded preview is unavailable.",
+            {"show_alert": True},
+        )
+    ]
+
+
+@pytest.mark.asyncio
 async def test_workbench_voice_preview_uses_bound_session_without_telegram(
     tmp_path,
 ):
@@ -578,9 +876,9 @@ def test_voice_picker_uses_clear_localized_language_annotations(tmp_path):
         labels = [row[0].text for row in keyboard[:-1]]
         main_menu = manager.voice_menu_text()
 
-    assert "晓晓（简中 · Edge）" in labels
-    assert "七海（日语 · Edge）" in labels
-    assert "晓晓（简中 · Kokoro）" in labels
+    assert "晓晓（简中 · 女声 · Edge）" in labels
+    assert "七海（日语 · 女声 · Edge）" in labels
+    assert "晓晓（简中 · 女声 · Kokoro）" in labels
     assert "<b>语音风格</b> · 未设置" in main_menu
     assert keyboard[-1][0].callback_data == "voice:back:main"
 

@@ -20,6 +20,10 @@ from orchestrator import ui_language
 from orchestrator.config_json import ConfigConflictError, read_config_json, write_config_json
 from orchestrator.tts_routing import fallback_providers, normalize_language, resolve_tts_route
 from orchestrator.tts_providers import build_provider, list_provider_names
+from orchestrator.tts_voice_previews import (
+    DEFAULT_TTS_VOICE_PREVIEW_ASSET_ROOT,
+    get_tts_voice_preview_assets as resolve_tts_voice_preview_assets,
+)
 from orchestrator.voice_preview_bundle import (
     DEFAULT_VOICE_PREVIEW_ASSET_ROOT,
     VOICE_PREVIEW_VERSION as PRODUCT_VOICE_PREVIEW_VERSION,
@@ -174,24 +178,32 @@ class VoiceManager:
             "voice_name": "en-US-EmmaNeural",
             "label": "Emma [US Edge]",
             "language": "English",
+            "locale": "en-US",
+            "gender": "female",
         },
         "euk": {
             "provider": "edge",
             "voice_name": "en-GB-SoniaNeural",
             "label": "Sonia [UK Edge]",
             "language": "English",
+            "locale": "en-GB",
+            "gender": "female",
         },
         "ecn": {
             "provider": "edge",
             "voice_name": "zh-CN-XiaoxiaoNeural",
             "label": "Xiaoxiao [CN Edge]",
             "language": "Chinese",
+            "locale": "zh-CN",
+            "gender": "female",
         },
         "ecny": {
             "provider": "edge",
             "voice_name": "zh-CN-XiaoyiNeural",
             "label": "Xiaoyi [CN Edge]",
             "language": "Chinese",
+            "locale": "zh-CN",
+            "gender": "female",
         },
         # XiaochenNeural and XiaohanNeural discontinued by Microsoft (2026-03)
         "ectc": {
@@ -199,60 +211,80 @@ class VoiceManager:
             "voice_name": "zh-TW-HsiaoChenNeural",
             "label": "HsiaoChen [TW Edge]",
             "language": "Chinese",
+            "locale": "zh-TW",
+            "gender": "female",
         },
         "ecty": {
             "provider": "edge",
             "voice_name": "zh-TW-HsiaoYuNeural",
             "label": "HsiaoYu [TW Edge]",
             "language": "Chinese",
+            "locale": "zh-TW",
+            "gender": "female",
         },
         "echm": {
             "provider": "edge",
             "voice_name": "zh-HK-HiuMaanNeural",
             "label": "HiuMaan [HK Edge]",
             "language": "Chinese",
+            "locale": "zh-HK",
+            "gender": "female",
         },
         "echg": {
             "provider": "edge",
             "voice_name": "zh-HK-HiuGaaiNeural",
             "label": "HiuGaai [HK Edge]",
             "language": "Chinese",
+            "locale": "zh-HK",
+            "gender": "female",
         },
         "eja": {
             "provider": "edge",
             "voice_name": "ja-JP-NanamiNeural",
             "label": "Nanami [JP Edge]",
             "language": "Japanese",
+            "locale": "ja-JP",
+            "gender": "female",
         },
         "us": {
             "provider": "piper",
             "voice_name": str(PIPER_MODEL_DIR / "en_US-lessac-high.onnx"),
             "label": "Lessac [Piper-US]",
             "language": "English",
+            "locale": "en-US",
+            "gender": "female",
         },
         "uk": {
             "provider": "piper",
             "voice_name": str(PIPER_MODEL_DIR / "en_GB-cori-high.onnx"),
             "label": "Cori [Piper-UK]",
             "language": "English",
+            "locale": "en-GB",
+            "gender": "female",
         },
         "pcn": {
             "provider": "piper",
             "voice_name": str(PIPER_MODEL_DIR / "zh_CN-huayan-medium.onnx"),
             "label": "Huayan [Piper-CN]",
             "language": "Chinese",
+            "locale": "zh-CN",
+            "gender": "female",
         },
         "cn": {
             "provider": "windows",
             "voice_name": "Microsoft Huihui Desktop",
             "label": "Huihui [Win-CN]",
             "language": "Chinese",
+            "locale": "zh-CN",
+            "gender": "female",
         },
         "wus": {
             "provider": "windows",
             "voice_name": "Microsoft Zira Desktop",
             "label": "Zira [Win-US]",
             "language": "English",
+            "locale": "en-US",
+            "gender": "female",
         },
         # Kokoro local TTS presets — runs on CPU, no API key needed
         "ko_bella": {
@@ -260,6 +292,8 @@ class VoiceManager:
             "voice_name": "af_bella",
             "label": "Bella [Kokoro EN]",
             "language": "English",
+            "locale": "en-US",
+            "gender": "female",
             "provider_options": {"lang_code": "a"},
         },
         "ko_heart": {
@@ -267,6 +301,8 @@ class VoiceManager:
             "voice_name": "af_heart",
             "label": "Heart [Kokoro EN]",
             "language": "English",
+            "locale": "en-US",
+            "gender": "female",
             "provider_options": {"lang_code": "a"},
         },
         "ko_xiaoxiao": {
@@ -274,6 +310,8 @@ class VoiceManager:
             "voice_name": "zf_xiaoxiao",
             "label": "Xiaoxiao [Kokoro ZH]",
             "language": "Chinese",
+            "locale": "zh-CN",
+            "gender": "female",
             "provider_options": {"lang_code": "z"},
         },
         "ko_xiaobei": {
@@ -281,6 +319,8 @@ class VoiceManager:
             "voice_name": "zf_xiaobei",
             "label": "Xiaobei [Kokoro ZH]",
             "language": "Chinese",
+            "locale": "zh-CN",
+            "gender": "female",
             "provider_options": {"lang_code": "z"},
         },
     }
@@ -329,11 +369,46 @@ class VoiceManager:
     }
 
     MACOS_VOICE_PRESETS = {
-        "maus_ava":      {"provider": "macos", "voice_name": "Ava",      "label": "Ava [macOS EN-US]",       "language": "en-US"},
-        "maus_samantha": {"provider": "macos", "voice_name": "Samantha", "label": "Samantha [macOS EN-US]",   "language": "en-US"},
-        "maus_alex":     {"provider": "macos", "voice_name": "Alex",     "label": "Alex [macOS EN-US male]",  "language": "en-US"},
-        "maus_daniel":   {"provider": "macos", "voice_name": "Daniel",   "label": "Daniel [macOS EN-GB]",     "language": "en-GB"},
-        "maus_moira":    {"provider": "macos", "voice_name": "Moira",    "label": "Moira [macOS EN-IE]",      "language": "en-IE"},
+        "maus_ava": {
+            "provider": "macos",
+            "voice_name": "Ava",
+            "label": "Ava [macOS EN-US]",
+            "language": "en-US",
+            "locale": "en-US",
+            "gender": "female",
+        },
+        "maus_samantha": {
+            "provider": "macos",
+            "voice_name": "Samantha",
+            "label": "Samantha [macOS EN-US]",
+            "language": "en-US",
+            "locale": "en-US",
+            "gender": "female",
+        },
+        "maus_alex": {
+            "provider": "macos",
+            "voice_name": "Alex",
+            "label": "Alex [macOS EN-US male]",
+            "language": "en-US",
+            "locale": "en-US",
+            "gender": "male",
+        },
+        "maus_daniel": {
+            "provider": "macos",
+            "voice_name": "Daniel",
+            "label": "Daniel [macOS EN-GB]",
+            "language": "en-GB",
+            "locale": "en-GB",
+            "gender": "male",
+        },
+        "maus_moira": {
+            "provider": "macos",
+            "voice_name": "Moira",
+            "label": "Moira [macOS EN-IE]",
+            "language": "en-IE",
+            "locale": "en-IE",
+            "gender": "female",
+        },
     }
 
     if sys.platform == "darwin":
@@ -347,6 +422,7 @@ class VoiceManager:
         secrets: dict | None = None,
         native_capabilities: list[dict] | None = None,
         preview_asset_root: Path | None = None,
+        tts_preview_asset_root: Path | None = None,
     ):
         self.workspace_dir = workspace_dir
         self.media_dir = media_dir
@@ -355,6 +431,9 @@ class VoiceManager:
         self.ffmpeg_cmd = ffmpeg_cmd
         self.preview_asset_root = Path(
             preview_asset_root or DEFAULT_VOICE_PREVIEW_ASSET_ROOT
+        ).resolve()
+        self.tts_preview_asset_root = Path(
+            tts_preview_asset_root or DEFAULT_TTS_VOICE_PREVIEW_ASSET_ROOT
         ).resolve()
         self._secrets = secrets or {}
         self._native_capabilities = tuple(
@@ -794,9 +873,16 @@ class VoiceManager:
             str(preset.get("provider") or "").strip().casefold(),
             str(preset.get("provider") or "TTS"),
         )
+        gender_id = str(preset.get("gender") or "").strip().casefold()
+        gender = (
+            ui_language.tr(f"voice.gender.{gender_id}", locale=selected_locale)
+            if gender_id in {"female", "male"}
+            else ""
+        )
+        details = " · ".join(part for part in (language, gender, provider) if part)
         if selected_locale == "zh-CN":
-            return f"{name}（{language} · {provider}）"
-        return f"{name} ({language} · {provider})"
+            return f"{name}（{details}）"
+        return f"{name} ({details})"
 
     def active_tts_voice_label(self, *, locale: str | None = None) -> str:
         alias = self.get_active_preset_alias()
@@ -950,6 +1036,37 @@ class VoiceManager:
             if fallback is not None:
                 assets.append((output_renderer, fallback))
         return tuple(assets)
+
+    def get_tts_voice_preview_assets(
+        self,
+        alias: str,
+        *,
+        telegram: bool,
+    ) -> tuple[tuple[str, Path], ...]:
+        """Resolve the exact prerecorded sample for one concrete TTS voice."""
+
+        key = str(alias or "").strip().casefold()
+        preset = self.VOICE_PRESETS.get(key)
+        if not preset:
+            return ()
+        return resolve_tts_voice_preview_assets(
+            key,
+            preset,
+            telegram=telegram,
+            root=self.tts_preview_asset_root,
+        )
+
+    def tts_voice_preview_caption(
+        self,
+        alias: str,
+        *,
+        locale: str | None = None,
+    ) -> str:
+        return ui_language.tr(
+            "voice.tts.preview.caption",
+            locale=locale,
+            voice=self.voice_preset_menu_label(alias, locale=locale),
+        )
 
     def _normalise_state(self, data: dict) -> dict:
         merged = copy.deepcopy(self.DEFAULT_STATE)

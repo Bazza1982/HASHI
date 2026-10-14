@@ -626,6 +626,29 @@ def test_builder_copies_the_versioned_voice_preview_bundle(tmp_path):
         assert len(payload) == entry["size_bytes"]
         assert hashlib.sha256(payload).hexdigest() == entry["sha256"]
 
+    tts_preview_root = (
+        destination / "orchestrator" / "tts_voice_preview_assets" / "v1"
+    )
+    tts_manifest = json.loads(
+        (tts_preview_root / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert tts_manifest["schema_version"] == 1
+    assert tts_manifest["version"] == "v1"
+    assert tts_manifest["kind"] == "tts_voice_presets"
+    assert len(tts_manifest["entries"]) == 36
+    for entry in tts_manifest["entries"]:
+        payload = (tts_preview_root / entry["path"]).read_bytes()
+        if entry["format"] == "ogg":
+            assert payload.startswith(b"OggS")
+        else:
+            assert payload.startswith(b"ID3") or (
+                len(payload) > 1
+                and payload[0] == 0xFF
+                and payload[1] & 0xE0 == 0xE0
+            )
+        assert len(payload) == entry["size_bytes"]
+        assert hashlib.sha256(payload).hexdigest() == entry["sha256"]
+
 
 def test_builder_copies_and_validates_the_runtime_entry_profile(tmp_path):
     builder = _load_builder()

@@ -144,8 +144,11 @@ supplies its display locale; other surfaces use HASHI `/language`. A 90%-dominan
 unsupported language temporarily selects a compatible voice from the same provider;
 English never forces a switch. Provider fallback is explicit and only moves from
 paid/network toward free/local. Temporary changes and fallbacks are user-visible and
-written as privacy-safe decision JSONL with every attempt. `/voice` labels choices
-with language and provider. See [TTS language routing decision](repairs/TTS_LANGUAGE_ROUTING_DECISION_20261015.md).
+written as privacy-safe decision JSONL with every attempt. `/voice` labels concrete
+voices with language, gender, and provider. Selecting one saves it and publishes its
+exact prerecorded provider/voice/language sample (OGG for Telegram, MP3 for browser
+Frontends); a missing or invalid sample keeps the choice and reports unavailability.
+This does not change `/call`. See [TTS language routing decision](repairs/TTS_LANGUAGE_ROUTING_DECISION_20261015.md).
 
 Historical call checkpoints are superseded by the current [call decision](HASHI_CALL_INTERACTION_2026-10-04.md); physical audio, camera, accuracy and latency acceptance remain separate.
 The October 9 HASHI3 repair binds Call availability/start to the page's registered
