@@ -140,10 +140,13 @@ Storage filled by active operations, or invalid/unwritable storage, still reject
 a new reboot without interrupting healthy services.
 
 On shared-process recovery, an inherited broad receipt with a published handoff
-request remains active so the successor can reconcile Core and Worker evidence.
-Other inherited accepted/running receipts become unconfirmed. Pending terminal
-notices retain their delivery budget without an extra delayed-result label.
-Recovery does not rerun a targeted reboot or infer success
+request remains active only in the successor shared process prepared by that
+same live Core handoff. A normal cold/recovery startup marks the inherited
+transaction interrupted and unconfirmed, even when it observes the requested
+generation and every Worker online; cold availability is not continuity of the
+hot transaction. Other inherited accepted/running receipts become unconfirmed.
+Pending terminal notices retain their delivery budget without an extra
+delayed-result label. Recovery does not rerun a targeted reboot or infer success
 merely because an Agent is online.
 
 For the one-generation transition from legacy Worker-only `same|max`, a newly

@@ -672,6 +672,26 @@ class RebootManager:
                 or shared.get("status") != "requested"
             ):
                 continue
+            if record.get("recovered") and not getattr(
+                self.kernel, "_shared_replacement_candidate", False
+            ):
+                # A normal cold/recovery startup may observe the same committed
+                # generation and online Workers after the previous Core died.
+                # That is not continuity of the original hot transaction. Only
+                # the shared process prepared by the live Core handoff may
+                # confirm an inherited broad reboot receipt.
+                await self._release_reboot_fences(record)
+                interrupted = {
+                    **shared,
+                    "status": "unconfirmed",
+                }
+                self._finish(
+                    record,
+                    "unconfirmed",
+                    reason="interrupted",
+                    shared_replacement=interrupted,
+                )
+                continue
             request_id = str(shared.get("request_id") or "")
             receipt_path = state_dir / f"replacement-{request_id}.json"
             if not receipt_path.exists():

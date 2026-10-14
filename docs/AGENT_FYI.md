@@ -8,6 +8,10 @@ Final identity uses Agent + worker nonce + generation and the authoritative
 route/process handle; PID is diagnostic. Receipts separately state outcome and
 observation confidence, preserve partial success, and name failed Agents and
 checks. Start notification remains before any possible Workbench disconnect.
+Only the successor shared process prepared by the same live Core handoff may
+confirm an inherited broad-reboot receipt. A cold/recovery startup must mark it
+interrupted and unconfirmed even if the requested generation and all Workers
+are online; restored availability is not proof that the hot transaction lived.
 `/restart`, Core and Remote behavior are unchanged. See
 [reboot decision](HASHI_REBOOT_FAST_RELIABLE_PLAN_2026-10-14.md).
 

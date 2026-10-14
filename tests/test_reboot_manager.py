@@ -1267,6 +1267,7 @@ async def test_successor_reconciles_shared_function_without_touching_remote(
     generation = _Generation("a")
     new_kernel = _Kernel()
     new_kernel.paths = SimpleNamespace(bridge_home=tmp_path)
+    new_kernel._shared_replacement_candidate = True
     new_kernel.shared_generation_id = generation.manifest.generation_id
     new_kernel.function_release_adoption = {
         "status": "fallback",
@@ -1310,6 +1311,52 @@ async def test_successor_reconciles_shared_function_without_touching_remote(
     assert all(record["online"].values())
     assert {item["old_pid"] for item in record["workers"].values()} == {101, 102}
     assert {item["new_pid"] for item in record["workers"].values()} == {201, 202}
+
+
+@pytest.mark.asyncio
+async def test_cold_start_does_not_confirm_interrupted_shared_replacement(tmp_path):
+    old_kernel = _Kernel()
+    old_kernel.paths = SimpleNamespace(bridge_home=tmp_path)
+    old_manager = RebootManager(old_kernel, None)
+    assert await old_manager.hot_restart({"mode": "max"})
+    pending = old_manager.receipts.records()[-1]
+
+    generation = _Generation("a")
+    cold_kernel = _Kernel()
+    cold_kernel.paths = SimpleNamespace(bridge_home=tmp_path)
+    cold_kernel._shared_replacement_candidate = False
+    cold_kernel.shared_generation_id = generation.manifest.generation_id
+    cold_kernel.runtimes = []
+    for index, name in enumerate(("zelda", "sunny"), start=1):
+        client = _Client(name, 200 + index, generation, cold_kernel.events)
+        cold_kernel.runtimes.append(
+            AgentRuntimeHandle(
+                cold_kernel,
+                client,
+                _metadata(name, client.pid, generation, telegram=True),
+            )
+        )
+
+    state_dir = tmp_path / "state" / "instance"
+    (state_dir / "kernel-requests" / f"{pending['id']}.json").unlink()
+    (state_dir / f"replacement-{pending['id']}.json").write_text(
+        json.dumps(
+            {"ok": True, "generation_id": generation.manifest.generation_id}
+        ),
+        encoding="utf-8",
+    )
+
+    cold = RebootManager(cold_kernel, None)
+    cold.receipts.recover()
+    await cold.reconcile_shared_replacements()
+
+    record = cold.receipts.get(pending["id"])
+    assert record["status"] == "unconfirmed"
+    assert record["outcome"] == "failed"
+    assert record["observation_confidence"] == "unconfirmed"
+    assert record["committed"] is False
+    assert record["reason"] == "interrupted"
+    assert record["shared_replacement"]["status"] == "unconfirmed"
 
 
 @pytest.mark.asyncio
