@@ -62,15 +62,34 @@ duration is recorded but is not used as the corrected-path benchmark. It loaded
 source commit `731592adfe9afd6e0a1716bc99ef527b9bb2aaef` as generation
 `sha256:edd9fde514e6aa27c0879cdf936ec35518298b5df2da0d1c39644ea91c86b2ad`.
 
-Observed corrected-path evidence:
+Observed pre-follow-up lifecycle evidence:
+
+Evidence correction: the five 4.6-5.5 s `min` runs and two 20.6-20.7 s
+`max` runs below were submitted through the legacy Workbench administration
+endpoint. That endpoint reached the same RebootManager but called PAO directly
+instead of entering through the standard Frontend Connector slash-command RPC.
+The timings remain valid process-replacement evidence, but they are not
+end-to-end FC latency or frontend-parity evidence; the earlier 5.4 s p95 claim
+is withdrawn. Real Telegram runs of 44.8 s and 37.7 s for `min`, followed by
+49.5 s for `max`, exposed a qualification-cache provenance loop.
+
+The follow-up repair sends the Workbench administration action through the same
+`/reboot min` FC-to-Worker command path, removes its duplicate activity query,
+and leaves PAO's one authoritative preflight intact. A clean new Git commit with
+identical Function bytes now performs one exact byte revalidation and refreshes
+the qualification receipt without an isolated probe. Immutable artifact
+creation provenance remains historical and can no longer overwrite the current
+qualification commit during a broad handoff. Changed Function bytes still fail
+closed. Fresh end-to-end FC results are recorded only after committed-source
+adoption.
 
 - five same-generation `min` runs completed in 5.5, 5.2, 4.6, 4.9 and 5.0 s;
-  interpolated p95 was 5.4 s and the observed maximum was 5.5 s, below the 15 s
-  gate. Every receipt was `succeeded` + `confirmed`, with no warnings;
+  every receipt was `succeeded` + `confirmed`, with no warnings. These are
+  retained as RebootManager/Worker measurements only;
 - same-generation `min` recorded one candidate Worker, zero full-closure imports
   and zero qualification work. After the first warm-up seal, each run recorded
   one necessary manifest hash rather than one full generation scan;
-- corrected-path `max` runs completed in 20.6 and 20.7 s with 11/11 Workers
+- RebootManager-level `max` runs completed in 20.6 and 20.7 s with 11/11 Workers
   online. Qualification, materialization and full-closure import counts were
   zero; each of the 11 new process bootstraps verified its own artifact once;
 - during the instrumented `max`, Workbench/API unavailability was 0.83 s. The
@@ -89,8 +108,8 @@ Observed corrected-path evidence:
   injection switch or test backdoor was added merely to manufacture a live
   failure.
 
-The HASHI3 topology has 11 Workers, not the production topology's 26. The live
-result therefore proves the corrected lifecycle and the 11-Worker timings; it
-does not pretend to be a 26-Worker p95 sample. The offline count regression
-still proves that full-closure work is not multiplied by Worker count. HASHI4
-was neither modified nor rebooted.
+The HASHI3 topology has 11 Workers, not the production topology's 26. The prior
+live result proves the RebootManager lifecycle and 11-Worker process timings,
+not the follow-up FC entry correction and not a 26-Worker p95 sample. The
+offline count regression still proves that full-closure work is not multiplied
+by Worker count. HASHI4 was neither modified nor rebooted.

@@ -265,11 +265,9 @@ def _read_qualified_generation_cache(
     if str(payload.get("artifact_slug") or "") != slug:
         return None
     artifact = cache_path.parent / slug
-    if (
-        generation_artifact_source_commit(artifact, generation.manifest)
-        != generation.receipt.source_commit
-    ):
-        return None
+    # The artifact is content-addressed.  Its stored commit records when those
+    # exact bytes were first materialized; a later equivalent qualification
+    # can legitimately bind the same bytes to a newer checkout commit.
     verify_generation_artifact(artifact, generation)
     return generation, artifact
 
@@ -317,7 +315,22 @@ def load_qualified_generation_cache(
         if cached is None:
             return None
         generation, artifact = cached
-        generation.verify_qualification_seal(expected_runtime)
+        refreshed = generation.refresh_qualification_seal(expected_runtime)
+        if refreshed is not generation:
+            try:
+                persist_qualified_generation_cache(
+                    bridge_home,
+                    refreshed,
+                    artifact,
+                )
+            except Exception as exc:
+                bridge_logger.warning(
+                    "Equivalent Function generation was accepted but its refreshed "
+                    "cache receipt could not be saved: %s: %s",
+                    type(exc).__name__,
+                    exc,
+                )
+        generation = refreshed
         return generation, artifact
     except Exception as exc:
         bridge_logger.info(
@@ -1280,22 +1293,25 @@ class FunctionWorkerSupervisor:
             cached = self._cached_generation
             if cached is not None:
                 try:
-                    cached.verify_qualification_seal(self.kernel.runtime_fingerprint)
-                    if not configured_observers_are_qualified(self.kernel, cached):
+                    refreshed = cached.refresh_qualification_seal(
+                        self.kernel.runtime_fingerprint
+                    )
+                    if not configured_observers_are_qualified(self.kernel, refreshed):
                         raise ValueError("Enabled observers require a new Function generation")
                 except Exception:
                     self._cached_generation = None
                     self._cached_artifact = None
                 else:
+                    self._cached_generation = refreshed
                     self.last_qualification_stats = {
                         "source": "memory_cache",
-                        "manifest_hash_count": 0,
+                        "manifest_hash_count": int(refreshed is not cached),
                         "full_closure_import_count": 0,
                         "duration_ms": round(
                             (time.perf_counter() - lookup_started) * 1000, 1
                         ),
                     }
-                    return cached
+                    return refreshed
             disk_cached = await asyncio.to_thread(
                 load_qualified_generation_cache,
                 self.kernel.paths.bridge_home,

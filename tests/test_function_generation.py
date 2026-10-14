@@ -466,6 +466,106 @@ def test_new_generation_reuses_probe_receipt_without_core_side_rehash(
     assert "generation_verify" not in stages
 
 
+def test_cache_seal_rebinds_equivalent_bytes_to_the_current_source_commit(
+    monkeypatch,
+):
+    runtime = enforce_runtime_contract(ROOT)
+    manifest = SourceManifest(
+        generation_id="sha256:" + "a" * 64,
+        entries=(),
+    )
+    generation = function_generation.VerifiedFunctionGeneration(
+        code_root=ROOT,
+        manifest=manifest,
+        receipt=CandidateProbeReceipt(
+            generation_id=manifest.generation_id,
+            module_names=manifest.module_names,
+            runtime=runtime,
+            probe_pid=123,
+            source_commit="a" * 40,
+        ),
+    )
+    byte_checks = []
+
+    monkeypatch.setattr(function_generation, "load_runtime_policy", lambda _root: object())
+    monkeypatch.setattr(
+        function_generation,
+        "cached_current_runtime_fingerprint",
+        lambda *_args, **_kwargs: runtime,
+    )
+    monkeypatch.setattr(
+        function_generation,
+        "compare_function_candidate_runtime",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        function_generation,
+        "verify_manifest_source_commit",
+        lambda *_args, **_kwargs: "b" * 40,
+    )
+    monkeypatch.setattr(
+        function_generation,
+        "verify_qualified_manifest_bytes",
+        lambda *args, **kwargs: byte_checks.append((args, kwargs)),
+    )
+
+    refreshed = generation.refresh_qualification_seal(runtime)
+
+    assert refreshed is not generation
+    assert refreshed.manifest is generation.manifest
+    assert refreshed.receipt.source_commit == "b" * 40
+    assert refreshed.receipt.generation_id == generation.receipt.generation_id
+    assert len(byte_checks) == 1
+
+
+def test_cache_seal_never_rebinds_changed_function_bytes(monkeypatch):
+    runtime = enforce_runtime_contract(ROOT)
+    manifest = SourceManifest(
+        generation_id="sha256:" + "a" * 64,
+        entries=(),
+    )
+    generation = function_generation.VerifiedFunctionGeneration(
+        code_root=ROOT,
+        manifest=manifest,
+        receipt=CandidateProbeReceipt(
+            generation_id=manifest.generation_id,
+            module_names=manifest.module_names,
+            runtime=runtime,
+            probe_pid=123,
+            source_commit="a" * 40,
+        ),
+    )
+
+    monkeypatch.setattr(function_generation, "load_runtime_policy", lambda _root: object())
+    monkeypatch.setattr(
+        function_generation,
+        "cached_current_runtime_fingerprint",
+        lambda *_args, **_kwargs: runtime,
+    )
+    monkeypatch.setattr(
+        function_generation,
+        "compare_function_candidate_runtime",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        function_generation,
+        "verify_manifest_source_commit",
+        lambda *_args, **_kwargs: "b" * 40,
+    )
+
+    def reject_changed_bytes(*_args, **_kwargs):
+        raise FunctionGenerationError("qualified Function source or asset changed")
+
+    monkeypatch.setattr(
+        function_generation,
+        "verify_qualified_manifest_bytes",
+        reject_changed_bytes,
+    )
+
+    with pytest.raises(FunctionGenerationError, match="source or asset changed"):
+        generation.refresh_qualification_seal(runtime)
+
+
 def test_in_process_generation_commit_api_is_retired():
     import orchestrator.function_generation as generation
 

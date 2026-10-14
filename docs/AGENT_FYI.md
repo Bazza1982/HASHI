@@ -12,11 +12,16 @@ checks. Start notification remains before any possible Workbench disconnect.
 [reboot decision](HASHI_REBOOT_FAST_RELIABLE_PLAN_2026-10-14.md).
 
 HASHI3 live adoption on October 14 measured five same-generation single-Agent
-reboots at 4.6-5.5 seconds and corrected-path 11-Worker `max` at 20.6-20.7
-seconds; observed Workbench/API cutover unavailability was 0.83 seconds. Start
-notice preceded disconnect, Core/Remote identities stayed fixed, and a heartbeat
-due across handoff completed once after recovery. HASHI3 has 11 Workers, so this
-is not a 26-Worker p95 claim. The detailed evidence is in the repair record.
+reboot transactions at 4.6-5.5 seconds and 11-Worker `max` at 20.6-20.7
+seconds, but those commands used the legacy Workbench administration endpoint
+that called PAO directly. They are process-level evidence, not valid
+Frontend-Connector latency or frontend-parity evidence; the former 5.4-second
+p95 claim is withdrawn. The administration endpoint now submits `/reboot min`
+through the same FC-to-Worker path as ordinary Backend API and Telegram input,
+and PAO alone owns the activity preflight. Equivalent Function bytes survive a
+documentation-only commit without another isolated probe; the current
+qualification commit and immutable artifact-creation provenance remain distinct.
+Fresh end-to-end HASHI3 FC acceptance is recorded separately after adoption.
 
 October 13: HASHI3/HASHI4 and Workbench use GitHub `main`; continue there,
 without new branches/worktrees. [Reconciliation](repairs/DEBUG_CALL_RECONCILIATION_20261013.md)

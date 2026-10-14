@@ -167,7 +167,10 @@ For `min`, a number, `same`, or an explicit group, the shared Function superviso
    record that exact source commit, then qualify the generation in an isolated
    process. Dirty files outside the manifest do not block qualification.
 3. Reuse a sealed qualified generation and content-addressed artifact when its
-   exact Git/runtime key still matches; otherwise probe and materialize once.
+   runtime and exact Function bytes still match. If clean Git HEAD moved while
+   those bytes stayed identical, re-hash the accepted manifest once and bind a
+   refreshed receipt to the current commit; do not repeat the isolated probe.
+   The artifact retains its original creation provenance.
 4. Keep old routes open while spawning one READY candidate Worker for every
    selected Agent.
 5. Re-read live activity. If a target became busy, discard candidates and keep

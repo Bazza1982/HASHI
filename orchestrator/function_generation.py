@@ -315,6 +315,46 @@ class VerifiedFunctionGeneration:
                 "Function generation source commit changed after qualification"
             )
 
+    def refresh_qualification_seal(
+        self, expected_runtime: RuntimeFingerprint
+    ) -> VerifiedFunctionGeneration:
+        """Admit an unchanged content generation after checkout provenance moves.
+
+        A content-addressed Function generation may remain byte-for-byte
+        identical across a documentation-only commit.  At cache admission we
+        first retain the cheap runtime and clean-checkout proof.  Only when the
+        Git identity moved do we hash the already-qualified manifest once and
+        bind a new receipt to the current commit.  The strict
+        ``verify_qualification_seal`` remains the final cutover guard, so a
+        source change during one reboot transaction is still rejected.
+        """
+
+        policy = load_runtime_policy(self.code_root)
+        live_runtime = cached_current_runtime_fingerprint(
+            policy, code_root=self.code_root
+        )
+        compare_function_candidate_runtime(
+            expected_runtime,
+            live_runtime,
+            code_root=self.code_root,
+        )
+        compare_function_candidate_runtime(
+            self.receipt.runtime,
+            live_runtime,
+            code_root=self.code_root,
+        )
+        source_commit = verify_manifest_source_commit(
+            self.manifest,
+            code_root=self.code_root,
+        )
+        if source_commit == self.receipt.source_commit:
+            return self
+        verify_qualified_manifest_bytes(self.manifest, code_root=self.code_root)
+        return replace(
+            self,
+            receipt=replace(self.receipt, source_commit=source_commit),
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "code_root": str(self.code_root),

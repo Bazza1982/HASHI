@@ -120,6 +120,7 @@ def qualify_release(payload: dict) -> dict:
     return {
         "manifest": generation.manifest.to_dict(),
         "runtime": runtime.to_dict(),
+        "source_commit": generation.receipt.source_commit,
         "generation_root": str(artifact),
         "entrypoint": payload["entrypoint"],
         "adoption": adoption,

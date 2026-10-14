@@ -178,6 +178,15 @@ performs real configuration and backend initialization. Focused offline tests,
 live HASHI3 adoption and performance evidence are recorded separately in the
 [scoped implementation record](repairs/REBOOT_FAST_RELIABLE_20261014.md).
 
+The follow-up correction routes the Workbench administration action through the
+same Frontend Connector slash-command RPC as ordinary Backend API and Telegram
+commands. It no longer calls PAO's reboot method directly and no longer performs
+a second activity query before PAO's authoritative preflight. A
+content-identical Function generation can reuse its immutable artifact after a
+documentation-only commit: exact bytes are revalidated once, the current
+qualification receipt gets the new source commit, and artifact-creation
+provenance remains unchanged. The final pre-cutover seal is still strict.
+
 The 2026-10-08 HASHI3 repair supersedes browser-display/start-delivery prerequisites
 and terminal-notice retention blocking. Start delivery has a two-second head
 start budget and failure is recorded without cancelling the reboot. New browser

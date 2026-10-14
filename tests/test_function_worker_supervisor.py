@@ -1038,6 +1038,12 @@ def test_qualified_generation_cache_round_trip_and_tamper_rejection(
         "verify_qualification_seal",
         lambda self, expected_runtime: None,
     )
+    monkeypatch.setattr(
+        VerifiedFunctionGeneration,
+        "refresh_qualification_seal",
+        lambda self, expected_runtime: self,
+        raising=False,
+    )
 
     loaded = load_qualified_generation_cache(
         bridge_home,
@@ -1063,6 +1069,87 @@ def test_qualified_generation_cache_round_trip_and_tamper_rejection(
         )
         is None
     )
+
+
+def test_qualified_cache_reuses_content_artifact_after_docs_only_commit(
+    tmp_path,
+    monkeypatch,
+):
+    source_root = tmp_path / "source"
+    bridge_home = tmp_path / "bridge"
+    generation = _verified_generation(source_root)
+    artifact = materialize_generation_artifact(bridge_home, generation)
+    persist_qualified_generation_cache(bridge_home, generation, artifact)
+    artifact_metadata = json.loads(
+        (artifact / "function-generation.json").read_text(encoding="utf-8")
+    )
+    artifact_creation_commit = artifact_metadata["source_commit"]
+
+    (source_root / "README.md").write_text(
+        "Documentation-only commit must not invalidate identical Function bytes.\n",
+        encoding="utf-8",
+    )
+    subprocess.run(
+        ["git", "-C", str(source_root), "add", "README.md"],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source_root),
+            "-c",
+            "user.name=HASHI Test",
+            "-c",
+            "user.email=hashi-test@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "docs only",
+        ],
+        check=True,
+    )
+    current_commit = subprocess.run(
+        ["git", "-C", str(source_root), "rev-parse", "HEAD"],
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout.strip()
+    monkeypatch.setattr(
+        "orchestrator.function_generation.load_runtime_policy",
+        lambda _root: object(),
+    )
+    monkeypatch.setattr(
+        "orchestrator.function_generation.cached_current_runtime_fingerprint",
+        lambda *_args, **_kwargs: generation.receipt.runtime,
+    )
+    monkeypatch.setattr(
+        "orchestrator.function_generation.compare_function_candidate_runtime",
+        lambda *_args, **_kwargs: None,
+    )
+
+    loaded = load_qualified_generation_cache(
+        bridge_home,
+        source_root,
+        generation.receipt.runtime,
+    )
+
+    assert loaded is not None
+    loaded_generation, loaded_artifact = loaded
+    assert loaded_artifact == artifact
+    assert loaded_generation.manifest.generation_id == generation.manifest.generation_id
+    assert loaded_generation.receipt.source_commit == current_commit
+    assert artifact_creation_commit == generation.receipt.source_commit
+    assert artifact_creation_commit != current_commit
+    cache_payload = json.loads(
+        (
+            bridge_home
+            / "state"
+            / "function_generations"
+            / "qualified-generation.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert cache_payload["generation"]["receipt"]["source_commit"] == current_commit
 
 
 @pytest.mark.asyncio
@@ -1118,11 +1205,18 @@ async def test_in_memory_generation_cache_uses_lightweight_seal_not_full_byte_sc
     def full_scan(_runtime):
         raise AssertionError("cache hit must not re-hash the complete source closure")
 
-    generation = SimpleNamespace(
-        manifest=SimpleNamespace(module_names=("orchestrator.worker_demo",)),
-        verify_qualification_seal=lambda runtime: seal_checks.append(runtime),
-        verify_qualified_source=full_scan,
-    )
+    class _CachedGeneration:
+        manifest = SimpleNamespace(module_names=("orchestrator.worker_demo",))
+        verify_qualified_source = staticmethod(full_scan)
+
+        def refresh_qualification_seal(self, runtime):
+            seal_checks.append(runtime)
+            return self
+
+        def verify_qualification_seal(self, _runtime):
+            raise AssertionError("cache admission must use the refreshable seal")
+
+    generation = _CachedGeneration()
     supervisor = FunctionWorkerSupervisor(kernel)
     supervisor._cached_generation = generation
     monkeypatch.setattr(

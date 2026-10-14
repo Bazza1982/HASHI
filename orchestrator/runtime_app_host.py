@@ -100,7 +100,17 @@ class RuntimeAppHost:
         )
 
         generation_root = Path(self.bootstrap["generation_root"])
-        source_commit = generation_artifact_source_commit(generation_root, manifest)
+        artifact_source_commit = generation_artifact_source_commit(
+            generation_root,
+            manifest,
+        )
+        source_commit = str(
+            self.bootstrap.get("source_commit") or artifact_source_commit
+        ).lower()
+        if len(source_commit) not in {40, 64} or any(
+            character not in "0123456789abcdef" for character in source_commit
+        ):
+            raise ValueError("qualified Function source commit is invalid")
         startup_generation = generation_from_dict(
             {
                 "code_root": self.bootstrap["code_root"],

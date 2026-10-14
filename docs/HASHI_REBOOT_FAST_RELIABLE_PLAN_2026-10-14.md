@@ -530,12 +530,28 @@ Protected Core 检查通过。现场采用结果见 14.4，并与离线事实分
 
 2026-10-14 获得仅限 HASHI3 的明确授权后完成：
 
+证据更正：此前列出的五次 4.6–5.5 秒 `min` 和两次 20.6–20.7 秒
+`max` 是由旧 Workbench 管理端点发起。该端点直接调用 PAO，虽经过同一个
+RebootManager，却没有经过标准 Frontend Connector slash-command RPC。因此这些
+数据只能证明进程替换阶段性能，不能证明 Workbench/Telegram 命令入口一致，
+原“端到端 p95 约 5.4 秒”结论撤回。真实 Telegram 现场随后出现 44.8、37.7 秒
+的 `min` 和 49.5 秒的 `max`，暴露出同一 generation 在新 Git 提交与旧
+artifact 创建提交之间来回切换、反复触发完整资格检查的问题。
+
+跟进修复把 Workbench 管理动作改为提交同一个 `/reboot min` 到 FC→Worker
+命令链，并删除入口处重复的活动检查；PAO 仍保留唯一权威 preflight。缓存身份
+改为“精确 Function 内容 + runtime”，提交号只作为当前资格来源：HEAD 改变但
+内容相同时只精确复核一次字节并刷新回执，不再跑隔离 probe；任何 Function
+字节变化仍 fail closed。artifact 的创建来源保持不可变，不再反向覆盖当前
+资格回执。修复后的真实 FC 现场数据必须在提交并采用后另行记录。
+
 - 第一次 `max` 由旧 Functions 发起，仅作为采用运行；62.8 秒后加载提交
   `731592ad` 对应的新 generation；
-- 新运行代连续五次 `min` 为 5.5、5.2、4.6、4.9、5.0 秒，插值 p95 约
-  5.4 秒，五次均为 `succeeded` + `confirmed`，无警告；
-- 新运行代两次 `max` 为 20.6 和 20.7 秒，11/11 在线；一次精细观测到
-  Workbench/API 中断约 0.83 秒；
+- 旧管理端点连续五次 `min` 为 5.5、5.2、4.6、4.9、5.0 秒，五次均为
+  `succeeded` + `confirmed`，无警告；仅保留为 RebootManager/Worker
+  过程证据，不作为 FC 或用户端耗时结论；
+- 旧管理端点两次 `max` 为 20.6 和 20.7 秒，11/11 在线；一次精细观测到
+  Workbench/API 中断约 0.83 秒；同样不作为命令入口一致性的证明；
 - `min` 的 qualification/full-closure import 均为零；稳定缓存后仅有 1 次
   必要清单封印检查。`max` 对 11 个候选只保留每个进程一次 bootstrap 制品
   验证，没有 11 次完整闭包导入；
