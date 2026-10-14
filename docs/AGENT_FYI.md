@@ -14,10 +14,6 @@ noticeable, directly relevant and socially natural. Phone, model, reasoning,
 STT/TTS and Session ownership remain unchanged. See
 [Call decision](HASHI_CALL_INTERACTION_2026-10-04.md) for the complete contract.
 
-Earlier October 11-12 Call, microphone, restart and hangup checkpoints are
-preserved in [history](AGENT_FYI_HISTORY_2026-10-13.md). The current Call
-decision supersedes them wherever behavior differs.
-
 ## Authority and ownership
 
 PCM owns Persona, Context and Memory; PAO owns Agents, Sessions, Runs, jobs, Workzones and delivery; HERV3 owns Engine Turns, model/tool loop and cost; Frontend Connectors authenticate and render. Use the narrowest Function/configuration owner. Core has no product policy/imports. Protected Core requires explicit major-migration authorization, version bump, label and independent review; flags grant nothing.
@@ -89,6 +85,10 @@ Tool batches before effects. /stop, /retry, /resend and /steer differ; recovery
 cannot restore revoked authority. Show typed progress, not private reasoning.
 
 ## UI, media, and Phone
+
+Manual Desktop stale input is unexecuted: keep its lease, pause for a fresh
+frame and never replay. Other failures release control. See
+[desktop](HASHI_CROSS_PLATFORM_DEVICE_CONTROL_PLAN.md).
 
 Local cascade speech is an opt-in Function sidecar. Synthetic evidence does not establish physical audio acceptance. See [local Phone](HASHI_PHONE_LOCAL_CASCADE_GATE2.md).
 
