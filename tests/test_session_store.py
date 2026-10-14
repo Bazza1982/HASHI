@@ -535,6 +535,57 @@ def test_listener_marks_confirmed_user_stop_as_stopped_not_failed(tmp_path, monk
     assert store.get_run_by_request("backend-error", owner_id=owner)["state"] == "failed"
 
 
+def test_reconcile_durable_user_stop_receipt_marks_only_matching_run_stopped(tmp_path):
+    database = tmp_path / "state" / "sessions.sqlite3"
+    store = SessionStore(database, instance_id="HASHI1")
+    owner = "user:7"
+    session = store.create_session(owner_id=owner, agent_id="lily")
+    accepted = {}
+    accepted["stopped-request"] = store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="lily",
+        request_id="stopped-request",
+        text="check",
+        source="workbench",
+        idempotency_key="stopped-request",
+    )
+    store.mark_request_running("stopped-request", worker_id="old-worker")
+    stopped_at = datetime.now(timezone.utc).isoformat()
+    accepted["unrelated-request"] = store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="lily",
+        request_id="unrelated-request",
+        text="new request",
+        source="workbench",
+        idempotency_key="unrelated-request",
+    )
+    store.mark_request_running("unrelated-request", worker_id="new-worker")
+
+    reconciled = store.reconcile_incomplete_runs(
+        agent_id="lily",
+        user_stopped_at=stopped_at,
+        user_stop_request_id="stopped-request",
+    )
+
+    assert {
+        run["request_id"]: run["state"] for run in reconciled
+    } == {
+        "stopped-request": "stopped",
+        "unrelated-request": "interrupted",
+    }
+    reopened = SessionStore(database, instance_id="HASHI1")
+    assert reopened.get_run(accepted["stopped-request"].run_id)["state"] == "stopped"
+    assert (
+        reopened.get_run(accepted["unrelated-request"].run_id)["state"]
+        == "interrupted"
+    )
+    events = reopened.events(session["session_id"], owner_id=owner)
+    assert [event["kind"] for event in events].count("run.stopped") == 1
+    assert [event["kind"] for event in events].count("run.interrupted") == 1
+
+
 def _complete(
     store: SessionStore,
     *,

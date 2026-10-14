@@ -653,6 +653,25 @@ async def _process_single_item(runtime: Any, item: Any) -> None:
 
     except asyncio.CancelledError:
         runtime.is_generating = False
+        if item is not None:
+            from orchestrator.runtime_control import peek_user_interrupt
+
+            intentional_stop = (
+                item.request_id in runtime_cancel.requested_ids(runtime)
+                and peek_user_interrupt(runtime, item.request_id) == "user_stop"
+            )
+            if intentional_stop:
+                try:
+                    await runtime_cancel.finish_queued_request(
+                        runtime,
+                        item,
+                        error="Interrupted by user_stop",
+                    )
+                except Exception as terminal_exc:
+                    runtime.error_logger.exception(
+                        "User-stop terminal persistence failed: "
+                        f"{type(terminal_exc).__name__}: {terminal_exc}"
+                    )
         raise
     except Exception as exc:
         runtime._mark_error(str(exc))

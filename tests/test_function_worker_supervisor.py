@@ -634,8 +634,10 @@ async def test_worker_activation_reconciles_only_its_agent_before_accepting(
     calls = []
 
     class _Store:
-        def reconcile_incomplete_runs(self, *, agent_id=None):
-            calls.append(agent_id)
+        def reconcile_incomplete_runs(
+            self, *, agent_id=None, user_stopped_at=None, user_stop_request_id=None
+        ):
+            calls.append((agent_id, user_stopped_at, user_stop_request_id))
             return [{"request_id": "req-stale"}]
 
     from orchestrator import runtime_session
@@ -646,8 +648,47 @@ async def test_worker_activation_reconciles_only_its_agent_before_accepting(
 
     reconciled = await host._reconcile_interrupted_session_runs(object())
 
-    assert calls == ["alpha"]
+    assert calls == [("alpha", None, None)]
     assert reconciled == [{"request_id": "req-stale"}]
+
+
+@pytest.mark.asyncio
+async def test_worker_activation_repairs_request_named_by_user_stop_fence(
+    monkeypatch,
+):
+    calls = []
+
+    class _Store:
+        def reconcile_incomplete_runs(
+            self, *, agent_id=None, user_stopped_at=None, user_stop_request_id=None
+        ):
+            calls.append((agent_id, user_stopped_at, user_stop_request_id))
+            return [{"request_id": "req-stopped", "state": "stopped"}]
+
+    class _FenceStore:
+        def current(self, agent_id):
+            assert agent_id == "alpha"
+            return SimpleNamespace(
+                reason="user_stop",
+                request_id="req-stopped",
+                stopped_at="2026-10-14T08:22:55+00:00",
+            )
+
+    from orchestrator import agent_stop_fence, runtime_session
+
+    monkeypatch.setattr(runtime_session, "ensure_store", lambda _runtime: _Store())
+    monkeypatch.setattr(
+        agent_stop_fence, "store_for_runtime", lambda _runtime: _FenceStore()
+    )
+    host = FunctionWorkerHost.__new__(FunctionWorkerHost)
+    host.agent_name = "alpha"
+
+    reconciled = await host._reconcile_interrupted_session_runs(object())
+
+    assert calls == [
+        ("alpha", "2026-10-14T08:22:55+00:00", "req-stopped"),
+    ]
+    assert reconciled == [{"request_id": "req-stopped", "state": "stopped"}]
 
 
 @pytest.mark.asyncio

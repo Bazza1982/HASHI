@@ -2323,6 +2323,7 @@
     "control.retry_starting": "Starting recovery retry…",
     "control.stop.stopped": "Stopped this Agent's execution. Cleared {count} pending item(s) and stopped its active work.",
     "control.stop.cleared_idle": "Applied an Agent-level stop and cleared {count} pending item(s); no request was running.",
+    "control.stop.unconfirmed": "Stop is not fully confirmed: {count} request(s) could not be confirmed as durably stopped. Check the current state before taking another action.",
     "control.stop.continuation_saved": " The unfinished task was saved; send “continue” or “继续” to resume it.",
     "long.previous_finalizing": "⏳ The previous /long batch is still finalizing its media intake.",
     "long.already_here": "⏳ Already in /long mode. Send /end to finish.",

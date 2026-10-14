@@ -540,6 +540,44 @@ async def test_adapter_fixed_backend_keeps_one_session_and_accepts_incremental_t
 
 
 @pytest.mark.asyncio
+async def test_user_stop_shutdown_cancels_fixed_turn_before_runtime_cleanup():
+    events = []
+    accepted = SimpleNamespace(turn_id="turn-active")
+
+    class _Coordinator:
+        def cancel(self, turn, *, reason):
+            events.append(("cancel", turn.turn_id, reason))
+            return {"status": "cancelled"}
+
+    class _Runtime:
+        async def shutdown(self, *, reason):
+            events.append(("shutdown", reason))
+
+    adapter = object.__new__(HERv2Adapter)
+    adapter.config = SimpleNamespace(
+        _hashi_runtime=SimpleNamespace(
+            _user_interrupt={"reason": "user_stop"},
+        )
+    )
+    adapter.logger = logging.getLogger("test.herv3.user-stop")
+    adapter._session_coordinator = _Coordinator()
+    adapter._canonical_active_turns = {"request-active": accepted}
+    adapter._active_runtimes = {"request-active": _Runtime()}
+    adapter._learning = None
+
+    await adapter.shutdown()
+
+    assert events == [
+        (
+            "cancel",
+            "turn-active",
+            "HASHI /stop cancelled the active HER turn.",
+        ),
+        ("shutdown", "USER_STOP"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_fixed_route_freeze_failure_closes_turn_before_provider_work(
     tmp_path,
     monkeypatch,

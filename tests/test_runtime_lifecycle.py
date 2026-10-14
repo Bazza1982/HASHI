@@ -59,6 +59,150 @@ async def test_prompt_failure_finishes_durable_run_and_visible_activity(tmp_path
     assert restored.get_run(accepted.run_id)["state"]=="failed"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "terminal_fault", [None, "before_commit", "after_commit", "readback", "missing_run"]
+)
+async def test_user_stop_cancellation_persists_stopped_run_for_refresh(
+    tmp_path, monkeypatch, terminal_fault
+):
+    from types import MethodType
+    from unittest.mock import AsyncMock
+
+    from orchestrator import runtime_control, ui_language
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+    from orchestrator.request_activity import RequestActivityStore
+    from orchestrator.session_store import SessionNotFound, SessionStore
+    from tests.test_runtime_pipeline import _item, _runtime
+
+    runtime = _runtime()
+    database = tmp_path / "sessions.sqlite3"
+    runtime.session_store = SessionStore(database, instance_id="HASHI1")
+    owner = "owner"
+    session = runtime.session_store.create_session(
+        owner_id=owner, agent_id=runtime.name, title="stop refresh"
+    )
+    accepted = runtime.session_store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id=runtime.name,
+        request_id="req-user-stop",
+        text="Keep working until stopped",
+        source="session-api",
+        idempotency_key="user-stop-refresh",
+    )
+    item = _item(
+        request_id=accepted.request_id,
+        session_id=session["session_id"],
+        run_id=accepted.run_id,
+        context_generation=1,
+        owner_id=owner,
+        source="session-api",
+        session_surface="workbench",
+        session_channel_key="default",
+    )
+    runtime.request_activity = RequestActivityStore()
+    runtime.request_activity.start(item.request_id)
+    runtime.queue = asyncio.Queue()
+    runtime._request_listeners = {}
+    runtime._pending_request_results = {}
+    runtime._background_request_ids = set()
+    runtime._request_meta_by_id = {}
+    runtime._session_executions = {}
+    runtime._session_execution_tasks = {}
+    runtime._notify_request_listeners = MethodType(
+        FlexibleAgentRuntime._notify_request_listeners, runtime
+    )
+    runtime._remote_backend_block_reason = lambda _source: None
+    runtime._notify_right_brain_interrupted = lambda *args, **kwargs: None
+    runtime._is_authorized_user = lambda _user_id: True
+    runtime._reply_text = AsyncMock()
+    runtime.error_logger.exception = lambda _message: None
+
+    entered_prompt_build = asyncio.Event()
+
+    async def hold_prompt_build(*_args, **_kwargs):
+        entered_prompt_build.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        runtime_lifecycle.runtime_workzone, "activate_backend_state", AsyncMock()
+    )
+    monkeypatch.setattr(
+        runtime_lifecycle.runtime_pipeline, "build_turn_prompt", hold_prompt_build
+    )
+    monkeypatch.setattr(
+        "orchestrator.runtime_media.finish_native_voice_transcript_path", AsyncMock()
+    )
+    monkeypatch.setattr(
+        "orchestrator.frontend_whatsapp_mirror.deliver_whatsapp_mirror", AsyncMock()
+    )
+    monkeypatch.setattr(
+        "orchestrator.runtime_debug_reporting.schedule_terminal_diagnostic",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "orchestrator.runtime_debug_reporting.schedule_failure_report",
+        lambda *args, **kwargs: None,
+    )
+
+    await runtime.queue.put(item)
+    dequeued = await runtime.queue.get()
+    execution_task = asyncio.create_task(
+        runtime_lifecycle._process_single_item(runtime, dequeued)
+    )
+    runtime._session_execution_tasks[item.request_id] = execution_task
+    await asyncio.wait_for(entered_prompt_build.wait(), timeout=2)
+    assert runtime.session_store.get_run(accepted.run_id)["state"] == "running"
+
+    message = SimpleNamespace(text="/stop", chat=SimpleNamespace(id=123))
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=123),
+        effective_chat=SimpleNamespace(id=123),
+        effective_message=message,
+        message=message,
+    )
+    write_attempts = []
+    if terminal_fault in {"before_commit", "after_commit"}:
+        original_finish = runtime.session_store.finish_request
+
+        def finish_with_fault(*args, **kwargs):
+            write_attempts.append(1)
+            if terminal_fault == "before_commit":
+                raise OSError("isolated terminal write failed before commit")
+            original_finish(*args, **kwargs)
+            raise OSError("isolated terminal write reported an error after commit")
+
+        monkeypatch.setattr(runtime.session_store, "finish_request", finish_with_fault)
+    elif terminal_fault in {"readback", "missing_run"}:
+
+        def readback_with_fault(*args, **kwargs):
+            if terminal_fault == "missing_run":
+                raise SessionNotFound("isolated Run could not be found")
+            raise OSError("isolated terminal readback failed")
+
+        monkeypatch.setattr(runtime.session_store, "get_run_by_request", readback_with_fault)
+    await runtime_control.cmd_stop(runtime, update, SimpleNamespace(args=[]))
+
+    assert execution_task.done()
+    reopened = SessionStore(database, instance_id="HASHI1")
+    expected_state = "running" if terminal_fault == "before_commit" else "stopped"
+    assert reopened.get_run(accepted.run_id, owner_id=owner)["state"] == expected_state
+    events = reopened.events(session["session_id"], owner_id=owner)
+    assert [event["kind"] for event in events].count("run.stopped") == (
+        0 if terminal_fault == "before_commit" else 1
+    )
+    reply = runtime._reply_text.await_args.args[1]
+    unconfirmed = ui_language.tr("control.stop.unconfirmed", count=1)
+    if terminal_fault in {"before_commit", "readback", "missing_run"}:
+        assert reply == unconfirmed
+    else:
+        assert reply != unconfirmed
+        assert ui_language.tr("control.stop.stopped", count=0) in reply
+    if terminal_fault in {"before_commit", "after_commit"}:
+        assert len(write_attempts) == 1
+
+
 class _Logger:
     def __init__(self):
         self.messages = []

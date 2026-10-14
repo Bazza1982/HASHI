@@ -167,6 +167,10 @@ class BrowserModeTests(unittest.IsolatedAsyncioTestCase):
                 authorized_id=123,
             )
             runtime.config = SimpleNamespace(active_backend="codex-cli")
+            runtime.backend_manager = SimpleNamespace(
+                _read_state_dict=lambda: {}, agent_mode="flex", privacy_level=0
+            )
+            runtime._execution_admissions = {}
             runtime.queue = asyncio.Queue()
             runtime.error_logger = SimpleNamespace(error=lambda *_args, **_kwargs: None)
             runtime.message_logger = SimpleNamespace(info=lambda *_args, **_kwargs: None)
@@ -175,21 +179,23 @@ class BrowserModeTests(unittest.IsolatedAsyncioTestCase):
             )
             runtime_session.initialize_runtime_sessions(runtime)
 
-            # Enqueue must resolve the refreshed module-owned request class and
-            # persist the request under the channel's HASHI Session.
-            with patch("orchestrator.flexible_agent_runtime.QueuedRequest", object()):
-                request_id = await runtime.enqueue_request(
-                    456,
-                    "Find recent CSR sources",
-                    "browser:brave",
-                    "Browser task",
-                    habit_learning_eligible=True,
-                )
+            request_id = await runtime.enqueue_request(
+                456,
+                "Find recent CSR sources",
+                "browser:brave",
+                "Browser task",
+                habit_learning_eligible=True,
+            )
 
             item = runtime.queue.get_nowait()
             self.assertEqual(request_id, "req-browser-test-test-0001")
             self.assertTrue(item.habit_learning_eligible)
             self.assertEqual(item.session_id, runtime.default_session_id)
+            run = runtime.session_store.get_run_by_request(
+                request_id, agent_id=runtime.name
+            )
+            self.assertEqual(run["session_id"], item.session_id)
+            self.assertEqual(run["state"], "queued")
 
     async def test_command_without_args_shows_menu(self):
         runtime = _BrowserRuntime()

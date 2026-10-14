@@ -6889,6 +6889,8 @@ class SessionStore:
         self,
         *,
         agent_id: str | None = None,
+        user_stopped_at: str | None = None,
+        user_stop_request_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Terminalize Runs whose in-memory executor was lost on restart.
 
@@ -6909,23 +6911,33 @@ class SessionStore:
         interrupt Runs that still belong to another live Agent.
         """
 
+        user_stop_time: datetime | None = None
+        if user_stopped_at:
+            try:
+                user_stop_time = datetime.fromisoformat(
+                    str(user_stopped_at).strip().replace("Z", "+00:00")
+                )
+                if user_stop_time.tzinfo is None:
+                    user_stop_time = user_stop_time.replace(tzinfo=timezone.utc)
+            except (TypeError, ValueError):
+                user_stop_time = None
         now = _utc_now()
         target_agent_id = str(agent_id or "").strip().lower() or None
+        stopped_request_id = str(user_stop_request_id or "").strip()
         reconciled_ids: list[str] = []
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             agent_clause = " AND r.agent_id = ?" if target_agent_id else ""
             params: tuple[str, ...] = (
-                (self.instance_id, "hchat-exchange", target_agent_id)
+                (self.instance_id, target_agent_id)
                 if target_agent_id
-                else (self.instance_id, "hchat-exchange")
+                else (self.instance_id,)
             )
             rows = connection.execute(
                 f"""
                 SELECT r.* FROM runs AS r
                 JOIN sessions AS s ON s.session_id = r.session_id
                 WHERE s.instance_id = ? AND r.state IN ('queued', 'running')
-                  AND NOT (r.source = ? AND r.state = 'queued')
                 {agent_clause}
                 ORDER BY r.created_at, r.run_id
                 """,
@@ -6935,7 +6947,42 @@ class SessionStore:
                 prior_state = str(run["state"])
                 run_id = str(run["run_id"])
                 session_id = str(run["session_id"])
-                if target_agent_id:
+                created_at: datetime | None = None
+                try:
+                    created_at = datetime.fromisoformat(
+                        str(run["created_at"]).replace("Z", "+00:00")
+                    )
+                    if created_at.tzinfo is None:
+                        created_at = created_at.replace(tzinfo=timezone.utc)
+                except (TypeError, ValueError):
+                    pass
+                user_stopped = bool(
+                    target_agent_id
+                    and user_stop_time is not None
+                    and (
+                        str(run["request_id"]) == stopped_request_id
+                        or (
+                            created_at is not None
+                            and created_at < user_stop_time
+                        )
+                    )
+                )
+                if (
+                    str(run["source"]) == "hchat-exchange"
+                    and prior_state == "queued"
+                    and not user_stopped
+                ):
+                    continue
+                terminal_state = "stopped" if user_stopped else "interrupted"
+                error_code = (
+                    "user_stop" if user_stopped else "runtime_restart_interrupted"
+                )
+                if user_stopped:
+                    reason = (
+                        f"Agent '{target_agent_id}' was stopped by the user "
+                        "before this Run reached a terminal state"
+                    )
+                elif target_agent_id:
                     reason = (
                         f"Agent '{target_agent_id}' restarted before the accepted Run began"
                         if prior_state == "queued"
@@ -6950,22 +6997,30 @@ class SessionStore:
                 updated = connection.execute(
                     """
                     UPDATE runs
-                    SET state = 'interrupted', fencing_token = fencing_token + 1,
-                        worker_id = NULL, error_code = 'runtime_restart_interrupted',
+                    SET state = ?, fencing_token = fencing_token + 1,
+                        worker_id = NULL, error_code = ?,
                         error_text = ?, completed_at = ?, updated_at = ?
                     WHERE run_id = ? AND state = ?
                     """,
-                    (reason, now, now, run_id, prior_state),
+                    (
+                        terminal_state,
+                        error_code,
+                        reason,
+                        now,
+                        now,
+                        run_id,
+                        prior_state,
+                    ),
                 )
                 if updated.rowcount != 1:
                     continue
                 connection.execute(
                     """
                     UPDATE run_attempts
-                    SET state = 'interrupted', finished_at = ?
+                    SET state = ?, finished_at = ?
                     WHERE run_id = ? AND state = 'running'
                     """,
-                    (now, run_id),
+                    (terminal_state, now, run_id),
                 )
                 self._release_run_audio_leases(
                     connection, run_id=run_id, released_at=now
@@ -6974,26 +7029,27 @@ class SessionStore:
                     connection,
                     session_id=session_id,
                     run_id=run_id,
-                    kind="run.interrupted",
-                    status="interrupted",
+                    kind=f"run.{terminal_state}",
+                    status=terminal_state,
                     phase="recovery",
                     summary=reason,
                     detail={
                         "agent_id": str(run["agent_id"]),
-                        "error_code": "runtime_restart_interrupted",
+                        "error_code": error_code,
                         "prior_state": prior_state,
                         "recovery_scope": "agent" if target_agent_id else "instance",
+                        "user_stop_reconciled": user_stopped,
                     },
                     outbox=True,
                 )
                 projection = {
                     "run_id": run_id,
                     "session_id": session_id,
-                    "state": "interrupted",
+                    "state": terminal_state,
                     "user_message_id": str(run["user_message_id"]),
                     "final_message_id": None,
                     "error": reason,
-                    "error_code": "runtime_restart_interrupted",
+                    "error_code": error_code,
                     "prior_state": prior_state,
                     "latest_event_sequence": event["sequence"],
                 }
