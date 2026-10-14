@@ -1,6 +1,6 @@
 # HASHI 热重启提速、可靠性与回执修复方案
 
-状态：实现、HASHI3 标准 FC 现场验收及离线恢复复核完成；HASHI3 当前在线（现场拓扑为 11 Workers）
+状态：实现、HASHI3 标准 FC 现场验收、离线恢复复核及用户实测完成；HASHI3 当前在线（现场拓扑为 11 Workers）
 日期：2026-10-14
 开发分支：`debug-reboot`（仅 HASHI3）
 功能所有者：PAO；用户消息由 Frontend Connector Functions 所有

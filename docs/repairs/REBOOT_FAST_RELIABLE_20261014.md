@@ -217,3 +217,8 @@ The final affected regression set passed 236/236, the curated Core gate passed
 839 with 1 skipped, Windows launcher tests passed 12/12, and Protected Core
 checks passed for both the worktree and the branch relative to `main`. HASHI3
 is online. HASHI4 was neither modified nor rebooted.
+
+User acceptance is recorded separately from implementation and system evidence:
+after the final live sequence, the user reported on 2026-10-14 that the observed
+result was very good. This approves the verified HASHI3 behavior for PR review;
+it is not evidence that HASHI4 has adopted or loaded the change.
