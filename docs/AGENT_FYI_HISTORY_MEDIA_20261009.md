@@ -169,3 +169,9 @@ Physical phones, other machines, microphone/camera use and human hearing remain
 uncertified. Preserve the already-open user Electron; native adoption is next
 normal launch. Original source/WIP is preserved; no HASHI4 changes or cold Core
 restart. See [current delivery](repairs/NIGHTLY_20261008_HASHI3.md).
+
+## Legacy compatibility guard
+
+The legacy incoming bridge checks every successful ACK field through the
+standalone importer's validator before it skips a previously delivered batch.
+Inconsistent receipts fail closed and retain the old source batch.

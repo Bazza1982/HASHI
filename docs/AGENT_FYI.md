@@ -24,9 +24,8 @@ Source/Worker/delivery require proof. Tools cannot edit/kill Core/Python, read s
 
 Configuration owns identity, ports, Workzones, endpoints and models. Ignore secrets/machine paths. Instance models use allowed_backends and runtime effort options; shared compatibility uses the qualified registry. Explicit choices persist; unknown capabilities/prices are neither unsupported nor zero cost.
 
-Agent display name and Emoji come from revisioned instance configuration. Live
-runtime metadata supplies dynamic status only and cannot overwrite identity;
-Worker refresh after a save is best-effort and never reverses durable success.
+Agent display name/Emoji come only from revisioned instance configuration.
+Runtime supplies dynamic status, never identity. Post-save Worker refresh is best-effort and cannot reverse durable success.
 
 Verified exact-model capabilities never expire. Unknown lookup failures can back off; refresh failures cannot erase verified facts. Changed model/adapter identity or validated source revisions may replace them. Pricing freshness is separate. See [capabilities](HASHI_MODEL_CAPABILITY_DISCOVERY.md).
 
@@ -141,13 +140,9 @@ file-microphone recognition/reply/playback/hangup pass; 52 focused checks pass.
 Physical microphone/camera and hearing remain personal acceptance.
 
 
-Remaining Move/Scheduler/HCC and prior deployment notes are preserved in [October 9 history](AGENT_FYI_HISTORY_MEDIA_20261009.md). Historical deployment scopes grant no current authority.
+Remaining Move/Scheduler/HCC, legacy compatibility and prior deployment notes are preserved in [October 9 history](AGENT_FYI_HISTORY_MEDIA_20261009.md). Historical deployment scopes grant no current authority.
 
 The Lily Wiki pipeline counts only newly promoted candidates. Repeated private
 knowledge promotion must not rewrite an already-promoted candidate or inflate
 the daily promotion total. Its dated consolidation scan and embed log remains
 the publication gate; a Scheduler trigger timestamp alone is insufficient.
-
-The legacy incoming bridge now checks every successful ACK field through the
-standalone importer's validator before it skips a previously delivered batch;
-inconsistent receipts fail closed and retain the old source batch.
