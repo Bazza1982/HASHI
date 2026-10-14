@@ -1267,7 +1267,7 @@ async def test_successor_reconciles_shared_function_without_touching_remote(
     generation = _Generation("a")
     new_kernel = _Kernel()
     new_kernel.paths = SimpleNamespace(bridge_home=tmp_path)
-    new_kernel._shared_replacement_candidate = True
+    new_kernel._shared_replacement_continuity = True
     new_kernel.shared_generation_id = generation.manifest.generation_id
     new_kernel.function_release_adoption = {
         "status": "fallback",
@@ -1324,7 +1324,7 @@ async def test_cold_start_does_not_confirm_interrupted_shared_replacement(tmp_pa
     generation = _Generation("a")
     cold_kernel = _Kernel()
     cold_kernel.paths = SimpleNamespace(bridge_home=tmp_path)
-    cold_kernel._shared_replacement_candidate = False
+    cold_kernel._shared_replacement_continuity = False
     cold_kernel.shared_generation_id = generation.manifest.generation_id
     cold_kernel.runtimes = []
     for index, name in enumerate(("zelda", "sunny"), start=1):

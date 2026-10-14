@@ -241,6 +241,7 @@ async def test_transient_connector_failure_retries_without_blocking_other_connec
         runtimes=[],
         shared_generation_id="generation-a",
         _handoff_draining=True,
+        _shared_replacement_candidate=True,
         startup_status={"issues": []},
         api_gateway=None,
         whatsapp=None,
@@ -259,6 +260,8 @@ async def test_transient_connector_failure_retries_without_blocking_other_connec
     try:
         result = await host.commit()
         assert result["committed"] and result["degraded"]
+        assert app._shared_replacement_candidate is False
+        assert app._shared_replacement_continuity is True
         assert healthy.is_running and whatsapp_calls
         await asyncio.wait_for(host.connector_task, timeout=1)
         assert flaky.is_running and flaky.calls == 2

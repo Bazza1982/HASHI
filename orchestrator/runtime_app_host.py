@@ -263,6 +263,9 @@ class RuntimeAppHost:
             raise RuntimeError("shared Functions are not active")
         app._handoff_draining = False
         app._shared_committed = True
+        app._shared_replacement_continuity = bool(
+            getattr(app, "_shared_replacement_candidate", False)
+        )
         app._shared_replacement_candidate = False
         app.shared_adopted_at = datetime.now().astimezone().isoformat()
         broadcast_topology = getattr(

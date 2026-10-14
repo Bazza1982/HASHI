@@ -673,7 +673,7 @@ class RebootManager:
             ):
                 continue
             if record.get("recovered") and not getattr(
-                self.kernel, "_shared_replacement_candidate", False
+                self.kernel, "_shared_replacement_continuity", False
             ):
                 # A normal cold/recovery startup may observe the same committed
                 # generation and online Workers after the previous Core died.
