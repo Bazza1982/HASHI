@@ -13,7 +13,9 @@ def _parse_timestamp(value) -> datetime | None:
     if not text:
         return None
     try:
-        parsed = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith("Z") else text)
+        parsed = datetime.fromisoformat(
+            text[:-1] + "+00:00" if text.endswith("Z") else text
+        )
     except ValueError:
         return None
     if parsed.tzinfo is None:
@@ -48,9 +50,7 @@ def build_call_time_context(recent_history, *, now: datetime | None = None) -> s
         f"Current local date and time: {_display_timestamp(current)}.",
     ]
     if previous is None:
-        lines.append(
-            "There is no earlier user message in this Conversation Session."
-        )
+        lines.append("There is no earlier user message in this Conversation Session.")
     else:
         previous = previous.astimezone(current.tzinfo if supplied_now else None)
         lines.append(

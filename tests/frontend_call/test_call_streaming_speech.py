@@ -430,9 +430,7 @@ async def test_filler_preparation_does_not_compete_with_opening_speech(tmp_path)
             "filler synthesis competed with the opening voice"
         )
         requested = asyncio.create_task(
-            service.invoke(
-                "owner", {**binding, "operation": "filler", "slot": 0}
-            )
+            service.invoke("owner", {**binding, "operation": "filler", "slot": 0})
         )
         await asyncio.sleep(0)
         await asyncio.sleep(0)
