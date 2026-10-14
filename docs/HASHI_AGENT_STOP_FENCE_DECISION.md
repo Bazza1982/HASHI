@@ -129,7 +129,16 @@ uncommitted-source failures were cleared without weakening the gate.
 The final focused run passed 118 cases, including four new regressions and
 the restored event assertions. Protected Core and whitespace checks also
 passed.
-These are offline checks. The HASHI3 live canary recorded above exercised
-`6c12e927`, not the subsequent review fixes; it is not evidence of HASHI4
-adoption. Source deployment and a separately authorized Function adoption
-remain distinct.
+Final candidate `d259f654` passed the curated Core gate with 821 passed and
+1 Windows-inapplicable skip, the complete HERV3 adapter suite with 98 passed,
+and the focused stop/HERV3 regression set with 16 passed. Protected Core and
+lint checks passed.
+
+HASHI3 then loaded that exact clean commit with all 11 Function Workers active
+and accepting the same generation. Through the real Workbench frontend, an
+active HERV3 foreground request was stopped; the outer Run persisted as
+`stopped`, the fixed-session Engine Turn persisted as `cancelled`, and an
+immediate next request completed normally. After a full page reload and chat
+reopen, the Agent remained idle with queue zero, no stop spinner, and no late
+output from the cancelled request. This is not evidence of HASHI4 adoption;
+source deployment and Function adoption remain distinct.
