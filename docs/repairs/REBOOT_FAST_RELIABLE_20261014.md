@@ -83,6 +83,16 @@ qualification commit during a broad handoff. Changed Function bytes still fail
 closed. Fresh end-to-end FC results are recorded only after committed-source
 adoption.
 
+The first follow-up FC `max` correctly reached all 11 targets but rolled back
+before cutover. The runtime contract named a dependency-digest mismatch. No
+package had changed: a release build had regenerated ignored root
+`hashi_bridge.egg-info` from version `4.0.0a2` to `4.0.0b1` after Core launch.
+Because Python distribution discovery reads that metadata, the packaging side
+effect manufactured runtime drift. Cold restart is not a Function deployment
+or recovery path. Python packages now build from an exact temporary Git `HEAD`
+export, leaving the live checkout unchanged; HASHI3 restores the exact
+launch-time metadata before retrying adoption through `/reboot` only.
+
 - five same-generation `min` runs completed in 5.5, 5.2, 4.6, 4.9 and 5.0 s;
   every receipt was `succeeded` + `confirmed`, with no warnings. These are
   retained as RebootManager/Worker measurements only;

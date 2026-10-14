@@ -101,6 +101,14 @@ and `uv sync` must not implicitly create or synchronize that environment.
 Diagnostics use the existing approved interpreter directly; isolated helpers
 use `uv run --no-project` or an explicitly separate environment.
 
+Python release packaging is isolated for the same reason. Setuptools may
+rewrite project-local `*.egg-info` metadata even when no dependency changes.
+Release artifacts therefore use `scripts/build_python_release.py`, which builds
+an exact Git `HEAD` export in a temporary directory. A packaging command must
+never run against a checkout owned by a live Core: ignored metadata is still
+visible to Python distribution discovery and can otherwise manufacture a false
+runtime drift that blocks Function `/reboot`.
+
 Windows has no system IANA timezone database. The standard dependency contract
 therefore installs the hash-locked `tzdata` package on Windows only, so
 timezone-sensitive Scheduler and Wiki evidence uses the same named zones as

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import tarfile
 import tomllib
 from pathlib import Path
 
 from packaging.requirements import Requirement
+from scripts.build_python_release import build_python_release
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -86,6 +88,57 @@ def test_development_requirements_extend_standard_without_runtime_duplication():
 
 def test_uv_cannot_implicitly_manage_the_runtime_environment():
     assert _pyproject()["tool"]["uv"]["managed"] is False
+
+
+def test_python_release_build_uses_an_isolated_committed_export(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    metadata = source / "hashi_bridge.egg-info" / "PKG-INFO"
+    metadata.parent.mkdir()
+    metadata.write_text(
+        "Metadata-Version: 2.4\nName: hashi-bridge\nVersion: runtime-baseline\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "dist"
+    calls: list[tuple[tuple[str, ...], Path]] = []
+
+    def run(command, *, cwd, check):
+        command = tuple(str(part) for part in command)
+        working_directory = Path(cwd).resolve()
+        calls.append((command, working_directory))
+        assert check is True
+        if command[:3] == ("git", "archive", "--format=tar"):
+            archive_path = Path(command[command.index("--output") + 1])
+            payload = tmp_path / "tracked-pyproject.toml"
+            payload.write_text("[build-system]\n", encoding="utf-8")
+            with tarfile.open(archive_path, "w") as archive:
+                archive.add(payload, arcname="pyproject.toml")
+            return
+        assert command[:3] == (sys.executable, "-m", "build")
+        assert working_directory != source.resolve()
+        generated = working_directory / "hashi_bridge.egg-info" / "PKG-INFO"
+        generated.parent.mkdir()
+        generated.write_text("Version: candidate\n", encoding="utf-8")
+        output.mkdir(parents=True, exist_ok=True)
+        (output / "hashi_bridge.whl").write_bytes(b"wheel")
+
+    artifacts = build_python_release(source, output, runner=run)
+
+    assert metadata.read_text(encoding="utf-8").endswith(
+        "Version: runtime-baseline\n"
+    )
+    assert artifacts == (output / "hashi_bridge.whl",)
+    assert calls[0][0][-1] == "HEAD"
+    assert calls[1][1] != source.resolve()
+
+
+def test_release_checklist_never_builds_python_packages_in_runtime_checkout():
+    checklist = (ROOT / "docs" / "RELEASE_CHECKLIST.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "python scripts/build_python_release.py" in checklist
+    assert "`python -m build`" not in checklist
 
 
 def test_setup_py_is_metadata_free_compatibility_shim():

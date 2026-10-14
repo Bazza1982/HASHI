@@ -25,7 +25,9 @@
   - `python -m pytest -q tests/test_runtime_contract.py tests/test_function_generation.py tests/test_reboot_manager.py`
 - Core gate: `python -m pytest -q`
 - Offline product suite for the release candidate: `python -m pytest -q tests -m "not contract and not live and not platform and not real_wall_clock"`
-- Python source distribution and wheel: `python -m build`
+- Python source distribution and wheel:
+  `python scripts/build_python_release.py`. It builds committed `HEAD` in a
+  temporary export; never run the packaging backend in a live runtime checkout.
 - npm publication boundary: `npm pack --dry-run --json` and
   `python -m pytest -q tests/contract/test_npm_package_contract.py`
   - the user guides and their local navigation targets are present in the
@@ -274,7 +276,7 @@ rollout.
 
 ### Package
 
-- Build artifacts: `python -m build`
+- Build artifacts: `python scripts/build_python_release.py`
 - Fresh install smoke: install the built wheel into a clean environment
 - CLI smoke: `nagare run tests/fixtures/smoke_test.yaml --yes --silent --smoke-handler`
 - Contract tests: `pytest -q tests/contract`

@@ -22,6 +22,11 @@ and PAO alone owns the activity preflight. Equivalent Function bytes survive a
 documentation-only commit without another isolated probe; the current
 qualification commit and immutable artifact-creation provenance remain distinct.
 Fresh end-to-end HASHI3 FC acceptance is recorded separately after adoption.
+Python release builds now run from an isolated committed-source export; direct
+packaging in a live HASHI checkout is forbidden because regenerated `egg-info`
+can alter the Core environment fingerprint without changing any dependency.
+That contamination is repaired by restoring the launch-time environment and
+then using `/reboot`, never by normalizing a Function change with `/restart`.
 
 October 13: HASHI3/HASHI4 and Workbench use GitHub `main`; continue there,
 without new branches/worktrees. [Reconciliation](repairs/DEBUG_CALL_RECONCILIATION_20261013.md)
