@@ -1241,6 +1241,9 @@ async def test_max_reboot_rejects_busy_worker_before_shared_handoff(tmp_path):
     record = manager.receipts.records()[-1]
     assert (record["status"], record["reason"]) == ("rejected", "target_busy")
     assert record["busy_targets"] == ["sunny"]
+    assert manager._operation_projection(record)["blocking_targets"] == [
+        {"agent_id": "sunny", "display_name": "sunny"}
+    ]
     assert not any(handle._cutover for handle in kernel.runtimes)
     assert not (
         tmp_path / "state" / "instance" / "kernel-requests" / f"{record['id']}.json"
@@ -1618,6 +1621,9 @@ async def test_target_becoming_busy_during_prepare_discards_candidate_before_fen
     assert metadata_reads == 2
     assert record["outcome"] == "rejected"
     assert record["reason"] == "target_became_busy"
+    assert manager._operation_projection(record)["blocking_targets"] == [
+        {"agent_id": "zelda", "display_name": "zelda"}
+    ]
     assert candidate.shutdown_calls == 1
     assert handle.client is old and old.process.is_alive()
     assert handle._cutover is False
@@ -2259,6 +2265,9 @@ async def test_unreadable_activity_retains_worker_and_actionable_receipt(tmp_pat
     assert not await manager.hot_restart({"mode": "min", "agent_name": "zelda"})
     record = RebootManager(kernel, None).receipts.records()[-1]
     assert record["reason"] == "activity_unavailable"
+    assert manager._operation_projection(record)["blocking_targets"] == [
+        {"agent_id": "zelda", "display_name": "zelda"}
+    ]
     assert old.process.alive and not kernel.events
     rendered = render_status(record, locale="en")
     assert "Agent activity is unavailable; retry later." in rendered

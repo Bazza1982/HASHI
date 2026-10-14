@@ -222,3 +222,20 @@ User acceptance is recorded separately from implementation and system evidence:
 after the final live sequence, the user reported on 2026-10-14 that the observed
 result was very good. This approves the verified HASHI3 behavior for PR review;
 it is not evidence that HASHI4 has adopted or loaded the change.
+
+## Rejection presentation follow-up
+
+The later HASHI4 `/reboot max` request was received and rejected before any
+replacement because Agent `sakura` was processing work. The persisted receipt
+already retained `reason=target_busy` and `busy_targets=[sakura]`; neither the
+backend repair nor its merge had been lost. The remaining defect crossed the
+Frontend Connector boundary: the operation projection omitted those target
+details, Workbench reduced the rejection to a generic banner, and its submitted
+command row was incorrectly marked as a failed message send.
+
+Tests reproduced all three missing behaviors before implementation. The
+operation projection now exposes bounded blocking Agent IDs and display names;
+Workbench names them, explains when retry is safe, and keeps the command row
+accepted while presenting the terminal rejection as the operation outcome.
+There is no automatic retry, route change, Worker replacement, Python change,
+Protected Core change, or HASHI4 restart in this follow-up.
