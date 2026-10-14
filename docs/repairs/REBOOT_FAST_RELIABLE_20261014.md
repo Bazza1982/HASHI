@@ -154,3 +154,24 @@ before disconnection and final messages stated an unambiguous outcome.
 Core PID 12824 and Remote child PID 20204 remained unchanged. HASHI4 was not
 modified or rebooted. The final affected regression set passed 108/108 and the
 Protected Core check passed.
+
+## Post-acceptance deployment correction
+
+Commit `dc758d6e` changed only documentation. It did not change Function bytes
+or generation, so no live adoption was required. An additional `max` was
+nevertheless submitted. The candidate reused generation
+`sha256:22774b7e5c4852a8f9a262a41787258393df340f1ed132e39dc3b18df33b3458`,
+started the new shared Functions and reached 11/11 Workers. Before the final
+connector recovery and receipt, Core PID 12824 terminated abnormally along
+with its Function process tree. Its PID file remained stale and Windows
+recorded no Python crash or resource-exhaustion event. Available evidence does
+not identify the terminating actor, but this was not a normal Core exit and is
+not evidence that Function adoption needs a cold restart.
+
+The deployment rule is corrected as follows: committed Function-byte changes
+adopt only through standard-FC `/reboot` with the narrowest valid scope;
+documentation, test and release-note-only commits execute no runtime adoption
+command. Source commit, Function generation and current runtime availability
+remain separate facts. A missing Core is reported as a separate operational
+failure and is never converted into a Function `/restart` requirement. HASHI4
+was untouched.

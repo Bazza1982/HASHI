@@ -72,6 +72,14 @@
 - Backend API health: `curl http://127.0.0.1:<backend_api_port>/api/health`
 - API Gateway health when enabled: `curl http://127.0.0.1:<api_gateway_port>/health`
 - Live reboot smoke:
+  - classify the committed diff before live adoption: only Function-byte
+    changes require a runtime command; documentation, tests and release notes
+    alone require none
+  - adopt every Function-byte change through the standard Frontend Connector
+    `/reboot` path with the narrowest valid scope; never substitute a cold
+    process restart
+  - attach acceptance to an already-running Core; never launch or retain Core
+    under a temporary test, verification or foreground command executor
   - `/reboot min`
   - `/reboot max`
   - while at least one other Agent remains online, adopt a disposable public

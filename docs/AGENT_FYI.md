@@ -28,6 +28,15 @@ can alter the Core environment fingerprint without changing any dependency.
 That contamination is repaired by restoring the launch-time environment and
 then using `/reboot`, never by normalizing a Function change with `/restart`.
 
+Function deployment is generation-scoped, not commit-scoped. A committed
+Function-byte change is adopted only through the standard Frontend Connector
+`/reboot` path and with the narrowest valid target. Documentation, tests and
+release-note-only commits do not change the Function generation and require no
+runtime command. Never launch or hold the long-running Core under a temporary
+test/verification process merely to perform acceptance. If Core is unavailable,
+report that separate operational state; do not substitute `/restart` as a
+Function deployment or recovery step.
+
 October 13: HASHI3/HASHI4 and Workbench use GitHub `main`; continue there,
 without new branches/worktrees. [Reconciliation](repairs/DEBUG_CALL_RECONCILIATION_20261013.md)
 preserves the repairs; source and runtime adoption remain separate.

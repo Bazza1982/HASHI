@@ -1,6 +1,6 @@
 # HASHI 热重启提速、可靠性与回执修复方案
 
-状态：实现与 HASHI3 现场验收完成；准备提交 PR（现场拓扑为 11 Workers）
+状态：实现与 HASHI3 标准 FC 现场验收完成；部署方法已纠正；HASHI3 当前离线且未冷启动（现场拓扑为 11 Workers）
 日期：2026-10-14
 开发分支：`debug-reboot`（仅 HASHI3）
 功能所有者：PAO；用户消息由 Frontend Connector Functions 所有
@@ -129,6 +129,18 @@ Core 的共享 Functions handoff 本身已经在真正切换时执行 quiesce、
 受保护 bootstrap 的一次制品验证保留，作为每个新进程的安全边界。所有重复工作
 清理、状态判断、回执和消息调整都在 Functions 所有者中完成。若实现中发现必须
 改变 Core 协议，应停止该项并单独提出 Core 大版本迁移，不能借本方案绕过。
+
+### 3.3 部署按 Function generation，而不是按提交号
+
+- 已提交的 Function 字节发生变化时，只能通过标准 Frontend Connector
+  `/reboot` 路径采用，并选择最窄的正确范围；
+- 只有文档、测试或发布说明变化时，Function generation 没有变化，不执行
+  `min`、`max` 或任何其他运行采用命令；
+- source commit、Function generation 和当前运行状态分别报告，不为追求“提交号
+  看起来一致”而制造一次无意义热重启；
+- 长期 Core 不得由临时测试、验证或前台命令执行器托管。验收只连接已经运行的
+  HASHI3；Core 不可用时报告独立运行故障，不得以 `/restart` 代替 Function
+  部署或故障恢复。
 
 ## 4. 目标流程
 
@@ -573,8 +585,17 @@ generation 的 `min → max → min` 分别为 5.4、21.1、5.2 秒，全部为
   制品验证，完整资格和完整闭包导入均为零；
 - 两次 `min` 的新旧 Worker nonce、启动时间、generation、Agent 身份、路由、
   backend readiness 和旧进程退出均由权威回执确认，PID 只保留作诊断；
-- 最终现场 Core PID 仍为 12824，Remote child PID 仍为 20204；HASHI4 未修改、
-  未重启，全程没有使用 `/restart`。
+- 标准 FC 验收结束时 Core PID 仍为 12824，Remote child PID 仍为 20204；
+  HASHI4 未修改、未重启，全程没有使用 `/restart`。
+
+验收文档提交后曾错误地再触发一次 `max`，尽管该提交没有改变任何 Function
+字节、generation 仍为
+`sha256:22774b7e5c4852a8f9a262a41787258393df340f1ed132e39dc3b18df33b3458`。
+新共享 Functions 已启动并达到 11/11 Worker 后，Core 非正常终止；PID 文件未
+正常清理，Windows 没有 Python 崩溃或资源耗尽事件，现有证据无法确定终止来源，
+操作因而没有最终回执。
+这次无意义的文档后采用不计入成功验收，也不产生冷启动要求。HASHI3 当前运行
+采用状态单独标为不可用/未复核；不得用 `/restart` 使 Function 变更生效。
 
 HASHI3 当前只有 11 个 Worker，因此上述实机结果不能冒充 26-Worker p95。
 26-Worker 的重复资格工作已由计数回归证明不会随 Worker 数量倍增；生产规模
