@@ -1,60 +1,5 @@
 # HASHI Agent FYI
 
-October 14 reboot decision: `/reboot` preparation keeps old routes, API and
-Scheduler online; only the final cutover is fenced. A new generation is fully
-qualified once by the isolated probe, while the protected bootstrap verifies
-each process artifact once and each Worker still performs real backend startup.
-Final identity uses Agent + worker nonce + generation and the authoritative
-route/process handle; PID is diagnostic. Receipts separately state outcome and
-observation confidence, preserve partial success, and name failed Agents and
-checks. Start notification remains before any possible Workbench disconnect.
-Only the successor shared process prepared by the same live Core handoff may
-confirm an inherited broad-reboot receipt. A cold/recovery startup must mark it
-interrupted and unconfirmed even if the requested generation and all Workers
-are online; restored availability is not proof that the hot transaction lived.
-`/restart`, Core and Remote behavior are unchanged. See
-[reboot decision](HASHI_REBOOT_FAST_RELIABLE_PLAN_2026-10-14.md).
-
-HASHI3 live adoption on October 14 measured five same-generation single-Agent
-reboot transactions at 4.6-5.5 seconds and 11-Worker `max` at 20.6-20.7
-seconds, but those commands used the legacy Workbench administration endpoint
-that called PAO directly. They are process-level evidence, not valid
-Frontend-Connector latency or frontend-parity evidence; the former 5.4-second
-p95 claim is withdrawn. The administration endpoint now submits `/reboot min`
-through the same FC-to-Worker path as ordinary Backend API and Telegram input,
-and PAO alone owns the activity preflight. Equivalent Function bytes survive a
-documentation-only commit without another isolated probe; the current
-qualification commit and immutable artifact-creation provenance remain distinct.
-The final standard-FC HASHI3 `min → max → min` acceptance completed in
-4.6, 18.5 and 4.7 seconds; every receipt was succeeded + confirmed, the two
-targeted runs selected only `agent1`, and the broad run selected all 11 Agents.
-Core and Remote identities remained unchanged while shared Functions changed
-only for `max`.
-Python release builds now run from an isolated committed-source export; direct
-packaging in a live HASHI checkout is forbidden because regenerated `egg-info`
-can alter the Core environment fingerprint without changing any dependency.
-That contamination is repaired by restoring the launch-time environment and
-then using `/reboot`, never by normalizing a Function change with `/restart`.
-
-HASHI3's later offline state was caused by its legacy Windows task launcher,
-not by a need to cold-restart Function code. Native Python stderr was converted
-to a terminating PowerShell `NativeCommandError`; Windows Job cleanup then
-removed the Core/Functions tree. HASHI3 now uses the standard launcher with
-separate streams and child-exit-code authority, on the unchanged Python 3.12.13
-and 63-package environment. Cold startup must never confirm an inherited broad
-receipt from availability alone. Only the successor shared process prepared by
-the same live Core handoff carries the continuity witness needed to confirm it.
-HASHI3 is online; its final adoption used `/reboot` only, never `/restart`.
-
-Function deployment is generation-scoped, not commit-scoped. A committed
-Function-byte change is adopted only through the standard Frontend Connector
-`/reboot` path and with the narrowest valid target. Documentation, tests and
-release-note-only commits do not change the Function generation and require no
-runtime command. Never launch or hold the long-running Core under a temporary
-test/verification process merely to perform acceptance. If Core is unavailable,
-report that separate operational state; do not substitute `/restart` as a
-Function deployment or recovery step.
-
 October 13: HASHI3/HASHI4 and Workbench use GitHub `main`; continue there,
 without new branches/worktrees. [Reconciliation](repairs/DEBUG_CALL_RECONCILIATION_20261013.md)
 preserves the repairs; source and runtime adoption remain separate.
@@ -77,7 +22,7 @@ decision supersedes them wherever behavior differs.
 
 PCM owns Persona, Context and Memory; PAO owns Agents, Sessions, Runs, jobs, Workzones and delivery; HERV3 owns Engine Turns, model/tool loop and cost; Frontend Connectors authenticate and render. Use the narrowest Function/configuration owner. Core has no product policy/imports. Protected Core requires explicit major-migration authorization, version bump, label and independent review; flags grant nothing.
 
-Source, running Workers and delivery need separate proof. Agent tools cannot edit live Core/Python, read secrets, kill Core or grant authority. /reboot min|same replaces one Worker; max adopts shared Functions and Workers, leaving Core and Remote live. Every reboot mode reads live Worker activity before cutover; max rejects and names busy Agents before publishing a shared replacement. Check identity, generation, receipts and idle window. Windows restart needs exact actuator and exit code.
+Source, Workers and delivery need separate proof. Tools cannot edit/kill live Core/Python, read secrets or grant authority. Frontends use FC→PAO `/reboot`: `min|same` replaces one exact Worker; `max` shared Functions/Workers, never Core/Remote. Only same-live-Core successors confirm inherited broad receipts; cold startup records interrupted/unconfirmed. Function code adopts by reboot; docs do not. Windows restart needs exact actuator/exit code. [Decision](HASHI_REBOOT_FAST_RELIABLE_PLAN_2026-10-14.md).
 
 ## Configuration, identity, and persistence
 
