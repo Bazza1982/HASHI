@@ -1,5 +1,6 @@
 from orchestrator.frontend_call.contract import (
     complete_speech_segments,
+    FILLER_TIER_SIZE,
     filler_phrases,
     speech_segments,
 )
@@ -68,11 +69,53 @@ def test_final_answer_groups_short_sentences_into_a_natural_tts_item():
 
 
 def test_fillers_are_localized_and_do_not_claim_an_answer():
-    assert filler_phrases("zh-CN") == (
+    simplified = filler_phrases("zh-CN")
+    assert FILLER_TIER_SIZE == 10
+    assert len(simplified) == 3 * FILLER_TIER_SIZE
+    assert simplified[:10] == (
         "嗯……",
-        "让我想一想……",
-        "我还在处理，请稍等一下。",
+        "唔……",
+        "哦……",
+        "呃……",
+        "这个……",
+        "让我想想……",
+        "这个嘛……",
+        "嗯，我想想……",
+        "我想想啊……",
+        "怎么说呢……",
     )
+    assert simplified[10:20] == (
+        "嗯……我想想啊。",
+        "哦，这个啊……",
+        "嗯……怎么说呢。",
+        "这个……让我想一下。",
+        "哦……让我再想一想。",
+        "嗯……我先把思路理顺。",
+        "唔……我琢磨一下。",
+        "这个嘛……我再琢磨一下。",
+        "嗯……我想想怎么说比较好。",
+        "哦……让我理一下思路。",
+    )
+    assert simplified[20:] == (
+        "嗯……这个我得稍微想一下，怎么说比较合适呢……",
+        "哦……让我稍微整理一下思路，再接着说。",
+        "嗯……我先把思路理一理，再看看怎么回答。",
+        "这个嘛……我想先把思路理顺一点，再跟你说。",
+        "唔……让我再琢磨一下，想想怎么表达更合适。",
+        "嗯……让我稍微整理一下，再接着回答。",
+        "哦……我在想怎么把这件事讲得更清楚一点。",
+        "嗯……我先想想怎么解释得更自然一点。",
+        "这个……让我想一下从哪里开始说会比较好。",
+        "嗯……我先把思路串起来，再慢慢跟你讲。",
+    )
+    for locale in ("en", "zh-CN", "zh-TW", "ja"):
+        phrases = filler_phrases(locale)
+        assert len(phrases) == 3 * FILLER_TIER_SIZE
+        assert len(set(phrases)) == len(phrases)
+    assert filler_phrases("en")[10].startswith("Hmm")
+    assert filler_phrases("en")[20].startswith("Hmm")
+    assert filler_phrases("zh-TW")[10].startswith("嗯")
+    assert filler_phrases("ja")[10].startswith("うーん")
     assert filler_phrases("unknown") == filler_phrases("en")
 
 

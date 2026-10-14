@@ -381,9 +381,8 @@ async def test_call_projection_removes_stage_directions_from_captions_and_speech
 
 
 @pytest.mark.asyncio
-async def test_filler_warming_waits_for_every_opening_speech_segment(tmp_path):
+async def test_filler_preparation_does_not_compete_with_opening_speech(tmp_path):
     service, ports, adapters, base, _clock = setup(tmp_path)
-    service.filler_warm_seconds = 0
     first = "第一句已经足够长，可以单独成为自然的开场播报内容。"
     second = "第二句同样足够长，应当先合成完成，再准备后台填充语音。"
     first_started, second_started, filler_started = (
@@ -410,6 +409,7 @@ async def test_filler_warming_waits_for_every_opening_speech_segment(tmp_path):
 
     ports.opening = opening
     adapters.synthesize = synthesize
+    requested = None
     try:
         binding, _, _ = await start(service, base)
         await asyncio.wait_for(first_started.wait(), 1)
@@ -429,18 +429,29 @@ async def test_filler_warming_waits_for_every_opening_speech_segment(tmp_path):
         assert not filler_started.is_set(), (
             "filler synthesis competed with the opening voice"
         )
+        requested = asyncio.create_task(
+            service.invoke("owner", {**binding, "operation": "filler", "slot": 0})
+        )
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not filler_started.is_set(), (
+            "requested filler synthesis competed with the opening voice"
+        )
         release_second.set()
-        await asyncio.wait_for(filler_started.wait(), 1)
+        filler = await asyncio.wait_for(requested, 1)
+        assert filler["ready"] is True
+        assert filler["text"] == "Hmm…"
     finally:
+        if requested and not requested.done():
+            requested.cancel()
         release_first.set()
         release_second.set()
         await service.close()
 
 
 @pytest.mark.asyncio
-async def test_fillers_are_prepared_in_the_selected_voice_and_locale(tmp_path):
+async def test_requested_fillers_are_prepared_on_demand_and_cached(tmp_path):
     service, ports, adapters, base, _clock = setup(tmp_path)
-    service.filler_warm_seconds = 0
 
     async def opening(*_args):
         return "您好，请讲。"
@@ -468,16 +479,26 @@ async def test_fillers_are_prepared_in_the_selected_voice_and_locale(tmp_path):
         await call.task
         if call.speech_task:
             await call.speech_task
-        if call.filler_task:
-            await call.filler_task
+        assert adapters.tts == 1
 
-        expected = ("嗯……", "让我想一想……", "我还在处理，请稍等一下。")
-        assert adapters.tts == 1 + len(expected)
-        for slot, text in enumerate(expected):
-            asset = await service.invoke(
-                "owner", {**binding, "operation": "filler", "slot": slot}
-            )
-            assert asset["ready"] is True
-            assert asset["text"] == text
+        short = await service.invoke(
+            "owner", {**binding, "operation": "filler", "slot": 7}
+        )
+        assert short["ready"] is True
+        assert short["text"] == "嗯，我想想……"
+        assert adapters.tts == 2
+
+        cached = await service.invoke(
+            "owner", {**binding, "operation": "filler", "slot": 7}
+        )
+        assert cached["text"] == short["text"]
+        assert adapters.tts == 2
+
+        medium = await service.invoke(
+            "owner", {**binding, "operation": "filler", "slot": 17}
+        )
+        assert medium["ready"] is True
+        assert medium["text"] == "这个嘛……我再琢磨一下。"
+        assert adapters.tts == 3
     finally:
         await service.close()

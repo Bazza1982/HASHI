@@ -77,9 +77,8 @@ class Call:
     speech_errors: dict = field(default_factory=dict)
     speech_attempts: dict = field(default_factory=dict)
     speech_delivered: set = field(default_factory=set)
-    filler_task: asyncio.Task | None = None
+    filler_tasks: dict = field(default_factory=dict)
     filler_cache: dict = field(default_factory=dict)
-    filler_errors: dict = field(default_factory=dict)
     rows: list = field(default_factory=list)
     camera_enabled: bool = False
     camera_epoch: int = 0
@@ -108,12 +107,10 @@ class CallService:
         *,
         clock=time.monotonic,
         poll_seconds=0.7,
-        filler_warm_seconds=2.0,
         startup_video_timeout=None,
     ):
         self.config, self.ports, self.adapters = config, ports, adapters
         self.clock, self.poll_seconds = clock, poll_seconds
-        self.filler_warm_seconds = filler_warm_seconds
         self.startup_video_timeout = (
             max(0.01, float(startup_video_timeout))
             if startup_video_timeout is not None
@@ -245,9 +242,14 @@ class CallService:
                     reason=reason,
                     segment=call.speech_index,
                 )
-        if call.filler_task:
-            if call.filler_task.cancel():
-                emit("filler_warm_cancel_requested", **self._facts(call), reason=reason)
+        for slot, task in call.filler_tasks.items():
+            if task.cancel():
+                emit(
+                    "filler_prepare_cancel_requested",
+                    **self._facts(call),
+                    reason=reason,
+                    filler=slot,
+                )
         call.speech_cache.clear()
         call.filler_cache.clear()
         self._camera_off(call, reason="call_ended")
@@ -398,12 +400,15 @@ class CallService:
                     call.task,
                     call.cancel_task,
                     call.speech_task,
-                    call.filler_task,
                     call.vision_task,
                 )
                 if t
             ]
-            tasks += list(call.turn_tasks.values()) + list(call.cancel_tasks.values())
+            tasks += (
+                list(call.turn_tasks.values())
+                + list(call.cancel_tasks.values())
+                + list(call.filler_tasks.values())
+            )
         tasks = list(dict.fromkeys(tasks))
         if tasks:
             done, pending = await asyncio.wait(tasks, timeout=5)
@@ -1056,7 +1061,15 @@ class CallService:
             if cached is None:
                 cached = self._filler_cache.get(self._filler_key(call, text))
             if cached is None:
-                return {"ok": True, "ready": False, "filler": slot, "text": text}
+                task = call.filler_tasks.get(slot)
+                if task is None:
+                    task = asyncio.create_task(self._prepare_filler(call, slot, text))
+                    call.filler_tasks[slot] = task
+                try:
+                    cached = await asyncio.shield(task)
+                finally:
+                    if task.done() and call.filler_tasks.get(slot) is task:
+                        call.filler_tasks.pop(slot, None)
             self._privacy(call, "tts")
             call.filler_cache[slot] = cached
             return {"ok": True, "ready": True, "filler": slot, "text": text, **cached}
@@ -1126,11 +1139,9 @@ class CallService:
             }
         )
 
-    async def _warm_fillers(self, call):
+    async def _prepare_filler(self, call, slot, text):
+        started = self.clock()
         try:
-            # Every opening segment is user-facing audio. The task pointer
-            # advances as the browser requests each segment, so follow that
-            # chain before low-priority filler work uses the same provider.
             opening_turn = call.turn if call.turn.get("kind") == "opening" else None
             while (
                 opening_turn is not None
@@ -1145,72 +1156,57 @@ class CallService:
                 if call.speech_index >= len(opening_parts) - 1:
                     break
                 await asyncio.sleep(0.05)
-            await asyncio.sleep(self.filler_warm_seconds)
-            for slot, text in enumerate(filler_phrases(call.locale)):
-                if call.phase != "active":
-                    return
-                key = self._filler_key(call, text)
-                cached = self._filler_cache.get(key)
-                if cached is not None:
-                    call.filler_cache[slot] = cached
-                    continue
-                started = self.clock()
-                try:
-                    self.ports.validate(call.owner, call.binding)
-                    self._privacy(call, "tts")
-                    emit(
-                        "filler_warm_started",
-                        **self._facts(call),
-                        stage="tts",
-                        filler=slot,
-                        locale=call.locale,
-                    )
-                    with diagnostic_context(
-                        **self._facts(call), stage="tts", filler=slot
-                    ):
-                        result = await self.adapters.synthesize(
-                            call.targets["tts"], call.profile["tts"], text
-                        )
-                    call.billing.record_tts(
-                        call.targets["tts"],
-                        text,
-                        result.pop("_billing_usage", None),
-                    )
-                    if call.phase != "active":
-                        return
-                    self.ports.validate(call.owner, call.binding)
-                    self._privacy(call, "tts")
-                    while len(self._filler_cache) >= 64:
-                        self._filler_cache.pop(next(iter(self._filler_cache)))
-                    self._filler_cache[key] = result
-                    call.filler_cache[slot] = result
-                    emit(
-                        "filler_warm_completed",
-                        **self._facts(call),
-                        stage="tts",
-                        filler=slot,
-                        locale=call.locale,
-                        duration_ms=elapsed_ms(self.clock, started),
-                    )
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    call.filler_errors[slot] = (
-                        exc.code
-                        if isinstance(exc, CallError)
-                        else "call_filler_unavailable"
-                    )
-                    emit(
-                        "filler_warm_failed",
-                        **self._facts(call),
-                        stage="tts",
-                        filler=slot,
-                        locale=call.locale,
-                        duration_ms=elapsed_ms(self.clock, started),
-                        **error_facts(exc, "call_filler_unavailable"),
-                    )
+            self.ports.validate(call.owner, call.binding)
+            self._privacy(call, "tts")
+            emit(
+                "filler_prepare_started",
+                **self._facts(call),
+                stage="tts",
+                filler=slot,
+                locale=call.locale,
+            )
+            with diagnostic_context(**self._facts(call), stage="tts", filler=slot):
+                result = await self.adapters.synthesize(
+                    call.targets["tts"], call.profile["tts"], text
+                )
+            call.billing.record_tts(
+                call.targets["tts"],
+                text,
+                result.pop("_billing_usage", None),
+            )
+            if call.phase != "active":
+                raise CallError("call_ended", 410)
+            self.ports.validate(call.owner, call.binding)
+            self._privacy(call, "tts")
+            key = self._filler_key(call, text)
+            while len(self._filler_cache) >= 64:
+                self._filler_cache.pop(next(iter(self._filler_cache)))
+            self._filler_cache[key] = result
+            call.filler_cache[slot] = result
+            emit(
+                "filler_prepare_completed",
+                **self._facts(call),
+                stage="tts",
+                filler=slot,
+                locale=call.locale,
+                duration_ms=elapsed_ms(self.clock, started),
+            )
+            return result
         except asyncio.CancelledError:
-            return
+            raise
+        except Exception as exc:
+            emit(
+                "filler_prepare_failed",
+                **self._facts(call),
+                stage="tts",
+                filler=slot,
+                locale=call.locale,
+                duration_ms=elapsed_ms(self.clock, started),
+                **error_facts(exc, "call_filler_unavailable"),
+            )
+            if isinstance(exc, CallError):
+                raise
+            raise CallError("call_filler_unavailable", 502) from exc
 
     def _queue_speech(self, call, turn, text, kind):
         text = str(text or "").strip()
@@ -1457,8 +1453,6 @@ class CallService:
             )
             if turn["speech_segments"]:
                 self._start_speech(call, 0, turn["speech_segments"][0])
-            if not call.filler_task or call.filler_task.done():
-                call.filler_task = asyncio.create_task(self._warm_fillers(call))
         except asyncio.CancelledError:
             emit(
                 "opening_cancelled",
