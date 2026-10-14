@@ -227,9 +227,55 @@ def test_manual_stop_is_projected_separately_from_unexpected_offline(tmp_path):
     assert server._metadata_for_agent(row, None)["status"] == "offline"
 
 
+def test_online_agent_identity_comes_from_persisted_config(tmp_path):
+    runtime = SimpleNamespace(
+        name="lily",
+        get_runtime_metadata=lambda: {
+            "id": "lily",
+            "name": "lily",
+            "display_name": "Stale Runtime Name",
+            "emoji": "⌛",
+            "online": True,
+            "status": "online",
+            "model": "gpt-5.6",
+        },
+    )
+    server = _server(tmp_path, active=True, orchestrator=SimpleNamespace(runtimes=[runtime]))
+
+    metadata = server._metadata_for_agent(_config(True)["agents"][0], runtime)
+
+    assert metadata["display_name"] == "Lily"
+    assert metadata["emoji"] == "🌸"
+    assert metadata["online"] is True
+    assert metadata["model"] == "gpt-5.6"
+
+
 @pytest.mark.asyncio
 async def test_agent_metadata_update_normalizes_config_encoding_and_updates_values(tmp_path):
-    server = _server(tmp_path, active=False)
+    refreshes = []
+
+    class _Runtime:
+        name = "lily"
+        config = SimpleNamespace(extra={"display_name": "Stale Runtime Name", "emoji": "⌛"})
+
+        def get_runtime_metadata(self):
+            return {
+                "id": "lily",
+                "name": "lily",
+                "display_name": "Stale Runtime Name",
+                "emoji": "⌛",
+                "online": True,
+                "status": "online",
+            }
+
+        async def refresh_identity_metadata(self, *, display_name, emoji):
+            refreshes.append((display_name, emoji))
+
+    server = _server(
+        tmp_path,
+        active=True,
+        orchestrator=SimpleNamespace(runtimes=[_Runtime()]),
+    )
 
     response = await server.handle_agent_metadata(
         _Request(
@@ -242,12 +288,117 @@ async def test_agent_metadata_update_normalizes_config_encoding_and_updates_valu
     payload = json.loads(response.text)
     assert payload["agent"]["display_name"] == "Lily Moon"
     assert payload["agent"]["emoji"] == "🌙"
+    assert refreshes == [("Lily Moon", "🌙")]
     raw = server.config_path.read_bytes()
     assert not raw.startswith(b"\xef\xbb\xbf")
     assert b"\r" not in raw
     assert raw.endswith(b"\n")
     stored = json.loads(raw.decode("utf-8-sig"))
     assert stored["agents"][0]["display_name"] == "Lily Moon"
+
+
+@pytest.mark.asyncio
+async def test_agent_metadata_partial_update_refreshes_sparse_identity_defaults(tmp_path):
+    refreshes = []
+
+    class _Runtime:
+        name = "lily"
+
+        def get_runtime_metadata(self):
+            return {
+                "id": "lily",
+                "name": "lily",
+                "display_name": "Stale Runtime Name",
+                "emoji": "⌛",
+                "online": True,
+                "status": "online",
+            }
+
+        async def refresh_identity_metadata(self, *, display_name, emoji):
+            refreshes.append((display_name, emoji))
+
+    server = _server(
+        tmp_path,
+        active=True,
+        orchestrator=SimpleNamespace(runtimes=[_Runtime()]),
+    )
+    raw = read_config_json(server.config_path)
+    raw["agents"][0].pop("emoji")
+    write_config_json(server.config_path, raw)
+
+    response = await server.handle_agent_metadata(_Request(
+        match_info={"name": "lily"},
+        payload={"display_name": "Lily Moon"},
+    ))
+
+    assert response.status == 200
+    payload = json.loads(response.text)
+    assert payload["agent"]["display_name"] == "Lily Moon"
+    assert payload["agent"]["emoji"] == "🤖"
+    assert refreshes == [("Lily Moon", "🤖")]
+    persisted = read_config_json(server.config_path)["agents"][0]
+    assert persisted["display_name"] == "Lily Moon"
+    assert "emoji" not in persisted
+
+
+    second_root = tmp_path / "emoji-only"
+    second_root.mkdir()
+    second_server = _server(
+        second_root,
+        active=True,
+        orchestrator=SimpleNamespace(runtimes=[_Runtime()]),
+    )
+    raw = read_config_json(second_server.config_path)
+    raw["agents"][0].pop("display_name")
+    write_config_json(second_server.config_path, raw)
+
+    response = await second_server.handle_agent_metadata(_Request(
+        match_info={"name": "lily"},
+        payload={"emoji": "🌙"},
+    ))
+
+    assert response.status == 200
+    payload = json.loads(response.text)
+    assert payload["agent"]["display_name"] == "lily"
+    assert payload["agent"]["emoji"] == "🌙"
+    assert refreshes[-1] == ("lily", "🌙")
+    persisted = read_config_json(second_server.config_path)["agents"][0]
+    assert "display_name" not in persisted
+    assert persisted["emoji"] == "🌙"
+
+
+@pytest.mark.asyncio
+async def test_agent_metadata_update_keeps_persisted_result_when_worker_refresh_fails(tmp_path):
+    class _Runtime:
+        name = "lily"
+
+        def get_runtime_metadata(self):
+            return {
+                "id": "lily",
+                "display_name": "Stale Runtime Name",
+                "emoji": "⌛",
+                "online": True,
+            }
+
+        async def refresh_identity_metadata(self, **_identity):
+            raise RuntimeError("worker unavailable")
+
+    server = _server(
+        tmp_path,
+        active=True,
+        orchestrator=SimpleNamespace(runtimes=[_Runtime()]),
+    )
+
+    response = await server.handle_agent_metadata(_Request(
+        match_info={"name": "lily"},
+        payload={"display_name": "Lily Moon", "emoji": "🌙"},
+    ))
+
+    assert response.status == 200
+    assert json.loads(response.text)["agent"]["display_name"] == "Lily Moon"
+    persisted = read_config_json(server.config_path)["agents"][0]
+    assert persisted["display_name"] == "Lily Moon"
+    assert persisted["emoji"] == "🌙"
 
 
 @pytest.mark.asyncio

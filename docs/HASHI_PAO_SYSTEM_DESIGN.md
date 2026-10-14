@@ -99,6 +99,14 @@ available for recovery but is written back inactive through the revisioned
 configuration owner; the caller receives a lifecycle failure rather than a
 false ready result. Configured, active, and running remain distinct states.
 
+An Agent's `display_name` and `emoji` come from its revisioned instance
+configuration. Runtime metadata contributes live facts such as health, Engine,
+model, and activity, but cannot replace that persisted identity. A successful
+identity update returns the freshly persisted Agent record and asks an active
+Function Worker to refresh its in-memory projection. If that best-effort refresh
+is unavailable, the durable update remains successful and later reads still use
+the configured identity.
+
 A successful user-directed Agent stop records a PAO lifecycle marker in the
 shared Functions handoff. The Backend API projects that configured-but-stopped
 Agent as `status=stopped`, distinct from an unexpected offline Worker and from

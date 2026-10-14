@@ -652,6 +652,33 @@ async def test_worker_republishes_runtime_metadata_after_slash_command(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_worker_refreshes_persisted_identity_and_republishes_metadata():
+    runtime = SimpleNamespace(
+        config=SimpleNamespace(extra={"display_name": "Old Name", "emoji": "⌛"})
+    )
+    host = FunctionWorkerHost.__new__(FunctionWorkerHost)
+    host.runtime = runtime
+    host.phase = "ACTIVE"
+    host.accepting = True
+    host.agent_name = "akane"
+    publications = []
+
+    async def emit_metadata():
+        publications.append("metadata")
+
+    host.emit_metadata = emit_metadata
+
+    result = await host.handle_request(
+        "worker.identity.refresh",
+        {"display_name": "Akane Moon", "emoji": "🌙"},
+    )
+
+    assert result == {"ok": True}
+    assert runtime.config.extra == {"display_name": "Akane Moon", "emoji": "🌙"}
+    assert publications == ["metadata"]
+
+
+@pytest.mark.asyncio
 async def test_worker_activation_reconciles_only_its_agent_before_accepting(
     monkeypatch,
 ):

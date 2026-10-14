@@ -268,7 +268,7 @@ class AgentManagementManager:
             action.connector_id,
         )
         if action.operation == "metadata.update":
-            return self._update_metadata(action)
+            return await self._update_metadata(action)
         if action.operation == "lifecycle.set_active":
             return await self._dispatch_lifecycle(action, session_store=session_store)
         if action.operation == "agent.create":
@@ -488,7 +488,7 @@ class AgentManagementManager:
         outcome["event_id"] = completed.get("event_id")
         return outcome
 
-    def _update_metadata(self, action: AgentManagementAction) -> dict:
+    async def _update_metadata(self, action: AgentManagementAction) -> dict:
         display_name = action.payload.get("display_name")
         emoji = action.payload.get("emoji")
         try:
@@ -514,13 +514,19 @@ class AgentManagementManager:
                 "agent not found", error_code="agent_not_found", status_code=404
             )
         runtime = self._runtime_map().get((action.agent_id or "").casefold())
-        if runtime is not None and getattr(runtime, "config", None) is not None:
-            extra = dict(getattr(runtime.config, "extra", None) or {})
-            if display_name is not None:
-                extra["display_name"] = row["display_name"]
-            if emoji is not None:
-                extra["emoji"] = row["emoji"]
-            runtime.config.extra = extra
+        refresh = getattr(runtime, "refresh_identity_metadata", None)
+        if callable(refresh):
+            try:
+                await refresh(
+                    display_name=str(row.get("display_name", row["name"])),
+                    emoji=str(row.get("emoji", "🤖")),
+                )
+            except Exception:
+                logger.warning(
+                    "Persisted Agent identity could not be refreshed in the active Worker agent=%s",
+                    action.agent_id,
+                    exc_info=True,
+                )
         return {"agent_row": row, "status": 200}
 
     async def _set_active(self, action: AgentManagementAction) -> dict:

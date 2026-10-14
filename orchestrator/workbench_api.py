@@ -1878,6 +1878,10 @@ class WorkbenchApiServer:
                     "whatsapp": self._is_whatsapp_available(),
                 },
             }
+        metadata["id"] = agent_row["name"]
+        metadata["name"] = agent_row["name"]
+        metadata["display_name"] = agent_row.get("display_name", agent_row["name"])
+        metadata["emoji"] = agent_row.get("emoji", "🤖")
         metadata["is_active"] = bool(agent_row.get("is_active", True))
         metadata["isActive"] = metadata["is_active"]
         if not metadata["is_active"]:
