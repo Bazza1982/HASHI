@@ -2710,6 +2710,22 @@ class HERv2Adapter(BaseBackend):
             "user_stop": "USER_STOP",
             "user_retry": "USER_STOP",
         }.get(raw_reason, "RUNTIME_SHUTDOWN")
+        if reason == "USER_STOP" and self._session_coordinator is not None:
+            # /stop must release the durable fixed-session turn before the
+            # outer request task can be cancelled. Otherwise cancellation
+            # during request-local service cleanup can leave this row active
+            # even though the HASHI Run is already durably stopped.
+            for accepted in tuple(self._canonical_active_turns.values()):
+                try:
+                    self._session_coordinator.cancel(
+                        accepted,
+                        reason="HASHI /stop cancelled the active HER turn.",
+                    )
+                except HerFixedProtocolError as exc:
+                    self.logger.warning(
+                        "HERV3 fixed-turn cancellation during /stop failed: %s",
+                        exc.code,
+                    )
         active = tuple(self._active_runtimes.values())
         if active:
             await asyncio.gather(

@@ -103,7 +103,9 @@ launch; clear pre-fence one-shots; reject stale callbacks. Periodic definitions
 stay enabled. Runs save `stopped` and a terminal event before cleanup; adoption
 repairs pre-fence remnants. Confirm canonical state before success. Failed,
 missing or unreadable saves stay unconfirmed; never blindly retry. DB handles
-close after commit/rollback. See [stop contract](HASHI_AGENT_STOP_FENCE_DECISION.md).
+close after commit/rollback. HERV3 user stop releases its durable fixed-session
+Turn before outer request cleanup so the next request is not blocked as
+concurrent. See [stop contract](HASHI_AGENT_STOP_FENCE_DECISION.md).
 
 Media bind one draft/instance/Agent/Run; Remote sends managed bytes. HERV3 gains no wider authority. Safe Voice uses typed confirm/discard; missing idempotency blocks upload and stale media is discarded. /voice uses a validated Function bundle/local media; Workbench gets Session audio, Telegram its voice renderer.
 

@@ -52,6 +52,11 @@ the command reports that stop is unconfirmed instead of claiming success. A
 write that reports an error after commit is read back without retrying it;
 only a confirmed `stopped` record permits the normal success receipt.
 
+For HERV3 fixed sessions, user stop also cancels the durable Engine Turn before
+the outer request task and its request-local services are torn down. This
+prevents a stopped Run from leaving an `active` HER Turn that blocks the next
+request with a false concurrent-turn conflict.
+
 The stop-fence store closes each SQLite connection after its transaction,
 including initialization, reads and failed writes. Transaction rollback alone
 does not release a connection; cleanup cannot rely on Python garbage collection
@@ -90,7 +95,7 @@ ownership conflicts. Protected Core checks remain mandatory.
 
 ## Independent pre-merge review (2026-10-14)
 
-The review on HASHI3 `debug-stop` found two release blockers in the original
+The review on HASHI3 `debug-stop` found three release blockers in the original
 implementation:
 
 - Stop could finish while a managed process was being created; the late
@@ -102,6 +107,11 @@ implementation:
   facade, a fixture with 1,001 older owned jobs plus newer/other-Agent jobs
   cancelled only 999. Lifecycle callers now request a complete snapshot;
   the epoch and Agent filters still protect new work and other Agents.
+- A live HERV3 stop saved the outer Run as `stopped` but cancellation during
+  request-local service cleanup left the durable Engine Turn `active`; the
+  next request was rejected as concurrent. User-stop shutdown now cancels the
+  fixed-session Turn before runtime cleanup, so later cancellation cannot
+  retain that lock.
 
 Three real-process regression cases failed before the launch fix and passed
 after it. The large-job-set case failed before the list fix. Existing success
