@@ -948,6 +948,30 @@ def test_generation_artifact_tamper_is_rejected_before_worker_spawn(tmp_path):
         verify_generation_artifact(artifact, generation)
 
 
+def test_new_artifact_materialization_hashes_each_output_once_without_tree_rescan(
+    tmp_path,
+    monkeypatch,
+):
+    source_root = tmp_path / "source"
+    generation = _verified_generation(source_root)
+    rescans = []
+    original = verify_generation_artifact
+
+    def record_rescan(root, candidate):
+        rescans.append(Path(root))
+        return original(root, candidate)
+
+    monkeypatch.setattr(
+        "orchestrator.function_worker_supervisor.verify_generation_artifact",
+        record_rescan,
+    )
+
+    artifact = materialize_generation_artifact(tmp_path / "bridge", generation)
+
+    assert artifact.is_dir()
+    assert rescans == []
+
+
 def test_qualified_byte_verification_does_not_rebuild_dependency_graph(
     tmp_path,
     monkeypatch,
@@ -1011,7 +1035,7 @@ def test_qualified_generation_cache_round_trip_and_tamper_rejection(
     persist_qualified_generation_cache(bridge_home, generation, artifact)
     monkeypatch.setattr(
         VerifiedFunctionGeneration,
-        "verify_qualified_source",
+        "verify_qualification_seal",
         lambda self, expected_runtime: None,
     )
 
@@ -1110,6 +1134,31 @@ async def test_in_memory_generation_cache_uses_lightweight_seal_not_full_byte_sc
     assert seal_checks == [kernel.runtime_fingerprint]
 
 
+def test_qualification_work_counts_come_from_observed_stages(monkeypatch):
+    kernel = _Kernel()
+    supervisor = FunctionWorkerSupervisor(kernel)
+    generation = _Generation("q")
+
+    def qualify(_kernel, *, timing_callback):
+        for stage in (
+            "initial_manifest",
+            "isolated_probe.imports_contract",
+            "isolated_probe.manifest",
+            "final_manifest",
+        ):
+            timing_callback(stage, 1.0)
+        return generation
+
+    monkeypatch.setattr(
+        "orchestrator.function_worker_supervisor.probe_function_generation",
+        qualify,
+    )
+
+    assert supervisor.qualify_generation() is generation
+    assert supervisor.last_qualification_stats["manifest_hash_count"] == 3
+    assert supervisor.last_qualification_stats["full_closure_import_count"] == 1
+
+
 def test_boot_cache_keeps_last_verified_generation_when_checkout_is_broken(
     tmp_path,
     monkeypatch,
@@ -1186,6 +1235,38 @@ async def test_route_gate_drains_inflight_then_holds_new_work_until_commit():
     assert await waiting == "request-202"
     assert old.calls == ["runtime.enqueue_api_text"]
     assert new.calls == ["runtime.enqueue_api_text"]
+
+
+@pytest.mark.asyncio
+async def test_legacy_cutover_helper_uses_lightweight_generation_seal(monkeypatch):
+    kernel = _Kernel()
+    old = _Client("alpha", 101)
+    handle = _handle(kernel, old)
+    kernel.runtimes.append(handle)
+    seal_checks = []
+
+    def full_scan(_runtime):
+        raise AssertionError("cutover must not re-hash the complete source closure")
+
+    generation = SimpleNamespace(
+        manifest=SimpleNamespace(generation_id="sha256:" + "b" * 64),
+        verify_qualification_seal=lambda runtime: seal_checks.append(runtime),
+        verify_qualified_source=full_scan,
+    )
+    candidate = _Client("alpha", 202, generation=generation)
+    supervisor = FunctionWorkerSupervisor(kernel)
+
+    async def activate(client):
+        return _metadata(client.agent_name, client.pid)
+
+    monkeypatch.setattr(supervisor, "activate_new_worker", activate)
+
+    retired, metadata = await supervisor.cutover_handle(handle, candidate)
+
+    assert retired is old
+    assert metadata["worker_pid"] == 202
+    assert handle.client is candidate
+    assert seal_checks == [kernel.runtime_fingerprint]
 
 
 @pytest.mark.asyncio

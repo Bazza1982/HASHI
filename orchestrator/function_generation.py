@@ -280,6 +280,41 @@ class VerifiedFunctionGeneration:
                 "Function generation source commit changed after qualification"
             )
 
+    def verify_qualification_seal(
+        self, expected_runtime: RuntimeFingerprint
+    ) -> None:
+        """Cheaply prove that a qualified checkout and runtime are unchanged.
+
+        The isolated probe already bound the manifest to exact bytes.  On a
+        cache hit, the Git commit plus a clean qualified path set proves those
+        tracked bytes still match HEAD without reading the full closure again.
+        The protected Worker bootstrap remains the authority for bytes in each
+        process artifact.
+        """
+
+        policy = load_runtime_policy(self.code_root)
+        live_runtime = cached_current_runtime_fingerprint(
+            policy, code_root=self.code_root
+        )
+        compare_function_candidate_runtime(
+            expected_runtime,
+            live_runtime,
+            code_root=self.code_root,
+        )
+        compare_function_candidate_runtime(
+            self.receipt.runtime,
+            live_runtime,
+            code_root=self.code_root,
+        )
+        source_commit = verify_manifest_source_commit(
+            self.manifest,
+            code_root=self.code_root,
+        )
+        if source_commit != self.receipt.source_commit:
+            raise FunctionGenerationError(
+                "Function generation source commit changed after qualification"
+            )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "code_root": str(self.code_root),
@@ -983,10 +1018,9 @@ def probe_function_generation(
         for name, elapsed_ms in receipt.stage_timings_ms:
             timing_callback(f"isolated_probe.{name}", elapsed_ms)
     if set(receipt.module_names) == set(initial_manifest.module_names):
-        # The independent interpreter accepted this exact closure. Re-hash all
-        # its bytes and rediscover assets rather than parse the same graph again.
-        timed("final_manifest", verify_qualified_manifest_bytes,
-              initial_manifest, code_root=code_root)
+        # The independent interpreter accepted the exact generation digest and
+        # commit produced above.  The final Git gate below closes source drift;
+        # re-reading the whole closure here would add no independent evidence.
         manifest = initial_manifest
     else:
         # A dynamic import expanded the closure: qualify its graph normally.
@@ -1013,7 +1047,6 @@ def probe_function_generation(
         manifest=manifest,
         receipt=receipt,
     )
-    timed("generation_verify", generation.verify_qualified_source, expected_runtime)
     return generation
 
 

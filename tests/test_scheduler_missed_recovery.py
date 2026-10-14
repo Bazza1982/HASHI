@@ -237,6 +237,10 @@ async def test_single_recent_startup_catchup_is_marked_as_recovery(tmp_path):
         "trigger": "recovery",
     }
 
+    await _run_one_scheduler_pass(scheduler)
+
+    assert len(runtime.enqueued) == 1
+
 
 def test_hourly_cron_occurrence_capture_counts_all_seven_missed_turns():
     last_run = datetime(2026, 8, 8, 22, 8, 32, tzinfo=SYDNEY).timestamp()

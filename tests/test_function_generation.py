@@ -403,6 +403,69 @@ def test_default_hot_probe_does_not_seed_from_core_loaded_modules(monkeypatch):
     assert "orchestrator.workbench_api" in verified.manifest.module_names
 
 
+def test_new_generation_reuses_probe_receipt_without_core_side_rehash(
+    monkeypatch,
+):
+    runtime = enforce_runtime_contract(ROOT)
+    manifest = SourceManifest(
+        generation_id="sha256:" + "a" * 64,
+        entries=(),
+    )
+    counts = {"manifest": 0, "commit": 0, "bytes": 0, "verify": 0}
+    stages = []
+
+    def build(*_args, **_kwargs):
+        counts["manifest"] += 1
+        return manifest
+
+    def commit(*_args, **_kwargs):
+        counts["commit"] += 1
+        return "f" * 40
+
+    def bytes_check(*_args, **_kwargs):
+        counts["bytes"] += 1
+
+    def repeated_verify(self, _expected_runtime):
+        counts["verify"] += 1
+
+    monkeypatch.setattr(function_generation, "build_source_manifest", build)
+    monkeypatch.setattr(function_generation, "verify_manifest_source_commit", commit)
+    monkeypatch.setattr(
+        function_generation,
+        "verify_qualified_manifest_bytes",
+        bytes_check,
+    )
+    monkeypatch.setattr(
+        function_generation.VerifiedFunctionGeneration,
+        "verify_qualified_source",
+        repeated_verify,
+    )
+    monkeypatch.setattr(function_generation, "declared_observer_modules", lambda _p: ())
+
+    receipt = CandidateProbeReceipt(
+        generation_id=manifest.generation_id,
+        module_names=manifest.module_names,
+        runtime=runtime,
+        probe_pid=123,
+        source_commit="f" * 40,
+    )
+    kernel = types.SimpleNamespace(
+        paths=types.SimpleNamespace(code_root=ROOT),
+        runtime_fingerprint=runtime,
+    )
+
+    generation = probe_function_generation(
+        kernel,
+        probe_runner=lambda **_kwargs: receipt,
+        timing_callback=lambda name, _elapsed_ms: stages.append(name),
+    )
+
+    assert generation.manifest is manifest
+    assert counts == {"manifest": 1, "commit": 2, "bytes": 0, "verify": 0}
+    assert "final_manifest" not in stages
+    assert "generation_verify" not in stages
+
+
 def test_in_process_generation_commit_api_is_retired():
     import orchestrator.function_generation as generation
 
