@@ -25,12 +25,26 @@ through the same FC-to-Worker path as ordinary Backend API and Telegram input,
 and PAO alone owns the activity preflight. Equivalent Function bytes survive a
 documentation-only commit without another isolated probe; the current
 qualification commit and immutable artifact-creation provenance remain distinct.
-Fresh end-to-end HASHI3 FC acceptance is recorded separately after adoption.
+The final standard-FC HASHI3 `min → max → min` acceptance completed in
+4.6, 18.5 and 4.7 seconds; every receipt was succeeded + confirmed, the two
+targeted runs selected only `agent1`, and the broad run selected all 11 Agents.
+Core and Remote identities remained unchanged while shared Functions changed
+only for `max`.
 Python release builds now run from an isolated committed-source export; direct
 packaging in a live HASHI checkout is forbidden because regenerated `egg-info`
 can alter the Core environment fingerprint without changing any dependency.
 That contamination is repaired by restoring the launch-time environment and
 then using `/reboot`, never by normalizing a Function change with `/restart`.
+
+HASHI3's later offline state was caused by its legacy Windows task launcher,
+not by a need to cold-restart Function code. Native Python stderr was converted
+to a terminating PowerShell `NativeCommandError`; Windows Job cleanup then
+removed the Core/Functions tree. HASHI3 now uses the standard launcher with
+separate streams and child-exit-code authority, on the unchanged Python 3.12.13
+and 63-package environment. Cold startup must never confirm an inherited broad
+receipt from availability alone. Only the successor shared process prepared by
+the same live Core handoff carries the continuity witness needed to confirm it.
+HASHI3 is online; its final adoption used `/reboot` only, never `/restart`.
 
 Function deployment is generation-scoped, not commit-scoped. A committed
 Function-byte change is adopted only through the standard Frontend Connector

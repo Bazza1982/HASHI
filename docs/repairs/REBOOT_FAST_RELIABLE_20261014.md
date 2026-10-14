@@ -168,10 +168,52 @@ recorded no Python crash or resource-exhaustion event. Available evidence does
 not identify the terminating actor, but this was not a normal Core exit and is
 not evidence that Function adoption needs a cold restart.
 
-The deployment rule is corrected as follows: committed Function-byte changes
-adopt only through standard-FC `/reboot` with the narrowest valid scope;
-documentation, test and release-note-only commits execute no runtime adoption
-command. Source commit, Function generation and current runtime availability
-remain separate facts. A missing Core is reported as a separate operational
-failure and is never converted into a Function `/restart` requirement. HASHI4
-was untouched.
+Subsequent diagnosis identified the terminating mechanism. HASHI3 was still
+managed by a legacy task launcher that redirected native Python stderr through
+PowerShell `*>>` while `ErrorActionPreference` was `Stop`. A background
+prewarm-thread diagnostic became `NativeCommandError`, terminated the launcher,
+and its Windows Job cleanup then removed the Core/Functions process tree. The
+HASHI3 user task now uses the repository's standard launcher, which separates
+stdout/stderr and treats the Python child exit code as authoritative.
+
+The deployment rule remains: committed Function-byte changes adopt only through
+standard-FC `/reboot` with the narrowest valid scope; documentation, test and
+release-note-only commits execute no runtime adoption command. Source commit,
+Function generation and current runtime availability remain separate facts. A
+missing Core is a separate operational failure and is never converted into a
+Function `/restart` requirement. HASHI4 was untouched.
+
+## Offline recovery and final truthful acceptance
+
+The standard launcher brought the already-offline HASHI3 instance back under
+its user-level scheduled task without `/restart`. It used the same Python
+3.12.13 executable and the same 63-package environment; no dependency was
+installed, removed or upgraded. All subsequent Function adoption used
+Workbench's standard Frontend Connector `/reboot` path.
+
+Cold startup exposed a second correctness defect: an interrupted broad receipt
+could be promoted to success merely because the requested generation and all
+Workers were currently online. Red evidence preceded both repairs. Commit
+`5fbbcbca` rejects cold-start confirmation and records the inherited operation
+as interrupted/unconfirmed. The first live adoption then showed that the
+temporary candidate marker was cleared before the receipt watcher observed it.
+Commit `2af77d58` preserves a successor-process continuity witness across the
+commit. Neither change touches Protected Core.
+
+Commit `2af77d58` was adopted by a standard-FC `/reboot max` in 47.0 s with
+11/11 Agents online. The final same-generation FC sequence was:
+
+- `min`: 4.6 s, exact target `agent1`, succeeded + confirmed;
+- `max`: 18.5 s, all 11 targets, succeeded + confirmed;
+- `min`: 4.7 s, exact target `agent1`, succeeded + confirmed.
+
+The targeted operations did not request or replace shared Functions. The broad
+operation committed shared PID 14664 to 29432. Core PID 13944 and Remote child
+PID 20204 remained unchanged; API and Gateway stayed healthy and all 11 Workers
+were online after every terminal receipt. Python version, executable digest and
+63-package digest matched the recovery baseline exactly.
+
+The final affected regression set passed 236/236, the curated Core gate passed
+839 with 1 skipped, Windows launcher tests passed 12/12, and Protected Core
+checks passed for both the worktree and the branch relative to `main`. HASHI3
+is online. HASHI4 was neither modified nor rebooted.

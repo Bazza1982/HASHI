@@ -1,6 +1,6 @@
 # HASHI 热重启提速、可靠性与回执修复方案
 
-状态：实现与 HASHI3 标准 FC 现场验收完成；部署方法已纠正；HASHI3 当前离线且未冷启动（现场拓扑为 11 Workers）
+状态：实现、HASHI3 标准 FC 现场验收及离线恢复复核完成；HASHI3 当前在线（现场拓扑为 11 Workers）
 日期：2026-10-14
 开发分支：`debug-reboot`（仅 HASHI3）
 功能所有者：PAO；用户消息由 Frontend Connector Functions 所有
@@ -591,11 +591,39 @@ generation 的 `min → max → min` 分别为 5.4、21.1、5.2 秒，全部为
 验收文档提交后曾错误地再触发一次 `max`，尽管该提交没有改变任何 Function
 字节、generation 仍为
 `sha256:22774b7e5c4852a8f9a262a41787258393df340f1ed132e39dc3b18df33b3458`。
-新共享 Functions 已启动并达到 11/11 Worker 后，Core 非正常终止；PID 文件未
-正常清理，Windows 没有 Python 崩溃或资源耗尽事件，现有证据无法确定终止来源，
-操作因而没有最终回执。
-这次无意义的文档后采用不计入成功验收，也不产生冷启动要求。HASHI3 当前运行
-采用状态单独标为不可用/未复核；不得用 `/restart` 使 Function 变更生效。
+新共享 Functions 已启动并达到 11/11 Worker 后，Core 非正常终止，操作没有
+最终回执。后续诊断确认原因不是 Function 热采用需要冷重启，而是 HASHI3 仍由
+旧任务启动脚本托管：它在 `ErrorActionPreference=Stop` 下用 `*>>` 接收
+原生 Python 的 stderr；一个后台预热线程写入 stderr 后被 PowerShell 转成
+`NativeCommandError`，终止了启动脚本，随后的 Windows Job 清理带走 Core
+及其 Functions 进程树。
+
+HASHI3 用户级计划任务已改用仓库中的标准启动脚本。该脚本分离 stdout/stderr，
+并以 Python 子进程退出码为准，不再把后台诊断输出当作 Core 退出。恢复使用完全
+相同的 Python 3.12.13 解释器和 63 个包，没有安装、删除或升级依赖，也没有使用
+`/restart`。Core 重新在线后，所有 Function 源码采用仍只经过标准 FC
+`/reboot`。
+
+这次恢复还暴露出一个回执正确性缺陷：普通冷启动曾把上次中断的 broad receipt
+按“当前 generation 和 Workers 都在线”错误提升为成功。先建立红灯后，提交
+`5fbbcbca` 规定只有同一个 live Core handoff 准备出的 successor shared
+process 才能确认继承回执；普通冷/恢复启动必须记为 interrupted +
+unconfirmed。真实采用随后发现临时候选标记在 commit 时已被清除，提交
+`2af77d58` 将这一连续性证据保存为 successor process 的只读事实。两项都是
+PAO/Functions 修复，没有修改 Protected Core。
+
+提交 `2af77d58` 通过 Workbench 标准 FC `/reboot max` 现场采用，耗时
+47.0 秒并确认 11/11 在线。随后同 generation 的最终
+`min → max → min` 分别为 4.6、18.5、4.7 秒，全部为
+`succeeded + confirmed`。两次 `min` 都只以 `agent1` 为目标，未请求
+共享替换；`max` 精确包含 11 个目标，共享 Functions PID 从 14664 换为
+29432。整个采用与最终序列中 Core PID 始终为 13944，Remote child PID 始终为
+20204，API 与 Gateway 健康、11/11 Workers 在线。Python 版本、解释器字节
+指纹、63 包清单指纹均与恢复前基线相同。
+
+最后相关回归为 236/236，通过 curated Core gate 839 passed、1 skipped，
+Windows 启动器回归为 12/12；工作树与相对 `main` 的 Protected Core 检查
+均通过。HASHI3 当前在线；HASHI4 未修改、未重启。
 
 HASHI3 当前只有 11 个 Worker，因此上述实机结果不能冒充 26-Worker p95。
 26-Worker 的重复资格工作已由计数回归证明不会随 Worker 数量倍增；生产规模
