@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import hashlib
+import inspect
 import json
 import logging
 import multiprocessing
 import subprocess
+import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -48,6 +51,27 @@ from orchestrator.runtime_contract import (
 from orchestrator.scheduler import TaskScheduler
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_live_worker_prepare_does_not_repeat_probe_or_bootstrap_generation_checks():
+    tree = ast.parse(textwrap.dedent(inspect.getsource(FunctionWorkerHost.prepare)))
+    called = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name):
+            called.add(node.func.id)
+        elif isinstance(node.func, ast.Attribute):
+            owner = node.func.value
+            if isinstance(owner, ast.Name):
+                called.add(f"{owner.id}.{node.func.attr}")
+
+    # The isolated probe owns full-closure import/contract validation.  The
+    # protected bootstrap owns one actual artifact-byte verification per new
+    # process.  Repeating either in the live Host adds cost but no evidence.
+    assert "verify_qualified_manifest_bytes" not in called
+    assert "validate_function_contract" not in called
+    assert "importlib.import_module" not in called
 
 
 class _Process:
@@ -1057,6 +1081,33 @@ async def test_prepare_generation_skips_only_preverified_source_scan(
         artifact,
     )
     assert verifications == [kernel.runtime_fingerprint]
+
+
+@pytest.mark.asyncio
+async def test_in_memory_generation_cache_uses_lightweight_seal_not_full_byte_scan(
+    monkeypatch,
+):
+    kernel = _Kernel()
+    kernel.paths = SimpleNamespace()
+    seal_checks = []
+
+    def full_scan(_runtime):
+        raise AssertionError("cache hit must not re-hash the complete source closure")
+
+    generation = SimpleNamespace(
+        manifest=SimpleNamespace(module_names=("orchestrator.worker_demo",)),
+        verify_qualification_seal=lambda runtime: seal_checks.append(runtime),
+        verify_qualified_source=full_scan,
+    )
+    supervisor = FunctionWorkerSupervisor(kernel)
+    supervisor._cached_generation = generation
+    monkeypatch.setattr(
+        "orchestrator.function_worker_supervisor.configured_observers_are_qualified",
+        lambda _kernel, _generation: True,
+    )
+
+    assert await supervisor.qualified_generation() is generation
+    assert seal_checks == [kernel.runtime_fingerprint]
 
 
 def test_boot_cache_keeps_last_verified_generation_when_checkout_is_broken(

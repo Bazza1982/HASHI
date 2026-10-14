@@ -60,6 +60,7 @@ class _Client:
         generation: _Generation,
         events: list[str],
         *,
+        nonce: str | None = None,
         telegram: bool = True,
         quiesce_error: Exception | None = None,
         activation_error: Exception | None = None,
@@ -67,11 +68,20 @@ class _Client:
         self.agent_name = name
         self.process = _Process(pid)
         self.generation = generation
+        self.nonce = nonce or f"{name}:{pid}:{generation.manifest.generation_id[-8:]}"
+        self.started_at = f"started:{self.nonce}"
         self.events = events
         self.telegram = telegram
         self.quiesce_error = quiesce_error
         self.activation_error = activation_error
-        self.metadata = _metadata(name, pid, generation, telegram=telegram)
+        self.metadata = _metadata(
+            name,
+            pid,
+            generation,
+            nonce=self.nonce,
+            started_at=self.started_at,
+            telegram=telegram,
+        )
         self.shutdown_calls = 0
 
     @property
@@ -109,11 +119,17 @@ def _metadata(
     pid: int,
     generation: _Generation,
     *,
+    nonce: str | None = None,
+    started_at: str | None = None,
     telegram: bool,
 ) -> dict:
+    worker_nonce = nonce or f"{name}:{pid}:{generation.manifest.generation_id[-8:]}"
     return {
         "name": name,
         "worker_pid": pid,
+        "worker_nonce": worker_nonce,
+        "worker_started_at": started_at or f"started:{worker_nonce}",
+        "worker_adopted_at": f"adopted:{worker_nonce}",
         "generation_id": generation.manifest.generation_id,
         "generation_module_count": len(generation.manifest.entries),
         "runtime_id": "core-runtime",
@@ -168,6 +184,8 @@ class _FunctionWorkers:
             candidate.agent_name,
             candidate.pid,
             candidate.generation,
+            nonce=candidate.nonce,
+            started_at=candidate.started_at,
             telegram=candidate.telegram,
         )
         return dict(candidate.metadata)
@@ -286,27 +304,100 @@ async def test_reboot_persists_truthful_final_receipt_before_notification(
     assert record["targets"] == ["zelda"]
     assert record["committed"] is (not reject)
     if not reject:
-        assert record["workers"]["zelda"] == {
-            "old_pid": 101,
-            "new_pid": 201,
-            "observed_pid": 201,
-            "pid_changed": True,
-            "old_exited": True,
-            "generation_id": "sha256:" + "a" * 64,
-            "observed_generation_id": "sha256:" + "a" * 64,
-            "source_commit": "f" * 40,
-            "runtime_id": "core-runtime",
-            "observed_runtime_id": "core-runtime",
-            "observed_agent": "zelda",
-            "agent_matches": True,
-            "process_alive": True,
-            "active": True,
-            "accepting": True,
-            "backend_ready": True,
-            "startup_success": True,
-            "online": True,
-        }
+        evidence = record["workers"]["zelda"]
+        assert evidence["state"] == "online_new"
+        assert evidence["failed_checks"] == []
+        assert evidence["old_worker_nonce"] == "zelda:101:00000000"
+        assert evidence["expected_worker_nonce"] == "zelda:201:aaaaaaaa"
+        assert evidence["observed_worker_nonce"] == "zelda:201:aaaaaaaa"
+        assert evidence["worker_identity_changed"] is True
+        assert evidence["worker_started_at"] == "started:zelda:201:aaaaaaaa"
+        assert evidence["worker_adopted_at"] == "adopted:zelda:201:aaaaaaaa"
+        assert evidence["old_exited"] is True
+        assert evidence["online"] is True
+        assert record["outcome"] == "succeeded"
+        assert record["observation_confidence"] == "confirmed"
     assert record["delivery"]["status"] != "sent"
+
+
+@pytest.mark.asyncio
+async def test_pid_reuse_is_confirmed_by_nonce_generation_and_agent_identity():
+    kernel = _Kernel(names=("zelda",))
+    old = kernel.runtimes[0].client
+    generation = _Generation("a")
+    candidate = _Client(
+        "zelda",
+        old.pid,
+        generation,
+        kernel.events,
+        nonce="replacement-nonce",
+    )
+    kernel.function_workers.queue_round(generation, {"zelda": candidate})
+    manager = RebootManager(kernel, None)
+
+    assert await manager.hot_restart({"mode": "min", "agent_name": "zelda"})
+
+    record = manager.receipts.records()[-1]
+    evidence = record["workers"]["zelda"]
+    assert record["outcome"] == "succeeded"
+    assert record["observation_confidence"] == "confirmed"
+    assert evidence["old_pid"] == evidence["new_pid"] == 101
+    assert evidence["pid_changed"] is False
+    assert evidence["worker_identity_changed"] is True
+    assert evidence["observed_worker_nonce"] == "replacement-nonce"
+    assert evidence["failed_checks"] == []
+    assert evidence["online"] is True
+
+
+@pytest.mark.asyncio
+async def test_pid_change_cannot_hide_worker_nonce_identity_mismatch():
+    kernel = _Kernel(names=("zelda",))
+    candidate = kernel.queue_generation("a", names=("zelda",))["zelda"]
+    activate = kernel.function_workers.activate_new_worker
+
+    async def activate_with_wrong_identity(client):
+        metadata = await activate(client)
+        client.metadata["worker_nonce"] = "unexpected-worker"
+        return {**metadata, "worker_nonce": "unexpected-worker"}
+
+    kernel.function_workers.activate_new_worker = activate_with_wrong_identity
+    manager = RebootManager(kernel, None)
+
+    assert await manager.hot_restart({"mode": "min", "agent_name": "zelda"})
+
+    record = manager.receipts.records()[-1]
+    evidence = record["workers"]["zelda"]
+    assert evidence["pid_changed"] is True
+    assert evidence["state"] == "unavailable"
+    assert evidence["failed_checks"] == ["identity_mismatch"]
+    assert evidence["online"] is False
+    assert record["outcome"] == "failed"
+    assert record["observation_confidence"] == "confirmed"
+
+
+@pytest.mark.asyncio
+async def test_healthy_new_route_with_old_exit_pending_is_success_with_warning():
+    kernel = _Kernel(names=("zelda",))
+    old = kernel.runtimes[0].client
+    kernel.queue_generation("a", names=("zelda",))
+
+    async def delayed_shutdown(*, force=True):
+        assert force is True
+        old.shutdown_calls += 1
+
+    old.shutdown = delayed_shutdown
+    manager = RebootManager(kernel, None)
+
+    assert await manager.hot_restart({"mode": "min", "agent_name": "zelda"})
+
+    record = manager.receipts.records()[-1]
+    evidence = record["workers"]["zelda"]
+    assert evidence["state"] == "online_new"
+    assert evidence["old_exited"] is False
+    assert evidence["online"] is True
+    assert record["outcome"] == "succeeded_with_warning"
+    assert record["warnings"] == ["old_worker_exit_pending"]
+    assert record["observation_confidence"] == "confirmed"
 
 
 def _notice_manager(tmp_path):
@@ -1087,6 +1178,7 @@ async def test_max_reboot_submits_one_shared_function_replacement(tmp_path):
         ).read_text(encoding="utf-8")
     )
     assert request == {"id": record["id"]}
+    assert all(not handle._cutover for handle in kernel.runtimes)
     assert kernel.events == [
         "zelda:101:worker.metadata",
         "sunny:102:worker.metadata",
@@ -1353,7 +1445,10 @@ async def test_failed_shared_replacement_reopens_all_agent_routes(tmp_path):
     assert accepted["accepted"]
     assert all(not handle._cutover for handle in kernel.runtimes)
     assert await manager.hot_restart(kernel._restart_request)
-    assert all(handle._cutover for handle in kernel.runtimes)
+    # PAO only publishes the prepared handoff request.  The old Functions and
+    # every route remain available until Core owns the final cutover window.
+    assert all(not handle._cutover for handle in kernel.runtimes)
+    assert kernel.api_gateway._accepting_requests
     record = manager.receipts.get(accepted["record"]["id"])
     state_dir = tmp_path / "state" / "instance"
     (state_dir / "kernel-requests" / f"{record['id']}.json").unlink()
@@ -1404,6 +1499,38 @@ async def test_route_gate_timeout_discards_candidate_and_releases_route(
     assert candidates["zelda"].shutdown_calls == 1
     assert manager.receipts.records()[-1]["restored"] is True
     assert manager.receipts.records()[-1]["reason"] == "route_busy"
+
+
+@pytest.mark.asyncio
+async def test_target_becoming_busy_during_prepare_discards_candidate_before_fence():
+    kernel = _Kernel(names=("zelda",))
+    handle = kernel.runtimes[0]
+    old = handle.client
+    candidate = kernel.queue_generation("a", names=("zelda",))["zelda"]
+    original_call = old.call
+    metadata_reads = 0
+
+    async def observe_activity(method, params=None, **kwargs):
+        nonlocal metadata_reads
+        result = await original_call(method, params, **kwargs)
+        if method == "worker.metadata":
+            metadata_reads += 1
+            if metadata_reads == 2:
+                return {**result, "queue_depth": 1}
+        return result
+
+    old.call = observe_activity
+    manager = RebootManager(kernel, None)
+
+    assert not await manager.hot_restart({"mode": "min", "agent_name": "zelda"})
+
+    record = manager.receipts.records()[-1]
+    assert metadata_reads == 2
+    assert record["outcome"] == "rejected"
+    assert record["reason"] == "target_became_busy"
+    assert candidate.shutdown_calls == 1
+    assert handle.client is old and old.process.is_alive()
+    assert handle._cutover is False
 
 
 @pytest.mark.asyncio
@@ -1565,9 +1692,47 @@ async def test_post_commit_health_decides_receipt_without_false_rollback(
     record = manager.receipts.records()[-1]
     assert record["status"] == ("succeeded" if ready else "unconfirmed")
     assert record["lifecycle_state"] == ("online" if ready else "unconfirmed")
+    assert record["outcome"] == ("succeeded_with_warning" if ready else "failed")
+    assert record["observation_confidence"] == "confirmed"
+    assert record["warnings"] == ["topology_publish_failed"]
+    if not ready:
+        assert record["workers"]["zelda"]["failed_checks"] == [
+            "backend_not_ready"
+        ]
     assert record["committed"] and record["online"] == {"zelda": ready}
     assert kernel.runtimes[0].client is candidate and candidate.process.is_alive()
     assert not old.process.is_alive()
+
+
+@pytest.mark.asyncio
+async def test_committed_group_with_one_unready_worker_reports_partial_truth():
+    kernel = _Kernel()
+    kernel.queue_generation("a")
+    activate = kernel.function_workers.activate_new_worker
+
+    async def activate_with_one_unready(client):
+        metadata = await activate(client)
+        if client.agent_name == "sunny":
+            client.metadata["backend_ready"] = False
+            metadata["backend_ready"] = False
+        return metadata
+
+    kernel.function_workers.activate_new_worker = activate_with_one_unready
+    manager = RebootManager(kernel, None)
+
+    assert await manager.hot_restart(
+        {"mode": "group", "targets": ["zelda", "sunny"]}
+    )
+
+    record = manager.receipts.records()[-1]
+    assert record["outcome"] == "partial"
+    assert record["observation_confidence"] == "confirmed"
+    assert record["online"] == {"zelda": True, "sunny": False}
+    assert record["workers"]["zelda"]["state"] == "online_new"
+    assert record["workers"]["sunny"]["state"] == "unavailable"
+    assert record["workers"]["sunny"]["failed_checks"] == [
+        "backend_not_ready"
+    ]
 
 
 @pytest.mark.asyncio
@@ -1687,12 +1852,22 @@ def test_reboot_notices_use_names_for_one_target_and_counts_for_many():
 
     partial = {
         **many,
-        "status": "failed",
-        "lifecycle_state": "unconfirmed",
+        "status": "unconfirmed",
+        "lifecycle_state": "committed",
+        "outcome": "partial",
+        "observation_confidence": "confirmed",
         "online": {name: index < 18 for index, name in enumerate(many["targets"])},
+        "workers": {
+            name: {
+                "state": "online_new" if index < 18 else "unavailable",
+                "failed_checks": [] if index < 18 else ["backend_not_ready"],
+            }
+            for index, name in enumerate(many["targets"])
+        },
     }
     warning = render_notice(partial)
     assert "18/20" in warning and "Agent 18" in warning and "Agent 0" not in warning
+    assert "backend is not ready" in warning
 
 
 @pytest.mark.parametrize("locale", ["en", "zh-CN"])
