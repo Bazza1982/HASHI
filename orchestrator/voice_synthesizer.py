@@ -1,6 +1,6 @@
 import asyncio
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
@@ -18,6 +18,16 @@ class VoiceAsset:
     fallback_from: str | None = None
     fallback_reason_code: str | None = None
     fallback_reason: str | None = None
+    voice_name: str | None = None
+    language: str | None = None
+    language_confidence: float | None = None
+    language_scores: dict[str, float] = field(default_factory=dict)
+    adapted_from_voice: str | None = None
+    adaptation_reason: str | None = None
+    style_requested: str | None = None
+    style_applied: bool | None = None
+    style_reason: str | None = None
+    notice: str | None = None
 
 
 @dataclass(frozen=True)

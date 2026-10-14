@@ -1178,12 +1178,19 @@ class AgentRuntimeHandle:
         )
 
     async def synthesize_tui_speech(
-        self, text: str, request_id: str
+        self,
+        text: str,
+        request_id: str,
+        source_language: str | None = None,
     ) -> dict[str, Any]:
         return dict(
             await self._route(
                 "runtime.tui_speech",
-                {"text": str(text), "request_id": str(request_id)},
+                {
+                    "text": str(text),
+                    "request_id": str(request_id),
+                    "source_language": str(source_language or ""),
+                },
                 timeout=120,
             )
             or {}

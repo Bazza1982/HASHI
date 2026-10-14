@@ -8101,7 +8101,17 @@ class WorkbenchApiServer:
             )
         text = str(payload.get("text") or "").strip()
         request_id = str(payload.get("request_id") or "").strip()
-        if not text or len(text) > 20_000 or not request_id or len(request_id) > 160:
+        source_language = str(payload.get("source_language") or "").strip()
+        if (
+            not text
+            or len(text) > 20_000
+            or not request_id
+            or len(request_id) > 160
+            or (
+                source_language
+                and not re.fullmatch(r"[A-Za-z0-9_-]{1,35}", source_language)
+            )
+        ):
             return web.json_response(
                 {"ok": False, "code": "invalid_speech_request", "error": "valid text and request_id are required"},
                 status=400,
@@ -8113,7 +8123,7 @@ class WorkbenchApiServer:
                 status=503,
             )
         try:
-            result = method(text, request_id)
+            result = method(text, request_id, source_language or None)
             if inspect.isawaitable(result):
                 result = await result
         except VoiceSynthesisError as exc:

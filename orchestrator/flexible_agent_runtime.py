@@ -2838,7 +2838,14 @@ class FlexibleAgentRuntime:
             )
             if not customization or customization.get("route") != "connector_local":
                 raise RuntimeError("Telegram voice rendition is not registered in FC")
-            asset = await self.voice_manager.synthesize_reply(self.name, request_id, text, force=force)
+            asset = await self.voice_manager.synthesize_reply(
+                self.name,
+                request_id,
+                text,
+                force=force,
+                source_language=ui_language.preferred_locale(self),
+                source_surface="telegram",
+            )
             if asset is None:
                 return False
             payload = asset.ogg_path.read_bytes()
@@ -2848,7 +2855,7 @@ class FlexibleAgentRuntime:
                 media_type="audio/ogg",
                 payload=payload,
                 sha256=hashlib.sha256(payload).hexdigest(),
-                caption="",
+                caption=asset.notice or "",
                 publication_id=(
                     "voice-rendition:"
                     + hashlib.sha256(
@@ -2941,7 +2948,12 @@ class FlexibleAgentRuntime:
         self.voice_manager.set_voice_profile(profile_id)
         return self.tui_voice_state()
 
-    async def synthesize_tui_speech(self, text: str, request_id: str) -> dict[str, Any]:
+    async def synthesize_tui_speech(
+        self,
+        text: str,
+        request_id: str,
+        source_language: str | None = None,
+    ) -> dict[str, Any]:
         """Generate a bounded local-presentation asset without any Bot send."""
 
         spoken = str(text or "").strip()
@@ -2954,6 +2966,8 @@ class FlexibleAgentRuntime:
             str(request_id or f"tui-say-{uuid4().hex}"),
             spoken,
             force=True,
+            source_language=source_language or ui_language.preferred_locale(self),
+            source_surface="workbench",
         )
         if asset is None:
             raise RuntimeError("TTS is unavailable for this Agent")
@@ -2975,6 +2989,16 @@ class FlexibleAgentRuntime:
             "fallback_from": asset.fallback_from,
             "fallback_reason_code": asset.fallback_reason_code,
             "fallback_reason": asset.fallback_reason,
+            "voice_name": asset.voice_name,
+            "language": asset.language,
+            "language_confidence": asset.language_confidence,
+            "language_scores": dict(asset.language_scores),
+            "adapted_from_voice": asset.adapted_from_voice,
+            "adaptation_reason": asset.adaptation_reason,
+            "style_requested": asset.style_requested,
+            "style_applied": asset.style_applied,
+            "style_reason": asset.style_reason,
+            "notice": asset.notice,
             "request_id": str(request_id or ""),
         }
 
@@ -3823,7 +3847,32 @@ class FlexibleAgentRuntime:
         )
         return InlineKeyboardMarkup(rows)
 
-    def _voice_keyboard(self) -> InlineKeyboardMarkup:
+    def _voice_keyboard(self, view: str = "main") -> InlineKeyboardMarkup:
+        if view == "voices":
+            active_alias = self.voice_manager.get_active_preset_alias()
+            rows = [
+                [
+                    InlineKeyboardButton(
+                        selected_label(
+                            self.voice_manager.voice_preset_menu_label(alias),
+                            alias == active_alias,
+                        ),
+                        callback_data=f"voice:use:{alias}",
+                    )
+                ]
+                for alias, _preset, availability in self.voice_manager.get_voice_presets()
+                if availability == "ready"
+            ]
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        ui_language.tr("voice.tts.back"),
+                        callback_data="voice:back:main",
+                    )
+                ]
+            )
+            return InlineKeyboardMarkup(rows)
+
         mode = self.voice_manager.get_reply_mode()
         native = self.voice_manager.native_policy
         profile_id = self.voice_manager.get_voice_profile_id()
@@ -3858,6 +3907,12 @@ class FlexibleAgentRuntime:
                         native["reply_content"] == "audio_only",
                     ),
                     callback_data="voice:content:audio",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    ui_language.tr("voice.tts.choose"),
+                    callback_data="voice:view:voices",
                 ),
             ],
         ]
@@ -4459,8 +4514,25 @@ class FlexibleAgentRuntime:
         action = parts[1] if len(parts) > 1 else "refresh"
         value = parts[2] if len(parts) > 2 else ""
         message = None
+        render_view = "main"
         preview_profile: str | None = None
         preview_renderers: tuple[str, ...] = ()
+        if action == "view" and value == "voices":
+            await query.edit_message_text(
+                self.voice_manager.voice_choice_menu_text(),
+                reply_markup=self._voice_keyboard("voices"),
+                parse_mode="HTML",
+            )
+            await query.answer()
+            return
+        if action == "back":
+            await query.edit_message_text(
+                self.voice_manager.voice_menu_text(),
+                reply_markup=self._voice_keyboard(),
+                parse_mode="HTML",
+            )
+            await query.answer()
+            return
         try:
             if action == "mode":
                 message = self.voice_manager.set_reply_mode(value)
@@ -4482,6 +4554,7 @@ class FlexibleAgentRuntime:
                 )
             elif action == "use":
                 message = self.voice_manager.apply_voice_preset(value)
+                render_view = "voices"
         except Exception as e:
             await query.answer(str(e), show_alert=True)
             return
@@ -4494,8 +4567,16 @@ class FlexibleAgentRuntime:
             )
             if len(preview_assets) != len(preview_renderers):
                 preview_assets = ()
-        text = self.voice_manager.voice_menu_text()
-        await query.edit_message_text(text, reply_markup=self._voice_keyboard(), parse_mode="HTML")
+        text = (
+            self.voice_manager.voice_choice_menu_text()
+            if render_view == "voices"
+            else self.voice_manager.voice_menu_text()
+        )
+        await query.edit_message_text(
+            text,
+            reply_markup=self._voice_keyboard(render_view),
+            parse_mode="HTML",
+        )
         callback_notice = message or ui_language.tr("common.updated")
         if preview_profile and not preview_assets:
             callback_notice = ui_language.tr("voice.preview.unavailable")

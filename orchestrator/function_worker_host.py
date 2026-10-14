@@ -1626,6 +1626,7 @@ class FunctionWorkerHost:
             return await runtime.synthesize_tui_speech(
                 str(params.get("text") or ""),
                 str(params.get("request_id") or ""),
+                str(params.get("source_language") or "") or None,
             )
         raise FunctionWorkerStateError(f"unknown Worker request: {method}")
 

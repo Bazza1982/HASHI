@@ -195,7 +195,7 @@ class _Runtime:
             "profiles": [{"id": profile, "label": "Selected"}],
         }
 
-    async def synthesize_tui_speech(self, text, request_id):
+    async def synthesize_tui_speech(self, text, request_id, source_language=None):
         content = b"OggS-test-audio"
         return {
             "content_b64": base64.b64encode(content).decode("ascii"),
@@ -204,6 +204,7 @@ class _Runtime:
             "media_type": "audio/ogg",
             "request_id": request_id,
             "spoken": text,
+            "source_language": source_language,
             "provider": "windows",
             "fallback_from": "edge",
             "fallback_reason_code": "tts_protocol_rejected",
@@ -592,7 +593,12 @@ async def test_session_workzone_reference_requires_session_owner_before_file_rea
 async def test_tui_speech_generates_asset_without_enqueue_or_connector_send(tmp_path):
     server, runtime = _server(tmp_path)
     response = await server.handle_tui_speech(
-        _Request({"agent": "lily", "text": "read this", "request_id": "say-1"})
+        _Request({
+            "agent": "lily",
+            "text": "read this",
+            "request_id": "say-1",
+            "source_language": "ja-JP",
+        })
     )
     payload = json.loads(response.text)
 
@@ -600,6 +606,7 @@ async def test_tui_speech_generates_asset_without_enqueue_or_connector_send(tmp_
     assert payload["ok"] is True
     assert base64.b64decode(payload["content_b64"]).startswith(b"OggS")
     assert payload["spoken"] == "read this"
+    assert payload["source_language"] == "ja-JP"
     assert payload["provider"] == "windows"
     assert payload["fallback_from"] == "edge"
     assert payload["fallback_reason_code"] == "tts_protocol_rejected"
@@ -611,7 +618,7 @@ async def test_tui_speech_generates_asset_without_enqueue_or_connector_send(tmp_
 async def test_tui_speech_failure_returns_safe_provider_reasons(tmp_path):
     server, runtime = _server(tmp_path)
 
-    async def fail_speech(_text, _request_id):
+    async def fail_speech(_text, _request_id, _source_language=None):
         raise VoiceSynthesisError(
             "tts_all_providers_failed",
             (

@@ -93,6 +93,7 @@ def test_piper_preset_uses_standalone_executable_without_python_module(
 def test_voice_profiles_resolve_supported_native_voice_and_tts_fallback(tmp_path):
     manager = _manager(tmp_path)
     manager.set_native_target("openrouter-api", "openai/gpt-audio-mini")
+    manager.apply_voice_preset("ecn")
 
     expected = {
         "warm_female": ("shimmer", "en-US-EmmaMultilingualNeural"),
@@ -106,7 +107,9 @@ def test_voice_profiles_resolve_supported_native_voice_and_tts_fallback(tmp_path
         assert state["voice_profile"] == profile_id
         assert state["native"]["voice"] == native_voice
         assert state["provider"] == "edge"
-        assert state["voice_name"] == tts_voice
+        # TTS voice and style are independent preferences. Changing style must
+        # not silently overwrite the user's selected Xiaoxiao voice.
+        assert state["voice_name"] == "zh-CN-XiaoxiaoNeural"
 
     assert manager._tts_voice_for_profile("warm_male", "任务完成。") == (
         "zh-CN-YunxiNeural"
@@ -292,18 +295,20 @@ def test_voice_menu_explains_generation_and_separates_native_reply_format(tmp_pa
     assert "<b>Voice generation</b>" in menu
     assert "Voice messages go directly to an audio model" in menu
     assert "Speech is transcribed, a text model answers" in menu
-    assert "<b>Voice</b> · 👩 Clear" in menu
+    assert "<b>Default TTS voice</b> · Auto (follows request language)" in menu
+    assert "<b>Voice style</b> · 👩 Clear" in menu
     assert "<b>Native reply format</b> · Audio + text · native replies only" in menu
     assert "Native target" not in menu
     assert "Retention" not in menu
     assert "Audio-model tools" not in menu
 
-    assert len(keyboard) == 5
-    assert [len(row) for row in keyboard] == [2, 1, 2, 2, 2]
+    assert len(keyboard) == 6
+    assert [len(row) for row in keyboard] == [2, 1, 2, 1, 2, 2]
     assert [[button.text for button in row] for row in keyboard] == [
         ["✓ Native audio model", "Text model + TTS"],
         ["Voice off"],
         ["✓ Audio + text", "Audio only"],
+        ["🗣️ Choose default TTS voice"],
         ["👩 Warm", "✓ 👩 Clear"],
         ["👨 Warm", "👨 Calm"],
     ]
@@ -311,6 +316,7 @@ def test_voice_menu_explains_generation_and_separates_native_reply_format(tmp_pa
         ["voice:mode:native", "voice:mode:tts"],
         ["voice:mode:off"],
         ["voice:content:both", "voice:content:audio"],
+        ["voice:view:voices"],
         ["voice:profile:warm_female", "voice:profile:clear_female"],
         ["voice:profile:warm_male", "voice:profile:calm_male"],
     ]
@@ -369,10 +375,11 @@ async def test_voice_profile_callback_updates_both_renderers_without_growing_men
     state = manager.get_state()
     assert state["voice_profile"] == "calm_male"
     assert state["native"]["voice"] == "echo"
-    assert state["voice_name"] == "en-US-ChristopherNeural"
+    assert state["provider"] == "windows"
+    assert state["voice_name"] is None
     assert len(query.edits) == 1
     assert "native echo" not in query.edits[0][0]
-    assert len(query.edits[0][1]["reply_markup"].inline_keyboard) == 5
+    assert len(query.edits[0][1]["reply_markup"].inline_keyboard) == 6
     assert query.answers[0][0].startswith("Voice set to 👨 Calm")
     assert [call["chat_id"] for call in sent_previews] == [99, 99]
     assert [call["caption"] for call in sent_previews] == [
@@ -532,6 +539,7 @@ async def test_semantic_profile_drives_language_aware_tts_synthesis(
     tmp_path, monkeypatch
 ):
     manager = _manager(tmp_path)
+    manager.set_provider("edge")
     manager.set_voice_profile("warm_male")
     manager.set_reply_mode("tts")
     calls = []
@@ -558,6 +566,75 @@ async def test_semantic_profile_drives_language_aware_tts_synthesis(
     await manager.synthesize_reply("arale", "req-voice", "任务完成。")
 
     assert calls[0]["voice_name"] == "zh-CN-YunxiNeural"
+
+
+def test_voice_picker_uses_clear_localized_language_annotations(tmp_path):
+    manager = _manager(tmp_path)
+    runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
+    runtime.voice_manager = manager
+
+    with voice_manager_module.ui_language.language_scope(manager, locale="zh-CN"):
+        keyboard = runtime._voice_keyboard("voices").inline_keyboard
+        labels = [row[0].text for row in keyboard[:-1]]
+        main_menu = manager.voice_menu_text()
+
+    assert "晓晓（简中 · Edge）" in labels
+    assert "七海（日语 · Edge）" in labels
+    assert "晓晓（简中 · Kokoro）" in labels
+    assert "<b>语音风格</b> · 未设置" in main_menu
+    assert keyboard[-1][0].callback_data == "voice:back:main"
+
+
+@pytest.mark.asyncio
+async def test_japanese_adaptation_is_temporary_audited_and_user_visible(
+    tmp_path, monkeypatch
+):
+    manager = _manager(tmp_path)
+    manager.apply_voice_preset("ecn")
+    manager.set_reply_mode("tts")
+    calls = []
+
+    class Provider:
+        async def synthesize(self, **kwargs):
+            calls.append(kwargs)
+            output = Path(kwargs["output_dir"]) / "voice.ogg"
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(b"OggS-test")
+            return VoiceAsset(
+                provider="edge",
+                text=kwargs["text"],
+                spoken_text=kwargs["text"],
+                wav_path=None,
+                ogg_path=output,
+            )
+
+    monkeypatch.setattr(voice_manager_module, "build_provider", lambda *_a, **_k: Provider())
+
+    text = "これは日本語の文章です。すぐに読み上げてください。"
+    asset = await manager.synthesize_reply(
+        "arale",
+        "req-japanese",
+        text,
+        force=True,
+        source_language="zh-CN",
+        source_surface="workbench",
+    )
+
+    assert calls[0]["voice_name"] == "ja-JP-NanamiNeural"
+    assert asset.voice_name == "ja-JP-NanamiNeural"
+    assert asset.adapted_from_voice == "zh-CN-XiaoxiaoNeural"
+    assert asset.language == "ja"
+    assert "临时" in asset.notice
+    assert "默认语音未改变" in asset.notice
+    assert manager.get_state()["voice_name"] == "zh-CN-XiaoxiaoNeural"
+
+    audit = json.loads(manager.voice_audit_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert audit["source_surface"] == "workbench"
+    assert audit["language"]["language"] == "ja"
+    assert audit["routing"]["primary"]["adapted_from_voice"] == "zh-CN-XiaoxiaoNeural"
+    assert audit["attempts"][0]["status"] == "succeeded"
+    assert audit["result"]["voice_name"] == "ja-JP-NanamiNeural"
+    assert text not in manager.voice_audit_path.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
@@ -611,12 +688,13 @@ async def test_edge_protocol_rejection_falls_back_to_windows_without_reusing_edg
     assert len(edge_calls) == 1
     assert len(windows_calls) == 1
     assert windows_calls[0]["voice_name"] is None
-    assert windows_calls[0]["provider_options"] == {}
+    assert windows_calls[0]["provider_options"] == {"language_hint": "zh"}
     assert asset.provider == "windows"
     assert asset.fallback_from == "edge"
     assert asset.fallback_reason_code == "tts_protocol_rejected"
     assert "HTTP 403" in asset.fallback_reason
     assert "token=" not in asset.fallback_reason
+    assert "downgraded to Windows TTS" in asset.notice
 
     second = await manager.synthesize_reply(
         "arale", "req-cooldown", "任务完成。", max_retries=2, force=True

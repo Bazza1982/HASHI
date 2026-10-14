@@ -139,6 +139,14 @@ without reusing the Edge voice name. Success and failure retain safe provider,
 fallback and cause metadata, while service URLs and credentials are removed.
 See [voice fallback repair](repairs/VOICE_PROVIDER_FALLBACK_REPAIR_20261014.md).
 
+TTS routing now keeps preferred voice and optional style independent. Workbench
+supplies its display locale; other surfaces use HASHI `/language`. A 90%-dominant
+unsupported language temporarily selects a compatible voice from the same provider;
+English never forces a switch. Provider fallback is explicit and only moves from
+paid/network toward free/local. Temporary changes and fallbacks are user-visible and
+written as privacy-safe decision JSONL with every attempt. `/voice` labels choices
+with language and provider. See [TTS language routing decision](repairs/TTS_LANGUAGE_ROUTING_DECISION_20261015.md).
+
 Historical call checkpoints are superseded by the current [call decision](HASHI_CALL_INTERACTION_2026-10-04.md); physical audio, camera, accuracy and latency acceptance remain separate.
 The October 9 HASHI3 repair binds Call availability/start to the page's registered
 connection instead of another device's selection. Daily frontend adoption and
