@@ -1,9 +1,11 @@
 from __future__ import annotations
 import asyncio
+import json
 import wave
 from pathlib import Path
 
 from orchestrator.tts_providers.base import BaseTTSProvider
+from orchestrator.tts_routing import normalize_language
 from orchestrator.voice_synthesizer import VoiceAsset, convert_wav_to_ogg, spoken_text_language
 
 
@@ -28,7 +30,15 @@ class WindowsSapiProvider(BaseTTSProvider):
         wav_path = output_dir / f"{stem}.wav"
         ogg_path = output_dir / f"{stem}.ogg"
 
-        ps_script = self._powershell_script(str(wav_path), spoken_text, voice_name, rate)
+        options = provider_options or {}
+        language_hint = normalize_language(options.get("language_hint"))
+        ps_script = self._powershell_script(
+            str(wav_path),
+            spoken_text,
+            voice_name,
+            rate,
+            language_hint=language_hint,
+        )
         proc = await asyncio.create_subprocess_exec(
             "powershell",
             "-NoProfile",
@@ -52,15 +62,35 @@ class WindowsSapiProvider(BaseTTSProvider):
                 raise RuntimeError("Windows TTS returned empty audio for the selected voice.")
 
         await convert_wav_to_ogg(self.ffmpeg_cmd, wav_path, ogg_path)
+        actual_voice = voice_name
+        actual_language = language_hint
+        try:
+            metadata = json.loads(
+                stdout.decode("utf-8", errors="replace").strip().splitlines()[-1]
+            )
+            actual_voice = str(metadata.get("voice") or actual_voice or "").strip() or None
+            actual_language = normalize_language(metadata.get("language")) or actual_language
+        except (IndexError, TypeError, ValueError):
+            pass
         return VoiceAsset(
             provider=self.provider_name,
             text=text,
             spoken_text=spoken_text,
             wav_path=wav_path,
             ogg_path=ogg_path,
+            voice_name=actual_voice,
+            language=actual_language,
         )
 
-    def _powershell_script(self, wav_path: str, spoken_text: str, voice_name: str | None, rate: int) -> str:
+    def _powershell_script(
+        self,
+        wav_path: str,
+        spoken_text: str,
+        voice_name: str | None,
+        rate: int,
+        *,
+        language_hint: str | None = None,
+    ) -> str:
         safe_wav = wav_path.replace("'", "''")
         safe_text = spoken_text.replace("'", "''")
         if voice_name:
@@ -72,7 +102,7 @@ class WindowsSapiProvider(BaseTTSProvider):
                 "$synth.SelectVoice($voice.VoiceInfo.Name)\n"
             )
         else:
-            language = spoken_text_language(spoken_text)
+            language = language_hint or spoken_text_language(spoken_text)
             voice_line = (
                 f"if ($synth.Voice.Culture.TwoLetterISOLanguageName -ne '{language}') {{\n"
                 "  $voice = $synth.GetInstalledVoices() | "

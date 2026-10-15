@@ -80,4 +80,5 @@ class EdgeTTSProvider(BaseTTSProvider):
             spoken_text=spoken_text,
             wav_path=None,
             ogg_path=ogg_path,
+            voice_name=voice,
         )

@@ -165,6 +165,7 @@ from orchestrator.session_store import (
     SessionStore,
 )
 from orchestrator.transfer_store import TransferStore
+from orchestrator.voice_synthesizer import VoiceSynthesisError, safe_voice_error_detail
 from orchestrator.voice_transcript_gate import state_after_transcription
 
 logger = logging.getLogger("BridgeU.WorkbenchAPI")
@@ -8100,7 +8101,17 @@ class WorkbenchApiServer:
             )
         text = str(payload.get("text") or "").strip()
         request_id = str(payload.get("request_id") or "").strip()
-        if not text or len(text) > 20_000 or not request_id or len(request_id) > 160:
+        source_language = str(payload.get("source_language") or "").strip()
+        if (
+            not text
+            or len(text) > 20_000
+            or not request_id
+            or len(request_id) > 160
+            or (
+                source_language
+                and not re.fullmatch(r"[A-Za-z0-9_-]{1,35}", source_language)
+            )
+        ):
             return web.json_response(
                 {"ok": False, "code": "invalid_speech_request", "error": "valid text and request_id are required"},
                 status=400,
@@ -8112,17 +8123,37 @@ class WorkbenchApiServer:
                 status=503,
             )
         try:
-            result = method(text, request_id)
+            result = method(text, request_id, source_language or None)
             if inspect.isawaitable(result):
                 result = await result
-        except Exception as exc:
+        except VoiceSynthesisError as exc:
             logging.getLogger("BridgeU.Workbench").warning(
-                "TUI speech generation failed: agent=%s error=%s",
+                "TUI speech generation failed: agent=%s code=%s reason=%s",
                 getattr(runtime, "name", "unknown"),
-                exc,
+                exc.code,
+                safe_voice_error_detail(exc),
             )
             return web.json_response(
-                {"ok": False, "code": "tts_generation_failed", "error": str(exc)},
+                {
+                    "ok": False,
+                    "code": exc.code,
+                    "error": safe_voice_error_detail(exc),
+                    "provider_failures": [
+                        failure.as_dict() for failure in exc.failures
+                    ],
+                },
+                status=503,
+            )
+        except Exception as exc:
+            detail = safe_voice_error_detail(exc)
+            logging.getLogger("BridgeU.Workbench").warning(
+                "TUI speech generation failed: agent=%s error_type=%s reason=%s",
+                getattr(runtime, "name", "unknown"),
+                type(exc).__name__,
+                detail,
+            )
+            return web.json_response(
+                {"ok": False, "code": "tts_generation_failed", "error": detail},
                 status=503,
             )
         response = dict(result or {})

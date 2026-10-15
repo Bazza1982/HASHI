@@ -626,6 +626,29 @@ def test_builder_copies_the_versioned_voice_preview_bundle(tmp_path):
         assert len(payload) == entry["size_bytes"]
         assert hashlib.sha256(payload).hexdigest() == entry["sha256"]
 
+    tts_preview_root = (
+        destination / "orchestrator" / "tts_voice_preview_assets" / "v1"
+    )
+    tts_manifest = json.loads(
+        (tts_preview_root / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert tts_manifest["schema_version"] == 1
+    assert tts_manifest["version"] == "v1"
+    assert tts_manifest["kind"] == "tts_voice_presets"
+    assert len(tts_manifest["entries"]) == 62
+    for entry in tts_manifest["entries"]:
+        payload = (tts_preview_root / entry["path"]).read_bytes()
+        if entry["format"] == "ogg":
+            assert payload.startswith(b"OggS")
+        else:
+            assert payload.startswith(b"ID3") or (
+                len(payload) > 1
+                and payload[0] == 0xFF
+                and payload[1] & 0xE0 == 0xE0
+            )
+        assert len(payload) == entry["size_bytes"]
+        assert hashlib.sha256(payload).hexdigest() == entry["sha256"]
+
 
 def test_builder_copies_and_validates_the_runtime_entry_profile(tmp_path):
     builder = _load_builder()
@@ -709,13 +732,13 @@ def test_portable_dependency_generation_rejects_a_drifted_direct_input(tmp_path)
     shutil.copy2(ROOT / "requirements.txt", source / "requirements.txt")
     shutil.copy2(ROOT / "constraints" / "standard-py312.lock", standard)
     requirements = (PORTABLE / "requirements.in").read_text(encoding="utf-8")
-    requirements = requirements.replace("edge-tts==7.2.7", "edge-tts==0.0.0", 1)
+    requirements = requirements.replace("edge-tts==7.3.1", "edge-tts==0.0.0", 1)
     (portable / "requirements.in").write_text(requirements, encoding="utf-8")
     shutil.copy2(PORTABLE / "requirements.lock", portable / "requirements.lock")
 
     with pytest.raises(
         RuntimeError,
-        match=r"edge-tts: lock=7\.2\.7, input=0\.0\.0",
+        match=r"edge-tts: lock=7\.3\.1, input=0\.0\.0",
     ):
         builder.validate_portable_dependency_generation(
             source_root=source,
@@ -796,7 +819,7 @@ def test_portable_dependency_lock_keeps_requested_compact_capabilities():
     for name in ("pymupdf", "textual", "zeroconf"):
         assert f"{name}=={standard[name]}" in lock
     for required in (
-        "edge-tts==7.2.7",
+        "edge-tts==7.3.1",
         "playwright==1.58.0",
         "psutil==7.2.2",
     ):
@@ -809,6 +832,27 @@ def test_portable_dependency_lock_keeps_requested_compact_capabilities():
         "paddlepaddle==",
     ):
         assert excluded not in lock
+
+
+def test_portable_tts_helper_uses_capacity_safe_edge_only_runtime(tmp_path, monkeypatch):
+    builder = _load_builder()
+    commands = []
+    monkeypatch.setattr(builder, "extract_python", lambda *_args: None)
+    monkeypatch.setattr(builder, "run", lambda command: commands.append(command))
+
+    builder.install_media_helpers(
+        tmp_path / "staging",
+        tmp_path / "app" / "hashi",
+        tmp_path / "cache",
+    )
+
+    tts_lock = tmp_path / "app" / "hashi" / "constraints" / "tts-edge-py312.lock"
+    assert any(str(tts_lock) in command for command in commands)
+    assert any(
+        command[-2:] == ["--probe", "--edge-only"]
+        and command[2].endswith("voice_synthesis_worker.py")
+        for command in commands
+    )
 
 
 def test_portable_launchers_are_drive_relative_and_gateway_stays_disabled():
@@ -847,7 +891,11 @@ def test_builder_enforces_capacity_and_prunes_cli_adaptors():
         "requirements-privacy.txt",
         "LICENSE",
     }
-    assert builder.RUNTIME_POLICY_FILES == (load_runtime_policy(ROOT).standard_lock,)
+    assert builder.RUNTIME_POLICY_FILES == (
+        load_runtime_policy(ROOT).standard_lock,
+        "constraints/transcription-py312.lock",
+        "constraints/tts-edge-py312.lock",
+    )
     assert "exp/loader.py" in builder.ROOT_PACKAGE_FILES
     assert "veritas" in builder.SOURCE_DIRS
     for name in ("codex", "claude", "gemini", "grok"):

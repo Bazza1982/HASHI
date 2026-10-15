@@ -11,6 +11,7 @@ import pytest
 from orchestrator.config import ConfigManager
 from orchestrator.workbench_api import WorkbenchApiServer
 from orchestrator.private_authorization import authorization_content_sha256
+from orchestrator.voice_synthesizer import VoiceProviderFailure, VoiceSynthesisError
 
 
 class _Request:
@@ -194,7 +195,7 @@ class _Runtime:
             "profiles": [{"id": profile, "label": "Selected"}],
         }
 
-    async def synthesize_tui_speech(self, text, request_id):
+    async def synthesize_tui_speech(self, text, request_id, source_language=None):
         content = b"OggS-test-audio"
         return {
             "content_b64": base64.b64encode(content).decode("ascii"),
@@ -203,6 +204,11 @@ class _Runtime:
             "media_type": "audio/ogg",
             "request_id": request_id,
             "spoken": text,
+            "source_language": source_language,
+            "provider": "windows",
+            "fallback_from": "edge",
+            "fallback_reason_code": "tts_protocol_rejected",
+            "fallback_reason": "Edge TTS rejected the speech request (HTTP 403).",
         }
 
 def _server(
@@ -587,7 +593,12 @@ async def test_session_workzone_reference_requires_session_owner_before_file_rea
 async def test_tui_speech_generates_asset_without_enqueue_or_connector_send(tmp_path):
     server, runtime = _server(tmp_path)
     response = await server.handle_tui_speech(
-        _Request({"agent": "lily", "text": "read this", "request_id": "say-1"})
+        _Request({
+            "agent": "lily",
+            "text": "read this",
+            "request_id": "say-1",
+            "source_language": "ja-JP",
+        })
     )
     payload = json.loads(response.text)
 
@@ -595,8 +606,60 @@ async def test_tui_speech_generates_asset_without_enqueue_or_connector_send(tmp_
     assert payload["ok"] is True
     assert base64.b64decode(payload["content_b64"]).startswith(b"OggS")
     assert payload["spoken"] == "read this"
+    assert payload["source_language"] == "ja-JP"
+    assert payload["provider"] == "windows"
+    assert payload["fallback_from"] == "edge"
+    assert payload["fallback_reason_code"] == "tts_protocol_rejected"
     assert runtime.api_delivery_flags == []
     assert runtime.api_media_calls == []
+
+
+@pytest.mark.asyncio
+async def test_tui_speech_failure_returns_safe_provider_reasons(tmp_path):
+    server, runtime = _server(tmp_path)
+
+    async def fail_speech(_text, _request_id, _source_language=None):
+        raise VoiceSynthesisError(
+            "tts_all_providers_failed",
+            (
+                "Edge TTS rejected the speech request (HTTP 403). "
+                "Automatic Windows TTS fallback also failed: "
+                "Windows TTS has no installed voice for language: ja."
+            ),
+            failures=(
+                VoiceProviderFailure(
+                    "edge",
+                    "tts_protocol_rejected",
+                    "Edge TTS rejected the speech request (HTTP 403).",
+                ),
+                VoiceProviderFailure(
+                    "windows",
+                    "tts_voice_unavailable",
+                    "Windows TTS has no installed voice for language: ja.",
+                ),
+            ),
+        )
+
+    runtime.synthesize_tui_speech = fail_speech
+    response = await server.handle_tui_speech(
+        _Request(
+            {
+                "agent": "lily",
+                "text": "read this",
+                "request_id": "say-failed",
+            }
+        )
+    )
+    payload = json.loads(response.text)
+
+    assert response.status == 503
+    assert payload["code"] == "tts_all_providers_failed"
+    assert "HTTP 403" in payload["error"]
+    assert "language: ja" in payload["error"]
+    assert [failure["code"] for failure in payload["provider_failures"]] == [
+        "tts_protocol_rejected",
+        "tts_voice_unavailable",
+    ]
 
 
 @pytest.mark.asyncio

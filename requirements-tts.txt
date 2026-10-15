@@ -1,4 +1,12 @@
-# Isolated Edge speech helper. Never install this file into the long-lived
+# Isolated free TTS providers. Never install this file into the long-lived
 # HASHI Core or Function Worker environment.
-edge-tts==7.2.8
+edge-tts==7.3.1
 imageio-ffmpeg==0.6.0
+kokoro==0.9.4
+misaki[en,zh]==0.9.4
+soundfile==0.13.1
+
+# Misaki defaults to a Cutlet/Unidic path whose dictionary is not installed by
+# its package. HASHI selects Misaki's OpenJTalk path instead; this maintained
+# drop-in replacement provides prebuilt wheels on supported local platforms.
+pyopenjtalk-plus==0.4.1.post9

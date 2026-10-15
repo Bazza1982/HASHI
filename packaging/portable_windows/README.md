@@ -69,7 +69,10 @@ USB bundle.
 The image contains HERV3, official DeepSeek defaults, configurable Qwen via
 the official DashScope OpenAI-compatible endpoint, TUI, the HASHI Backend API,
 Remote/LAN/HChat, Scheduler, Nagare, Superloops, browser/desktop
-tools, Tesseract OCR, FFmpeg, Edge TTS, and one Chinese Piper voice. It uses the
+tools, Tesseract OCR, FFmpeg, Edge TTS, installed Windows SAPI voices, and one
+Chinese Piper voice. The standard deployment's local Kokoro/Torch runtime is
+intentionally omitted because it cannot fit within this artifact's enforced
+957 MB capacity. It uses the
 host Edge or Chrome and does not bundle Electron or Chromium. There is no CLI
 Engine, local LLM, semantic vector runtime, system Python or Node installation,
 global PATH change, Windows service, registry installation, or ProgramData
