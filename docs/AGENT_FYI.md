@@ -133,42 +133,19 @@ Commands follow the [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md), retain Session 
 
 `/say` reads the latest final reply, `/say 2`–`/say 4` that many, `/say 1-3` the latest three oldest first. Skip cost/command/progress. Telegram needs confirmed chat delivery; Workbench/TUI play locally. Reboot receipts never prove playback.
 
-Manual Workbench Read Aloud accepts its own typed reason. Edge speech runs in
-the isolated TTS runtime; on Windows, a failed Edge provider falls back to SAPI
-without reusing the Edge voice name. Success and failure retain safe provider,
-fallback and cause metadata, while service URLs and credentials are removed.
-See [voice fallback repair](repairs/VOICE_PROVIDER_FALLBACK_REPAIR_20261014.md).
+TTS logs omit secrets. `/voice` chooses a labelled voice/preview; >=90% unsupported
+text switches inside its provider (English exempt). Workbench uses display locale,
+others `/language`. Fallback is visible and only paid/network to free/local; Windows
+Edge may use SAPI under its own name. `/call` is unchanged. See
+[routing](repairs/TTS_LANGUAGE_ROUTING_DECISION_20261015.md)
+and [fallback](repairs/VOICE_PROVIDER_FALLBACK_REPAIR_20261014.md).
 
-TTS routing now keeps preferred voice and optional style independent. Workbench
-supplies its display locale; other surfaces use HASHI `/language`. A 90%-dominant
-unsupported language temporarily selects a compatible voice from the same provider;
-English never forces a switch. Provider fallback is explicit and only moves from
-paid/network toward free/local. Temporary changes and fallbacks are user-visible and
-written as privacy-safe decision JSONL with every attempt. `/voice` labels concrete
-voices with language, gender, and provider. Selecting one saves it and publishes its
-exact prerecorded provider/voice/language sample (OGG for Telegram, MP3 for browser
-Frontends); a missing or invalid sample keeps the choice and reports unavailability.
-This does not change `/call`. See [TTS language routing decision](repairs/TTS_LANGUAGE_ROUTING_DECISION_20261015.md).
+Deploys install Edge/Kokoro and SAPI without changing settings; the 957 MB portable
+keeps Edge/SAPI/Piper but omits Kokoro/Torch. See
+[deployment](repairs/FREE_TTS_DEPLOYMENT_DECISION_20261015.md).
 
-Standard deployments now prepare free Edge and local Kokoro in an isolated,
-pinned TTS Function runtime and cache every configured Kokoro voice before
-publishing readiness. Windows SAPI voices are discovered by exact installed
-name; missing voices stay hidden. Installation never enables voice replies or
-changes the user's `/voice` choice. The 957 MB Windows portable image is the
-explicit capacity exception: Edge + installed SAPI + Piper remain available,
-while Kokoro/Torch is omitted under a separate verified Edge-only lock. See the
-[free TTS deployment decision](repairs/FREE_TTS_DEPLOYMENT_DECISION_20261015.md).
+See the [call decision](HASHI_CALL_INTERACTION_2026-10-04.md); device acceptance is
+separate. [Older checkpoints](AGENT_FYI_HISTORY_MEDIA_20261009.md) grant no authority.
 
-Historical call checkpoints are superseded by the current [call decision](HASHI_CALL_INTERACTION_2026-10-04.md); physical audio, camera, accuracy and latency acceptance remain separate.
-The October 9 HASHI3 repair binds Call availability/start to the page's registered
-connection instead of another device's selection. Daily frontend adoption and
-file-microphone recognition/reply/playback/hangup pass; 52 focused checks pass.
-Physical microphone/camera and hearing remain personal acceptance.
-
-
-Remaining Move/Scheduler/HCC, legacy compatibility and prior deployment notes are preserved in [October 9 history](AGENT_FYI_HISTORY_MEDIA_20261009.md). Historical deployment scopes grant no current authority.
-
-The Lily Wiki pipeline counts only newly promoted candidates. Repeated private
-knowledge promotion must not rewrite an already-promoted candidate or inflate
-the daily promotion total. Its dated consolidation scan and embed log remains
-the publication gate; a Scheduler trigger timestamp alone is insufficient.
+Lily Wiki requires new candidates plus consolidation/embed evidence; a Scheduler
+timestamp is insufficient.
