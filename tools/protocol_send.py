@@ -48,6 +48,12 @@ from tools.hchat_send import (
 _FAILURE_STATES = frozenset(
     {"abandoned_after_restart", "failed", "reply_failed", "timed_out"}
 )
+_CONFIRMATION_WAITING_STATES = frozenset(
+    {"awaiting_confirmation", "confirming", "pending_confirmation"}
+)
+_CONFIRMATION_TERMINAL_STATES = frozenset(
+    {"discarded", "confirmation_expired", "confirmation_superseded"}
+)
 
 
 def _build_request_headers(
@@ -163,21 +169,28 @@ def _build_message_payload(
     text: str,
     ttl: int,
     conversation_id: str | None,
+    message_id: str | None = None,
+    originated_at: str | None = None,
+    message_type: str = "agent_message",
+    in_reply_to: str | None = None,
 ) -> dict:
-    message_id = f"msg-{uuid.uuid4().hex[:16]}"
+    mid = message_id or f"msg-{uuid.uuid4().hex[:16]}"
+    orig = originated_at or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     return {
-        "message_type": "agent_message",
-        "message_id": message_id,
+        "message_type": str(message_type or "agent_message"),
+        "message_id": mid,
+        "originated_at": orig,
         "conversation_id": conversation_id or f"conv-{uuid.uuid4().hex[:16]}",
         "from_instance": source_instance,
         "from_agent": from_agent.lower(),
         "to_instance": target_instance,
         "to_agent": to_agent.lower(),
-        "body": {"text": text},
+        "body": {"text": text, "originated_at": orig},
         "hop_count": 0,
         "ttl": max(1, int(ttl)),
         "route_trace": [source_instance],
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": orig,
+        "in_reply_to": in_reply_to,
     }
 
 
@@ -682,6 +695,10 @@ def _delivery_disposition(result: dict) -> str:
     state = str(result.get("state") or "accepted").strip().lower()
     if not result.get("ok") or state in _FAILURE_STATES:
         return "failed"
+    if state in _CONFIRMATION_WAITING_STATES:
+        return "pending_confirmation"
+    if state in _CONFIRMATION_TERMINAL_STATES:
+        return state
     # Protocol lifecycle states stop at a peer protocol endpoint or its local
     # /api/chat queue. Neither reply_sent nor completed carries the later
     # Frontend Connector transport receipt, so this tool cannot claim "sent".
@@ -696,12 +713,23 @@ def _print_delivery_receipt(
     text: str,
 ) -> None:
     disposition = _delivery_disposition(result)
-    stream = sys.stderr if disposition == "failed" else sys.stdout
-    title = (
-        "❌ Protocol message failed"
-        if disposition == "failed"
-        else "🟡 Protocol message queued"
-    )
+    terminal_titles = {
+        "discarded": "⚪ Protocol message discarded without execution",
+        "confirmation_expired": "⌛ Protocol message confirmation expired",
+        "confirmation_superseded": "⚪ Protocol message superseded without execution",
+    }
+    if disposition == "failed":
+        stream = sys.stderr
+        title = "❌ Protocol message failed"
+    elif disposition == "pending_confirmation":
+        stream = sys.stdout
+        title = "🟠 Protocol message waiting for confirmation"
+    elif disposition in terminal_titles:
+        stream = sys.stderr
+        title = terminal_titles[disposition]
+    else:
+        stream = sys.stdout
+        title = "🟡 Protocol message queued"
     print(f"{title}: {from_agent} → {target}", file=stream)
     print(f"   Message:\n{text}", file=stream)
 
@@ -719,6 +747,10 @@ def send_protocol_message(
     shared_token: str | None = None,
     private_credential_ids: list[str] | tuple[str, ...] | None = None,
     authorization_resources: list[str] | tuple[str, ...] | None = None,
+    message_id: str | None = None,
+    originated_at: str | None = None,
+    message_type: str = "agent_message",
+    in_reply_to: str | None = None,
     timeout: int = 10,
 ) -> bool:
     cfg = _load_config()
@@ -742,6 +774,10 @@ def send_protocol_message(
         text=text,
         ttl=ttl,
         conversation_id=conversation_id,
+        message_id=message_id,
+        originated_at=originated_at,
+        message_type=message_type,
+        in_reply_to=in_reply_to,
     )
     selected_credentials = list(private_credential_ids or [])
     selected_resources = list(authorization_resources or [])
@@ -791,6 +827,17 @@ def send_protocol_message(
             remote_host = candidate
             break
     base_url = f"http://{remote_host}:{remote_port}"
+    capabilities, capability_error = fetch_remote_protocol_capabilities(
+        base_url, timeout=min(timeout, 5)
+    )
+    if capability_error or "message_freshness_v1" not in capabilities:
+        reason = capability_error or "peer does not advertise message_freshness_v1"
+        print(
+            "❌ Remote peer does not support HChat message freshness protection; "
+            f"update the peer before sending ({reason}).",
+            file=sys.stderr,
+        )
+        return False
     attachments = attachments or []
     _record_outbound_correlation(payload, state="sending", sidecar_base_url=local_sidecar_base_url)
     if attachments:
@@ -830,6 +877,9 @@ def send_protocol_message(
         print(f"   state: {result.get('state', 'accepted')}")
         if attachments:
             print(f"   attachments: {len(attachments)}")
+        # The receiver handled confirmation terminal states authoritatively.
+        # Treat that as a completed transport exchange so callers do not
+        # fail over and submit the same logical message through another path.
         return True
     _record_outbound_correlation(payload, state="failed", result=result, sidecar_base_url=local_sidecar_base_url)
     _print_delivery_receipt(

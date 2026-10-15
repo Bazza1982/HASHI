@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -25,6 +26,9 @@ class _Request:
         body=b"",
     ):
         self._payload = payload or {}
+        if isinstance(self._payload, dict) and "message" in self._payload and "originated_at" not in self._payload:
+            from datetime import datetime, timezone
+            self._payload.setdefault("originated_at", datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
         self.query = query or {}
         self.match_info = match_info or {}
         self.headers = headers or {}
@@ -1809,6 +1813,9 @@ async def test_protocol_hchat_attachments_enter_one_canonical_session_request(tm
                 ),
             },
             "remote_attachments": attachments,
+            "message_id": "wire-attachment-1",
+            "originated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "message_type": "agent_message",
             "idempotency_key": "protocol:message:wire-attachment-1",
         }
     )
@@ -1902,6 +1909,9 @@ async def test_transferred_protocol_hchat_document_is_rejected_before_staging(tm
                 ),
             },
             "remote_attachments": attachments,
+            "message_id": "wire-transfer-document",
+            "originated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "message_type": "agent_message",
             "idempotency_key": "protocol:message:wire-transfer-document",
         }
     )
@@ -2022,6 +2032,9 @@ async def test_protocol_hchat_attachment_batch_rolls_back_if_one_file_changes(tm
                 ),
             },
             "remote_attachments": attachments,
+            "message_id": "wire-attachment-rollback",
+            "originated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "message_type": "agent_message",
             "idempotency_key": "protocol:message:wire-attachment-rollback",
         }
     )

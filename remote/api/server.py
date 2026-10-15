@@ -389,6 +389,10 @@ class HchatPayload(BaseModel):
     from_instance: str          # e.g. "HASHI9"
     to_agent: str               # e.g. "lily"
     text: str                   # The message content (already formatted)
+    message_id: str
+    originated_at: str
+    idempotency_key: str
+    message_type: str = "agent_message"
     to_instance: Optional[str] = None  # Final target when a configured exchange relays
     source_hchat_format: bool = False  # If True, text is raw hchat format
     reply_route: Optional[dict] = None  # Sender's routing info for reply delivery
@@ -488,6 +492,7 @@ class ProtocolMessagePayload(BaseModel):
     ttl: int = 8
     route_trace: list[str] = []
     message_type: str = "agent_message"
+    originated_at: Optional[str] = None
     created_at: Optional[str] = None
     private_authorization_proofs: list[dict[str, Any]] = []
     authorization_resources: list[str] = []
@@ -520,7 +525,9 @@ class ExchangeMessagePayload(BaseModel):
     from_agent: str
     to_address: str
     text: str
-    message_id: Optional[str] = None
+    message_id: str
+    originated_at: str
+    idempotency_key: str
     conversation_id: Optional[str] = None
     message_type: str = "agent_message"
     in_reply_to: Optional[str] = None
@@ -3394,6 +3401,15 @@ def create_app(
                     "code": "EXCHANGE_DISABLED",
                 },
             )
+        if payload.idempotency_key != f"hchat:{payload.message_id}":
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "state": "rejected",
+                    "code": "INVALID_MESSAGE",
+                },
+            )
         if payload.authorization_resources or payload.private_authorization_proofs:
             return JSONResponse(
                 status_code=409,
@@ -3409,6 +3425,7 @@ def create_app(
                 to_address=payload.to_address,
                 text=payload.text,
                 message_id=payload.message_id,
+                originated_at=payload.originated_at,
                 conversation_id=payload.conversation_id,
                 message_type=payload.message_type,
                 in_reply_to=payload.in_reply_to,
@@ -3853,6 +3870,10 @@ def create_app(
                     target_instance=requested_instance,
                     source_instance=parsed["instance_id"] or payload.from_instance,
                     reply_route_override=payload.reply_route,
+                    message_id=payload.message_id,
+                    message_type=payload.message_type,
+                    originated_at=payload.originated_at,
+                    idempotency_key=payload.idempotency_key,
                 )
                 if ok:
                     logger.info(
@@ -3914,6 +3935,10 @@ def create_app(
             "agent": payload.to_agent.lower(),
             "text": message_text,
             "source": "hchat",
+            "message_id": payload.message_id,
+            "originated_at": payload.originated_at,
+            "idempotency_key": payload.idempotency_key,
+            "message_type": payload.message_type,
             "hchat_context": {
                 "from_agent": claimed_agent,
                 "from_instance": payload.from_instance,
@@ -3923,6 +3948,9 @@ def create_app(
                 "network_authentication": "pairing_bearer",
                 "sender_assurance": "authenticated_client_declared",
                 "relay_chain": [],
+                "message_id": payload.message_id,
+                "originated_at": payload.originated_at,
+                "message_type": payload.message_type,
             },
         }
         if payload.private_authorization_proofs:
@@ -3972,7 +4000,10 @@ def create_app(
                 result = json.loads(resp.read().decode("utf-8"))
                 if result.get("ok"):
                     logger.info("HChat relayed: %s → %s", payload.from_instance, payload.to_agent)
-                    return {"ok": True, "relayed": True}
+                    return JSONResponse(
+                        status_code=int(getattr(resp, "status", 200)),
+                        content={**result, "relayed": True},
+                    )
                 else:
                     logger.warning("Workbench rejected hchat: %s", result)
                     return JSONResponse(

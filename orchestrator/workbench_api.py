@@ -14,6 +14,7 @@ import re
 import time
 from collections.abc import Mapping
 from datetime import datetime
+import ipaddress
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -21,6 +22,21 @@ from uuid import uuid4
 
 from aiohttp import web
 
+from orchestrator.message_freshness import (
+    classify_freshness,
+    CONFIRMATION_EXPIRY_SECONDS,
+    FRESHNESS_TELEGRAM_SECONDS,
+    FRESHNESS_WORKBENCH_LOCAL_SECONDS,
+    FRESHNESS_WORKBENCH_REMOTE_SECONDS,
+    FRESHNESS_HCHAT_SECONDS,
+)
+from orchestrator.ingress_confirmation import (
+    IngressConfirmationService,
+    ConfirmationNotFoundError,
+    ConfirmationConflictError,
+    ConfirmationExpiredError,
+    ConfirmationSupersededError,
+)
 from orchestrator.admin_local_testing import (
     execute_local_command,
     supported_commands,
@@ -169,6 +185,16 @@ from orchestrator.voice_synthesizer import VoiceSynthesisError, safe_voice_error
 from orchestrator.voice_transcript_gate import state_after_transcription
 
 logger = logging.getLogger("BridgeU.WorkbenchAPI")
+
+
+def is_request_loopback(request) -> bool:
+    remote = getattr(request, "remote", None)
+    if not remote:
+        return True
+    try:
+        return ipaddress.ip_address(remote).is_loopback
+    except ValueError:
+        return remote in ("127.0.0.1", "::1", "localhost")
 
 _SUPPORTED_CONNECTOR_TYPES = frozenset(
     {"github", "slack", "google_chat", "teams", "feishu"}
@@ -364,6 +390,7 @@ class WorkbenchApiServer:
         self._standalone_agent_management = None
         self._static_connectors = list(connectors or [])
         self.session_store = SessionStore.from_global_config(self.global_config)
+        self.ingress_confirmation = IngressConfirmationService(self.session_store)
         self.reconciled_session_runs = (
             self.session_store.reconcile_incomplete_runs()
             if reconcile_session_runs
@@ -694,6 +721,21 @@ class WorkbenchApiServer:
                 "POST",
                 "/api/v1/sessions/{session_id}/runs/{run_id}/cancel",
                 self.handle_v1_session_run_cancel,
+            ),
+            (
+                "GET",
+                "/api/v1/sessions/{session_id}/ingress-confirmations",
+                self.handle_v1_session_ingress_confirmations_list,
+            ),
+            (
+                "GET",
+                "/api/v1/sessions/{session_id}/ingress-confirmations/{confirmation_id}",
+                self.handle_v1_session_ingress_confirmation_get,
+            ),
+            (
+                "POST",
+                "/api/v1/sessions/{session_id}/ingress-confirmations/{confirmation_id}/decision",
+                self.handle_v1_session_ingress_confirmation_decide,
             ),
             (
                 "GET",
@@ -5826,9 +5868,18 @@ class WorkbenchApiServer:
     def _v1_error(error: Exception, *, status: int | None = None):
         resolved_status = status
         if resolved_status is None:
-            if isinstance(error, SessionNotFound):
+            if isinstance(error, (SessionNotFound, ConfirmationNotFoundError)):
                 resolved_status = 404
-            elif isinstance(error, (SessionConflict, IdempotencyConflict)):
+            elif isinstance(
+                error,
+                (
+                    SessionConflict,
+                    IdempotencyConflict,
+                    ConfirmationConflictError,
+                    ConfirmationExpiredError,
+                    ConfirmationSupersededError,
+                ),
+            ):
                 resolved_status = 409
             elif isinstance(error, (ValueError, TypeError)):
                 resolved_status = 400
@@ -6004,6 +6055,29 @@ class WorkbenchApiServer:
                 "available": True,
                 "protocol_version": "1.0",
             }
+        capabilities["message_freshness"] = {
+            "version": "1.0",
+            "capability": "message_freshness_v1",
+            "required_fields": ["originated_at"],
+            "time_format": "rfc3339_utc",
+            "pending_receipt_supported": True,
+            "decisions_supported": ["confirm", "discard"],
+            "states": [
+                "awaiting_confirmation",
+                "confirming",
+                "confirmed",
+                "discarded",
+                "expired",
+                "superseded",
+            ],
+            "thresholds_seconds": {
+                "telegram": FRESHNESS_TELEGRAM_SECONDS,
+                "workbench_local": FRESHNESS_WORKBENCH_LOCAL_SECONDS,
+                "workbench_remote": FRESHNESS_WORKBENCH_REMOTE_SECONDS,
+                "hchat": FRESHNESS_HCHAT_SECONDS,
+            },
+            "confirmation_expiry_seconds": CONFIRMATION_EXPIRY_SECONDS,
+        }
         return web.json_response(capabilities)
 
     async def handle_v2_frontend_capabilities(self, request):
@@ -6480,322 +6554,933 @@ class WorkbenchApiServer:
         self._audio_transcript_tasks.add(task)
         task.add_done_callback(self._audio_transcript_tasks.discard)
 
+    async def _execute_session_run_from_payload(
+        self,
+        session: dict[str, Any],
+        owner: str,
+        payload: dict[str, Any],
+        *,
+        request=None,
+        confirmation_id: str | None = None,
+        confirmed_at: str | None = None,
+        validate_only: bool = False,
+    ) -> dict[str, Any] | web.Response:
+        runtime = self._runtime_map().get(session["agent_id"])
+        if runtime is None:
+            raise SessionNotFound("agent runtime not found")
+        message = payload.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            raise ValueError("message.content must be a list")
+        display_text = None
+        if "display_text" in message:
+            display_text = message["display_text"]
+            if not isinstance(display_text, str):
+                raise ValueError("message.display_text must be a string")
+            if len(display_text) > MAX_SESSION_MESSAGE_CHARS:
+                raise ValueError(
+                    "message.display_text exceeds the configured message limit"
+                )
+        text_blocks = [
+            str(block.get("text") or "")
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        ]
+        text = "\n".join(part for part in text_blocks if part).strip()
+        audio_blocks = [
+            dict(block)
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "audio"
+        ]
+        attachment_blocks = [
+            dict(block)
+            for block in content
+            if isinstance(block, dict)
+            and str(block.get("type") or "").strip().casefold()
+            in {"attachment", "audio"}
+        ]
+        surface = str(payload.get("surface") or "session-api").strip().lower()
+        if (
+            not surface
+            or len(surface) > 80
+            or any(
+                character not in "abcdefghijklmnopqrstuvwxyz0123456789._-"
+                for character in surface
+            )
+        ):
+            raise ValueError("surface must be a lowercase protocol identifier")
+        if audio_blocks and not self._native_audio_chat_v1_ready():
+            raise SessionConflict("native audio Session Turns are not enabled")
+        if audio_blocks and not self._runtime_native_audio_ready(
+            runtime, terminal=surface
+        ) and any(
+            str(block.get("semantic_role") or "audio_attachment") != "voice_message"
+            for block in audio_blocks
+        ):
+            raise SessionConflict(
+                "native audio is not enabled or qualified for this Agent"
+            )
+        if len(attachment_blocks) > MAX_SESSION_ATTACHMENTS_PER_MESSAGE:
+            raise ValueError("message exceeds the configured attachment count limit")
+        if not text and not attachment_blocks:
+            raise ValueError(
+                "message requires text or a committed attachment content part"
+            )
+        idempotency_key = str(
+            payload.get("idempotency_key")
+            or (request.headers.get("Idempotency-Key") if request else "")
+            or ""
+        ).strip()
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required")
+        client_id = str(
+            (request.headers.get("X-Client-Id") if request else "")
+            or payload.get("client_id")
+            or "default"
+        )
+        supplied_delivery_policy = payload.get("delivery_policy")
+        tui_metadata: dict[str, Any] = {}
+        response_preferences = dict(payload.get("response_preferences") or {})
+        if surface == "tui":
+            if payload.get("message_source") is not None:
+                raise ValueError("TUI source is asserted by the connector endpoint")
+            if supplied_delivery_policy is None:
+                from orchestrator.frontend_delivery import tui_run_delivery_policy
+
+                supplied_delivery_policy = tui_run_delivery_policy(
+                    telegram_mirror=True, client_id=client_id
+                )
+            policy = normalize_tui_run_delivery_policy(
+                supplied_delivery_policy, client_id=client_id
+            )
+            tui_metadata = {
+                FRONTEND_CLIENT_METADATA_KEY: {
+                    "kind": "tui", "client_id": client_id,
+                },
+                "ui_locale": normalize_locale(payload.get("ui_locale")),
+            }
+        elif supplied_delivery_policy is not None:
+            if surface not in {"workbench", "external", "session-api"}:
+                raise ValueError(
+                    "delivery_policy is supported only for surface=tui or an external frontend"
+                )
+            policy = normalize_frontend_run_delivery_policy(
+                supplied_delivery_policy,
+                connector_id="session_api",
+                client_id=client_id,
+            )
+            if any(
+                target["connector_id"] != "telegram"
+                or target["role"] != "mirror"
+                for target in policy["targets"]
+            ):
+                raise ValueError(
+                    "external frontend delivery_policy may only configure the Telegram mirror"
+                )
+            frontend_metadata = {
+                "kind": "session_api",
+                "client_id": client_id,
+            }
+            tui_metadata = {
+                FRONTEND_CLIENT_METADATA_KEY: frontend_metadata,
+            }
+        canonical_parts: list[dict[str, Any]] = []
+        total_attachment_bytes = 0
+        for item_index, block in enumerate(content, start=1):
+            if not isinstance(block, dict):
+                raise ValueError("message content parts must be objects")
+            block_type = str(block.get("type") or "").strip().casefold()
+            if block_type == "text":
+                canonical_parts.append(
+                    {
+                        "type": "text",
+                        "item_index": item_index,
+                        "text": str(block.get("text") or ""),
+                    }
+                )
+            elif block_type in {"attachment", "audio"}:
+                canonical_part = self.session_store.attachment_canonical_part(
+                    session_id=session["session_id"],
+                    owner_id=owner,
+                    attachment_id=str(block.get("attachment_id") or ""),
+                    item_index=item_index,
+                    semantic_role=(
+                        str(block.get("semantic_role") or "audio_attachment")
+                        if block_type == "audio"
+                        else str(block.get("semantic_role") or "") or None
+                    ),
+                    caption=str(block.get("caption") or ""),
+                    detail=str(block.get("detail") or ""),
+                )
+                if block_type == "audio" and canonical_part["modality"] != "audio":
+                    raise ValueError("audio content requires an audio attachment")
+                if (
+                    canonical_part["modality"] == "audio"
+                    and canonical_part.get("semantic_role") == "voice_message"
+                    and not self._native_audio_chat_v1_ready()
+                ):
+                    raise SessionConflict("native voice Session Turns are not enabled")
+                total_attachment_bytes += int(canonical_part["size_bytes"])
+                if total_attachment_bytes > MAX_SESSION_ATTACHMENT_TOTAL_BYTES:
+                    raise ValueError(
+                        "message exceeds the configured total attachment size limit"
+                    )
+                canonical_parts.append(canonical_part)
+            else:
+                raise ValueError(f"unsupported message content type {block_type!r}")
+        canonical_content = canonical_request_content(canonical_parts)
+        source_declaration = payload.get("message_source")
+        normalized_source_declaration = None
+        if source_declaration is not None:
+            normalized_source_declaration = normalize_external_source(
+                source_declaration
+            )
+        proofs = payload.get("private_authorization_proofs")
+        binding = payload.get("private_authorization_binding")
+        authorization_metadata: dict[str, Any] = {}
+        if isinstance(proofs, list):
+            authorization_metadata[PRIVATE_AUTHORIZATION_PROOFS_METADATA_KEY] = [
+                dict(item) for item in proofs if isinstance(item, Mapping)
+            ]
+        if isinstance(binding, Mapping):
+            authorization_metadata[PRIVATE_AUTHORIZATION_BINDING_METADATA_KEY] = (
+                dict(binding)
+            )
+        supplied_metadata = payload.get("request_metadata")
+        if isinstance(supplied_metadata, Mapping):
+            connector_evidence = supplied_metadata.get(
+                CONNECTOR_EVIDENCE_METADATA_KEY
+            )
+            if connector_evidence is not None:
+                if not isinstance(connector_evidence, Mapping):
+                    raise ValueError("connector evidence must be an object")
+                authorization_metadata[CONNECTOR_EVIDENCE_METADATA_KEY] = dict(
+                    connector_evidence
+                )
+        if validate_only:
+            return {
+                "runtime": runtime,
+                "message": message,
+                "content": content,
+                "display_text": display_text,
+                "text": text,
+                "attachment_blocks": attachment_blocks,
+                "idempotency_key": idempotency_key,
+                "canonical_content": canonical_content,
+            }
+        from orchestrator import runtime_transfer
+
+        transfer_session_metadata = {
+            "session_id": session["session_id"],
+            "owner_id": owner,
+            "session_surface": surface,
+            "session_channel_key": client_id,
+        }
+        transfer_request_fingerprint = {
+            "kind": "session-run",
+            "payload_sha256": hashlib.sha256(
+                json.dumps(
+                    payload,
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+        }
+        if runtime_transfer.session_request_requires_transfer_fence(
+            canonical_content
+        ):
+            redirect = runtime_transfer.authoritative_transfer_redirect_snapshot(
+                runtime
+            )
+            if redirect is not None:
+                transfer_response = self._transfer_redirect_response(
+                    runtime,
+                    source="session-api",
+                    session_metadata=transfer_session_metadata,
+                    idempotency_key=idempotency_key,
+                    request_fingerprint=transfer_request_fingerprint,
+                    redirect=redirect,
+                )
+                if transfer_response is not None:
+                    return transfer_response
+        transcript_state = self._begin_session_voice_transcription(
+            runtime=runtime,
+            canonical_content=canonical_content,
+            terminal=surface,
+        )
+        try:
+            req_meta = {
+                "session_id": session["session_id"],
+                "owner_id": owner,
+                "session_surface": surface,
+                "session_channel_key": client_id,
+                "execution_mode": payload.get("execution_mode"),
+                "parent_run_id": payload.get("parent_run_id"),
+                "session_message_text": text,
+                "session_message_display_text": display_text,
+                "session_message_content": content,
+                "session_context_generation": payload.get(
+                    "session_context_generation"
+                ),
+                "response_preferences": response_preferences,
+                **(
+                    {
+                        MESSAGE_SOURCE_CLAIM_METADATA_KEY: (
+                            normalized_source_declaration
+                        )
+                    }
+                    if normalized_source_declaration is not None
+                    else {}
+                ),
+                **authorization_metadata,
+                **tui_metadata,
+            }
+            if confirmation_id is not None:
+                req_meta["ingress_confirmation_id"] = confirmation_id
+            if confirmed_at is not None:
+                req_meta["confirmed_at"] = confirmed_at
+
+            request_id = await runtime.enqueue_request(
+                runtime._primary_chat_id(),
+                text,
+                "tui" if surface == "tui" else "session-api",
+                text[:160],
+                deliver_to_telegram=True,
+                idempotency_key=idempotency_key,
+                request_metadata=req_meta,
+                request_content=canonical_content,
+            )
+        except Exception as exc:
+            if transcript_state is not None:
+                transcript_state["task"].cancel()
+            redirect = runtime_transfer.transfer_redirect_from_exception(exc)
+            if redirect is not None:
+                transfer_response = self._transfer_redirect_response(
+                    runtime,
+                    source="session-api",
+                    session_metadata=transfer_session_metadata,
+                    idempotency_key=idempotency_key,
+                    request_fingerprint=transfer_request_fingerprint,
+                    redirect=redirect,
+                )
+                if transfer_response is not None:
+                    return transfer_response
+            raise
+        if not request_id:
+            if transcript_state is not None:
+                transcript_state["task"].cancel()
+            raise SessionConflict("request was not accepted")
+        self._bind_session_voice_transcription(
+            runtime=runtime,
+            state=transcript_state,
+            request_id=str(request_id),
+        )
+        run = self.session_store.get_run_by_request(request_id)
+        return {
+            "session_id": session["session_id"],
+            "run_id": run["run_id"],
+            "message_id": run["user_message_id"],
+            "request_id": request_id,
+            "state": run["state"],
+        }
+
     async def handle_v1_session_runs_create(self, request):
         owner = self._v1_owner_id(request)
         if owner is None:
             return self._v1_error(ValueError("not authenticated"), status=401)
         try:
             payload = await request.json()
+            if not isinstance(payload, dict):
+                raise ValueError("Session Run request body must be an object")
             session = self.session_store.get_session(
                 request.match_info["session_id"], owner_id=owner, include_deleted=False
             )
-            runtime = self._runtime_map().get(session["agent_id"])
-            if runtime is None:
-                raise SessionNotFound("agent runtime not found")
-            message = payload.get("message")
-            content = message.get("content") if isinstance(message, dict) else None
-            if not isinstance(content, list):
-                raise ValueError("message.content must be a list")
-            display_text = None
-            if "display_text" in message:
-                display_text = message["display_text"]
-                if not isinstance(display_text, str):
-                    raise ValueError("message.display_text must be a string")
-                if len(display_text) > MAX_SESSION_MESSAGE_CHARS:
-                    raise ValueError(
-                        "message.display_text exceeds the configured message limit"
-                    )
-            text_blocks = [
-                str(block.get("text") or "")
-                for block in content
-                if isinstance(block, dict) and block.get("type") == "text"
-            ]
-            text = "\n".join(part for part in text_blocks if part).strip()
-            audio_blocks = [
-                dict(block)
-                for block in content
-                if isinstance(block, dict) and block.get("type") == "audio"
-            ]
-            attachment_blocks = [
-                dict(block)
-                for block in content
-                if isinstance(block, dict)
-                and str(block.get("type") or "").strip().casefold()
-                in {"attachment", "audio"}
-            ]
             surface = str(payload.get("surface") or "session-api").strip().lower()
-            if (
-                not surface
-                or len(surface) > 80
-                or any(
-                    character not in "abcdefghijklmnopqrstuvwxyz0123456789._-"
-                    for character in surface
-                )
-            ):
-                raise ValueError("surface must be a lowercase protocol identifier")
-            if audio_blocks and not self._native_audio_chat_v1_ready():
-                raise SessionConflict("native audio Session Turns are not enabled")
-            if audio_blocks and not self._runtime_native_audio_ready(
-                runtime, terminal=surface
-            ) and any(
-                str(block.get('semantic_role') or 'audio_attachment') != 'voice_message'
-                for block in audio_blocks
-            ):
-                raise SessionConflict(
-                    "native audio is not enabled or qualified for this Agent"
-                )
-            if len(attachment_blocks) > MAX_SESSION_ATTACHMENTS_PER_MESSAGE:
-                raise ValueError("message exceeds the configured attachment count limit")
-            if not text and not attachment_blocks:
-                raise ValueError(
-                    "message requires text or a committed attachment content part"
-                )
-            idempotency_key = str(
+            is_loopback = is_request_loopback(request)
+            # TUI is intentionally outside the network freshness policy.  Its
+            # existing direct connector is identifiable by the server-owned
+            # loopback boundary plus the established TUI client/idempotency
+            # namespace.  A remote request or a body that only claims
+            # ``surface=tui`` does not receive this exemption.
+            idempotency_hint = str(
                 payload.get("idempotency_key")
                 or request.headers.get("Idempotency-Key")
                 or ""
             ).strip()
-            if not idempotency_key:
-                raise ValueError("idempotency_key is required")
-            client_id = str(
-                request.headers.get("X-Client-Id")
-                or payload.get("client_id")
-                or "default"
+            client_id_hint = str(payload.get("client_id") or "").strip()
+            trusted_local_tui = bool(
+                is_loopback
+                and surface == "tui"
+                and client_id_hint.startswith("tui-")
+                and idempotency_hint.startswith("tui-")
             )
-            supplied_delivery_policy = payload.get("delivery_policy")
-            tui_metadata: dict[str, Any] = {}
-            response_preferences = dict(payload.get("response_preferences") or {})
-            if surface == "tui":
-                if payload.get("message_source") is not None:
-                    raise ValueError("TUI source is asserted by the connector endpoint")
-                if supplied_delivery_policy is None:
-                    from orchestrator.frontend_delivery import tui_run_delivery_policy
-
-                    supplied_delivery_policy = tui_run_delivery_policy(
-                        telegram_mirror=True, client_id=client_id
-                    )
-                policy = normalize_tui_run_delivery_policy(
-                    supplied_delivery_policy, client_id=client_id
+            message = payload.get("message")
+            originated_at = payload.get("originated_at") or (
+                message.get("originated_at") if isinstance(message, dict) else None
+            )
+            is_remote = not is_loopback
+            freshness = (
+                None
+                if trusted_local_tui
+                else classify_freshness(
+                    ingress_type="workbench",
+                    originated_at=originated_at,
+                    is_remote=is_remote,
                 )
-                tui_metadata = {
-                    FRONTEND_CLIENT_METADATA_KEY: {
-                        "kind": "tui", "client_id": client_id,
-                    },
-                    "ui_locale": normalize_locale(payload.get("ui_locale")),
-                }
-            elif supplied_delivery_policy is not None:
-                if surface not in {"workbench", "external", "session-api"}:
-                    raise ValueError(
-                        "delivery_policy is supported only for surface=tui or an external frontend"
-                    )
-                policy = normalize_frontend_run_delivery_policy(
-                    supplied_delivery_policy,
-                    connector_id="session_api",
-                    client_id=client_id,
+            )
+            if freshness is not None and not freshness.is_fresh:
+                prepared = await self._execute_session_run_from_payload(
+                    session,
+                    owner,
+                    payload,
+                    request=request,
+                    validate_only=True,
                 )
-                if any(
-                    target["connector_id"] != "telegram"
-                    or target["role"] != "mirror"
-                    for target in policy["targets"]
-                ):
-                    raise ValueError(
-                        "external frontend delivery_policy may only configure the Telegram mirror"
-                    )
-                frontend_metadata = {
-                    "kind": "session_api",
-                    "client_id": client_id,
-                }
-                tui_metadata = {
-                    FRONTEND_CLIENT_METADATA_KEY: frontend_metadata,
-                }
-            canonical_parts: list[dict[str, Any]] = []
-            total_attachment_bytes = 0
-            for item_index, block in enumerate(content, start=1):
-                if not isinstance(block, dict):
-                    raise ValueError("message content parts must be objects")
-                block_type = str(block.get("type") or "").strip().casefold()
-                if block_type == "text":
-                    canonical_parts.append(
-                        {
-                            "type": "text",
-                            "item_index": item_index,
-                            "text": str(block.get("text") or ""),
-                        }
-                    )
-                elif block_type in {"attachment", "audio"}:
-                    canonical_part = self.session_store.attachment_canonical_part(
-                        session_id=session["session_id"],
-                        owner_id=owner,
-                        attachment_id=str(block.get("attachment_id") or ""),
-                        item_index=item_index,
-                        semantic_role=(
-                            str(block.get("semantic_role") or "audio_attachment")
-                            if block_type == "audio"
-                            else str(block.get("semantic_role") or "") or None
-                        ),
-                        caption=str(block.get("caption") or ""),
-                        detail=str(block.get("detail") or ""),
-                    )
-                    if block_type == "audio" and canonical_part["modality"] != "audio":
-                        raise ValueError("audio content requires an audio attachment")
-                    if (
-                        canonical_part["modality"] == "audio"
-                        and canonical_part.get("semantic_role") == "voice_message"
-                        and not self._native_audio_chat_v1_ready()
-                    ):
-                        raise SessionConflict("native voice Session Turns are not enabled")
-                    total_attachment_bytes += int(canonical_part["size_bytes"])
-                    if total_attachment_bytes > MAX_SESSION_ATTACHMENT_TOTAL_BYTES:
-                        raise ValueError(
-                            "message exceeds the configured total attachment size limit"
-                        )
-                    canonical_parts.append(canonical_part)
-                else:
-                    raise ValueError(f"unsupported message content type {block_type!r}")
-            canonical_content = canonical_request_content(canonical_parts)
-            from orchestrator import runtime_transfer
+                text = prepared["text"]
+                display_text = prepared["display_text"]
+                idempotency_key = prepared["idempotency_key"]
+                canonical_content = prepared["canonical_content"]
 
-            transfer_session_metadata = {
-                "session_id": session["session_id"],
-                "owner_id": owner,
-                "session_surface": surface,
-                "session_channel_key": client_id,
-            }
-            transfer_request_fingerprint = {
-                "kind": "session-run",
-                "payload_sha256": hashlib.sha256(
+                digest_payload = {
+                    "session_id": session["session_id"],
+                    "owner_id": owner,
+                    "payload": payload,
+                }
+                payload_digest = "sha256:" + hashlib.sha256(
                     json.dumps(
-                        payload,
-                        ensure_ascii=True,
+                        digest_payload,
                         sort_keys=True,
+                        ensure_ascii=False,
                         separators=(",", ":"),
+                        allow_nan=False,
                     ).encode("utf-8")
-                ).hexdigest(),
-            }
-            if runtime_transfer.session_request_requires_transfer_fence(
-                canonical_content
-            ):
-                redirect = runtime_transfer.authoritative_transfer_redirect_snapshot(
-                    runtime
+                ).hexdigest()
+
+                canonical_parts = (
+                    list(canonical_content.get("parts") or [])
+                    if isinstance(canonical_content, Mapping)
+                    else []
                 )
-                if redirect is not None:
-                    transfer_response = self._transfer_redirect_response(
-                        runtime,
-                        source="session-api",
-                        session_metadata=transfer_session_metadata,
-                        idempotency_key=idempotency_key,
-                        request_fingerprint=transfer_request_fingerprint,
-                        redirect=redirect,
-                    )
-                    if transfer_response is not None:
-                        return transfer_response
-            source_declaration = payload.get("message_source")
-            normalized_source_declaration = None
-            if source_declaration is not None:
-                normalized_source_declaration = normalize_external_source(
-                    source_declaration
-                )
-            proofs = payload.get("private_authorization_proofs")
-            binding = payload.get("private_authorization_binding")
-            authorization_metadata: dict[str, Any] = {}
-            if isinstance(proofs, list):
-                authorization_metadata[PRIVATE_AUTHORIZATION_PROOFS_METADATA_KEY] = [
-                    dict(item) for item in proofs if isinstance(item, Mapping)
+                canonical_attachments = [
+                    part
+                    for part in canonical_parts
+                    if isinstance(part, Mapping)
+                    and str(part.get("type") or "") == "media"
                 ]
-            if isinstance(binding, Mapping):
-                authorization_metadata[PRIVATE_AUTHORIZATION_BINDING_METADATA_KEY] = (
-                    dict(binding)
-                )
-            supplied_metadata = payload.get("request_metadata")
-            if isinstance(supplied_metadata, Mapping):
-                connector_evidence = supplied_metadata.get(
-                    CONNECTOR_EVIDENCE_METADATA_KEY
-                )
-                if connector_evidence is not None:
-                    if not isinstance(connector_evidence, Mapping):
-                        raise ValueError("connector evidence must be an object")
-                    # PAO verifies the signature and prompt binding at
-                    # admission. No other client metadata enters this path.
-                    authorization_metadata[CONNECTOR_EVIDENCE_METADATA_KEY] = dict(
-                        connector_evidence
+                display_metadata = {
+                    "text": text if text else (display_text or ""),
+                    "attachment_count": len(canonical_attachments),
+                    "attachment_names": [
+                        str(part.get("filename") or "attachment")
+                        for part in canonical_attachments
+                    ],
+                }
+                source_message_id = str(
+                    payload.get("source_message_id")
+                    or (
+                        message.get("client_message_id")
+                        if isinstance(message, dict)
+                        else None
                     )
-            transcript_state = self._begin_session_voice_transcription(
-                runtime=runtime,
-                canonical_content=canonical_content,
-                terminal=surface,
-            )
-            try:
-                request_id = await runtime.enqueue_request(
-                    runtime._primary_chat_id(),
-                    text,
-                    "tui" if surface == "tui" else "session-api",
-                    text[:160],
-                    deliver_to_telegram=True,
+                    or idempotency_key
+                )
+                expires_at = freshness.expires_at.isoformat().replace("+00:00", "Z")
+
+                conf = self.ingress_confirmation.register_pending(
+                    session_id=session["session_id"],
+                    owner_id=owner,
+                    agent_id=session["agent_id"],
+                    connector_id="session_api",
+                    transport="workbench_remote" if is_remote else "workbench_local",
+                    source_message_id=source_message_id,
                     idempotency_key=idempotency_key,
-                    request_metadata={
-                        "session_id": session["session_id"],
-                        "owner_id": owner,
-                        "session_surface": surface,
-                        "session_channel_key": client_id,
-                        "execution_mode": payload.get("execution_mode"),
-                        "parent_run_id": payload.get("parent_run_id"),
-                        "session_message_text": text,
-                        "session_message_display_text": display_text,
-                        "session_message_content": content,
-                        "session_context_generation": payload.get(
-                            "session_context_generation"
-                        ),
-                        "response_preferences": response_preferences,
-                        **(
-                            {
-                                MESSAGE_SOURCE_CLAIM_METADATA_KEY: (
-                                    normalized_source_declaration
-                                )
-                            }
-                            if normalized_source_declaration is not None
-                            else {}
-                        ),
-                        **authorization_metadata,
-                        **tui_metadata,
-                    },
-                    request_content=canonical_content,
+                    payload_digest=payload_digest,
+                    message_kind="frontend_message",
+                    context_generation=session.get("context_generation", 1),
+                    originated_at=originated_at,
+                    received_at=freshness.received_at,
+                    threshold_seconds=freshness.threshold_seconds,
+                    reason=freshness.reason,
+                    delay_seconds=freshness.delay_seconds,
+                    expires_at=expires_at,
+                    payload=payload,
+                    display_metadata=display_metadata,
                 )
-            except Exception as exc:
-                if transcript_state is not None:
-                    transcript_state["task"].cancel()
-                redirect = runtime_transfer.transfer_redirect_from_exception(exc)
-                if redirect is not None:
-                    transfer_response = self._transfer_redirect_response(
-                        runtime,
-                        source="session-api",
-                        session_metadata=transfer_session_metadata,
-                        idempotency_key=idempotency_key,
-                        request_fingerprint=transfer_request_fingerprint,
-                        redirect=redirect,
+                if conf["state"] == "confirmed" and conf.get("run_id"):
+                    run = self.session_store.get_run(conf["run_id"], owner_id=owner)
+                    return web.json_response(
+                        {
+                            "ok": True,
+                            "accepted": True,
+                            "session_id": session["session_id"],
+                            "run_id": run["run_id"],
+                            "message_id": run["user_message_id"],
+                            "request_id": run["request_id"],
+                            "state": run["state"],
+                            "replayed": True,
+                        },
+                        status=202,
+                        headers={"Cache-Control": "no-store"},
                     )
-                    if transfer_response is not None:
-                        return transfer_response
-                raise
-            if not request_id:
-                if transcript_state is not None:
-                    transcript_state["task"].cancel()
-                raise SessionConflict("request was not accepted")
-            self._bind_session_voice_transcription(
-                runtime=runtime,
-                state=transcript_state,
-                request_id=str(request_id),
+                public_conf = self.ingress_confirmation.public_record(conf)
+                waiting = conf["state"] in {
+                    "awaiting_confirmation",
+                    "confirming",
+                }
+                return web.json_response(
+                    {
+                        "ok": True,
+                        "accepted": False,
+                        "session_id": session["session_id"],
+                        "state": conf["state"],
+                        "confirmation_required": waiting,
+                        "confirmation": {
+                            **public_conf,
+                            "id": conf["confirmation_id"],
+                        },
+                    },
+                    status=202,
+                    headers={"Cache-Control": "no-store"},
+                )
+
+            # Fresh messages (including the always-local TUI) execute normally.
+            result = await self._execute_session_run_from_payload(
+                session, owner, payload, request=request
             )
-            run = self.session_store.get_run_by_request(request_id)
+            if isinstance(result, web.Response):
+                return result
             return web.json_response(
                 {
                     "ok": True,
                     "session_id": session["session_id"],
-                    "run_id": run["run_id"],
-                    "message_id": run["user_message_id"],
-                    "request_id": request_id,
-                    "state": run["state"],
+                    "run_id": result["run_id"],
+                    "message_id": result["message_id"],
+                    "request_id": result["request_id"],
+                    "state": result["state"],
                 },
                 status=202,
+            )
+        except Exception as exc:
+            return self._v1_error(exc)
+
+    async def handle_v1_session_ingress_confirmations_list(self, request):
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        try:
+            session_id = request.match_info["session_id"]
+            session = self.session_store.get_session(
+                session_id, owner_id=owner, include_deleted=False
+            )
+            limit = int(request.query.get("limit", 50))
+            confirmations = self.ingress_confirmation.list(
+                session_id=session["session_id"],
+                owner_id=owner,
+                limit=limit,
+            )
+            return web.json_response(
+                {
+                    "ok": True,
+                    "session_id": session_id,
+                    "confirmations": [
+                        self.ingress_confirmation.public_record(item)
+                        for item in confirmations
+                    ],
+                },
+                headers={"Cache-Control": "no-store"},
+            )
+        except Exception as exc:
+            return self._v1_error(exc)
+
+    async def handle_v1_session_ingress_confirmation_get(self, request):
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        try:
+            session_id = request.match_info["session_id"]
+            confirmation_id = request.match_info["confirmation_id"]
+            session = self.session_store.get_session(
+                session_id, owner_id=owner, include_deleted=False
+            )
+            confirmation = self.ingress_confirmation.get(
+                confirmation_id=confirmation_id,
+                owner_id=owner,
+                session_id=session["session_id"],
+            )
+            return web.json_response(
+                {
+                    "ok": True,
+                    "session_id": session_id,
+                    "confirmation": self.ingress_confirmation.public_record(
+                        confirmation
+                    ),
+                },
+                headers={"Cache-Control": "no-store"},
+            )
+        except Exception as exc:
+            return self._v1_error(exc)
+
+    async def handle_v1_session_ingress_confirmation_decide(self, request):
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        try:
+            session_id = request.match_info["session_id"]
+            confirmation_id = request.match_info["confirmation_id"]
+            session = self.session_store.get_session(
+                session_id, owner_id=owner, include_deleted=False
+            )
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise ValueError("decision request body must be an object")
+            if set(body) != {"decision"}:
+                raise ValueError("decision request may contain only 'decision'")
+            decision = str(body.get("decision") or "").strip().lower()
+            if decision not in {"confirm", "discard"}:
+                raise ValueError("decision must be either 'confirm' or 'discard'")
+            # The route's Session is part of the authority boundary.  Owning
+            # two Sessions must not let a caller decide a confirmation from
+            # one by presenting its ID through the other Session's endpoint.
+            self.ingress_confirmation.get(
+                confirmation_id=confirmation_id,
+                owner_id=owner,
+                session_id=session["session_id"],
+            )
+
+            if decision == "discard":
+                record = await self.ingress_confirmation.decide_async(
+                    confirmation_id=confirmation_id,
+                    decision="discard",
+                    owner_id=owner,
+                )
+                return web.json_response(
+                    {
+                        "ok": True,
+                        "session_id": session_id,
+                        "confirmation_id": confirmation_id,
+                        "state": record["state"],
+                        "decision": record["decision"],
+                        "run_id": None,
+                    },
+                    headers={"Cache-Control": "no-store"},
+                )
+
+            # decision == 'confirm'
+            async def _execute_confirmed_run(rec):
+                if str(rec.get("message_kind") or "").startswith("hchat_"):
+                    saved_payload = rec.get("payload") or {}
+                    if saved_payload.get("execution_kind") == "exchange_inbox":
+                        result = await self._exchange_ingress_service().confirm_pending(
+                            str(saved_payload.get("inbox_key") or ""),
+                            confirmation_id=str(rec.get("confirmation_id") or ""),
+                        )
+                        return result.run_id
+                    runtime_payload = saved_payload.get("runtime_payload")
+                    enqueue_kwargs = saved_payload.get("enqueue_kwargs")
+                    if not isinstance(runtime_payload, Mapping) and isinstance(
+                        enqueue_kwargs, Mapping
+                    ):
+                        exchange_kind = str(
+                            enqueue_kwargs.get("exchange_kind") or "message"
+                        )
+                        protocol_message_id = str(
+                            enqueue_kwargs.get("message_id")
+                            or saved_payload.get("message_id")
+                            or ""
+                        )
+                        from_instance = str(
+                            enqueue_kwargs.get("from_instance") or ""
+                        ).strip().upper()
+                        from_agent = str(
+                            enqueue_kwargs.get("from_agent") or ""
+                        ).strip().casefold()
+                        target_instance = str(
+                            enqueue_kwargs.get("to_instance")
+                            or getattr(self.global_config, "instance_id", "")
+                        ).strip().upper()
+                        target_agent = str(
+                            enqueue_kwargs.get("to_agent")
+                            or saved_payload.get("to_agent")
+                            or ""
+                        ).strip().casefold()
+                        authenticated_peer = str(
+                            enqueue_kwargs.get("authenticated_peer") or ""
+                        ).strip().upper()
+                        route_trace = [
+                            str(item).strip().upper()
+                            for item in enqueue_kwargs.get("route_trace") or ()
+                            if str(item).strip().upper()
+                            not in {from_instance, target_instance}
+                        ]
+                        hchat_claim = {
+                            "from_agent": from_agent,
+                            "from_instance": from_instance,
+                            "to_agent": target_agent,
+                            "to_instance": target_instance,
+                            "authenticated_peer": authenticated_peer,
+                            "network_authentication": str(
+                                enqueue_kwargs.get("network_authentication")
+                                or "not_verified"
+                            ),
+                            "sender_assurance": (
+                                "shared_network_member_declared"
+                                if authenticated_peer
+                                else "declared"
+                            ),
+                            "relay_chain": route_trace,
+                            "origin_instance": {
+                                "id": from_instance,
+                                "assurance": (
+                                    "shared_network_hmac"
+                                    if authenticated_peer == from_instance
+                                    else "declared"
+                                ),
+                            },
+                            "message_id": protocol_message_id,
+                            "originated_at": saved_payload.get("originated_at"),
+                            "message_type": (
+                                "agent_reply"
+                                if exchange_kind == "reply"
+                                else "agent_message"
+                            ),
+                        }
+                        claims: dict[str, Any] = {
+                            MESSAGE_SOURCE_RESERVED_METADATA_KEY: "hchat",
+                            HCHAT_CONTEXT_METADATA_KEY: hchat_claim,
+                        }
+                        protocol_attachments = enqueue_kwargs.get("attachments")
+                        if protocol_attachments:
+                            claims[HCHAT_ATTACHMENT_CLAIM_KEY] = (
+                                canonical_hchat_attachment_manifest(
+                                    protocol_attachments
+                                )
+                            )
+                        private_proofs = [
+                            dict(item)
+                            for item in enqueue_kwargs.get(
+                                "private_authorization_proofs"
+                            )
+                            or ()
+                            if isinstance(item, Mapping)
+                        ]
+                        if private_proofs:
+                            from orchestrator.private_authorization import (
+                                authorization_content_sha256,
+                            )
+
+                            content_text = str(
+                                enqueue_kwargs.get("authorization_content_text")
+                                if enqueue_kwargs.get(
+                                    "authorization_content_text"
+                                )
+                                is not None
+                                else saved_payload.get("prompt_text") or ""
+                            )
+                            claims[PRIVATE_AUTHORIZATION_PROOFS_METADATA_KEY] = (
+                                private_proofs
+                            )
+                            claims[PRIVATE_AUTHORIZATION_BINDING_METADATA_KEY] = {
+                                "message_id": protocol_message_id,
+                                "from_instance": from_instance,
+                                "from_agent": from_agent,
+                                "to_instance": target_instance,
+                                "to_agent": target_agent,
+                                "content_sha256": authorization_content_sha256(
+                                    content_text
+                                ),
+                                "resources": list(
+                                    enqueue_kwargs.get("authorization_resources")
+                                    or ()
+                                ),
+                            }
+                        from orchestrator.message_context import (
+                            seal_connector_evidence,
+                        )
+
+                        prompt_text = str(saved_payload.get("prompt_text") or "")
+                        evidence = seal_connector_evidence(
+                            self.config_path.parent,
+                            claims=claims,
+                            prompt=prompt_text,
+                        )
+                        metadata = {
+                            "system_exchange": True,
+                            "system_exchange_kind": exchange_kind,
+                            "system_exchange_terminal": exchange_kind == "reply",
+                            "protocol_message_id": protocol_message_id,
+                            "protocol_conversation_id": str(
+                                enqueue_kwargs.get("conversation_id") or ""
+                            ),
+                            "protocol_from_instance": from_instance,
+                            "protocol_from_agent": from_agent,
+                            "connector_id": "remote",
+                            "ingress_transport": "remote.protocol",
+                            "session_surface": "remote",
+                            "session_channel_key": (
+                                f"{from_instance}:"
+                                f"{enqueue_kwargs.get('conversation_id') or ''}"
+                            ),
+                        }
+                        if evidence is not None:
+                            metadata[CONNECTOR_EVIDENCE_METADATA_KEY] = evidence
+                        runtime_payload = {
+                            "text": prompt_text,
+                            "source": f"protocol:{exchange_kind}",
+                            "request_metadata": metadata,
+                            "idempotency_key": saved_payload.get(
+                                "idempotency_key"
+                            ),
+                        }
+                        if protocol_attachments:
+                            runtime_payload["remote_attachments"] = claims[
+                                HCHAT_ATTACHMENT_CLAIM_KEY
+                            ]
+                        saved_payload = dict(saved_payload)
+                        saved_payload["runtime_payload"] = runtime_payload
+                        rec = dict(rec)
+                        rec["payload"] = saved_payload
+                    if (
+                        rec.get("message_kind") == "hchat_request"
+                        and isinstance(runtime_payload, Mapping)
+                        and runtime_payload.get("remote_attachments") is not None
+                    ):
+                        agent_id = str(saved_payload.get("to_agent") or "").strip()
+                        runtime = self._runtime_map().get(agent_id)
+                        if runtime is None:
+                            raise ValueError(
+                                f"Agent runtime {agent_id!r} not found for confirmed HChat execution"
+                            )
+                        text = str(runtime_payload.get("text") or "")
+                        source = str(runtime_payload.get("source") or "protocol:message")
+                        metadata = dict(runtime_payload.get("request_metadata") or {})
+                        idempotency_key = str(
+                            saved_payload.get("idempotency_key") or ""
+                        ).strip()
+                        if not idempotency_key:
+                            raise ValueError("confirmed HChat attachment idempotency key is missing")
+                        attachments = canonical_hchat_attachment_manifest(
+                            runtime_payload.get("remote_attachments")
+                        )
+                        claims = verify_connector_evidence(
+                            self.config_path.parent,
+                            evidence=metadata.get(CONNECTOR_EVIDENCE_METADATA_KEY),
+                            prompt=text,
+                        )
+                        if (
+                            not isinstance(claims, Mapping)
+                            or canonical_hchat_attachment_manifest(
+                                claims.get(HCHAT_ATTACHMENT_CLAIM_KEY)
+                            )
+                            != attachments
+                        ):
+                            raise ValueError(
+                                "confirmed HChat attachment manifest does not match signed evidence"
+                            )
+                        (
+                            canonical_content,
+                            staged_attachment_ids,
+                            resolved_session,
+                            resolved_owner,
+                        ) = await asyncio.to_thread(
+                            self._stage_hchat_remote_attachments,
+                            runtime=runtime,
+                            text=text,
+                            session_metadata=metadata,
+                            idempotency_key=idempotency_key,
+                            attachments=attachments,
+                        )
+                        try:
+                            request_id = await runtime.enqueue_api_text(
+                                text,
+                                source=source,
+                                deliver_to_telegram=True,
+                                request_metadata=metadata,
+                                request_content=canonical_content,
+                                idempotency_key=idempotency_key,
+                            )
+                        except Exception:
+                            existing = await asyncio.to_thread(
+                                self.session_store.find_run_by_idempotency,
+                                session_id=resolved_session["session_id"],
+                                owner_id=resolved_owner,
+                                idempotency_key=idempotency_key,
+                            )
+                            if existing is None:
+                                await asyncio.to_thread(
+                                    self.session_store.discard_unbound_attachments,
+                                    session_id=resolved_session["session_id"],
+                                    owner_id=resolved_owner,
+                                    attachment_ids=staged_attachment_ids,
+                                )
+                                raise
+                            request_id = str(existing["request_id"])
+                        if not request_id:
+                            raise RuntimeError(
+                                "Agent runtime did not accept confirmed HChat attachment message"
+                            )
+                        run = self.session_store.get_run_by_request(
+                            str(request_id),
+                            owner_id=resolved_owner,
+                            agent_id=agent_id,
+                        )
+                        return str(run.get("run_id") or "") or None
+                    from orchestrator.hchat_freshness_gate import (
+                        execute_confirmed_hchat,
+                    )
+
+                    return await execute_confirmed_hchat(
+                        rec,
+                        runtime_map_fn=self._runtime_map,
+                        session_store=self.session_store,
+                    )
+                saved_payload = rec["payload"]
+                exec_result = await self._execute_session_run_from_payload(
+                    session,
+                    owner,
+                    saved_payload,
+                    # Decision-request headers must not replace the immutable
+                    # client identity or idempotency data captured on arrival.
+                    request=None,
+                    confirmation_id=rec["confirmation_id"],
+                    confirmed_at=self.ingress_confirmation._now_iso(),
+                )
+                if isinstance(exec_result, web.Response):
+                    raise ValueError("Unexpected response during run execution")
+                return exec_result["run_id"]
+
+            record = await self.ingress_confirmation.decide_async(
+                confirmation_id=confirmation_id,
+                decision="confirm",
+                owner_id=owner,
+                execute_fn=_execute_confirmed_run,
+            )
+            run_payload: dict[str, Any] = {}
+            if record.get("run_id"):
+                if str(record.get("message_kind") or "").startswith("hchat_"):
+                    # Some authenticated transports retain a transport-scoped
+                    # execution owner.  The confirmation owner may see the
+                    # release result, but must not receive another owner's Run.
+                    run_payload = {"run_id": record["run_id"]}
+                else:
+                    run = self.session_store.get_run(record["run_id"], owner_id=owner)
+                    run_payload = {
+                        "run_id": run["run_id"],
+                        "request_id": run["request_id"],
+                        "message_id": run["user_message_id"],
+                        "run_state": run["state"],
+                    }
+            return web.json_response(
+                {
+                    "ok": True,
+                    "session_id": session_id,
+                    "confirmation_id": confirmation_id,
+                    "state": record["state"],
+                    "decision": record["decision"],
+                    **run_payload,
+                },
+                status=202 if record["state"] == "confirming" else 200,
+                headers={"Cache-Control": "no-store"},
             )
         except Exception as exc:
             return self._v1_error(exc)
@@ -8975,6 +9660,254 @@ class WorkbenchApiServer:
         if isinstance(binding, Mapping):
             session_metadata[PRIVATE_AUTHORIZATION_BINDING_METADATA_KEY] = dict(binding)
         remote_attachments = payload.get("remote_attachments")
+
+        # HChat is a network ingress even when its final hop is the local
+        # Workbench compatibility API.  Fence it before redirects, attachment
+        # staging, slash-command handling, Run creation, or Agent admission.
+        source_norm = source.casefold()
+        verified_hchat_context = (
+            dict(hchat_context) if isinstance(hchat_context, Mapping) else None
+        )
+        normalized_remote_attachments = None
+        if remote_attachments is not None:
+            # Authentication and the signed manifest must be valid before an
+            # untrusted caller is allowed to create a durable confirmation
+            # card.  File staging and content reads remain after freshness.
+            if isinstance(attachment_spec, Mapping) or workzone_ref:
+                return web.json_response(
+                    {"ok": False, "error": "exactly one attachment source is required"},
+                    status=400,
+                )
+            attachment_claims = verify_connector_evidence(
+                self.config_path.parent,
+                evidence=session_metadata.get(CONNECTOR_EVIDENCE_METADATA_KEY),
+                prompt=text,
+            )
+            attachment_context = (
+                attachment_claims.get(HCHAT_CONTEXT_METADATA_KEY)
+                if isinstance(attachment_claims, Mapping)
+                else None
+            )
+            if (
+                source_norm != "protocol:message"
+                or not isinstance(attachment_claims, Mapping)
+                or attachment_claims.get(MESSAGE_SOURCE_RESERVED_METADATA_KEY)
+                != "hchat"
+                or not isinstance(attachment_context, Mapping)
+                or str(attachment_context.get("network_authentication") or "")
+                != "shared_network_hmac"
+            ):
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "error": "verified HChat attachment evidence is required",
+                        "error_code": "hchat_attachment_evidence_required",
+                    },
+                    status=401,
+                )
+            try:
+                normalized_remote_attachments = canonical_hchat_attachment_manifest(
+                    remote_attachments
+                )
+                signed_manifest = canonical_hchat_attachment_manifest(
+                    attachment_claims.get(HCHAT_ATTACHMENT_CLAIM_KEY)
+                )
+            except ValueError as exc:
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "error": str(exc),
+                        "error_code": "invalid_hchat_attachment_manifest",
+                    },
+                    status=400,
+                )
+            if signed_manifest != normalized_remote_attachments:
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "error": "HChat attachment manifest does not match signed evidence",
+                        "error_code": "hchat_attachment_manifest_mismatch",
+                    },
+                    status=401,
+                )
+            if not str(payload.get("idempotency_key") or "").strip():
+                return web.json_response(
+                    {"ok": False, "error": "idempotency_key is required"},
+                    status=400,
+                )
+            verified_hchat_context = dict(attachment_context)
+        if verified_hchat_context is None:
+            connector_claims = verify_connector_evidence(
+                self.config_path.parent,
+                evidence=session_metadata.get(CONNECTOR_EVIDENCE_METADATA_KEY),
+                prompt=text,
+            )
+            claimed_context = (
+                connector_claims.get(HCHAT_CONTEXT_METADATA_KEY)
+                if isinstance(connector_claims, Mapping)
+                else None
+            )
+            if isinstance(claimed_context, Mapping):
+                verified_hchat_context = dict(claimed_context)
+        is_hchat_ingress = bool(
+            source_norm == "hchat"
+            or source_norm.startswith("protocol:")
+            or verified_hchat_context is not None
+        )
+        if is_hchat_ingress:
+            from orchestrator.hchat_freshness_gate import (
+                _resolve_hchat_owner,
+                check_hchat_freshness_and_register,
+                is_hchat_terminal_reply,
+            )
+
+            context = verified_hchat_context or {}
+            message_id = str(
+                payload.get("message_id")
+                or context.get("message_id")
+                or session_metadata.get("protocol_message_id")
+                or ""
+            ).strip()
+            idempotency_key = str(
+                payload.get("idempotency_key") or f"hchat:{message_id}"
+            ).strip()
+            if not message_id:
+                message_id = "legacy-" + hashlib.sha256(
+                    json.dumps(
+                        {
+                            "agent": agent_name,
+                            "text": text,
+                            "source": source,
+                            "from_agent": context.get("from_agent"),
+                            "from_instance": context.get("from_instance"),
+                            "idempotency_key": idempotency_key,
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ).encode("utf-8")
+                ).hexdigest()[:32]
+                if not idempotency_key or idempotency_key == "hchat:":
+                    idempotency_key = f"hchat:{message_id}"
+            originated_at = payload.get("originated_at") or context.get(
+                "originated_at"
+            )
+            from_agent = str(context.get("from_agent") or "unknown").strip().casefold()
+            from_instance = str(
+                context.get("from_instance") or "UNKNOWN"
+            ).strip().upper()
+            message_type = str(
+                payload.get("message_type")
+                or context.get("message_type")
+                or session_metadata.get("system_exchange_kind")
+                or ""
+            )
+            is_reply = is_hchat_terminal_reply(message_type, text)
+            owner_id = str(session_metadata.get("owner_id") or "").strip() or None
+            runtime_payload = {
+                "text": text,
+                "source": source,
+                "request_metadata": session_metadata,
+                "idempotency_key": idempotency_key,
+            }
+            if remote_attachments is not None:
+                runtime_payload["remote_attachments"] = normalized_remote_attachments
+            try:
+                is_fresh, confirmation = check_hchat_freshness_and_register(
+                    store=self.session_store,
+                    originated_at=originated_at,
+                    is_remote=True,
+                    to_agent=agent_name,
+                    from_agent=from_agent,
+                    from_instance=from_instance,
+                    message_id=message_id,
+                    text=text,
+                    is_reply=is_reply,
+                    transport="workbench_api",
+                    connector_id="hchat_workbench",
+                    owner_id=owner_id,
+                    idempotency_key=idempotency_key,
+                    canonical_text=text,
+                    attachment_binding=normalized_remote_attachments or [],
+                    payload_to_execute={"runtime_payload": runtime_payload},
+                )
+            except (ValueError, ConfirmationConflictError) as exc:
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "error": str(exc),
+                        "error_code": "hchat_freshness_rejected",
+                    },
+                    status=409,
+                )
+            if not is_fresh and confirmation is not None:
+                confirmation_state = str(confirmation.get("state") or "")
+                waiting = confirmation_state in {
+                    "awaiting_confirmation",
+                    "confirming",
+                }
+                accepted = confirmation_state == "confirmed"
+                return web.json_response(
+                    {
+                        "ok": True,
+                        "accepted": accepted,
+                        "state": confirmation_state,
+                        "confirmation_required": waiting,
+                        "confirmation_id": confirmation["confirmation_id"],
+                        "confirmation": self.ingress_confirmation.public_record(
+                            confirmation
+                        ),
+                        **(
+                            {"run_id": confirmation.get("run_id")}
+                            if accepted and confirmation.get("run_id")
+                            else {}
+                        ),
+                    },
+                    status=202 if waiting else 200,
+                    headers={"Cache-Control": "no-store"},
+                )
+            if is_reply:
+                resolved_owner = _resolve_hchat_owner(
+                    self.session_store,
+                    to_agent=agent_name,
+                    preferred_owner_id=owner_id,
+                )
+                reply_session = self.session_store.resolve_primary_session(
+                    owner_id=resolved_owner,
+                    agent_id=agent_name,
+                    establish=True,
+                )
+                displayed = self.session_store.append_presentation_message(
+                    session_id=reply_session["session_id"],
+                    owner_id=resolved_owner,
+                    agent_id=agent_name,
+                    role="assistant",
+                    text=str(
+                        session_metadata.get("system_exchange_terminal_text")
+                        or text
+                    ),
+                    source="hchat-reply",
+                    idempotency_key=f"hchat-display:{message_id}",
+                    presentation_channel="hchat-reply",
+                    history_eligible=False,
+                    message_context={
+                        "system_exchange": True,
+                        "system_exchange_kind": "reply",
+                        "system_exchange_terminal": True,
+                        "hchat_message_id": message_id,
+                        "hchat_from_agent": from_agent,
+                        "hchat_from_instance": from_instance,
+                    },
+                )
+                return web.json_response(
+                    {
+                        "ok": True,
+                        "accepted": True,
+                        "state": "displayed",
+                        "session_id": reply_session["session_id"],
+                        "message_id": displayed["message_id"],
+                    }
+                )
+
         attachment_kind = None
         if isinstance(attachment_spec, Mapping):
             attachment_kind = self._classify_upload(
@@ -9354,6 +10287,10 @@ class WorkbenchApiServer:
         from_instance = (payload.get("from_instance") or "").strip().upper()
         text = (payload.get("text") or "").strip()
         reply_route = payload.get("reply_route")
+        message_id = str(payload.get("message_id") or "").strip()
+        originated_at = payload.get("originated_at")
+        idempotency_key = str(payload.get("idempotency_key") or "").strip()
+        message_type = str(payload.get("message_type") or "agent_message").strip()
 
         if (
             not to_agent
@@ -9361,6 +10298,9 @@ class WorkbenchApiServer:
             or not from_agent
             or not from_instance
             or not text
+            or not message_id
+            or not originated_at
+            or idempotency_key != f"hchat:{message_id}"
         ):
             return web.json_response(
                 {"ok": False, "error": "missing required fields"}, status=400
@@ -9425,22 +10365,122 @@ class WorkbenchApiServer:
             message_text = format_hchat_message(from_agent, from_instance, text)
             if reply_route and isinstance(reply_route, dict):
                 self._learn_reply_route(message_text, reply_route)
-            await runtime.enqueue_api_text(
-                message_text,
-                source="hchat",
-                request_metadata={
-                    HCHAT_CONTEXT_METADATA_KEY: {
-                        "from_agent": from_agent,
-                        "from_instance": from_instance,
-                        "to_agent": to_agent,
-                        "to_instance": to_instance,
-                        "sender_assurance": "declared",
-                        "network_authentication": "not_verified",
-                        "relay_chain": [local_instance],
+            hchat_metadata = {
+                HCHAT_CONTEXT_METADATA_KEY: {
+                    "from_agent": from_agent,
+                    "from_instance": from_instance,
+                    "to_agent": to_agent,
+                    "to_instance": to_instance,
+                    "sender_assurance": "declared",
+                    "network_authentication": "not_verified",
+                    "relay_chain": [local_instance],
+                    "message_id": message_id,
+                    "originated_at": originated_at,
+                    "message_type": message_type,
+                }
+            }
+            from orchestrator.hchat_freshness_gate import (
+                _resolve_hchat_owner,
+                check_hchat_freshness_and_register,
+                is_hchat_terminal_reply,
+            )
+
+            is_reply = is_hchat_terminal_reply(message_type, text)
+            is_fresh, confirmation = check_hchat_freshness_and_register(
+                store=self.session_store,
+                originated_at=originated_at,
+                is_remote=True,
+                to_agent=to_agent,
+                from_agent=from_agent,
+                from_instance=from_instance,
+                message_id=message_id,
+                text=message_text,
+                is_reply=is_reply,
+                transport="workbench_exchange",
+                connector_id="hchat_workbench_exchange",
+                idempotency_key=idempotency_key,
+                canonical_text=text,
+                payload_to_execute={
+                    "runtime_payload": {
+                        "text": message_text,
+                        "source": "hchat",
+                        "request_metadata": hchat_metadata,
+                        "idempotency_key": idempotency_key,
                     }
                 },
             )
-            return web.json_response({"ok": True, "relayed": True, "exchange": True})
+            if not is_fresh and confirmation is not None:
+                confirmation_state = str(confirmation.get("state") or "")
+                waiting = confirmation_state in {
+                    "awaiting_confirmation",
+                    "confirming",
+                }
+                accepted = confirmation_state == "confirmed"
+                return web.json_response(
+                    {
+                        "ok": True,
+                        "relayed": True,
+                        "exchange": True,
+                        "accepted": accepted,
+                        "state": confirmation_state,
+                        "confirmation_required": waiting,
+                        "confirmation_id": confirmation["confirmation_id"],
+                        **(
+                            {"run_id": confirmation.get("run_id")}
+                            if accepted and confirmation.get("run_id")
+                            else {}
+                        ),
+                    },
+                    status=202 if waiting else 200,
+                    headers={"Cache-Control": "no-store"},
+                )
+            if is_reply:
+                owner_id = _resolve_hchat_owner(
+                    self.session_store,
+                    to_agent=to_agent,
+                )
+                session = self.session_store.resolve_primary_session(
+                    owner_id=owner_id,
+                    agent_id=to_agent,
+                    establish=True,
+                )
+                displayed = self.session_store.append_presentation_message(
+                    session_id=session["session_id"],
+                    owner_id=owner_id,
+                    agent_id=to_agent,
+                    role="assistant",
+                    text=text,
+                    source="hchat-reply",
+                    idempotency_key=f"hchat-display:{message_id}",
+                    presentation_channel="hchat-reply",
+                    history_eligible=False,
+                )
+                return web.json_response(
+                    {
+                        "ok": True,
+                        "relayed": True,
+                        "exchange": True,
+                        "state": "displayed",
+                        "session_id": session["session_id"],
+                        "message_id": displayed["message_id"],
+                    }
+                )
+            request_id = await runtime.enqueue_api_text(
+                message_text,
+                source="hchat",
+                request_metadata=hchat_metadata,
+                idempotency_key=idempotency_key,
+            )
+            return web.json_response(
+                {
+                    "ok": bool(request_id),
+                    "relayed": True,
+                    "exchange": True,
+                    "state": "queued" if request_id else "rejected",
+                    "request_id": request_id,
+                },
+                status=200 if request_id else 409,
+            )
 
         gate_result = self._enterprise_channel_gate().check_egress(
             "hchat",
@@ -9473,6 +10513,10 @@ class WorkbenchApiServer:
                 reply_route_override=reply_route
                 if isinstance(reply_route, dict)
                 else None,
+                message_id=message_id,
+                message_type=message_type,
+                originated_at=originated_at,
+                idempotency_key=idempotency_key,
             )
             if ok:
                 return web.json_response(
@@ -11129,6 +12173,7 @@ class WorkbenchApiServer:
                 endpoint = None
         payload = {
             "ok": True,
+            "capabilities": ["message_freshness_v1"],
             "instance_id": getattr(self.global_config, "instance_id", None)
             or getattr(orchestrator, "instance_id", None)
             or "HASHI",

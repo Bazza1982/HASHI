@@ -86,6 +86,7 @@ def test_explicit_retry_reuses_the_exact_persisted_frame(tmp_path):
             text="Please review.",
             message_id="message_1",
             conversation_id="conversation_1",
+            originated_at=utc_timestamp(now),
         )
     )
 

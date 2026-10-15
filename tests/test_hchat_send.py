@@ -51,12 +51,41 @@ def test_send_hchat_local_agent_uses_local_workbench_fallback(monkeypatch):
     monkeypatch.setattr(
         hchat_send,
         "_send_via_local_workbench",
-        lambda *args: calls.append(args) or True,
+        lambda *args, **kwargs: calls.append((args, kwargs)) or True,
     )
 
     assert hchat_send.send_hchat("akane", "zelda", "hello") is True
 
-    assert calls == [(cfg, 18800, "akane", "zelda", "hello", "HASHI1", {"instance_id": "HASHI1"})]
+    assert calls[0][0] == (cfg, 18800, "akane", "zelda", "hello", "HASHI1", {"instance_id": "HASHI1"})
+    assert calls[0][1]["message_id"].startswith("hchat-")
+    assert calls[0][1]["originated_at"].endswith("Z")
+    assert calls[0][1]["idempotency_key"] == f"hchat:{calls[0][1]['message_id']}"
+
+
+@pytest.mark.parametrize(
+    ("state", "expected_success", "expected_text"),
+    [
+        ("awaiting_confirmation", True, "waiting for confirmation"),
+        ("confirmed", True, "confirmed for execution"),
+        ("discarded", True, "discarded without execution"),
+        ("expired", True, "confirmation expired"),
+        ("superseded", True, "superseded without execution"),
+    ],
+)
+def test_hchat_receipt_projects_confirmation_state(
+    state, expected_success, expected_text, capsys
+):
+    success = hchat_send._print_hchat_result_receipt(
+        {"ok": True, "state": state},
+        label="test route",
+        from_agent="zelda",
+        target="akane@HASHI2",
+        text="delayed instruction",
+    )
+
+    captured = capsys.readouterr()
+    assert success is expected_success
+    assert expected_text in (captured.out + captured.err)
 
 
 def test_send_hchat_enterprise_denies_disabled_hchat_egress(tmp_path, monkeypatch):
@@ -72,7 +101,7 @@ def test_send_hchat_enterprise_denies_disabled_hchat_egress(tmp_path, monkeypatc
     monkeypatch.setattr(
         hchat_send,
         "_send_via_local_workbench",
-        lambda *args: calls.append(args) or True,
+        lambda *args, **kwargs: calls.append((args, kwargs)) or True,
     )
 
     assert hchat_send.send_hchat("akane", "zelda", "hello") is False
@@ -108,11 +137,12 @@ def test_send_hchat_enterprise_allows_bound_sender_agent(tmp_path, monkeypatch):
     monkeypatch.setattr(
         hchat_send,
         "_send_via_local_workbench",
-        lambda *args: calls.append(args) or True,
+        lambda *args, **kwargs: calls.append((args, kwargs)) or True,
     )
 
     assert hchat_send.send_hchat("akane", "zelda", "hello") is True
-    assert calls == [(cfg, 18800, "akane", "zelda", "hello", "HASHI1", {"instance_id": "HASHI1"})]
+    assert calls[0][0] == (cfg, 18800, "akane", "zelda", "hello", "HASHI1", {"instance_id": "HASHI1"})
+    assert calls[0][1]["idempotency_key"] == f"hchat:{calls[0][1]['message_id']}"
     assert _audit_events(tmp_path) == []
 
 
@@ -125,12 +155,13 @@ def test_send_hchat_explicit_local_instance_uses_local_workbench_fallback(monkey
     monkeypatch.setattr(
         hchat_send,
         "_send_via_local_workbench",
-        lambda *args: calls.append(args) or True,
+        lambda *args, **kwargs: calls.append((args, kwargs)) or True,
     )
 
     assert hchat_send.send_hchat("akane@HASHI1", "zelda", "hello") is True
 
-    assert calls == [(cfg, 18800, "akane", "zelda", "hello", "HASHI1", {"instance_id": "HASHI1"})]
+    assert calls[0][0] == (cfg, 18800, "akane", "zelda", "hello", "HASHI1", {"instance_id": "HASHI1"})
+    assert calls[0][1]["idempotency_key"] == f"hchat:{calls[0][1]['message_id']}"
 
 
 def test_format_hchat_message_adds_autoreply_instruction():
@@ -170,7 +201,8 @@ def test_send_via_workbench_uses_autoreply_envelope(monkeypatch, capsys):
         if req.get_method() == "GET":
             return FakeResponse(
                 b'{"ok": true, "instance_id": "HASHI1", '
-                b'"workbench_endpoint": {"instance_id": "HASHI1"}}'
+                b'"workbench_endpoint": {"instance_id": "HASHI1"}, '
+                b'"capabilities": ["message_freshness_v1"]}'
             )
         payloads.append(json.loads(req.data.decode("utf-8")))
         return FakeResponse()
@@ -466,11 +498,13 @@ def test_send_hchat_remote_prefers_protocol_transport_when_shared_token_availabl
     monkeypatch.setattr(
         hchat_send,
         "_send_via_protocol_transport",
-        lambda to_agent, target_instance, from_agent, text: calls.append((to_agent, target_instance, from_agent, text)) or True,
+        lambda to_agent, target_instance, from_agent, text, **kwargs: calls.append((to_agent, target_instance, from_agent, text, kwargs)) or True,
     )
 
     assert hchat_send.send_hchat("agent1@INTEL", "zelda", "hello over protocol") is True
-    assert calls == [("agent1", "INTEL", "zelda", "hello over protocol")]
+    assert calls[0][:4] == ("agent1", "INTEL", "zelda", "hello over protocol")
+    assert calls[0][4]["message_id"].startswith("hchat-")
+    assert calls[0][4]["originated_at"].endswith("Z")
 
 
 def test_protocol_transport_delegates_to_protocol_send(monkeypatch):

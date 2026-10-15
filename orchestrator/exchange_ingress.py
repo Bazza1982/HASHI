@@ -12,6 +12,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from datetime import datetime, timezone
 
 from orchestrator.exchange_config import ExchangeConfig, load_exchange_config
 from orchestrator.message_context import (
@@ -238,6 +239,8 @@ class InboxRecord:
     run_id: str | None
     session_id: str | None
     message_id: str | None
+    confirmation_id: str | None
+    confirmation_owner_id: str | None
     accepted_at: float
     updated_at: float
     replayed: bool = False
@@ -268,11 +271,22 @@ class ExchangeInbox:
                     run_id TEXT,
                     session_id TEXT,
                     message_id TEXT,
+                    confirmation_id TEXT,
+                    confirmation_owner_id TEXT,
                     accepted_at REAL NOT NULL,
                     updated_at REAL NOT NULL
                 )
                 """
             )
+            columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(exchange_inbox)")
+            }
+            for column_name in ("confirmation_id", "confirmation_owner_id"):
+                if column_name not in columns:
+                    connection.execute(
+                        f"ALTER TABLE exchange_inbox ADD COLUMN {column_name} TEXT"
+                    )
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS exchange_inbox_pending
@@ -306,6 +320,16 @@ class ExchangeInbox:
             ),
             message_id=(
                 str(row["message_id"]) if row["message_id"] is not None else None
+            ),
+            confirmation_id=(
+                str(row["confirmation_id"])
+                if row["confirmation_id"] is not None
+                else None
+            ),
+            confirmation_owner_id=(
+                str(row["confirmation_owner_id"])
+                if row["confirmation_owner_id"] is not None
+                else None
             ),
             accepted_at=float(row["accepted_at"]),
             updated_at=float(row["updated_at"]),
@@ -382,10 +406,13 @@ class ExchangeInbox:
             ).fetchone()
             if row is None:
                 return None
-            if str(row["state"]) == "scheduled" and not recover_scheduled:
+            current_state = str(row["state"])
+            if current_state not in {"accepted", "scheduling", "scheduled"}:
+                return None
+            if current_state == "scheduled" and not recover_scheduled:
                 return None
             if (
-                str(row["state"]) == "scheduling"
+                current_state == "scheduling"
                 and float(row["updated_at"]) > stale_before
                 and not recover_leased
             ):
@@ -415,6 +442,138 @@ class ExchangeInbox:
                 """,
                 (now, str(inbox_key)),
             )
+
+    def mark_pending_confirmation(
+        self,
+        inbox_key: str,
+        *,
+        confirmation_id: str,
+        owner_id: str,
+    ) -> InboxRecord:
+        now = time.time()
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                UPDATE exchange_inbox
+                SET state='pending_confirmation', confirmation_id=?,
+                    confirmation_owner_id=?, updated_at=?
+                WHERE inbox_key=? AND state IN ('accepted', 'pending_confirmation')
+                """,
+                (
+                    str(confirmation_id),
+                    str(owner_id),
+                    now,
+                    str(inbox_key),
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM exchange_inbox WHERE inbox_key=?",
+                (str(inbox_key),),
+            ).fetchone()
+        if row is None:
+            raise ExchangeIngressError("Exchange inbox record disappeared")
+        record = self._record(row)
+        if record.confirmation_id != str(confirmation_id):
+            raise ExchangeIngressConflict("Exchange confirmation identity conflict")
+        return record
+
+    def release_confirmation(
+        self,
+        inbox_key: str,
+        *,
+        confirmation_id: str,
+    ) -> InboxRecord:
+        now = time.time()
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            changed = connection.execute(
+                """
+                UPDATE exchange_inbox
+                SET state='accepted', updated_at=?
+                WHERE inbox_key=? AND state='pending_confirmation'
+                  AND confirmation_id=?
+                """,
+                (now, str(inbox_key), str(confirmation_id)),
+            ).rowcount
+            row = connection.execute(
+                "SELECT * FROM exchange_inbox WHERE inbox_key=?",
+                (str(inbox_key),),
+            ).fetchone()
+        if row is None:
+            raise ExchangeIngressError("Exchange inbox record disappeared")
+        record = self._record(row)
+        if changed != 1 and record.state not in {"accepted", "scheduling", "scheduled", "displayed"}:
+            raise ExchangeIngressConflict("Exchange confirmation is no longer releasable")
+        return record
+
+    def restore_pending_confirmation(self, inbox_key: str) -> None:
+        now = time.time()
+        with self._lock, self._connection() as connection:
+            connection.execute(
+                """
+                UPDATE exchange_inbox
+                SET state='pending_confirmation', updated_at=?
+                WHERE inbox_key=? AND state IN ('accepted', 'scheduling')
+                  AND confirmation_id IS NOT NULL
+                """,
+                (now, str(inbox_key)),
+            )
+
+    def mark_confirmation_terminal(
+        self,
+        inbox_key: str,
+        *,
+        state: str,
+    ) -> InboxRecord:
+        normalized = str(state).strip().casefold()
+        if normalized not in {
+            "discarded",
+            "confirmation_expired",
+            "confirmation_superseded",
+        }:
+            raise ValueError("invalid Exchange confirmation terminal state")
+        now = time.time()
+        with self._lock, self._connection() as connection:
+            connection.execute(
+                """
+                UPDATE exchange_inbox SET state=?, updated_at=?
+                WHERE inbox_key=? AND state='pending_confirmation'
+                """,
+                (normalized, now, str(inbox_key)),
+            )
+            row = connection.execute(
+                "SELECT * FROM exchange_inbox WHERE inbox_key=?",
+                (str(inbox_key),),
+            ).fetchone()
+        if row is None:
+            raise ExchangeIngressError("Exchange inbox record disappeared")
+        return self._record(row)
+
+    def mark_displayed(
+        self,
+        inbox_key: str,
+        *,
+        session_id: str,
+        message_id: str,
+    ) -> InboxRecord:
+        now = time.time()
+        with self._lock, self._connection() as connection:
+            connection.execute(
+                """
+                UPDATE exchange_inbox
+                SET state='displayed', session_id=?, message_id=?, updated_at=?
+                WHERE inbox_key=?
+                """,
+                (str(session_id), str(message_id), now, str(inbox_key)),
+            )
+            row = connection.execute(
+                "SELECT * FROM exchange_inbox WHERE inbox_key=?",
+                (str(inbox_key),),
+            ).fetchone()
+        if row is None:
+            raise ExchangeIngressError("Exchange inbox record disappeared")
+        return self._record(row)
 
     def mark_scheduled(
         self,
@@ -516,6 +675,19 @@ class ExchangeInbox:
                 """
                 SELECT * FROM exchange_inbox
                 WHERE state='scheduled' AND delivery_json!='{}'
+                ORDER BY accepted_at, inbox_key
+                LIMIT ?
+                """,
+                (max(1, min(int(limit), 100)),),
+            ).fetchall()
+        return [self._record(row) for row in rows]
+
+    def pending_confirmations(self, *, limit: int = 100) -> list[InboxRecord]:
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM exchange_inbox
+                WHERE state='pending_confirmation'
                 ORDER BY accepted_at, inbox_key
                 LIMIT ?
                 """,
@@ -625,13 +797,97 @@ class ExchangeIngressService:
         evidence: Any,
         prompt: str,
     ) -> InboxRecord:
-        _principal, delivery = self._verified(
+        principal, delivery = self._verified(
             evidence=evidence,
             prompt=prompt,
+            # Durable acceptance already enforced the 10-minute transport
+            # deadline.  Scheduling and a later 15-minute confirmation must
+            # not retroactively expire an item that arrived in time.
+            require_deadline=False,
         )
         identity = delivery_identity_key(delivery)
         inbox_key = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        current = self.inbox.get(inbox_key)
+        if current is None:
+            raise ExchangeIngressError("Exchange delivery was not durably accepted")
+        if current.state in {
+            "pending_confirmation",
+            "discarded",
+            "confirmation_expired",
+            "confirmation_superseded",
+            "displayed",
+            "scheduled",
+        }:
+            return current
+        recipient = ExchangeAddress.from_mapping(delivery["recipient"])
+        sender = ExchangeAddress.from_mapping(delivery["sender"])
+        from orchestrator.hchat_freshness_gate import (
+            check_hchat_freshness_and_register,
+        )
+
+        is_reply = delivery["message_type"] == "agent_reply"
+        observed_owners = self.session_store.conversation_owner_ids(
+            agent_id=recipient.agent_id
+        )
+        confirmation_owner = (
+            observed_owners[0]
+            if len(observed_owners) == 1
+            else f"exchange:{principal.authority_id}:{principal.actor_id}"
+        )
+        is_fresh, confirmation = check_hchat_freshness_and_register(
+            store=self.session_store,
+            originated_at=delivery.get("created_at"),
+            received_at=datetime.fromtimestamp(current.accepted_at, timezone.utc),
+            is_remote=True,
+            to_agent=recipient.agent_id,
+            from_agent=sender.agent_id,
+            from_instance=principal.registered_instance_id,
+            message_id=str(delivery["message_id"]),
+            text=str(delivery["content"]["text"]),
+            is_reply=is_reply,
+            transport="exchange",
+            connector_id="hchat_exchange",
+            owner_id=confirmation_owner,
+            idempotency_key=current.idempotency_key,
+            canonical_text=str(delivery["content"]["text"]),
+            payload_to_execute={
+                "execution_kind": "exchange_inbox",
+                "inbox_key": inbox_key,
+                "originated_at": delivery.get("created_at"),
+            },
+        )
+        if not is_fresh and confirmation is not None:
+            return self.inbox.mark_pending_confirmation(
+                inbox_key,
+                confirmation_id=confirmation["confirmation_id"],
+                owner_id=confirmation["owner_id"],
+            )
         return await self._schedule_key(inbox_key)
+
+    async def confirm_pending(
+        self,
+        inbox_key: str,
+        *,
+        confirmation_id: str,
+    ) -> InboxRecord:
+        """Release exactly one Exchange inbox item after its bound decision."""
+
+        record = self.inbox.get(inbox_key)
+        if record is None:
+            raise ExchangeIngressError("Exchange inbox record not found")
+        if record.state in {"scheduled", "displayed"}:
+            return record
+        if record.confirmation_id != str(confirmation_id):
+            raise ExchangeIngressConflict("Exchange confirmation identity mismatch")
+        self.inbox.release_confirmation(
+            inbox_key,
+            confirmation_id=confirmation_id,
+        )
+        try:
+            return await self._schedule_key(inbox_key)
+        except Exception:
+            self.inbox.restore_pending_confirmation(inbox_key)
+            raise
 
     @staticmethod
     def _runtime_claims(
@@ -717,6 +973,43 @@ class ExchangeIngressService:
                 require_deadline=False,
             )
             recipient = ExchangeAddress.from_mapping(delivery["recipient"])
+            exchange_owner_id = (
+                f"exchange:{principal.authority_id}:{principal.actor_id}"
+            )
+            if delivery["message_type"] == "agent_reply":
+                reply_owner_id = str(
+                    record.confirmation_owner_id or exchange_owner_id
+                )
+                target_session = self.session_store.resolve_primary_session(
+                    owner_id=reply_owner_id,
+                    agent_id=recipient.agent_id,
+                    establish=True,
+                )
+                displayed = self.session_store.append_presentation_message(
+                    session_id=target_session["session_id"],
+                    owner_id=reply_owner_id,
+                    agent_id=recipient.agent_id,
+                    role="assistant",
+                    text=str(delivery["content"]["text"]),
+                    source="hchat-exchange-reply",
+                    idempotency_key=f"hchat-display:{delivery['message_id']}",
+                    presentation_channel="hchat-reply",
+                    history_eligible=False,
+                    message_context={
+                        "system_exchange": True,
+                        "system_exchange_kind": "reply",
+                        "system_exchange_terminal": True,
+                        "hchat_message_id": delivery["message_id"],
+                        "hchat_from_agent": principal.agent_id,
+                        "hchat_from_instance": principal.registered_instance_id,
+                        "exchange_inbox_key": inbox_key,
+                    },
+                )
+                return self.inbox.mark_displayed(
+                    inbox_key,
+                    session_id=target_session["session_id"],
+                    message_id=str(displayed["message_id"]),
+                )
             runtime = self._runtime_map().get(recipient.agent_id)
             if runtime is None or getattr(runtime, "startup_success", True) is False:
                 raise ExchangeIngressUnavailable(
@@ -733,9 +1026,7 @@ class ExchangeIngressService:
                 )
             metadata = {
                 CONNECTOR_EVIDENCE_METADATA_KEY: connector_evidence,
-                "owner_id": (
-                    f"exchange:{principal.authority_id}:{principal.actor_id}"
-                ),
+                "owner_id": exchange_owner_id,
                 "connector_id": "exchange",
                 "ingress_transport": "exchange.wss",
                 "session_surface": "exchange",
@@ -806,6 +1097,44 @@ class ExchangeIngressService:
             return recovered
         if not config.enabled:
             return recovered
+        from orchestrator.ingress_confirmation import (
+            ConfirmationNotFoundError,
+            IngressConfirmationService,
+        )
+
+        confirmation_service = IngressConfirmationService(self.session_store)
+        for record in self.inbox.pending_confirmations(limit=limit):
+            if not record.confirmation_id or not record.confirmation_owner_id:
+                continue
+            try:
+                confirmation = confirmation_service.get(
+                    record.confirmation_id,
+                    owner_id=record.confirmation_owner_id,
+                )
+            except ConfirmationNotFoundError:
+                continue
+            state = str(confirmation.get("state") or "")
+            if state == "discarded":
+                recovered.append(
+                    self.inbox.mark_confirmation_terminal(
+                        record.inbox_key,
+                        state="discarded",
+                    )
+                )
+            elif state == "expired":
+                recovered.append(
+                    self.inbox.mark_confirmation_terminal(
+                        record.inbox_key,
+                        state="confirmation_expired",
+                    )
+                )
+            elif state == "superseded":
+                recovered.append(
+                    self.inbox.mark_confirmation_terminal(
+                        record.inbox_key,
+                        state="confirmation_superseded",
+                    )
+                )
         for record in scheduled:
             state = scheduled_states[record.inbox_key]
             if recover_scheduled and state == "queued":

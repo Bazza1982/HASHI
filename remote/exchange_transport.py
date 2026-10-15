@@ -774,6 +774,7 @@ class ExchangeTransport:
         to_address: str,
         text: str,
         message_id: str | None = None,
+        originated_at: str | None = None,
         conversation_id: str | None = None,
         message_type: str = "agent_message",
         in_reply_to: str | None = None,
@@ -802,6 +803,7 @@ class ExchangeTransport:
                     conversation_id=conversation_id,
                     message_type=message_type,
                     in_reply_to=in_reply_to,
+                    originated_at=originated_at,
                 )
                 return await self._transmit_record(
                     ws,
@@ -827,14 +829,22 @@ class ExchangeTransport:
         if not isinstance(target, Mapping):
             raise ExchangeTransportError("RESOLVE_REJECTED")
         now = self.clock()
+        if not originated_at:
+            raise ExchangeTransportError("INVALID_MESSAGE")
+        try:
+            origin_timestamp = parse_timestamp(originated_at)
+        except ValueError as exc:
+            raise ExchangeTransportError("INVALID_MESSAGE") from exc
         lifetime = max(1, min(int(expires_in_seconds), 600))
+        if now >= origin_timestamp + lifetime:
+            raise ExchangeTransportError("MESSAGE_EXPIRED")
         outbound = send_frame(
             message_id=message_id or self._new_id("msg"),
             conversation_id=conversation_id or self._new_id("conv"),
             from_agent=normalized_sender,
             to=target,
-            created_at=utc_timestamp(now),
-            expires_at=utc_timestamp(now + lifetime),
+            created_at=utc_timestamp(origin_timestamp),
+            expires_at=utc_timestamp(origin_timestamp + lifetime),
             message_type=message_type,
             in_reply_to=in_reply_to,
             text=str(text),
@@ -859,6 +869,7 @@ class ExchangeTransport:
         conversation_id: str | None,
         message_type: str,
         in_reply_to: str | None,
+        originated_at: str | None,
     ) -> None:
         frame = record.frame
         content = frame.get("content")
@@ -871,6 +882,7 @@ class ExchangeTransport:
             )
             or frame.get("message_type") != message_type
             or frame.get("in_reply_to") != in_reply_to
+            or frame.get("created_at") != originated_at
             or not isinstance(content, Mapping)
             or content.get("text") != text
         ):

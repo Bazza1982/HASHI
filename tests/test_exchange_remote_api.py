@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 from fastapi.testclient import TestClient
 
@@ -61,12 +62,15 @@ def _app(tmp_path):
 
 
 def _payload(**overrides):
+    message_id = "message_1"
     value = {
         "from_instance": "HASHI_LOCAL",
         "from_agent": "planner",
         "to_address": "reviewer@server.alice",
         "text": "Please review.",
-        "message_id": "message_1",
+        "message_id": message_id,
+        "originated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "idempotency_key": f"hchat:{message_id}",
         "conversation_id": "conversation_1",
         "message_type": "agent_message",
         "in_reply_to": None,

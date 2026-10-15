@@ -1,0 +1,672 @@
+"""Tests for Session API message freshness gate and ingress confirmation endpoints.
+
+Functional owner: PAO / Functions layer
+Engineering layer: Functions
+Verification: Red-green proof for Session API freshness gate and confirmation endpoints.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+from types import SimpleNamespace
+import pytest
+
+from orchestrator.workbench_api import WorkbenchApiServer
+from orchestrator.session_store import SessionConflict
+
+
+class _MockRequest:
+    def __init__(
+        self,
+        payload=None,
+        *,
+        query=None,
+        match_info=None,
+        headers=None,
+        remote="127.0.0.1",
+    ):
+        self._payload = payload or {}
+        self.query = query or {}
+        self.match_info = match_info or {}
+        self.headers = headers or {}
+        self.remote = remote
+
+    async def json(self):
+        return self._payload
+
+
+class _MockRuntime:
+    name = "lily"
+    backend_ready = True
+
+    def __init__(self, server=None):
+        self.server = server
+        self.enqueue_request_calls = 0
+        self.last_enqueued_text = None
+        self.last_idempotency_key = None
+        self.last_request_metadata = None
+
+    def _primary_chat_id(self):
+        return 123
+
+    async def enqueue_request(
+        self,
+        _chat_id,
+        prompt,
+        source,
+        _summary,
+        *,
+        idempotency_key,
+        request_metadata,
+        **kwargs,
+    ):
+        self.enqueue_request_calls += 1
+        self.last_enqueued_text = prompt
+        self.last_idempotency_key = idempotency_key
+        self.last_request_metadata = dict(request_metadata)
+        request_id = f"req-{self.enqueue_request_calls}"
+        accepted = self.server.session_store.accept_run(
+            session_id=request_metadata["session_id"],
+            owner_id=request_metadata["owner_id"],
+            agent_id=self.name,
+            request_id=request_id,
+            text=str(request_metadata.get("session_message_text", prompt)),
+            source=source,
+            idempotency_key=idempotency_key,
+            content=request_metadata.get("session_message_content"),
+        )
+        return accepted.request_id
+
+
+@pytest.fixture
+def api_server(tmp_path: Path):
+    config_path = tmp_path / "agents.json"
+    config_path.write_text(
+        json.dumps({"global": {}, "agents": [{"name": "lily"}]}),
+        encoding="utf-8",
+    )
+    runtime = _MockRuntime()
+    server = WorkbenchApiServer(
+        config_path=config_path,
+        global_config=SimpleNamespace(
+            bridge_home=tmp_path,
+            project_root=tmp_path,
+            instance_id="HASHI3",
+            authorized_id=7,
+            workbench_port=18800,
+            api_gateway_port=18801,
+            deployment_profile="personal",
+        ),
+        runtimes=[runtime],
+    )
+    runtime.server = server
+    return server, runtime
+
+
+@pytest.fixture
+def session(api_server):
+    server, _ = api_server
+    return server.session_store.resolve_primary_session(
+        owner_id="user:7",
+        agent_id="lily",
+        establish=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_capabilities_advertises_message_freshness(api_server):
+    server, _ = api_server
+    req = _MockRequest()
+    resp = await server.handle_v1_capabilities(req)
+    assert resp.status == 200
+    data = json.loads(resp.text)
+    assert "message_freshness" in data
+    freshness_cap = data["message_freshness"]
+    assert freshness_cap["capability"] == "message_freshness_v1"
+    assert "originated_at" in freshness_cap["required_fields"]
+    assert freshness_cap["pending_receipt_supported"] is True
+    assert "confirm" in freshness_cap["decisions_supported"]
+    assert "discard" in freshness_cap["decisions_supported"]
+
+
+@pytest.mark.asyncio
+async def test_session_runs_missing_originated_at_requires_confirmation(api_server, session):
+    server, runtime = api_server
+    req = _MockRequest(
+        {
+            "idempotency_key": "idemp-no-originated",
+            "message": {"content": [{"type": "text", "text": "hello without timestamp"}]},
+        },
+        match_info={"session_id": session["session_id"]},
+    )
+    resp = await server.handle_v1_session_runs_create(req)
+    assert resp.status == 202
+    data = json.loads(resp.text)
+    assert data.get("confirmation_required") is True
+    assert data.get("accepted") is False
+    assert data.get("state") == "awaiting_confirmation"
+    assert "run_id" not in data
+    assert data["confirmation"]["reason"] == "timestamp_missing"
+    assert data["confirmation"]["confirmation_id"].startswith("conf-")
+    # Verify no run was enqueued
+    assert runtime.enqueue_request_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_session_runs_stale_originated_at_requires_confirmation(api_server, session):
+    server, runtime = api_server
+    # 40 seconds ago (local threshold is 30s)
+    originated = (datetime.now(timezone.utc) - timedelta(seconds=40)).isoformat().replace("+00:00", "Z")
+    req = _MockRequest(
+        {
+            "idempotency_key": "idemp-stale-msg",
+            "originated_at": originated,
+            "message": {"content": [{"type": "text", "text": "stale message"}]},
+        },
+        match_info={"session_id": session["session_id"]},
+        remote="127.0.0.1",
+    )
+    resp = await server.handle_v1_session_runs_create(req)
+    assert resp.status == 202
+    data = json.loads(resp.text)
+    assert data.get("confirmation_required") is True
+    assert data.get("accepted") is False
+    assert data["confirmation"]["reason"] == "stale"
+    assert runtime.enqueue_request_calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message",
+    [
+        {
+            "display_text": 42,
+            "content": [{"type": "text", "text": "invalid display text"}],
+        },
+        {
+            "content": [
+                {
+                    "type": "attachment",
+                    "attachment_id": "att-does-not-exist",
+                }
+            ]
+        },
+        {"content": [{"type": "unsupported", "text": "invalid part"}]},
+    ],
+)
+async def test_stale_invalid_payload_is_rejected_before_confirmation(
+    api_server, session, message
+):
+    server, runtime = api_server
+    originated = (
+        datetime.now(timezone.utc) - timedelta(seconds=40)
+    ).isoformat().replace("+00:00", "Z")
+    req = _MockRequest(
+        {
+            "idempotency_key": "idemp-stale-invalid",
+            "originated_at": originated,
+            "message": message,
+        },
+        match_info={"session_id": session["session_id"]},
+        remote="127.0.0.1",
+    )
+
+    resp = await server.handle_v1_session_runs_create(req)
+
+    assert resp.status >= 400
+    assert runtime.enqueue_request_calls == 0
+    assert server.ingress_confirmation.list(
+        session_id=session["session_id"], owner_id="user:7"
+    ) == []
+
+
+def _stage_committed_attachment(
+    server,
+    session,
+    *,
+    payload: bytes,
+    filename: str,
+    media_type: str,
+    semantic_role: str | None = None,
+):
+    staged = server.session_store.stage_attachment(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        filename=filename,
+        media_type=media_type,
+        size_bytes=len(payload),
+        sha256=hashlib.sha256(payload).hexdigest(),
+        semantic_role=semantic_role,
+    )
+    server.session_store.upload_attachment_bytes(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        attachment_id=staged["attachment_id"],
+        payload=payload,
+    )
+    server.session_store.commit_attachment(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        attachment_id=staged["attachment_id"],
+    )
+    return staged["attachment_id"]
+
+
+@pytest.mark.asyncio
+async def test_stale_committed_attachment_waits_then_executes_once(
+    api_server, session
+):
+    server, runtime = api_server
+    attachment_id = _stage_committed_attachment(
+        server,
+        session,
+        payload=b"one",
+        filename="evidence.txt",
+        media_type="text/plain",
+    )
+    originated = (
+        datetime.now(timezone.utc) - timedelta(seconds=40)
+    ).isoformat().replace("+00:00", "Z")
+    create = await server.handle_v1_session_runs_create(
+        _MockRequest(
+            {
+                "idempotency_key": "idemp-stale-attachment",
+                "originated_at": originated,
+                "message": {
+                    "content": [
+                        {
+                            "type": "attachment",
+                            "attachment_id": attachment_id,
+                        }
+                    ]
+                },
+            },
+            match_info={"session_id": session["session_id"]},
+        )
+    )
+    created = json.loads(create.text)
+    assert create.status == 202
+    assert created["confirmation_required"] is True
+    assert created["confirmation"]["display_metadata"]["attachment_names"] == [
+        "evidence.txt"
+    ]
+    assert runtime.enqueue_request_calls == 0
+
+    confirmation_id = created["confirmation"]["confirmation_id"]
+    decide = _MockRequest(
+        {"decision": "confirm"},
+        match_info={
+            "session_id": session["session_id"],
+            "confirmation_id": confirmation_id,
+        },
+    )
+    first = await server.handle_v1_session_ingress_confirmation_decide(decide)
+    second = await server.handle_v1_session_ingress_confirmation_decide(decide)
+
+    assert first.status == 200
+    assert second.status == 200
+    assert json.loads(first.text)["state"] == "confirmed"
+    assert json.loads(second.text)["run_id"] == json.loads(first.text)["run_id"]
+    assert runtime.enqueue_request_calls == 1
+    assert runtime.last_request_metadata["session_message_content"] == [
+        {"type": "attachment", "attachment_id": attachment_id}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_pending_confirmation_reserves_attachment_until_terminal(
+    api_server, session
+):
+    server, runtime = api_server
+    attachment_id = _stage_committed_attachment(
+        server,
+        session,
+        payload=b"keep while pending",
+        filename="pending.txt",
+        media_type="text/plain",
+    )
+    originated = (
+        datetime.now(timezone.utc) - timedelta(seconds=40)
+    ).isoformat().replace("+00:00", "Z")
+    create = await server.handle_v1_session_runs_create(
+        _MockRequest(
+            {
+                "idempotency_key": "idemp-pending-attachment-reservation",
+                "originated_at": originated,
+                "message": {
+                    "content": [
+                        {
+                            "type": "attachment",
+                            "attachment_id": attachment_id,
+                        }
+                    ]
+                },
+            },
+            match_info={"session_id": session["session_id"]},
+        )
+    )
+    created = json.loads(create.text)
+    assert created["confirmation_required"] is True
+    with pytest.raises(SessionConflict, match="message-bound"):
+        server.session_store.discard_unbound_attachments(
+            session_id=session["session_id"],
+            owner_id="user:7",
+            attachment_ids=[attachment_id],
+        )
+    assert runtime.enqueue_request_calls == 0
+
+    discard = await server.handle_v1_session_ingress_confirmation_decide(
+        _MockRequest(
+            {"decision": "discard"},
+            match_info={
+                "session_id": session["session_id"],
+                "confirmation_id": created["confirmation"]["confirmation_id"],
+            },
+        )
+    )
+    assert json.loads(discard.text)["state"] == "discarded"
+    assert server.session_store.discard_unbound_attachments(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        attachment_ids=[attachment_id],
+    ) == [attachment_id]
+    assert runtime.enqueue_request_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_stale_voice_attachment_does_not_start_transcription_before_confirmation(
+    api_server, session, monkeypatch
+):
+    server, runtime = api_server
+    monkeypatch.setattr(server, "_native_audio_chat_v1_ready", lambda: True)
+    transcription_calls = []
+
+    def _unexpected_transcription(**kwargs):
+        transcription_calls.append(kwargs)
+        raise AssertionError("stale voice was transcribed before confirmation")
+
+    monkeypatch.setattr(
+        server, "_begin_session_voice_transcription", _unexpected_transcription
+    )
+    attachment_id = _stage_committed_attachment(
+        server,
+        session,
+        payload=b"OggS-delayed-voice",
+        filename="delayed.ogg",
+        media_type="audio/ogg",
+        semantic_role="voice_message",
+    )
+    originated = (
+        datetime.now(timezone.utc) - timedelta(seconds=40)
+    ).isoformat().replace("+00:00", "Z")
+
+    response = await server.handle_v1_session_runs_create(
+        _MockRequest(
+            {
+                "idempotency_key": "idemp-stale-voice",
+                "originated_at": originated,
+                "message": {
+                    "content": [
+                        {
+                            "type": "audio",
+                            "attachment_id": attachment_id,
+                            "semantic_role": "voice_message",
+                        }
+                    ]
+                },
+            },
+            match_info={"session_id": session["session_id"]},
+        )
+    )
+
+    assert response.status == 202
+    assert json.loads(response.text)["confirmation_required"] is True
+    assert transcription_calls == []
+    assert runtime.enqueue_request_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_session_runs_fresh_originated_at_executes_immediately(api_server, session):
+    server, runtime = api_server
+    # 5 seconds ago (fresh for both local 30s and remote 60s)
+    originated = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat().replace("+00:00", "Z")
+    req = _MockRequest(
+        {
+            "idempotency_key": "idemp-fresh-msg",
+            "originated_at": originated,
+            "message": {"content": [{"type": "text", "text": "fresh message"}]},
+        },
+        match_info={"session_id": session["session_id"]},
+        remote="127.0.0.1",
+    )
+    resp = await server.handle_v1_session_runs_create(req)
+    assert resp.status == 202
+    data = json.loads(resp.text)
+    assert data.get("ok") is True
+    assert data.get("confirmation_required") is not True
+    assert "run_id" in data
+    assert runtime.enqueue_request_calls == 1
+    assert runtime.last_enqueued_text == "fresh message"
+
+
+@pytest.mark.asyncio
+async def test_session_runs_remote_workbench_threshold_60s(api_server, session):
+    server, runtime = api_server
+    # 45 seconds ago on remote connection (remote threshold is 60s -> fresh!)
+    originated = (datetime.now(timezone.utc) - timedelta(seconds=45)).isoformat().replace("+00:00", "Z")
+    req = _MockRequest(
+        {
+            "idempotency_key": "idemp-remote-45s",
+            "originated_at": originated,
+            "message": {"content": [{"type": "text", "text": "remote 45s message"}]},
+        },
+        match_info={"session_id": session["session_id"]},
+        remote="192.168.1.100",  # non-loopback
+    )
+    resp = await server.handle_v1_session_runs_create(req)
+    assert resp.status == 202
+    data = json.loads(resp.text)
+    assert "run_id" in data
+    assert runtime.enqueue_request_calls == 1
+
+    # 70 seconds ago on remote connection (exceeds 60s -> stale!)
+    originated_70s = (datetime.now(timezone.utc) - timedelta(seconds=70)).isoformat().replace("+00:00", "Z")
+    req_stale = _MockRequest(
+        {
+            "idempotency_key": "idemp-remote-70s",
+            "originated_at": originated_70s,
+            "message": {"content": [{"type": "text", "text": "remote 70s message"}]},
+        },
+        match_info={"session_id": session["session_id"]},
+        remote="192.168.1.100",
+    )
+    resp_stale = await server.handle_v1_session_runs_create(req_stale)
+    assert resp_stale.status == 202
+    data_stale = json.loads(resp_stale.text)
+    assert data_stale.get("confirmation_required") is True
+    assert runtime.enqueue_request_calls == 1  # not incremented
+
+
+@pytest.mark.asyncio
+async def test_client_declared_tui_surface_never_bypasses_freshness(api_server, session):
+    server, runtime = api_server
+    # Loopback is not a trusted connector identity. A forged body field cannot bypass.
+    req_local_tui = _MockRequest(
+        {
+            "idempotency_key": "idemp-local-tui",
+            "surface": "tui",
+            "message": {"content": [{"type": "text", "text": "local tui prompt"}]},
+        },
+        match_info={"session_id": session["session_id"]},
+        remote="127.0.0.1",
+    )
+    resp = await server.handle_v1_session_runs_create(req_local_tui)
+    assert resp.status == 202
+    data = json.loads(resp.text)
+    assert data.get("confirmation_required") is True
+    assert "run_id" not in data
+    assert runtime.enqueue_request_calls == 0
+
+    # The established local TUI connector shape is exempt: loopback is
+    # server-observed, and both connector IDs use the existing TUI namespace.
+    req_real_local_tui = _MockRequest(
+        {
+            "idempotency_key": "tui-real-local-1",
+            "surface": "tui",
+            "client_id": "tui-client-1",
+            "message": {"content": [{"type": "text", "text": "real local tui"}]},
+        },
+        match_info={"session_id": session["session_id"]},
+        remote="127.0.0.1",
+    )
+    resp_real = await server.handle_v1_session_runs_create(req_real_local_tui)
+    real_data = json.loads(resp_real.text)
+    assert resp_real.status == 202
+    assert real_data.get("confirmation_required") is not True
+    assert "run_id" in real_data
+    assert runtime.enqueue_request_calls == 1
+
+    # Non-loopback remote claiming surface="tui" -> NOT exempt!
+    req_remote_fake_tui = _MockRequest(
+        {
+            "idempotency_key": "idemp-remote-tui",
+            "surface": "tui",
+            "message": {"content": [{"type": "text", "text": "remote claiming tui"}]},
+        },
+        match_info={"session_id": session["session_id"]},
+        remote="192.168.1.100",
+    )
+    resp_remote = await server.handle_v1_session_runs_create(req_remote_fake_tui)
+    assert resp_remote.status == 202
+    data_remote = json.loads(resp_remote.text)
+    assert data_remote.get("confirmation_required") is True
+    assert runtime.enqueue_request_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_ingress_confirmations_list_and_get_endpoints(api_server, session):
+    server, _ = api_server
+    # Trigger a pending confirmation
+    req = _MockRequest(
+        {
+            "idempotency_key": "idemp-pending-query",
+            "message": {"content": [{"type": "text", "text": "pending query test"}]},
+        },
+        match_info={"session_id": session["session_id"]},
+    )
+    create_resp = await server.handle_v1_session_runs_create(req)
+    conf_id = json.loads(create_resp.text)["confirmation"]["id"]
+
+    # List confirmations
+    list_req = _MockRequest(match_info={"session_id": session["session_id"]})
+    list_resp = await server.handle_v1_session_ingress_confirmations_list(list_req)
+    assert list_resp.status == 200
+    assert list_resp.headers.get("Cache-Control") == "no-store"
+    list_data = json.loads(list_resp.text)
+    assert list_data.get("ok") is True
+    assert len(list_data["confirmations"]) >= 1
+    assert any(c["confirmation_id"] == conf_id for c in list_data["confirmations"])
+
+    # Get single confirmation
+    get_req = _MockRequest(
+        match_info={"session_id": session["session_id"], "confirmation_id": conf_id}
+    )
+    get_resp = await server.handle_v1_session_ingress_confirmation_get(get_req)
+    assert get_resp.status == 200
+    assert get_resp.headers.get("Cache-Control") == "no-store"
+    get_data = json.loads(get_resp.text)
+    assert get_data["confirmation"]["confirmation_id"] == conf_id
+
+    # A confirmation ID cannot be decided through another Session owned by
+    # the same user.
+    other_session = server.session_store.create_session(
+        owner_id="user:7", agent_id="lily", title="other session"
+    )
+    cross_session_req = _MockRequest(
+        {"decision": "discard"},
+        match_info={
+            "session_id": other_session["session_id"],
+            "confirmation_id": conf_id,
+        },
+    )
+    cross_session_resp = (
+        await server.handle_v1_session_ingress_confirmation_decide(
+            cross_session_req
+        )
+    )
+    assert cross_session_resp.status == 404
+    unchanged = server.ingress_confirmation.get(
+        conf_id,
+        owner_id="user:7",
+        session_id=session["session_id"],
+    )
+    assert unchanged["state"] == "awaiting_confirmation"
+
+
+@pytest.mark.asyncio
+async def test_ingress_confirmation_decision_confirm_and_discard(api_server, session):
+    server, runtime = api_server
+    # 1. Test Discard
+    req_discard = _MockRequest(
+        {
+            "idempotency_key": "idemp-discard-test",
+            "message": {"content": [{"type": "text", "text": "to be discarded"}]},
+        },
+        match_info={"session_id": session["session_id"]},
+    )
+    resp_discard = await server.handle_v1_session_runs_create(req_discard)
+    conf_discard_id = json.loads(resp_discard.text)["confirmation"]["id"]
+
+    decide_req = _MockRequest(
+        {"decision": "discard"},
+        match_info={"session_id": session["session_id"], "confirmation_id": conf_discard_id},
+    )
+    decide_resp = await server.handle_v1_session_ingress_confirmation_decide(decide_req)
+    assert decide_resp.status == 200
+    assert decide_resp.headers.get("Cache-Control") == "no-store"
+    d_data = json.loads(decide_resp.text)
+    assert d_data["state"] == "discarded"
+    assert d_data["run_id"] is None
+    assert runtime.enqueue_request_calls == 0
+
+    # 2. Test Confirm
+    req_confirm = _MockRequest(
+        {
+            "idempotency_key": "idemp-confirm-test",
+            "message": {"content": [{"type": "text", "text": "to be confirmed"}]},
+        },
+        match_info={"session_id": session["session_id"]},
+    )
+    resp_confirm = await server.handle_v1_session_runs_create(req_confirm)
+    conf_confirm_id = json.loads(resp_confirm.text)["confirmation"]["id"]
+
+    decide_conf_req = _MockRequest(
+        {"decision": "confirm", "text": "attempted override text"},
+        match_info={"session_id": session["session_id"], "confirmation_id": conf_confirm_id},
+    )
+    decide_conf_resp = await server.handle_v1_session_ingress_confirmation_decide(decide_conf_req)
+    assert decide_conf_resp.status == 400
+    assert runtime.enqueue_request_calls == 0
+
+    decide_conf_req = _MockRequest(
+        {"decision": "confirm"},
+        match_info={"session_id": session["session_id"], "confirmation_id": conf_confirm_id},
+    )
+    decide_conf_resp = await server.handle_v1_session_ingress_confirmation_decide(decide_conf_req)
+    assert decide_conf_resp.status == 200
+    assert decide_conf_resp.headers.get("Cache-Control") == "no-store"
+    c_data = json.loads(decide_conf_resp.text)
+    assert c_data["state"] == "confirmed"
+    assert c_data["run_id"] is not None
+    assert runtime.enqueue_request_calls == 1
+    # Verify original text executed, NOT override
+    assert runtime.last_enqueued_text == "to be confirmed"
+
+    # Repeated confirm returns same result
+    repeat_resp = await server.handle_v1_session_ingress_confirmation_decide(decide_conf_req)
+    assert repeat_resp.status == 200
+    r_data = json.loads(repeat_resp.text)
+    assert r_data["run_id"] == c_data["run_id"]
+    assert runtime.enqueue_request_calls == 1  # not re-executed

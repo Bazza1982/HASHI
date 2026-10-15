@@ -12,12 +12,14 @@ from orchestrator.exchange_ingress import (
     ExchangeInbox,
     ExchangeIngressAuthenticationError,
     ExchangeIngressConflict,
+    ExchangeIngressError,
     ExchangeIngressPermissionError,
     ExchangeIngressService,
     build_exchange_ingress_claims,
     render_exchange_hchat_prompt,
 )
 from orchestrator.message_context import seal_connector_evidence
+from orchestrator.ingress_confirmation import IngressConfirmationService
 from orchestrator.session_store import SessionStore
 from remote.exchange_outbox import ExchangeOutbox
 from remote.exchange_protocol import send_frame, utc_timestamp
@@ -262,6 +264,114 @@ def test_service_persists_before_scheduling_and_preserves_verified_identity(
         kwargs["request_metadata"]["owner_id"]
         == "exchange:authority_1:actor_alice"
     )
+
+
+def test_exchange_60_second_confirmation_boundary_and_exact_release(tmp_path):
+    _configure(tmp_path)
+    now = time.time()
+    store = SessionStore(
+        tmp_path / "state" / "sessions.sqlite3",
+        instance_id="HASHI2",
+    )
+    calls = []
+
+    class Runtime:
+        startup_success = True
+
+        async def enqueue_api_text(self, text, **kwargs):
+            calls.append((text, kwargs))
+            return "request_exchange_boundary"
+
+    service = ExchangeIngressService(
+        hashi_root=tmp_path,
+        runtime_map=lambda: {"reviewer": Runtime()},
+        session_store=store,
+    )
+    delivery = _delivery(now - 61)
+    delivery["authorization_expires_at"] = utc_timestamp(now + 60)
+    delivery["expires_at"] = utc_timestamp(now + 239)
+    prompt, evidence = _evidence(tmp_path, delivery)
+
+    accepted = service.accept(evidence=evidence, prompt=prompt)
+    pending = asyncio.run(service.schedule(evidence=evidence, prompt=prompt))
+
+    assert accepted.state == "accepted"
+    assert pending.state == "pending_confirmation"
+    assert pending.confirmation_id
+    assert calls == []
+    confirmation = IngressConfirmationService(store).get(
+        pending.confirmation_id,
+        owner_id=pending.confirmation_owner_id,
+    )
+    assert confirmation["reason"] == "stale"
+    assert confirmation["threshold_seconds"] == 60
+    assert confirmation["expires_at"] > delivery["expires_at"]
+
+    first_release = asyncio.run(
+        service.confirm_pending(
+            pending.inbox_key,
+            confirmation_id=pending.confirmation_id,
+        )
+    )
+    second_release = asyncio.run(
+        service.confirm_pending(
+            pending.inbox_key,
+            confirmation_id=pending.confirmation_id,
+        )
+    )
+    assert first_release.state == "scheduled"
+    assert second_release.state == "scheduled"
+    assert len(calls) == 1
+
+
+def test_exchange_message_inside_60_seconds_schedules_without_confirmation(tmp_path):
+    _configure(tmp_path)
+    now = time.time()
+    delivery = _delivery(now - 59)
+    delivery["authorization_expires_at"] = utc_timestamp(now + 60)
+    prompt, evidence = _evidence(tmp_path, delivery)
+    calls = []
+
+    class Runtime:
+        startup_success = True
+
+        async def enqueue_api_text(self, text, **kwargs):
+            calls.append((text, kwargs))
+            return "request_exchange_fresh"
+
+    service = ExchangeIngressService(
+        hashi_root=tmp_path,
+        runtime_map=lambda: {"reviewer": Runtime()},
+        session_store=SessionStore(
+            tmp_path / "state" / "sessions.sqlite3",
+            instance_id="HASHI2",
+        ),
+    )
+    service.accept(evidence=evidence, prompt=prompt)
+    scheduled = asyncio.run(service.schedule(evidence=evidence, prompt=prompt))
+
+    assert scheduled.state == "scheduled"
+    assert len(calls) == 1
+
+
+def test_exchange_transport_hard_expiry_still_rejects_after_600_seconds(tmp_path):
+    _configure(tmp_path)
+    now = time.time()
+    delivery = _delivery(now - 601)
+    delivery["authorization_expires_at"] = utc_timestamp(now + 60)
+    delivery["expires_at"] = utc_timestamp(now - 1)
+    prompt, evidence = _evidence(tmp_path, delivery)
+    service = ExchangeIngressService(
+        hashi_root=tmp_path,
+        runtime_map=lambda: {"reviewer": SimpleNamespace(startup_success=True)},
+        session_store=SessionStore(
+            tmp_path / "state" / "sessions.sqlite3",
+            instance_id="HASHI2",
+        ),
+    )
+
+    with pytest.raises(ExchangeIngressError, match="expired"):
+        service.accept(evidence=evidence, prompt=prompt)
 
 
 def test_ack_loss_redelivery_with_new_epoch_reuses_the_scheduled_run(tmp_path):

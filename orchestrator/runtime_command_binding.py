@@ -76,6 +76,7 @@ BOT_COMMAND_BINDINGS: tuple[BotCommandBinding, ...] = tuple(
 CALLBACK_BINDINGS: tuple[CallbackBinding, ...] = (
     # Questions use their PAO answer transaction, not command admission/new Runs.
     CallbackBinding(QUESTION_CALLBACK_PATTERN, 'callback_run_question', command=False),
+    CallbackBinding(r"^ingress_confirm:", "callback_ingress_confirm", command=False),
     CallbackBinding(r"^fallback:", "callback_fallback"),
     CallbackBinding(
         r"^(model|backend|bmodel|effort|backend_menu|her_adv|her_execution|her_model|her_route|her_routes|her_reasoning|her_target)",
