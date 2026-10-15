@@ -285,5 +285,8 @@ placeholder with a short deterministic summary. This operation adds no model or
 provider call, and replaying the same acceptance cannot rename the Session
 again. Manual titles remain authoritative.
 
+Listing also migrates older untouched placeholders from their first visible
+user message without changing their activity timestamp.
+
 The existing revision-checked Session update route now also supports archive
 and restore. Archive removes the Session from ordinary active lists and clears

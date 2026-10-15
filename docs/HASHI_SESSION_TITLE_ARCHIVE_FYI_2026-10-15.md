@@ -10,6 +10,9 @@ without introducing a second Session store or a maintenance model.
 - A conversation created without a user title records a system-owned placeholder.
 - On the first accepted user Run, PAO derives a short deterministic title from
   the user-visible request and marks it as maintenance-owned.
+- When an older untouched placeholder is listed, PAO derives the same title from
+  its first visible user message. The migration preserves the Session activity
+  timestamp and runs only once.
 - A user rename is authoritative and is never replaced automatically.
 - Replay of an existing idempotency key does not repeat title maintenance.
 - The revision-checked Session update accepts `active` and `archived`.

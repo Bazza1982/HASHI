@@ -97,6 +97,54 @@ def test_manual_or_explicit_title_is_never_overwritten(tmp_path):
     assert unchanged["title_source"] == "user"
 
 
+def test_listing_backfills_legacy_placeholder_without_changing_activity_date(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.create_session(
+        owner_id=owner,
+        agent_id="lily",
+        title="Temporary migration fixture",
+    )
+    store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="lily",
+        request_id="legacy-title",
+        text="Review the HASHI3 backend selection and Session archive flow",
+        source="workbench",
+        idempotency_key="legacy-title",
+    )
+    legacy_updated_at = "2026-10-01T01:02:03.000000Z"
+    with store._lock, store._connection() as connection:
+        connection.execute(
+            """
+            UPDATE sessions SET title='New conversation', title_source='system',
+                updated_at=? WHERE session_id=?
+            """,
+            (legacy_updated_at, session["session_id"]),
+        )
+
+    listed = store.list_sessions(owner_id=owner, agent_id="lily")
+    migrated = next(row for row in listed if row["session_id"] == session["session_id"])
+    assert migrated["title"] == "Review the HASHI3 backend selection and Session archive…"
+    assert migrated["title_source"] == "maintenance"
+    assert migrated["updated_at"] == legacy_updated_at
+    title_events = [
+        event
+        for event in store.events(session["session_id"], owner_id=owner)
+        if event["kind"] == "session.title_updated"
+    ]
+    assert title_events[-1]["detail"] == {
+        "source": "maintenance",
+        "reason": "placeholder_backfill",
+    }
+
+    repeated = store.list_sessions(owner_id=owner, agent_id="lily")
+    assert next(row for row in repeated if row["session_id"] == session["session_id"])[
+        "revision"
+    ] == migrated["revision"]
+
+
 def test_archive_and_restore_preserve_messages_and_use_revision_cas(tmp_path):
     store = _store(tmp_path)
     owner = "user:7"

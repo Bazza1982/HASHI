@@ -2618,6 +2618,65 @@ class SessionStore:
                 """,
                 params,
             ).fetchall()
+            changed = False
+            for row in rows:
+                if (
+                    str(row["title_source"]) != "system"
+                    or not is_system_session_title(str(row["title"]))
+                ):
+                    continue
+                message = connection.execute(
+                    """
+                    SELECT text, display_text FROM messages
+                    WHERE session_id = ? AND role = 'user' AND visibility = 'visible'
+                    ORDER BY ordinal ASC LIMIT 1
+                    """,
+                    (str(row["session_id"]),),
+                ).fetchone()
+                if message is None:
+                    continue
+                title_input = (
+                    str(message["display_text"])
+                    if message["display_text"] is not None
+                    and str(message["display_text"]).strip()
+                    else str(message["text"])
+                )
+                automatic_title = automatic_session_title(title_input)
+                if not automatic_title:
+                    continue
+                updated = connection.execute(
+                    """
+                    UPDATE sessions SET title = ?, title_source = 'maintenance',
+                        revision = revision + 1
+                    WHERE session_id = ? AND title_source = 'system' AND title = ?
+                    """,
+                    (automatic_title, str(row["session_id"]), str(row["title"])),
+                )
+                if updated.rowcount != 1:
+                    continue
+                self._append_event(
+                    connection,
+                    session_id=str(row["session_id"]),
+                    run_id=None,
+                    kind="session.title_updated",
+                    status=str(row["status"]),
+                    phase="control",
+                    summary="Session title updated",
+                    detail={
+                        "source": "maintenance",
+                        "reason": "placeholder_backfill",
+                    },
+                    outbox=False,
+                )
+                changed = True
+            if changed:
+                rows = connection.execute(
+                    f"""
+                    SELECT * FROM sessions WHERE {" AND ".join(clauses)}
+                    ORDER BY is_default DESC, updated_at DESC, session_id ASC LIMIT ?
+                    """,
+                    params,
+                ).fetchall()
         return [self._session_dict(row) for row in rows]
 
     def set_memory_policy(

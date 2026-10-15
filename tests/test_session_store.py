@@ -2191,13 +2191,14 @@ def test_terminal_commit_writes_message_event_projection_and_outbox_together(tmp
     assert [event["kind"] for event in store.events(session["session_id"])] == [
         "session.created",
         "run.accepted",
+        "session.title_updated",
         "run.started",
         "run.completed",
     ]
     with sqlite3.connect(store.db_path) as connection:
         assert (
             connection.execute("SELECT COUNT(*) FROM delivery_outbox").fetchone()[0]
-            == 2
+            == 3
         )
 
 
