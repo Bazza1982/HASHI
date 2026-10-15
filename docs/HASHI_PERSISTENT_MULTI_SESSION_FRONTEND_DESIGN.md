@@ -61,6 +61,12 @@ behind that binding remains an internal boundary.
 | Non-agent product data and final domain authorization | Owning service |
 
 ## 4. Domain invariants
+lists without deleting canonical customer state.
+
+Titles also retain their source. A newly created conversation starts with a
+system placeholder unless the user supplied a title. When PAO accepts its first
+user Run, it may replace only an untouched system placeholder with a short,
+deterministic title derived from that user-visible request. A user rename marks
 
 ### Session
 
@@ -160,6 +166,10 @@ The request digest covers every semantic input that could change execution.
 Reusing the same key and digest returns the original acceptance; reusing the key
 with a different digest returns `idempotency_conflict`.
 
+loss and retry.
+
+Archive and restore are revision-checked Session updates. Archiving removes
+ordinary channel bindings while retaining Messages, Runs and Events. The
 ## 8. Controls
 
 Cancel is idempotent, moves a non-terminal Run to `stopped`, clears its worker
@@ -232,6 +242,8 @@ and project the same state.
 6. Snapshot plus Events reconstructs client-visible state after cache loss.
 7. Fresh, archive and promotion preserve canonical records.
 8. Cross-owner and cross-Agent access fails without confirming resource
+11. Automatic title maintenance never replaces a user-owned title, and archive
+    plus restore preserves the complete canonical record.
    existence.
 9. The generated history meets the declared size threshold, the current request
    appears once, and a cross-Session sentinel appears zero times in the provider
@@ -263,3 +275,15 @@ owner-scoped regardless of Telegram/Workbench origin. Terminal success waits
 for restored connectivity and disappears after four visible seconds. Failure
 and unknown outcomes remain visible. Theme semantics provide border, icon,
 primary text and a subtle background tint. Real theme/live evidence is pending.
+primary text and a subtle background tint. Real theme/live evidence is pending.
+
+### 2026-10-15 Workbench Session navigation candidate
+
+PAO now records whether a Session title came from the system, maintenance or the
+user. The first accepted user Run can replace only an untouched conversation
+placeholder with a short deterministic summary. This operation adds no model or
+provider call, and replaying the same acceptance cannot rename the Session
+again. Manual titles remain authoritative.
+
+The existing revision-checked Session update route now also supports archive
+and restore. Archive removes the Session from ordinary active lists and clears

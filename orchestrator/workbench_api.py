@@ -6074,10 +6074,12 @@ class WorkbenchApiServer:
             )
             if agent_id not in self._runtime_map():
                 raise SessionNotFound("agent not found")
+            provided_title = str(payload.get("title") or "").strip()
             session = self.session_store.create_session(
                 owner_id=owner,
                 agent_id=agent_id,
-                title=str(payload.get("title") or "New session"),
+                title=provided_title or None,
+                title_source="user" if provided_title else "system",
             )
             surface = str(payload.get("surface") or "").strip().lower()
             channel_key = str(
@@ -6216,6 +6218,7 @@ class WorkbenchApiServer:
                 owner_id=owner,
                 expected_revision=int(expected),
                 title=payload.get("title"),
+                status=payload.get("status"),
             )
             response = web.json_response({"ok": True, "session": session})
             response.headers["ETag"] = f'"{session["revision"]}"'
