@@ -184,6 +184,12 @@ DeepSeek request's thinking mode and never select a HASHI workflow. The Backend
 catalogue exposes Provider-specific models and effort choices rather than copied
 HER-wide placeholders.
 
+HERV3 Provider menus and target validation derive model choices through
+`runtime_effort_options`. An instance's `allowed_backends.available_models`
+restriction also applies inside HERV3, including an empty list. Shared defaults
+and Provider metadata cannot reintroduce excluded models; a Provider's default
+selection must be one of its effective models.
+
 Some Provider/model pairs use a binary reasoning option, such as `off` or
 `enabled`. The selected value must reach that Provider unchanged, including
 after a Worker loads persisted Agent settings. The retained internal HER effort

@@ -10,10 +10,10 @@ from orchestrator.flexible_backend_registry import (
     BACKEND_REGISTRY,
     HER_V2_ENGINE,
     canonical_backend_engine,
-    get_available_models,
     get_backend_label,
     get_default_model,
 )
+from orchestrator.runtime_effort_options import get_available_models
 
 
 HER_V3_CONFIGURATION_STATE_KEY = "her_v3_configuration"
@@ -269,8 +269,14 @@ def build_v3_provider_options(
                 source.get(key)
                 for key in ("default_model", "model", "fast_model", "pro_model")
             )
-        values.extend(get_available_models(engine))
-        models = _unique_strings(values)
+        configured_models = _unique_strings(values)
+        models = _unique_strings(
+            model
+            for row in rows or [profile]
+            for model in get_available_models(
+                engine, backend={**row, "models": configured_models}
+            )
+        )
         status = str(profile.get("status") or "stable").strip().casefold()
         reason = None
         if status == "disabled":
@@ -288,6 +294,8 @@ def build_v3_provider_options(
         ).strip()
         if target.provider == engine and target.model in models:
             default_model = target.model
+        if default_model not in models:
+            default_model = next(iter(models), "")
         options.append(
             {
                 "name": name,

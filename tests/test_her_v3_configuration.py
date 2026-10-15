@@ -169,6 +169,40 @@ def test_v3_provider_options_derive_deepseek_models_from_provider_catalogue(tmp_
     assert deepseek["models"] == ["deepseek-flash", "deepseek-v4-pro"]
 
 
+@pytest.mark.parametrize("available", [["local-qwen:27b", "local-gemma:31b"], []])
+def test_v3_provider_choices_respect_instance_model_restrictions(tmp_path, available):
+    manager = _manager(tmp_path)
+    manager.config.allowed_backends.append({
+        "engine": "ollama-api",
+        "model": "local-qwen:27b",
+        "models": ["local-qwen:27b", "local-gemma:31b"],
+        "available_models": available,
+    })
+    manager.global_config.her_providers["providers"]["ollama"] = {
+        "engine": "ollama-api",
+        "models": ["profile-only-model"],
+    }
+
+    option = manager._her_v3_provider_option("ollama")
+
+    assert option["models"] == available
+    assert option["available"] is bool(available)
+    assert option["default_model"] == next(iter(available), "")
+    if not available:
+        with pytest.raises(ValueError, match="no configured models"):
+            manager.prepare_her_v3_provider("ollama")
+        return
+
+    target = manager.prepare_her_v3_provider("ollama")
+    assert target == HERv3ModelTarget("ollama-api", available[0])
+    manager._her_v3_configuration_override = target.to_dict()
+    assert manager.prepare_her_v3_model(available[1]).model == available[1]
+    with pytest.raises(ValueError, match="not available"):
+        manager.prepare_her_v3_model("profile-only-model")
+    with pytest.raises(ValueError, match="not available"):
+        manager.prepare_her_v3_model("gemma4:26b")
+
+
 def test_level_two_persists_only_with_qualified_herv3_provider(tmp_path, monkeypatch):
     manager = _manager(tmp_path)
     monkeypatch.setenv("HASHI_PRIVACY_FILTER_PYTHON", sys.executable)
