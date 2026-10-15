@@ -2927,3 +2927,48 @@ async def test_agent_history_api_reads_archived_session_before_new_session(tmp_p
             owner_id="user:8",
             agent_id="lily",
         )
+
+@pytest.mark.asyncio
+async def test_session_patch_archives_and_restores_without_deleting_records(tmp_path):
+    server, _runtime = _server(tmp_path)
+    owner = "user:7"
+    session = server.session_store.create_session(
+        owner_id=owner,
+        agent_id="lily",
+        title="Keep this Session",
+    )
+    server.session_store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="lily",
+        request_id="archive-api",
+        text="Persistent message",
+        source="workbench",
+        idempotency_key="archive-api",
+    )
+    current = server.session_store.get_session(session["session_id"], owner_id=owner)
+
+    archived_response = await server.handle_v1_session_patch(
+        _Request(
+            {"status": "archived", "expected_revision": current["revision"]},
+            match_info={"session_id": session["session_id"]},
+        )
+    )
+    archived = json.loads(archived_response.text)["session"]
+    assert archived_response.status == 200
+    assert archived["status"] == "archived"
+    assert archived_response.headers["ETag"] == f'"{archived["revision"]}"'
+
+    restored_response = await server.handle_v1_session_patch(
+        _Request(
+            {"status": "active", "expected_revision": archived["revision"]},
+            match_info={"session_id": session["session_id"]},
+        )
+    )
+    restored = json.loads(restored_response.text)["session"]
+    assert restored_response.status == 200
+    assert restored["status"] == "active"
+    assert [
+        message["text"]
+        for message in server.session_store.messages(session["session_id"], owner_id=owner)
+    ] == ["Persistent message"]
