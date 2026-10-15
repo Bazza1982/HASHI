@@ -1,5 +1,6 @@
 from __future__ import annotations
 import copy
+import functools
 import hashlib
 import html
 import importlib.util
@@ -8,6 +9,7 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -30,7 +32,11 @@ from orchestrator.voice_preview_bundle import (
     VoicePreviewBundleError,
     validate_voice_preview_bundle,
 )
-from orchestrator.voice_synthesis_runtime import isolated_tts_configured
+from orchestrator.voice_synthesis_runtime import (
+    isolated_tts_configured,
+    isolated_tts_supports,
+    resolve_tts_python,
+)
 from orchestrator.voice_synthesizer import (
     VoiceAsset,
     VoiceProviderFailure,
@@ -132,6 +138,47 @@ def _provider_failure(provider_name: str, exc: Exception) -> VoiceProviderFailur
     )
 
 
+@functools.lru_cache(maxsize=1)
+def _installed_windows_voice_names() -> frozenset[str]:
+    """Return the enabled SAPI voices without claiming unavailable presets."""
+
+    if sys.platform != "win32":
+        return frozenset()
+    script = (
+        "$ErrorActionPreference = 'Stop'\n"
+        "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)\n"
+        "Add-Type -AssemblyName System.Speech\n"
+        "$synth = New-Object System.Speech.Synthesis.SpeechSynthesizer\n"
+        "try {\n"
+        "  $synth.GetInstalledVoices() | Where-Object { $_.Enabled } | "
+        "ForEach-Object { $_.VoiceInfo.Name }\n"
+        "} finally { $synth.Dispose() }\n"
+    )
+    try:
+        completed = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return frozenset()
+    if completed.returncode:
+        return frozenset()
+    return frozenset(line.strip() for line in completed.stdout.splitlines() if line.strip())
+
+
 class VoiceManager:
     PROVIDER_FAILURE_COOLDOWN_SECONDS = 300.0
     PROJECT_ROOT = Path(
@@ -181,6 +228,14 @@ class VoiceManager:
             "locale": "en-US",
             "gender": "female",
         },
+        "eusm": {
+            "provider": "edge",
+            "voice_name": "en-US-GuyNeural",
+            "label": "Guy [US Edge]",
+            "language": "English",
+            "locale": "en-US",
+            "gender": "male",
+        },
         "euk": {
             "provider": "edge",
             "voice_name": "en-GB-SoniaNeural",
@@ -188,6 +243,14 @@ class VoiceManager:
             "language": "English",
             "locale": "en-GB",
             "gender": "female",
+        },
+        "eukm": {
+            "provider": "edge",
+            "voice_name": "en-GB-RyanNeural",
+            "label": "Ryan [UK Edge]",
+            "language": "English",
+            "locale": "en-GB",
+            "gender": "male",
         },
         "ecn": {
             "provider": "edge",
@@ -204,6 +267,14 @@ class VoiceManager:
             "language": "Chinese",
             "locale": "zh-CN",
             "gender": "female",
+        },
+        "ecnm": {
+            "provider": "edge",
+            "voice_name": "zh-CN-YunxiNeural",
+            "label": "Yunxi [CN Edge]",
+            "language": "Chinese",
+            "locale": "zh-CN",
+            "gender": "male",
         },
         # XiaochenNeural and XiaohanNeural discontinued by Microsoft (2026-03)
         "ectc": {
@@ -222,6 +293,14 @@ class VoiceManager:
             "locale": "zh-TW",
             "gender": "female",
         },
+        "ectm": {
+            "provider": "edge",
+            "voice_name": "zh-TW-YunJheNeural",
+            "label": "YunJhe [TW Edge]",
+            "language": "Chinese",
+            "locale": "zh-TW",
+            "gender": "male",
+        },
         "echm": {
             "provider": "edge",
             "voice_name": "zh-HK-HiuMaanNeural",
@@ -238,6 +317,14 @@ class VoiceManager:
             "locale": "zh-HK",
             "gender": "female",
         },
+        "echkm": {
+            "provider": "edge",
+            "voice_name": "zh-HK-WanLungNeural",
+            "label": "WanLung [HK Edge]",
+            "language": "Chinese",
+            "locale": "zh-HK",
+            "gender": "male",
+        },
         "eja": {
             "provider": "edge",
             "voice_name": "ja-JP-NanamiNeural",
@@ -245,6 +332,14 @@ class VoiceManager:
             "language": "Japanese",
             "locale": "ja-JP",
             "gender": "female",
+        },
+        "ejam": {
+            "provider": "edge",
+            "voice_name": "ja-JP-KeitaNeural",
+            "label": "Keita [JP Edge]",
+            "language": "Japanese",
+            "locale": "ja-JP",
+            "gender": "male",
         },
         "us": {
             "provider": "piper",
@@ -286,6 +381,14 @@ class VoiceManager:
             "locale": "en-US",
             "gender": "female",
         },
+        "wusm": {
+            "provider": "windows",
+            "voice_name": "Microsoft David Desktop",
+            "label": "David [Win-US]",
+            "language": "English",
+            "locale": "en-US",
+            "gender": "male",
+        },
         # Kokoro local TTS presets — runs on CPU, no API key needed
         "ko_bella": {
             "provider": "kokoro",
@@ -305,6 +408,33 @@ class VoiceManager:
             "gender": "female",
             "provider_options": {"lang_code": "a"},
         },
+        "ko_michael": {
+            "provider": "kokoro",
+            "voice_name": "am_michael",
+            "label": "Michael [Kokoro EN-US]",
+            "language": "English",
+            "locale": "en-US",
+            "gender": "male",
+            "provider_options": {"lang_code": "a"},
+        },
+        "ko_emma": {
+            "provider": "kokoro",
+            "voice_name": "bf_emma",
+            "label": "Emma [Kokoro EN-GB]",
+            "language": "English",
+            "locale": "en-GB",
+            "gender": "female",
+            "provider_options": {"lang_code": "b"},
+        },
+        "ko_george": {
+            "provider": "kokoro",
+            "voice_name": "bm_george",
+            "label": "George [Kokoro EN-GB]",
+            "language": "English",
+            "locale": "en-GB",
+            "gender": "male",
+            "provider_options": {"lang_code": "b"},
+        },
         "ko_xiaoxiao": {
             "provider": "kokoro",
             "voice_name": "zf_xiaoxiao",
@@ -322,6 +452,33 @@ class VoiceManager:
             "locale": "zh-CN",
             "gender": "female",
             "provider_options": {"lang_code": "z"},
+        },
+        "ko_yunxi": {
+            "provider": "kokoro",
+            "voice_name": "zm_yunxi",
+            "label": "Yunxi [Kokoro ZH]",
+            "language": "Chinese",
+            "locale": "zh-CN",
+            "gender": "male",
+            "provider_options": {"lang_code": "z"},
+        },
+        "ko_alpha": {
+            "provider": "kokoro",
+            "voice_name": "jf_alpha",
+            "label": "Alpha [Kokoro JA]",
+            "language": "Japanese",
+            "locale": "ja-JP",
+            "gender": "female",
+            "provider_options": {"lang_code": "j"},
+        },
+        "ko_kumo": {
+            "provider": "kokoro",
+            "voice_name": "jm_kumo",
+            "label": "Kumo [Kokoro JA]",
+            "language": "Japanese",
+            "locale": "ja-JP",
+            "gender": "male",
+            "provider_options": {"lang_code": "j"},
         },
     }
 
@@ -474,10 +631,13 @@ class VoiceManager:
     def _default_python_exe(self) -> str:
         return sys.executable
 
+    def _available_windows_voice_names(self) -> frozenset[str]:
+        return _installed_windows_voice_names()
+
     def _provider_status(self, provider_name: str) -> str:
         name = (provider_name or "").strip().lower()
         if name == "windows":
-            return "installed"
+            return "installed" if self._available_windows_voice_names() else "not installed"
         if name == "edge":
             return (
                 "installed"
@@ -493,7 +653,11 @@ class VoiceManager:
                 else "not installed"
             )
         if name == "kokoro":
-            return "installed" if importlib.util.find_spec("kokoro") else f"not installed in Python {sys.version_info.major}.{sys.version_info.minor}"
+            return (
+                "installed"
+                if isolated_tts_supports("kokoro") or importlib.util.find_spec("kokoro")
+                else "not installed"
+            )
         if name == "coqui":
             return f"not installed in Python {sys.version_info.major}.{sys.version_info.minor}"
         return "unknown"
@@ -511,6 +675,16 @@ class VoiceManager:
             provider_options.setdefault(
                 "module_mode", importlib.util.find_spec("piper") is not None
             )
+        if payload.get("provider") == "kokoro":
+            try:
+                python = resolve_tts_python()
+            except RuntimeError:
+                python = None
+            if python is not None:
+                provider_options.setdefault("python_exe", str(python))
+                provider_options.setdefault(
+                    "model_cache", str(python.parent.parent / "model-cache")
+                )
         payload["provider_options"] = provider_options
         return payload
 
@@ -541,10 +715,24 @@ class VoiceManager:
 
     def get_voice_presets(self) -> list[tuple[str, dict, str]]:
         rows: list[tuple[str, dict, str]] = []
+        windows_voices = self._available_windows_voice_names()
+        provider_status = {
+            provider: self._provider_status(provider)
+            for provider in {str(item["provider"]) for item in self.VOICE_PRESETS.values()}
+            if provider not in {"piper", "windows"}
+        }
         for alias, preset in self.VOICE_PRESETS.items():
             available = "ready"
             if preset["provider"] == "piper":
                 available = "ready" if Path(preset["voice_name"]).exists() else "missing model"
+            elif preset["provider"] == "windows":
+                available = (
+                    "ready"
+                    if str(preset["voice_name"]) in windows_voices
+                    else "missing system voice"
+                )
+            elif provider_status[preset["provider"]] != "installed":
+                available = provider_status[preset["provider"]]
             rows.append((alias, dict(preset), available))
         return rows
 
@@ -811,37 +999,55 @@ class VoiceManager:
         return f"Voice mode set to {normalized.upper()}."
 
     _VOICE_LOCAL_NAMES = {
+        "ecnm": "云希",
         "ecn": "晓晓",
         "ecny": "晓伊",
         "ectc": "曉臻",
         "ecty": "曉雨",
+        "ectm": "雲哲",
         "echm": "曉曼",
         "echg": "曉佳",
+        "echkm": "雲龍",
         "eja": "七海",
+        "ejam": "圭太",
         "pcn": "华妍",
         "cn": "慧慧",
         "ko_xiaoxiao": "晓晓",
         "ko_xiaobei": "晓蓓",
+        "ko_yunxi": "云希",
     }
     _VOICE_LANGUAGE_ANNOTATIONS = {
         "eus": ("English (US)", "美式英语"),
+        "eusm": ("English (US)", "美式英语"),
         "euk": ("English (UK)", "英式英语"),
+        "eukm": ("English (UK)", "英式英语"),
         "ecn": ("Simplified Chinese", "简中"),
         "ecny": ("Simplified Chinese", "简中"),
+        "ecnm": ("Simplified Chinese", "简中"),
         "ectc": ("Traditional Chinese (Taiwan)", "繁中·台湾"),
         "ecty": ("Traditional Chinese (Taiwan)", "繁中·台湾"),
+        "ectm": ("Traditional Chinese (Taiwan)", "繁中·台湾"),
         "echm": ("Cantonese (Hong Kong)", "粤语·香港"),
         "echg": ("Cantonese (Hong Kong)", "粤语·香港"),
+        "echkm": ("Cantonese (Hong Kong)", "粤语·香港"),
         "eja": ("Japanese", "日语"),
+        "ejam": ("Japanese", "日语"),
         "us": ("English (US)", "美式英语"),
         "uk": ("English (UK)", "英式英语"),
         "pcn": ("Simplified Chinese", "简中"),
         "cn": ("Simplified Chinese", "简中"),
         "wus": ("English (US)", "美式英语"),
-        "ko_bella": ("English", "英语"),
-        "ko_heart": ("English", "英语"),
+        "wusm": ("English (US)", "美式英语"),
+        "ko_bella": ("English (US)", "美式英语"),
+        "ko_heart": ("English (US)", "美式英语"),
+        "ko_michael": ("English (US)", "美式英语"),
+        "ko_emma": ("English (UK)", "英式英语"),
+        "ko_george": ("English (UK)", "英式英语"),
         "ko_xiaoxiao": ("Simplified Chinese", "简中"),
         "ko_xiaobei": ("Simplified Chinese", "简中"),
+        "ko_yunxi": ("Simplified Chinese", "简中"),
+        "ko_alpha": ("Japanese", "日语"),
+        "ko_kumo": ("Japanese", "日语"),
     }
     _VOICE_PROVIDER_SHORT = {
         "edge": "Edge",

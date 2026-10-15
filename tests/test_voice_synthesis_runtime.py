@@ -28,6 +28,16 @@ def test_resolve_tts_python_uses_instance_platform_config(tmp_path, monkeypatch)
     assert voice_synthesis_runtime.resolve_tts_python() == helper
 
 
+def test_resolve_tts_python_returns_none_when_instance_has_no_tts_config(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("BRIDGE_HOME", str(tmp_path))
+    monkeypatch.delenv("HASHI_TTS_PYTHON", raising=False)
+
+    assert voice_synthesis_runtime.resolve_tts_python() is None
+    assert voice_synthesis_runtime.isolated_tts_supports("kokoro") is False
+
+
 def test_resolve_tts_python_rejects_active_runtime(monkeypatch):
     monkeypatch.setenv("HASHI_TTS_PYTHON", str(Path(voice_synthesis_runtime.sys.executable)))
 

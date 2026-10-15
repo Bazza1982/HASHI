@@ -1,7 +1,7 @@
 # TTS Language Routing and Degradation Decision (2026-10-15)
 
-Status: language routing adopted on HASHI3 `debug-voice`; concrete `/voice`
-preview extension implemented and offline-verified; its live adoption is pending.
+Status: language routing and concrete `/voice` preview extension adopted and
+accepted on HASHI3 `debug-voice` on 2026-10-15.
 
 ## Ownership and boundary
 
@@ -49,7 +49,7 @@ present returned evidence; they do not maintain their own language or fallback r
 Preview assets use a versioned manifest containing the preset alias, provider,
 stable voice identity, locale, fixed script, byte size, and SHA-256 digest.
 HASHI validates that provenance before publication. The generated bundle covers
-all 18 non-macOS presets. macOS-native samples must be generated and verified on
+all 31 non-macOS presets. macOS-native samples must be generated and verified on
 macOS; until then those selections fail safely with the same visible notice.
 The independent `/call` voice menu and previews are unchanged.
 
@@ -88,9 +88,11 @@ The concrete `/voice` preview extension additionally recorded four focused
 failures before implementation. Green evidence covers exact preset provenance,
 gender/locale metadata, Telegram publication, browser MP3 publication,
 missing-preview behavior, `/call` isolation, locale catalogs, routing/runtime,
-and portable packaging: 71 pytest checks passed. All 36 bundled OGG/MP3 files
+and portable packaging: 71 pytest checks passed. All 62 bundled OGG/MP3 files
 decoded successfully; Python compilation, focused Ruff checks, patch hygiene,
 and the protected Core check also passed.
 
-Live HASHI3 and Workbench validation is recorded separately after hot adoption. User
-acceptance remains a separate final state.
+Live HASHI3 and Workbench validation was recorded separately after hot adoption;
+the user reported acceptance success on 2026-10-15. The subsequent free TTS
+deployment expansion is governed by
+[the free TTS deployment decision](FREE_TTS_DEPLOYMENT_DECISION_20261015.md).

@@ -2,10 +2,53 @@ from __future__ import annotations
 
 import io
 import json
+import sys
+from types import SimpleNamespace
 
 import pytest
 
 from orchestrator import voice_synthesis_worker as worker
+
+
+def test_kokoro_cache_download_is_scoped_to_configured_voices(tmp_path, monkeypatch):
+    calls = []
+
+    def snapshot_download(**kwargs):
+        calls.append(kwargs)
+        snapshot = tmp_path / "snapshot"
+        for relative in kwargs["allow_patterns"]:
+            target = snapshot / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"ready")
+        return str(snapshot)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(snapshot_download=snapshot_download),
+    )
+
+    payload = worker.prepare_kokoro_assets(
+        tmp_path / "cache",
+        ("af_bella", "jm_kumo"),
+        local_files_only=False,
+    )
+
+    assert calls == [
+        {
+            "repo_id": "hexgrad/Kokoro-82M",
+            "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",
+            "allow_patterns": [
+                "config.json",
+                "kokoro-v1_0.pth",
+                "voices/af_bella.pt",
+                "voices/jm_kumo.pt",
+            ],
+            "local_files_only": False,
+        }
+    ]
+    assert payload["status"] == "ok"
+    assert payload["voices"] == ["af_bella", "jm_kumo"]
 
 
 @pytest.mark.parametrize("text", ["中文语音", "晓晓与晓伊，您好。🌸", "日本語と English"], ids=["chinese", "emoji", "mixed"])

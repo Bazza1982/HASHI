@@ -150,6 +150,15 @@ exact prerecorded provider/voice/language sample (OGG for Telegram, MP3 for brow
 Frontends); a missing or invalid sample keeps the choice and reports unavailability.
 This does not change `/call`. See [TTS language routing decision](repairs/TTS_LANGUAGE_ROUTING_DECISION_20261015.md).
 
+Standard deployments now prepare free Edge and local Kokoro in an isolated,
+pinned TTS Function runtime and cache every configured Kokoro voice before
+publishing readiness. Windows SAPI voices are discovered by exact installed
+name; missing voices stay hidden. Installation never enables voice replies or
+changes the user's `/voice` choice. The 957 MB Windows portable image is the
+explicit capacity exception: Edge + installed SAPI + Piper remain available,
+while Kokoro/Torch is omitted under a separate verified Edge-only lock. See the
+[free TTS deployment decision](repairs/FREE_TTS_DEPLOYMENT_DECISION_20261015.md).
+
 Historical call checkpoints are superseded by the current [call decision](HASHI_CALL_INTERACTION_2026-10-04.md); physical audio, camera, accuracy and latency acceptance remain separate.
 The October 9 HASHI3 repair binds Call availability/start to the page's registered
 connection instead of another device's selection. Daily frontend adoption and

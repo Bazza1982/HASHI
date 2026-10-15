@@ -38,6 +38,78 @@
     },
     {
       "locale": "en-GB",
+      "profile": "eukm",
+      "renderer": "tts",
+      "format": "ogg",
+      "path": "en-GB/eukm/tts.ogg",
+      "size_bytes": 49569,
+      "sha256": "65da8b64642120ebfd96db73a8b6cf3283b31642582488b5acbd137c05aad972",
+      "provider": "edge",
+      "voice": "en-GB-RyanNeural",
+      "script": "Hello, this is my voice. I can read your messages clearly and naturally."
+    },
+    {
+      "locale": "en-GB",
+      "profile": "eukm",
+      "renderer": "tts_mp3",
+      "format": "mp3",
+      "path": "en-GB/eukm/tts_mp3.mp3",
+      "size_bytes": 71180,
+      "sha256": "0fd878336de36efae8a64a9d683bf729e21c046292e83f65c14a9e654c0b2e24",
+      "provider": "edge",
+      "voice": "en-GB-RyanNeural",
+      "script": "Hello, this is my voice. I can read your messages clearly and naturally."
+    },
+    {
+      "locale": "en-GB",
+      "profile": "ko_emma",
+      "renderer": "tts",
+      "format": "ogg",
+      "path": "en-GB/ko_emma/tts.ogg",
+      "size_bytes": 40381,
+      "sha256": "077d9949edd0e70316a36f5fc6eba91a735b8e12c4c0142f27035dd886479fbf",
+      "provider": "kokoro",
+      "voice": "bf_emma",
+      "script": "Hello, this is my voice. I can read your messages clearly and naturally."
+    },
+    {
+      "locale": "en-GB",
+      "profile": "ko_emma",
+      "renderer": "tts_mp3",
+      "format": "mp3",
+      "path": "en-GB/ko_emma/tts_mp3.mp3",
+      "size_bytes": 60812,
+      "sha256": "00586cb38d499a488333660ee306b03f8a84bc91b389127ffc9ced2879da9ce5",
+      "provider": "kokoro",
+      "voice": "bf_emma",
+      "script": "Hello, this is my voice. I can read your messages clearly and naturally."
+    },
+    {
+      "locale": "en-GB",
+      "profile": "ko_george",
+      "renderer": "tts",
+      "format": "ogg",
+      "path": "en-GB/ko_george/tts.ogg",
+      "size_bytes": 51586,
+      "sha256": "c3d8157b7d31029a38061b44fe9674cc0b448b759ac93e105ce31a1274aebbf6",
+      "provider": "kokoro",
+      "voice": "bm_george",
+      "script": "Hello, this is my voice. I can read your messages clearly and naturally."
+    },
+    {
+      "locale": "en-GB",
+      "profile": "ko_george",
+      "renderer": "tts_mp3",
+      "format": "mp3",
+      "path": "en-GB/ko_george/tts_mp3.mp3",
+      "size_bytes": 65708,
+      "sha256": "29e97d3782bd8fceae13bcc3175500396ae269bd176bfdec95c4ee0131e0c69b",
+      "provider": "kokoro",
+      "voice": "bm_george",
+      "script": "Hello, this is my voice. I can read your messages clearly and naturally."
+    },
+    {
+      "locale": "en-GB",
       "profile": "uk",
       "renderer": "tts",
       "format": "ogg",
@@ -82,6 +154,30 @@
       "sha256": "4d4a1e62cb9d2de5ae035d035fd6938ef4e42a317491a4a576ffe3351bbdc85b",
       "provider": "edge",
       "voice": "en-US-EmmaNeural",
+      "script": "Hello, this is my voice. I can read your messages clearly and naturally."
+    },
+    {
+      "locale": "en-US",
+      "profile": "eusm",
+      "renderer": "tts",
+      "format": "ogg",
+      "path": "en-US/eusm/tts.ogg",
+      "size_bytes": 46063,
+      "sha256": "85d5cfb1849ec4ce0e92e9f13f80dcc85481e5b1fea3c9eca8ab1ad800faca50",
+      "provider": "edge",
+      "voice": "en-US-GuyNeural",
+      "script": "Hello, this is my voice. I can read your messages clearly and naturally."
+    },
+    {
+      "locale": "en-US",
+      "profile": "eusm",
+      "renderer": "tts_mp3",
+      "format": "mp3",
+      "path": "en-US/eusm/tts_mp3.mp3",
+      "size_bytes": 72044,
+      "sha256": "1f033269cab38eb97f3258bd2f0f1540af4cca70c9b1882c704211bb543734e1",
+      "provider": "edge",
+      "voice": "en-US-GuyNeural",
       "script": "Hello, this is my voice. I can read your messages clearly and naturally."
     },
     {
@@ -134,6 +230,30 @@
     },
     {
       "locale": "en-US",
+      "profile": "ko_michael",
+      "renderer": "tts",
+      "format": "ogg",
+      "path": "en-US/ko_michael/tts.ogg",
+      "size_bytes": 50026,
+      "sha256": "042e0ff0cf41e71f284ca2f4a30a4dbb11e13cadf206b78926746478d6b478a9",
+      "provider": "kokoro",
+      "voice": "am_michael",
+      "script": "Hello, this is my voice. I can read your messages clearly and naturally."
+    },
+    {
+      "locale": "en-US",
+      "profile": "ko_michael",
+      "renderer": "tts_mp3",
+      "format": "mp3",
+      "path": "en-US/ko_michael/tts_mp3.mp3",
+      "size_bytes": 66284,
+      "sha256": "b35e335d1ba16850d5d5e1502b0a70a858b4e3be156c9205f66b39fcfd6ec73a",
+      "provider": "kokoro",
+      "voice": "am_michael",
+      "script": "Hello, this is my voice. I can read your messages clearly and naturally."
+    },
+    {
+      "locale": "en-US",
       "profile": "us",
       "renderer": "tts",
       "format": "ogg",
@@ -181,6 +301,30 @@
       "script": "Hello, this is my voice. I can read your messages clearly and naturally."
     },
     {
+      "locale": "en-US",
+      "profile": "wusm",
+      "renderer": "tts",
+      "format": "ogg",
+      "path": "en-US/wusm/tts.ogg",
+      "size_bytes": 49852,
+      "sha256": "25f2a55129ced34bbf7e94ebb5912c54f340d4553a90a67c0ed159520b768d0c",
+      "provider": "windows",
+      "voice": "Microsoft David Desktop",
+      "script": "Hello, this is my voice. I can read your messages clearly and naturally."
+    },
+    {
+      "locale": "en-US",
+      "profile": "wusm",
+      "renderer": "tts_mp3",
+      "format": "mp3",
+      "path": "en-US/wusm/tts_mp3.mp3",
+      "size_bytes": 73484,
+      "sha256": "433acd7395f19fa19bca6630c70f9b4438950b557ae3e618fe6caae66be85f7f",
+      "provider": "windows",
+      "voice": "Microsoft David Desktop",
+      "script": "Hello, this is my voice. I can read your messages clearly and naturally."
+    },
+    {
       "locale": "ja-JP",
       "profile": "eja",
       "renderer": "tts",
@@ -202,6 +346,78 @@
       "sha256": "7dc954bbe535179e5b8a580ab7d0620d8c27d52eab6d7c652a1865500c8bed08",
       "provider": "edge",
       "voice": "ja-JP-NanamiNeural",
+      "script": "こんにちは、これは私の声です。文章を自然にはっきり読み上げます。"
+    },
+    {
+      "locale": "ja-JP",
+      "profile": "ejam",
+      "renderer": "tts",
+      "format": "ogg",
+      "path": "ja-JP/ejam/tts.ogg",
+      "size_bytes": 49762,
+      "sha256": "b5c46bfcee0b3ae32852deedc190cffead5c78af0fab8c2051e86a8ff41cdfa7",
+      "provider": "edge",
+      "voice": "ja-JP-KeitaNeural",
+      "script": "こんにちは、これは私の声です。文章を自然にはっきり読み上げます。"
+    },
+    {
+      "locale": "ja-JP",
+      "profile": "ejam",
+      "renderer": "tts_mp3",
+      "format": "mp3",
+      "path": "ja-JP/ejam/tts_mp3.mp3",
+      "size_bytes": 77804,
+      "sha256": "4c60d8bddd690f1db55628bc594de9074f780593f423aa233f9105e0adfb6326",
+      "provider": "edge",
+      "voice": "ja-JP-KeitaNeural",
+      "script": "こんにちは、これは私の声です。文章を自然にはっきり読み上げます。"
+    },
+    {
+      "locale": "ja-JP",
+      "profile": "ko_alpha",
+      "renderer": "tts",
+      "format": "ogg",
+      "path": "ja-JP/ko_alpha/tts.ogg",
+      "size_bytes": 58237,
+      "sha256": "13a1a48f9ae5443be742d9fa63e552db1a2aa3831613d133a650e537a8bada6f",
+      "provider": "kokoro",
+      "voice": "jf_alpha",
+      "script": "こんにちは、これは私の声です。文章を自然にはっきり読み上げます。"
+    },
+    {
+      "locale": "ja-JP",
+      "profile": "ko_alpha",
+      "renderer": "tts_mp3",
+      "format": "mp3",
+      "path": "ja-JP/ko_alpha/tts_mp3.mp3",
+      "size_bytes": 82988,
+      "sha256": "5337f8d10ff90a84aade5810d2761c15df1a6f1b6ef6d88401354efcdd456750",
+      "provider": "kokoro",
+      "voice": "jf_alpha",
+      "script": "こんにちは、これは私の声です。文章を自然にはっきり読み上げます。"
+    },
+    {
+      "locale": "ja-JP",
+      "profile": "ko_kumo",
+      "renderer": "tts",
+      "format": "ogg",
+      "path": "ja-JP/ko_kumo/tts.ogg",
+      "size_bytes": 71396,
+      "sha256": "0ed174ae58ab6e6be5330758b647811e154318a95f7fc55f4ba3db7c9c8dfb5b",
+      "provider": "kokoro",
+      "voice": "jm_kumo",
+      "script": "こんにちは、これは私の声です。文章を自然にはっきり読み上げます。"
+    },
+    {
+      "locale": "ja-JP",
+      "profile": "ko_kumo",
+      "renderer": "tts_mp3",
+      "format": "mp3",
+      "path": "ja-JP/ko_kumo/tts_mp3.mp3",
+      "size_bytes": 90188,
+      "sha256": "9a3fa730913003e48e2258d1b8c9be0a49e4489858d777f4a4b107ef4862b708",
+      "provider": "kokoro",
+      "voice": "jm_kumo",
       "script": "こんにちは、これは私の声です。文章を自然にはっきり読み上げます。"
     },
     {
@@ -250,6 +466,30 @@
       "sha256": "b2380d9a0697f6d1ca4cbd7d34f3bc799b76929949573cd3bf7b0196eec88084",
       "provider": "edge",
       "voice": "zh-CN-XiaoxiaoNeural",
+      "script": "您好，这是我的声音。我会清楚自然地为您朗读文字。"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "ecnm",
+      "renderer": "tts",
+      "format": "ogg",
+      "path": "zh-CN/ecnm/tts.ogg",
+      "size_bytes": 45030,
+      "sha256": "e4a86e9c251215c39e6e422b5f1f501654ac581218dd95f0d613bc095b858f0c",
+      "provider": "edge",
+      "voice": "zh-CN-YunxiNeural",
+      "script": "您好，这是我的声音。我会清楚自然地为您朗读文字。"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "ecnm",
+      "renderer": "tts_mp3",
+      "format": "mp3",
+      "path": "zh-CN/ecnm/tts_mp3.mp3",
+      "size_bytes": 71180,
+      "sha256": "73033117d220364304edcc69e11deee3b02029252694a91ef9cd28cb2efef4f2",
+      "provider": "edge",
+      "voice": "zh-CN-YunxiNeural",
       "script": "您好，这是我的声音。我会清楚自然地为您朗读文字。"
     },
     {
@@ -326,6 +566,30 @@
     },
     {
       "locale": "zh-CN",
+      "profile": "ko_yunxi",
+      "renderer": "tts",
+      "format": "ogg",
+      "path": "zh-CN/ko_yunxi/tts.ogg",
+      "size_bytes": 36273,
+      "sha256": "0dcffe192bceb908108155a93df333e493cd189cc780887821065a41e763ad82",
+      "provider": "kokoro",
+      "voice": "zm_yunxi",
+      "script": "您好，这是我的声音。我会清楚自然地为您朗读文字。"
+    },
+    {
+      "locale": "zh-CN",
+      "profile": "ko_yunxi",
+      "renderer": "tts_mp3",
+      "format": "mp3",
+      "path": "zh-CN/ko_yunxi/tts_mp3.mp3",
+      "size_bytes": 63404,
+      "sha256": "5393020d434094cbcf8ad498c6f0670392acd960510edea81130b22a44510f0d",
+      "provider": "kokoro",
+      "voice": "zm_yunxi",
+      "script": "您好，这是我的声音。我会清楚自然地为您朗读文字。"
+    },
+    {
+      "locale": "zh-CN",
       "profile": "pcn",
       "renderer": "tts",
       "format": "ogg",
@@ -374,6 +638,30 @@
     },
     {
       "locale": "zh-HK",
+      "profile": "echkm",
+      "renderer": "tts",
+      "format": "ogg",
+      "path": "zh-HK/echkm/tts.ogg",
+      "size_bytes": 55928,
+      "sha256": "76b774324b5988fd541dfca75c6d8943ba83bb57f9437c427996fd98acc2b4fa",
+      "provider": "edge",
+      "voice": "zh-HK-WanLungNeural",
+      "script": "你好，呢個係我嘅聲音。我會清楚自然噉為你朗讀文字。"
+    },
+    {
+      "locale": "zh-HK",
+      "profile": "echkm",
+      "renderer": "tts_mp3",
+      "format": "mp3",
+      "path": "zh-HK/echkm/tts_mp3.mp3",
+      "size_bytes": 82124,
+      "sha256": "23ca5dd908a1826b3453216d347451d6b2083735021246eed6982cb588b70b09",
+      "provider": "edge",
+      "voice": "zh-HK-WanLungNeural",
+      "script": "你好，呢個係我嘅聲音。我會清楚自然噉為你朗讀文字。"
+    },
+    {
+      "locale": "zh-HK",
       "profile": "echm",
       "renderer": "tts",
       "format": "ogg",
@@ -418,6 +706,30 @@
       "sha256": "ad3065dd43af403265f0ffdbb09fb4325b4dafc6f02779ea3c3a77f1c2457451",
       "provider": "edge",
       "voice": "zh-TW-HsiaoChenNeural",
+      "script": "您好，這是我的聲音。我會清楚自然地為您朗讀文字。"
+    },
+    {
+      "locale": "zh-TW",
+      "profile": "ectm",
+      "renderer": "tts",
+      "format": "ogg",
+      "path": "zh-TW/ectm/tts.ogg",
+      "size_bytes": 44784,
+      "sha256": "b0c62b0dadf8b40ade054457291f0ad4a599a488ea0825efe121bf11107b0718",
+      "provider": "edge",
+      "voice": "zh-TW-YunJheNeural",
+      "script": "您好，這是我的聲音。我會清楚自然地為您朗讀文字。"
+    },
+    {
+      "locale": "zh-TW",
+      "profile": "ectm",
+      "renderer": "tts_mp3",
+      "format": "mp3",
+      "path": "zh-TW/ectm/tts_mp3.mp3",
+      "size_bytes": 74348,
+      "sha256": "976a2660611fff74b425703c6cb11c061fda25b291f0603f5d713c164c28645a",
+      "provider": "edge",
+      "voice": "zh-TW-YunJheNeural",
       "script": "您好，這是我的聲音。我會清楚自然地為您朗讀文字。"
     },
     {

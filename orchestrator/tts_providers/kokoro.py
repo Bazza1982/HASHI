@@ -40,6 +40,13 @@ class KokoroProvider(BaseTTSProvider):
             f"lang = {provider_options.get('lang_code', 'a')!r}\n"
             f"speed = {float(provider_options.get('speed', 1.0))!r}\n"
             f"wav_path = {str(wav_path)!r}\n"
+            "if lang == 'j':\n"
+            "    from misaki import ja\n"
+            "    _JAG2P = ja.JAG2P\n"
+            "    class _OpenJTalkJAG2P(_JAG2P):\n"
+            "        def __init__(self):\n"
+            "            super().__init__(version='pyopenjtalk')\n"
+            "    ja.JAG2P = _OpenJTalkJAG2P\n"
             "pipeline = KPipeline(lang_code=lang)\n"
             "generator = pipeline(text, voice=voice, speed=speed)\n"
             "audio = None\n"
@@ -52,8 +59,18 @@ class KokoroProvider(BaseTTSProvider):
         )
         env = os.environ.copy()
         python_exe = provider_options.get("python_exe") or "python"
+        for inherited in ("PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV"):
+            env.pop(inherited, None)
+        env["PYTHONNOUSERSITE"] = "1"
+        model_cache = provider_options.get("model_cache")
+        if model_cache:
+            cache_root = Path(model_cache).expanduser().resolve()
+            cache_root.mkdir(parents=True, exist_ok=True)
+            env["HF_HOME"] = str(cache_root)
+            env["HF_HUB_CACHE"] = str(cache_root / "hub")
         proc = await asyncio.create_subprocess_exec(
             python_exe,
+            "-I",
             "-c",
             code,
             stdout=asyncio.subprocess.PIPE,

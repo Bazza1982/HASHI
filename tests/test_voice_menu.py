@@ -258,6 +258,69 @@ def test_tts_voice_catalog_declares_locale_and_gender_for_every_preset():
     assert VoiceManager.VOICE_PRESETS["pcn"]["gender"] == "female"
 
 
+def test_free_voice_catalog_has_balanced_gender_coverage_for_supported_locales():
+    coverage = {
+        (str(preset["provider"]), str(preset["locale"]), str(preset["gender"]))
+        for preset in VoiceManager.VOICE_PRESETS.values()
+    }
+
+    assert {
+        ("edge", locale, gender)
+        for locale in ("en-US", "en-GB", "zh-CN", "zh-TW", "zh-HK", "ja-JP")
+        for gender in ("female", "male")
+    } <= coverage
+    assert {
+        ("kokoro", locale, gender)
+        for locale in ("en-US", "en-GB", "zh-CN", "ja-JP")
+        for gender in ("female", "male")
+    } <= coverage
+    assert {
+        ("windows", "en-US", "female"),
+        ("windows", "en-US", "male"),
+        ("windows", "zh-CN", "female"),
+    } <= coverage
+
+
+def test_kokoro_preset_uses_the_isolated_tts_runtime(tmp_path, monkeypatch):
+    isolated_python = tmp_path / "tts-runtime" / "Scripts" / "python.exe"
+    isolated_python.parent.mkdir(parents=True)
+    isolated_python.write_bytes(b"isolated")
+    monkeypatch.setattr(
+        voice_manager_module,
+        "resolve_tts_python",
+        lambda: isolated_python,
+        raising=False,
+    )
+    manager = _manager(tmp_path)
+
+    preset = manager._preset_payload("ko_bella")
+
+    assert preset["provider_options"]["python_exe"] == str(isolated_python)
+    assert preset["provider_options"]["model_cache"] == str(
+        isolated_python.parent.parent / "model-cache"
+    )
+
+
+def test_windows_voice_presets_are_ready_only_when_the_exact_sapi_voice_exists(
+    tmp_path, monkeypatch
+):
+    manager = _manager(tmp_path)
+    monkeypatch.setattr(
+        manager,
+        "_available_windows_voice_names",
+        lambda: frozenset({"Microsoft David Desktop"}),
+        raising=False,
+    )
+
+    availability = {
+        alias: status for alias, _preset, status in manager.get_voice_presets()
+    }
+
+    assert availability["wusm"] == "ready"
+    assert availability["wus"] == "missing system voice"
+    assert availability["cn"] == "missing system voice"
+
+
 def test_packaged_tts_voice_preview_bundle_covers_non_macos_presets(tmp_path):
     manager = _manager(tmp_path)
     aliases = [
@@ -266,7 +329,7 @@ def test_packaged_tts_voice_preview_bundle_covers_non_macos_presets(tmp_path):
         if preset["provider"] != "macos"
     ]
 
-    assert len(aliases) == 18
+    assert len(aliases) == 31
     for alias in aliases:
         assert manager.get_tts_voice_preview_assets(alias, telegram=True)
         assert manager.get_tts_voice_preview_assets(alias, telegram=False)
@@ -866,8 +929,9 @@ async def test_semantic_profile_drives_language_aware_tts_synthesis(
     assert calls[0]["voice_name"] == "zh-CN-YunxiNeural"
 
 
-def test_voice_picker_uses_clear_localized_language_annotations(tmp_path):
+def test_voice_picker_uses_clear_localized_language_annotations(tmp_path, monkeypatch):
     manager = _manager(tmp_path)
+    monkeypatch.setattr(manager, "_provider_status", lambda _provider: "installed")
     runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
     runtime.voice_manager = manager
 

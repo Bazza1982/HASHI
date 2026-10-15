@@ -1,4 +1,4 @@
-"""Edge TTS client for an isolated instance-owned helper interpreter."""
+"""TTS client helpers for an isolated instance-owned interpreter."""
 
 from __future__ import annotations
 
@@ -60,18 +60,23 @@ def _validate_isolated_python(value: str | os.PathLike[str]) -> Path:
     return candidate
 
 
-def _configured_tts_python(bridge_home: Path) -> str:
+def _configured_tts_payload(bridge_home: Path) -> dict[str, Any]:
     config_path = bridge_home / "state" / "platform" / "tts.json"
     try:
         payload = json.loads(config_path.read_text(encoding="utf-8-sig"))
     except FileNotFoundError:
-        return ""
+        return {}
     except (OSError, json.JSONDecodeError) as exc:
         raise TTSRuntimeError("TTS platform configuration is unreadable") from exc
     if not isinstance(payload, dict):
         raise TTSRuntimeError("TTS platform configuration must be an object")
     if payload.get("schema_version") != TTS_CONFIG_SCHEMA_VERSION:
         raise TTSRuntimeError("TTS platform configuration schema is unsupported")
+    return payload
+
+
+def _configured_tts_python(bridge_home: Path) -> str:
+    payload = _configured_tts_payload(bridge_home)
     python = payload.get("python", "")
     if not isinstance(python, str):
         raise TTSRuntimeError("TTS platform Python must be a string")
@@ -96,6 +101,62 @@ def isolated_tts_configured() -> bool:
         return resolve_tts_python() is not None
     except TTSRuntimeError:
         return False
+
+
+def isolated_tts_supports(distribution: str) -> bool:
+    """Return whether the isolated helper declares or contains a distribution."""
+
+    wanted = str(distribution or "").strip().casefold().replace("_", "-")
+    if not wanted:
+        return False
+    try:
+        python = resolve_tts_python()
+    except TTSRuntimeError:
+        return False
+    if python is None:
+        return False
+
+    bridge_home_value = str(os.environ.get("BRIDGE_HOME") or "").strip()
+    if bridge_home_value and not str(os.environ.get("HASHI_TTS_PYTHON") or "").strip():
+        try:
+            payload = _configured_tts_payload(_absolute_path(bridge_home_value))
+        except TTSRuntimeError:
+            return False
+        packages = payload.get("packages")
+        if isinstance(packages, dict):
+            declared = {
+                str(name).strip().casefold().replace("_", "-")
+                for name in packages
+            }
+            return wanted in declared
+
+    environment = dict(os.environ)
+    for inherited in ("PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV"):
+        environment.pop(inherited, None)
+    environment["PYTHONNOUSERSITE"] = "1"
+    try:
+        completed = subprocess.run(
+            [
+                str(python),
+                "-I",
+                "-c",
+                (
+                    "import importlib.metadata, sys; "
+                    "print(importlib.metadata.version(sys.argv[1]))"
+                ),
+                wanted,
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            check=False,
+            env=environment,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0 and bool(completed.stdout.strip())
 
 
 def _result_payload(completed: subprocess.CompletedProcess[str]) -> dict[str, Any]:

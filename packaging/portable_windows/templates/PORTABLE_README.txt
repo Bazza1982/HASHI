@@ -149,10 +149,14 @@ Runtime profile / 运行配置
   LAN Remote 一键配对有效期为七天。已启用宿主机全盘访问；不包含本地 LLM，
   也不支持离线生成。
 
-- Included: Tesseract OCR, Chinese Piper TTS, Edge TTS, FFmpeg, browser/desktop
-  tools, multi-Agent orchestration, Nagare, Superloops, and Scheduler.
-  已包含：Tesseract OCR、中文 Piper TTS、Edge TTS、FFmpeg、浏览器/桌面工具、
-  多 Agent 编排、Nagare、Superloops 和 Scheduler。
+- Included: Tesseract OCR, Chinese Piper TTS, Edge TTS, installed Windows SAPI
+  voices, FFmpeg, browser/desktop tools, multi-Agent orchestration, Nagare,
+  Superloops, and Scheduler. The standard deployment's Kokoro/Torch runtime is
+  omitted because it cannot fit within this image's enforced 957 MB capacity.
+  已包含：Tesseract OCR、中文 Piper TTS、Edge TTS、本机已安装的 Windows SAPI
+  语音、FFmpeg、浏览器/桌面工具、多 Agent 编排、Nagare、Superloops 和
+  Scheduler。标准部署中的 Kokoro/Torch 运行时无法容纳于严格限制为 957 MB 的
+  本映像，因此便携版不包含它。
 
 For a 957 MB drive, use NTFS with the default 4 KiB allocation unit.
 957 MB USB 建议使用 NTFS 与默认 4 KiB 分配单元。

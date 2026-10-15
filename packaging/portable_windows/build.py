@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import secrets as secrets_module
 import shutil
@@ -47,6 +48,16 @@ _RUNTIME_POLICY = load_runtime_policy(HASHI_ROOT)
 PYTHON_VERSION = _RUNTIME_POLICY.python_text
 PYTHON_BUILD_DATE = _RUNTIME_POLICY.portable_build_date
 STANDARD_LOCK_RELATIVE = Path(_RUNTIME_POLICY.standard_lock)
+MEDIA_RUNTIME_LOCKS = {
+    "transcription": Path("constraints/transcription-py312.lock"),
+    # The 957 MB portable image cannot contain Kokoro/Torch. Standard npm and
+    # checkout deployments use the full tts-py312.lock; Portable retains the
+    # free Edge helper plus Windows SAPI and the bundled Piper voice.
+    "tts": Path("constraints/tts-edge-py312.lock"),
+}
+ALLOWLISTED_LOCK_RELATIVES = frozenset(
+    (STANDARD_LOCK_RELATIVE, *MEDIA_RUNTIME_LOCKS.values())
+)
 
 
 @dataclass(frozen=True)
@@ -145,7 +156,10 @@ ROOT_SOURCE_FILES = (
     "requirements-privacy.txt",
     "LICENSE",
 )
-RUNTIME_POLICY_FILES = (_RUNTIME_POLICY.standard_lock,)
+RUNTIME_POLICY_FILES = (
+    STANDARD_LOCK_RELATIVE.as_posix(),
+    *(path.as_posix() for path in MEDIA_RUNTIME_LOCKS.values()),
+)
 ROOT_PACKAGE_FILES = (
     "exp/__init__.py",
     "exp/loader.py",
@@ -279,7 +293,7 @@ def remove_path(path: Path) -> None:
 
 
 def ignored_tracked_source(relative: Path) -> bool:
-    if relative == STANDARD_LOCK_RELATIVE:
+    if relative in ALLOWLISTED_LOCK_RELATIVES:
         return False
     for part in relative.parts:
         if (
@@ -595,11 +609,20 @@ def install_media_helpers(staging: Path, app_hashi: Path, cache: Path) -> None:
                          ("tts", "voice_synthesis_worker.py")):
         runtime = media / kind / "Scripts"
         extract_python(runtime, cache)
-        run(["uv", "pip", "install", "--target", str(runtime / "Lib" / "site-packages"),
-             "--python-platform", "x86_64-pc-windows-msvc", "--python-version", "3.12",
-             "--only-binary", ":all:", "-r", str(app_hashi / "constraints" / f"{kind}-py312.lock")])
+        install = [
+            "uv", "pip", "install",
+            "--target", str(runtime / "Lib" / "site-packages"),
+            "--python-platform", "x86_64-pc-windows-msvc",
+            "--python-version", "3.12",
+        ]
+        install.extend(["--only-binary", ":all:"])
+        install.extend([
+            "-r", str(app_hashi / MEDIA_RUNTIME_LOCKS[kind])
+        ])
+        run(install)
         command = [str(runtime / "python.exe"), "-I", str(app_hashi / "orchestrator" / worker)]
-        run(command + ["--probe"])
+        probe = ["--probe", "--edge-only"] if kind == "tts" else ["--probe"]
+        run(command + probe)
         if kind == "transcription":
             previous = os.environ.get("HF_HUB_CACHE")
             os.environ["HF_HUB_CACHE"] = str(media / "model-cache")

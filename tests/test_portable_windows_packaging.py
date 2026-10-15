@@ -635,7 +635,7 @@ def test_builder_copies_the_versioned_voice_preview_bundle(tmp_path):
     assert tts_manifest["schema_version"] == 1
     assert tts_manifest["version"] == "v1"
     assert tts_manifest["kind"] == "tts_voice_presets"
-    assert len(tts_manifest["entries"]) == 36
+    assert len(tts_manifest["entries"]) == 62
     for entry in tts_manifest["entries"]:
         payload = (tts_preview_root / entry["path"]).read_bytes()
         if entry["format"] == "ogg":
@@ -834,6 +834,27 @@ def test_portable_dependency_lock_keeps_requested_compact_capabilities():
         assert excluded not in lock
 
 
+def test_portable_tts_helper_uses_capacity_safe_edge_only_runtime(tmp_path, monkeypatch):
+    builder = _load_builder()
+    commands = []
+    monkeypatch.setattr(builder, "extract_python", lambda *_args: None)
+    monkeypatch.setattr(builder, "run", lambda command: commands.append(command))
+
+    builder.install_media_helpers(
+        tmp_path / "staging",
+        tmp_path / "app" / "hashi",
+        tmp_path / "cache",
+    )
+
+    tts_lock = tmp_path / "app" / "hashi" / "constraints" / "tts-edge-py312.lock"
+    assert any(str(tts_lock) in command for command in commands)
+    assert any(
+        command[-2:] == ["--probe", "--edge-only"]
+        and command[2].endswith("voice_synthesis_worker.py")
+        for command in commands
+    )
+
+
 def test_portable_launchers_are_drive_relative_and_gateway_stays_disabled():
     for name in (
         "Start_HASHI_TUI.bat",
@@ -870,7 +891,11 @@ def test_builder_enforces_capacity_and_prunes_cli_adaptors():
         "requirements-privacy.txt",
         "LICENSE",
     }
-    assert builder.RUNTIME_POLICY_FILES == (load_runtime_policy(ROOT).standard_lock,)
+    assert builder.RUNTIME_POLICY_FILES == (
+        load_runtime_policy(ROOT).standard_lock,
+        "constraints/transcription-py312.lock",
+        "constraints/tts-edge-py312.lock",
+    )
     assert "exp/loader.py" in builder.ROOT_PACKAGE_FILES
     assert "veritas" in builder.SOURCE_DIRS
     for name in ("codex", "claude", "gemini", "grok"):

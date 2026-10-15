@@ -222,6 +222,101 @@ def test_full_media_entrypoint_stops_at_required_failure(tmp_path, monkeypatch, 
     assert "--prepare-model" in calls[0][1] and "--check" in calls[0][1]
 
 
+def test_default_tts_sidecar_lock_covers_edge_and_local_kokoro():
+    from orchestrator.voice_synthesis_worker import REQUIRED_DISTRIBUTIONS
+    from scripts import provision_tts_runtime
+
+    required = {
+        "edge-tts",
+        "imageio-ffmpeg",
+        "kokoro",
+        "misaki",
+        "pyopenjtalk-plus",
+        "soundfile",
+    }
+    assert required <= set(REQUIRED_DISTRIBUTIONS)
+    locked = provision_tts_runtime._locked_versions(
+        ROOT / "constraints" / "tts-py312.lock"
+    )
+    assert required <= set(locked)
+
+
+def test_default_tts_provisioner_prefetches_every_configured_kokoro_voice():
+    from orchestrator.voice_manager import VoiceManager
+    from scripts import provision_tts_runtime
+
+    configured = {
+        str(preset["voice_name"])
+        for preset in VoiceManager.VOICE_PRESETS.values()
+        if preset["provider"] == "kokoro"
+    }
+
+    assert configured
+    assert set(provision_tts_runtime.configured_kokoro_voices()) == configured
+
+
+def test_default_tts_provisioning_publishes_only_after_kokoro_cache_is_ready(
+    tmp_path, monkeypatch
+):
+    from scripts import provision_tts_runtime
+
+    runtime_dir = tmp_path / "tts-runtime"
+    python = provision_tts_runtime.runtime_python_path(runtime_dir)
+    python.parent.mkdir(parents=True)
+    python.write_bytes(b"isolated")
+    base_python = tmp_path / "base-python"
+    base_python.write_bytes(b"base")
+    order = []
+    probe = {
+        "status": "ok",
+        "python": provision_tts_runtime.APPROVED_PYTHON,
+        "packages": {},
+        "ffmpeg": str(tmp_path / "ffmpeg"),
+    }
+    kokoro = {
+        "status": "ok",
+        "repo_id": "hexgrad/Kokoro-82M",
+        "revision": "pinned",
+        "model_cache": str(runtime_dir / "model-cache"),
+        "voices": ["af_bella"],
+    }
+
+    monkeypatch.setattr(
+        provision_tts_runtime,
+        "_run",
+        lambda command, *, timeout: subprocess.CompletedProcess(
+            command, 0, stdout="", stderr=""
+        ),
+    )
+    monkeypatch.setattr(
+        provision_tts_runtime,
+        "probe_runtime",
+        lambda *_args, **_kwargs: order.append("probe") or probe,
+    )
+    monkeypatch.setattr(
+        provision_tts_runtime,
+        "prepare_kokoro_model",
+        lambda *_args, check_only, **_kwargs: (
+            order.append("check" if check_only else "prepare") or kokoro
+        ),
+    )
+    monkeypatch.setattr(
+        provision_tts_runtime,
+        "_write_platform_config",
+        lambda *_args, **_kwargs: order.append("publish") or tmp_path / "tts.json",
+    )
+
+    receipt = provision_tts_runtime.provision_runtime(
+        bridge_home=tmp_path,
+        runtime_dir=runtime_dir,
+        base_python=base_python,
+        lock_path=ROOT / "constraints" / "tts-py312.lock",
+    )
+
+    assert receipt["status"] == "ready"
+    assert order == ["probe", "prepare", "check", "publish"]
+
+
 
 def test_npm_cli_propagates_owned_default_pointer_without_explicit_override(tmp_path):
     version = json.loads((ROOT / "package.json").read_text())["version"]

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Provision Edge TTS outside the active HASHI runtime environment."""
+"""Provision free Edge and Kokoro TTS outside the active HASHI runtime."""
 
 from __future__ import annotations
 
@@ -20,7 +20,11 @@ from orchestrator.voice_synthesis_worker import (  # noqa: E402
     REQUIRED_DISTRIBUTIONS,
     RESULT_PREFIX as TTS_RESULT_PREFIX,
 )
-from orchestrator.config_json import read_config_json, new_config_json, write_config_json
+from orchestrator.config_json import (  # noqa: E402
+    new_config_json,
+    read_config_json,
+    write_config_json,
+)
 
 CONFIG_SCHEMA_VERSION = 1
 APPROVED_PYTHON = "3.12.13"
@@ -106,6 +110,32 @@ def _require_success(completed: subprocess.CompletedProcess[str], *, action: str
     )
 
 
+def _worker_payload(
+    completed: subprocess.CompletedProcess[str],
+    *,
+    action: str,
+) -> dict[str, Any]:
+    result_line = next(
+        (
+            line[len(TTS_RESULT_PREFIX) :]
+            for line in reversed(completed.stdout.splitlines())
+            if line.startswith(TTS_RESULT_PREFIX)
+        ),
+        None,
+    )
+    if result_line is None:
+        _require_success(completed, action=action)
+        raise ProvisioningError(f"TTS runtime {action} returned no result")
+    try:
+        payload = json.loads(result_line)
+    except json.JSONDecodeError as exc:
+        raise ProvisioningError(f"TTS runtime {action} returned invalid JSON") from exc
+    if completed.returncode != 0 or not isinstance(payload, dict) or payload.get("status") != "ok":
+        detail = str(payload.get("error") if isinstance(payload, dict) else f"{action} failed")
+        raise ProvisioningError(f"TTS runtime {action} failed: {detail[-1000:]}")
+    return payload
+
+
 def _locked_versions(lock_path: Path) -> dict[str, str]:
     versions: dict[str, str] = {}
     for raw_line in lock_path.read_text(encoding="utf-8").splitlines():
@@ -121,25 +151,11 @@ def _locked_versions(lock_path: Path) -> dict[str, str]:
 
 
 def probe_runtime(python: Path, *, lock_path: Path) -> dict[str, Any]:
-    completed = _run([str(python), "-I", str(WORKER_PATH), "--probe"], timeout=60.0)
-    result_line = next(
-        (
-            line[len(TTS_RESULT_PREFIX) :]
-            for line in reversed(completed.stdout.splitlines())
-            if line.startswith(TTS_RESULT_PREFIX)
-        ),
-        None,
-    )
-    if result_line is None:
-        _require_success(completed, action="probe")
-        raise ProvisioningError("TTS runtime probe returned no result")
-    try:
-        payload = json.loads(result_line)
-    except json.JSONDecodeError as exc:
-        raise ProvisioningError("TTS runtime probe returned invalid JSON") from exc
-    if completed.returncode != 0 or not isinstance(payload, dict) or payload.get("status") != "ok":
-        detail = str(payload.get("error") if isinstance(payload, dict) else "probe failed")
-        raise ProvisioningError(f"TTS runtime probe failed: {detail[-1000:]}")
+    # Importing the local Kokoro/Torch stack for the first time can exceed one
+    # minute on Windows while antivirus scans native wheels. It remains a
+    # bounded, short-lived Function probe rather than a Core startup action.
+    completed = _run([str(python), "-I", str(WORKER_PATH), "--probe"], timeout=180.0)
+    payload = _worker_payload(completed, action="probe")
     if str(payload.get("python") or "") != APPROVED_PYTHON:
         raise ProvisioningError(
             f"TTS runtime uses unsupported Python {payload.get('python') or 'unknown'}"
@@ -156,6 +172,48 @@ def probe_runtime(python: Path, *, lock_path: Path) -> dict[str, Any]:
     return payload
 
 
+def configured_kokoro_voices() -> tuple[str, ...]:
+    """Derive model preparation from the authoritative voice catalogue."""
+
+    from orchestrator.voice_manager import VoiceManager
+
+    return tuple(
+        sorted(
+            {
+                str(preset["voice_name"])
+                for preset in VoiceManager.VOICE_PRESETS.values()
+                if preset.get("provider") == "kokoro"
+            }
+        )
+    )
+
+
+def prepare_kokoro_model(
+    python: Path,
+    *,
+    runtime_dir: Path,
+    check_only: bool,
+) -> dict[str, Any]:
+    voices = configured_kokoro_voices()
+    if not voices:
+        raise ProvisioningError("No configured Kokoro voices were found")
+    command = [
+        str(python),
+        "-I",
+        str(WORKER_PATH),
+        "--check-kokoro" if check_only else "--prepare-kokoro",
+        "--model-cache",
+        str(runtime_dir / "model-cache"),
+    ]
+    for voice in voices:
+        command.extend(["--kokoro-voice", voice])
+    completed = _run(command, timeout=180.0 if check_only else 1500.0)
+    return _worker_payload(
+        completed,
+        action="Kokoro cache check" if check_only else "Kokoro model preparation",
+    )
+
+
 def _write_platform_config(
     bridge_home: Path,
     *,
@@ -163,6 +221,7 @@ def _write_platform_config(
     runtime_dir: Path,
     lock_path: Path,
     probe: dict[str, Any],
+    kokoro: dict[str, Any],
 ) -> Path:
     config_path = bridge_home / "state" / "platform" / "tts.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -174,6 +233,10 @@ def _write_platform_config(
         "python_version": str(probe["python"]),
         "packages": dict(probe["packages"]),
         "ffmpeg": str(probe["ffmpeg"]),
+        "model_cache": str(kokoro["model_cache"]),
+        "kokoro_repo": str(kokoro["repo_id"]),
+        "kokoro_revision": str(kokoro["revision"]),
+        "kokoro_voices": list(kokoro["voices"]),
     }
     try:
         document = read_config_json(config_path)
@@ -209,17 +272,20 @@ def provision_runtime(
         raise ProvisioningError("TTS environment has no Python executable")
     completed = _run(
         [str(_absolute_path(python)), "-m", "pip", "install", "--disable-pip-version-check", "-r", str(lock_path)],
-        timeout=900.0,
+        timeout=1500.0,
     )
     _require_success(completed, action="dependency installation")
     python = _absolute_path(python)
     probe = probe_runtime(python, lock_path=lock_path)
+    prepare_kokoro_model(python, runtime_dir=runtime_dir, check_only=False)
+    kokoro = prepare_kokoro_model(python, runtime_dir=runtime_dir, check_only=True)
     config_path = _write_platform_config(
         bridge_home,
         python=python,
         runtime_dir=runtime_dir,
         lock_path=lock_path,
         probe=probe,
+        kokoro=kokoro,
     )
     return {
         "status": "ready",
@@ -228,6 +294,7 @@ def provision_runtime(
         "config_path": str(config_path),
         "lock_sha256": sha256_file(lock_path),
         "probe": probe,
+        "kokoro": kokoro,
     }
 
 
@@ -239,6 +306,7 @@ def check_runtime(*, bridge_home: Path, runtime_dir: Path, lock_path: Path) -> d
     if not python.is_file():
         raise ProvisioningError("Isolated TTS runtime is not installed")
     probe = probe_runtime(python, lock_path=lock_path)
+    kokoro = prepare_kokoro_model(python, runtime_dir=runtime_dir, check_only=True)
     config_path = bridge_home / "state" / "platform" / "tts.json"
     if not config_path.is_file():
         raise ProvisioningError("TTS platform configuration is not published")
@@ -247,7 +315,20 @@ def check_runtime(*, bridge_home: Path, runtime_dir: Path, lock_path: Path) -> d
         raise ProvisioningError("TTS platform configuration selects another runtime")
     if config.get("lock_sha256") != sha256_file(lock_path):
         raise ProvisioningError("TTS platform configuration uses another lock")
-    return {"status": "ready", "python": str(python), "probe": probe}
+    if config.get("model_cache") != str(runtime_dir / "model-cache"):
+        raise ProvisioningError("TTS platform configuration selects another model cache")
+    if config.get("kokoro_repo") != kokoro["repo_id"]:
+        raise ProvisioningError("TTS platform configuration selects another Kokoro repository")
+    if config.get("kokoro_revision") != kokoro["revision"]:
+        raise ProvisioningError("TTS platform configuration selects another Kokoro revision")
+    if config.get("kokoro_voices") != list(configured_kokoro_voices()):
+        raise ProvisioningError("TTS platform configuration does not cover configured Kokoro voices")
+    return {
+        "status": "ready",
+        "python": str(python),
+        "probe": probe,
+        "kokoro": kokoro,
+    }
 
 
 def _parser() -> argparse.ArgumentParser:

@@ -1,0 +1,4 @@
+# Capacity-limited Edge-only helper for the 957 MB Windows portable image.
+# Standard npm and checkout deployments use requirements-tts.txt instead.
+edge-tts==7.3.1
+imageio-ffmpeg==0.6.0
