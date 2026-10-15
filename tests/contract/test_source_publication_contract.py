@@ -70,6 +70,7 @@ def test_only_reviewed_templates_are_tracked_despite_ignore_rules() -> None:
     )
 
     assert ignored_but_tracked == {
+        "constraints/tts-edge-py312.lock",
         "packaging/portable_windows/requirements.lock",
         "packaging/portable_windows/templates/agent_capabilities.json",
         "packaging/portable_windows/templates/agents.json",
