@@ -3442,3 +3442,63 @@ def test_phone_inbox_uses_one_globally_ordered_page_across_messages_and_events(t
     assert [item["summary"] for item in second_page[5:]] == [
         f"event-{i}" for i in range(1, 21)
     ]
+def test_hchat_idempotency_replays_across_transport_specific_envelopes(tmp_path):
+    store = _store(tmp_path)
+    session = store.resolve_primary_session(
+        owner_id="user:7", agent_id="lily", establish=True
+    )
+    logical_message = {
+        "message_id": "hchat-cross-transport-1",
+        "originated_at": "2026-10-16T00:00:00Z",
+        "message_type": "agent_message",
+        "idempotency_key": "hchat:hchat-cross-transport-1",
+        "payload_digest": "sha256:" + "a" * 64,
+    }
+    first = store.accept_run(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        agent_id="lily",
+        request_id="req-hchat-protocol",
+        text="System exchange message from rain@HASHI2:\nreview this",
+        source="protocol:message",
+        idempotency_key=logical_message["idempotency_key"],
+        message_context={
+            "hchat_message": logical_message,
+            "network_authentication": "shared_network_hmac",
+        },
+        delivery_route={"session_surface": "remote"},
+    )
+
+    replay = store.accept_run(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        agent_id="lily",
+        request_id="req-hchat-exchange-fallback",
+        text="Independent Exchange message from rain: review this",
+        source="hchat-exchange",
+        idempotency_key=logical_message["idempotency_key"],
+        message_context={
+            "hchat_message": dict(logical_message),
+            "network_authentication": "exchange_wss",
+        },
+        delivery_route={"session_surface": "exchange"},
+    )
+
+    assert replay.replayed is True
+    assert replay.run_id == first.run_id
+    assert replay.request_id == first.request_id
+    assert len(store.recent_session_runs(session["session_id"], owner_id="user:7")) == 1
+
+    conflicting = dict(logical_message)
+    conflicting["payload_digest"] = "sha256:" + "b" * 64
+    with pytest.raises(IdempotencyConflict):
+        store.accept_run(
+            session_id=session["session_id"],
+            owner_id="user:7",
+            agent_id="lily",
+            request_id="req-hchat-conflict",
+            text="different body",
+            source="hchat",
+            idempotency_key=logical_message["idempotency_key"],
+            message_context={"hchat_message": conflicting},
+        )

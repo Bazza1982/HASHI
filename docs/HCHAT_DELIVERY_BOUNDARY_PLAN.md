@@ -429,3 +429,31 @@ ordinary HChat intact. The receiver owns group/scope/resource mapping in its
 ignored local configuration. PAO verifies and persists sanitized results for
 one Message/Run; PCM projects only those results. Raw secrets and raw proofs are
 not model, transcript, generic audit, receipt, or user-facing payloads.
+
+## 12. Delayed-message freshness and delivery status (implemented 2026-10-16)
+
+Each logical non-public `/hchat` send now fixes one `message_id`,
+`originated_at`, idempotency key and conversation ID before route selection.
+Fallbacks preserve them. The receiving HASHI checks freshness immediately
+before Agent admission: up to 60 seconds is accepted normally; a later request
+or reply becomes a durable confirmation; Exchange retains its existing
+10-minute transport expiry. A reply is confirmed for display, while a request
+is confirmed for execution. Once accepted, later PAO queue time does not cause
+a second freshness decision.
+
+Pending, confirmed/displayed, discarded, confirmation-expired and superseded
+outcomes use deterministic presentation-only status messages back to the
+sender. A status cannot invoke the sender Agent. It is accepted only when its
+message ID, `in_reply_to`, conversation and exact reversed sender/target route
+match the sender's durable outbound correlation. Replays are idempotent and a
+reused message ID cannot be rebound to another route. Peers must advertise both
+freshness and status capabilities; otherwise the send fails closed instead of
+using a weaker fallback.
+
+The immutable ingress digest includes source instance and Agent, target Agent,
+message identity and timestamp, request/reply kind, canonical body and
+attachment binding. This permits one logical message to survive a transport
+fallback while rejecting identity, content or attachment substitution.
+
+The design is user-approved and qualified on non-production HASHI3. Automated
+qualification is recorded separately; production adoption remains pending.

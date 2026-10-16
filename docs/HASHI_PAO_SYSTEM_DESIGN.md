@@ -138,6 +138,22 @@ PAO is the sole owner of:
 An Engine may own its internal Engine Session but must not become a second
 owner of the enclosing Conversation Session.
 
+#### Delayed ingress confirmation (implemented 2026-10-16)
+
+PAO owns the durable confirmation ledger for network messages that fail the
+Frontend Connector freshness window. The ledger binds source message ID,
+idempotency key, payload digest, owner, Agent, Session, context generation,
+attachments, original timestamp, receipt timestamp and decision deadline.
+Creating a pending confirmation is not Message or Run admission and cannot
+invoke an Agent, transcription or Tool. Confirming performs the ordinary
+admission path with the saved payload and exactly-once identity; concurrent or
+repeated decisions return the same outcome. Discarded, expired and superseded
+records remain user-visible terminal facts and cannot later be released.
+
+The user approved this policy for HASHI3 and the paired non-production
+Workbench. Automated and live non-production qualification are recorded
+separately; production adoption remains pending.
+
 Cancelling one reply is a PAO Run control operation in shared Functions. The
 caller supplies its exact owner, Agent, Session, Run, and request identity; the
 Agent Worker removes only that ready item or interrupts only its matching live

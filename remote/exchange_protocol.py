@@ -27,6 +27,7 @@ REQUIRED_CAPABILITIES = (
     "receipt_v1",
     "agent_reply_v1",
     "public_address_v1",
+    "message_freshness_v1",
 )
 CAPABILITIES = REQUIRED_CAPABILITIES + (AUTHORIZED_ROUTES_CAPABILITY,)
 MESSAGE_KINDS = frozenset({"agent_message", "agent_reply"})

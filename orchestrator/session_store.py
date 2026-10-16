@@ -1220,6 +1220,8 @@ class SessionStore:
             )
             from orchestrator.phone_context_handoff import initialize_schema as initialize_phone_context_schema
             initialize_phone_context_schema(connection)
+            from orchestrator.ingress_confirmation import initialize_schema as initialize_ingress_confirmation_schema
+            initialize_ingress_confirmation_schema(connection)
             # Upgrade older split inboxes into one sequence so transcript and
             # delegation replay keeps the Provider's per-call receive order.
             connection.execute(
@@ -3364,7 +3366,36 @@ class SessionStore:
                 (session_id, str(idempotency_key)),
             ).fetchone()
             if existing is not None:
-                if str(existing["request_digest"]) != digest:
+                request_matches = str(existing["request_digest"]) == digest
+                if not request_matches and str(idempotency_key).startswith("hchat:"):
+                    try:
+                        existing_context = json.loads(
+                            str(existing["message_context_json"] or "{}")
+                        )
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        existing_context = {}
+                    incoming_hchat = (
+                        dict(message_context or {}).get("hchat_message")
+                        if isinstance(message_context, Mapping)
+                        else None
+                    )
+                    existing_hchat = (
+                        existing_context.get("hchat_message")
+                        if isinstance(existing_context, Mapping)
+                        else None
+                    )
+                    request_matches = bool(
+                        isinstance(incoming_hchat, Mapping)
+                        and isinstance(existing_hchat, Mapping)
+                        and str(incoming_hchat.get("idempotency_key") or "")
+                        == str(idempotency_key)
+                        == str(existing_hchat.get("idempotency_key") or "")
+                        and str(incoming_hchat.get("message_id") or "")
+                        == str(existing_hchat.get("message_id") or "")
+                        and str(incoming_hchat.get("payload_digest") or "")
+                        == str(existing_hchat.get("payload_digest") or "")
+                    )
+                if not request_matches:
                     raise IdempotencyConflict(
                         "idempotency key is already bound to a different request"
                     )
@@ -5146,6 +5177,17 @@ class SessionStore:
                             "SELECT 1 FROM voice_transcripts WHERE attachment_id=? LIMIT 1",
                             (attachment_id,),
                         ),
+                        (
+                            "SELECT 1 FROM ingress_confirmations "
+                            "WHERE session_id=? AND owner_id=? "
+                            "AND state IN ('awaiting_confirmation','confirming') "
+                            "AND payload_json LIKE ? LIMIT 1",
+                            (
+                                str(session_id),
+                                str(owner_id),
+                                reference_pattern,
+                            ),
+                        ),
                     )
                 )
                 if bound:
@@ -6070,6 +6112,18 @@ class SessionStore:
                         """,
                         (attachment_id,),
                     )
+                    continue
+                pending_confirmation = connection.execute(
+                    """
+                    SELECT 1 FROM ingress_confirmations
+                    WHERE session_id=?
+                      AND state IN ('awaiting_confirmation','confirming')
+                      AND payload_json LIKE ?
+                    LIMIT 1
+                    """,
+                    (str(row["session_id"]), reference_pattern),
+                ).fetchone()
+                if pending_confirmation is not None:
                     continue
                 active_delivery = connection.execute(
                     """

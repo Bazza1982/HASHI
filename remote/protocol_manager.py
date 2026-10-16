@@ -104,6 +104,8 @@ DEFAULT_CAPABILITIES = [
     "tui_proxy_v1",
     "message_source_context_v1",
     "private_authorization_proof_v1",
+    "message_freshness_v1",
+    "hchat_delivery_status_v1",
 ]
 TERMINAL_INFLIGHT_STATES = {
     "reply_sent",
@@ -115,6 +117,9 @@ TERMINAL_INFLIGHT_STATES = {
     "timed_out",
     "abandoned_after_restart",
     "reply_delivered_locally",
+    "discarded",
+    "confirmation_expired",
+    "confirmation_superseded",
 }
 
 
@@ -1056,6 +1061,8 @@ class ProtocolManager:
 
     async def handle_protocol_message(self, payload: dict) -> tuple[int, dict]:
         message_type = str(payload.get("message_type") or "agent_message").strip().lower()
+        if message_type == "delivery_status":
+            return await self._handle_delivery_status(payload)
         if message_type == "agent_reply":
             return await self._handle_agent_reply(payload)
 
@@ -1064,6 +1071,7 @@ class ProtocolManager:
             return 400, self._error_payload("delivery_expired", "TTL expired or invalid", retryable=False, payload=payload)
 
         message_id = str(payload.get("message_id") or "").strip()
+        idempotency_key = str(payload.get("idempotency_key") or "").strip()
         conversation_id = str(payload.get("conversation_id") or "").strip()
         from_instance = str(payload.get("from_instance") or "").strip().upper()
         from_agent = str(payload.get("from_agent") or "").strip().lower()
@@ -1073,14 +1081,48 @@ class ProtocolManager:
 
         if not all([message_id, conversation_id, from_instance, from_agent, to_agent]):
             return 400, self._error_payload("invalid_message", "Missing required protocol message fields", retryable=False, payload=payload)
+        if idempotency_key != f"hchat:{message_id}":
+            return 400, self._error_payload(
+                "invalid_message",
+                "Protocol message idempotency_key does not match message_id",
+                retryable=False,
+                payload=payload,
+            )
         if local_instance in route_trace:
             return 409, self._error_payload("loop_detected", "Local instance already present in route_trace", retryable=False, payload=payload)
 
         existing = self._inflight.get(message_id)
         if existing:
             state = str(existing.get("state") or "")
+            if state in {
+                "discarded",
+                "confirmation_expired",
+                "confirmation_superseded",
+            }:
+                return 200, {
+                    "ok": True,
+                    "message_type": "ack",
+                    "message_id": message_id,
+                    "conversation_id": conversation_id,
+                    "accepted": False,
+                    "state": state,
+                    "confirmation_id": existing.get("confirmation_id"),
+                    "normalized_ttl": existing.get("ttl", normalized_ttl),
+                }
             if state in {"reply_sent", "completed"}:
                 return 409, self._error_payload("duplicate_message", "Message already completed", retryable=False, payload=payload)
+            if state == "awaiting_confirmation":
+                return 202, {
+                    "ok": True,
+                    "message_type": "ack",
+                    "message_id": message_id,
+                    "conversation_id": conversation_id,
+                    "accepted": False,
+                    "confirmation_required": True,
+                    "confirmation_id": existing.get("confirmation_id"),
+                    "state": "awaiting_confirmation",
+                    "normalized_ttl": existing.get("ttl", normalized_ttl),
+                }
             if state in {"delivery_in_progress", "delivered_to_local_queue", "assistant_started", "assistant_streaming"}:
                 return 202, {
                     "ok": True,
@@ -1176,6 +1218,7 @@ class ProtocolManager:
         enqueue_kwargs = {
             "exchange_kind": "message",
             "message_id": message_id,
+            "idempotency_key": idempotency_key,
             "conversation_id": conversation_id,
             "from_instance": from_instance,
             "from_agent": from_agent,
@@ -1203,15 +1246,106 @@ class ProtocolManager:
         }
         if attachments:
             enqueue_kwargs["attachments"] = attachments
+
+        from orchestrator.hchat_freshness_gate import (
+            check_hchat_freshness_and_register,
+            hchat_payload_digest,
+        )
+
+        originated_at = (
+            payload.get("originated_at")
+            or (body.get("originated_at") if isinstance(body, dict) else None)
+        )
+        enqueue_kwargs["originated_at"] = originated_at
+        enqueue_kwargs["payload_digest"] = hchat_payload_digest(
+            message_id=message_id,
+            originated_at=originated_at,
+            from_agent=from_agent,
+            from_instance=from_instance,
+            to_agent=to_agent,
+            is_reply=False,
+            text=str(body.get("text") or ""),
+            attachment_binding=attachments or [],
+        )
+        is_fresh, conf = check_hchat_freshness_and_register(
+            store=self._frontend_session_store(),
+            originated_at=originated_at,
+            is_remote=True,
+            to_agent=to_agent,
+            from_agent=from_agent,
+            from_instance=from_instance,
+            message_id=message_id,
+            text=str(body.get("text") or ""),
+            is_reply=False,
+            transport="protocol",
+            connector_id="hchat_protocol",
+            idempotency_key=idempotency_key,
+            canonical_text=str(body.get("text") or ""),
+            attachment_binding=attachments or [],
+            payload_to_execute={
+                "to_agent": to_agent,
+                "prompt_text": prompt_text,
+                "enqueue_kwargs": enqueue_kwargs,
+                "originated_at": originated_at,
+            },
+        )
+        if not is_fresh and conf:
+            confirmation_state = str(conf.get("state") or "")
+            waiting = confirmation_state in {"awaiting_confirmation", "confirming"}
+            protocol_state = {
+                "awaiting_confirmation": "awaiting_confirmation",
+                "confirming": "awaiting_confirmation",
+                "confirmed": "delivered_to_local_queue",
+                "discarded": "discarded",
+                "expired": "confirmation_expired",
+                "superseded": "confirmation_superseded",
+            }.get(confirmation_state, "failed")
+            self._inflight[message_id] = {
+                "message_id": message_id,
+                "conversation_id": conversation_id,
+                "from_instance": from_instance,
+                "from_agent": from_agent,
+                "to_instance": local_instance,
+                "to_agent": to_agent,
+                "confirmation_id": conf["confirmation_id"],
+                "owner_id": conf["owner_id"],
+                "state": protocol_state,
+                "reply_target_agent": from_agent,
+                "updated_at": int(time.time()),
+                "ttl": normalized_ttl,
+            }
+            self._save_inflight()
+            return (202 if waiting or confirmation_state == "confirmed" else 200), {
+                "ok": True,
+                "message_type": "ack",
+                "message_id": message_id,
+                "conversation_id": conversation_id,
+                "accepted": confirmation_state == "confirmed",
+                "confirmation_required": waiting,
+                "confirmation_id": conf["confirmation_id"],
+                "state": confirmation_state,
+                **(
+                    {"run_id": conf.get("run_id")}
+                    if confirmation_state == "confirmed" and conf.get("run_id")
+                    else {}
+                ),
+                "normalized_ttl": normalized_ttl,
+            }
+
         local_acceptance = await self._enqueue_local_prompt(
             to_agent,
             prompt_text,
             **enqueue_kwargs,
         )
         if isinstance(local_acceptance, dict):
-            request_id = str(local_acceptance.get("request_id") or "")
-            session_id = str(local_acceptance.get("session_id") or "")
-            run_id = str(local_acceptance.get("run_id") or "")
+            if str(local_acceptance.get("state") or "") == "displayed":
+                request_id = ""
+                session_id = str(local_acceptance.get("session_id") or "")
+                run_id = ""
+            else:
+                request_id = str(local_acceptance.get("request_id") or "")
+                session_id = str(local_acceptance.get("session_id") or "")
+                run_id = str(local_acceptance.get("run_id") or "")
         else:
             request_id = str(local_acceptance or "")
             session_id = ""
@@ -1248,8 +1382,206 @@ class ProtocolManager:
             "normalized_ttl": normalized_ttl,
         }
 
+    async def _handle_delivery_status(self, payload: dict) -> tuple[int, dict]:
+        """Project a peer's immutable delivery outcome without invoking an Agent."""
+
+        from orchestrator.hchat_delivery_status import (
+            decode_delivery_status,
+            delivery_status_display_text,
+            delivery_status_message_id,
+        )
+        from orchestrator.message_freshness import parse_rfc3339_utc
+
+        message_id = str(payload.get("message_id") or "").strip()
+        idempotency_key = str(payload.get("idempotency_key") or "").strip()
+        conversation_id = str(payload.get("conversation_id") or "").strip()
+        in_reply_to = str(payload.get("in_reply_to") or "").strip()
+        from_instance = str(payload.get("from_instance") or "").strip().upper()
+        from_agent = str(payload.get("from_agent") or "").strip().lower()
+        to_instance = str(payload.get("to_instance") or "").strip().upper()
+        to_agent = str(payload.get("to_agent") or "").strip().lower()
+        originated_at = str(payload.get("originated_at") or "").strip()
+        route_trace = [
+            str(value).strip().upper()
+            for value in payload.get("route_trace") or ()
+            if str(value).strip()
+        ]
+        local_instance = str(
+            self._instance_info.get("instance_id") or ""
+        ).strip().upper()
+        normalized_ttl = min(
+            max(int(payload.get("ttl") or self._max_allowed_ttl), 0),
+            self._max_allowed_ttl,
+        )
+        body = payload.get("body") or {}
+        try:
+            status_notice = decode_delivery_status(str(body.get("text") or ""))
+        except ValueError as exc:
+            return 400, self._error_payload(
+                "invalid_delivery_status",
+                str(exc),
+                retryable=False,
+                payload=payload,
+            )
+        if (
+            normalized_ttl <= 0
+            or not all(
+                (
+                    message_id,
+                    conversation_id,
+                    in_reply_to,
+                    from_instance,
+                    from_agent,
+                    to_instance,
+                    to_agent,
+                    originated_at,
+                )
+            )
+            or status_notice is None
+            or parse_rfc3339_utc(originated_at) is None
+            or idempotency_key != f"hchat:{message_id}"
+            or status_notice["original_message_id"] != in_reply_to
+            or message_id
+            != delivery_status_message_id(in_reply_to, status_notice["state"])
+        ):
+            return 400, self._error_payload(
+                "invalid_delivery_status",
+                "Delivery status identity or timestamp is invalid",
+                retryable=False,
+                payload=payload,
+            )
+        if local_instance in route_trace:
+            return 409, self._error_payload(
+                "loop_detected",
+                "Local instance already present in delivery status route_trace",
+                retryable=False,
+                payload=payload,
+            )
+
+        if to_instance != local_instance:
+            peer = self._peer_registry.get_peer(to_instance) if self._peer_registry else None
+            if peer is None:
+                return 404, self._error_payload(
+                    "target_instance_not_found",
+                    f"Target instance '{to_instance}' not in peer registry",
+                    retryable=True,
+                    payload=payload,
+                )
+            forward_payload = dict(payload)
+            forward_payload["route_trace"] = route_trace + [local_instance]
+            forward_payload["hop_count"] = int(payload.get("hop_count") or 0) + 1
+            forward_payload["ttl"] = normalized_ttl - 1
+            if forward_payload["ttl"] <= 0:
+                return 400, self._error_payload(
+                    "delivery_expired",
+                    "TTL expired while forwarding delivery status",
+                    retryable=False,
+                    payload=payload,
+                )
+            last_exc = None
+            for host in self._candidate_hosts_for_peer(peer):
+                for url in self._candidate_urls(host, peer.port, "/protocol/message"):
+                    try:
+                        result = await asyncio.get_running_loop().run_in_executor(
+                            None,
+                            lambda u=url: self._post_json(u, forward_payload, timeout=4),
+                        )
+                        if self._response_is_error(result):
+                            raise RuntimeError(result)
+                        return 202, result
+                    except Exception as exc:
+                        last_exc = exc
+            return 502, self._error_payload(
+                "forward_failed",
+                f"Failed to forward delivery status to {to_instance}: {last_exc}",
+                retryable=True,
+                payload=payload,
+            )
+
+        correlation = self._outbound_correlation_for(in_reply_to)
+        if not correlation:
+            return 409, self._error_payload(
+                "delivery_status_correlation_missing",
+                "Delivery status does not match a local outbound HChat message",
+                retryable=False,
+                payload=payload,
+            )
+        expected = {
+            "conversation_id": conversation_id,
+            "from_instance": to_instance,
+            "from_agent": to_agent,
+            "to_instance": from_instance,
+            "to_agent": from_agent,
+        }
+        if any(
+            str(correlation.get(key) or "").strip().casefold()
+            != str(value or "").strip().casefold()
+            for key, value in expected.items()
+        ):
+            return 409, self._error_payload(
+                "delivery_status_correlation_mismatch",
+                "Delivery status does not match the original HChat route",
+                retryable=False,
+                payload=payload,
+            )
+
+        local_agents = {
+            str(item.get("agent_name") or "").strip().lower()
+            for item in self.get_local_agents_snapshot()
+        }
+        if to_agent not in local_agents:
+            return 404, self._error_payload(
+                "target_agent_unavailable",
+                f"Delivery status target '{to_agent}' is unavailable",
+                retryable=True,
+                payload=payload,
+            )
+        self._mark_outbound_delivery_status(
+            in_reply_to,
+            status=status_notice["state"],
+            status_message_id=message_id,
+            updated_at=int(time.time()),
+        )
+        raw_status_text = str(body.get("text") or "")
+        visible_text = delivery_status_display_text(status_notice)
+        displayed = await self._enqueue_local_prompt(
+            to_agent,
+            raw_status_text,
+            exchange_kind="status",
+            message_id=message_id,
+            conversation_id=conversation_id,
+            from_instance=from_instance,
+            from_agent=from_agent,
+            to_instance=local_instance,
+            to_agent=to_agent,
+            route_trace=route_trace,
+            terminal_response_text=visible_text,
+            originated_at=originated_at,
+            idempotency_key=idempotency_key,
+            in_reply_to=in_reply_to,
+        )
+        if not displayed:
+            return 502, self._error_payload(
+                "local_status_projection_failed",
+                "Delivery status could not be projected locally",
+                retryable=True,
+                payload=payload,
+            )
+        return 200, {
+            "ok": True,
+            "message_type": "ack",
+            "message_id": message_id,
+            "in_reply_to": in_reply_to,
+            "conversation_id": conversation_id,
+            "accepted": True,
+            "state": "displayed",
+            "delivery_status": status_notice["state"],
+            "normalized_ttl": normalized_ttl,
+        }
+
     async def _handle_agent_reply(self, payload: dict) -> tuple[int, dict]:
         message_id = str(payload.get("message_id") or "").strip()
+        idempotency_key = str(payload.get("idempotency_key") or "").strip()
         conversation_id = str(payload.get("conversation_id") or "").strip()
         in_reply_to = str(payload.get("in_reply_to") or "").strip()
         to_agent = str(payload.get("to_agent") or "").strip().lower()
@@ -1264,6 +1596,13 @@ class ProtocolManager:
             return 400, self._error_payload("delivery_expired", "TTL expired or invalid", retryable=False, payload=payload)
         if not all([message_id, conversation_id, in_reply_to, from_instance, from_agent, to_agent]):
             return 400, self._error_payload("invalid_reply", "Missing required agent_reply fields", retryable=False, payload=payload)
+        if idempotency_key != f"hchat:{message_id}":
+            return 400, self._error_payload(
+                "invalid_reply",
+                "Protocol reply idempotency_key does not match message_id",
+                retryable=False,
+                payload=payload,
+            )
         if local_instance in route_trace:
             return 409, self._error_payload("loop_detected", "Local instance already present in reply route_trace", retryable=False, payload=payload)
         if from_instance == local_instance:
@@ -1272,8 +1611,36 @@ class ProtocolManager:
         existing_reply = self._inflight.get(message_id)
         if existing_reply:
             state = str(existing_reply.get("state") or "")
+            if state in {
+                "reply_delivered_locally",
+                "discarded",
+                "confirmation_expired",
+                "confirmation_superseded",
+            }:
+                return 200, {
+                    "ok": True,
+                    "message_type": "ack",
+                    "message_id": message_id,
+                    "conversation_id": conversation_id,
+                    "accepted": state == "reply_delivered_locally",
+                    "state": state,
+                    "confirmation_id": existing_reply.get("confirmation_id"),
+                    "normalized_ttl": existing_reply.get("ttl", normalized_ttl),
+                }
             if state in TERMINAL_INFLIGHT_STATES:
                 return 409, self._error_payload("duplicate_message", "Reply message already terminal", retryable=False, payload=payload)
+            if state == "awaiting_confirmation":
+                return 202, {
+                    "ok": True,
+                    "message_type": "ack",
+                    "message_id": message_id,
+                    "conversation_id": conversation_id,
+                    "accepted": False,
+                    "confirmation_required": True,
+                    "confirmation_id": existing_reply.get("confirmation_id"),
+                    "state": "awaiting_confirmation",
+                    "normalized_ttl": existing_reply.get("ttl", normalized_ttl),
+                }
             return 202, {
                 "ok": True,
                 "message_type": "ack",
@@ -1316,6 +1683,91 @@ class ProtocolManager:
                 error["body"]["details"] = {"moved_to": moved["address"]}
                 return 410, error
             return 404, self._error_payload("target_agent_unavailable", f"Reply target '{to_agent}' is unavailable", retryable=True, payload=payload)
+        from orchestrator.hchat_freshness_gate import (
+            check_hchat_freshness_and_register,
+            hchat_payload_digest,
+        )
+
+        originated_at = payload.get("originated_at")
+        payload_digest = hchat_payload_digest(
+            message_id=message_id,
+            originated_at=originated_at,
+            from_agent=from_agent,
+            from_instance=from_instance,
+            to_agent=to_agent,
+            is_reply=True,
+            text=str((body or {}).get("text") or "").strip(),
+        )
+        is_fresh, conf = check_hchat_freshness_and_register(
+            store=self._frontend_session_store(),
+            originated_at=originated_at,
+            is_remote=True,
+            to_agent=to_agent,
+            from_agent=from_agent,
+            from_instance=from_instance,
+            message_id=message_id,
+            text=str((body or {}).get("text") or "").strip(),
+            is_reply=True,
+            transport="protocol",
+            connector_id="hchat_protocol",
+            idempotency_key=idempotency_key,
+            canonical_text=str((body or {}).get("text") or "").strip(),
+            payload_to_execute={
+                "to_agent": to_agent,
+                "conversation_id": conversation_id,
+                "in_reply_to": in_reply_to,
+                "text": str((body or {}).get("text") or "").strip(),
+                "reply_target_agent": from_agent,
+                "originated_at": originated_at,
+            },
+        )
+        if not is_fresh and conf:
+            now_ts = int(time.time())
+            confirmation_state = str(conf.get("state") or "")
+            waiting = confirmation_state in {"awaiting_confirmation", "confirming"}
+            protocol_state = {
+                "awaiting_confirmation": "awaiting_confirmation",
+                "confirming": "awaiting_confirmation",
+                "confirmed": "reply_delivered_locally",
+                "discarded": "discarded",
+                "expired": "confirmation_expired",
+                "superseded": "confirmation_superseded",
+            }.get(confirmation_state, "failed")
+            self._inflight[message_id] = {
+                "message_id": message_id,
+                "conversation_id": conversation_id,
+                "in_reply_to": in_reply_to,
+                "from_instance": from_instance,
+                "from_agent": from_agent,
+                "to_instance": local_instance,
+                "to_agent": to_agent,
+                "confirmation_id": conf["confirmation_id"],
+                "owner_id": conf["owner_id"],
+                "state": protocol_state,
+                "reply_target_agent": from_agent,
+                "correlation_state": correlation_state,
+                "route_trace": route_trace,
+                "ttl": normalized_ttl,
+                "created_at": now_ts,
+                "updated_at": now_ts,
+            }
+            self._save_inflight()
+            return (202 if waiting or confirmation_state == "confirmed" else 200), {
+                "ok": True,
+                "message_type": "ack",
+                "message_id": message_id,
+                "conversation_id": conversation_id,
+                "accepted": confirmation_state == "confirmed",
+                "confirmation_required": waiting,
+                "confirmation_id": conf["confirmation_id"],
+                "state": confirmation_state,
+                **(
+                    {"run_id": conf.get("run_id")}
+                    if confirmation_state == "confirmed" and conf.get("run_id")
+                    else {}
+                ),
+                "normalized_ttl": normalized_ttl,
+            }
         prompt_text = self._render_remote_reply_prompt(from_agent, from_instance, body)
         local_acceptance = await self._enqueue_local_prompt(
             to_agent,
@@ -1326,6 +1778,9 @@ class ProtocolManager:
             from_instance=from_instance,
             from_agent=from_agent,
             terminal_response_text=str((body or {}).get("text") or "").strip(),
+            originated_at=originated_at,
+            idempotency_key=idempotency_key,
+            payload_digest=payload_digest,
         )
         if isinstance(local_acceptance, dict):
             request_id = str(local_acceptance.get("request_id") or "")
@@ -1335,7 +1790,11 @@ class ProtocolManager:
             request_id = str(local_acceptance or "")
             session_id = ""
             run_id = ""
-        if not request_id:
+        displayed_without_run = bool(
+            isinstance(local_acceptance, dict)
+            and str(local_acceptance.get("state") or "") == "displayed"
+        )
+        if not request_id and not displayed_without_run:
             return 502, self._error_payload("local_enqueue_failed", "Failed to inject reply into local agent", retryable=True, payload=payload)
         now = int(time.time())
         if correlated:
@@ -1369,7 +1828,7 @@ class ProtocolManager:
             "message_id": message_id,
             "accepted": True,
             "state": "reply_delivered_locally",
-            "request_id": request_id,
+            "request_id": request_id or None,
             "session_id": session_id or None,
             "run_id": run_id or None,
             "in_reply_to": in_reply_to,
@@ -1417,8 +1876,19 @@ class ProtocolManager:
         authorization_content_text: str | None = None,
         terminal_response_text: str | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        originated_at: str | None = None,
+        idempotency_key: str | None = None,
+        in_reply_to: str | None = None,
+        payload_digest: str | None = None,
     ) -> dict[str, str] | None:
-        terminal = exchange_kind == "reply"
+        terminal = exchange_kind in {"reply", "status"}
+        hchat_message_type = (
+            "delivery_status"
+            if exchange_kind == "status"
+            else "agent_reply"
+            if terminal
+            else "agent_message"
+        )
         request_metadata = {
             "system_exchange": True,
             "system_exchange_kind": exchange_kind,
@@ -1464,6 +1934,13 @@ class ProtocolManager:
                         else "declared"
                     ),
                     "relay_chain": relay_chain,
+                    "message_id": message_id,
+                    "idempotency_key": idempotency_key or f"hchat:{message_id}",
+                    "payload_digest": payload_digest,
+                    "originated_at": originated_at,
+                    "message_type": hchat_message_type,
+                    "conversation_id": conversation_id,
+                    "in_reply_to": in_reply_to,
                     "origin_instance": {
                         "id": from_instance,
                         "assurance": (
@@ -1552,7 +2029,10 @@ class ProtocolManager:
             "text": text,
             "source": f"protocol:{exchange_kind}",
             "request_metadata": request_metadata,
-            "idempotency_key": f"protocol:{exchange_kind}:{message_id}",
+            "idempotency_key": idempotency_key or f"hchat:{message_id}",
+            "message_id": message_id,
+            "originated_at": originated_at,
+            "message_type": hchat_message_type,
         }
         if normalized_attachments:
             payload["remote_attachments"] = normalized_attachments
@@ -1567,6 +2047,16 @@ class ProtocolManager:
                     lambda u=url: self._post_json(u, payload, timeout=10),
                 )
                 if result.get("ok"):
+                    if str(result.get("state") or "") == "displayed":
+                        return {
+                            key: value
+                            for key, value in {
+                                "state": "displayed",
+                                "session_id": str(result.get("session_id") or "").strip(),
+                                "message_id": str(result.get("message_id") or "").strip(),
+                            }.items()
+                            if value
+                        }
                     request_id = str(result.get("request_id") or "").strip()
                     if not request_id:
                         continue
@@ -1789,7 +2279,10 @@ class ProtocolManager:
         now = time.time()
         for message_id, item in list(self._inflight.items()):
             state = str(item.get("state") or "")
-            if state in TERMINAL_INFLIGHT_STATES:
+            if (
+                state in TERMINAL_INFLIGHT_STATES
+                and not item.get("delivery_status_pending")
+            ):
                 continue
             try:
                 changed = await self._advance_inflight_item(item, now=now)
@@ -1800,7 +2293,113 @@ class ProtocolManager:
         if dirty:
             self._save_inflight()
 
+    async def _flush_pending_delivery_status(
+        self,
+        item: dict,
+        *,
+        now: float,
+    ) -> bool:
+        pending = str(item.get("delivery_status_pending") or "").strip()
+        if not pending:
+            return False
+        sent = await self._send_delivery_status(
+            item,
+            pending,
+            reason=str(item.get("delivery_status_reason") or "").strip() or None,
+        )
+        item["updated_at"] = int(now)
+        if sent:
+            item["delivery_status_notified_state"] = pending
+            item.pop("delivery_status_pending", None)
+            item.pop("delivery_status_reason", None)
+            item.pop("delivery_status_error_code", None)
+        return True
+
     async def _advance_inflight_item(self, item: dict, *, now: float) -> bool:
+        if item.get("delivery_status_pending"):
+            return await self._flush_pending_delivery_status(item, now=now)
+        if str(item.get("state") or "") == "awaiting_confirmation":
+            confirmation_id = str(item.get("confirmation_id") or "").strip()
+            owner_id = str(item.get("owner_id") or "").strip()
+            if not confirmation_id or not owner_id:
+                item["state"] = "failed"
+                item["error_code"] = "confirmation_identity_missing"
+                item["updated_at"] = int(now)
+                return True
+            from orchestrator.ingress_confirmation import (
+                ConfirmationNotFoundError,
+                IngressConfirmationService,
+            )
+
+            try:
+                confirmation = IngressConfirmationService(
+                    self._frontend_session_store()
+                ).get(
+                    confirmation_id,
+                    owner_id=owner_id,
+                )
+            except ConfirmationNotFoundError:
+                item["state"] = "failed"
+                item["error_code"] = "confirmation_not_found"
+                item["updated_at"] = int(now)
+                return True
+            confirmation_state = str(confirmation.get("state") or "")
+            if confirmation_state in {"awaiting_confirmation", "confirming"}:
+                return False
+            if confirmation_state == "discarded":
+                item["state"] = "discarded"
+                item["delivery_status_pending"] = "discarded"
+                return await self._flush_pending_delivery_status(item, now=now)
+            if confirmation_state == "expired":
+                item["state"] = "confirmation_expired"
+                item["delivery_status_pending"] = "confirmation_expired"
+                item["delivery_status_reason"] = "confirmation_timeout_15m"
+                return await self._flush_pending_delivery_status(item, now=now)
+            if confirmation_state == "superseded":
+                item["state"] = "confirmation_superseded"
+                item["delivery_status_pending"] = "confirmation_superseded"
+                item["delivery_status_reason"] = "session_context_advanced"
+                return await self._flush_pending_delivery_status(item, now=now)
+            if confirmation_state != "confirmed":
+                return False
+            if confirmation.get("message_kind") == "hchat_reply":
+                in_reply_to = str(item.get("in_reply_to") or "").strip()
+                correlated = self._inflight.get(in_reply_to) if in_reply_to else None
+                if correlated:
+                    correlated["state"] = "reply_delivered_locally"
+                    correlated["reply_message_id"] = item.get("message_id")
+                    correlated["reply_delivered_at"] = int(now)
+                if in_reply_to and not correlated:
+                    self._mark_outbound_reply_delivered(
+                        in_reply_to,
+                        reply_message_id=str(item.get("message_id") or ""),
+                        delivered_at=int(now),
+                    )
+                item["state"] = "reply_delivered_locally"
+                item["delivery_status_pending"] = "displayed"
+                return await self._flush_pending_delivery_status(item, now=now)
+            run_id = str(confirmation.get("run_id") or "").strip()
+            if not run_id:
+                return False
+            try:
+                run = self._frontend_session_store().get_run(
+                    run_id,
+                    owner_id=owner_id,
+                )
+            except Exception:
+                return False
+            item.update(
+                {
+                    "run_id": run_id,
+                    "session_id": str(run.get("session_id") or ""),
+                    "request_id": str(run.get("request_id") or ""),
+                    "state": str(run.get("state") or "queued"),
+                    "updated_at": int(now),
+                }
+            )
+            item["delivery_status_pending"] = "executed"
+            return await self._flush_pending_delivery_status(item, now=now)
+
         agent_name = str(item.get("to_agent") or "").lower()
         changed = False
         session_id = str(item.get("session_id") or "").strip()
@@ -2019,6 +2618,115 @@ class ProtocolManager:
             "state": "failed" if known_failure else "unknown",
         }
 
+    async def _send_delivery_status(
+        self,
+        item: dict[str, Any],
+        status: str,
+        *,
+        reason: str | None = None,
+    ) -> bool:
+        """Return a durable presentation-only outcome to the sending Agent."""
+
+        from orchestrator.hchat_delivery_status import (
+            delivery_status_message_id,
+            encode_delivery_status,
+        )
+
+        instance_id = str(item.get("from_instance") or "").strip().upper()
+        peer = self._peer_registry.get_peer(instance_id) if self._peer_registry else None
+        if peer is not None:
+            live_status = str(
+                (peer.properties or {}).get("live_status") or ""
+            ).strip().lower()
+            if live_status in {"stale", "offline"}:
+                await self._refresh_single_peer_liveness(peer)
+                peer = (
+                    self._peer_registry.get_peer(instance_id)
+                    if self._peer_registry
+                    else peer
+                )
+        peer_capabilities = {
+            str(value) for value in getattr(peer, "capabilities", ()) or ()
+        }
+        if peer is not None and "hchat_delivery_status_v1" not in peer_capabilities:
+            item["delivery_status_error_code"] = (
+                "hchat_delivery_status_capability_missing"
+            )
+            return False
+        route = self._resolve_peer_route(instance_id)
+        if route is None:
+            return False
+        original_message_id = str(item.get("message_id") or "").strip()
+        if not original_message_id:
+            return False
+        notices = item.setdefault("delivery_status_notices", {})
+        notice = notices.get(status)
+        if not isinstance(notice, dict):
+            notice = {
+                "message_id": delivery_status_message_id(
+                    original_message_id, status
+                ),
+                "originated_at": datetime.now(timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
+            }
+            notices[status] = notice
+        status_message_id = str(notice["message_id"])
+        originated_at = str(notice["originated_at"])
+        payload = {
+            "message_type": "delivery_status",
+            "message_id": status_message_id,
+            "idempotency_key": f"hchat:{status_message_id}",
+            "conversation_id": item.get("conversation_id"),
+            "in_reply_to": original_message_id,
+            "from_instance": self._instance_info.get("instance_id"),
+            "from_agent": item.get("to_agent"),
+            "to_instance": item.get("from_instance"),
+            "to_agent": item.get("reply_target_agent") or item.get("from_agent"),
+            "body": {
+                "text": encode_delivery_status(
+                    original_message_id=original_message_id,
+                    state=status,
+                    reason=reason,
+                ),
+                "originated_at": originated_at,
+            },
+            "hop_count": 0,
+            "ttl": min(
+                int(item.get("ttl") or self._max_allowed_ttl),
+                self._max_allowed_ttl,
+            ),
+            "route_trace": [
+                str(self._instance_info.get("instance_id") or "").upper()
+            ],
+            "originated_at": originated_at,
+            "created_at": originated_at,
+        }
+        urls = self._candidate_urls(
+            route["host"], route["port"], "/protocol/message"
+        )
+        if not urls:
+            return False
+        try:
+            result = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: self._post_json(urls[0], payload, timeout=10),
+            )
+            if self._response_confirms_terminal_duplicate(result, payload):
+                return True
+            if self._response_is_error(result):
+                item["delivery_status_error_code"] = "delivery_status_rejected"
+                return False
+            return bool(result.get("ok", True))
+        except Exception as exc:
+            logger.warning(
+                "Delivery status %s for %s has unknown outcome: %s",
+                status,
+                original_message_id,
+                exc,
+            )
+            return False
+
     async def _send_agent_reply(self, item: dict, reply_text: str) -> bool:
         instance_id = str(item.get("from_instance") or "")
         peer = self._peer_registry.get_peer(instance_id) if self._peer_registry else None
@@ -2026,24 +2734,49 @@ class ProtocolManager:
             live_status = str((peer.properties or {}).get("live_status") or "").strip().lower()
             if live_status in {"stale", "offline"}:
                 await self._refresh_single_peer_liveness(peer)
+                peer = (
+                    self._peer_registry.get_peer(instance_id)
+                    if self._peer_registry
+                    else peer
+                )
+        if peer is not None and "message_freshness_v1" not in {
+            str(value) for value in getattr(peer, "capabilities", ()) or ()
+        }:
+            item["reply_failure_known"] = True
+            item["reply_error_code"] = "message_freshness_capability_missing"
+            logger.warning(
+                "Cannot send HChat reply to %s: peer lacks message_freshness_v1",
+                instance_id,
+            )
+            return False
         route = self._resolve_peer_route(instance_id)
         if route is None:
             logger.warning("Cannot send reply for %s: origin peer unavailable", item.get("message_id"))
             return False
+        reply_message_id = str(
+            item.setdefault("reply_message_id", f"{item['message_id']}:reply")
+        )
+        reply_originated_at = str(
+            item.setdefault(
+                "reply_originated_at",
+                datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            )
+        )
         payload = {
             "message_type": "agent_reply",
-            "message_id": f"{item['message_id']}:reply",
+            "message_id": reply_message_id,
             "conversation_id": item.get("conversation_id"),
             "in_reply_to": item.get("message_id"),
             "from_instance": self._instance_info.get("instance_id"),
             "from_agent": item.get("to_agent"),
             "to_instance": item.get("from_instance"),
             "to_agent": item.get("reply_target_agent") or item.get("from_agent"),
-            "body": {"text": reply_text},
+            "body": {"text": reply_text, "originated_at": reply_originated_at},
             "hop_count": 0,
             "ttl": min(int(item.get("ttl") or self._max_allowed_ttl), self._max_allowed_ttl),
             "route_trace": [str(self._instance_info.get("instance_id") or "").upper()],
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "originated_at": reply_originated_at,
+            "created_at": reply_originated_at,
         }
         reply_attachments = [
             dict(attachment)
@@ -2351,6 +3084,10 @@ class ProtocolManager:
             state = str(item.get("state") or "")
             if state in TERMINAL_INFLIGHT_STATES:
                 continue
+            if state == "awaiting_confirmation" and item.get("confirmation_id"):
+                # The PAO confirmation ledger is restart-safe and authoritative;
+                # keep polling it instead of abandoning a visible user decision.
+                continue
             item["previous_state"] = state or "unknown"
             item["state"] = "abandoned_after_restart"
             item["abandoned_reason"] = "sidecar_restart_without_rebind"
@@ -2383,6 +3120,25 @@ class ProtocolManager:
         item["reply_message_id"] = reply_message_id
         item["reply_delivered_at"] = delivered_at
         item["updated_at"] = delivered_at
+        messages[str(message_id).strip()] = item
+        self._save_outbound_correlations(messages)
+
+    def _mark_outbound_delivery_status(
+        self,
+        message_id: str,
+        *,
+        status: str,
+        status_message_id: str,
+        updated_at: int,
+    ) -> None:
+        messages = self._load_outbound_correlations()
+        item = messages.get(str(message_id or "").strip())
+        if not isinstance(item, dict):
+            return
+        item["state"] = str(status)
+        item["delivery_status"] = str(status)
+        item["delivery_status_message_id"] = str(status_message_id)
+        item["updated_at"] = int(updated_at)
         messages[str(message_id).strip()] = item
         self._save_outbound_correlations(messages)
 
