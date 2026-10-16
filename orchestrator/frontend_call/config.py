@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import math
 import re
+from ipaddress import ip_address, ip_network
 from urllib.parse import urlsplit
 from orchestrator.config_json import (
     read_config_json,
@@ -35,6 +36,19 @@ OPENROUTER_GEMINI_TTS_MODELS = {
     "google/gemini-3.8-flash-lite-tts",
     "google/gemini-3.8-flash-tts",
 }
+PRIVATE_LAN_NETWORKS = tuple(
+    ip_network(cidr) for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+)
+
+
+def _is_private_lan_literal(host):
+    try:
+        address = ip_address(host)
+    except ValueError:
+        return False
+    return address.version == 4 and any(
+        address in network for network in PRIVATE_LAN_NETWORKS
+    )
 
 
 def options_for(target, value):
@@ -93,14 +107,20 @@ def validate_target(target):
         or not parsed.hostname
     ):
         raise CallError("call_target_invalid", 503)
-    if target.get("location") == "local":
+    location = target.get("location")
+    if location == "local":
         if parsed.scheme not in ("http", "https") or parsed.hostname not in (
             "127.0.0.1",
             "localhost",
             "::1",
         ):
             raise CallError("call_local_target_not_loopback", 503)
-    elif target.get("location") != "cloud" or parsed.scheme != "https":
+    elif location == "lan":
+        if parsed.scheme not in ("http", "https") or not _is_private_lan_literal(
+            parsed.hostname
+        ):
+            raise CallError("call_lan_target_not_private", 503)
+    elif location != "cloud" or parsed.scheme != "https":
         raise CallError("call_target_invalid", 503)
     if not isinstance(target.get("model"), str) or not 1 <= len(target["model"]) <= 200:
         raise CallError("call_model_required", 503)

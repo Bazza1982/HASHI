@@ -37,6 +37,10 @@ from orchestrator.frontend_contracts import (
     normalize_delivery_receipt,
     normalize_media_group,
 )
+from orchestrator.session_titles import (
+    automatic_session_title,
+    is_system_session_title,
+)
 from orchestrator.storage_profile import removable_storage_profile
 
 TERMINAL_RUN_STATES = frozenset(
@@ -1216,6 +1220,8 @@ class SessionStore:
             )
             from orchestrator.phone_context_handoff import initialize_schema as initialize_phone_context_schema
             initialize_phone_context_schema(connection)
+            from orchestrator.ingress_confirmation import initialize_schema as initialize_ingress_confirmation_schema
+            initialize_ingress_confirmation_schema(connection)
             # Upgrade older split inboxes into one sequence so transcript and
             # delegation replay keeps the Provider's per-call receive order.
             connection.execute(
@@ -2427,6 +2433,7 @@ class SessionStore:
         owner_id: str,
         agent_id: str,
         title: str | None = None,
+        title_source: str | None = None,
         is_default: bool = False,
         session_kind: str = SESSION_KIND_CONVERSATION,
     ) -> dict[str, Any]:
@@ -2435,6 +2442,10 @@ class SessionStore:
         session_kind = str(session_kind or "").strip().casefold()
         if not owner_id or not agent_id:
             raise ValueError("owner_id and agent_id are required")
+        if title_source is not None:
+            title_source = str(title_source).strip().casefold()
+            if title_source not in {"system", "user", "maintenance"}:
+                raise ValueError("unsupported Session title source")
         if session_kind not in SESSION_KINDS:
             raise ValueError("unsupported Session kind")
         if is_default and session_kind != SESSION_KIND_CONVERSATION:
@@ -2479,12 +2490,15 @@ class SessionStore:
                     else "New session"
                 )
             ).strip()
+            resolved_title_source = title_source or (
+                "system" if is_system_session_title(resolved_title) else "user"
+            )
             connection.execute(
                 """
                 INSERT INTO sessions(
                     session_id, instance_id, owner_id, agent_id, title,
-                    session_kind, is_default, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    title_source, session_kind, is_default, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
@@ -2492,6 +2506,7 @@ class SessionStore:
                     owner_id,
                     agent_id,
                     resolved_title,
+                    resolved_title_source,
                     session_kind,
                     int(is_default),
                     now,
@@ -2532,6 +2547,7 @@ class SessionStore:
             owner_id=owner_id,
             agent_id=agent_id,
             title=f"{str(agent_id).strip().lower()} default",
+            title_source="system",
             is_default=True,
         )
 
@@ -2547,6 +2563,7 @@ class SessionStore:
             owner_id=owner_id,
             agent_id=agent_id,
             title=f"{str(agent_id).strip().lower()} activity",
+            title_source="system",
             session_kind=SESSION_KIND_AGENT_ACTIVITY,
         )
 
@@ -2603,6 +2620,65 @@ class SessionStore:
                 """,
                 params,
             ).fetchall()
+            changed = False
+            for row in rows:
+                if (
+                    str(row["title_source"]) != "system"
+                    or not is_system_session_title(str(row["title"]))
+                ):
+                    continue
+                message = connection.execute(
+                    """
+                    SELECT text, display_text FROM messages
+                    WHERE session_id = ? AND role = 'user' AND visibility = 'visible'
+                    ORDER BY ordinal ASC LIMIT 1
+                    """,
+                    (str(row["session_id"]),),
+                ).fetchone()
+                if message is None:
+                    continue
+                title_input = (
+                    str(message["display_text"])
+                    if message["display_text"] is not None
+                    and str(message["display_text"]).strip()
+                    else str(message["text"])
+                )
+                automatic_title = automatic_session_title(title_input)
+                if not automatic_title:
+                    continue
+                updated = connection.execute(
+                    """
+                    UPDATE sessions SET title = ?, title_source = 'maintenance',
+                        revision = revision + 1
+                    WHERE session_id = ? AND title_source = 'system' AND title = ?
+                    """,
+                    (automatic_title, str(row["session_id"]), str(row["title"])),
+                )
+                if updated.rowcount != 1:
+                    continue
+                self._append_event(
+                    connection,
+                    session_id=str(row["session_id"]),
+                    run_id=None,
+                    kind="session.title_updated",
+                    status=str(row["status"]),
+                    phase="control",
+                    summary="Session title updated",
+                    detail={
+                        "source": "maintenance",
+                        "reason": "placeholder_backfill",
+                    },
+                    outbox=False,
+                )
+                changed = True
+            if changed:
+                rows = connection.execute(
+                    f"""
+                    SELECT * FROM sessions WHERE {" AND ".join(clauses)}
+                    ORDER BY is_default DESC, updated_at DESC, session_id ASC LIMIT ?
+                    """,
+                    params,
+                ).fetchall()
         return [self._session_dict(row) for row in rows]
 
     def set_memory_policy(
@@ -3290,7 +3366,36 @@ class SessionStore:
                 (session_id, str(idempotency_key)),
             ).fetchone()
             if existing is not None:
-                if str(existing["request_digest"]) != digest:
+                request_matches = str(existing["request_digest"]) == digest
+                if not request_matches and str(idempotency_key).startswith("hchat:"):
+                    try:
+                        existing_context = json.loads(
+                            str(existing["message_context_json"] or "{}")
+                        )
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        existing_context = {}
+                    incoming_hchat = (
+                        dict(message_context or {}).get("hchat_message")
+                        if isinstance(message_context, Mapping)
+                        else None
+                    )
+                    existing_hchat = (
+                        existing_context.get("hchat_message")
+                        if isinstance(existing_context, Mapping)
+                        else None
+                    )
+                    request_matches = bool(
+                        isinstance(incoming_hchat, Mapping)
+                        and isinstance(existing_hchat, Mapping)
+                        and str(incoming_hchat.get("idempotency_key") or "")
+                        == str(idempotency_key)
+                        == str(existing_hchat.get("idempotency_key") or "")
+                        and str(incoming_hchat.get("message_id") or "")
+                        == str(existing_hchat.get("message_id") or "")
+                        and str(incoming_hchat.get("payload_digest") or "")
+                        == str(existing_hchat.get("payload_digest") or "")
+                    )
+                if not request_matches:
                     raise IdempotencyConflict(
                         "idempotency key is already bound to a different request"
                     )
@@ -3427,13 +3532,46 @@ class SessionStore:
                 detail={"message_id": message_id, "request_id": request_id},
                 outbox=True,
             )
-            connection.execute(
-                """
-                UPDATE sessions SET updated_at = ?, revision = revision + 1
-                WHERE session_id = ?
-                """,
-                (now, session_id),
-            )
+            automatic_title = None
+            if (
+                str(session["session_kind"]) == SESSION_KIND_CONVERSATION
+                and str(session["title_source"]) == "system"
+                and is_system_session_title(str(session["title"]))
+            ):
+                title_input = (
+                    display_text
+                    if isinstance(display_text, str) and display_text.strip()
+                    else clean
+                )
+                automatic_title = automatic_session_title(title_input)
+            if automatic_title:
+                connection.execute(
+                    """
+                    UPDATE sessions SET title = ?, title_source = 'maintenance',
+                        updated_at = ?, revision = revision + 1
+                    WHERE session_id = ?
+                    """,
+                    (automatic_title, now, session_id),
+                )
+                self._append_event(
+                    connection,
+                    session_id=session_id,
+                    run_id=run_id,
+                    kind="session.title_updated",
+                    status="active",
+                    phase="control",
+                    summary="Session title updated",
+                    detail={"source": "maintenance"},
+                    outbox=True,
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE sessions SET updated_at = ?, revision = revision + 1
+                    WHERE session_id = ?
+                    """,
+                    (now, session_id),
+                )
         return AcceptedRun(
             session_id=session_id,
             run_id=run_id,
@@ -5039,6 +5177,17 @@ class SessionStore:
                             "SELECT 1 FROM voice_transcripts WHERE attachment_id=? LIMIT 1",
                             (attachment_id,),
                         ),
+                        (
+                            "SELECT 1 FROM ingress_confirmations "
+                            "WHERE session_id=? AND owner_id=? "
+                            "AND state IN ('awaiting_confirmation','confirming') "
+                            "AND payload_json LIKE ? LIMIT 1",
+                            (
+                                str(session_id),
+                                str(owner_id),
+                                reference_pattern,
+                            ),
+                        ),
                     )
                 )
                 if bound:
@@ -5963,6 +6112,18 @@ class SessionStore:
                         """,
                         (attachment_id,),
                     )
+                    continue
+                pending_confirmation = connection.execute(
+                    """
+                    SELECT 1 FROM ingress_confirmations
+                    WHERE session_id=?
+                      AND state IN ('awaiting_confirmation','confirming')
+                      AND payload_json LIKE ?
+                    LIMIT 1
+                    """,
+                    (str(row["session_id"]), reference_pattern),
+                ).fetchone()
+                if pending_confirmation is not None:
                     continue
                 active_delivery = connection.execute(
                     """
@@ -7177,10 +7338,16 @@ class SessionStore:
         owner_id: str,
         expected_revision: int,
         title: str | None = None,
+        status: str | None = None,
     ) -> dict[str, Any]:
         clean_title = str(title or "").strip()
         if title is not None and not clean_title:
             raise ValueError("title cannot be empty")
+        clean_status = str(status or "").strip().casefold()
+        if status is not None and clean_status not in {"active", "archived"}:
+            raise ValueError("status must be active or archived")
+        if title is None and status is None:
+            raise ValueError("title or status is required")
         now = _utc_now()
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -7195,13 +7362,49 @@ class SessionStore:
                 raise SessionNotFound(str(session_id))
             if int(row["revision"]) != int(expected_revision):
                 raise SessionConflict("Session revision does not match")
-            if title is not None:
+            if str(row["status"]) == "deleted":
+                raise SessionConflict("deleted Session cannot be updated")
+            target_status = (
+                clean_status if status is not None else str(row["status"])
+            )
+            if target_status == "archived" and bool(row["is_default"]):
+                raise SessionConflict(
+                    "the permanent default Session cannot be archived"
+                )
+            target_title = clean_title if title is not None else str(row["title"])
+            target_title_source = "user" if title is not None else str(row["title_source"])
+            status_changed = target_status != str(row["status"])
+            connection.execute(
+                """
+                UPDATE sessions SET title = ?, title_source = ?, status = ?,
+                    deleted_at = NULL, revision = revision + 1, updated_at = ?
+                WHERE session_id = ?
+                """,
+                (
+                    target_title,
+                    target_title_source,
+                    target_status,
+                    now,
+                    str(session_id),
+                ),
+            )
+            if status_changed and target_status == "archived":
                 connection.execute(
-                    """
-                    UPDATE sessions SET title = ?, title_source = 'user',
-                        revision = revision + 1, updated_at = ? WHERE session_id = ?
-                    """,
-                    (clean_title, now, str(session_id)),
+                    "DELETE FROM channel_bindings WHERE session_id = ?",
+                    (str(session_id),),
+                )
+            if status_changed:
+                event_action = "restored" if target_status == "active" else target_status
+                self._append_event(
+                    connection,
+                    session_id=str(session_id),
+                    run_id=None,
+                    kind=f"session.{event_action}",
+                    status=target_status,
+                    phase="control",
+                    summary=f"Session {event_action}",
+                    detail={"records_deleted": False},
+                    outbox=True,
                 )
             updated = connection.execute(
                 "SELECT * FROM sessions WHERE session_id = ?", (str(session_id),)

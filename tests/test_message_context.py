@@ -218,6 +218,11 @@ def test_exchange_verified_hchat_context_projects_a_typed_relay_envelope(tmp_pat
             "from_instance": "HASHI2",
             "to_agent": "lily",
             "to_instance": "HASHI1",
+            "message_id": "exchange-message-01",
+            "originated_at": "2026-10-16T01:02:03Z",
+            "message_type": "agent_message",
+            "idempotency_key": "hchat:exchange-message-01",
+            "payload_digest": "sha256:" + "a" * 64,
             "sender_assurance": "exchange_verified",
             "network_authentication": "exchange_wss",
             "authenticated_peer": "HASHI2",
@@ -266,6 +271,13 @@ def test_exchange_verified_hchat_context_projects_a_typed_relay_envelope(tmp_pat
     assert snapshot["network_authentication"] == "exchange_wss"
     assert snapshot["origin_instance"]["assurance"] == "exchange_verified"
     assert snapshot["relay_chain"] == ["remote-agent@HASHI2"]
+    assert snapshot["hchat_message"] == {
+        "message_id": "exchange-message-01",
+        "originated_at": "2026-10-16T01:02:03Z",
+        "message_type": "agent_message",
+        "idempotency_key": "hchat:exchange-message-01",
+        "payload_digest": "sha256:" + "a" * 64,
+    }
 
 
 def test_snapshot_does_not_trust_forged_runtime_result_or_mutate_inputs(tmp_path):

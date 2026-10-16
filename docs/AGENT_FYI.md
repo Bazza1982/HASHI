@@ -1,140 +1,102 @@
 # HASHI Agent FYI
 
-October 16 capacity-admission repair: the user approved fixing the observed
-Ollama context rejection. Keep the 49,152/8,192/90-second baseline and PCM
-Persona. HERV3 Functions now use a native one-token probe of the final
-privacy-filtered payload; only a valid provider count within 40,960 permits
-full generation. Probe output/tools are never delivered or executed, and its
-physical call, tokens, latency and wire evidence are accounted separately.
-Only newly completed tool outputs may get an explicit bounded page; full
-outputs remain private, hash-addressed and audited. Earlier task/PCM/results
-are not pruned. PAO Functions retain the original backend terminal if its
-error notification fails; the delivery failure is secondary evidence.
-357 related checks passed; the Core gate passed 847 with one Windows skip
-after source commit qualification. Source `815882bf` was adopted through one
-Agent6-only hot reboot with terminal success, ready state and matching artifact
-bytes; Core, other Workers, services and configuration stayed unchanged.
-Real saved-result paging counted 16,801 against an isolated 17,000 input cap
-at the same 49,152 total window, without replay. Current GPU free memory was
-about 190 MiB: long prefill and a full synthetic chain hit their test deadlines,
-so long-input/speech performance is not accepted.
-See [repair decision](HERV3_OLLAMA_CONTEXT_PILOT.md#2026-10-16-capacity-admission-repair).
+October 16 local Ollama pilot: Agent6 keeps the 49,152 context, 8,192 output
+reserve, 90-second idle release and main PCM Persona. Native admission probes
+and bounded new-result paging guard capacity; auxiliary presentation calls
+are bypassed. Source `815882bf` was adopted for Agent6; long-input and speech
+performance remain unaccepted. See [pilot decision](HERV3_OLLAMA_CONTEXT_PILOT.md).
 
+October 16: `/call` LAN targets accept only literal RFC 1918 IPv4 endpoints;
+DNS, loopback, link-local/public addresses and redirects stay blocked. Selection
+is per owner/Agent. See [Call decision](HASHI_CALL_INTERACTION_2026-10-04.md).
 
-October 16 Ollama presentation/provider correction: HERV3 publishes provider
-`ollama` and the configured model separately; `ollama-api` remains an internal
-adapter compatibility ID. Registered Model Provider names (including
-`deepseek`) round-trip through configuration, allowlists and saved selections.
-Ollama progress, required questions and optional final style pass through
-without an auxiliary model call; the main PCM Persona/final answer remain.
-Cloud inference behavior, capacities and Core are unchanged. The downstream
-`/commentary off` switch is still a visibility control. The user approved this
-group's commit and Agent6-only hot adoption, with task testing reserved for
-the user. Source `ad630550` is now adopted by Agent6: terminal reboot success,
-public Provider `ollama`, unchanged model/48K settings and matching artifact
-bytes are verified. Other Workers/Core stayed unchanged. The 873 distinct
-offline checks passed, with one POSIX-mode case skipped on Windows; live
-latency/token comparison remains for the user's task test.
-See [presentation decision](HERV3_OLLAMA_CONTEXT_PILOT.md#2026-10-16-ollama-only-pcm-presentation).
+October 13: HASHI3/HASHI4 and Workbench use existing GitHub `main`; create no
+branch/worktree. Source and adoption remain separate. See
+[reconciliation](repairs/DEBUG_CALL_RECONCILIATION_20261013.md).
 
-October 16 Ollama deployment completed under explicit user approval: source
-commit `4dd4cb1a`, revisioned 48K/8K profile and Agent6-only hot adoption.
-Terminal receipt succeeded; the new ACTIVE/ready Worker publishes native
-context and 90-second idle settings, and its adapter hashes match committed
-source. Core, unselected Workers and observed service listeners stayed
-unchanged. No push/merge, shared restart or task replay occurred. The user owns
-subsequent task testing; voice contention and long-term stability remain open.
-See [deployment evidence](HERV3_OLLAMA_CONTEXT_PILOT.md#2026-10-16-agent6-deployment-outcome).
-
-October 16 Ollama continuation: the user selected 48K (49,152), with 8K
-reasoning/output reserve, to leave GPU capacity for local speech. Keep the
-`feature-ollama` HERV3 Function/instance-only scope; do not redesign PCM.
-Independent Qwen tests passed original-task render preservation, three real
-read-only tool rounds, and 39,537-input-token inference. Ollama reported full
-GPU placement, but whole-device minimum free memory was only 1,116 MiB with
-the local multimodal service resident. Active voice latency/peak memory and
-longer Agent6 acceptance remain unverified. The candidate adds optional
-90-second idle residency (idle release observed) and per-call native timings;
-180 related regression checks passed. At that pre-deployment checkpoint,
-Agent6 config and Workers were unchanged pending the committed-source gate;
-the later deployment outcome is recorded separately.
-See [current pilot decision](HERV3_OLLAMA_CONTEXT_PILOT.md#2026-10-16-48k-continuation).
-
-October 15 scoped exception: the user authorized `feature-ollama` for MSI
-Agent6's HERV3/Ollama 64K trial and GPU observation. The opt-in native provider
-path preserves task/tool history and disables server truncation; other
-providers and PCM policy are unchanged. Source tests, Worker adoption and
-longer observation remain separate. No merge or broad restart is authorized.
-See [pilot decision](HERV3_OLLAMA_CONTEXT_PILOT.md).
-Initial source/independent native tests passed; Agent6 adoption was rejected
-because Function source must be committed. At that checkpoint its old Worker
-remained active and unadopted pilot configuration was restored. Do not describe this as an Agent6
-live or long-term acceptance pass.
-
-October 13: HASHI3/HASHI4 and Workbench use GitHub `main`; continue there,
-without new branches/worktrees. [Reconciliation](repairs/DEBUG_CALL_RECONCILIATION_20261013.md)
-preserves the repairs; source and runtime adoption remain separate.
-
-October 13 Call camera decision: video prepares a default camera during
-ringback; no first frame means voice fallback. Local preview is not proof of
-Agent vision. Once frames arrive, slow inference keeps the camera live; only
-stopped ingress or confirmed initial vision failure disables it. Stale
-snapshots cannot reverse newer camera changes. Multi-camera users can swap
-sources on the same Call. Camera content stays silent unless exceptionally
-noticeable, directly relevant and socially natural. Phone, model, reasoning,
-STT/TTS and Session ownership remain unchanged. See
-[Call decision](HASHI_CALL_INTERACTION_2026-10-04.md) for the complete contract.
+October 13 Call: prepare the camera during ringback; without a first frame use
+voice. Preview is not Agent vision. Only stopped ingress or confirmed initial
+vision failure disables it; comments stay rare and relevant. See
+[Call decision](HASHI_CALL_INTERACTION_2026-10-04.md).
 
 ## Authority and ownership
 
-PCM owns Persona, Context and Memory; PAO owns Agents, Sessions, Runs, jobs, Workzones and delivery; HERV3 owns Engine Turns, model/tool loop and cost; Frontend Connectors authenticate and render. Use the narrowest Function/configuration owner. Core has no product policy/imports. Protected Core requires explicit major-migration authorization, version bump, label and independent review; flags grant nothing.
+PCM owns Persona/Context/Memory; PAO owns Agents/Sessions/Runs/jobs/Workzones
+and delivery; HERV3 owns Engine Turns, model/tool loop and cost; Frontends
+authenticate/render. Use the narrowest Function/config owner. Core has no
+product policy/imports. Core changes require explicit major-migration approval,
+version bump, label and independent review; flags grant nothing.
 
-Source/Worker/delivery require proof. Tools cannot edit/kill Core/Python, read secrets or grant authority. FC→PAO `/reboot`: `min|same` one Worker; `max` shared Functions/Workers, never Core/Remote. Safety rejection keeps reason/blockers: command delivered, not chat failure. Only a same-live-Core successor confirms inherited broad receipts; cold startup is unconfirmed. Function code adopts by reboot; docs do not. Windows restart needs exact actuator/exit code. [Decision](HASHI_REBOOT_FAST_RELIABLE_PLAN_2026-10-14.md).
+Source, Worker adoption and delivery need separate proof. Tools cannot edit/kill
+Core/Python, read secrets or grant authority. `/reboot min|same` replaces one
+Worker; `max` replaces shared Functions/Workers, never Core/Remote. Function
+code adopts by reboot; docs do not. See
+[reboot decision](HASHI_REBOOT_FAST_RELIABLE_PLAN_2026-10-14.md).
+Workbench local configuration adoption keeps manager-level busy responses as
+`AGENT_BUSY` and retries only before a durable receipt exists. A durable
+`target_busy` outcome remains explicitly pending.
 
 ## Configuration, identity, and persistence
 
-Configuration owns identity, ports, Workzones, endpoints and models. Ignore secrets/machine paths. Instance models use allowed_backends and runtime effort options; shared compatibility uses the qualified registry. Explicit choices persist; unknown capabilities/prices are neither unsupported nor zero cost.
+Configuration owns identity, ports, Workzones, endpoints and models. Ignore
+secrets/machine paths. Instance model opt-ins use `allowed_backends` and runtime
+effort; shared compatibility uses the qualified registry. Unknown capability or
+price is neither unsupported nor zero. Explicit choices persist.
 
-Agent display name/Emoji come only from revisioned instance configuration.
-Runtime supplies dynamic status, never identity. Post-save Worker refresh is best-effort and cannot reverse durable success.
+Agent name/Emoji come from revisioned instance configuration; runtime supplies
+status only. A failed post-save Worker refresh cannot reverse durable success.
 
-Verified exact-model capabilities never expire. Unknown lookup failures can back off; refresh failures cannot erase verified facts. Changed model/adapter identity or validated source revisions may replace them. Pricing freshness is separate. See [capabilities](HASHI_MODEL_CAPABILITY_DISCOVERY.md).
+Verified exact-model capabilities do not expire; lookup/refresh failure cannot
+erase them. Changed model/adapter identity or validated source revisions may
+replace them. Pricing freshness is separate. See [capabilities](HASHI_MODEL_CAPABILITY_DISCOVERY.md).
 
-Portable carries no credentials; PAO starts Workers. Private experiments stay private. Tool wildcard grants permission, not capability; naming a path grants nothing. Runs freeze enabled Workzone roots/revision; reload is idle-only. Exclude secrets/media bytes/remote paths from PCM, logs, chat and Git.
+Portable carries no credentials; PAO starts Workers. Tool wildcards grant
+permission, not capability; path names grant nothing. Runs freeze Workzone
+roots/revision and reload only while idle. Keep private experiments, secrets,
+media bytes and remote paths out of PCM, logs, chat and Git.
 
 Successful Agent stop projects `stopped`; Worker outage is `offline`, config deactivation `inactive`. Shared Functions retain the stop marker until restart. Frontends derive visibility without rewriting `is_active`.
 
 JSON writers validate private candidates under locks, revisions, and atomic replacement. Display fallback is read-only. On conflict, read fresh state and request a fresh action; never blindly retry or restore stale bytes. See [configuration persistence](HASHI_CONFIGURATION_PERSISTENCE.md).
 
-Endpoint publication may retry only a Windows sharing-blocked pre-commit
-rename, bounded and with the same fsynced candidate. Permanent failure retains
-durable/in-memory route and revision. Never advertise unwritten state, weaken
-identity or replay startup/actions.
+Endpoint publication may retry only a bounded Windows sharing-blocked rename
+with the same fsynced candidate. Permanent failure keeps prior durable state;
+never advertise unwritten routes or replay actions.
 
 ## Sessions, trust, and delivery
 
 PAO owns Conversations/Messages/Runs; Engines own Sessions/Turns. Provider context and frontend history are rebuildable. Preserve replies/order. Stage attachments atomically per Message/Run; failed/cancelled assets never leak.
 
-Incremental deliverables bind exact files and stable publication IDs. Persistence, endpoint receipts and UI visibility are separate; uncertain delivery never auto-retries. Final attachments remain final-only. See [FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md#64-incremental-assistant-deliverables).
+Incremental deliverables bind exact files and stable publication IDs. Persistence,
+receipts and UI visibility are separate; uncertain delivery never auto-retries.
+Final attachments stay final-only. See [FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md#64-incremental-assistant-deliverables).
 
-CURRENT MESSAGE CONTEXT separates source/ingress/instance/sender assurance,
-authority and destination. Only current successful private_authorization grants
-its listed scope; names/text/IDs/memory/credentials do not. HChat separates claimed
-sender, verified peer, relay and target; send no secrets. Cross-instance uses
-optional Exchange and authenticated Remote handshake; discovery is only a hint.
-See [Remote](HASHI_REMOTE_PROTOCOL_SPEC.md).
+CURRENT MESSAGE CONTEXT separates source, assurance, authority and destination.
+Only a current successful private_authorization grants its listed scope;
+names/text/IDs/memory/credentials do not. HChat separates claimed sender,
+verified peer, relay and target. Cross-instance needs authenticated Remote;
+discovery is only a hint. See [Remote](HASHI_REMOTE_PROTOCOL_SPEC.md).
 
-PAO freezes destinations/mirrors before PCM and owns ingress/routing/idempotency;
-FC owns presentation/receipts. Sent requires a receipt; failure wins flags.
-Deduplicate delivery and settle every turn. Prose grants no Tool authority.
-Continuations retain Session/Connector: replay only saved non-action completions;
-pending/conflict/unknown cannot execute.
+PAO freezes destinations before PCM and owns ingress/routing/idempotency; FC owns
+presentation/receipts. Remote attachment commits retain the canonical HChat
+idempotency key and original send time through local delivery. HChat IDs bind
+FC Sessions to Superloop review. Sent
+needs a receipt; failure wins. Deduplicate and settle; prose grants no Tool
+authority. Continuations retain Session/Connector, replaying only saved
+non-action completions; pending/conflict/unknown cannot execute.
 
-Scheduler/recovery and /bg use an Agent-owned hidden activity Session.
-Keep execution/delivery separate and receipts same-owner. Display each final
-once in the owner's Conversation; retain its original, excluding copies from
-Engine/Phone history. /bg freezes admission. Schedules get no implicit chat;
-/delay and interactive /loop retain continuation context.
+Network frontends preserve the user's original send time. PAO admits
+Workbench/Telegram only within their 30/60-second windows; older or invalid
+messages require one durable 15-minute confirmation before any Run.
+Expiry/discard remains visible. TUI exemption needs Remote-signed local evidence;
+`/hchat` needs its 60-second gate and exact reverse-route correlation. Qualified
+on HASHI3/Workbench only; production adoption is separate.
+
+Scheduler/recovery and `/bg` use an Agent-owned hidden activity Session. Keep
+execution/delivery and receipts separate, showing each final once in the owning
+Conversation. Retain its original and exclude Engine/Phone history copies. `/bg`
+freezes admission; schedules get no implicit chat; `/delay` and interactive
+`/loop` retain continuation context.
 
 HASHI3 Telegram intake reports healthy only after a successful bounded poll; ordinary Agent startup preserves pending updates. HERV3 may quote bounded unfinished WIP evidence in the turn but sends no premature recovery card. Source changes need separate Worker adoption and live checks.
 
@@ -145,7 +107,11 @@ and its own model IDs. Preserve history/usage and Gemini models on qualified
 routes; the old-client rejection is not an account ban. See
 [retirement](HASHI_GEMINI_CLI_RETIREMENT.md).
 
-Public HERV3 is her-v3; her-v2 names are compatibility only. JEV defaults off. /backend selects Engine, /provider Model Provider, /model model, /effort reasoning; Fixed/Flex and Memory+ are independent. /meter uses all physical calls/cost. Codex cumulative counters need a persisted turn baseline; estimate if unknown. USD estimates are not subscription bills.
+Public HERV3 is `her-v3`; `her-v2` names are compatibility only. JEV defaults
+off. `/backend`, `/provider`, `/model` and `/effort` select their named layers;
+Fixed/Flex and Memory+ are independent. `/meter` counts physical calls/cost.
+Codex cumulative usage needs a persisted baseline; otherwise estimate. USD
+estimates are not subscription bills.
 
 Level 2: HERV3/DeepSeek only. Local PII detection can miss values;
 `/privacy 2` needs risk acceptance and blocks on detector failure.
@@ -160,24 +126,25 @@ cannot restore revoked authority. Show typed progress, not private reasoning.
 
 ## UI, media, and Phone
 
-Manual Desktop stale input is unexecuted: keep its lease, pause for a fresh
-frame and never replay. Other failures release control. See
-[desktop](HASHI_CROSS_PLATFORM_DEVICE_CONTROL_PLAN.md).
+Manual Desktop stale input stays unexecuted: keep its lease, wait for a fresh
+frame and never replay. Other failures release control. See [desktop](HASHI_CROSS_PLATFORM_DEVICE_CONTROL_PLAN.md).
 
 Local cascade speech is an opt-in Function sidecar. Synthetic evidence does not establish physical audio acceptance. See [local Phone](HASHI_PHONE_LOCAL_CASCADE_GATE2.md).
 
 Live Phone defaults on; a missing provider API key blocks calls and must be named in `/phone`. An explicit instance opt-out remains valid. The Agent's Phone settings and PCM readiness do not prove provider readiness.
 
-Phone failures retain a safe durable cause: content policy, authentication, quota, rate limit, rejected configuration and provider outage remain distinct. Failed/interrupted panels stay until dismissal; normal hang-up may dismiss automatically. Terminal calls settle pending attempts and release busy state across Function replacement.
+Phone failures retain distinct durable causes: policy, auth, quota, rate limit,
+configuration and provider outage. Failed/interrupted panels stay until
+dismissal; normal hang-up may dismiss. Terminal calls settle attempts and clear
+busy state across Function replacement.
 
 Renderers/catalogs own UI text. /language changes shared UI, /tui language local TUI; neither translates replies/IDs. TUI switches freeze generation/Agent/capabilities/Session. Remote authenticates. /telegram off and /whatsapp off disable future mirrors, preserving origin replies. /think and /commentary are independent.
 
 `/stop` fences every Agent Session: cancel/reap owned work, clear pre-fence
-one-shots and reject stale callbacks; periodic definitions remain. Runs save
-`stopped` plus terminal event before cleanup; adoption repairs remnants. Require
-canonical state; never blindly retry unconfirmed saves. Close DB after
-commit/rollback. HERV3 releases its fixed Turn before outer cleanup to prevent
-false concurrency. See [stop contract](HASHI_AGENT_STOP_FENCE_DECISION.md).
+one-shots and reject stale callbacks; periodic definitions remain. Save `stopped`
+and its terminal event before cleanup; repair remnants on adoption. Never retry
+unconfirmed saves; close DB after commit/rollback. HERV3 releases its fixed Turn
+before outer cleanup. See [stop contract](HASHI_AGENT_STOP_FENCE_DECISION.md).
 
 Media bind one draft/instance/Agent/Run; Remote sends managed bytes. HERV3 gains no wider authority. Safe Voice uses typed confirm/discard; missing idempotency blocks upload and stale media is discarded. /voice uses a validated Function bundle/local media; Workbench gets Session audio, Telegram its voice renderer.
 
@@ -186,13 +153,15 @@ Actions receive bounded original PCM/Conversation/job evidence, excluding
 scheduled prompts; lookups create no Run. Required context must fit. See
 [PCM](HASHI_PCM_SYSTEM_DESIGN.md) and [PAO](HASHI_PAO_SYSTEM_DESIGN.md).
 
-Phone fragments remain ordered durable Session speech. Acceptance, execution, playback and listening need separate evidence. Validate action origin/order, deliver final results and never auto-retry uncertain writes.
+Phone fragments remain ordered durable Session speech. Acceptance, execution,
+playback and listening need separate proof. Validate origin/order, deliver final
+results and never auto-retry uncertain writes.
 
 Phone handoff preserves its frozen ID only after scoped snapshot/delegation
-validation. Pre-model errors settle the durable Run and visible activity through
-the result owner; caught errors are not success. Grouping for handoff byte limits
-is lossless: retain roles, text, event IDs, order and timestamps and accept old
-snapshots. It grants no authority/retry. See [handoff](HASHI_PHONE_CONTEXT_HANDOFF.md).
+validation. Pre-model errors settle the durable Run and activity through the
+result owner; caught errors are not success. Byte-limit grouping preserves roles,
+text, event IDs, order and timestamps and accepts old snapshots. It grants no
+authority/retry. See [handoff](HASHI_PHONE_CONTEXT_HANDOFF.md).
 
 Qualified Function adapters own Phone settings: apply next call, retain provider
 on recovery. Open once with Persona/language after readiness; yield to speech.
@@ -202,12 +171,14 @@ Keep source, adoption and device acceptance separate.
 
 Commands follow the [UI guide](HASHI_COMMAND_UI_STYLE_GUIDE.md), retain Session and remain owner-admitted during active Runs. /new creates a fresh Session without deleting history; PAO owns Agent deletion/cleanup receipts.
 
-`/say` reads the latest final reply, `/say 2`–`/say 4` that many, `/say 1-3` the latest three oldest first. Skip cost/command/progress. Telegram needs confirmed chat delivery; Workbench/TUI play locally. Reboot receipts never prove playback.
+`/say` reads the latest final; `2`–`4` select a count and `1-3` the latest three,
+oldest first. Skip cost/command/progress. Telegram needs confirmed delivery;
+Workbench/TUI play locally. Reboot receipts never prove playback.
 
-TTS logs omit secrets. `/voice` chooses a labelled voice/preview; >=90% unsupported
-text switches inside its provider (English exempt). Workbench uses display locale,
-others `/language`. Fallback is visible and only paid/network to free/local; Windows
-Edge may use SAPI under its own name. `/call` is unchanged. See
+TTS logs omit secrets. `/voice` chooses a labelled voice/preview; >=90%
+unsupported text switches within its provider (English exempt). Workbench uses
+display locale, others `/language`. Fallback is visible and only paid/network
+to free/local; Windows Edge may use named SAPI. `/call` is unchanged. See
 [routing](repairs/TTS_LANGUAGE_ROUTING_DECISION_20261015.md)
 and [fallback](repairs/VOICE_PROVIDER_FALLBACK_REPAIR_20261014.md).
 

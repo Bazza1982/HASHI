@@ -776,6 +776,16 @@ class FlexibleAgentRuntime:
                     ):
                         session.block("channel_denied")
                         return
+                    from orchestrator.telegram_freshness_gate import check_telegram_message_freshness
+                    if await check_telegram_message_freshness(
+                        self,
+                        update,
+                        handler_kind="command",
+                        command_name=cmd,
+                        args=args,
+                    ):
+                        session.block("stale_confirmation_required")
+                        return
                     self._record_active_chat(update)
                     message = getattr(update, "effective_message", None) or getattr(
                         update, "message", None
@@ -1021,6 +1031,24 @@ class FlexibleAgentRuntime:
         from orchestrator.frontend_delivery import telegram_delivery_for_admission
 
         admission_metadata = dict(request_metadata or {})
+        # A delayed Telegram Update may only pass the freshness gate while the
+        # connector is replaying the immutable server-side record.  Bind that
+        # release to the original idempotency key so a callback retry, worker
+        # restart, or transport replay cannot create a second Run.
+        from orchestrator.telegram_freshness_gate import current_telegram_release
+
+        confirmed_telegram = current_telegram_release()
+        if confirmed_telegram is not None:
+            idempotency_key = str(confirmed_telegram["idempotency_key"])
+            admission_metadata.update(
+                {
+                    "ingress_confirmation_id": confirmed_telegram["confirmation_id"],
+                    "source_message_id": confirmed_telegram["source_message_id"],
+                    "originated_at": confirmed_telegram.get("originated_at"),
+                    "freshness_received_at": confirmed_telegram.get("received_at"),
+                    "ingress_transport": "telegram",
+                }
+            )
         admission_metadata.setdefault("owner_id", runtime_session.owner_id(self))
         telegram_requested = telegram_delivery_for_admission(
             source=source,
@@ -5848,6 +5876,7 @@ class FlexibleAgentRuntime:
                     pending["prompt"],
                     "voice_transcript",
                     pending["summary"],
+                    request_metadata={"ingress_transport": "telegram"},
                 )
         elif action == "no":
             if pending and pending.get("native_audio"):
@@ -11244,6 +11273,9 @@ class FlexibleAgentRuntime:
             return
         if not await FlexibleAgentRuntime._telegram_channel_allowed(self, update, source_channel="telegram"):
             return
+        from orchestrator.telegram_freshness_gate import check_telegram_message_freshness
+        if await check_telegram_message_freshness(self, update, handler_kind="text"):
+            return
         self._record_active_chat(update)
         if self._should_redirect_after_transfer():
             await self._reply_text(update, self._transfer_redirect_text())
@@ -11274,7 +11306,23 @@ class FlexibleAgentRuntime:
     async def download_media(self, file_id: str, filename: str) -> Path:
         return await runtime_media.download_media(self, file_id, filename)
 
+    async def callback_ingress_confirm(self, update: Update, context: Any):
+        from orchestrator.telegram_freshness_gate import handle_telegram_confirmation_callback
+        await handle_telegram_confirmation_callback(self, update)
+
     async def _handle_media_message(self, update, media_kind: str, filename: str, file_id: str, prompt: str, summary: str):
+        from orchestrator.telegram_freshness_gate import check_telegram_message_freshness
+        if await check_telegram_message_freshness(
+            self,
+            update,
+            handler_kind="media",
+            media_kind=media_kind,
+            filename=filename,
+            file_id=file_id,
+            prompt=prompt,
+            summary=summary,
+        ):
+            return
         await runtime_media.handle_media_message(self, update, media_kind, filename, file_id, prompt, summary)
 
     async def handle_document(self, update: Update, context: Any):
@@ -11290,12 +11338,38 @@ class FlexibleAgentRuntime:
         await runtime_media.handle_audio(self, update, context)
 
     async def _handle_voice_or_audio(self, update: Update, media_kind: str, filename: str, file_id: str, caption: str = ""):
+        from orchestrator.telegram_freshness_gate import check_telegram_message_freshness
+        if await check_telegram_message_freshness(
+            self,
+            update,
+            handler_kind="media",
+            media_kind=media_kind,
+            filename=filename,
+            file_id=file_id,
+            caption=caption,
+        ):
+            return
         await runtime_media.handle_voice_or_audio(self, update, media_kind, filename, file_id, caption=caption)
 
     async def handle_video(self, update: Update, context: Any):
         await runtime_media.handle_video(self, update, context)
 
     async def handle_sticker(self, update: Update, context: Any):
+        if not self._is_authorized_user(update.effective_user.id):
+            return
+        if not await FlexibleAgentRuntime._telegram_channel_allowed(
+            self, update, source_channel="telegram"
+        ):
+            return
+        from orchestrator.telegram_freshness_gate import check_telegram_message_freshness
+        if await check_telegram_message_freshness(
+            self,
+            update,
+            handler_kind="media",
+            media_kind="Sticker",
+            filename="sticker",
+        ):
+            return
         await runtime_media.handle_sticker(self, update, context)
 
     async def send_long_message(

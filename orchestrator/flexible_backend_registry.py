@@ -438,6 +438,72 @@ def get_available_models(engine: str) -> list[str]:
     return list(get_backend_entry(engine).get("models") or [])
 
 
+# Authoritative canonical same-model equivalence for user-consented fallback.
+# Keys are canonical model identities shared across Model Providers; values map
+# each Provider engine to the exact model id that serves that canonical model.
+# This is the only owner of the mapping: fallback policy, command UI, and
+# adapters derive from it and never copy model lists.
+CANONICAL_MODEL_EQUIVALENTS: dict[str, dict[str, str]] = {
+    "deepseek-v4-flash": {
+        "deepseek-api": "deepseek-v4-flash",
+        "openrouter-api": "deepseek/deepseek-v4-flash",
+    },
+    "deepseek-v4-pro": {
+        "deepseek-api": "deepseek-v4-pro",
+        "openrouter-api": "deepseek/deepseek-v4-pro",
+    },
+}
+
+
+def canonical_model_id(engine: str | None, model: str | None) -> str | None:
+    """Return the canonical identity that several Providers may serve."""
+
+    normalized_engine = canonical_backend_engine(engine)
+    normalized_model = str(model or "").strip()
+    if not normalized_engine or not normalized_model:
+        return None
+    for canonical, targets in CANONICAL_MODEL_EQUIVALENTS.items():
+        if targets.get(normalized_engine) == normalized_model:
+            return canonical
+    return None
+
+
+def same_model_target(
+    *,
+    source_engine: str | None,
+    source_model: str | None,
+    target_engine: str | None,
+    target_model: str | None,
+) -> bool:
+    """Prove that two exact Provider/model pairs serve one canonical model."""
+
+    canonical = canonical_model_id(source_engine, source_model)
+    if canonical is None:
+        return False
+    target = canonical_backend_engine(target_engine)
+    return bool(target) and CANONICAL_MODEL_EQUIVALENTS[canonical].get(
+        target
+    ) == str(target_model or "").strip()
+
+
+def get_same_model_provider_targets(
+    engine: str | None, model: str | None
+) -> list[tuple[str, str]]:
+    """Return mapped same-canonical-model targets on other Providers."""
+
+    canonical = canonical_model_id(engine, model)
+    if canonical is None:
+        return []
+    source = canonical_backend_engine(engine)
+    return [
+        (target_engine, target_model)
+        for target_engine, target_model in CANONICAL_MODEL_EQUIVALENTS[
+            canonical
+        ].items()
+        if target_engine != source
+    ]
+
+
 def get_gateway_models(engine: str) -> list[str]:
     entry = get_backend_entry(engine)
     if not entry.get("gateway_enabled"):

@@ -35,7 +35,9 @@ def actual_admission_api(phone, tmp_path):
     runtime = SimpleNamespace(name=phone.agent_id, session_store=phone.store,
         workspace_dir=workspace, global_config=SimpleNamespace(
             authorized_id=7, instance_id="HASHI", bridge_home=tmp_path, project_root=None),
-        config=SimpleNamespace(workspace_dir=workspace), queue=asyncio.Queue(),
+        config=SimpleNamespace(workspace_dir=workspace),
+        backend_manager=SimpleNamespace(_read_state_dict=lambda: {}),
+        queue=asyncio.Queue(), _execution_admissions={},
         error_logger=logging.getLogger("test.phone.error"), message_logger=logging.getLogger("test.phone.messages"),
         request_activity=SimpleNamespace(start=lambda *args, **kwargs: None),
         next_request_id=lambda: f"actual-admission-{next(sequence)}")
@@ -118,18 +120,17 @@ async def test_real_admission_rejects_owner_agent_or_generation_change(phone, tm
 
 
 @pytest.mark.asyncio
-async def test_non_primary_scope_is_rejected_before_phone_context_or_worker_admission(phone, tmp_path):
-    from orchestrator.frontend_live_voice.protocol import LiveVoiceError
+async def test_owned_non_primary_conversation_remains_valid_after_primary_switch(phone, tmp_path):
     server, runtime = actual_admission_api(phone, tmp_path)
     primary = phone.store.ensure_default_session(owner_id=phone.owner_id, agent_id=phone.agent_id)
     phone.store.bind_primary_session(owner_id=phone.owner_id, agent_id=phone.agent_id, session_id=primary["session_id"])
-    with pytest.raises(LiveVoiceError, match="live_scope_changed"):
-        server._resolve_live_voice_phone_session(phone.agent_id, owner_id=phone.owner_id,
-            session_id=phone.session_id, context_generation=1)
-    proposal = SimpleNamespace(text="Save synthetic fitness data", execution_text="", delegation_id="target-request",
-                               version=1, digest="a" * 64)
-    with pytest.raises(LiveVoiceError, match="live_admission_scope_changed"):
-        await server._admit_live_voice_run(phone.binding, proposal, "wrong-scope")
+    session = server._require_live_voice_session_scope(
+        owner_id=phone.owner_id,
+        agent_id=phone.agent_id,
+        session_id=phone.session_id,
+        context_generation=1,
+    )
+    assert session["session_id"] == phone.session_id
     assert runtime.queue.empty()
     assert phone.store.recent_session_runs(phone.session_id, owner_id=phone.owner_id) == []
 
@@ -137,8 +138,7 @@ async def test_non_primary_scope_is_rejected_before_phone_context_or_worker_admi
 @pytest.mark.asyncio
 async def test_known_initial_rejection_closes_pending_receipt_without_recovery_retry(phone, tmp_path):
     server, runtime = actual_admission_api(phone, tmp_path)
-    primary = phone.store.ensure_default_session(owner_id=phone.owner_id, agent_id=phone.agent_id)
-    phone.store.bind_primary_session(owner_id=phone.owner_id, agent_id=phone.agent_id, session_id=primary["session_id"])
+    phone.store.archive_session(phone.session_id)
     phone.manager._admit_run = server._admit_live_voice_run
     phone.judgments = [decision(action("write", "Save synthetic exercise data"))]
     await speak(phone, "Save synthetic exercise data")

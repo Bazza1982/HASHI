@@ -505,6 +505,29 @@ def test_config_rejects_wrong_locality_and_unsupported_protocol(changes):
         validate_target(target)
 
 
+def test_config_allows_literal_private_lan_targets_only():
+    target = document()["targets"][2]
+    target.update(
+        {
+            "location": "lan",
+            "base_url": "http://192.168.0.41:48254/v1",
+            "model": "minicpm-v-4.6",
+        }
+    )
+
+    assert validate_target(target)["base_url"] == "http://192.168.0.41:48254/v1"
+
+    for base_url in (
+        "http://127.0.0.1:48254/v1",
+        "http://169.254.169.254/v1",
+        "http://8.8.8.8/v1",
+        "http://vision.local:48254/v1",
+        "ftp://192.168.0.41:48254/v1",
+    ):
+        with pytest.raises(CallError, match="call_lan_target_not_private"):
+            validate_target({**target, "base_url": base_url})
+
+
 async def test_turn_enters_agent_once_and_duplicate_upload_is_idempotent(tmp_path):
     service, ports, adapters, base, _ = setup(tmp_path)
     binding, start_body, _ = await start(service, base)

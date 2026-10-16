@@ -271,6 +271,7 @@ API_PROTOCOL_CAPABILITIES = [
 ]
 
 _WORKBENCH_GATEWAY_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE"})
+_WORKBENCH_SESSION_RUN_API_PATH = re.compile(r"^v1/sessions/[^/]+/runs/?$")
 _BRIDGE_HANDOFF_PROXY_TIMEOUT_SECONDS = 3590.0
 _WORKBENCH_GATEWAY_REQUEST_HEADERS = frozenset(
     {
@@ -387,8 +388,15 @@ def _redacted_protocol_status() -> dict[str, Any]:
 
 class HchatPayload(BaseModel):
     from_instance: str          # e.g. "HASHI9"
+    from_agent: Optional[str] = None
     to_agent: str               # e.g. "lily"
     text: str                   # The message content (already formatted)
+    message_id: str
+    originated_at: str
+    idempotency_key: str
+    conversation_id: Optional[str] = None
+    message_type: str = "agent_message"
+    in_reply_to: Optional[str] = None
     to_instance: Optional[str] = None  # Final target when a configured exchange relays
     source_hchat_format: bool = False  # If True, text is raw hchat format
     reply_route: Optional[dict] = None  # Sender's routing info for reply delivery
@@ -477,6 +485,7 @@ class ProtocolHandshakePayload(BaseModel):
 
 class ProtocolMessagePayload(BaseModel):
     message_id: str
+    idempotency_key: str
     conversation_id: str
     in_reply_to: Optional[str] = None
     from_instance: str
@@ -488,6 +497,7 @@ class ProtocolMessagePayload(BaseModel):
     ttl: int = 8
     route_trace: list[str] = []
     message_type: str = "agent_message"
+    originated_at: Optional[str] = None
     created_at: Optional[str] = None
     private_authorization_proofs: list[dict[str, Any]] = []
     authorization_resources: list[str] = []
@@ -520,7 +530,9 @@ class ExchangeMessagePayload(BaseModel):
     from_agent: str
     to_address: str
     text: str
-    message_id: Optional[str] = None
+    message_id: str
+    originated_at: str
+    idempotency_key: str
     conversation_id: Optional[str] = None
     message_type: str = "agent_message"
     in_reply_to: Optional[str] = None
@@ -624,6 +636,7 @@ class AttachmentCancelPayload(BaseModel):
 
 class ProtocolMessageWithAttachmentsPayload(BaseModel):
     message_id: str
+    idempotency_key: str
     conversation_id: str
     in_reply_to: Optional[str] = None
     from_instance: str
@@ -636,6 +649,7 @@ class ProtocolMessageWithAttachmentsPayload(BaseModel):
     ttl: int = 8
     route_trace: list[str] = []
     message_type: str = "agent_message"
+    originated_at: Optional[str] = None
     created_at: Optional[str] = None
     private_authorization_proofs: list[dict[str, Any]] = []
     authorization_resources: list[str] = []
@@ -2104,6 +2118,78 @@ def _validate_workbench_gateway_path(api_path: str) -> str:
     return f"/api/{value}"
 
 
+def _with_remote_workbench_ingress_evidence(
+    *,
+    method: str,
+    api_path: str,
+    body_bytes: bytes,
+    authenticated_instance: str | None,
+) -> bytes:
+    """Seal the external network hop before relaying a Session Run locally.
+
+    The Remote gateway has already authenticated the exact caller body.  The
+    Workbench API sees only the following loopback hop, so it cannot otherwise
+    distinguish a remote Workbench message (60-second window) from a local one
+    (30-second window).  The marker is body-bound and signed with this
+    instance's shared-network secret; any caller-supplied marker is replaced.
+    """
+    normalized_path = str(api_path or "").strip().strip("/")
+    origin_id = str(authenticated_instance or "").strip().upper()
+    if (
+        str(method or "").upper() != "POST"
+        or not _WORKBENCH_SESSION_RUN_API_PATH.fullmatch(normalized_path)
+        or not origin_id
+    ):
+        return body_bytes
+    try:
+        payload = json.loads(body_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, TypeError):
+        return body_bytes
+    if not isinstance(payload, dict):
+        return body_bytes
+    supplied_metadata = payload.get("request_metadata")
+    if supplied_metadata is not None and not isinstance(supplied_metadata, dict):
+        # Preserve the invalid shape so the local API remains the authority
+        # that rejects it; do not silently repair caller input.
+        return body_bytes
+    message = payload.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    prompt = "\n".join(
+        str(block.get("text") or "")
+        for block in (content or ())
+        if isinstance(block, dict) and block.get("type") == "text"
+    )
+    from orchestrator.message_context import (
+        CONNECTOR_EVIDENCE_METADATA_KEY,
+        NETWORK_INGRESS_SCOPE_CLAIM_KEY,
+        REMOTE_WORKBENCH_INGRESS_SCOPE,
+        seal_connector_evidence,
+    )
+
+    evidence = seal_connector_evidence(
+        Path(_hashi_root) if _hashi_root else Path.cwd(),
+        claims={
+            NETWORK_INGRESS_SCOPE_CLAIM_KEY: REMOTE_WORKBENCH_INGRESS_SCOPE,
+            "_origin_instance_evidence": {
+                "id": origin_id,
+                "assurance": "shared_network_hmac",
+            },
+        },
+        prompt=prompt,
+    )
+    if evidence is None:
+        # Failing closed leaves the stricter local 30-second policy in force.
+        return body_bytes
+    metadata = dict(supplied_metadata or {})
+    metadata[CONNECTOR_EVIDENCE_METADATA_KEY] = evidence
+    payload["request_metadata"] = metadata
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
 class WorkbenchGatewayError(ConnectionError):
     def __init__(self, code: str, *, accepted: bool | None, retryable: bool, status: int):
         self.code, self.accepted, self.retryable, self.status = code, accepted, retryable, status
@@ -2821,7 +2907,7 @@ def create_app(
             "proxy_received", **trace_facts, method=request.method,
             api_path=safe_api_path, request_bytes=len(body_bytes),
         )
-        ok, reason, _authenticated_instance = verify_protocol_request(
+        ok, reason, authenticated_instance = verify_protocol_request(
             request,
             body_bytes=body_bytes,
         )
@@ -2834,6 +2920,12 @@ def create_app(
             )
             detail = "Shared token required" if reason == "auth_required" else "Invalid or expired shared token"
             raise HTTPException(status_code=401, detail=detail)
+        body_bytes = _with_remote_workbench_ingress_evidence(
+            method=request.method,
+            api_path=api_path,
+            body_bytes=body_bytes,
+            authenticated_instance=authenticated_instance,
+        )
         _workbench_gateway_log(
             "proxy_authenticated", **trace_facts, method=request.method,
             api_path=safe_api_path,
@@ -3394,6 +3486,28 @@ def create_app(
                     "code": "EXCHANGE_DISABLED",
                 },
             )
+        if payload.idempotency_key != f"hchat:{payload.message_id}":
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "state": "rejected",
+                    "code": "INVALID_MESSAGE",
+                },
+            )
+        if payload.message_type not in {
+            "agent_message",
+            "agent_reply",
+            "delivery_status",
+        }:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "error": "Unsupported HChat message_type",
+                    "error_code": "invalid_message",
+                },
+            )
         if payload.authorization_resources or payload.private_authorization_proofs:
             return JSONResponse(
                 status_code=409,
@@ -3409,6 +3523,8 @@ def create_app(
                 to_address=payload.to_address,
                 text=payload.text,
                 message_id=payload.message_id,
+                originated_at=payload.originated_at,
+                idempotency_key=payload.idempotency_key,
                 conversation_id=payload.conversation_id,
                 message_type=payload.message_type,
                 in_reply_to=payload.in_reply_to,
@@ -3745,6 +3861,7 @@ def create_app(
         try:
             local_payload = ProtocolMessagePayload(
                 message_id=payload.message_id,
+                idempotency_key=payload.idempotency_key,
                 conversation_id=payload.conversation_id,
                 in_reply_to=payload.in_reply_to,
                 from_instance=payload.from_instance,
@@ -3760,6 +3877,7 @@ def create_app(
                 ttl=payload.ttl,
                 route_trace=payload.route_trace,
                 message_type=payload.message_type,
+                originated_at=payload.originated_at,
                 created_at=payload.created_at,
                 private_authorization_proofs=payload.private_authorization_proofs,
                 authorization_resources=payload.authorization_resources,
@@ -3832,6 +3950,16 @@ def create_app(
             text_snippet=payload.text,
         )
 
+        if payload.idempotency_key != f"hchat:{payload.message_id}":
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "error": "HChat idempotency_key does not match message_id",
+                    "error_code": "invalid_message",
+                },
+            )
+
         local_instance_id = str(_instance_info.get("instance_id", "")).upper()
         requested_instance = (payload.to_instance or "").strip().upper()
 
@@ -3839,26 +3967,56 @@ def create_app(
             try:
                 from tools.hchat_send import parse_hchat_message, send_hchat
 
-                parsed = parse_hchat_message(payload.text, default_instance=payload.from_instance)
-                if not parsed:
-                    return JSONResponse(
-                        status_code=400,
-                        content={"ok": False, "error": "Invalid exchange hchat format"},
+                parsed = parse_hchat_message(
+                    payload.text,
+                    default_instance=payload.from_instance,
+                )
+                if payload.message_type == "delivery_status":
+                    relay_from_agent = str(payload.from_agent or "").strip().casefold()
+                    relay_source_instance = str(payload.from_instance or "").strip().upper()
+                    relay_text = payload.text
+                    if not relay_from_agent or not relay_source_instance:
+                        return JSONResponse(
+                            status_code=400,
+                            content={
+                                "ok": False,
+                                "error": "Delivery status relay identity is required",
+                            },
+                        )
+                else:
+                    if not parsed:
+                        return JSONResponse(
+                            status_code=400,
+                            content={
+                                "ok": False,
+                                "error": "Invalid exchange hchat format",
+                            },
+                        )
+                    relay_from_agent = parsed["agent"]
+                    relay_source_instance = (
+                        parsed["instance_id"] or payload.from_instance
                     )
+                    relay_text = parsed["body"]
 
                 ok = send_hchat(
                     payload.to_agent,
-                    parsed["agent"],
-                    parsed["body"],
+                    relay_from_agent,
+                    relay_text,
                     target_instance=requested_instance,
-                    source_instance=parsed["instance_id"] or payload.from_instance,
+                    source_instance=relay_source_instance,
                     reply_route_override=payload.reply_route,
+                    message_id=payload.message_id,
+                    conversation_id=payload.conversation_id,
+                    message_type=payload.message_type,
+                    in_reply_to=payload.in_reply_to,
+                    originated_at=payload.originated_at,
+                    idempotency_key=payload.idempotency_key,
                 )
                 if ok:
                     logger.info(
                         "HChat exchange relayed: %s/%s → %s@%s via %s",
-                        parsed["instance_id"] or payload.from_instance,
-                        parsed["agent"],
+                        relay_source_instance,
+                        relay_from_agent,
                         payload.to_agent,
                         requested_instance,
                         local_instance_id,
@@ -3901,7 +4059,9 @@ def create_app(
             payload.text, default_instance=payload.from_instance
         )
         claimed_agent = str(
-            (parsed_hchat or {}).get("agent") or payload.from_instance.lower()
+            payload.from_agent
+            or (parsed_hchat or {}).get("agent")
+            or payload.from_instance.lower()
         ).strip().casefold()
         if payload.source_hchat_format:
             message_text = payload.text  # already formatted
@@ -3914,6 +4074,12 @@ def create_app(
             "agent": payload.to_agent.lower(),
             "text": message_text,
             "source": "hchat",
+            "message_id": payload.message_id,
+            "originated_at": payload.originated_at,
+            "idempotency_key": payload.idempotency_key,
+            "conversation_id": payload.conversation_id,
+            "message_type": payload.message_type,
+            "in_reply_to": payload.in_reply_to,
             "hchat_context": {
                 "from_agent": claimed_agent,
                 "from_instance": payload.from_instance,
@@ -3923,6 +4089,11 @@ def create_app(
                 "network_authentication": "pairing_bearer",
                 "sender_assurance": "authenticated_client_declared",
                 "relay_chain": [],
+                "message_id": payload.message_id,
+                "originated_at": payload.originated_at,
+                "message_type": payload.message_type,
+                "conversation_id": payload.conversation_id,
+                "in_reply_to": payload.in_reply_to,
             },
         }
         if payload.private_authorization_proofs:
@@ -3972,7 +4143,10 @@ def create_app(
                 result = json.loads(resp.read().decode("utf-8"))
                 if result.get("ok"):
                     logger.info("HChat relayed: %s → %s", payload.from_instance, payload.to_agent)
-                    return {"ok": True, "relayed": True}
+                    return JSONResponse(
+                        status_code=int(getattr(resp, "status", 200)),
+                        content={**result, "relayed": True},
+                    )
                 else:
                     logger.warning("Workbench rejected hchat: %s", result)
                     return JSONResponse(

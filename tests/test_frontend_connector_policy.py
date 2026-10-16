@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -81,10 +82,15 @@ async def test_native_telegram_text_message_enters_admission_as_telegram(
     )
     monkeypatch.setattr(runtime_module, "_print_user_message", lambda *_args: None)
 
-    message = SimpleNamespace(text="hello from Telegram")
+    message = SimpleNamespace(
+        message_id=123,
+        text="hello from Telegram",
+        date=datetime.now(timezone.utc),
+    )
     update = SimpleNamespace(
         effective_user=SimpleNamespace(id=42),
         effective_chat=SimpleNamespace(id=99),
+        effective_message=message,
         message=message,
     )
 

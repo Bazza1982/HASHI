@@ -942,7 +942,16 @@ class HashiApiAdapter(OpenRouterAdapter):
         silent: bool = False,
         on_stream_event: StreamCallback = None,
         request_content: Mapping[str, Any] | None = None,
+        continuation_messages: list[dict[str, Any]] | None = None,
+        provider_call_limit: int | None = None,
+        before_provider_call: Any = None,
     ) -> BackendResponse:
+        if continuation_messages is not None:
+            # The gateway keeps its own session/continuation contract; an
+            # HERV3 cross-Provider continuation cannot be represented here.
+            raise ValueError(
+                "hashi-api does not accept an assembled HERV3 continuation"
+            )
         started = time.perf_counter()
         self._ensure_client()
 

@@ -50,3 +50,31 @@ def test_register_outbound_correlation_rejects_wrong_local_instance(tmp_path):
 
     assert result["ok"] is False
     assert result["code"] == "wrong_source_instance"
+
+
+def test_register_outbound_correlation_rejects_message_id_route_rebinding(tmp_path):
+    state_path = tmp_path / "outbound.json"
+    base = {
+        "message_id": "msg-bound",
+        "conversation_id": "conv-bound",
+        "from_instance": "HASHI1",
+        "from_agent": "zelda",
+        "to_instance": "HASHI2",
+        "to_agent": "rain",
+    }
+    assert register_outbound_correlation(
+        base,
+        local_instance="HASHI1",
+        state_path=state_path,
+    )["ok"]
+
+    conflict = register_outbound_correlation(
+        {**base, "to_agent": "mallory"},
+        local_instance="HASHI1",
+        state_path=state_path,
+    )
+
+    assert conflict["ok"] is False
+    assert conflict["code"] == "outbound_correlation_conflict"
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    assert saved["messages"]["msg-bound"]["to_agent"] == "rain"

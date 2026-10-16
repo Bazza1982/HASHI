@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -25,6 +26,9 @@ class _Request:
         body=b"",
     ):
         self._payload = payload or {}
+        if isinstance(self._payload, dict) and "message" in self._payload and "originated_at" not in self._payload:
+            from datetime import datetime, timezone
+            self._payload.setdefault("originated_at", datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
         self.query = query or {}
         self.match_info = match_info or {}
         self.headers = headers or {}
@@ -1809,7 +1813,10 @@ async def test_protocol_hchat_attachments_enter_one_canonical_session_request(tm
                 ),
             },
             "remote_attachments": attachments,
-            "idempotency_key": "protocol:message:wire-attachment-1",
+            "message_id": "wire-attachment-1",
+            "originated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "message_type": "agent_message",
+            "idempotency_key": "hchat:wire-attachment-1",
         }
     )
     request.content_type = "application/json"
@@ -1902,7 +1909,10 @@ async def test_transferred_protocol_hchat_document_is_rejected_before_staging(tm
                 ),
             },
             "remote_attachments": attachments,
-            "idempotency_key": "protocol:message:wire-transfer-document",
+            "message_id": "wire-transfer-document",
+            "originated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "message_type": "agent_message",
+            "idempotency_key": "hchat:wire-transfer-document",
         }
     )
     request.content_type = "application/json"
@@ -2022,7 +2032,10 @@ async def test_protocol_hchat_attachment_batch_rolls_back_if_one_file_changes(tm
                 ),
             },
             "remote_attachments": attachments,
-            "idempotency_key": "protocol:message:wire-attachment-rollback",
+            "message_id": "wire-attachment-rollback",
+            "originated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "message_type": "agent_message",
+            "idempotency_key": "hchat:wire-attachment-rollback",
         }
     )
     request.content_type = "application/json"
@@ -2927,3 +2940,48 @@ async def test_agent_history_api_reads_archived_session_before_new_session(tmp_p
             owner_id="user:8",
             agent_id="lily",
         )
+
+@pytest.mark.asyncio
+async def test_session_patch_archives_and_restores_without_deleting_records(tmp_path):
+    server, _runtime = _server(tmp_path)
+    owner = "user:7"
+    session = server.session_store.create_session(
+        owner_id=owner,
+        agent_id="lily",
+        title="Keep this Session",
+    )
+    server.session_store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="lily",
+        request_id="archive-api",
+        text="Persistent message",
+        source="workbench",
+        idempotency_key="archive-api",
+    )
+    current = server.session_store.get_session(session["session_id"], owner_id=owner)
+
+    archived_response = await server.handle_v1_session_patch(
+        _Request(
+            {"status": "archived", "expected_revision": current["revision"]},
+            match_info={"session_id": session["session_id"]},
+        )
+    )
+    archived = json.loads(archived_response.text)["session"]
+    assert archived_response.status == 200
+    assert archived["status"] == "archived"
+    assert archived_response.headers["ETag"] == f'"{archived["revision"]}"'
+
+    restored_response = await server.handle_v1_session_patch(
+        _Request(
+            {"status": "active", "expected_revision": archived["revision"]},
+            match_info={"session_id": session["session_id"]},
+        )
+    )
+    restored = json.loads(restored_response.text)["session"]
+    assert restored_response.status == 200
+    assert restored["status"] == "active"
+    assert [
+        message["text"]
+        for message in server.session_store.messages(session["session_id"], owner_id=owner)
+    ] == ["Persistent message"]
