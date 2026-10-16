@@ -288,8 +288,10 @@ the adapter suffix; internal adapter authorization and models are retained.
 The independent full gate uses Python 3.12.13 and the exact standard dependency
 lock. Its pre-commit run passed 870 cases, skipped one and rejected three
 qualification cases solely because modified Function source was not committed.
-Re-run qualification after the authorized commit and record the final result.
-These checks do not measure live latency or prove running Worker adoption.
+After source commit `ad630550`, those three qualification cases passed:
+873 distinct cases passed in aggregate, with the POSIX mode case skipped on
+Windows. Protected-Core and whitespace checks passed. These checks do not
+measure live latency or by themselves prove running Worker adoption.
 
 The user subsequently approved committing this group and restarting Agent6,
 with the next real task reserved for the user. This authorizes only a supported
@@ -298,6 +300,25 @@ push/merge or business-task replay. The preceding source checks do not prove
 adoption: record a terminal lifecycle receipt, changed Worker identity and
 matching committed/artifact bytes separately. Do not infer a new live
 latency/token acceptance result from test doubles or merely accepting reboot.
+
+### 2026-10-16 Provider/presentation deployment outcome
+
+- Source commit `ad630550` includes only this experiment and Provider identity
+  correction; unrelated checkout changes remain outside the commit.
+- Agent6's revisioned main configuration and Provider allowlist now use
+  `ollama`; its actual local model tag and native 48K/8K/90-second settings
+  were preserved. No persisted model override existed to migrate.
+- One supported Agent6-only hot reboot reached terminal `succeeded`, with
+  targets exactly `[agent6]`. Its public Provider is now `ollama`, the model
+  is preserved, and ready/accepting/ACTIVE state is confirmed.
+- The Worker PID, nonce and generation changed. All six modified runtime source
+  files in the immutable artifact match both source commit and checkout bytes.
+  The artifact records the same source commit.
+- Core identity/source digest, other Worker identities and observed service
+  listeners stayed unchanged. Private receipt details remain in Agent-local
+  evidence. No push/merge, task replay or new model inference was performed.
+- User task testing, live latency/token comparison and voice contention remain
+  separate acceptance items.
 
 ## Rollback and trial limits
 

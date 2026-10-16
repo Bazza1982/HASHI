@@ -9,7 +9,11 @@ without an auxiliary model call; the main PCM Persona/final answer remain.
 Cloud inference behavior, capacities and Core are unchanged. The downstream
 `/commentary off` switch is still a visibility control. The user approved this
 group's commit and Agent6-only hot adoption, with task testing reserved for
-the user. Source checks and actual adoption are recorded separately.
+the user. Source `ad630550` is now adopted by Agent6: terminal reboot success,
+public Provider `ollama`, unchanged model/48K settings and matching artifact
+bytes are verified. Other Workers/Core stayed unchanged. The 873 distinct
+offline checks passed, with one POSIX-mode case skipped on Windows; live
+latency/token comparison remains for the user's task test.
 See [presentation decision](HERV3_OLLAMA_CONTEXT_PILOT.md#2026-10-16-ollama-only-pcm-presentation).
 
 October 16 Ollama deployment completed under explicit user approval: source
