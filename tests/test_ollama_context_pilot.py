@@ -37,6 +37,67 @@ def _adapter(tmp_path, *, enabled=True, capacity=49152, url=None):
     return OllamaAdapter(config, SimpleNamespace())
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native_context", [False, True])
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("reasoning,think", [("enabled", True), ("off", False)])
+async def test_boolean_reasoning_uses_native_chat_and_survives_tool_continuation(
+    tmp_path, native_context, streaming, reasoning, think
+):
+    adapter = _adapter(tmp_path, enabled=native_context, capacity=49152 if native_context else None)
+    adapter.config.extra["provider_reasoning"] = reasoning
+    messages = [
+        {"role": "user", "content": "read the file"},
+        {"role": "assistant", "content": "", "tool_calls": [{
+            "id": "read-1", "type": "function",
+            "function": {"name": "file_read", "arguments": '{"path":"a.txt"}'},
+        }]},
+        {"role": "tool", "tool_call_id": "read-1", "content": "file contents"},
+    ]
+    original = deepcopy(messages)
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, json={
+            "message": {"content": "answer", "thinking": "checking" if think else ""},
+            "done": True, "done_reason": "stop", "prompt_eval_count": 100, "eval_count": 3,
+        })
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        adapter.client = client
+        payload = adapter._build_payload(messages, use_streaming=streaming)
+        method = adapter._stream_api_once if streaming else adapter._call_api_once
+        result = await method(payload, adapter._request_headers(), None)
+
+    assert requests[0].url.path == "/api/chat"
+    sent = json.loads(requests[0].content)
+    assert sent["think"] is think
+    assert "reasoning_effort" not in sent
+    assert sent["options"]["num_predict"] == (8192 if native_context else 4096)
+    assert sent["messages"][-1]["tool_name"] == "file_read"
+    assert sent["messages"][-2]["tool_calls"][0]["function"]["arguments"] == {"path": "a.txt"}
+    assert messages == original
+    assert result.text == "answer"
+    assert result.reasoning_content == ("checking" if think else "")
+    assert result.provider_compatibility["native_request_controls"]["think"] is think
+
+
+def test_direct_boolean_effort_is_independent_of_display_and_generation_budget(tmp_path):
+    adapter = _adapter(tmp_path, enabled=False, capacity=None)
+    adapter.set_reasoning_enabled(True)
+    adapter.effort = "off"
+    disabled = adapter._build_payload([{"role": "user", "content": "task"}])
+    adapter.effort = "enabled"
+    enabled = adapter._build_payload([{"role": "user", "content": "task"}])
+    assert disabled["think"] is False
+    assert enabled["think"] is True
+    assert disabled["options"] == enabled["options"] == {"num_ctx": 32768, "num_predict": 4096}
+    adapter.effort = "low"
+    with pytest.raises(ValueError, match="enabled/off"):
+        adapter._build_payload([{"role": "user", "content": "task"}])
+
+
 def test_native_context_is_an_instance_opt_in(tmp_path):
     adapter = _adapter(tmp_path, enabled=False)
     payload = adapter._build_payload([{"role": "user", "content": "task"}])
@@ -426,8 +487,10 @@ async def test_native_probe_without_complete_bounded_counts_cannot_admit_generat
     assert len(requests) == 1
 
 @pytest.mark.asyncio
-async def test_native_capacity_probe_keeps_exact_boundary_and_separate_usage(tmp_path):
+@pytest.mark.parametrize("reasoning,think", [("enabled", True), ("off", False)])
+async def test_native_capacity_probe_keeps_exact_boundary_and_separate_usage(tmp_path, reasoning, think):
     adapter = _adapter(tmp_path)
+    adapter.config.extra["provider_reasoning"] = reasoning
     requests, visible = [], []
 
     def respond(request):
@@ -454,6 +517,7 @@ async def test_native_capacity_probe_keeps_exact_boundary_and_separate_usage(tmp
     assert "hidden" not in visible
     assert [payload["options"]["num_predict"] for payload in requests] == [1, 8192]
     assert requests[0]["messages"] == requests[1]["messages"]
+    assert all(payload["think"] is think for payload in requests)
     records = response.stream_metadata["meter"]["provider_calls"]
     assert len(records) == 2
     assert records[0]["purpose"] == "context_capacity_probe"

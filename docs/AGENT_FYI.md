@@ -1,5 +1,10 @@
 # HASHI Agent FYI
 
+October 16 Ollama reasoning: explicit `enabled/off` uses native boolean
+`think`; binary `/effort` controls derive from exact-model instance opt-ins.
+Native transport is independent of the context pilot. Keep local tags out of
+the shared catalogue. See [Ollama decision](HERV3_OLLAMA_CONTEXT_PILOT.md).
+
 October 16 local Ollama pilot: Agent6 keeps the 49,152 context, 8,192 output
 reserve, 90-second idle release and main PCM Persona. Native admission probes
 and bounded new-result paging guard capacity; auxiliary presentation calls

@@ -83,6 +83,8 @@ def _runtime():
         _get_current_effort=lambda: "high",
         _configuration_followup=lambda _source: ("choose effort", None),
     )
+    runtime._is_binary_reasoning = lambda: FlexibleAgentRuntime._is_binary_reasoning(runtime)
+    runtime._effort_display_value = lambda value: FlexibleAgentRuntime._effort_display_value(runtime, value)
     runtime.get_current_provider = lambda: FlexibleAgentRuntime.get_current_provider(runtime)
     runtime.get_current_model = lambda: FlexibleAgentRuntime.get_current_model(runtime)
     return runtime

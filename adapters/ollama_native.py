@@ -222,6 +222,8 @@ async def call_native_chat(adapter, payload, headers, on_stream_event) -> _APIRe
         name: value for name, value in (payload.get("options") or {}).items()
         if name in {"num_ctx", "num_predict", "num_batch", "num_gpu"}
     }
+    if "think" in payload:
+        compatibility["native_request_controls"]["think"] = payload["think"]
     if "keep_alive" in payload:
         compatibility["native_request_controls"]["keep_alive_seconds"] = payload["keep_alive"]
     if translated:

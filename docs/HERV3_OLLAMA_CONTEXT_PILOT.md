@@ -406,6 +406,51 @@ business task was resumed and no unrelated GPU user was stopped.
   contention acceptance remain separate. Telegram destination validity remains
   distinct from the repaired preservation of its primary backend error.
 
+### 2026-10-16 boolean model reasoning selection
+
+The user requested local enablement of a third installed model and reasoning
+selection for all three Ollama models, whose installed versions support a
+boolean switch rather than native low/medium/high levels.
+
+HERV3 owns the transport change in Functions. PAO's existing instance
+configuration owner publishes the local model grants and exact-model
+`model_efforts: ["enabled", "off"]`. The runtime resolver remains the source
+for Provider/model menus, selection validation and public metadata. No local
+model tag or blanket Ollama capability is added to the shared registry.
+Provider remains `ollama`; the actual installed tag remains the model.
+
+- Explicit reasoning uses native `/api/chat` with top-level `think: true` or
+  `think: false`. The adapter rejects unsupported strength strings rather than
+  sending strings that a server might silently ignore.
+- Native transport and the exact-count capacity pilot are separate. Unconfigured
+  compatibility callers keep their former endpoint/default. Reasoning selection
+  alone does not enable the capacity pilot or require an invented capacity.
+- Native tool argument/result translation and response parsing apply to both
+  routes. An explicit direct-adapter effort also survives persistence/reload.
+- The context pilot retains its exact model capacity and output reserve.
+  Native reasoning without the pilot keeps the prior 32K window and uses a
+  bounded 4,096 total thinking/answer budget. That cap is not reasoning strength.
+- Capacity probes retain the same boolean as generation. Both native request
+  controls and effective-parameter evidence record it without exposing prompts.
+- Binary `/effort` choices have localized On/Off labels and explain their
+  binary scope. `/think` remains a display preference. Other models retain
+  their existing supported levels and menu behavior.
+- Local defaults preserve thinking enabled; model availability, active model
+  selection, configuration persistence and Worker adoption remain separate facts.
+  The new model receives the existing Agent6 48K/8K capacity profile, while
+  existing profiles and the 90-second idle setting remain intact.
+
+Validation: 11 focused pre-fix failures reproduced the missing native switch,
+incorrect compatibility route and untranslated binary controls. The final
+focused adapter/configuration/frontend/cloud-consumer run passed 218 cases.
+Six isolated real-service calls tested both switch values on all three installed
+models: each answered the arithmetic check correctly; disabled reasoning
+returned an empty thinking channel and enabled reasoning returned a nonempty
+one. These canaries used 8K context and 4K output and are not 48K throughput,
+business-task, tool-quality or speech-concurrency acceptance. Their temporary
+residency ended after each model pair. Source commit, the full deterministic
+gate and Agent6 adoption must be recorded separately.
+
 ## Rollback and trial limits
 
 Retain the experiment on `feature-ollama`; do not merge or commit it implicitly.

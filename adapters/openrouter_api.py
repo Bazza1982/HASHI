@@ -574,6 +574,7 @@ def _effective_protocol_parameters(payload: Mapping[str, Any]) -> dict[str, Any]
         "top_p",
         "modalities",
         "reasoning_effort",
+        "think",
     ):
         if key in payload:
             value = payload.get(key)

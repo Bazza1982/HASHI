@@ -301,14 +301,24 @@ async def test_v3_manager_initializes_from_public_main_target_without_v2_profile
     } == {("deepseek-api", "deepseek-v4-pro")}
 
 
-def test_v3_effort_choices_are_deepseek_reasoning_levels_and_persist(tmp_path):
+@pytest.mark.parametrize("provider,model,choices,initial", [
+    ("deepseek-api", "deepseek-v4-pro", ["off", "high", "max"], "high"),
+    ("ollama", "local-qwen:27b", ["enabled", "off"], "enabled"),
+])
+def test_v3_effort_choices_follow_provider_model_and_persist(
+    tmp_path, provider, model, choices, initial
+):
     manager = _manager(tmp_path)
-    effective = apply_v3_target(
-        _raw_config(),
-        HERv3ModelTarget("deepseek-api", "deepseek-v4-pro"),
-    )
+    if provider == "ollama":
+        manager.config.allowed_backends.append({
+            "engine": "ollama-api", "models": [model], "available_models": [model],
+            "model_efforts": {model: choices},
+        })
+    target = HERv3ModelTarget(provider, model)
+    manager.apply_her_v3_target(target)
+    effective = apply_v3_target(_raw_config(), target)
     manager.current_backend = SimpleNamespace(
-        effort="high",
+        effort=initial,
         _v2_config=HERv2Config.from_mapping(effective),
         config=SimpleNamespace(engine="her-v2", extra={"her_v2": effective}),
     )
@@ -316,12 +326,19 @@ def test_v3_effort_choices_are_deepseek_reasoning_levels_and_persist(tmp_path):
     runtime.config = manager.config
     runtime.backend_manager = manager
 
-    assert runtime._get_available_efforts() == ["off", "high", "max"]
-    assert runtime._get_current_effort() == "high"
+    assert runtime._get_available_efforts() == choices
+    assert runtime._get_current_effort() == initial
+    buttons = [b for row in runtime._effort_keyboard().inline_keyboard for b in row]
+    assert [b.callback_data for b in buttons] == [f"effort:{choice}" for choice in choices]
+    if provider == "ollama":
+        assert buttons[0].text != "✓ enabled"
+        assert "<code>enabled</code>" not in runtime._build_effort_followup_text()
 
-    runtime._set_active_effort("off")
-
-    assert manager.current_backend.effort == "zero"
-    assert runtime._get_current_effort() == "off"
-    state = json.loads(manager.state_file.read_text(encoding="utf-8"))
-    assert state["backend_efforts"]["her-v2"] == "off"
+    for selected in ("off", initial):
+        runtime._set_active_effort(selected)
+        assert manager.current_backend.effort == ("zero" if selected == "off" else selected)
+        assert runtime._get_current_effort() == selected
+        reloaded = _manager_reloaded(manager)
+        backend = reloaded.config.allowed_backends[0]
+        assert backend["effort"] == selected
+        assert reloaded.state_store.read()["backend_efforts"]["her-v2"] == selected

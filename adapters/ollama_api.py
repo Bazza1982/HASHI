@@ -1,11 +1,8 @@
-"""
-Ollama API adapter — local model backend via Ollama's OpenAI-compatible API.
+"""Ollama model adapter with native boolean thinking controls.
 
-Differences from OpenRouter:
-  - Endpoint: http://localhost:11434/v1/chat/completions (configurable)
-  - No API key required
-  - No OpenRouter-specific headers or reasoning toggles
-  - Models are local Ollama models (e.g. gemma4:26b, qwen3:32b)
+Explicit reasoning uses /api/chat and a top-level boolean think. Native
+capacity admission remains a separate instance opt-in. Unconfigured legacy
+callers retain the OpenAI-compatible endpoint and model default.
 """
 
 from __future__ import annotations
@@ -44,6 +41,35 @@ class OllamaAdapter(OpenRouterAdapter):
         # Allow override via agent extra config
         extra = getattr(self.config, "extra", {}) or {}
         self.ollama_url = extra.get("ollama_url", _DEFAULT_OLLAMA_URL)
+        self.effort = extra.get("effort")
+
+    def _ollama_think(self) -> bool | None:
+        extra = getattr(self.config, "extra", None) or {}
+        configured = extra.get("provider_reasoning")
+        if configured is None:
+            configured = extra.get("reasoning_effort")
+        if configured is None:
+            configured = self.effort
+        if type(configured) is bool:
+            return configured
+        normalized = str(configured or "").strip().casefold()
+        if normalized in {"", "default", "auto"}:
+            return self.reasoning_enabled
+        if normalized in {"off", "none", "zero", "false", "0", "disabled"}:
+            return False
+        if normalized in {"enabled", "on", "true", "1"}:
+            return True
+        raise ValueError(
+            "Ollama boolean thinking supports only enabled/off; "
+            "low/medium/high are not supported by this control."
+        )
+
+    def _native_chat_enabled(self) -> bool:
+        return (
+            self._native_context_enabled()
+            or self._ollama_think() is not None
+            or urlsplit(self.ollama_url).path.endswith("/api/chat")
+        )
 
     def _provider_evidence_url(self) -> str:
         return self._chat_completions_url()
@@ -122,7 +148,7 @@ class OllamaAdapter(OpenRouterAdapter):
         # Verify Ollama is reachable
         try:
             tags_url = "http://localhost:11434/api/tags"
-            if self._native_context_enabled():
+            if self._native_chat_enabled():
                 parts = urlsplit(self._chat_completions_url())
                 tags_url = urlunsplit(parts._replace(path=parts.path[:-4] + "tags"))
             resp = await self.client.get(tags_url)
@@ -147,13 +173,13 @@ class OllamaAdapter(OpenRouterAdapter):
 
     def _chat_completions_url(self) -> str:
         endpoint = str(getattr(self, "ollama_url", _DEFAULT_OLLAMA_URL))
-        if not self._native_context_enabled():
+        if not self._native_chat_enabled():
             return endpoint
         parts = urlsplit(endpoint)
         if parts.path.endswith("/v1/chat/completions"):
             parts = parts._replace(path=parts.path[:-20] + "/api/chat")
         elif not parts.path.endswith("/api/chat"):
-            raise ValueError("Ollama context pilot requires a chat endpoint URL")
+            raise ValueError("Ollama native controls require a chat endpoint URL")
         return urlunsplit(parts)
 
     def _build_payload(
@@ -173,6 +199,9 @@ class OllamaAdapter(OpenRouterAdapter):
             "messages": messages,
             "options": {"num_ctx": 32768},
         }
+        think = self._ollama_think()
+        if think is not None:
+            payload["think"] = think
         if use_streaming:
             payload["stream"] = True
         if allow_tools and self.tool_registry:
@@ -187,8 +216,7 @@ class OllamaAdapter(OpenRouterAdapter):
                 ]
             if tool_defs:
                 payload["tools"] = tool_defs
-        if self._native_context_enabled():
-            capacity = self._native_capacity()
+        if self._native_chat_enabled():
             native_messages = deepcopy(messages)
             tool_names = {}
             for message in native_messages:
@@ -208,10 +236,14 @@ class OllamaAdapter(OpenRouterAdapter):
                     if name:
                         message["tool_name"] = name
             payload["messages"] = native_messages
-            payload["options"] = {
-                "num_ctx": capacity.context_window_tokens,
-                "num_predict": capacity.response_headroom_tokens,
-            }
+            if self._native_context_enabled():
+                capacity = self._native_capacity()
+                payload["options"] = {
+                    "num_ctx": capacity.context_window_tokens,
+                    "num_predict": capacity.response_headroom_tokens,
+                }
+            else:
+                payload["options"]["num_predict"] = 4096
             model_options = (getattr(self.config, "extra", None) or {}).get(
                 "model_capabilities", {}
             ).get(self.config.model, {})
@@ -236,7 +268,7 @@ class OllamaAdapter(OpenRouterAdapter):
         return {"Content-Type": "application/json"}
 
     async def _call_api_once(self, payload, headers, on_stream_event) -> _APIResult:
-        if self._native_context_enabled():
+        if self._native_chat_enabled():
             from adapters.ollama_native import call_native_chat
 
             result = await call_native_chat(self, payload, headers, on_stream_event)
@@ -245,7 +277,7 @@ class OllamaAdapter(OpenRouterAdapter):
         return await super()._call_api_once(payload, headers, on_stream_event)
 
     async def _stream_api_once(self, payload, headers, on_stream_event) -> _APIResult:
-        if self._native_context_enabled():
+        if self._native_chat_enabled():
             return await self._call_api_once(payload, headers, on_stream_event)
         return await super()._stream_api_once(payload, headers, on_stream_event)
 
