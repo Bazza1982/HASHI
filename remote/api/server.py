@@ -271,6 +271,7 @@ API_PROTOCOL_CAPABILITIES = [
 ]
 
 _WORKBENCH_GATEWAY_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE"})
+_WORKBENCH_SESSION_RUN_API_PATH = re.compile(r"^v1/sessions/[^/]+/runs/?$")
 _BRIDGE_HANDOFF_PROXY_TIMEOUT_SECONDS = 3590.0
 _WORKBENCH_GATEWAY_REQUEST_HEADERS = frozenset(
     {
@@ -2115,6 +2116,78 @@ def _validate_workbench_gateway_path(api_path: str) -> str:
     return f"/api/{value}"
 
 
+def _with_remote_workbench_ingress_evidence(
+    *,
+    method: str,
+    api_path: str,
+    body_bytes: bytes,
+    authenticated_instance: str | None,
+) -> bytes:
+    """Seal the external network hop before relaying a Session Run locally.
+
+    The Remote gateway has already authenticated the exact caller body.  The
+    Workbench API sees only the following loopback hop, so it cannot otherwise
+    distinguish a remote Workbench message (60-second window) from a local one
+    (30-second window).  The marker is body-bound and signed with this
+    instance's shared-network secret; any caller-supplied marker is replaced.
+    """
+    normalized_path = str(api_path or "").strip().strip("/")
+    origin_id = str(authenticated_instance or "").strip().upper()
+    if (
+        str(method or "").upper() != "POST"
+        or not _WORKBENCH_SESSION_RUN_API_PATH.fullmatch(normalized_path)
+        or not origin_id
+    ):
+        return body_bytes
+    try:
+        payload = json.loads(body_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, TypeError):
+        return body_bytes
+    if not isinstance(payload, dict):
+        return body_bytes
+    supplied_metadata = payload.get("request_metadata")
+    if supplied_metadata is not None and not isinstance(supplied_metadata, dict):
+        # Preserve the invalid shape so the local API remains the authority
+        # that rejects it; do not silently repair caller input.
+        return body_bytes
+    message = payload.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    prompt = "\n".join(
+        str(block.get("text") or "")
+        for block in (content or ())
+        if isinstance(block, dict) and block.get("type") == "text"
+    )
+    from orchestrator.message_context import (
+        CONNECTOR_EVIDENCE_METADATA_KEY,
+        NETWORK_INGRESS_SCOPE_CLAIM_KEY,
+        REMOTE_WORKBENCH_INGRESS_SCOPE,
+        seal_connector_evidence,
+    )
+
+    evidence = seal_connector_evidence(
+        Path(_hashi_root) if _hashi_root else Path.cwd(),
+        claims={
+            NETWORK_INGRESS_SCOPE_CLAIM_KEY: REMOTE_WORKBENCH_INGRESS_SCOPE,
+            "_origin_instance_evidence": {
+                "id": origin_id,
+                "assurance": "shared_network_hmac",
+            },
+        },
+        prompt=prompt,
+    )
+    if evidence is None:
+        # Failing closed leaves the stricter local 30-second policy in force.
+        return body_bytes
+    metadata = dict(supplied_metadata or {})
+    metadata[CONNECTOR_EVIDENCE_METADATA_KEY] = evidence
+    payload["request_metadata"] = metadata
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
 class WorkbenchGatewayError(ConnectionError):
     def __init__(self, code: str, *, accepted: bool | None, retryable: bool, status: int):
         self.code, self.accepted, self.retryable, self.status = code, accepted, retryable, status
@@ -2832,7 +2905,7 @@ def create_app(
             "proxy_received", **trace_facts, method=request.method,
             api_path=safe_api_path, request_bytes=len(body_bytes),
         )
-        ok, reason, _authenticated_instance = verify_protocol_request(
+        ok, reason, authenticated_instance = verify_protocol_request(
             request,
             body_bytes=body_bytes,
         )
@@ -2845,6 +2918,12 @@ def create_app(
             )
             detail = "Shared token required" if reason == "auth_required" else "Invalid or expired shared token"
             raise HTTPException(status_code=401, detail=detail)
+        body_bytes = _with_remote_workbench_ingress_evidence(
+            method=request.method,
+            api_path=api_path,
+            body_bytes=body_bytes,
+            authenticated_instance=authenticated_instance,
+        )
         _workbench_gateway_log(
             "proxy_authenticated", **trace_facts, method=request.method,
             api_path=safe_api_path,

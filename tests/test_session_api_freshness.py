@@ -13,6 +13,8 @@ from pathlib import Path
 from types import SimpleNamespace
 import pytest
 
+from orchestrator import workbench_api as workbench_api_module
+from orchestrator.message_freshness import classify_message_freshness
 from orchestrator.workbench_api import WorkbenchApiServer
 from orchestrator.session_store import SessionConflict
 from orchestrator.hchat_delivery_status import (
@@ -20,7 +22,11 @@ from orchestrator.hchat_delivery_status import (
     delivery_status_message_id,
     encode_delivery_status,
 )
-from orchestrator.message_context import seal_connector_evidence
+from orchestrator.message_context import (
+    NETWORK_INGRESS_SCOPE_CLAIM_KEY,
+    REMOTE_WORKBENCH_INGRESS_SCOPE,
+    seal_connector_evidence,
+)
 
 
 class _MockRequest:
@@ -816,6 +822,70 @@ async def test_session_runs_fresh_originated_at_executes_immediately(api_server,
 
 
 @pytest.mark.asyncio
+async def test_virtual_120s_network_delay_is_quarantined_replayed_and_executed_once(
+    api_server, session, monkeypatch
+):
+    server, runtime = api_server
+    originated = datetime.now(timezone.utc)
+    virtual_arrival = originated + timedelta(seconds=120)
+
+    def classify_at_virtual_arrival(*args, **kwargs):
+        kwargs["received_at"] = virtual_arrival
+        return classify_message_freshness(*args, **kwargs)
+
+    monkeypatch.setattr(
+        workbench_api_module,
+        "classify_freshness",
+        classify_at_virtual_arrival,
+    )
+    payload = {
+        "idempotency_key": "virtual-network-delay-key",
+        "originated_at": originated.isoformat().replace("+00:00", "Z"),
+        "message": {
+            "client_message_id": "virtual-network-delay-source",
+            "content": [
+                {"type": "text", "text": "execute after virtual delay review"}
+            ],
+        },
+    }
+    request = _MockRequest(
+        payload,
+        match_info={"session_id": session["session_id"]},
+        remote="127.0.0.1",
+    )
+
+    first = await server.handle_v1_session_runs_create(request)
+    replay = await server.handle_v1_session_runs_create(request)
+    first_data = json.loads(first.text)
+    replay_data = json.loads(replay.text)
+    assert first.status == 202
+    assert first_data["state"] == "awaiting_confirmation"
+    assert first_data["confirmation"]["reason"] == "stale"
+    assert first_data["confirmation"]["delay_seconds"] == 120.0
+    assert first_data["confirmation"]["threshold_seconds"] == 30
+    assert replay_data["confirmation"]["confirmation_id"] == (
+        first_data["confirmation"]["confirmation_id"]
+    )
+    assert runtime.enqueue_request_calls == 0
+
+    confirmation_id = first_data["confirmation"]["confirmation_id"]
+    decision = _MockRequest(
+        {"decision": "confirm"},
+        match_info={
+            "session_id": session["session_id"],
+            "confirmation_id": confirmation_id,
+        },
+    )
+    confirmed = await server.handle_v1_session_ingress_confirmation_decide(decision)
+    duplicate = await server.handle_v1_session_ingress_confirmation_decide(decision)
+    confirmed_data = json.loads(confirmed.text)
+    duplicate_data = json.loads(duplicate.text)
+    assert confirmed_data["state"] == "confirmed"
+    assert duplicate_data["run_id"] == confirmed_data["run_id"]
+    assert runtime.enqueue_request_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_session_runs_remote_workbench_threshold_60s(api_server, session):
     server, runtime = api_server
     # 45 seconds ago on remote connection (remote threshold is 60s -> fresh!)
@@ -851,6 +921,103 @@ async def test_session_runs_remote_workbench_threshold_60s(api_server, session):
     data_stale = json.loads(resp_stale.text)
     assert data_stale.get("confirmation_required") is True
     assert runtime.enqueue_request_calls == 1  # not incremented
+
+
+@pytest.mark.asyncio
+async def test_remote_gateway_evidence_retains_60s_window_on_loopback_only_when_signed(
+    api_server, session
+):
+    server, runtime = api_server
+    root = server.config_path.parent
+    (root / "secrets.json").write_text(
+        json.dumps({"hashi_remote_shared_token": "remote-workbench-secret"}),
+        encoding="utf-8",
+    )
+    prompt = "remote through gateway"
+    originated_45s = (
+        datetime.now(timezone.utc) - timedelta(seconds=45)
+    ).isoformat().replace("+00:00", "Z")
+
+    # A caller-owned marker cannot turn a local 30-second request into remote.
+    forged = _MockRequest(
+        {
+            "idempotency_key": "remote-gateway-forged",
+            "originated_at": originated_45s,
+            "message": {"content": [{"type": "text", "text": prompt}]},
+            "request_metadata": {
+                "_connector_evidence": {
+                    "claims": {
+                        NETWORK_INGRESS_SCOPE_CLAIM_KEY:
+                            REMOTE_WORKBENCH_INGRESS_SCOPE,
+                    }
+                }
+            },
+        },
+        match_info={"session_id": session["session_id"]},
+        remote="127.0.0.1",
+    )
+    forged_response = await server.handle_v1_session_runs_create(forged)
+    forged_data = json.loads(forged_response.text)
+    assert forged_data["confirmation_required"] is True
+    assert forged_data["confirmation"]["threshold_seconds"] == 30
+    assert runtime.enqueue_request_calls == 0
+
+    evidence = seal_connector_evidence(
+        root,
+        claims={
+            NETWORK_INGRESS_SCOPE_CLAIM_KEY: REMOTE_WORKBENCH_INGRESS_SCOPE,
+            "_origin_instance_evidence": {
+                "id": "WORKBENCH",
+                "assurance": "shared_network_hmac",
+            },
+        },
+        prompt=prompt,
+    )
+    trusted = _MockRequest(
+        {
+            "idempotency_key": "remote-gateway-trusted",
+            "originated_at": originated_45s,
+            "message": {"content": [{"type": "text", "text": prompt}]},
+            "request_metadata": {"_connector_evidence": evidence},
+        },
+        match_info={"session_id": session["session_id"]},
+        remote="127.0.0.1",
+    )
+    trusted_response = await server.handle_v1_session_runs_create(trusted)
+    trusted_data = json.loads(trusted_response.text)
+    assert trusted_data.get("confirmation_required") is not True
+    assert "run_id" in trusted_data
+    assert runtime.enqueue_request_calls == 1
+
+    stale_prompt = "remote delayed too long"
+    stale_evidence = seal_connector_evidence(
+        root,
+        claims={
+            NETWORK_INGRESS_SCOPE_CLAIM_KEY: REMOTE_WORKBENCH_INGRESS_SCOPE,
+            "_origin_instance_evidence": {
+                "id": "WORKBENCH",
+                "assurance": "shared_network_hmac",
+            },
+        },
+        prompt=stale_prompt,
+    )
+    stale = _MockRequest(
+        {
+            "idempotency_key": "remote-gateway-stale",
+            "originated_at": (
+                datetime.now(timezone.utc) - timedelta(seconds=65)
+            ).isoformat().replace("+00:00", "Z"),
+            "message": {"content": [{"type": "text", "text": stale_prompt}]},
+            "request_metadata": {"_connector_evidence": stale_evidence},
+        },
+        match_info={"session_id": session["session_id"]},
+        remote="127.0.0.1",
+    )
+    stale_response = await server.handle_v1_session_runs_create(stale)
+    stale_data = json.loads(stale_response.text)
+    assert stale_data["confirmation_required"] is True
+    assert stale_data["confirmation"]["threshold_seconds"] == 60
+    assert runtime.enqueue_request_calls == 1
 
 
 @pytest.mark.asyncio

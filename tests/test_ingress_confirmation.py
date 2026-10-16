@@ -1,6 +1,7 @@
 """Unit tests for ingress confirmation persistence and state machine (PAO Functions layer)."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
@@ -9,6 +10,7 @@ from pathlib import Path
 from threading import Barrier, Event, Lock
 import pytest
 
+from orchestrator import ingress_confirmation as ingress_confirmation_module
 from orchestrator.session_store import SessionStore
 from orchestrator.ingress_confirmation import (
     IngressConfirmationService,
@@ -638,6 +640,81 @@ def test_restart_reclaims_abandoned_pre_run_lease(store: SessionStore, test_sess
     assert len(
         store.recent_session_runs(test_session["session_id"], owner_id="user:alice")
     ) == 1
+
+
+@pytest.mark.asyncio
+async def test_slow_async_confirmation_renews_lease_and_cannot_execute_twice(
+    store: SessionStore, test_session, monkeypatch
+):
+    monkeypatch.setattr(
+        ingress_confirmation_module,
+        "CONFIRMATION_EXECUTION_LEASE_SECONDS",
+        0.12,
+    )
+    service = IngressConfirmationService(store)
+    now = datetime.now(timezone.utc)
+    payload = {
+        "text": "slow connector action",
+        "content": [{"type": "text", "text": "slow connector action"}],
+    }
+    rec = service.register_pending(
+        session_id=test_session["session_id"],
+        owner_id="user:alice",
+        agent_id="kasumi",
+        connector_id="telegram",
+        transport="telegram",
+        source_message_id="msg-slow-heartbeat",
+        idempotency_key="idemp-slow-heartbeat",
+        payload_digest=_digest(json.dumps(payload, sort_keys=True)),
+        message_kind="frontend_message",
+        context_generation=test_session["context_generation"],
+        originated_at=(now - timedelta(seconds=90)),
+        received_at=now,
+        threshold_seconds=30,
+        reason="stale",
+        delay_seconds=90.0,
+        expires_at=now + timedelta(minutes=15),
+        payload=payload,
+        display_metadata={"text": payload["text"]},
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def slow_execute(_record):
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release.wait()
+        return None
+
+    first = asyncio.create_task(
+        service.decide_async(
+            confirmation_id=rec["confirmation_id"],
+            decision="confirm",
+            owner_id="user:alice",
+            execute_fn=slow_execute,
+        )
+    )
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        # Stay in flight for more than two complete unrenewed lease periods.
+        await asyncio.sleep(0.30)
+        duplicate = await service.decide_async(
+            confirmation_id=rec["confirmation_id"],
+            decision="confirm",
+            owner_id="user:alice",
+            execute_fn=lambda _record: pytest.fail(
+                "a live renewed execution lease must not be reclaimed"
+            ),
+        )
+        assert duplicate["state"] == "confirming"
+        assert calls == 1
+    finally:
+        release.set()
+    completed = await asyncio.wait_for(first, timeout=1)
+    assert completed["state"] == "confirmed"
+    assert calls == 1
 
 
 def test_confirmation_owner_and_session_boundaries_are_not_cross_readable(

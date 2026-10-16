@@ -10,6 +10,7 @@ import inspect
 import json
 import logging
 from datetime import datetime, timezone
+from threading import Event, Thread
 from typing import Any, Callable
 from uuid import uuid4
 
@@ -17,11 +18,13 @@ from orchestrator.message_freshness import parse_rfc3339_utc
 
 logger = logging.getLogger("HASHI.IngressConfirmation")
 
-# A short lease separates an in-flight decision from a process that died after
-# persisting ``confirming``.  Run admission is idempotent, so a later claimant
-# may safely retry after this lease; before then duplicate clicks only observe
-# the in-flight state.
+# A short renewable lease separates an in-flight decision from a process that
+# died after persisting ``confirming``.  The worker renews it from a daemon
+# thread so even a slow or event-loop-blocking connector action cannot be
+# reclaimed concurrently.  A crashed process stops renewing and remains
+# recoverable after the lease.
 CONFIRMATION_EXECUTION_LEASE_SECONDS = 30
+CONFIRMATION_EXECUTION_HEARTBEAT_MAX_SECONDS = 10.0
 
 
 class IngressConfirmationError(Exception):
@@ -699,6 +702,73 @@ class IngressConfirmationService:
                 execution_token=execution_token,
             )
 
+    def _renew_execution_lease(
+        self,
+        *,
+        confirmation_id: str,
+        execution_token: str,
+    ) -> bool:
+        """Refresh one still-owned execution lease without changing its state."""
+        now_str = self._now_iso()
+        with self.store._lock, self.store._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            changed = connection.execute(
+                """
+                UPDATE ingress_confirmations
+                SET execution_started_at = ?, updated_at = ?
+                WHERE confirmation_id = ? AND state = 'confirming'
+                  AND execution_token = ?
+                """,
+                (now_str, now_str, confirmation_id, execution_token),
+            ).rowcount
+        return changed == 1
+
+    def _start_execution_heartbeat(
+        self,
+        *,
+        confirmation_id: str,
+        execution_token: str,
+    ) -> tuple[Event, Thread]:
+        stop = Event()
+        interval = max(
+            0.01,
+            min(
+                CONFIRMATION_EXECUTION_HEARTBEAT_MAX_SECONDS,
+                float(CONFIRMATION_EXECUTION_LEASE_SECONDS) / 3.0,
+            ),
+        )
+
+        def heartbeat() -> None:
+            while not stop.wait(interval):
+                try:
+                    if not self._renew_execution_lease(
+                        confirmation_id=confirmation_id,
+                        execution_token=execution_token,
+                    ):
+                        return
+                except Exception:
+                    # A transient SQLite contention must not silently end lease
+                    # protection.  Retry on the next heartbeat; the normal
+                    # store busy timeout still bounds each attempt.
+                    logger.exception(
+                        "Failed to renew ingress confirmation execution lease",
+                        extra={"confirmation_id": confirmation_id},
+                    )
+
+        thread = Thread(
+            target=heartbeat,
+            name=f"ingress-confirmation-{confirmation_id}",
+            daemon=True,
+        )
+        thread.start()
+        return stop, thread
+
+    @staticmethod
+    def _stop_execution_heartbeat(heartbeat: tuple[Event, Thread]) -> None:
+        stop, thread = heartbeat
+        stop.set()
+        thread.join(timeout=1.0)
+
     def _release_failed_claim(
         self,
         *,
@@ -755,17 +825,23 @@ class IngressConfirmationService:
         )
         if token is None:
             return record
+        heartbeat = self._start_execution_heartbeat(
+            confirmation_id=confirmation_id,
+            execution_token=token,
+        )
         try:
             result = execute_fn(record) if execute_fn is not None else None
             if inspect.isawaitable(result):
                 raise TypeError("decide() execute_fn returned an awaitable; use decide_async()")
-        except Exception as exc:
+        except BaseException as exc:
+            self._stop_execution_heartbeat(heartbeat)
             self._release_failed_claim(
                 confirmation_id=confirmation_id,
                 execution_token=token,
                 error=exc,
             )
             raise
+        self._stop_execution_heartbeat(heartbeat)
         return self._finish_execution(
             record=record,
             execution_token=token,
@@ -788,17 +864,23 @@ class IngressConfirmationService:
         )
         if token is None:
             return record
+        heartbeat = self._start_execution_heartbeat(
+            confirmation_id=confirmation_id,
+            execution_token=token,
+        )
         try:
             result = execute_fn(record) if execute_fn is not None else None
             if inspect.isawaitable(result):
                 result = await result
-        except Exception as exc:
+        except BaseException as exc:
+            self._stop_execution_heartbeat(heartbeat)
             self._release_failed_claim(
                 confirmation_id=confirmation_id,
                 execution_token=token,
                 error=exc,
             )
             raise
+        self._stop_execution_heartbeat(heartbeat)
         return self._finish_execution(
             record=record,
             execution_token=token,

@@ -10,6 +10,12 @@ import pytest
 
 from fastapi.testclient import TestClient
 
+from orchestrator.message_context import (
+    CONNECTOR_EVIDENCE_METADATA_KEY,
+    NETWORK_INGRESS_SCOPE_CLAIM_KEY,
+    REMOTE_WORKBENCH_INGRESS_SCOPE,
+    verify_connector_evidence,
+)
 from remote.api import server as remote_server
 from remote.api.server import create_app
 from remote.security.pairing import PairingManager
@@ -145,6 +151,53 @@ def test_gateway_proxy_authenticates_exact_body_and_forwards_api_request(tmp_pat
     names = [row["event"] for row in _gateway_events(caplog)]
     assert names.index("proxy_received") < names.index("proxy_authenticated") < names.index("proxy_response_ready")
     assert names.index("proxy_response_ready") < names.index("asgi_response_completed")
+
+
+def test_gateway_proxy_seals_remote_scope_for_session_run_after_authentication(
+    tmp_path, monkeypatch
+):
+    client, token = _client(tmp_path)
+    captured: dict = {}
+
+    def fake_forward(**kwargs):
+        captured.update(kwargs)
+        return 202, b'{"ok":true}', {"content-type": "application/json"}
+
+    monkeypatch.setattr(remote_server, "_forward_workbench_gateway_request", fake_forward)
+    prompt = "delayed remote message"
+    payload = {
+        "idempotency_key": "remote-delay-idempotency",
+        "originated_at": "2026-10-16T00:00:00Z",
+        "message": {"content": [{"type": "text", "text": prompt}]},
+        "request_metadata": {
+            "client_fact": "preserved",
+            CONNECTOR_EVIDENCE_METADATA_KEY: {"claims": {"forged": True}},
+        },
+    }
+    body = json.dumps(payload).encode("utf-8")
+    path = "/workbench/v1/proxy/api/v1/sessions/ses-1/runs"
+    response = client.post(
+        path,
+        content=body,
+        headers={
+            "Content-Type": "application/json",
+            **_signed_headers(token, method="POST", path=path, body=body),
+        },
+    )
+
+    assert response.status_code == 202
+    forwarded = json.loads(captured["body_bytes"])
+    assert forwarded["request_metadata"]["client_fact"] == "preserved"
+    evidence = forwarded["request_metadata"][CONNECTOR_EVIDENCE_METADATA_KEY]
+    assert evidence != payload["request_metadata"][CONNECTOR_EVIDENCE_METADATA_KEY]
+    claims = verify_connector_evidence(tmp_path, evidence=evidence, prompt=prompt)
+    assert claims == {
+        NETWORK_INGRESS_SCOPE_CLAIM_KEY: REMOTE_WORKBENCH_INGRESS_SCOPE,
+        "_origin_instance_evidence": {
+            "id": "WORKBENCH",
+            "assurance": "shared_network_hmac",
+        },
+    }
 
 
 def test_gateway_proxy_authenticates_bridge_transfer_response(tmp_path, monkeypatch):

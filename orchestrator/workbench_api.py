@@ -151,9 +151,11 @@ from orchestrator.message_context import (
     MESSAGE_CONTEXT_METADATA_KEY,
     MESSAGE_SOURCE_CLAIM_METADATA_KEY,
     MESSAGE_SOURCE_RESERVED_METADATA_KEY,
+    NETWORK_INGRESS_SCOPE_CLAIM_KEY,
     PRIVATE_AUTHORIZATION_BINDING_METADATA_KEY,
     PRIVATE_AUTHORIZATION_PROOFS_METADATA_KEY,
     PRIVATE_AUTHORIZATION_RESULTS_METADATA_KEY,
+    REMOTE_WORKBENCH_INGRESS_SCOPE,
     normalize_external_source,
     public_source_capabilities,
     verify_connector_evidence,
@@ -7098,10 +7100,24 @@ class WorkbenchApiServer:
                 and str(origin_evidence.get("assurance") or "").strip()
                 == "shared_network_hmac"
             )
+            # Remote Workbench authentication terminates at the Remote
+            # gateway, which then relays over loopback.  Only its locally
+            # sealed connector evidence may retain the remote 60-second
+            # freshness window; caller-owned surface or metadata cannot.
+            trusted_remote_workbench = bool(
+                is_loopback
+                and isinstance(connector_claims, Mapping)
+                and connector_claims.get(NETWORK_INGRESS_SCOPE_CLAIM_KEY)
+                == REMOTE_WORKBENCH_INGRESS_SCOPE
+                and isinstance(origin_evidence, Mapping)
+                and str(origin_evidence.get("id") or "").strip()
+                and str(origin_evidence.get("assurance") or "").strip()
+                == "shared_network_hmac"
+            )
             originated_at = payload.get("originated_at") or (
                 message.get("originated_at") if isinstance(message, dict) else None
             )
-            is_remote = not is_loopback
+            is_remote = not is_loopback or trusted_remote_workbench
             freshness = (
                 None
                 if trusted_local_tui

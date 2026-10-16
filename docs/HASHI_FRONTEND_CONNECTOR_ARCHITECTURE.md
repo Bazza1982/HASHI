@@ -329,7 +329,7 @@ declared sender into a uniquely authenticated Agent. PCM and external clients
 receive only sanitized verification results, never shared secrets or raw
 proofs.
 
-#### Network message freshness and confirmation (HASHI3 candidate, 2026-10-16)
+#### Network message freshness and confirmation (implemented 2026-10-16)
 
 Every network Frontend Connector records `originated_at` when the user first
 submits a message and preserves it across local queueing, retry and reconnect.
@@ -349,9 +349,13 @@ version rollout rather than silently dropping the timestamp or confirmation
 receipt. Workbench renders pending and terminal states from the canonical API;
 terminal expiry remains visible with its reason.
 
-This behavior is user-approved and implemented only on the paired
-`debug-message-expiry` HASHI3/Workbench candidate branches. Non-production live
-verification and production adoption remain separate and are not yet claimed.
+An authenticated Remote Workbench gateway replaces any caller-owned ingress
+marker with prompt-bound connector evidence before its loopback relay. PAO keeps
+the remote 60-second window only when that evidence verifies; an unsigned or
+invalid loopback claim remains subject to the local 30-second window.
+
+This behavior is user-approved and qualified on non-production HASHI3 and
+Workbench. Production adoption remains a separate, not-yet-claimed step.
 
 ### 6.2 Standard multi-attachment message admission
 

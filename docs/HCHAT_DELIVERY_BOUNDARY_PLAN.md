@@ -430,7 +430,7 @@ ignored local configuration. PAO verifies and persists sanitized results for
 one Message/Run; PCM projects only those results. Raw secrets and raw proofs are
 not model, transcript, generic audit, receipt, or user-facing payloads.
 
-## 12. Delayed-message freshness and delivery status (HASHI3 candidate, 2026-10-16)
+## 12. Delayed-message freshness and delivery status (implemented 2026-10-16)
 
 Each logical non-public `/hchat` send now fixes one `message_id`,
 `originated_at`, idempotency key and conversation ID before route selection.
@@ -455,6 +455,5 @@ message identity and timestamp, request/reply kind, canonical body and
 attachment binding. This permits one logical message to survive a transport
 fallback while rejecting identity, content or attachment substitution.
 
-The design is user-approved and implemented on `debug-message-expiry` for
-HASHI3 only. Automated qualification is recorded separately; non-production
-live verification and any merge or production adoption remain pending.
+The design is user-approved and qualified on non-production HASHI3. Automated
+qualification is recorded separately; production adoption remains pending.

@@ -59,14 +59,14 @@ Deduplicate delivery and settle every turn. Prose grants no Tool authority.
 Continuations retain Session/Connector: replay only saved non-action completions;
 pending/conflict/unknown cannot execute.
 
-HASHI3 candidate: network frontends preserve the user's original send time.
+Network frontends preserve the user's original send time.
 PAO admits fresh Workbench/Telegram messages within its 30/60-second window;
 older or invalid messages become one durable 15-minute confirmation before any
 Run, Agent or transcription. Terminal discard/expiry/supersession stays visible.
 The TUI exemption requires Remote-signed local connector evidence. `/hchat`
 uses a 60-second gate plus exact reverse-route status correlation; weaker peers
-fail closed. This is implemented only on `debug-message-expiry`; live
-non-production verification, merge and production adoption are not yet claimed.
+fail closed. This is qualified on non-production HASHI3 and Workbench;
+production adoption remains a separate, not-yet-claimed step.
 
 Scheduler/recovery and /bg use an Agent-owned hidden activity Session.
 Keep execution/delivery separate and receipts same-owner. Display each final
