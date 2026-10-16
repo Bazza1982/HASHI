@@ -26,7 +26,7 @@ def _lan_node(**overrides):
         "label": "Studio GPU",
         "location": "lan",
         "base_url": "http://192.168.1.50:19446",
-        "manifest_path": "/v1/capabilities",
+        "manifest_path": "/.well-known/hashi-compute",
         "health_path": "/health",
         "enabled": True,
     }
@@ -379,6 +379,17 @@ def test_node_configuration_fails_closed_at_privacy_boundary(value):
         validate_compute_node(row)
 
 
+def test_node_uses_a_non_conflicting_well_known_manifest_default():
+    node = validate_compute_node(
+        {
+            "id": "studio-gpu",
+            "location": "lan",
+            "base_url": "http://192.168.1.50:19446",
+        }
+    )
+    assert node.manifest_path == "/.well-known/hashi-compute"
+
+
 def test_direct_dataclass_construction_cannot_bypass_node_validation():
     unsafe = ComputeNode(
         id="unsafe",
@@ -596,7 +607,9 @@ async def test_manifest_client_is_bounded_and_never_follows_redirects():
     )
 
     assert snapshot.source_format == "formal"
-    assert factory.receipt["url"] == "http://192.168.1.50:19446/v1/capabilities"
+    assert (
+        factory.receipt["url"] == "http://192.168.1.50:19446/.well-known/hashi-compute"
+    )
     assert factory.receipt["allow_redirects"] is False
     assert factory.receipt["session"]["trust_env"] is False
 

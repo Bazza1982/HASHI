@@ -51,7 +51,7 @@ Example (illustrative address only):
       "label": "Studio GPU",
       "location": "lan",
       "base_url": "http://192.168.1.50:19446",
-      "manifest_path": "/v1/capabilities",
+      "manifest_path": "/.well-known/hashi-compute",
       "health_path": "/health",
       "enabled": true
     }
@@ -70,6 +70,12 @@ The normative machine-readable shape is
   "schema_version": 1
 }
 ```
+
+The default discovery path is `/.well-known/hashi-compute`. It is deliberately
+separate from `/v1/capabilities`, which may remain a model-specific business
+endpoint (for example, voice-model capability lookup). An instance can override
+the manifest path for a transitional or differently hosted service; the current
+Hashi Compute compatibility entry uses `/api/overview` explicitly.
 
 The manifest declares service version, configuration revision, privacy
 location, a lightweight JSON health endpoint, global and per-service

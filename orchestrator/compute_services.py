@@ -32,6 +32,7 @@ from orchestrator.config_json import (
 COMPUTE_MANIFEST_SCHEMA = "hashi.compute.capabilities"
 COMPUTE_MANIFEST_VERSION = 1
 COMPUTE_CONFIG_VERSION = 1
+DEFAULT_COMPUTE_MANIFEST_PATH = "/.well-known/hashi-compute"
 MAX_MANIFEST_BYTES = 2 * 1024 * 1024
 MAX_NODES = 64
 MAX_SERVICES = 256
@@ -242,7 +243,8 @@ def validate_compute_node(value: Any) -> ComputeNode:
     authority = rendered_host + (f":{port}" if port is not None else "")
     base_url = urlunsplit((parsed.scheme.casefold(), authority, "", "", ""))
     manifest_path = _validate_path(
-        value.get("manifest_path"), code="compute_node_invalid"
+        value.get("manifest_path", DEFAULT_COMPUTE_MANIFEST_PATH),
+        code="compute_node_invalid",
     )
     health_raw = value.get("health_path")
     health_path = (
@@ -1376,6 +1378,7 @@ class ComputeServiceDirectory:
 
 __all__ = [
     "COMPUTE_CONFIG_VERSION",
+    "DEFAULT_COMPUTE_MANIFEST_PATH",
     "COMPUTE_MANIFEST_SCHEMA",
     "COMPUTE_MANIFEST_VERSION",
     "ComputeAudioFormats",
