@@ -20,6 +20,8 @@ The existing native-context opt-in owns this narrower provider adaptation:
   Unknown history formats, active recovery, unresolved effects and tool receipts
   are preserved. Scheduler inventory and tool discovery descriptions become
   indexes; full task instructions must be read before acting on recovery.
+  Historical runtime-generated recovery notifications are also indexed by
+  exchange/batch/task identity, without interpreting natural-language intent.
 - Every original reference is retained in a private SHA256-addressed file;
   model-facing omission never means deletion or a claim that omitted content
   was read. Shared PCM, Scheduler state and other Model Providers do not change.
@@ -41,8 +43,10 @@ closure; disabling only the new execution guard in an isolated test process
 allowed an unadvertised write and failed its sentinel check. The mutation was
 process-local and never changed source. The owning adapter/compiler/runtime
 component run passed 182 cases. Rendering the captured first payload reduced
-its reference/user message from 81,984 to 43,820 characters (46.55%) while
+its reference/user message from 81,984 to 28,774 characters (64.90%) while
 preserving system text, current request, active recovery and native schemas.
+The first 43,820-character candidate's native probe timed out at 180 seconds;
+its receipt is retained. The further reduced payload has a distinct canary.
 Characters are not tokens. Native count, deterministic gate, source commit and
 targeted Worker adoption are recorded separately; the user owns business-task
 testing.

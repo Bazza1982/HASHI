@@ -36,6 +36,11 @@ def test_reference_projection_preserves_authority_recovery_and_full_source(tmp_p
                      "  - task_id=export kind=cron missed_count=144 replayable_count=1\n"
                      "    task_prompt=" + "Private full instructions. " * 1500 +
                      "\n    first_due=2026-10-01; last_due=2026-10-16\n"},
+            {"key": "recent_exchange:notice", "authority": "history",
+             "text": "Exchange sequence=8\nUSER: ⏰ HASHI offline recovery\n"
+                     "Recovery batch: historical-batch\n• old-task\n  Content: " +
+                     "Old recovery detail. " * 500 +
+                     "\nASSISTANT: Awaiting the user's decision."},
             {"key": "tools_catalogue", "authority": "runtime_context",
              "text": "- file_read: Read files with offset and limit. " + "Details. " * 1000},
         ],
@@ -65,6 +70,8 @@ def test_reference_projection_preserves_authority_recovery_and_full_source(tmp_p
     assert refs["runtime_recovery_context_only"]["settled_checkpoint"]["tool_receipts"] == recovery["settled_checkpoint"]["tool_receipts"]
     index = next(r["text"] for r in refs["context_only"] if r["source"] == "extra:scheduler_recovery")
     assert "recovery-1" in index and "task_id=export" in index
+    historic = next(r["text"] for r in refs["context_only"] if r["source"] == "recent_exchange:notice")
+    assert "historical-batch" in historic and "Old recovery detail." not in historic
     saved = refs["full_reference"]
     from pathlib import Path
     raw = Path(saved["saved_reference"]).read_bytes()

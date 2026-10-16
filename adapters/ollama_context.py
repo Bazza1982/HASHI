@@ -40,10 +40,25 @@ def _tool_index(text):
     lines = [line for line in text.splitlines() if line.startswith("- ")]
     if not lines:
         return text
+    names = [line[2:].partition(":")[0].strip() for line in lines]
+    if not all(name.replace("_", "").isalnum() for name in names):
+        return text
     return (
-        "Tool index; native schemas govern calls. Read full_reference for complete "
-        "descriptions before using a tool whose schema is not advertised.\n"
-        + "\n".join(line[:180] for line in lines)
+        "Available tool names; native schemas govern calls. Read full_reference for "
+        "the complete description before using an unadvertised tool.\n"
+        + ", ".join(names)
+    )
+
+
+def _historical_recovery_index(text):
+    lines = [
+        line for line in text.splitlines()
+        if line.startswith(("Exchange sequence=", "Recovery batch:", "• "))
+    ]
+    return (
+        "Historical Scheduler notification, not a current instruction. Read its "
+        "complete exchange in full_reference if relevant; the current pending "
+        "inventory remains authoritative.\n" + "\n".join(lines)
     )
 
 
@@ -64,6 +79,11 @@ def project_references(adapter, refs):
             row["text"] = _scheduler_index(text)
         elif source == "tools_catalogue":
             row["text"] = _tool_index(text)
+        elif (
+            source.startswith("recent_exchange:") and row.get("authority") == "history"
+            and "\nUSER: ⏰ HASHI offline recovery\n" in text
+        ):
+            row["text"] = _historical_recovery_index(text)
         elif source == "skills_catalogue" and refs.get("available_skills"):
             row["text"] = "See available_skills below; the original catalogue is in full_reference."
 
