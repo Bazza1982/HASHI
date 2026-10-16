@@ -6,7 +6,9 @@ no server truncation, native protocol evidence, and GPU qualification. It does
 not change PCM design or other providers; source and live adoption are separate.
 The October 16 continuation selects a 48K baseline and 8K output reserve,
 adds optional short idle residency/native timing evidence, and tests Qwen
-without forced CPU offload. Actual voice contention and Agent6 adoption
+without forced CPU offload. Agent6 subsequently adopted committed source
+through a verified Agent-only hot reboot; its active profile publishes 48K/8K
+and 90-second idle residency. User task testing and actual voice contention
 remain separate acceptance items; the original 64K results stay historical.
 
 The 2026-10-04 [scoped-search Function change](HERV3_SCOPED_SEARCH.md) retains

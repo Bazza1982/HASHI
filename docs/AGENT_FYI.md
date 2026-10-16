@@ -1,11 +1,13 @@
 # HASHI Agent FYI
 
-October 16 deployment approval: the user explicitly authorized committing the
-scoped Ollama changes, applying the 48K candidate and hot-rebooting MSI Agent6.
-No push/merge, other-Agent/shared-service restart, Core migration or task replay
-is authorized. Earlier candidate-only notes remain historical; deployment
-requires separate terminal receipt/Worker evidence. The user owns subsequent
-task testing. See [deployment scope](HERV3_OLLAMA_CONTEXT_PILOT.md#2026-10-16-deployment-authorization).
+October 16 Ollama deployment completed under explicit user approval: source
+commit `4dd4cb1a`, revisioned 48K/8K profile and Agent6-only hot adoption.
+Terminal receipt succeeded; the new ACTIVE/ready Worker publishes native
+context and 90-second idle settings, and its adapter hashes match committed
+source. Core, unselected Workers and observed service listeners stayed
+unchanged. No push/merge, shared restart or task replay occurred. The user owns
+subsequent task testing; voice contention and long-term stability remain open.
+See [deployment evidence](HERV3_OLLAMA_CONTEXT_PILOT.md#2026-10-16-agent6-deployment-outcome).
 
 October 16 Ollama continuation: the user selected 48K (49,152), with 8K
 reasoning/output reserve, to leave GPU capacity for local speech. Keep the
@@ -16,8 +18,9 @@ GPU placement, but whole-device minimum free memory was only 1,116 MiB with
 the local multimodal service resident. Active voice latency/peak memory and
 longer Agent6 acceptance remain unverified. The candidate adds optional
 90-second idle residency (idle release observed) and per-call native timings;
-180 related regression checks passed. Active Agent6 config and Workers remain
-unchanged pending the committed-source adoption gate.
+180 related regression checks passed. At that pre-deployment checkpoint,
+Agent6 config and Workers were unchanged pending the committed-source gate;
+the later deployment outcome is recorded separately.
 See [current pilot decision](HERV3_OLLAMA_CONTEXT_PILOT.md#2026-10-16-48k-continuation).
 
 October 15 scoped exception: the user authorized `feature-ollama` for MSI
@@ -27,8 +30,8 @@ providers and PCM policy are unchanged. Source tests, Worker adoption and
 longer observation remain separate. No merge or broad restart is authorized.
 See [pilot decision](HERV3_OLLAMA_CONTEXT_PILOT.md).
 Initial source/independent native tests passed; Agent6 adoption was rejected
-because Function source must be committed. Its old Worker remains active and
-unadopted pilot configuration was restored. Do not describe this as an Agent6
+because Function source must be committed. At that checkpoint its old Worker
+remained active and unadopted pilot configuration was restored. Do not describe this as an Agent6
 live or long-term acceptance pass.
 
 October 13: HASHI3/HASHI4 and Workbench use GitHub `main`; continue there,

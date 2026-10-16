@@ -215,6 +215,33 @@ commit, revisioned profile write, terminal reboot receipt and new Agent6 Worker
 identity. Record the observed outcome without treating command acceptance as
 successful adoption; preserve unrelated checkout/configuration changes.
 
+### 2026-10-16 Agent6 deployment outcome
+
+- Source commit `4dd4cb1a` contains only this pilot's two adapter files, focused
+  tests and three owning/FYI documents. Unrelated checkout work was not staged,
+  committed or reset. The same 180 related checks passed again before commit.
+- Only Agent6's existing Ollama profile was updated through the revisioned
+  configuration writer: native context enabled, 49,152 total / 8,192 response
+  allowance, Qwen batch 128 and 90-second idle residency. Other Agent settings,
+  tools, model choices and global configuration were preserved.
+- The supported Backend API lifecycle submitted exactly one `/reboot min`
+  targeting Agent6. Its terminal receipt was `succeeded`, lifecycle `online`,
+  with targets exactly `[agent6]`; acceptance alone was not used as success.
+- Agent6's Worker PID, nonce and generation all changed. The newly active
+  generation's two adapter byte hashes match both committed source and checkout.
+  Its published runtime profile contains the deployed capacity/idle settings;
+  `online`, `backend_ready`, `startup_success` and `worker_accepting` were true,
+  and `worker_phase` was `ACTIVE`. HERV3/Ollama/Qwen remained selected.
+- Core process identity and protected-source digest stayed unchanged, as did
+  unselected Worker identities and observed Backend API/multimodal listeners.
+  No broad reboot, Core/Ollama/voice restart, task replay or extra notification
+  was performed.
+- Detailed operation IDs, process identities, configuration revisions and
+  artifact hashes remain in ignored Agent-local deployment evidence. No
+  inference task or speech stress test was started after adoption: the user
+  explicitly reserved subsequent functional testing. The earlier approximately
+  1.1-GiB loaded-model margin remains a caution, not a voice acceptance pass.
+
 ## Rollback and trial limits
 
 Retain the experiment on `feature-ollama`; do not merge or commit it implicitly.
