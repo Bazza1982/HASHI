@@ -51,6 +51,20 @@ Characters are not tokens. Native count, deterministic gate, source commit and
 targeted Worker adoption are recorded separately; the user owns business-task
 testing.
 
+Qualification closeout: source `eab15f4a` passed the 182-case component run
+and the final deterministic gate (856 passed, one platform skip). The isolated
+native probe counted 14,735 input tokens for the reduced captured payload,
+versus its original 37,536 (60.74% less); usable input remaining is 26,225.
+It generated one probe token, executed no business tools and preserved the
+8,192-token reserve. Its 156.93-second duration is not a cold-prefill benchmark;
+the preceding candidate's 180-second timeout remains part of the evidence.
+
+Agent6-only supported hot adoption succeeded. All five changed runtime files
+match the committed source and immutable artifact; readiness, unchanged Core,
+unselected Workers, listeners, model/effort and configuration were verified.
+No original business task was replayed. Long-input speed, full task quality
+and speech concurrency remain separate user acceptance work.
+
 ## Owner and approval
 
 HERV3 owns this Function-level provider adaptation. On 2026-10-15 the user

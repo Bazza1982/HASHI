@@ -6,8 +6,11 @@ reference material and preserves its full source privately by SHA256. PCM
 authority, the current task and active recovery evidence remain unchanged.
 Near capacity, HER closes tool use, retains completed results and probes the
 changed final payload independently; no completed action is replayed and the
-output reserve is not reduced. These are HERV3 Function changes. Source,
-native counts and Agent6 adoption need separate receipts.
+output reserve is not reduced. Source `eab15f4a` passed 182 component cases
+and the deterministic gate (856 passed, one platform skip), then Agent6 alone
+adopted it. The reduced captured request counted 14,735 native input tokens
+versus 37,536; its 156.93-second probe is not a throughput acceptance. Core,
+other Workers, configuration and model/effort remained unchanged.
 See [Ollama decision](HERV3_OLLAMA_CONTEXT_PILOT.md).
 
 October 16 Ollama reasoning: explicit `enabled/off` uses native boolean
