@@ -6221,6 +6221,7 @@ class WorkbenchApiServer:
             "version": "1.0",
             "capability": "message_freshness_v1",
             "required_fields": ["originated_at"],
+            "missing_required_field_error_code": "frontend_message_protocol_incompatible",
             "time_format": "rfc3339_utc",
             "pending_receipt_supported": True,
             "decisions_supported": ["confirm", "discard"],
@@ -7127,6 +7128,24 @@ class WorkbenchApiServer:
                     is_remote=is_remote,
                 )
             )
+            # A Session API client that omits the required original-send time
+            # is speaking an older frontend protocol.  That is not evidence of
+            # delay, so do not create a misleading confirmation or a Run.
+            if freshness is not None and freshness.reason == "timestamp_missing":
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "accepted": False,
+                        "code": "frontend_message_protocol_incompatible",
+                        "error": (
+                            "This frontend message protocol is incompatible: "
+                            "originated_at is required."
+                        ),
+                        "freshness_reason": freshness.reason,
+                    },
+                    status=409,
+                    headers={"Cache-Control": "no-store"},
+                )
             if freshness is not None and not freshness.is_fresh:
                 prepared = await self._execute_session_run_from_payload(
                     session,

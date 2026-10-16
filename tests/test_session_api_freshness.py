@@ -168,6 +168,10 @@ async def test_capabilities_advertises_message_freshness(api_server):
     freshness_cap = data["message_freshness"]
     assert freshness_cap["capability"] == "message_freshness_v1"
     assert "originated_at" in freshness_cap["required_fields"]
+    assert (
+        freshness_cap["missing_required_field_error_code"]
+        == "frontend_message_protocol_incompatible"
+    )
     assert freshness_cap["pending_receipt_supported"] is True
     assert "confirm" in freshness_cap["decisions_supported"]
     assert "discard" in freshness_cap["decisions_supported"]
@@ -395,7 +399,7 @@ async def test_hchat_sender_receives_waiting_then_terminal_status(
 
 
 @pytest.mark.asyncio
-async def test_session_runs_missing_originated_at_requires_confirmation(api_server, session):
+async def test_session_runs_missing_originated_at_rejects_incompatible_frontend(api_server, session):
     server, runtime = api_server
     req = _MockRequest(
         {
@@ -405,16 +409,17 @@ async def test_session_runs_missing_originated_at_requires_confirmation(api_serv
         match_info={"session_id": session["session_id"]},
     )
     resp = await server.handle_v1_session_runs_create(req)
-    assert resp.status == 202
+    assert resp.status == 409
     data = json.loads(resp.text)
-    assert data.get("confirmation_required") is True
     assert data.get("accepted") is False
-    assert data.get("state") == "awaiting_confirmation"
+    assert data.get("code") == "frontend_message_protocol_incompatible"
+    assert data.get("freshness_reason") == "timestamp_missing"
+    assert resp.headers["Cache-Control"] == "no-store"
     assert "run_id" not in data
-    assert data["confirmation"]["reason"] == "timestamp_missing"
-    assert data["confirmation"]["confirmation_id"].startswith("conf-")
-    # Verify no run was enqueued
     assert runtime.enqueue_request_calls == 0
+    assert server.ingress_confirmation.list(
+        session_id=session["session_id"], owner_id="user:7"
+    ) == []
 
 
 @pytest.mark.asyncio
@@ -1034,6 +1039,9 @@ async def test_client_declared_tui_surface_never_bypasses_freshness(api_server, 
             "idempotency_key": "tui-forged-local-1",
             "surface": "tui",
             "client_id": "tui-forged-client-1",
+            "originated_at": (
+                datetime.now(timezone.utc) - timedelta(seconds=40)
+            ).isoformat().replace("+00:00", "Z"),
             "message": {"content": [{"type": "text", "text": "local tui prompt"}]},
         },
         match_info={"session_id": session["session_id"]},
@@ -1083,6 +1091,9 @@ async def test_client_declared_tui_surface_never_bypasses_freshness(api_server, 
         {
             "idempotency_key": "idemp-remote-tui",
             "surface": "tui",
+            "originated_at": (
+                datetime.now(timezone.utc) - timedelta(seconds=65)
+            ).isoformat().replace("+00:00", "Z"),
             "message": {"content": [{"type": "text", "text": "remote claiming tui"}]},
         },
         match_info={"session_id": session["session_id"]},
@@ -1102,6 +1113,9 @@ async def test_ingress_confirmations_list_and_get_endpoints(api_server, session)
     req = _MockRequest(
         {
             "idempotency_key": "idemp-pending-query",
+            "originated_at": (
+                datetime.now(timezone.utc) - timedelta(seconds=40)
+            ).isoformat().replace("+00:00", "Z"),
             "message": {"content": [{"type": "text", "text": "pending query test"}]},
         },
         match_info={"session_id": session["session_id"]},
@@ -1162,6 +1176,9 @@ async def test_ingress_confirmation_decision_confirm_and_discard(api_server, ses
     req_discard = _MockRequest(
         {
             "idempotency_key": "idemp-discard-test",
+            "originated_at": (
+                datetime.now(timezone.utc) - timedelta(seconds=40)
+            ).isoformat().replace("+00:00", "Z"),
             "message": {"content": [{"type": "text", "text": "to be discarded"}]},
         },
         match_info={"session_id": session["session_id"]},
@@ -1185,6 +1202,9 @@ async def test_ingress_confirmation_decision_confirm_and_discard(api_server, ses
     req_confirm = _MockRequest(
         {
             "idempotency_key": "idemp-confirm-test",
+            "originated_at": (
+                datetime.now(timezone.utc) - timedelta(seconds=40)
+            ).isoformat().replace("+00:00", "Z"),
             "message": {"content": [{"type": "text", "text": "to be confirmed"}]},
         },
         match_info={"session_id": session["session_id"]},
