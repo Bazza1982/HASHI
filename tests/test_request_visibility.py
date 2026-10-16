@@ -14,6 +14,14 @@ from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.session_store import SessionStore
 
 
+def _runtime_for_admission():
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.config = SimpleNamespace()
+    runtime.backend_manager = SimpleNamespace(_read_state_dict=lambda: {})
+    runtime._execution_admissions = {}
+    return runtime
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "source",
@@ -28,7 +36,7 @@ from orchestrator.session_store import SessionStore
     ],
 )
 async def test_legacy_hidden_request_is_admitted_as_visible(tmp_path, monkeypatch, source):
-    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime = _runtime_for_admission()
     runtime.name = "visibility"
     runtime.global_config = SimpleNamespace(project_root=None)
     runtime.next_request_id = lambda: "req-visible"
@@ -84,7 +92,7 @@ async def test_legacy_hidden_request_is_admitted_as_visible(tmp_path, monkeypatc
 async def test_transfer_bridge_request_uses_internal_connector(
     tmp_path, monkeypatch, source
 ):
-    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime = _runtime_for_admission()
     runtime.name = "target"
     runtime.global_config = SimpleNamespace(project_root=None, instance_id="HASHI3")
     runtime.next_request_id = lambda: "req-transfer"
@@ -163,7 +171,7 @@ async def test_transfer_bridge_request_uses_internal_connector(
 async def test_worker_nonvoice_ingress_rechecks_transfer_fence_before_run(
     tmp_path, monkeypatch, transfer_state
 ):
-    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime = _runtime_for_admission()
     runtime.name = "source"
     runtime.global_config = SimpleNamespace(project_root=None, instance_id="HASHI2")
     runtime.next_request_id = lambda: "req-fenced"
@@ -224,7 +232,7 @@ async def test_worker_nonvoice_ingress_rechecks_transfer_fence_before_run(
 
 @pytest.mark.asyncio
 async def test_worker_nonvoice_ingress_preserves_complete_pending_transfer(tmp_path, monkeypatch):
-    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime = _runtime_for_admission()
     runtime.name = "source"
     runtime.global_config = SimpleNamespace(project_root=None, instance_id="HASHI2")
     runtime.next_request_id = lambda: "req-pending"
@@ -286,7 +294,7 @@ async def test_typed_tui_run_policy_cannot_disable_central_telegram_mirroring(
 ):
     from orchestrator.frontend_delivery import tui_request_metadata
 
-    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime = _runtime_for_admission()
     runtime.name = "visibility"
     runtime.global_config = SimpleNamespace(project_root=None)
     runtime.next_request_id = lambda: "req-tui"
@@ -344,7 +352,7 @@ async def test_validated_live_voice_origin_survives_canonical_context_rebuild(
     tmp_path,
     monkeypatch,
 ):
-    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime = _runtime_for_admission()
     runtime.name = "visibility"
     runtime.global_config = SimpleNamespace(project_root=None)
     runtime.next_request_id = lambda: "req-live-origin"
@@ -417,7 +425,7 @@ async def test_validated_live_voice_origin_survives_canonical_context_rebuild(
 async def test_exchange_source_fails_closed_without_verified_connector_evidence(
     tmp_path,
 ):
-    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime = _runtime_for_admission()
     runtime.name = "visibility"
     runtime.global_config = SimpleNamespace(
         project_root=tmp_path / "code",
@@ -478,7 +486,7 @@ async def test_private_proof_is_kept_out_of_persisted_request_metadata(
         ),
         encoding="utf-8",
     )
-    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime = _runtime_for_admission()
     runtime.name = "visibility"
     runtime.global_config = SimpleNamespace(
         project_root=tmp_path,
@@ -596,7 +604,7 @@ async def test_pao_persists_the_same_route_projected_into_pcm(
     mirrors,
     telegram,
 ):
-    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime = _runtime_for_admission()
     runtime.name = "visibility"
     runtime.global_config = SimpleNamespace(
         project_root=tmp_path,
@@ -660,7 +668,7 @@ async def test_pao_uses_central_mirror_switches_for_tui_admission(tmp_path, monk
     from orchestrator.connector_delivery_preferences import set_connector_preference
     from orchestrator.frontend_delivery import tui_request_metadata
 
-    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime = _runtime_for_admission()
     runtime.name = "visibility"
     runtime.global_config = SimpleNamespace(
         project_root=tmp_path, bridge_home=tmp_path,
@@ -711,7 +719,7 @@ async def test_idempotent_frontend_retry_reuses_the_original_pcm_request_identit
     tmp_path,
     monkeypatch,
 ):
-    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime = _runtime_for_admission()
     runtime.name = "visibility"
     runtime.global_config = SimpleNamespace(
         project_root=tmp_path,
