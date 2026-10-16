@@ -211,6 +211,8 @@ def test_attachment_upload_and_commit_delivers_via_existing_protocol_path(tmp_pa
 
     commit_payload = {
         "message_id": "msg-1",
+        "idempotency_key": "hchat:msg-1",
+        "originated_at": "2026-10-16T00:00:00Z",
         "conversation_id": "conv-1",
         "from_instance": "HASHI2",
         "from_agent": "zhaojun",
@@ -246,6 +248,8 @@ def test_attachment_upload_and_commit_delivers_via_existing_protocol_path(tmp_pa
     assert body["attachments"][0]["filename"] == "report.txt"
     assert len(protocol.messages) == 1
     delivered = protocol.messages[0]
+    assert delivered["idempotency_key"] == "hchat:msg-1"
+    assert delivered["originated_at"] == "2026-10-16T00:00:00Z"
     assert delivered["body"]["attachments"][0]["attachment_id"] == "att-1"
     assert "[Remote attachments]" in delivered["body"]["text"]
     assert "report.txt" in delivered["body"]["text"]
@@ -278,6 +282,7 @@ def test_attachment_commit_rejects_missing_pending_upload(tmp_path):
 
     commit_payload = {
         "message_id": "msg-2",
+        "idempotency_key": "hchat:msg-2",
         "conversation_id": "conv-2",
         "from_instance": "HASHI2",
         "from_agent": "zhaojun",
@@ -347,6 +352,7 @@ def test_attachment_upload_cancel_removes_pending_upload(tmp_path):
 
     commit_payload = {
         "message_id": "msg-cancel",
+        "idempotency_key": "hchat:msg-cancel",
         "conversation_id": "conv-cancel",
         "from_instance": "HASHI2",
         "from_agent": "zhaojun",
@@ -427,6 +433,7 @@ def test_streaming_v2_accepts_opaque_script_and_delivers_only_after_commit(tmp_p
     assert protocol.messages == []
     commit_payload = {
         "message_id": "msg-stream",
+        "idempotency_key": "hchat:msg-stream",
         "conversation_id": "conv-stream",
         "from_instance": "HASHI2",
         "from_agent": "zhaojun",
@@ -491,6 +498,7 @@ def test_streaming_v2_rolls_back_committed_files_when_message_delivery_fails(tmp
     )
     commit_payload = {
         "message_id": "msg-rollback",
+        "idempotency_key": "hchat:msg-rollback",
         "conversation_id": "conv-rollback",
         "from_instance": "HASHI2",
         "from_agent": "zhaojun",

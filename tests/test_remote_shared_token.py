@@ -375,6 +375,7 @@ def test_protocol_message_requires_auth_when_token_configured(tmp_path):
     client, protocol = _client(tmp_path)
     payload = {
         "message_id": "m1",
+        "idempotency_key": "hchat:m1",
         "conversation_id": "c1",
         "from_instance": "HASHI2",
         "from_agent": "rika",
@@ -395,6 +396,7 @@ def test_protocol_message_rejects_route_loop_before_manager(tmp_path):
     client, protocol = _client(tmp_path)
     payload = {
         "message_id": "m-loop",
+        "idempotency_key": "hchat:m-loop",
         "conversation_id": "c-loop",
         "from_instance": "HASHI2",
         "from_agent": "rika",
@@ -430,6 +432,7 @@ def test_protocol_message_rejects_expired_ttl_before_manager(tmp_path):
     client, protocol = _client(tmp_path)
     payload = {
         "message_id": "m-expired",
+        "idempotency_key": "hchat:m-expired",
         "conversation_id": "c-expired",
         "from_instance": "HASHI2",
         "from_agent": "rika",
@@ -466,6 +469,7 @@ def test_protocol_reply_forces_agent_reply_message_type(tmp_path):
     client, protocol = _client(tmp_path)
     payload = {
         "message_id": "m-reply",
+        "idempotency_key": "hchat:m-reply",
         "conversation_id": "c-reply",
         "in_reply_to": "m-original",
         "from_instance": "HASHI2",
