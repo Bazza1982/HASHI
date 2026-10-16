@@ -26,6 +26,9 @@ Only a same-live-Core successor confirms inherited broad receipts. Function
 code adopts by reboot; docs do not. Safety rejection is a delivered command with
 reasons; cold startup confirms no inherited receipt. Windows restarts need an
 exact actuator/exit code. See [reboot decision](HASHI_REBOOT_FAST_RELIABLE_PLAN_2026-10-14.md).
+Workbench local configuration adoption keeps manager-level busy responses as
+`AGENT_BUSY` and retries only before a durable receipt exists. A durable
+`target_busy` outcome remains explicitly pending.
 
 ## Configuration, identity, and persistence
 
@@ -69,7 +72,9 @@ verified peer, relay and target. Cross-instance needs authenticated Remote;
 discovery is only a hint. See [Remote](HASHI_REMOTE_PROTOCOL_SPEC.md).
 
 PAO freezes destinations before PCM and owns ingress/routing/idempotency; FC owns
-presentation/receipts. HChat IDs bind FC Sessions to Superloop review. Sent
+presentation/receipts. Remote attachment commits retain the canonical HChat
+idempotency key and original send time through local delivery. HChat IDs bind
+FC Sessions to Superloop review. Sent
 needs a receipt; failure wins. Deduplicate and settle; prose grants no Tool
 authority. Continuations retain Session/Connector, replaying only saved
 non-action completions; pending/conflict/unknown cannot execute.
