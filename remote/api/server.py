@@ -387,12 +387,15 @@ def _redacted_protocol_status() -> dict[str, Any]:
 
 class HchatPayload(BaseModel):
     from_instance: str          # e.g. "HASHI9"
+    from_agent: Optional[str] = None
     to_agent: str               # e.g. "lily"
     text: str                   # The message content (already formatted)
     message_id: str
     originated_at: str
     idempotency_key: str
+    conversation_id: Optional[str] = None
     message_type: str = "agent_message"
+    in_reply_to: Optional[str] = None
     to_instance: Optional[str] = None  # Final target when a configured exchange relays
     source_hchat_format: bool = False  # If True, text is raw hchat format
     reply_route: Optional[dict] = None  # Sender's routing info for reply delivery
@@ -481,6 +484,7 @@ class ProtocolHandshakePayload(BaseModel):
 
 class ProtocolMessagePayload(BaseModel):
     message_id: str
+    idempotency_key: str
     conversation_id: str
     in_reply_to: Optional[str] = None
     from_instance: str
@@ -3410,6 +3414,19 @@ def create_app(
                     "code": "INVALID_MESSAGE",
                 },
             )
+        if payload.message_type not in {
+            "agent_message",
+            "agent_reply",
+            "delivery_status",
+        }:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "error": "Unsupported HChat message_type",
+                    "error_code": "invalid_message",
+                },
+            )
         if payload.authorization_resources or payload.private_authorization_proofs:
             return JSONResponse(
                 status_code=409,
@@ -3426,6 +3443,7 @@ def create_app(
                 text=payload.text,
                 message_id=payload.message_id,
                 originated_at=payload.originated_at,
+                idempotency_key=payload.idempotency_key,
                 conversation_id=payload.conversation_id,
                 message_type=payload.message_type,
                 in_reply_to=payload.in_reply_to,
@@ -3849,6 +3867,16 @@ def create_app(
             text_snippet=payload.text,
         )
 
+        if payload.idempotency_key != f"hchat:{payload.message_id}":
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "error": "HChat idempotency_key does not match message_id",
+                    "error_code": "invalid_message",
+                },
+            )
+
         local_instance_id = str(_instance_info.get("instance_id", "")).upper()
         requested_instance = (payload.to_instance or "").strip().upper()
 
@@ -3856,30 +3884,56 @@ def create_app(
             try:
                 from tools.hchat_send import parse_hchat_message, send_hchat
 
-                parsed = parse_hchat_message(payload.text, default_instance=payload.from_instance)
-                if not parsed:
-                    return JSONResponse(
-                        status_code=400,
-                        content={"ok": False, "error": "Invalid exchange hchat format"},
+                parsed = parse_hchat_message(
+                    payload.text,
+                    default_instance=payload.from_instance,
+                )
+                if payload.message_type == "delivery_status":
+                    relay_from_agent = str(payload.from_agent or "").strip().casefold()
+                    relay_source_instance = str(payload.from_instance or "").strip().upper()
+                    relay_text = payload.text
+                    if not relay_from_agent or not relay_source_instance:
+                        return JSONResponse(
+                            status_code=400,
+                            content={
+                                "ok": False,
+                                "error": "Delivery status relay identity is required",
+                            },
+                        )
+                else:
+                    if not parsed:
+                        return JSONResponse(
+                            status_code=400,
+                            content={
+                                "ok": False,
+                                "error": "Invalid exchange hchat format",
+                            },
+                        )
+                    relay_from_agent = parsed["agent"]
+                    relay_source_instance = (
+                        parsed["instance_id"] or payload.from_instance
                     )
+                    relay_text = parsed["body"]
 
                 ok = send_hchat(
                     payload.to_agent,
-                    parsed["agent"],
-                    parsed["body"],
+                    relay_from_agent,
+                    relay_text,
                     target_instance=requested_instance,
-                    source_instance=parsed["instance_id"] or payload.from_instance,
+                    source_instance=relay_source_instance,
                     reply_route_override=payload.reply_route,
                     message_id=payload.message_id,
+                    conversation_id=payload.conversation_id,
                     message_type=payload.message_type,
+                    in_reply_to=payload.in_reply_to,
                     originated_at=payload.originated_at,
                     idempotency_key=payload.idempotency_key,
                 )
                 if ok:
                     logger.info(
                         "HChat exchange relayed: %s/%s → %s@%s via %s",
-                        parsed["instance_id"] or payload.from_instance,
-                        parsed["agent"],
+                        relay_source_instance,
+                        relay_from_agent,
                         payload.to_agent,
                         requested_instance,
                         local_instance_id,
@@ -3922,7 +3976,9 @@ def create_app(
             payload.text, default_instance=payload.from_instance
         )
         claimed_agent = str(
-            (parsed_hchat or {}).get("agent") or payload.from_instance.lower()
+            payload.from_agent
+            or (parsed_hchat or {}).get("agent")
+            or payload.from_instance.lower()
         ).strip().casefold()
         if payload.source_hchat_format:
             message_text = payload.text  # already formatted
@@ -3938,7 +3994,9 @@ def create_app(
             "message_id": payload.message_id,
             "originated_at": payload.originated_at,
             "idempotency_key": payload.idempotency_key,
+            "conversation_id": payload.conversation_id,
             "message_type": payload.message_type,
+            "in_reply_to": payload.in_reply_to,
             "hchat_context": {
                 "from_agent": claimed_agent,
                 "from_instance": payload.from_instance,
@@ -3951,6 +4009,8 @@ def create_app(
                 "message_id": payload.message_id,
                 "originated_at": payload.originated_at,
                 "message_type": payload.message_type,
+                "conversation_id": payload.conversation_id,
+                "in_reply_to": payload.in_reply_to,
             },
         }
         if payload.private_authorization_proofs:

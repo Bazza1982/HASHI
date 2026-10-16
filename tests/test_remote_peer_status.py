@@ -6,6 +6,7 @@ import stat
 import sys
 import time
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -2788,6 +2789,7 @@ def test_protocol_status_counts_only_active_inflight_messages():
 
 def test_protocol_message_preserves_hchat_sender_relay_and_private_proofs(tmp_path):
     manager = ProtocolManager.__new__(ProtocolManager)
+    manager._hashi_root = tmp_path
     manager._instance_info = {"instance_id": "HASHI3"}
     manager._max_allowed_ttl = 8
     manager._inflight = {}
@@ -2805,6 +2807,8 @@ def test_protocol_message_preserves_hchat_sender_relay_and_private_proofs(tmp_pa
     payload = {
         "message_type": "agent_message",
         "message_id": "wire-private-1",
+        "idempotency_key": "hchat:wire-private-1",
+        "originated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "conversation_id": "conv-private-1",
         "from_instance": "HASHI1",
         "from_agent": "sender",
@@ -2833,6 +2837,7 @@ def test_protocol_message_preserves_hchat_sender_relay_and_private_proofs(tmp_pa
 
 def test_protocol_message_forwards_only_server_verified_attachment_manifest(tmp_path):
     manager = ProtocolManager.__new__(ProtocolManager)
+    manager._hashi_root = tmp_path
     manager._instance_info = {"instance_id": "HASHI3"}
     manager._max_allowed_ttl = 8
     manager._inflight = {}
@@ -2857,6 +2862,8 @@ def test_protocol_message_forwards_only_server_verified_attachment_manifest(tmp_
     payload = {
         "message_type": "agent_message",
         "message_id": "wire-attachment-1",
+        "idempotency_key": "hchat:wire-attachment-1",
+        "originated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "conversation_id": "conv-attachment-1",
         "from_instance": "HASHI1",
         "from_agent": "sender",
@@ -2879,6 +2886,7 @@ def test_protocol_message_forwards_only_server_verified_attachment_manifest(tmp_
     ]
 
     payload["message_id"] = "wire-attachment-2"
+    payload["idempotency_key"] = "hchat:wire-attachment-2"
     payload["_local_attachment_manifest_verified"] = False
     asyncio.run(manager.handle_protocol_message(payload))
     assert manager._captured_enqueue[2].get("attachments") is None
@@ -3077,6 +3085,8 @@ def _reply_payload(**overrides):
     payload = {
         "message_type": "agent_reply",
         "message_id": "msg-1:reply",
+        "idempotency_key": "hchat:msg-1:reply",
+        "originated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "conversation_id": "conv-1",
         "in_reply_to": "msg-1",
         "from_instance": "HASHI2",
@@ -3093,6 +3103,7 @@ def _reply_payload(**overrides):
 
 def _reply_manager(tmp_path):
     manager = ProtocolManager.__new__(ProtocolManager)
+    manager._hashi_root = tmp_path
     manager._instance_info = {"instance_id": "HASHI1"}
     manager._max_allowed_ttl = 8
     manager._inflight = {}
@@ -3133,8 +3144,8 @@ def test_agent_reply_dedupes_terminal_reply_without_second_enqueue(tmp_path):
 
     status, result = asyncio.run(manager._handle_agent_reply(_reply_payload()))
 
-    assert status == 409
-    assert result["body"]["code"] == "duplicate_message"
+    assert status == 200
+    assert result["state"] == "reply_delivered_locally"
     assert not hasattr(manager, "_last_enqueue")
 
 
@@ -3178,8 +3189,9 @@ def test_agent_reply_sender_accepts_terminal_duplicate_as_delivery_success():
 
 def test_agent_reply_accepts_and_records_legacy_missing_correlation(tmp_path):
     manager = _reply_manager(tmp_path)
+    payload = _reply_payload()
 
-    status, result = asyncio.run(manager._handle_agent_reply(_reply_payload()))
+    status, result = asyncio.run(manager._handle_agent_reply(payload))
 
     assert status == 202
     assert result["state"] == "reply_delivered_locally"
@@ -3191,14 +3203,28 @@ def test_agent_reply_accepts_and_records_legacy_missing_correlation(tmp_path):
         "System exchange reply from rika@HASHI2:\ndone"
     )
     assert "Terminal protocol notice" in manager._last_enqueue[1]
-    assert manager._last_enqueue_kwargs == {
+    assert {
+        key: manager._last_enqueue_kwargs[key]
+        for key in (
+            "exchange_kind",
+            "message_id",
+            "conversation_id",
+            "from_instance",
+            "from_agent",
+            "terminal_response_text",
+            "idempotency_key",
+        )
+    } == {
         "exchange_kind": "reply",
         "message_id": "msg-1:reply",
         "conversation_id": "conv-1",
         "from_instance": "HASHI2",
         "from_agent": "rika",
         "terminal_response_text": "done",
+        "idempotency_key": "hchat:msg-1:reply",
     }
+    assert manager._last_enqueue_kwargs["originated_at"] == payload["originated_at"]
+    assert manager._last_enqueue_kwargs["payload_digest"].startswith("sha256:")
 
 
 def test_protocol_reply_enqueue_is_idempotent_and_tool_terminal(monkeypatch):
@@ -3248,7 +3274,7 @@ def test_protocol_reply_enqueue_is_idempotent_and_tool_terminal(monkeypatch):
     assert captured[0][0] == "http://127.0.0.1:18804/api/chat"
     payload = captured[0][1]
     assert payload["source"] == "protocol:reply"
-    assert payload["idempotency_key"] == "protocol:reply:reply-1"
+    assert payload["idempotency_key"] == "hchat:reply-1"
     assert payload["request_metadata"]["system_exchange_terminal"] is True
     assert payload["request_metadata"]["system_exchange_terminal_text"] == "done"
     assert payload["request_metadata"]["tool_allowlist"] == []

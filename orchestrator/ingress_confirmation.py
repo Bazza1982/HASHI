@@ -239,10 +239,19 @@ class IngressConfirmationService:
                     connector_id, owner_id, source_message_id,
                 ),
             )
-            row = cursor.fetchone()
+            rows = cursor.fetchall()
+            if len(rows) > 1:
+                raise ConfirmationConflictError(
+                    "Ingress confirmation identities resolve to different records"
+                )
+            row = rows[0] if rows else None
             if row is not None:
                 existing = self._row_to_dict(row)
-                if existing["payload_digest"] != payload_digest:
+                if (
+                    existing["payload_digest"] != payload_digest
+                    or existing["idempotency_key"] != idempotency_key
+                    or existing["source_message_id"] != source_message_id
+                ):
                     raise ConfirmationConflictError(
                         f"Ingress confirmation conflict for idempotency_key {idempotency_key!r}"
                     )
@@ -419,6 +428,37 @@ class IngressConfirmationService:
                 LIMIT ?
                 """,
                 (agent_id, connector_id, max(1, min(int(limit), 2000))),
+            )
+            results: list[dict[str, Any]] = []
+            for row in cursor.fetchall():
+                record = self._row_to_dict(row)
+                results.append(
+                    self._check_lazy_state_transition_locked(connection, record)
+                )
+            return results
+
+    def list_hchat_status_candidates(
+        self,
+        *,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Return internal HChat decisions that may need a sender status notice."""
+
+        with self.store._lock, self.store._connection() as connection:
+            cursor = connection.execute(
+                """
+                SELECT * FROM ingress_confirmations
+                WHERE message_kind IN ('hchat_request', 'hchat_reply')
+                  AND payload_json LIKE '%"status_notification"%'
+                  AND display_metadata_json NOT LIKE '%"sender_delivery_status_complete"%'
+                  AND state IN (
+                      'awaiting_confirmation', 'confirming', 'confirmed',
+                      'discarded', 'expired', 'superseded'
+                  )
+                ORDER BY created_at ASC
+                LIMIT ?
+                """,
+                (max(1, min(int(limit), 2000)),),
             )
             results: list[dict[str, Any]] = []
             for row in cursor.fetchall():

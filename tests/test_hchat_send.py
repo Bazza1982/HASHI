@@ -9,6 +9,19 @@ import pytest
 from orchestrator.enterprise import ChannelRegistry, IdentityService
 from tools import hchat_send
 
+_REAL_REGISTER_HCHAT_OUTBOUND_CORRELATION = (
+    hchat_send._register_hchat_outbound_correlation
+)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_outbound_correlation_registry(monkeypatch):
+    monkeypatch.setattr(
+        hchat_send,
+        "_register_hchat_outbound_correlation",
+        lambda *_args, **_kwargs: True,
+    )
+
 
 def _local_cfg() -> dict:
     return {
@@ -22,6 +35,42 @@ def _local_cfg() -> dict:
             {"name": "zelda", "is_active": True},
         ],
     }
+
+
+def test_outbound_correlation_is_bound_before_fallback_delivery(monkeypatch):
+    from remote import protocol_outbound
+    from tools import protocol_send
+
+    recorded = []
+    monkeypatch.setattr(hchat_send, "_load_instances", lambda: {})
+    monkeypatch.setattr(
+        protocol_send,
+        "_local_sidecar_base_url",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        protocol_send,
+        "_record_outbound_correlation",
+        lambda payload, **kwargs: recorded.append((dict(payload), kwargs)),
+    )
+    monkeypatch.setattr(
+        protocol_outbound,
+        "get_outbound_correlation",
+        lambda *_args, **_kwargs: dict(recorded[0][0]),
+    )
+
+    assert _REAL_REGISTER_HCHAT_OUTBOUND_CORRELATION(
+        _local_cfg(),
+        message_id="message-bound",
+        conversation_id="conversation-bound",
+        source_instance="HASHI1",
+        from_agent="zelda",
+        target_instance="HASHI2",
+        to_agent="rain",
+    )
+    assert recorded[0][0]["message_id"] == "message-bound"
+    assert recorded[0][0]["conversation_id"] == "conversation-bound"
+    assert recorded[0][0]["to_instance"] == "HASHI2"
 
 
 def _enterprise_cfg(tmp_path) -> dict:
@@ -60,6 +109,7 @@ def test_send_hchat_local_agent_uses_local_workbench_fallback(monkeypatch):
     assert calls[0][1]["message_id"].startswith("hchat-")
     assert calls[0][1]["originated_at"].endswith("Z")
     assert calls[0][1]["idempotency_key"] == f"hchat:{calls[0][1]['message_id']}"
+    assert calls[0][1]["conversation_id"].startswith("conv-")
 
 
 @pytest.mark.parametrize(
@@ -202,7 +252,7 @@ def test_send_via_workbench_uses_autoreply_envelope(monkeypatch, capsys):
             return FakeResponse(
                 b'{"ok": true, "instance_id": "HASHI1", '
                 b'"workbench_endpoint": {"instance_id": "HASHI1"}, '
-                b'"capabilities": ["message_freshness_v1"]}'
+                b'"capabilities": ["message_freshness_v1", "hchat_delivery_status_v1"]}'
             )
         payloads.append(json.loads(req.data.decode("utf-8")))
         return FakeResponse()
@@ -217,11 +267,15 @@ def test_send_via_workbench_uses_autoreply_envelope(monkeypatch, capsys):
         "Please review the queue fix.\nKeep this exact line.",
         "HASHI1",
         expected_instance="HASHI1",
+        conversation_id="conversation-workbench",
     )
 
     assert payloads[0]["agent"] == "akane"
     assert payloads[0]["text"].startswith("[hchat from zelda@HASHI1] HChat protocol note:")
     assert "Do not run hchat_send.py" in payloads[0]["text"]
+    assert payloads[0]["hchat_context"]["conversation_id"] == (
+        "conversation-workbench"
+    )
     output = capsys.readouterr().out
     assert "Hchat queued" in output
     assert "Message:\nPlease review the queue fix.\nKeep this exact line." in output
@@ -505,6 +559,35 @@ def test_send_hchat_remote_prefers_protocol_transport_when_shared_token_availabl
     assert calls[0][:4] == ("agent1", "INTEL", "zelda", "hello over protocol")
     assert calls[0][4]["message_id"].startswith("hchat-")
     assert calls[0][4]["originated_at"].endswith("Z")
+    assert calls[0][4]["conversation_id"].startswith("conv-")
+
+
+def test_delivery_status_prefers_correlated_protocol_transport(monkeypatch):
+    cfg = _local_cfg()
+    calls = []
+    monkeypatch.setattr(hchat_send, "_load_config", lambda: cfg)
+    monkeypatch.setattr(hchat_send, "_shared_token_for_protocol", lambda: "shared-secret")
+    monkeypatch.setattr(
+        hchat_send,
+        "_send_via_protocol_transport",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or True,
+    )
+
+    assert hchat_send.send_hchat(
+        "zelda@HASHI3",
+        "rain",
+        "[hashi hchat delivery status v1] {}",
+        source_instance="HASHI2",
+        message_id="hstatus-1",
+        conversation_id="conversation-1",
+        message_type="delivery_status",
+        in_reply_to="original-1",
+    )
+
+    assert len(calls) == 1
+    assert calls[0][1]["message_type"] == "delivery_status"
+    assert calls[0][1]["conversation_id"] == "conversation-1"
+    assert calls[0][1]["in_reply_to"] == "original-1"
 
 
 def test_protocol_transport_delegates_to_protocol_send(monkeypatch):

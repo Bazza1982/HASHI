@@ -507,6 +507,23 @@ def build_message_context_snapshot(
             for item in hchat.get("relay_chain") or ()
             if str(item).strip()
         ]
+        hchat_message_id = str(hchat.get("message_id") or "").strip()
+        hchat_idempotency = str(hchat.get("idempotency_key") or "").strip()
+        hchat_digest = str(hchat.get("payload_digest") or "").strip().casefold()
+        if (
+            hchat_message_id
+            and hchat_idempotency == f"hchat:{hchat_message_id}"
+            and re.fullmatch(r"sha256:[0-9a-f]{64}", hchat_digest)
+        ):
+            snapshot["hchat_message"] = {
+                "message_id": hchat_message_id,
+                "originated_at": str(hchat.get("originated_at") or "").strip(),
+                "message_type": str(
+                    hchat.get("message_type") or "agent_message"
+                ).strip().casefold(),
+                "idempotency_key": hchat_idempotency,
+                "payload_digest": hchat_digest,
+            }
         origin = hchat.get("origin_instance")
         if isinstance(origin, Mapping) and str(origin.get("id") or "").strip():
             snapshot["origin_instance"] = {

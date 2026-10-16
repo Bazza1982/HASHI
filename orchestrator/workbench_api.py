@@ -398,6 +398,7 @@ class WorkbenchApiServer:
         )
         self._exchange_ingress = None
         self._exchange_recovery_task: asyncio.Task | None = None
+        self._hchat_status_recovery_task: asyncio.Task | None = None
         self._audio_cleanup_task: asyncio.Task | None = None
         self._audio_transcript_tasks: set[asyncio.Task] = set()
         self.identity_service = self._build_identity_service()
@@ -1978,6 +1979,10 @@ class WorkbenchApiServer:
             self._audio_cleanup_loop(),
             name="hashi-native-audio-cleanup",
         )
+        self._hchat_status_recovery_task = asyncio.create_task(
+            self._hchat_status_recovery_loop(),
+            name="hashi-hchat-status-recovery",
+        )
         try:
             from orchestrator.exchange_config import load_exchange_config
 
@@ -2107,6 +2112,155 @@ class WorkbenchApiServer:
                     type(exc).__name__,
                 )
 
+    async def _notify_hchat_confirmation_status(self, record: Mapping) -> bool:
+        payload = record.get("payload") or {}
+        notification = (
+            payload.get("status_notification")
+            if isinstance(payload, Mapping)
+            else None
+        )
+        if not isinstance(notification, Mapping):
+            return False
+        state = str(record.get("state") or "").strip().lower()
+        status = {
+            "awaiting_confirmation": "awaiting_confirmation",
+            "confirming": "awaiting_confirmation",
+            "confirmed": (
+                "displayed"
+                if str(record.get("message_kind") or "") == "hchat_reply"
+                else "executed"
+            ),
+            "discarded": "discarded",
+            "expired": "confirmation_expired",
+            "superseded": "confirmation_superseded",
+        }.get(state)
+        if status is None:
+            return False
+        display_metadata = record.get("display_metadata") or {}
+        if not isinstance(display_metadata, Mapping):
+            display_metadata = {}
+        sent_statuses = {
+            str(value).strip().lower()
+            for value in (
+                display_metadata.get("sender_delivery_statuses") or ()
+            )
+            if str(value).strip()
+        }
+        legacy_status = str(
+            display_metadata.get("sender_delivery_status") or ""
+        ).strip().lower()
+        if legacy_status:
+            sent_statuses.add(legacy_status)
+        if status in sent_statuses:
+            if status != "awaiting_confirmation" and not bool(
+                display_metadata.get("sender_delivery_status_complete")
+            ):
+                self.ingress_confirmation.update_display_metadata(
+                    confirmation_id=str(record.get("confirmation_id") or ""),
+                    owner_id=str(record.get("owner_id") or ""),
+                    updates={"sender_delivery_status_complete": True},
+                )
+            return True
+
+        from orchestrator.hchat_delivery_status import (
+            default_hchat_conversation_id,
+            delivery_status_message_id,
+            encode_delivery_status,
+        )
+        from tools.hchat_send import send_hchat
+
+        original_message_id = str(
+            record.get("source_message_id") or ""
+        ).strip()
+        to_agent = str(notification.get("to_agent") or "").strip().casefold()
+        target_instance = str(
+            notification.get("target_instance") or ""
+        ).strip().upper()
+        from_agent = str(
+            notification.get("from_agent") or record.get("agent_id") or ""
+        ).strip().casefold()
+        source_instance = str(
+            notification.get("source_instance")
+            or getattr(self.global_config, "instance_id", "")
+            or ""
+        ).strip().upper()
+        if not all(
+            (
+                original_message_id,
+                to_agent,
+                target_instance,
+                from_agent,
+                source_instance,
+            )
+        ):
+            return False
+        message_id = delivery_status_message_id(original_message_id, status)
+        reason = {
+            "confirmation_expired": "confirmation_timeout_15m",
+            "confirmation_superseded": "session_context_advanced",
+        }.get(status)
+        status_text = encode_delivery_status(
+            original_message_id=original_message_id,
+            state=status,
+            reason=reason,
+        )
+        delivered = await asyncio.to_thread(
+            send_hchat,
+            to_agent,
+            from_agent,
+            status_text,
+            target_instance,
+            source_instance=source_instance,
+            message_id=message_id,
+            conversation_id=str(notification.get("conversation_id") or "").strip()
+            or default_hchat_conversation_id(original_message_id),
+            message_type="delivery_status",
+            in_reply_to=original_message_id,
+            originated_at=str(
+                record.get("decided_at")
+                or record.get("updated_at")
+                or self.ingress_confirmation._now_iso()
+            ),
+            idempotency_key=f"hchat:{message_id}",
+        )
+        if not delivered:
+            return False
+        self.ingress_confirmation.update_display_metadata(
+            confirmation_id=str(record.get("confirmation_id") or ""),
+            owner_id=str(record.get("owner_id") or ""),
+            updates={
+                "sender_delivery_status": status,
+                "sender_delivery_status_message_id": message_id,
+                "sender_delivery_statuses": sorted(sent_statuses | {status}),
+                **(
+                    {"sender_delivery_status_complete": True}
+                    if status != "awaiting_confirmation"
+                    else {}
+                ),
+            },
+        )
+        return True
+
+    async def _hchat_status_recovery_loop(self) -> None:
+        while True:
+            try:
+                for record in self.ingress_confirmation.list_hchat_status_candidates():
+                    try:
+                        await self._notify_hchat_confirmation_status(record)
+                    except Exception as exc:
+                        logging.getLogger("HASHI.Workbench.HChatStatus").warning(
+                            "HChat sender status deferred (%s)",
+                            type(exc).__name__,
+                        )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logging.getLogger("HASHI.Workbench.HChatStatus").warning(
+                    "HChat sender status recovery failed (%s)",
+                    type(exc).__name__,
+                )
+            await asyncio.sleep(5)
+
     async def _audio_cleanup_loop(self) -> None:
         while True:
             await asyncio.sleep(60)
@@ -2126,6 +2280,12 @@ class WorkbenchApiServer:
         )
 
     async def shutdown(self):
+        if self._hchat_status_recovery_task is not None:
+            self._hchat_status_recovery_task.cancel()
+            await asyncio.gather(
+                self._hchat_status_recovery_task, return_exceptions=True
+            )
+            self._hchat_status_recovery_task = None
         if self._exchange_recovery_task is not None:
             self._exchange_recovery_task.cancel()
             await asyncio.gather(
@@ -6898,24 +7058,46 @@ class WorkbenchApiServer:
             )
             surface = str(payload.get("surface") or "session-api").strip().lower()
             is_loopback = is_request_loopback(request)
-            # TUI is intentionally outside the network freshness policy.  Its
-            # existing direct connector is identifiable by the server-owned
-            # loopback boundary plus the established TUI client/idempotency
-            # namespace.  A remote request or a body that only claims
-            # ``surface=tui`` does not receive this exemption.
-            idempotency_hint = str(
-                payload.get("idempotency_key")
-                or request.headers.get("Idempotency-Key")
-                or ""
-            ).strip()
-            client_id_hint = str(payload.get("client_id") or "").strip()
+            # TUI is intentionally outside the network freshness policy.  The
+            # exemption comes from Remote-sealed connector evidence on the
+            # loopback hop, never from caller-owned surface/client ID strings.
+            message = payload.get("message")
+            message_content = (
+                message.get("content")
+                if isinstance(message, Mapping)
+                else None
+            )
+            tui_prompt = "\n".join(
+                str(block.get("text") or "")
+                for block in (message_content or ())
+                if isinstance(block, Mapping) and block.get("type") == "text"
+            )
+            supplied_metadata = payload.get("request_metadata")
+            connector_claims = verify_connector_evidence(
+                self.config_path.parent,
+                evidence=(
+                    supplied_metadata.get(CONNECTOR_EVIDENCE_METADATA_KEY)
+                    if isinstance(supplied_metadata, Mapping)
+                    else None
+                ),
+                prompt=tui_prompt,
+            )
+            origin_evidence = (
+                connector_claims.get("_origin_instance_evidence")
+                if isinstance(connector_claims, Mapping)
+                else None
+            )
             trusted_local_tui = bool(
                 is_loopback
                 and surface == "tui"
-                and client_id_hint.startswith("tui-")
-                and idempotency_hint.startswith("tui-")
+                and isinstance(connector_claims, Mapping)
+                and connector_claims.get(MESSAGE_SOURCE_RESERVED_METADATA_KEY)
+                == "tui"
+                and isinstance(origin_evidence, Mapping)
+                and str(origin_evidence.get("id") or "").strip()
+                and str(origin_evidence.get("assurance") or "").strip()
+                == "shared_network_hmac"
             )
-            message = payload.get("message")
             originated_at = payload.get("originated_at") or (
                 message.get("originated_at") if isinstance(message, dict) else None
             )
@@ -7238,6 +7420,11 @@ class WorkbenchApiServer:
                                 ),
                             },
                             "message_id": protocol_message_id,
+                            "idempotency_key": saved_payload.get("idempotency_key"),
+                            "payload_digest": (
+                                enqueue_kwargs.get("payload_digest")
+                                or saved_payload.get("payload_digest")
+                            ),
                             "originated_at": saved_payload.get("originated_at"),
                             "message_type": (
                                 "agent_reply"
@@ -7316,11 +7503,10 @@ class WorkbenchApiServer:
                             "protocol_from_agent": from_agent,
                             "connector_id": "remote",
                             "ingress_transport": "remote.protocol",
-                            "session_surface": "remote",
-                            "session_channel_key": (
-                                f"{from_instance}:"
-                                f"{enqueue_kwargs.get('conversation_id') or ''}"
-                            ),
+                            "owner_id": rec.get("owner_id"),
+                            "session_id": rec.get("session_id"),
+                            "session_surface": "workbench",
+                            "session_channel_key": "default",
                         }
                         if evidence is not None:
                             metadata[CONNECTOR_EVIDENCE_METADATA_KEY] = evidence
@@ -8928,6 +9114,9 @@ class WorkbenchApiServer:
         parts: list[dict[str, Any]] = [
             {"type": "text", "item_index": 1, "text": text}
         ]
+        session_blocks: list[dict[str, Any]] = (
+            [{"type": "text", "text": text}] if text else []
+        )
         try:
             for item_index, (item, source_path) in enumerate(
                 zip(manifest, resolved_sources, strict=True), start=2
@@ -8989,6 +9178,16 @@ class WorkbenchApiServer:
                     part.pop("semantic_role", None)
                     part.pop("duration_ms", None)
                 parts.append(part)
+                session_block = {
+                    "type": "audio" if modality == "audio" else "attachment",
+                    "attachment_id": attachment_id,
+                }
+                if item.get("caption"):
+                    session_block["caption"] = str(item["caption"])
+                if modality == "audio":
+                    session_block["semantic_role"] = "audio_attachment"
+                session_blocks.append(session_block)
+            session_metadata["session_message_content"] = session_blocks
             return (
                 canonical_request_content(parts),
                 attachment_ids,
@@ -9648,9 +9847,6 @@ class WorkbenchApiServer:
                         },
                         status=400,
                     )
-        hchat_context = payload.get("hchat_context")
-        if source.casefold() == "hchat" and isinstance(hchat_context, Mapping):
-            session_metadata[HCHAT_CONTEXT_METADATA_KEY] = dict(hchat_context)
         proofs = payload.get("private_authorization_proofs")
         binding = payload.get("private_authorization_binding")
         if isinstance(proofs, list):
@@ -9665,9 +9861,7 @@ class WorkbenchApiServer:
         # Workbench compatibility API.  Fence it before redirects, attachment
         # staging, slash-command handling, Run creation, or Agent admission.
         source_norm = source.casefold()
-        verified_hchat_context = (
-            dict(hchat_context) if isinstance(hchat_context, Mapping) else None
-        )
+        verified_hchat_context = None
         normalized_remote_attachments = None
         if remote_attachments is not None:
             # Authentication and the signed manifest must be valid before an
@@ -9758,10 +9952,20 @@ class WorkbenchApiServer:
             from orchestrator.hchat_freshness_gate import (
                 _resolve_hchat_owner,
                 check_hchat_freshness_and_register,
+                hchat_payload_digest,
                 is_hchat_terminal_reply,
             )
 
-            context = verified_hchat_context or {}
+            if verified_hchat_context is None:
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "error": "verified HChat connector evidence is required",
+                        "error_code": "hchat_connector_evidence_required",
+                    },
+                    status=401,
+                )
+            context = dict(verified_hchat_context)
             message_id = str(
                 payload.get("message_id")
                 or context.get("message_id")
@@ -9771,23 +9975,15 @@ class WorkbenchApiServer:
             idempotency_key = str(
                 payload.get("idempotency_key") or f"hchat:{message_id}"
             ).strip()
-            if not message_id:
-                message_id = "legacy-" + hashlib.sha256(
-                    json.dumps(
-                        {
-                            "agent": agent_name,
-                            "text": text,
-                            "source": source,
-                            "from_agent": context.get("from_agent"),
-                            "from_instance": context.get("from_instance"),
-                            "idempotency_key": idempotency_key,
-                        },
-                        ensure_ascii=False,
-                        sort_keys=True,
-                    ).encode("utf-8")
-                ).hexdigest()[:32]
-                if not idempotency_key or idempotency_key == "hchat:":
-                    idempotency_key = f"hchat:{message_id}"
+            if not message_id or idempotency_key != f"hchat:{message_id}":
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "error": "valid HChat message_id and matching idempotency_key are required",
+                        "error_code": "invalid_hchat_identity",
+                    },
+                    status=400,
+                )
             originated_at = payload.get("originated_at") or context.get(
                 "originated_at"
             )
@@ -9801,8 +9997,177 @@ class WorkbenchApiServer:
                 or session_metadata.get("system_exchange_kind")
                 or ""
             )
+            conversation_id = str(
+                context.get("conversation_id")
+                or session_metadata.get("protocol_conversation_id")
+                or ""
+            ).strip()
+            in_reply_to = str(context.get("in_reply_to") or "").strip()
+            to_instance = str(
+                context.get("to_instance")
+                or getattr(self.global_config, "instance_id", "")
+                or ""
+            ).strip().upper()
             is_reply = is_hchat_terminal_reply(message_type, text)
-            owner_id = str(session_metadata.get("owner_id") or "").strip() or None
+            try:
+                owner_id = _resolve_hchat_owner(
+                    self.session_store,
+                    to_agent=agent_name,
+                    preferred_owner_id=SessionStore.owner_id_for(self.global_config),
+                )
+            except ValueError as exc:
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "error": str(exc),
+                        "error_code": "hchat_owner_unavailable",
+                    },
+                    status=409,
+                )
+            target_session = self.session_store.resolve_primary_session(
+                owner_id=owner_id,
+                agent_id=agent_name,
+                establish=True,
+            )
+            if message_type.strip().casefold() == "delivery_status":
+                from orchestrator.hchat_delivery_status import (
+                    decode_delivery_status,
+                    delivery_status_display_text,
+                    delivery_status_matches_outbound_correlation,
+                    delivery_status_message_id,
+                )
+                from orchestrator.message_freshness import parse_rfc3339_utc
+                from remote.protocol_outbound import get_outbound_correlation
+
+                try:
+                    status_notice = decode_delivery_status(text)
+                except ValueError as exc:
+                    return web.json_response(
+                        {
+                            "ok": False,
+                            "error": str(exc),
+                            "error_code": "invalid_hchat_delivery_status",
+                        },
+                        status=400,
+                    )
+                if (
+                    status_notice is None
+                    or not conversation_id
+                    or not in_reply_to
+                    or parse_rfc3339_utc(str(originated_at or "")) is None
+                    or status_notice["original_message_id"] != in_reply_to
+                    or message_id
+                    != delivery_status_message_id(
+                        in_reply_to,
+                        status_notice["state"],
+                    )
+                ):
+                    return web.json_response(
+                        {
+                            "ok": False,
+                            "error": "HChat delivery status identity is invalid",
+                            "error_code": "invalid_hchat_delivery_status",
+                        },
+                        status=400,
+                    )
+                correlation = get_outbound_correlation(
+                    in_reply_to,
+                    local_instance=to_instance,
+                )
+                if not delivery_status_matches_outbound_correlation(
+                    correlation,
+                    conversation_id=conversation_id,
+                    from_instance=from_instance,
+                    from_agent=from_agent,
+                    to_instance=to_instance,
+                    to_agent=agent_name,
+                ):
+                    return web.json_response(
+                        {
+                            "ok": False,
+                            "error": (
+                                "HChat delivery status does not match a local "
+                                "outbound message"
+                            ),
+                            "error_code": "hchat_delivery_status_correlation_mismatch",
+                        },
+                        status=409,
+                    )
+                visible_text = str(
+                    session_metadata.get("system_exchange_terminal_text")
+                    or delivery_status_display_text(status_notice)
+                ).strip()
+                displayed = self.session_store.append_presentation_message(
+                    session_id=target_session["session_id"],
+                    owner_id=owner_id,
+                    agent_id=agent_name,
+                    role="assistant",
+                    text=visible_text,
+                    source="hchat-status",
+                    idempotency_key=f"hchat-status:{message_id}",
+                    presentation_channel="hchat-status",
+                    history_eligible=False,
+                    message_context={
+                        "system_exchange": True,
+                        "system_exchange_kind": "status",
+                        "system_exchange_terminal": True,
+                        "hchat_message_id": message_id,
+                        "hchat_original_message_id": status_notice[
+                            "original_message_id"
+                        ],
+                        "hchat_delivery_status": status_notice["state"],
+                        "hchat_from_agent": from_agent,
+                        "hchat_from_instance": from_instance,
+                    },
+                )
+                return web.json_response(
+                    {
+                        "ok": True,
+                        "accepted": True,
+                        "state": "displayed",
+                        "delivery_status": status_notice["state"],
+                        "session_id": target_session["session_id"],
+                        "message_id": displayed["message_id"],
+                    }
+                )
+            logical_digest = hchat_payload_digest(
+                message_id=message_id,
+                originated_at=originated_at,
+                from_agent=from_agent,
+                from_instance=from_instance,
+                to_agent=agent_name,
+                is_reply=is_reply,
+                text=text,
+                attachment_binding=normalized_remote_attachments or [],
+            )
+            declared_digest = str(context.get("payload_digest") or "").strip().casefold()
+            if declared_digest and declared_digest != logical_digest:
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "error": "HChat payload digest does not match the signed message",
+                        "error_code": "hchat_payload_digest_mismatch",
+                    },
+                    status=409,
+                )
+            context.update(
+                {
+                    "message_id": message_id,
+                    "originated_at": originated_at,
+                    "message_type": "agent_reply" if is_reply else "agent_message",
+                    "idempotency_key": idempotency_key,
+                    "payload_digest": logical_digest,
+                }
+            )
+            session_metadata.update(
+                {
+                    HCHAT_CONTEXT_METADATA_KEY: context,
+                    "owner_id": owner_id,
+                    "session_id": target_session["session_id"],
+                    "session_surface": "workbench",
+                    "session_channel_key": "default",
+                }
+            )
             runtime_payload = {
                 "text": text,
                 "source": source,
@@ -9811,6 +10176,20 @@ class WorkbenchApiServer:
             }
             if remote_attachments is not None:
                 runtime_payload["remote_attachments"] = normalized_remote_attachments
+            pending_execution_payload = {"runtime_payload": runtime_payload}
+            if not source_norm.startswith("protocol:"):
+                pending_execution_payload["status_notification"] = {
+                    "to_agent": from_agent,
+                    "target_instance": from_instance,
+                    "from_agent": str(agent_name or "").strip().casefold(),
+                    "source_instance": str(
+                        context.get("to_instance")
+                        or getattr(self.global_config, "instance_id", "")
+                    ).strip().upper(),
+                    "conversation_id": str(
+                        context.get("conversation_id") or ""
+                    ).strip(),
+                }
             try:
                 is_fresh, confirmation = check_hchat_freshness_and_register(
                     store=self.session_store,
@@ -9828,7 +10207,7 @@ class WorkbenchApiServer:
                     idempotency_key=idempotency_key,
                     canonical_text=text,
                     attachment_binding=normalized_remote_attachments or [],
-                    payload_to_execute={"runtime_payload": runtime_payload},
+                    payload_to_execute=pending_execution_payload,
                 )
             except (ValueError, ConfirmationConflictError) as exc:
                 return web.json_response(
@@ -10290,7 +10669,9 @@ class WorkbenchApiServer:
         message_id = str(payload.get("message_id") or "").strip()
         originated_at = payload.get("originated_at")
         idempotency_key = str(payload.get("idempotency_key") or "").strip()
+        conversation_id = str(payload.get("conversation_id") or "").strip()
         message_type = str(payload.get("message_type") or "agent_message").strip()
+        in_reply_to = str(payload.get("in_reply_to") or "").strip()
 
         if (
             not to_agent
@@ -10362,9 +10743,114 @@ class WorkbenchApiServer:
                 )
             from tools.hchat_send import format_hchat_message
 
-            message_text = format_hchat_message(from_agent, from_instance, text)
+            message_text = (
+                text
+                if message_type.casefold() == "delivery_status"
+                else format_hchat_message(from_agent, from_instance, text)
+            )
             if reply_route and isinstance(reply_route, dict):
                 self._learn_reply_route(message_text, reply_route)
+            if message_type.casefold() == "delivery_status":
+                from orchestrator.hchat_delivery_status import (
+                    decode_delivery_status,
+                    delivery_status_display_text,
+                    delivery_status_matches_outbound_correlation,
+                    delivery_status_message_id,
+                )
+                from orchestrator.hchat_freshness_gate import _resolve_hchat_owner
+                from orchestrator.message_freshness import parse_rfc3339_utc
+                from remote.protocol_outbound import get_outbound_correlation
+
+                try:
+                    status_notice = decode_delivery_status(message_text)
+                except ValueError as exc:
+                    return web.json_response(
+                        {"ok": False, "error": str(exc)}, status=400
+                    )
+                if (
+                    status_notice is None
+                    or not conversation_id
+                    or not in_reply_to
+                    or parse_rfc3339_utc(str(originated_at or "")) is None
+                    or status_notice["original_message_id"] != in_reply_to
+                    or message_id
+                    != delivery_status_message_id(
+                        in_reply_to,
+                        status_notice["state"],
+                    )
+                ):
+                    return web.json_response(
+                        {
+                            "ok": False,
+                            "error": "invalid HChat delivery status identity",
+                        },
+                        status=400,
+                    )
+                correlation = get_outbound_correlation(
+                    in_reply_to,
+                    local_instance=local_instance,
+                )
+                if not delivery_status_matches_outbound_correlation(
+                    correlation,
+                    conversation_id=conversation_id,
+                    from_instance=from_instance,
+                    from_agent=from_agent,
+                    to_instance=to_instance,
+                    to_agent=to_agent,
+                ):
+                    return web.json_response(
+                        {
+                            "ok": False,
+                            "error": (
+                                "HChat delivery status does not match a local "
+                                "outbound message"
+                            ),
+                        },
+                        status=409,
+                    )
+                owner_id = _resolve_hchat_owner(
+                    self.session_store,
+                    to_agent=to_agent,
+                )
+                session = self.session_store.resolve_primary_session(
+                    owner_id=owner_id,
+                    agent_id=to_agent,
+                    establish=True,
+                )
+                displayed = self.session_store.append_presentation_message(
+                    session_id=session["session_id"],
+                    owner_id=owner_id,
+                    agent_id=to_agent,
+                    role="assistant",
+                    text=delivery_status_display_text(status_notice),
+                    source="hchat-status",
+                    idempotency_key=f"hchat-status:{message_id}",
+                    presentation_channel="hchat-status",
+                    history_eligible=False,
+                    message_context={
+                        "system_exchange": True,
+                        "system_exchange_kind": "status",
+                        "system_exchange_terminal": True,
+                        "hchat_message_id": message_id,
+                        "hchat_original_message_id": status_notice[
+                            "original_message_id"
+                        ],
+                        "hchat_delivery_status": status_notice["state"],
+                        "hchat_from_agent": from_agent,
+                        "hchat_from_instance": from_instance,
+                    },
+                )
+                return web.json_response(
+                    {
+                        "ok": True,
+                        "relayed": True,
+                        "exchange": True,
+                        "state": "displayed",
+                        "delivery_status": status_notice["state"],
+                        "session_id": session["session_id"],
+                        "message_id": displayed["message_id"],
+                    }
+                )
             hchat_metadata = {
                 HCHAT_CONTEXT_METADATA_KEY: {
                     "from_agent": from_agent,
@@ -10377,6 +10863,8 @@ class WorkbenchApiServer:
                     "message_id": message_id,
                     "originated_at": originated_at,
                     "message_type": message_type,
+                    "conversation_id": conversation_id,
+                    "in_reply_to": in_reply_to,
                 }
             }
             from orchestrator.hchat_freshness_gate import (
@@ -10406,7 +10894,16 @@ class WorkbenchApiServer:
                         "source": "hchat",
                         "request_metadata": hchat_metadata,
                         "idempotency_key": idempotency_key,
-                    }
+                    },
+                    "status_notification": {
+                        "to_agent": from_agent,
+                        "target_instance": from_instance,
+                        "from_agent": to_agent,
+                        "source_instance": to_instance,
+                        "conversation_id": str(
+                            payload.get("conversation_id") or ""
+                        ).strip(),
+                    },
                 },
             )
             if not is_fresh and confirmation is not None:
@@ -10514,7 +11011,9 @@ class WorkbenchApiServer:
                 if isinstance(reply_route, dict)
                 else None,
                 message_id=message_id,
+                conversation_id=conversation_id,
                 message_type=message_type,
+                in_reply_to=in_reply_to,
                 originated_at=originated_at,
                 idempotency_key=idempotency_key,
             )
@@ -12173,7 +12672,10 @@ class WorkbenchApiServer:
                 endpoint = None
         payload = {
             "ok": True,
-            "capabilities": ["message_freshness_v1"],
+            "capabilities": [
+                "message_freshness_v1",
+                "hchat_delivery_status_v1",
+            ],
             "instance_id": getattr(self.global_config, "instance_id", None)
             or getattr(orchestrator, "instance_id", None)
             or "HASHI",

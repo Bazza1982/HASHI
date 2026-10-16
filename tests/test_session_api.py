@@ -1816,7 +1816,7 @@ async def test_protocol_hchat_attachments_enter_one_canonical_session_request(tm
             "message_id": "wire-attachment-1",
             "originated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "message_type": "agent_message",
-            "idempotency_key": "protocol:message:wire-attachment-1",
+            "idempotency_key": "hchat:wire-attachment-1",
         }
     )
     request.content_type = "application/json"
@@ -1912,7 +1912,7 @@ async def test_transferred_protocol_hchat_document_is_rejected_before_staging(tm
             "message_id": "wire-transfer-document",
             "originated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "message_type": "agent_message",
-            "idempotency_key": "protocol:message:wire-transfer-document",
+            "idempotency_key": "hchat:wire-transfer-document",
         }
     )
     request.content_type = "application/json"
@@ -2035,7 +2035,7 @@ async def test_protocol_hchat_attachment_batch_rolls_back_if_one_file_changes(tm
             "message_id": "wire-attachment-rollback",
             "originated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "message_type": "agent_message",
-            "idempotency_key": "protocol:message:wire-attachment-rollback",
+            "idempotency_key": "hchat:wire-attachment-rollback",
         }
     )
     request.content_type = "application/json"

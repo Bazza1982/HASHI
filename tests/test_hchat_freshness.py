@@ -37,6 +37,11 @@ def test_hchat_send_generates_originated_at_and_message_id(monkeypatch):
     }
     monkeypatch.setattr(hchat_send, "_load_config", lambda: cfg)
     monkeypatch.setattr(hchat_send, "_build_reply_route", lambda _cfg: {"instance_id": "HASHI1"})
+    monkeypatch.setattr(
+        hchat_send,
+        "_register_hchat_outbound_correlation",
+        lambda *_args, **_kwargs: True,
+    )
 
     def mock_send_via_local_workbench(*args, **kwargs):
         calls.append((args, kwargs))
@@ -54,6 +59,7 @@ def test_hchat_send_generates_originated_at_and_message_id(monkeypatch):
     orig = kwargs["originated_at"]
     assert isinstance(orig, str) and (orig.endswith("Z") or "+00:00" in orig)
     assert kwargs["message_id"].startswith("hchat-")
+    assert kwargs["conversation_id"].startswith("conv-")
 
 
 def test_hchat_transport_fallback_reuses_one_pending_confirmation(tmp_path: Path):
@@ -96,7 +102,7 @@ def test_hchat_transport_fallback_reuses_one_pending_confirmation(tmp_path: Path
         transport="protocol",
         connector_id="hchat_protocol",
         owner_id="user:default",
-        idempotency_key=f"protocol:message:{message_id}",
+        idempotency_key=f"hchat:{message_id}",
         payload_to_execute={"prompt_text": "protocol envelope"},
     )
 
@@ -122,8 +128,25 @@ def test_hchat_transport_fallback_reuses_one_pending_confirmation(tmp_path: Path
             transport="protocol",
             connector_id="hchat_protocol",
             owner_id="user:default",
-            idempotency_key=f"protocol:message:{message_id}",
+            idempotency_key=f"hchat:{message_id}",
             payload_to_execute={"prompt_text": "different protocol envelope"},
+        )
+
+    with pytest.raises(ConfirmationConflictError):
+        check_hchat_freshness_and_register(
+            store=store,
+            originated_at=originated_at,
+            to_agent="lily",
+            from_agent="rain",
+            from_instance="HASHI9",
+            message_id=message_id,
+            text=raw_text,
+            is_reply=False,
+            transport="protocol",
+            connector_id="hchat_protocol",
+            owner_id="user:default",
+            idempotency_key=f"hchat:{message_id}",
+            payload_to_execute={"prompt_text": "different source instance"},
         )
 
 
@@ -170,7 +193,7 @@ async def test_confirmed_hchat_request_executes_exactly_one_run(tmp_path: Path):
         transport="protocol",
         connector_id="hchat_protocol",
         owner_id="user:default",
-        idempotency_key="protocol:message:hchat-confirm-once",
+        idempotency_key="hchat:hchat-confirm-once",
         payload_to_execute={
             "runtime_payload": {
                 "text": "execute only once",
@@ -240,11 +263,13 @@ async def test_protocol_manager_stale_message_requires_confirmation(tmp_path: Pa
         return {"request_id": "req-1", "session_id": "ses-1", "run_id": "run-1"}
 
     pm._enqueue_local_prompt = mock_enqueue
+    pm._send_delivery_status = AsyncMock(return_value=True)
 
     stale_originated = _make_utc_iso(seconds_ago=120)  # 2 minutes ago (> 60s)
     payload = {
         "message_type": "agent_message",
         "message_id": "msg-stale-001",
+        "idempotency_key": "hchat:msg-stale-001",
         "conversation_id": "conv-001",
         "from_instance": "HASHI2",
         "from_agent": "rain",
@@ -278,6 +303,11 @@ async def test_protocol_manager_stale_message_requires_confirmation(tmp_path: Pa
     )
     assert advanced is True
     assert pm._inflight[payload["message_id"]]["state"] == "discarded"
+    assert (
+        pm._inflight[payload["message_id"]]["delivery_status_notified_state"]
+        == "discarded"
+    )
+    pm._send_delivery_status.assert_awaited_once()
 
     retry_code, retry_resp = await pm.handle_protocol_message(payload)
     assert retry_code == 200
@@ -340,6 +370,7 @@ async def test_protocol_fallback_preserves_terminal_confirmation_from_another_ro
     payload = {
         "message_type": "agent_message",
         "message_id": message_id,
+        "idempotency_key": f"hchat:{message_id}",
         "conversation_id": "conv-cross-route",
         "from_instance": "HASHI2",
         "from_agent": "rain",
@@ -397,6 +428,7 @@ async def test_protocol_manager_stale_reply_requires_confirmation_to_display(tmp
     payload = {
         "message_type": "agent_reply",
         "message_id": "msg-reply-stale-001",
+        "idempotency_key": "hchat:msg-reply-stale-001",
         "in_reply_to": "msg-orig-001",
         "conversation_id": "conv-001",
         "from_instance": "HASHI2",
@@ -420,3 +452,77 @@ async def test_protocol_manager_stale_reply_requires_confirmation_to_display(tmp
     conf = service.get(resp["confirmation_id"], owner_id="user:default")
     assert conf["message_kind"] == "hchat_reply"
     assert conf["display_metadata"].get("action_label") == "仍然显示"
+
+
+@pytest.mark.asyncio
+async def test_protocol_delivery_status_updates_sender_and_never_invokes_agent(
+    tmp_path: Path,
+):
+    from orchestrator.hchat_delivery_status import (
+        delivery_status_message_id,
+        encode_delivery_status,
+    )
+    from remote.protocol_manager import ProtocolManager
+
+    original_message_id = "msg-status-original"
+    status_message_id = delivery_status_message_id(
+        original_message_id, "discarded"
+    )
+    pm = ProtocolManager(
+        hashi_root=tmp_path,
+        instance_info={"instance_id": "HASHI1", "platform": "windows"},
+        peer_registry=None,
+        workbench_port=18800,
+    )
+    pm._outbound_path = tmp_path / "protocol_outbound_hashi1.json"
+    pm._save_outbound_correlations(
+        {
+            original_message_id: {
+                "message_id": original_message_id,
+                "conversation_id": "conv-status-1",
+                "from_instance": "HASHI1",
+                "from_agent": "lily",
+                "to_instance": "HASHI2",
+                "to_agent": "rain",
+                "state": "awaiting_confirmation",
+            }
+        }
+    )
+    pm.get_local_agents_snapshot = lambda: [
+        {"agent_name": "lily", "is_active": True}
+    ]
+    pm._enqueue_local_prompt = AsyncMock(
+        return_value={"state": "displayed", "session_id": "ses-status"}
+    )
+    originated_at = _make_utc_iso()
+    payload = {
+        "message_type": "delivery_status",
+        "message_id": status_message_id,
+        "idempotency_key": f"hchat:{status_message_id}",
+        "in_reply_to": original_message_id,
+        "conversation_id": "conv-status-1",
+        "from_instance": "HASHI2",
+        "from_agent": "rain",
+        "to_instance": "HASHI1",
+        "to_agent": "lily",
+        "originated_at": originated_at,
+        "body": {
+            "text": encode_delivery_status(
+                original_message_id=original_message_id,
+                state="discarded",
+            ),
+            "originated_at": originated_at,
+        },
+        "ttl": 5,
+        "route_trace": ["HASHI2"],
+    }
+
+    code, response = await pm.handle_protocol_message(payload)
+
+    assert code == 200
+    assert response["state"] == "displayed"
+    assert response["delivery_status"] == "discarded"
+    outbound = pm._outbound_correlation_for(original_message_id)
+    assert outbound["delivery_status"] == "discarded"
+    pm._enqueue_local_prompt.assert_awaited_once()
+    assert pm._enqueue_local_prompt.await_args.kwargs["exchange_kind"] == "status"

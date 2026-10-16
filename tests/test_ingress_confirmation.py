@@ -164,6 +164,46 @@ def test_idempotent_registration_and_conflict(store: SessionStore, test_session)
         )
 
 
+def test_registration_rejects_crossed_idempotency_and_source_identities(
+    store: SessionStore, test_session
+):
+    now = datetime(2026, 10, 16, 12, 0, 0, tzinfo=timezone.utc)
+    service = IngressConfirmationService(store, clock=lambda: now)
+
+    def register(*, source_message_id: str, idempotency_key: str, text: str):
+        payload = {"text": text}
+        return service.register_pending(
+            session_id=test_session["session_id"],
+            owner_id="user:alice",
+            agent_id="kasumi",
+            connector_id="session_api",
+            transport="workbench",
+            source_message_id=source_message_id,
+            idempotency_key=idempotency_key,
+            payload_digest=_digest(json.dumps(payload, sort_keys=True)),
+            message_kind="frontend_message",
+            context_generation=test_session["context_generation"],
+            originated_at="2026-10-16T11:55:00Z",
+            received_at="2026-10-16T12:00:00Z",
+            threshold_seconds=30,
+            reason="stale",
+            delay_seconds=300.0,
+            expires_at="2026-10-16T12:15:00Z",
+            payload=payload,
+            display_metadata={"text": text},
+        )
+
+    register(source_message_id="source-a", idempotency_key="idemp-a", text="A")
+    register(source_message_id="source-b", idempotency_key="idemp-b", text="B")
+
+    with pytest.raises(ConfirmationConflictError):
+        register(
+            source_message_id="source-b",
+            idempotency_key="idemp-a",
+            text="crossed identity",
+        )
+
+
 def test_concurrent_registration_across_store_instances_returns_one_record(
     store: SessionStore, test_session
 ):

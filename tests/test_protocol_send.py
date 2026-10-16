@@ -15,7 +15,7 @@ def isolate_outbound_state(tmp_path, monkeypatch):
         protocol_send,
         "fetch_remote_protocol_capabilities",
         lambda base_url, timeout=5: (
-            {"message_freshness_v1", "message_attachments_v1"},
+            {"message_freshness_v1", "hchat_delivery_status_v1", "message_attachments_v1"},
             None,
         ),
     )
@@ -92,7 +92,7 @@ def test_send_protocol_message_uses_shared_token_for_plain_protocol_send(monkeyp
     monkeypatch.setattr(
         protocol_send,
         "fetch_remote_protocol_capabilities",
-        lambda base_url, timeout=5: ({"message_freshness_v1", "message_attachments_v1"}, None),
+        lambda base_url, timeout=5: ({"message_freshness_v1", "hchat_delivery_status_v1", "message_attachments_v1"}, None),
     )
 
     ok = protocol_send.send_protocol_message(
@@ -111,6 +111,9 @@ def test_send_protocol_message_uses_shared_token_for_plain_protocol_send(monkeyp
     assert headers["x-hashi-from-instance"] == "HASHI1"
     assert request["body"]["body"]["text"] == "hello there"
     assert request["body"]["to_agent"] == "lily"
+    assert request["body"]["idempotency_key"] == (
+        f"hchat:{request['body']['message_id']}"
+    )
     output = capsys.readouterr().out
     assert "Protocol message queued" in output
     assert "Message:\nhello there" in output
@@ -318,7 +321,7 @@ def test_send_protocol_message_failure_state_overrides_ok(monkeypatch, tmp_path,
     monkeypatch.setattr(
         protocol_send,
         "fetch_remote_protocol_capabilities",
-        lambda base_url, timeout=5: ({"message_freshness_v1", "message_attachments_v1"}, None),
+        lambda base_url, timeout=5: ({"message_freshness_v1", "hchat_delivery_status_v1", "message_attachments_v1"}, None),
     )
 
     ok = protocol_send.send_protocol_message(
@@ -356,7 +359,7 @@ def test_send_protocol_message_records_outbound_correlation(monkeypatch, tmp_pat
     monkeypatch.setattr(
         protocol_send,
         "fetch_remote_protocol_capabilities",
-        lambda base_url, timeout=5: ({"message_freshness_v1", "message_attachments_v1"}, None),
+        lambda base_url, timeout=5: ({"message_freshness_v1", "hchat_delivery_status_v1", "message_attachments_v1"}, None),
     )
 
     assert protocol_send.send_protocol_message("lily@HASHI9", "zelda", "hello", shared_token="shared-secret")
@@ -395,7 +398,7 @@ def test_send_protocol_message_prefers_local_sidecar_outbound_registration(monke
     monkeypatch.setattr(
         protocol_send,
         "fetch_remote_protocol_capabilities",
-        lambda base_url, timeout=5: ({"message_freshness_v1", "message_attachments_v1"}, None),
+        lambda base_url, timeout=5: ({"message_freshness_v1", "hchat_delivery_status_v1", "message_attachments_v1"}, None),
     )
 
     assert protocol_send.send_protocol_message("lily@HASHI9", "zelda", "hello", shared_token="shared-secret")
@@ -433,7 +436,7 @@ def test_send_protocol_message_falls_back_to_file_when_local_sidecar_unavailable
     monkeypatch.setattr(
         protocol_send,
         "fetch_remote_protocol_capabilities",
-        lambda base_url, timeout=5: ({"message_freshness_v1", "message_attachments_v1"}, None),
+        lambda base_url, timeout=5: ({"message_freshness_v1", "hchat_delivery_status_v1", "message_attachments_v1"}, None),
     )
 
     assert protocol_send.send_protocol_message("lily@HASHI9", "zelda", "hello", shared_token="shared-secret")
@@ -490,7 +493,7 @@ def test_send_protocol_message_uploads_attachments_then_commits(monkeypatch, tmp
     monkeypatch.setattr(
         protocol_send,
         "fetch_remote_protocol_capabilities",
-        lambda base_url, timeout=5: ({"message_freshness_v1", "message_attachments_v1"}, None),
+        lambda base_url, timeout=5: ({"message_freshness_v1", "hchat_delivery_status_v1", "message_attachments_v1"}, None),
     )
 
     ok = protocol_send.send_protocol_message(
@@ -561,7 +564,7 @@ def test_send_protocol_message_streams_v2_chunks_before_atomic_commit(
     monkeypatch.setattr(
         protocol_send,
         "fetch_remote_protocol_capabilities",
-        lambda base_url, timeout=5: ({"message_freshness_v1", "message_attachments_v2_streaming"}, None),
+        lambda base_url, timeout=5: ({"message_freshness_v1", "hchat_delivery_status_v1", "message_attachments_v2_streaming"}, None),
     )
 
     ok = protocol_send.send_protocol_message(
@@ -618,7 +621,7 @@ def test_send_protocol_message_cancels_staged_uploads_after_partial_failure(monk
     monkeypatch.setattr(
         protocol_send,
         "fetch_remote_protocol_capabilities",
-        lambda base_url, timeout=5: ({"message_freshness_v1", "message_attachments_v1"}, None),
+        lambda base_url, timeout=5: ({"message_freshness_v1", "hchat_delivery_status_v1", "message_attachments_v1"}, None),
     )
 
     ok = protocol_send.send_protocol_message(
@@ -666,7 +669,7 @@ def test_send_protocol_message_cancels_staged_uploads_after_commit_failure(monke
     monkeypatch.setattr(
         protocol_send,
         "fetch_remote_protocol_capabilities",
-        lambda base_url, timeout=5: ({"message_freshness_v1", "message_attachments_v1"}, None),
+        lambda base_url, timeout=5: ({"message_freshness_v1", "hchat_delivery_status_v1", "message_attachments_v1"}, None),
     )
 
     ok = protocol_send.send_protocol_message(
@@ -701,7 +704,7 @@ def test_send_protocol_message_rejects_attachment_send_when_live_peer_lacks_capa
     monkeypatch.setattr(
         protocol_send,
         "fetch_remote_protocol_capabilities",
-        lambda base_url, timeout=5: ({"message_freshness_v1", "protocol_message_v1"}, None),
+        lambda base_url, timeout=5: ({"message_freshness_v1", "hchat_delivery_status_v1", "protocol_message_v1"}, None),
     )
 
     ok = protocol_send.send_protocol_message(

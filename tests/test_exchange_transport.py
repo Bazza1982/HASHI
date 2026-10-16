@@ -95,6 +95,43 @@ def test_explicit_retry_reuses_the_exact_persisted_frame(tmp_path):
     assert sent == [original]
 
 
+def test_explicit_retry_normalizes_equivalent_origin_timestamp(tmp_path):
+    now = 1_800_000_000.0
+    transport = _ready_transport(tmp_path, now=now + 10)
+    original = send_frame(
+        message_id="message_normalized_time",
+        conversation_id="conversation_1",
+        from_agent="reviewer",
+        to=_target(),
+        created_at=utc_timestamp(now),
+        expires_at=utc_timestamp(now + 300),
+        message_type="agent_message",
+        in_reply_to=None,
+        text="Please review.",
+    )
+    transport.outbox.put(original)
+
+    async def fake_transmit(_ws, record, *, replayed):
+        assert record.frame == original
+        assert replayed is True
+        return {"ok": True, "replayed": True}
+
+    transport._transmit_record = fake_transmit
+    result = asyncio.run(
+        transport.send_message(
+            from_agent="reviewer",
+            to_address="planner@home.alice",
+            text="Please review.",
+            message_id="message_normalized_time",
+            conversation_id="conversation_1",
+            originated_at=utc_timestamp(now).replace("Z", ".000000Z"),
+            idempotency_key="hchat:message_normalized_time",
+        )
+    )
+
+    assert result == {"ok": True, "replayed": True}
+
+
 def test_explicit_retry_never_changes_content_under_the_same_id(tmp_path):
     now = 1_800_000_000.0
     transport = _ready_transport(tmp_path, now=now + 10)

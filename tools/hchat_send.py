@@ -48,6 +48,9 @@ from remote.internet_address import (  # noqa: E402
     parse_hchat_address,
 )
 from remote.security.client_auth import build_client_auth_headers  # noqa: E402
+from orchestrator.hchat_delivery_status import (  # noqa: E402
+    default_hchat_conversation_id,
+)
 from orchestrator.runtime_defaults import (  # noqa: E402
     DEFAULT_HASHI_REMOTE_PORT,
     DEFAULT_WORKBENCH_PORT,
@@ -771,10 +774,16 @@ def _probe_workbench_health(
 
 def _workbench_supports_message_freshness(host: str, port: int) -> bool:
     health = _read_http_json(f"http://{host}:{port}/api/health")
+    capabilities = {
+        str(value) for value in (health or {}).get("capabilities") or ()
+    }
     return bool(
         isinstance(health, dict)
-        and "message_freshness_v1"
-        in {str(value) for value in health.get("capabilities") or ()}
+        and {
+            "message_freshness_v1",
+            "hchat_delivery_status_v1",
+        }
+        <= capabilities
     )
 
 
@@ -839,7 +848,9 @@ def _send_via_local_workbench(
     message_id: str | None = None,
     originated_at: str | None = None,
     idempotency_key: str | None = None,
+    conversation_id: str | None = None,
     message_type: str = "agent_message",
+    in_reply_to: str | None = None,
 ) -> bool:
     expected_instance = _get_instance_id(cfg)
     for host in _local_workbench_hosts(cfg):
@@ -859,7 +870,9 @@ def _send_via_local_workbench(
             message_id=message_id,
             originated_at=originated_at,
             idempotency_key=idempotency_key,
+            conversation_id=conversation_id,
             message_type=message_type,
+            in_reply_to=in_reply_to,
         ):
             return True
     return False
@@ -973,6 +986,69 @@ def _build_reply_route(cfg: dict) -> dict:
         "wb_port": _get_workbench_port(cfg),
         "ttl": DEFAULT_TTL,
     }
+
+
+def _register_hchat_outbound_correlation(
+    cfg: dict,
+    *,
+    message_id: str,
+    conversation_id: str,
+    source_instance: str,
+    from_agent: str,
+    target_instance: str,
+    to_agent: str,
+) -> bool:
+    """Durably bind one logical HChat before any fallback transport sends it."""
+
+    payload = {
+        "message_id": message_id,
+        "conversation_id": conversation_id,
+        "from_instance": source_instance,
+        "from_agent": from_agent,
+        "to_instance": target_instance,
+        "to_agent": to_agent,
+    }
+    try:
+        from remote.protocol_outbound import get_outbound_correlation
+        from tools.protocol_send import (
+            _local_sidecar_base_url,
+            _record_outbound_correlation,
+        )
+
+        _record_outbound_correlation(
+            payload,
+            state="sending",
+            sidecar_base_url=_local_sidecar_base_url(
+                source_instance,
+                cfg,
+                _load_instances(),
+            ),
+        )
+        registered = get_outbound_correlation(
+            message_id,
+            local_instance=source_instance,
+        )
+        expected = {
+            "conversation_id": conversation_id,
+            "from_instance": source_instance,
+            "from_agent": from_agent,
+            "to_instance": target_instance,
+            "to_agent": to_agent,
+        }
+        if not isinstance(registered, dict) or any(
+            str(registered.get(key) or "").strip().casefold()
+            != str(value or "").strip().casefold()
+            for key, value in expected.items()
+        ):
+            raise ValueError("outbound correlation verification failed")
+        return True
+    except Exception as exc:
+        print(
+            "❌ HChat delivery-status correlation could not be registered: "
+            f"{exc}",
+            file=sys.stderr,
+        )
+        return False
 
 
 def _configured_exchange_instance(cfg: dict, instances: dict) -> str | None:
@@ -1221,6 +1297,7 @@ def _send_via_protocol_transport(
     authorization_resources: list[str] | tuple[str, ...] | None = None,
     message_id: str | None = None,
     originated_at: str | None = None,
+    idempotency_key: str | None = None,
     conversation_id: str | None = None,
     message_type: str = "agent_message",
     in_reply_to: str | None = None,
@@ -1249,6 +1326,8 @@ def _send_via_protocol_transport(
         protocol_kwargs["message_id"] = message_id
     if originated_at is not None:
         protocol_kwargs["originated_at"] = originated_at
+    if idempotency_key is not None:
+        protocol_kwargs["idempotency_key"] = idempotency_key
     if conversation_id is not None:
         protocol_kwargs["conversation_id"] = conversation_id
     if message_type != "agent_message":
@@ -1278,7 +1357,9 @@ def _send_via_workbench(
     message_id: str | None = None,
     originated_at: str | None = None,
     idempotency_key: str | None = None,
+    conversation_id: str | None = None,
     message_type: str = "agent_message",
+    in_reply_to: str | None = None,
 ) -> bool:
     if not expected_instance:
         print("❌ Hchat Workbench route has no expected instance identity.", file=sys.stderr)
@@ -1291,13 +1372,17 @@ def _send_via_workbench(
         return False
     if not _workbench_supports_message_freshness(host, port):
         print(
-            "❌ Hchat Workbench peer does not support message freshness protection; "
+            "❌ Hchat Workbench peer does not support complete freshness/status protection; "
             "update the peer before sending.",
             file=sys.stderr,
         )
         return False
     url = f"http://{host}:{port}/api/chat"
-    full_text = format_hchat_message(from_agent, source_instance, text)
+    full_text = (
+        text
+        if message_type == "delivery_status"
+        else format_hchat_message(from_agent, source_instance, text)
+    )
     mid = message_id or f"hchat-{uuid.uuid4().hex[:20]}"
     orig_at = originated_at or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     idemp_key = idempotency_key or f"hchat:{mid}"
@@ -1321,6 +1406,8 @@ def _send_via_workbench(
         "message_id": mid,
         "originated_at": orig_at,
         "message_type": message_type,
+        "conversation_id": conversation_id,
+        "in_reply_to": in_reply_to,
         "hchat_context": {
             "from_agent": from_agent,
             "from_instance": source_instance,
@@ -1331,6 +1418,8 @@ def _send_via_workbench(
             "message_id": mid,
             "originated_at": orig_at,
             "message_type": message_type,
+            "conversation_id": conversation_id,
+            "in_reply_to": in_reply_to,
         },
     }
     selected = list(private_credential_ids or [])
@@ -1399,20 +1488,29 @@ def _send_via_remote(
     message_id: str | None = None,
     originated_at: str | None = None,
     idempotency_key: str | None = None,
+    conversation_id: str | None = None,
     message_type: str = "agent_message",
+    in_reply_to: str | None = None,
 ) -> bool:
-    full_text = format_hchat_message(from_agent, source_instance, text)
+    full_text = (
+        text
+        if message_type == "delivery_status"
+        else format_hchat_message(from_agent, source_instance, text)
+    )
     mid = message_id or f"hchat-{uuid.uuid4().hex[:20]}"
     orig_at = originated_at or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     payload = {
         "from_instance": source_instance,
+        "from_agent": from_agent.lower(),
         "to_agent": to_agent.lower(),
         "text": full_text,
         "source_hchat_format": True,
         "message_id": mid,
         "originated_at": orig_at,
         "idempotency_key": idempotency_key or f"hchat:{mid}",
+        "conversation_id": conversation_id,
         "message_type": message_type,
+        "in_reply_to": in_reply_to,
     }
     if to_instance:
         payload["to_instance"] = _normalize_instance_id(to_instance)
@@ -1428,11 +1526,16 @@ def _send_via_remote(
         )
         return False
     protocol_status = _read_http_json(f"{scheme}://{host}:{port}/protocol/status")
-    if not isinstance(protocol_status, dict) or "message_freshness_v1" not in {
-        str(value) for value in protocol_status.get("capabilities") or ()
-    }:
+    protocol_capabilities = {
+        str(value)
+        for value in (protocol_status or {}).get("capabilities") or ()
+    }
+    if not isinstance(protocol_status, dict) or not {
+        "message_freshness_v1",
+        "hchat_delivery_status_v1",
+    } <= protocol_capabilities:
         print(
-            "❌ Hchat Remote peer does not support message freshness protection; "
+            "❌ Hchat Remote peer does not support complete freshness/status protection; "
             "update the peer before sending.",
             file=sys.stderr,
         )
@@ -1491,7 +1594,9 @@ def _deliver_remote_route(
     message_id: str | None = None,
     originated_at: str | None = None,
     idempotency_key: str | None = None,
+    conversation_id: str | None = None,
     message_type: str = "agent_message",
+    in_reply_to: str | None = None,
 ) -> bool:
     host = route.get("host")
     wb_port = route.get("wb_port")
@@ -1514,7 +1619,9 @@ def _deliver_remote_route(
                     message_id=message_id,
                     originated_at=originated_at,
                     idempotency_key=idempotency_key,
+                    conversation_id=conversation_id,
                     message_type=message_type,
+                    in_reply_to=in_reply_to,
                 ):
                     update_contact(to_agent, route["instance_id"], candidate_host, remote_port or DEFAULT_REMOTE_PORT, wb_port=wb_port)
                     return True
@@ -1537,7 +1644,9 @@ def _deliver_remote_route(
             message_id=message_id,
             originated_at=originated_at,
             idempotency_key=idempotency_key,
+            conversation_id=conversation_id,
             message_type=message_type,
+            in_reply_to=in_reply_to,
         ):
             update_contact(to_agent, route["instance_id"], remote_host, remote_port, wb_port=wb_port or remote_port)
             return True
@@ -1556,7 +1665,9 @@ def _send_via_exchange(
     message_id: str | None = None,
     originated_at: str | None = None,
     idempotency_key: str | None = None,
+    conversation_id: str | None = None,
     message_type: str = "agent_message",
+    in_reply_to: str | None = None,
 ) -> bool:
     exchange_instance = str(exchange_route.get("instance_id") or "exchange")
     host = exchange_route.get("host")
@@ -1578,7 +1689,9 @@ def _send_via_exchange(
             "message_id": message_id,
             "originated_at": originated_at,
             "idempotency_key": idempotency_key,
+            "conversation_id": conversation_id,
             "message_type": message_type,
+            "in_reply_to": in_reply_to,
         }
         req = urllib_request.Request(
             url,
@@ -1620,7 +1733,9 @@ def _send_via_exchange(
             message_id=message_id,
             originated_at=originated_at,
             idempotency_key=idempotency_key,
+            conversation_id=conversation_id,
             message_type=message_type,
+            in_reply_to=in_reply_to,
         )
     return False
 
@@ -1645,6 +1760,9 @@ def send_hchat(
 ) -> bool:
     if not message_id:
         message_id = f"hchat-{uuid.uuid4().hex[:20]}"
+    conversation_id = str(conversation_id or "").strip() or (
+        default_hchat_conversation_id(message_id)
+    )
     if not originated_at:
         from datetime import datetime, timezone
         originated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -1761,6 +1879,19 @@ def send_hchat(
             )
             return False
         if _is_local_agent(cfg, to_agent):
+            if (
+                message_type != "delivery_status"
+                and not _register_hchat_outbound_correlation(
+                    cfg,
+                    message_id=message_id,
+                    conversation_id=conversation_id,
+                    source_instance=source_instance,
+                    from_agent=from_agent,
+                    target_instance=instance_id,
+                    to_agent=to_agent,
+                )
+            ):
+                return False
             if _send_via_local_workbench(
                 cfg,
                 local_port,
@@ -1772,7 +1903,9 @@ def send_hchat(
                 message_id=message_id,
                 originated_at=originated_at,
                 idempotency_key=idempotency_key,
+                conversation_id=conversation_id,
                 message_type=message_type,
+                in_reply_to=in_reply_to,
                 **authorization_kwargs,
             ):
                 return True
@@ -1791,6 +1924,19 @@ def send_hchat(
             )
             return False
         if _is_local_agent(cfg, to_agent):
+            if (
+                message_type != "delivery_status"
+                and not _register_hchat_outbound_correlation(
+                    cfg,
+                    message_id=message_id,
+                    conversation_id=conversation_id,
+                    source_instance=source_instance,
+                    from_agent=from_agent,
+                    target_instance=target_instance,
+                    to_agent=to_agent,
+                )
+            ):
+                return False
             if _send_via_local_workbench(
                 cfg,
                 local_port,
@@ -1802,7 +1948,9 @@ def send_hchat(
                 message_id=message_id,
                 originated_at=originated_at,
                 idempotency_key=idempotency_key,
+                conversation_id=conversation_id,
                 message_type=message_type,
+                in_reply_to=in_reply_to,
                 **authorization_kwargs,
             ):
                 return True
@@ -1811,6 +1959,20 @@ def send_hchat(
         if _print_moved_agent_hint(to_agent):
             return False
         print(f"❌ {to_agent}@{target_instance} is not a local active agent.", file=sys.stderr)
+        return False
+
+    if (
+        message_type != "delivery_status"
+        and not _register_hchat_outbound_correlation(
+            cfg,
+            message_id=message_id,
+            conversation_id=conversation_id,
+            source_instance=source_instance,
+            from_agent=from_agent,
+            target_instance=target_instance,
+            to_agent=to_agent,
+        )
+    ):
         return False
 
     protocol_kwargs = dict(authorization_kwargs)
@@ -1823,6 +1985,7 @@ def send_hchat(
         text,
         message_id=message_id,
         originated_at=originated_at,
+        idempotency_key=idempotency_key,
         conversation_id=conversation_id,
         message_type=message_type,
         in_reply_to=in_reply_to,
@@ -1858,7 +2021,9 @@ def send_hchat(
             message_id=message_id,
             originated_at=originated_at,
             idempotency_key=idempotency_key,
+            conversation_id=conversation_id,
             message_type=message_type,
+            in_reply_to=in_reply_to,
         ):
             return True
         print(
@@ -1888,7 +2053,9 @@ def send_hchat(
             message_id=message_id,
             originated_at=originated_at,
             idempotency_key=idempotency_key,
+            conversation_id=conversation_id,
             message_type=message_type,
+            in_reply_to=in_reply_to,
         ):
             return True
         print("⚠️ Contacts cache route failed, falling back to discovery...", file=sys.stderr)
@@ -1907,7 +2074,9 @@ def send_hchat(
             message_id=message_id,
             originated_at=originated_at,
             idempotency_key=idempotency_key,
+            conversation_id=conversation_id,
             message_type=message_type,
+            in_reply_to=in_reply_to,
         ):
             return True
         print(f"❌ Remote delivery to {remote['instance_id']} failed.", file=sys.stderr)

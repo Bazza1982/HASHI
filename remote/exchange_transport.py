@@ -775,6 +775,7 @@ class ExchangeTransport:
         text: str,
         message_id: str | None = None,
         originated_at: str | None = None,
+        idempotency_key: str | None = None,
         conversation_id: str | None = None,
         message_type: str = "agent_message",
         in_reply_to: str | None = None,
@@ -792,8 +793,22 @@ class ExchangeTransport:
         normalized_sender = str(from_agent or "").strip().lower()
         if normalized_sender not in self._published_agents:
             raise ExchangeTransportError("SENDER_NOT_PUBLISHED")
+        stable_message_id = str(message_id or self._new_id("msg"))
+        stable_idempotency_key = str(
+            idempotency_key or f"hchat:{stable_message_id}"
+        )
+        if stable_idempotency_key != f"hchat:{stable_message_id}":
+            raise ExchangeTransportError("INVALID_MESSAGE")
+        origin_timestamp = None
+        normalized_originated_at = None
+        if originated_at:
+            try:
+                origin_timestamp = parse_timestamp(originated_at)
+            except ValueError as exc:
+                raise ExchangeTransportError("INVALID_MESSAGE") from exc
+            normalized_originated_at = utc_timestamp(origin_timestamp)
         if message_id:
-            existing = self.outbox.get(str(message_id))
+            existing = self.outbox.get(stable_message_id)
             if existing is not None:
                 self._validate_exact_retry(
                     existing,
@@ -803,13 +818,15 @@ class ExchangeTransport:
                     conversation_id=conversation_id,
                     message_type=message_type,
                     in_reply_to=in_reply_to,
-                    originated_at=originated_at,
+                    originated_at=normalized_originated_at,
                 )
                 return await self._transmit_record(
                     ws,
                     existing,
                     replayed=True,
                 )
+        if origin_timestamp is None or normalized_originated_at is None:
+            raise ExchangeTransportError("INVALID_MESSAGE")
         resolve_id = self._new_id("resolve")
         resolve_waiter = self._new_request_waiter(resolve_id)
         try:
@@ -829,21 +846,15 @@ class ExchangeTransport:
         if not isinstance(target, Mapping):
             raise ExchangeTransportError("RESOLVE_REJECTED")
         now = self.clock()
-        if not originated_at:
-            raise ExchangeTransportError("INVALID_MESSAGE")
-        try:
-            origin_timestamp = parse_timestamp(originated_at)
-        except ValueError as exc:
-            raise ExchangeTransportError("INVALID_MESSAGE") from exc
         lifetime = max(1, min(int(expires_in_seconds), 600))
         if now >= origin_timestamp + lifetime:
             raise ExchangeTransportError("MESSAGE_EXPIRED")
         outbound = send_frame(
-            message_id=message_id or self._new_id("msg"),
+            message_id=stable_message_id,
             conversation_id=conversation_id or self._new_id("conv"),
             from_agent=normalized_sender,
             to=target,
-            created_at=utc_timestamp(origin_timestamp),
+            created_at=normalized_originated_at,
             expires_at=utc_timestamp(origin_timestamp + lifetime),
             message_type=message_type,
             in_reply_to=in_reply_to,

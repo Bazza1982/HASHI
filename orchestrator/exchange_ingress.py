@@ -12,7 +12,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from orchestrator.exchange_config import ExchangeConfig, load_exchange_config
 from orchestrator.message_context import (
@@ -25,6 +25,7 @@ from remote.exchange_protocol import (
     canonical_json,
     delivery_identity_key,
     delivery_payload_digest,
+    send_frame,
     validate_delivery_deadline,
     validate_delivery_frame,
 )
@@ -719,6 +720,64 @@ class ExchangeIngressService:
             self.hashi_root / "state" / "exchange_outbox.sqlite3"
         )
 
+    @staticmethod
+    def _delivery_status_notice(
+        delivery: Mapping[str, Any],
+    ) -> dict[str, str] | None:
+        from orchestrator.hchat_delivery_status import decode_delivery_status
+
+        content = delivery.get("content")
+        if not isinstance(content, Mapping):
+            return None
+        return decode_delivery_status(str(content.get("text") or ""))
+
+    def _queue_sender_status(
+        self,
+        record: InboxRecord,
+        *,
+        state: str,
+        reason: str | None = None,
+    ) -> None:
+        """Persist one reverse Exchange status using the original identity tuple."""
+
+        from orchestrator.hchat_delivery_status import (
+            delivery_status_message_id,
+            encode_delivery_status,
+        )
+
+        delivery = record.delivery
+        sender = ExchangeAddress.from_mapping(delivery["sender"])
+        recipient = ExchangeAddress.from_mapping(delivery["recipient"])
+        original_message_id = str(delivery["message_id"])
+        message_id = delivery_status_message_id(original_message_id, state)
+        created = (
+            datetime.now(timezone.utc)
+            if state == "executed"
+            else datetime.fromtimestamp(
+                float(record.updated_at), timezone.utc
+            ).astimezone(timezone.utc)
+        )
+        created_at = created.isoformat().replace("+00:00", "Z")
+        expires_at = (created + timedelta(minutes=10)).isoformat().replace(
+            "+00:00", "Z"
+        )
+        frame = send_frame(
+            message_id=message_id,
+            conversation_id=str(delivery["conversation_id"]),
+            from_agent=recipient.agent_id,
+            to=sender.to_mapping(),
+            created_at=created_at,
+            expires_at=expires_at,
+            message_type="agent_reply",
+            in_reply_to=original_message_id,
+            text=encode_delivery_status(
+                original_message_id=original_message_id,
+                state=state,
+                reason=reason,
+            ),
+        )
+        self.outbox.put(frame)
+
     def _verified(
         self,
         *,
@@ -773,6 +832,12 @@ class ExchangeIngressService:
 
         if delivery.get("message_type") != "agent_reply":
             return
+        try:
+            status_notice = self._delivery_status_notice(delivery)
+        except ValueError as exc:
+            raise ExchangeIngressPermissionError(
+                "Exchange delivery status envelope is invalid"
+            ) from exc
         correlation = self.outbox.get_correlation(
             str(delivery.get("in_reply_to") or "")
         )
@@ -780,7 +845,13 @@ class ExchangeIngressService:
         recipient = ExchangeAddress.from_mapping(delivery["recipient"])
         if (
             correlation is None
-            or correlation.message_type != "agent_message"
+            or (
+                correlation.message_type != "agent_message"
+                and not (
+                    status_notice is not None
+                    and correlation.message_type == "agent_reply"
+                )
+            )
             or correlation.accepted_at is None
             or correlation.delivery_state in {"rejected", "expired"}
             or correlation.from_agent != recipient.agent_id
@@ -790,6 +861,25 @@ class ExchangeIngressService:
             raise ExchangeIngressPermissionError(
                 "Exchange reply does not match a local outbound request"
             )
+        if (
+            status_notice is not None
+            and status_notice["original_message_id"]
+            != str(delivery.get("in_reply_to") or "")
+        ):
+            raise ExchangeIngressPermissionError(
+                "Exchange delivery status does not match its correlation"
+            )
+        if status_notice is not None:
+            from orchestrator.hchat_delivery_status import (
+                delivery_status_message_id,
+            )
+
+            if str(delivery.get("message_id") or "") != delivery_status_message_id(
+                status_notice["original_message_id"], status_notice["state"]
+            ):
+                raise ExchangeIngressPermissionError(
+                    "Exchange delivery status identity is invalid"
+                )
 
     async def schedule(
         self,
@@ -810,17 +900,37 @@ class ExchangeIngressService:
         current = self.inbox.get(inbox_key)
         if current is None:
             raise ExchangeIngressError("Exchange delivery was not durably accepted")
-        if current.state in {
-            "pending_confirmation",
-            "discarded",
-            "confirmation_expired",
-            "confirmation_superseded",
-            "displayed",
-            "scheduled",
-        }:
+        if current.state == "pending_confirmation":
+            self._queue_sender_status(
+                current,
+                state="awaiting_confirmation",
+            )
+            return current
+        terminal_status = {
+            "discarded": "discarded",
+            "confirmation_expired": "confirmation_expired",
+            "confirmation_superseded": "confirmation_superseded",
+        }.get(current.state)
+        if terminal_status is not None:
+            self._queue_sender_status(
+                current,
+                state=terminal_status,
+                reason=(
+                    "confirmation_timeout_15m"
+                    if terminal_status == "confirmation_expired"
+                    else "session_context_advanced"
+                    if terminal_status == "confirmation_superseded"
+                    else None
+                ),
+            )
+            return current
+        if current.state in {"displayed", "scheduled"}:
             return current
         recipient = ExchangeAddress.from_mapping(delivery["recipient"])
         sender = ExchangeAddress.from_mapping(delivery["sender"])
+        status_notice = self._delivery_status_notice(delivery)
+        if status_notice is not None:
+            return await self._schedule_key(inbox_key)
         from orchestrator.hchat_freshness_gate import (
             check_hchat_freshness_and_register,
         )
@@ -829,9 +939,12 @@ class ExchangeIngressService:
         observed_owners = self.session_store.conversation_owner_ids(
             agent_id=recipient.agent_id
         )
+        user_owners = [
+            owner for owner in observed_owners if not str(owner).startswith("exchange:")
+        ]
         confirmation_owner = (
-            observed_owners[0]
-            if len(observed_owners) == 1
+            user_owners[0]
+            if len(user_owners) == 1
             else f"exchange:{principal.authority_id}:{principal.actor_id}"
         )
         is_fresh, confirmation = check_hchat_freshness_and_register(
@@ -848,7 +961,7 @@ class ExchangeIngressService:
             transport="exchange",
             connector_id="hchat_exchange",
             owner_id=confirmation_owner,
-            idempotency_key=current.idempotency_key,
+            idempotency_key=f"hchat:{delivery['message_id']}",
             canonical_text=str(delivery["content"]["text"]),
             payload_to_execute={
                 "execution_kind": "exchange_inbox",
@@ -857,11 +970,16 @@ class ExchangeIngressService:
             },
         )
         if not is_fresh and confirmation is not None:
-            return self.inbox.mark_pending_confirmation(
+            pending = self.inbox.mark_pending_confirmation(
                 inbox_key,
                 confirmation_id=confirmation["confirmation_id"],
                 owner_id=confirmation["owner_id"],
             )
+            self._queue_sender_status(
+                pending,
+                state="awaiting_confirmation",
+            )
+            return pending
         return await self._schedule_key(inbox_key)
 
     async def confirm_pending(
@@ -894,7 +1012,19 @@ class ExchangeIngressService:
         principal: VerifiedRemotePrincipal,
         delivery: Mapping[str, Any],
     ) -> dict[str, Any]:
+        from orchestrator.hchat_freshness_gate import hchat_payload_digest
+
         recipient = ExchangeAddress.from_mapping(delivery["recipient"])
+        message_id = str(delivery["message_id"])
+        logical_digest = hchat_payload_digest(
+            message_id=message_id,
+            originated_at=delivery.get("created_at"),
+            from_agent=principal.agent_id,
+            from_instance=principal.registered_instance_id,
+            to_agent=recipient.agent_id,
+            is_reply=delivery.get("message_type") == "agent_reply",
+            text=str(delivery["content"]["text"]),
+        )
         return {
             "_message_source_reserved": "hchat",
             "_hchat_context": {
@@ -908,13 +1038,18 @@ class ExchangeIngressService:
                 "network_authentication": "exchange_wss",
                 "authenticated_peer": principal.registered_instance_id,
                 "relay_chain": [principal.address],
+                "message_id": message_id,
+                "originated_at": delivery.get("created_at"),
+                "message_type": delivery.get("message_type"),
+                "idempotency_key": f"hchat:{message_id}",
+                "payload_digest": logical_digest,
                 "origin_instance": {
                     "id": principal.registered_instance_id,
                     "assurance": "exchange_verified",
                 },
                 "remote_principal": principal.public_snapshot(),
                 "exchange_message": {
-                    "message_id": delivery["message_id"],
+                    "message_id": message_id,
                     "conversation_id": delivery["conversation_id"],
                     "message_type": delivery["message_type"],
                     "in_reply_to": delivery["in_reply_to"],
@@ -973,43 +1108,89 @@ class ExchangeIngressService:
                 require_deadline=False,
             )
             recipient = ExchangeAddress.from_mapping(delivery["recipient"])
-            exchange_owner_id = (
+            fallback_exchange_owner_id = (
                 f"exchange:{principal.authority_id}:{principal.actor_id}"
             )
-            if delivery["message_type"] == "agent_reply":
-                reply_owner_id = str(
-                    record.confirmation_owner_id or exchange_owner_id
+            observed_owners = self.session_store.conversation_owner_ids(
+                agent_id=recipient.agent_id
+            )
+            user_owners = [
+                owner
+                for owner in observed_owners
+                if not str(owner).startswith("exchange:")
+            ]
+            target_owner_id = str(
+                record.confirmation_owner_id
+                or (
+                    user_owners[0]
+                    if len(user_owners) == 1
+                    else fallback_exchange_owner_id
                 )
-                target_session = self.session_store.resolve_primary_session(
-                    owner_id=reply_owner_id,
-                    agent_id=recipient.agent_id,
-                    establish=True,
+            )
+            target_session = self.session_store.resolve_primary_session(
+                owner_id=target_owner_id,
+                agent_id=recipient.agent_id,
+                establish=True,
+            )
+            if delivery["message_type"] == "agent_reply":
+                from orchestrator.hchat_delivery_status import (
+                    delivery_status_display_text,
+                )
+
+                status_notice = self._delivery_status_notice(delivery)
+                visible_text = (
+                    delivery_status_display_text(status_notice)
+                    if status_notice is not None
+                    else str(delivery["content"]["text"])
+                )
+                presentation_kind = (
+                    "status" if status_notice is not None else "reply"
                 )
                 displayed = self.session_store.append_presentation_message(
                     session_id=target_session["session_id"],
-                    owner_id=reply_owner_id,
+                    owner_id=target_owner_id,
                     agent_id=recipient.agent_id,
                     role="assistant",
-                    text=str(delivery["content"]["text"]),
-                    source="hchat-exchange-reply",
-                    idempotency_key=f"hchat-display:{delivery['message_id']}",
-                    presentation_channel="hchat-reply",
+                    text=visible_text,
+                    source=f"hchat-exchange-{presentation_kind}",
+                    idempotency_key=(
+                        f"hchat-status:{delivery['message_id']}"
+                        if status_notice is not None
+                        else f"hchat-display:{delivery['message_id']}"
+                    ),
+                    presentation_channel=f"hchat-{presentation_kind}",
                     history_eligible=False,
                     message_context={
                         "system_exchange": True,
-                        "system_exchange_kind": "reply",
+                        "system_exchange_kind": presentation_kind,
                         "system_exchange_terminal": True,
                         "hchat_message_id": delivery["message_id"],
                         "hchat_from_agent": principal.agent_id,
                         "hchat_from_instance": principal.registered_instance_id,
                         "exchange_inbox_key": inbox_key,
+                        **(
+                            {
+                                "hchat_original_message_id": status_notice[
+                                    "original_message_id"
+                                ],
+                                "hchat_delivery_status": status_notice["state"],
+                            }
+                            if status_notice is not None
+                            else {}
+                        ),
                     },
                 )
-                return self.inbox.mark_displayed(
+                displayed_record = self.inbox.mark_displayed(
                     inbox_key,
                     session_id=target_session["session_id"],
                     message_id=str(displayed["message_id"]),
                 )
+                if record.confirmation_id and status_notice is None:
+                    self._queue_sender_status(
+                        displayed_record,
+                        state="displayed",
+                    )
+                return displayed_record
             runtime = self._runtime_map().get(recipient.agent_id)
             if runtime is None or getattr(runtime, "startup_success", True) is False:
                 raise ExchangeIngressUnavailable(
@@ -1026,21 +1207,19 @@ class ExchangeIngressService:
                 )
             metadata = {
                 CONNECTOR_EVIDENCE_METADATA_KEY: connector_evidence,
-                "owner_id": exchange_owner_id,
+                "owner_id": target_owner_id,
+                "session_id": target_session["session_id"],
                 "connector_id": "exchange",
                 "ingress_transport": "exchange.wss",
-                "session_surface": "exchange",
-                "session_channel_key": (
-                    f"{principal.registered_instance_id}:"
-                    f"{delivery['conversation_id']}"
-                ),
+                "session_surface": "workbench",
+                "session_channel_key": "default",
             }
             request_id = await runtime.enqueue_api_text(
                 prompt,
                 source=EXCHANGE_SOURCE,
                 deliver_to_telegram=True,
                 request_metadata=metadata,
-                idempotency_key=record.idempotency_key,
+                idempotency_key=f"hchat:{delivery['message_id']}",
             )
             if not request_id:
                 raise ExchangeIngressUnavailable(
@@ -1090,6 +1269,11 @@ class ExchangeIngressService:
         for record in scheduled:
             state = scheduled_states[record.inbox_key]
             if state is not None and state != "queued":
+                if record.confirmation_id:
+                    self._queue_sender_status(
+                        record,
+                        state="executed",
+                    )
                 self.inbox.redact_scheduled(record.inbox_key)
         try:
             config = load_exchange_config(self.hashi_root)
@@ -1115,26 +1299,47 @@ class ExchangeIngressService:
                 continue
             state = str(confirmation.get("state") or "")
             if state == "discarded":
-                recovered.append(
-                    self.inbox.mark_confirmation_terminal(
-                        record.inbox_key,
-                        state="discarded",
-                    )
+                terminal = self.inbox.mark_confirmation_terminal(
+                    record.inbox_key,
+                    state="discarded",
                 )
+                self._queue_sender_status(terminal, state="discarded")
+                recovered.append(terminal)
             elif state == "expired":
-                recovered.append(
-                    self.inbox.mark_confirmation_terminal(
-                        record.inbox_key,
-                        state="confirmation_expired",
-                    )
+                terminal = self.inbox.mark_confirmation_terminal(
+                    record.inbox_key,
+                    state="confirmation_expired",
                 )
+                self._queue_sender_status(
+                    terminal,
+                    state="confirmation_expired",
+                    reason="confirmation_timeout_15m",
+                )
+                recovered.append(terminal)
             elif state == "superseded":
-                recovered.append(
-                    self.inbox.mark_confirmation_terminal(
-                        record.inbox_key,
-                        state="confirmation_superseded",
-                    )
+                terminal = self.inbox.mark_confirmation_terminal(
+                    record.inbox_key,
+                    state="confirmation_superseded",
                 )
+                self._queue_sender_status(
+                    terminal,
+                    state="confirmation_superseded",
+                    reason="session_context_advanced",
+                )
+                recovered.append(terminal)
+            elif state == "confirmed":
+                try:
+                    recovered.append(
+                        await self.confirm_pending(
+                            record.inbox_key,
+                            confirmation_id=record.confirmation_id,
+                        )
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Exchange confirmed inbox recovery deferred (%s)",
+                        type(exc).__name__,
+                    )
         for record in scheduled:
             state = scheduled_states[record.inbox_key]
             if recover_scheduled and state == "queued":

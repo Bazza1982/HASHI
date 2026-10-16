@@ -15,6 +15,12 @@ import pytest
 
 from orchestrator.workbench_api import WorkbenchApiServer
 from orchestrator.session_store import SessionConflict
+from orchestrator.hchat_delivery_status import (
+    decode_delivery_status,
+    delivery_status_message_id,
+    encode_delivery_status,
+)
+from orchestrator.message_context import seal_connector_evidence
 
 
 class _MockRequest:
@@ -32,6 +38,7 @@ class _MockRequest:
         self.match_info = match_info or {}
         self.headers = headers or {}
         self.remote = remote
+        self.content_type = "application/json"
 
     async def json(self):
         return self._payload
@@ -47,6 +54,7 @@ class _MockRuntime:
         self.last_enqueued_text = None
         self.last_idempotency_key = None
         self.last_request_metadata = None
+        self.last_request_content = None
 
     def _primary_chat_id(self):
         return 123
@@ -73,6 +81,34 @@ class _MockRuntime:
             agent_id=self.name,
             request_id=request_id,
             text=str(request_metadata.get("session_message_text", prompt)),
+            source=source,
+            idempotency_key=idempotency_key,
+            content=request_metadata.get("session_message_content"),
+        )
+        return accepted.request_id
+
+    async def enqueue_api_text(
+        self,
+        text,
+        *,
+        source,
+        request_metadata,
+        request_content,
+        idempotency_key,
+        **_kwargs,
+    ):
+        self.enqueue_request_calls += 1
+        self.last_enqueued_text = text
+        self.last_idempotency_key = idempotency_key
+        self.last_request_metadata = dict(request_metadata)
+        self.last_request_content = request_content
+        request_id = f"req-{self.enqueue_request_calls}"
+        accepted = self.server.session_store.accept_run(
+            session_id=request_metadata["session_id"],
+            owner_id=request_metadata["owner_id"],
+            agent_id=self.name,
+            request_id=request_id,
+            text=text,
             source=source,
             idempotency_key=idempotency_key,
             content=request_metadata.get("session_message_content"),
@@ -129,6 +165,227 @@ async def test_capabilities_advertises_message_freshness(api_server):
     assert freshness_cap["pending_receipt_supported"] is True
     assert "confirm" in freshness_cap["decisions_supported"]
     assert "discard" in freshness_cap["decisions_supported"]
+
+
+@pytest.mark.asyncio
+async def test_hchat_delivery_status_is_displayed_without_agent_run(
+    api_server, session, tmp_path: Path, monkeypatch
+):
+    from remote import protocol_outbound
+
+    server, runtime = api_server
+    (tmp_path / "secrets.json").write_text(
+        json.dumps(
+            {"hashi_remote_shared_token": "synthetic-status-shared-token"}
+        ),
+        encoding="utf-8",
+    )
+    original_message_id = "status-original-message"
+    status_message_id = delivery_status_message_id(
+        original_message_id, "confirmation_expired"
+    )
+    conversation_id = "status-conversation"
+    outbound_path = tmp_path / "protocol-outbound.json"
+    monkeypatch.setattr(
+        protocol_outbound,
+        "outbound_state_path",
+        lambda _instance: outbound_path,
+    )
+    assert protocol_outbound.register_outbound_correlation(
+        {
+            "message_id": original_message_id,
+            "conversation_id": conversation_id,
+            "from_instance": "HASHI3",
+            "from_agent": "lily",
+            "to_instance": "HASHI2",
+            "to_agent": "rain",
+        },
+        local_instance="HASHI3",
+        state_path=outbound_path,
+    )["ok"]
+    text = encode_delivery_status(
+        original_message_id=original_message_id,
+        state="confirmation_expired",
+        reason="confirmation_timeout_15m",
+    )
+    context = {
+        "from_agent": "rain",
+        "from_instance": "HASHI2",
+        "to_agent": "lily",
+        "to_instance": "HASHI3",
+        "message_id": status_message_id,
+        "originated_at": datetime.now(timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z"),
+        "message_type": "delivery_status",
+        "conversation_id": conversation_id,
+        "in_reply_to": original_message_id,
+        "network_authentication": "shared_network_hmac",
+    }
+    evidence = seal_connector_evidence(
+        tmp_path,
+        claims={
+            "_message_source_reserved": "hchat",
+            "_hchat_context": context,
+        },
+        prompt=text,
+    )
+
+    response = await server.handle_chat(
+        _MockRequest(
+            {
+                "agent": "lily",
+                "text": text,
+                "source": "protocol:status",
+                "message_id": status_message_id,
+                "idempotency_key": f"hchat:{status_message_id}",
+                "originated_at": context["originated_at"],
+                "message_type": "delivery_status",
+                "request_metadata": {"_connector_evidence": evidence},
+            }
+        )
+    )
+
+    data = json.loads(response.text)
+    assert response.status == 200, data
+    assert data["state"] == "displayed"
+    assert data["delivery_status"] == "confirmation_expired"
+    assert runtime.enqueue_request_calls == 0
+    visible = server.session_store.recent_visible_messages(
+        session["session_id"], owner_id="user:7"
+    )
+    assert visible[-1]["source"] == "hchat-status"
+    assert "15 minutes" in visible[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_hchat_confirmation_terminal_status_is_returned_once_to_sender(
+    api_server, session, monkeypatch
+):
+    from tools import hchat_send
+
+    server, _runtime = api_server
+    now = datetime.now(timezone.utc)
+    confirmation = server.ingress_confirmation.register_pending(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        agent_id="lily",
+        connector_id="hchat_workbench",
+        transport="workbench_api",
+        source_message_id="legacy-status-original",
+        idempotency_key="hchat:legacy-status-original",
+        payload_digest="a" * 64,
+        message_kind="hchat_request",
+        context_generation=session["context_generation"],
+        originated_at=(now - timedelta(seconds=90)),
+        received_at=now,
+        threshold_seconds=60,
+        reason="stale",
+        delay_seconds=90,
+        expires_at=(now + timedelta(minutes=15)),
+        payload={
+            "runtime_payload": {"text": "do not execute"},
+            "status_notification": {
+                "to_agent": "rain",
+                "target_instance": "HASHI2",
+                "from_agent": "lily",
+                "source_instance": "HASHI3",
+                "conversation_id": "conversation-status",
+            },
+        },
+        display_metadata={},
+    )
+    discarded = server.ingress_confirmation.decide(
+        confirmation_id=confirmation["confirmation_id"],
+        decision="discard",
+        owner_id="user:7",
+    )
+    calls = []
+
+    def fake_send_hchat(*args, **kwargs):
+        calls.append((args, kwargs))
+        return True
+
+    monkeypatch.setattr(hchat_send, "send_hchat", fake_send_hchat)
+
+    assert await server._notify_hchat_confirmation_status(discarded) is True
+    refreshed = server.ingress_confirmation.get(
+        confirmation["confirmation_id"], owner_id="user:7"
+    )
+    assert await server._notify_hchat_confirmation_status(refreshed) is True
+
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args[0] == "rain"
+    assert args[1] == "lily"
+    assert args[3] == "HASHI2"
+    assert decode_delivery_status(args[2])["state"] == "discarded"
+    assert kwargs["message_type"] == "delivery_status"
+    assert kwargs["in_reply_to"] == "legacy-status-original"
+    assert kwargs["idempotency_key"].startswith("hchat:hstatus-")
+
+
+@pytest.mark.asyncio
+async def test_hchat_sender_receives_waiting_then_terminal_status(
+    api_server, session, monkeypatch
+):
+    from tools import hchat_send
+
+    server, _runtime = api_server
+    now = datetime.now(timezone.utc)
+    confirmation = server.ingress_confirmation.register_pending(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        agent_id="lily",
+        connector_id="hchat_workbench",
+        transport="workbench_api",
+        source_message_id="status-lifecycle-original",
+        idempotency_key="hchat:status-lifecycle-original",
+        payload_digest="b" * 64,
+        message_kind="hchat_request",
+        context_generation=session["context_generation"],
+        originated_at=(now - timedelta(seconds=90)),
+        received_at=now,
+        threshold_seconds=60,
+        reason="stale",
+        delay_seconds=90,
+        expires_at=(now + timedelta(minutes=15)),
+        payload={
+            "runtime_payload": {"text": "execute only after confirmation"},
+            "status_notification": {
+                "to_agent": "rain",
+                "target_instance": "HASHI2",
+                "from_agent": "lily",
+                "source_instance": "HASHI3",
+                "conversation_id": "conversation-lifecycle",
+            },
+        },
+        display_metadata={},
+    )
+    calls = []
+    monkeypatch.setattr(
+        hchat_send,
+        "send_hchat",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or True,
+    )
+
+    assert await server._notify_hchat_confirmation_status(confirmation) is True
+    discarded = server.ingress_confirmation.decide(
+        confirmation_id=confirmation["confirmation_id"],
+        decision="discard",
+        owner_id="user:7",
+    )
+    assert await server._notify_hchat_confirmation_status(discarded) is True
+    refreshed = server.ingress_confirmation.get(
+        confirmation["confirmation_id"], owner_id="user:7"
+    )
+    assert await server._notify_hchat_confirmation_status(refreshed) is True
+
+    assert [decode_delivery_status(args[2])["state"] for args, _ in calls] == [
+        "awaiting_confirmation",
+        "discarded",
+    ]
+    assert refreshed["display_metadata"]["sender_delivery_status_complete"] is True
 
 
 @pytest.mark.asyncio
@@ -305,14 +562,121 @@ async def test_stale_committed_attachment_waits_then_executes_once(
     first = await server.handle_v1_session_ingress_confirmation_decide(decide)
     second = await server.handle_v1_session_ingress_confirmation_decide(decide)
 
-    assert first.status == 200
-    assert second.status == 200
+    assert first.status == 200, first.text
+    assert second.status == 200, second.text
     assert json.loads(first.text)["state"] == "confirmed"
     assert json.loads(second.text)["run_id"] == json.loads(first.text)["run_id"]
     assert runtime.enqueue_request_calls == 1
     assert runtime.last_request_metadata["session_message_content"] == [
         {"type": "attachment", "attachment_id": attachment_id}
     ]
+
+
+@pytest.mark.asyncio
+async def test_confirmed_stale_protocol_attachment_uses_primary_session_once(
+    api_server, session, tmp_path: Path
+):
+    from remote.protocol_manager import ProtocolManager
+
+    server, runtime = api_server
+    (tmp_path / "secrets.json").write_text(
+        json.dumps({"hashi_remote_shared_token": "synthetic-protocol-secret"}),
+        encoding="utf-8",
+    )
+    payload_bytes = b"verified delayed protocol attachment"
+    source_dir = (
+        tmp_path
+        / "state"
+        / "remote_attachments"
+        / "hashi3"
+        / "messages"
+        / "protocol-attachment-confirm"
+    )
+    source_dir.mkdir(parents=True)
+    source_path = source_dir / "evidence.txt"
+    source_path.write_bytes(payload_bytes)
+    attachment = {
+        "attachment_id": "remote-att-confirm-1",
+        "filename": "evidence.txt",
+        "mime_type": "text/plain",
+        "size_bytes": len(payload_bytes),
+        "sha256": hashlib.sha256(payload_bytes).hexdigest(),
+        "stored_path": str(source_path),
+    }
+    message_id = "protocol-attachment-confirm"
+    protocol = ProtocolManager(
+        hashi_root=tmp_path,
+        instance_info={"instance_id": "HASHI3", "platform": "windows"},
+        peer_registry=None,
+        workbench_port=18800,
+    )
+    protocol._inflight = {}
+    protocol.get_local_agents_snapshot = lambda: [
+        {"agent_name": "lily", "is_active": True}
+    ]
+    protocol._frontend_session_store = lambda: server.session_store
+    protocol._enqueue_local_prompt = pytest.fail
+    code, receipt = await protocol.handle_protocol_message(
+        {
+            "message_type": "agent_message",
+            "message_id": message_id,
+            "idempotency_key": f"hchat:{message_id}",
+            "originated_at": (
+                datetime.now(timezone.utc) - timedelta(seconds=90)
+            ).isoformat().replace("+00:00", "Z"),
+            "conversation_id": "conv-protocol-attachment-confirm",
+            "from_instance": "HASHI2",
+            "from_agent": "rain",
+            "to_instance": "HASHI3",
+            "to_agent": "lily",
+            "body": {"text": "inspect attached evidence", "attachments": [attachment]},
+            "ttl": 8,
+            "route_trace": ["HASHI2"],
+            "_local_attachment_manifest_verified": True,
+            "_network_authenticated_instance": "HASHI2",
+            "_network_authentication": "shared_network_hmac",
+        }
+    )
+    assert code == 202
+    assert receipt["confirmation_required"] is True
+    assert runtime.enqueue_request_calls == 0
+
+    decide_request = _MockRequest(
+        {"decision": "confirm"},
+        match_info={
+            "session_id": session["session_id"],
+            "confirmation_id": receipt["confirmation_id"],
+        },
+    )
+    first = await server.handle_v1_session_ingress_confirmation_decide(
+        decide_request
+    )
+    second = await server.handle_v1_session_ingress_confirmation_decide(
+        decide_request
+    )
+
+    first_data = json.loads(first.text)
+    second_data = json.loads(second.text)
+    assert first.status == 200, first_data
+    assert second.status == 200, second_data
+    assert first_data["state"] == "confirmed"
+    assert second_data["run_id"] == first_data["run_id"]
+    assert runtime.enqueue_request_calls == 1
+    assert runtime.last_request_metadata["session_id"] == session["session_id"]
+    assert runtime.last_idempotency_key == f"hchat:{message_id}"
+    attachment_parts = [
+        item
+        for item in runtime.last_request_content["parts"]
+        if item.get("type") == "media"
+    ]
+    assert len(attachment_parts) == 1
+    stored, stored_bytes = server.session_store.attachment_bytes(
+        session_id=session["session_id"],
+        owner_id="user:7",
+        attachment_id=attachment_parts[0]["attachment_id"],
+    )
+    assert stored["filename"] == "evidence.txt"
+    assert stored_bytes == payload_bytes
 
 
 @pytest.mark.asyncio
@@ -492,11 +856,17 @@ async def test_session_runs_remote_workbench_threshold_60s(api_server, session):
 @pytest.mark.asyncio
 async def test_client_declared_tui_surface_never_bypasses_freshness(api_server, session):
     server, runtime = api_server
-    # Loopback is not a trusted connector identity. A forged body field cannot bypass.
+    root = server.config_path.parent
+    (root / "secrets.json").write_text(
+        json.dumps({"hashi_remote_shared_token": "tui-connector-secret"}),
+        encoding="utf-8",
+    )
+    # Loopback and TUI-shaped body values are not connector identity.
     req_local_tui = _MockRequest(
         {
-            "idempotency_key": "idemp-local-tui",
+            "idempotency_key": "tui-forged-local-1",
             "surface": "tui",
+            "client_id": "tui-forged-client-1",
             "message": {"content": [{"type": "text", "text": "local tui prompt"}]},
         },
         match_info={"session_id": session["session_id"]},
@@ -509,14 +879,27 @@ async def test_client_declared_tui_surface_never_bypasses_freshness(api_server, 
     assert "run_id" not in data
     assert runtime.enqueue_request_calls == 0
 
-    # The established local TUI connector shape is exempt: loopback is
-    # server-observed, and both connector IDs use the existing TUI namespace.
+    # The existing Remote-to-Backend hop seals the real TUI identity with the
+    # local shared secret.  No TUI payload or connector behavior is changed.
+    trusted_prompt = "real local tui"
+    evidence = seal_connector_evidence(
+        root,
+        claims={
+            "_message_source_reserved": "tui",
+            "_origin_instance_evidence": {
+                "id": "HASHI3",
+                "assurance": "shared_network_hmac",
+            },
+        },
+        prompt=trusted_prompt,
+    )
     req_real_local_tui = _MockRequest(
         {
             "idempotency_key": "tui-real-local-1",
             "surface": "tui",
             "client_id": "tui-client-1",
-            "message": {"content": [{"type": "text", "text": "real local tui"}]},
+            "message": {"content": [{"type": "text", "text": trusted_prompt}]},
+            "request_metadata": {"_connector_evidence": evidence},
         },
         match_info={"session_id": session["session_id"]},
         remote="127.0.0.1",

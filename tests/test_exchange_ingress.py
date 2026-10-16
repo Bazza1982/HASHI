@@ -20,6 +20,11 @@ from orchestrator.exchange_ingress import (
 )
 from orchestrator.message_context import seal_connector_evidence
 from orchestrator.ingress_confirmation import IngressConfirmationService
+from orchestrator.hchat_delivery_status import (
+    decode_delivery_status,
+    delivery_status_message_id,
+    encode_delivery_status,
+)
 from orchestrator.session_store import SessionStore
 from remote.exchange_outbox import ExchangeOutbox
 from remote.exchange_protocol import send_frame, utc_timestamp
@@ -259,7 +264,7 @@ def test_service_persists_before_scheduling_and_preserves_verified_identity(
     queued_prompt, kwargs = calls[0]
     assert queued_prompt == prompt
     assert kwargs["source"] == "hchat-exchange"
-    assert kwargs["idempotency_key"] == accepted.idempotency_key
+    assert kwargs["idempotency_key"] == f"hchat:{delivery['message_id']}"
     assert (
         kwargs["request_metadata"]["owner_id"]
         == "exchange:authority_1:actor_alice"
@@ -306,6 +311,13 @@ def test_exchange_60_second_confirmation_boundary_and_exact_release(tmp_path):
     assert confirmation["reason"] == "stale"
     assert confirmation["threshold_seconds"] == 60
     assert confirmation["expires_at"] > delivery["expires_at"]
+    waiting_status = service.outbox.get(
+        delivery_status_message_id(delivery["message_id"], "awaiting_confirmation")
+    )
+    assert waiting_status is not None
+    assert decode_delivery_status(waiting_status.frame["content"]["text"])[
+        "state"
+    ] == "awaiting_confirmation"
 
     first_release = asyncio.run(
         service.confirm_pending(
@@ -322,6 +334,85 @@ def test_exchange_60_second_confirmation_boundary_and_exact_release(tmp_path):
     assert first_release.state == "scheduled"
     assert second_release.state == "scheduled"
     assert len(calls) == 1
+
+
+def test_exchange_discard_projects_terminal_status_to_sender(tmp_path):
+    _configure(tmp_path)
+    now = time.time()
+    store = SessionStore(
+        tmp_path / "state" / "sessions.sqlite3",
+        instance_id="HASHI2",
+    )
+    service = ExchangeIngressService(
+        hashi_root=tmp_path,
+        runtime_map=lambda: {
+            "reviewer": SimpleNamespace(startup_success=True)
+        },
+        session_store=store,
+    )
+    delivery = _delivery(now - 61)
+    delivery["authorization_expires_at"] = utc_timestamp(now + 60)
+    delivery["expires_at"] = utc_timestamp(now + 239)
+    prompt, evidence = _evidence(tmp_path, delivery)
+    service.accept(evidence=evidence, prompt=prompt)
+    pending = asyncio.run(service.schedule(evidence=evidence, prompt=prompt))
+    IngressConfirmationService(store).decide(
+        confirmation_id=pending.confirmation_id,
+        decision="discard",
+        owner_id=pending.confirmation_owner_id,
+    )
+
+    recovered = asyncio.run(service.recover_pending())
+
+    assert recovered[0].state == "discarded"
+    terminal_status = service.outbox.get(
+        delivery_status_message_id(delivery["message_id"], "discarded")
+    )
+    assert terminal_status is not None
+    assert decode_delivery_status(terminal_status.frame["content"]["text"])[
+        "state"
+    ] == "discarded"
+
+
+def test_exchange_delivery_status_is_display_only_and_correlation_bound(tmp_path):
+    _configure(tmp_path)
+    store = SessionStore(
+        tmp_path / "state" / "sessions.sqlite3",
+        instance_id="HASHI2",
+    )
+    delivery = _reply_delivery()
+    _record_original_outbound(tmp_path, delivery)
+    delivery["message_id"] = delivery_status_message_id(
+        "original_1", "discarded"
+    )
+    delivery["content"]["text"] = encode_delivery_status(
+        original_message_id="original_1",
+        state="discarded",
+    )
+    prompt, evidence = _evidence(tmp_path, delivery)
+    service = ExchangeIngressService(
+        hashi_root=tmp_path,
+        runtime_map=lambda: {
+            "reviewer": SimpleNamespace(startup_success=True)
+        },
+        session_store=store,
+    )
+
+    service.accept(evidence=evidence, prompt=prompt)
+    displayed = asyncio.run(service.schedule(evidence=evidence, prompt=prompt))
+
+    assert displayed.state == "displayed"
+    session = store.resolve_primary_session(
+        owner_id="exchange:authority_1:actor_alice",
+        agent_id="reviewer",
+        establish=False,
+    )
+    visible = store.recent_visible_messages(
+        session["session_id"],
+        owner_id="exchange:authority_1:actor_alice",
+    )
+    assert visible[-1]["source"] == "hchat-exchange-status"
+    assert "discarded" in visible[-1]["text"]
 
 
 def test_exchange_message_inside_60_seconds_schedules_without_confirmation(tmp_path):
@@ -603,8 +694,8 @@ def test_same_named_senders_from_different_actors_keep_separate_owners(
         call[1]["request_metadata"]["session_channel_key"]
         for call in calls
     ] == [
-        "instance_alice:conversation_1",
-        "instance_bob:conversation_1",
+        "default",
+        "default",
     ]
 
 

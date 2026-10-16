@@ -16,6 +16,7 @@ from typing import Any, Callable, Mapping
 
 from orchestrator.message_freshness import (
     classify_freshness,
+    parse_rfc3339_utc,
 )
 from orchestrator.ingress_confirmation import (
     IngressConfirmationService,
@@ -28,6 +29,10 @@ _HCHAT_OUTER_ENVELOPE = re.compile(
 )
 _HCHAT_AUTOREPLY_PREFIX = "HChat protocol note:"
 _HCHAT_TERMINAL_PREFIX = "\n\nHChat terminal reply notice:"
+_PROTOCOL_REQUEST_PREFIX = "system exchange message from "
+_PROTOCOL_REPLY_PREFIX = "system exchange reply from "
+_PROTOCOL_REQUEST_SUFFIX = "\n\nProtocol rule:"
+_PROTOCOL_REPLY_SUFFIX = "\n\nTerminal protocol notice:"
 
 
 def canonical_hchat_message_text(value: str | None) -> str:
@@ -37,6 +42,16 @@ def canonical_hchat_message_text(value: str | None) -> str:
     envelope = _HCHAT_OUTER_ENVELOPE.match(text)
     if envelope is not None:
         text = str(envelope.group("body") or "").strip()
+    lowered = text.casefold()
+    if lowered.startswith((_PROTOCOL_REQUEST_PREFIX, _PROTOCOL_REPLY_PREFIX)):
+        first_newline = text.find("\n")
+        if first_newline >= 0:
+            text = text[first_newline + 1 :].strip()
+            for suffix in (_PROTOCOL_REQUEST_SUFFIX, _PROTOCOL_REPLY_SUFFIX):
+                marker = text.find(suffix)
+                if marker >= 0:
+                    text = text[:marker].rstrip()
+                    break
     if text.startswith(_HCHAT_AUTOREPLY_PREFIX):
         separator = text.find("\n\n")
         if separator >= 0:
@@ -82,7 +97,7 @@ def _resolve_hchat_owner(
 
 def format_delay_display(delay_seconds: float) -> str:
     """Format delay seconds into plain Chinese string."""
-    seconds = int(round(delay_seconds))
+    seconds = max(0, int(round(delay_seconds)))
     if seconds < 60:
         return f"{seconds} 秒"
     minutes = seconds // 60
@@ -100,6 +115,46 @@ def is_hchat_terminal_reply(message_type: str | None, text: str | None) -> bool:
     if norm_text.startswith("[hchat reply from "):
         return True
     return False
+
+
+def hchat_payload_digest(
+    *,
+    message_id: str,
+    originated_at: str | datetime | None,
+    from_agent: str,
+    from_instance: str,
+    to_agent: str,
+    is_reply: bool,
+    text: str,
+    attachment_binding: Any = None,
+) -> str:
+    """Return one transport-independent digest for a logical HChat message."""
+
+    parsed_origin = parse_rfc3339_utc(originated_at)
+    normalized_origin = (
+        parsed_origin.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        if parsed_origin is not None
+        else str(originated_at or "")
+    )
+    digest_payload = {
+        "version": 1,
+        "message_id": str(message_id),
+        "originated_at": normalized_origin,
+        "from_agent": str(from_agent).strip().casefold(),
+        "from_instance": str(from_instance).strip().upper(),
+        "to_agent": str(to_agent).strip().casefold(),
+        "is_reply": bool(is_reply),
+        "text": canonical_hchat_message_text(text),
+        "attachments": attachment_binding if attachment_binding is not None else [],
+    }
+    return "sha256:" + hashlib.sha256(
+        json.dumps(
+            digest_payload,
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def check_hchat_freshness_and_register(
@@ -202,28 +257,17 @@ def check_hchat_freshness_and_register(
         "idempotency_key": stable_idempotency_key,
     })
 
-    digest_payload = {
-        "version": 1,
-        "message_id": str(message_id),
-        "originated_at": freshness.originated_at_iso
-        or str(originated_at or ""),
-        "from_agent": str(from_agent).strip().casefold(),
-        "from_instance": str(from_instance).strip().upper(),
-        "to_agent": str(to_agent).strip().casefold(),
-        "is_reply": bool(is_reply),
-        "text": canonical_hchat_message_text(
-            canonical_text if canonical_text is not None else text
-        ),
-        "attachments": attachment_binding if attachment_binding is not None else [],
-    }
-    payload_digest = "sha256:" + hashlib.sha256(
-        json.dumps(
-            digest_payload,
-            sort_keys=True,
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
+    payload_digest = hchat_payload_digest(
+        message_id=message_id,
+        originated_at=freshness.originated_at_iso or originated_at,
+        from_agent=from_agent,
+        from_instance=from_instance,
+        to_agent=to_agent,
+        is_reply=is_reply,
+        text=canonical_text if canonical_text is not None else text,
+        attachment_binding=attachment_binding,
+    )
+    saved_payload["payload_digest"] = payload_digest
 
     display_metadata = {
         "text": preview,

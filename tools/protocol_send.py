@@ -171,15 +171,20 @@ def _build_message_payload(
     conversation_id: str | None,
     message_id: str | None = None,
     originated_at: str | None = None,
+    idempotency_key: str | None = None,
     message_type: str = "agent_message",
     in_reply_to: str | None = None,
 ) -> dict:
     mid = message_id or f"msg-{uuid.uuid4().hex[:16]}"
     orig = originated_at or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    stable_idempotency_key = idempotency_key or f"hchat:{mid}"
+    if stable_idempotency_key != f"hchat:{mid}":
+        raise ValueError("HChat idempotency_key must match message_id")
     return {
         "message_type": str(message_type or "agent_message"),
         "message_id": mid,
         "originated_at": orig,
+        "idempotency_key": stable_idempotency_key,
         "conversation_id": conversation_id or f"conv-{uuid.uuid4().hex[:16]}",
         "from_instance": source_instance,
         "from_agent": from_agent.lower(),
@@ -274,13 +279,9 @@ def _record_outbound_correlation_file(payload: dict, *, state: str, result: dict
     message_id = str(payload.get("message_id") or "").strip()
     if not source_instance or not message_id:
         return
-    path = _outbound_state_path(source_instance)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    data = _load_outbound_state(path)
-    messages = data.setdefault("messages", {})
-    now = datetime.now(timezone.utc).isoformat()
-    item = dict(messages.get(message_id) or {})
-    item.update(
+    from remote.protocol_outbound import register_outbound_correlation
+
+    registration = register_outbound_correlation(
         {
             "message_id": message_id,
             "conversation_id": payload.get("conversation_id"),
@@ -289,16 +290,18 @@ def _record_outbound_correlation_file(payload: dict, *, state: str, result: dict
             "to_instance": payload.get("to_instance"),
             "to_agent": payload.get("to_agent"),
             "state": state,
-            "updated_at": now,
-        }
+            **({"result": result} if result is not None else {}),
+        },
+        local_instance=source_instance,
+        state_path=_outbound_state_path(source_instance),
     )
-    item.setdefault("created_at", now)
-    if result is not None:
-        item["last_result"] = result
-    messages[message_id] = item
-    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    tmp_path.replace(path)
+    if not registration.get("ok"):
+        raise ValueError(
+            str(
+                registration.get("error")
+                or "outbound HChat correlation could not be registered"
+            )
+        )
 
 
 def _record_outbound_correlation(
@@ -749,6 +752,7 @@ def send_protocol_message(
     authorization_resources: list[str] | tuple[str, ...] | None = None,
     message_id: str | None = None,
     originated_at: str | None = None,
+    idempotency_key: str | None = None,
     message_type: str = "agent_message",
     in_reply_to: str | None = None,
     timeout: int = 10,
@@ -776,6 +780,7 @@ def send_protocol_message(
         conversation_id=conversation_id,
         message_id=message_id,
         originated_at=originated_at,
+        idempotency_key=idempotency_key,
         message_type=message_type,
         in_reply_to=in_reply_to,
     )
@@ -830,10 +835,18 @@ def send_protocol_message(
     capabilities, capability_error = fetch_remote_protocol_capabilities(
         base_url, timeout=min(timeout, 5)
     )
-    if capability_error or "message_freshness_v1" not in capabilities:
-        reason = capability_error or "peer does not advertise message_freshness_v1"
+    required_hchat_capabilities = {
+        "message_freshness_v1",
+        "hchat_delivery_status_v1",
+    }
+    missing_hchat_capabilities = required_hchat_capabilities - capabilities
+    if capability_error or missing_hchat_capabilities:
+        reason = capability_error or (
+            "peer does not advertise "
+            + ", ".join(sorted(missing_hchat_capabilities))
+        )
         print(
-            "❌ Remote peer does not support HChat message freshness protection; "
+            "❌ Remote peer does not support complete HChat freshness/status protection; "
             f"update the peer before sending ({reason}).",
             file=sys.stderr,
         )
