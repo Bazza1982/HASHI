@@ -393,3 +393,25 @@ duplicates. Luna did not produce a finding in its earlier canaries, so prompt
 guidance is not claimed to force every model to report progress. The temporary
 QA target was restored afterward. See
 [current nightly delivery](repairs/NIGHTLY_20261008_HASHI3.md).
+
+## HASHI3 offline repair, 2026-10-16: safe stream-timeout continuation, consented fallback, truthful failure reporting
+
+Branch `debug-herv3` on HASHI3 (base `main` = `52181d1e`).  Source and offline
+evidence only; adoption and live verification have not happened.
+
+- A typed `PROVIDER_STREAM_IDLE_TIMEOUT` / `PROVIDER_RESPONSE_START_TIMEOUT`
+  may now use the existing bounded current-call continuation when
+  `safe_current_call_continuation` is already proven by checkpoint evidence.
+  The generic `hashi_disable_inplace_retry` guard still blocks every blind
+  retry; the no-Tool and partial-answer fences are unchanged; the shared
+  three-request local recovery budget is used, not duplicated.
+- Ordinary general-model fallback is now a user-consented policy (default
+  OFF) with an ordered allowlist, per-source rules, privacy narrowing, and an
+  explicit additional-call budget.  HERV3 consumes the resolved decision for
+  same-model Provider continuation; the HER stage layer consumes it for the
+  pre-effect HERV3/Codex CLI switch.  See
+  [model fallback policy](HASHI_MODEL_FALLBACK_POLICY.md).
+- Terminal public failure reporting separates same-target retries, the
+  interaction recovery used/limit, the Turn-wide cumulative count, and the
+  fallback disposition, and says "already retried, but still failed" in the
+  selected language.

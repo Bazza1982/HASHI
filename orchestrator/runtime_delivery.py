@@ -521,6 +521,17 @@ async def _send_standard_event_media_to_telegram(
     return accepted_ids, accepted_count
 
 
+def _recovery_int(value: Any) -> int:
+    """Bound one optional recovery counter for public rendering."""
+
+    if isinstance(value, bool):
+        return 0
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
 def format_backend_error_for_user(
     engine: str,
     error_text: str,
@@ -608,6 +619,88 @@ def format_backend_error_for_user(
             ui_language.tr("error.warning_partial_execution", locale=selected)
         )
 
+    retried_count = _recovery_int(context.get("same_target_retries")) or _recovery_int(
+        context.get("interaction_recovery_used")
+    )
+    if retried_count:
+        # Same-target recovery already ran and the request still failed; the
+        # public report says so plainly in the selected interface language.
+        lines.append(
+            ui_language.tr(
+                "error.retried_still_failed", locale=selected, count=retried_count
+            )
+        )
+    interaction_used = _recovery_int(context.get("interaction_recovery_used"))
+    interaction_limit = _recovery_int(context.get("interaction_recovery_limit"))
+    if interaction_used and interaction_limit:
+        # Scope label is mandatory: this ratio belongs to the failed
+        # interaction only and is never mixed with a Turn-wide total.
+        lines.append(
+            ui_language.tr(
+                "error.recovery_interaction_scope",
+                locale=selected,
+                used=interaction_used,
+                limit=interaction_limit,
+            )
+        )
+    turn_total = _recovery_int(context.get("turn_recovery_total"))
+    if turn_total:
+        lines.append(
+            ui_language.tr(
+                "error.recovery_turn_scope", locale=selected, count=turn_total
+            )
+        )
+    fallback = (
+        dict(context.get("fallback"))
+        if isinstance(context.get("fallback"), Mapping)
+        else {}
+    )
+    fallback_disposition = str(fallback.get("disposition") or "")
+    fallback_target = str(fallback.get("target") or "").strip()
+    fallback_reason = str(fallback.get("reason") or "").strip()
+    primary_failure = (
+        dict(context.get("fallback_primary_failure"))
+        if isinstance(context.get("fallback_primary_failure"), Mapping)
+        else {}
+    )
+    if fallback_disposition in {"attempted-success", "attempted-failed"} and primary_failure:
+        lines.append(
+            ui_language.tr(
+                "error.fallback_primary_failure",
+                locale=selected,
+                provider=str(primary_failure.get("provider") or ""),
+                model=str(primary_failure.get("model") or ""),
+                code=str(primary_failure.get("code") or ""),
+            )
+        )
+    if fallback_disposition == "attempted-success":
+        lines.append(
+            ui_language.tr(
+                "error.fallback_succeeded",
+                locale=selected,
+                target=fallback_target or ui_language.tr("common.none", locale=selected),
+            )
+        )
+    elif fallback_disposition == "attempted-failed":
+        lines.append(
+            ui_language.tr(
+                "error.fallback_attempted_failed",
+                locale=selected,
+                target=fallback_target or ui_language.tr("common.none", locale=selected),
+            )
+        )
+    elif fallback_disposition in {"disabled", "ask-required", "blocked", "unavailable"}:
+        reason_key = f"error.fallback_reason.{fallback_reason or 'unknown'}"
+        reason_text = ui_language.tr(reason_key, locale=selected)
+        if reason_text == reason_key:
+            reason_text = ui_language.tr(
+                "error.fallback_reason.unknown", locale=selected
+            )
+        lines.append(
+            ui_language.tr(
+                "error.fallback_not_attempted", locale=selected, reason=reason_text
+            )
+        )
     if "requires a newer version of" in exact:
         match = re.search(r"requires a newer version of ([^.]+)", exact, re.IGNORECASE)
         runtime_name = match.group(1).strip() if match else _backend_runtime_name(engine)

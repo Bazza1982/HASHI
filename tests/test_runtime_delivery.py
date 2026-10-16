@@ -1128,3 +1128,144 @@ async def test_typing_loop_sends_action_until_stopped(tmp_path):
     assert runtime.app.bot.actions == [
         {"chat_id": 123, "action": constants.ChatAction.TYPING}
     ]
+
+
+def test_public_failure_reports_scoped_recovery_and_retried_outcome():
+    context = {
+        "backend": "her-v3",
+        "error_code": "PROVIDER_SERVER_ERROR",
+        "error_retryable": False,
+        "side_effects_possible": True,
+        "same_target_retries": 3,
+        "interaction_recovery_used": 3,
+        "interaction_recovery_limit": 3,
+        "turn_recovery_total": 7,
+        "fallback": {
+            "disposition": "blocked",
+            "reason": "budget_exhausted",
+            "target": "",
+        },
+    }
+    public = runtime_delivery.build_public_failure(
+        "her-v2", "provider failed", locale="en", error_context=context
+    )
+    text = public["text"]
+    assert "Retried 3 times, but the request still failed." in text
+    assert "3 of 3 used in this interaction" in text
+    assert "Turn-wide cumulative recovery actions: 7." in text
+    assert "7/3" not in text
+    assert (
+        "Fallback was not attempted. First reason: the extra-call budget is exhausted."
+        in text
+    )
+    assert "(her-v3)" in text
+    assert "(her-v2)" not in text
+
+
+def test_public_failure_retried_sentence_follows_the_interface_language():
+    context = {
+        "backend": "her-v3",
+        "error_code": "PROVIDER_STREAM_IDLE_TIMEOUT",
+        "error_retryable": False,
+        "side_effects_possible": True,
+        "same_target_retries": 3,
+    }
+    chinese = runtime_delivery.build_public_failure(
+        "her-v3", "provider failed", locale="zh-CN", error_context=context
+    )
+    assert "已重试 3 次，仍然失败。" in chinese["text"]
+    english = runtime_delivery.build_public_failure(
+        "her-v3", "provider failed", locale="en", error_context=context
+    )
+    assert "Retried 3 times, but the request still failed." in english["text"]
+
+
+def test_public_failure_reports_fallback_success_without_claiming_replay():
+    context = {
+        "backend": "her-v3",
+        "error_code": "PROVIDER_SERVER_ERROR",
+        "error_retryable": False,
+        "side_effects_possible": True,
+        "same_target_retries": 3,
+        "fallback": {
+            "disposition": "attempted-success",
+            "target": "openrouter-api/deepseek/deepseek-v4-flash",
+            "reason": "",
+        },
+        "fallback_primary_failure": {
+            "provider": "deepseek-api",
+            "model": "deepseek-v4-flash",
+            "code": "PROVIDER_SERVER_ERROR",
+        },
+    }
+    public = runtime_delivery.build_public_failure(
+        "her-v3", "provider failed", locale="en", error_context=context
+    )
+    text = public["text"]
+    assert (
+        "Primary failure: deepseek-api / deepseek-v4-flash (PROVIDER_SERVER_ERROR)."
+        in text
+    )
+    assert (
+        "Execution continued on openrouter-api/deepseek/deepseek-v4-flash "
+        "without repeating completed actions." in text
+    )
+
+
+def test_public_failure_reports_both_failures_and_exhausted_fallback_budget():
+    context = {
+        "backend": "her-v3",
+        "error_code": "PROVIDER_STREAM_IDLE_TIMEOUT",
+        "error_retryable": False,
+        "side_effects_possible": True,
+        "fallback": {
+            "disposition": "attempted-failed",
+            "target": "codex-cli",
+            "reason": "",
+        },
+        "fallback_primary_failure": {
+            "provider": "deepseek-api",
+            "model": "deepseek-v4-flash",
+            "code": "PROVIDER_STREAM_IDLE_TIMEOUT",
+        },
+    }
+    public = runtime_delivery.build_public_failure(
+        "her-v3", "provider failed", locale="en", error_context=context
+    )
+    text = public["text"]
+    assert "Primary failure: deepseek-api / deepseek-v4-flash" in text
+    assert "Fallback to codex-cli was also attempted and failed." in text
+
+
+def test_backend_failure_fields_expose_scoped_counters_without_a_ratio():
+    from orchestrator.runtime_pipeline import backend_failure_fields
+
+    response = SimpleNamespace(
+        error_code="PROVIDER_SERVER_ERROR",
+        error_retryable=False,
+        http_status=503,
+        provider_request_id="",
+        retry_after_s=None,
+        tool_call_count=14,
+        side_effects_possible=True,
+        stream_metadata={
+            "provider_transport_retry_count": 3,
+            "provider_local_recovery_count": 3,
+            "provider_local_recovery_limit": 3,
+            "provider_local_recovery_exhausted": True,
+            "provider_turn_recovery_total": 7,
+            "provider_fallback": {
+                "disposition": "blocked",
+                "reason": "privacy_blocked",
+                "target": "",
+            },
+        },
+    )
+    fields = backend_failure_fields(response)
+    assert fields["same_target_retries"] == 3
+    assert fields["interaction_recovery_used"] == 3
+    assert fields["interaction_recovery_limit"] == 3
+    assert fields["turn_recovery_total"] == 7
+    assert fields["recovery_exhausted"] is True
+    assert fields["fallback"]["reason"] == "privacy_blocked"
+    assert fields["fallback"]["disposition"] == "blocked"

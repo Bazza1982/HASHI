@@ -161,7 +161,7 @@ class ProviderContextCapacityPreflightError(RuntimeError):
 
 
 class _ProviderStreamInactivityTimeout(httpx.ReadTimeout):
-    """Typed HER v2 timeout for one unfinished SSE provider call."""
+    """Typed HERV3 timeout for one unfinished SSE provider call."""
 
     def __init__(
         self,
@@ -1551,6 +1551,26 @@ def _transient_provider_call_error(error: Exception) -> bool:
     )
 
 
+def _checkpoint_backed_stream_inactivity_continuation(
+    error: Exception,
+    *,
+    current_call_continuation: bool,
+) -> bool:
+    """Narrow HERV3 exception for one typed SSE inactivity timeout.
+
+    The generic ``hashi_disable_inplace_retry`` guard stays effective for
+    every blind retry.  A typed stream inactivity timeout may reuse the
+    existing bounded current-call continuation only when the already-computed
+    checkpoint evidence proved that the assembled Provider messages and
+    completed Tool results are safe to reuse.
+    """
+
+    return bool(
+        current_call_continuation
+        and isinstance(error, _ProviderStreamInactivityTimeout)
+    )
+
+
 def _provider_call_retry_delay(
     error: Exception,
     *,
@@ -1737,6 +1757,9 @@ class OpenRouterAdapter(BaseBackend):
         self._her_v2_stream_inactivity_timeout_s: float | None = None
         self._privacy_gate: OutboundPrivacyGate | None = None
         self._herv3_privacy_scope = False
+        # One resolved HERV3 fallback port; absent means fallback is not wired
+        # for this request and no fallback metadata is produced.
+        self._provider_fallback_port: Any = None
 
     async def _protect_outbound_payload(
         self,
@@ -1766,6 +1789,41 @@ class OpenRouterAdapter(BaseBackend):
         if timeout <= 0:
             raise ValueError("HER v2 stream inactivity timeout must be positive")
         self._her_v2_stream_inactivity_timeout_s = timeout
+
+    def set_provider_fallback_port(self, port: Any) -> None:
+        """Bind the resolved HERV3 fallback decision port for this call.
+
+        The port is supplied by the PAO-owned HER stage bridge.  It evaluates
+        the user's persisted fallback policy and, when allowed, continues the
+        exact assembled provider conversation on the authorised target.  The
+        adapter never infers consent from a configured key or executable.
+        """
+
+        self._provider_fallback_port = port
+
+    async def continue_generation(
+        self,
+        messages: list[dict[str, Any]],
+        request_id: str,
+        *,
+        on_stream_event: StreamCallback = None,
+    ) -> BackendResponse:
+        """Continue one already assembled provider conversation on this target.
+
+        Used only by the HERV3 same-model Provider fallback: the exact
+        messages, including completed Tool results, are reused.  No Tool is
+        re-executed because of the handover itself; only genuinely new model
+        Tool calls are executed by the continuing loop.
+        """
+
+        return await self.generate_response(
+            "",
+            str(request_id or ""),
+            on_stream_event=on_stream_event,
+            continuation_messages=[
+                dict(item) if isinstance(item, Mapping) else item for item in messages
+            ],
+        )
 
     def _new_her_v2_stream_inactivity_guard(
         self,
@@ -3464,6 +3522,7 @@ class OpenRouterAdapter(BaseBackend):
         silent: bool = False,
         on_stream_event: StreamCallback = None,
         request_content: Mapping[str, Any] | None = None,
+        continuation_messages: list[dict[str, Any]] | None = None,
     ) -> BackendResponse:
         started = time.perf_counter()
         self._ensure_client()
@@ -3550,10 +3609,29 @@ class OpenRouterAdapter(BaseBackend):
             all_media_native = bool(media_routing) and all(
                 str(item.get("route") or "") == "native" for item in media_routing
             )
+            if continuation_messages is not None:
+                # HERV3 same-model Provider fallback: reuse the exact
+                # assembled messages, including completed Tool results; no
+                # Tool is re-executed by the handover itself.
+                messages = [
+                    dict(item) if isinstance(item, Mapping) else item
+                    for item in continuation_messages
+                ]
+                media_routing = ()
+                self._last_media_routing = ()
+                native_attachment_ids = set()
+                native_local_refs = set()
+                all_media_native = False
 
+            initial_provider_recovery_kind = (
+                "provider_fallback_same_model"
+                if continuation_messages is not None
+                else "none"
+            )
             for loop_idx in count():
                 provider_call_retry_count = 0
-                next_provider_recovery_kind = "none"
+                next_provider_recovery_kind = initial_provider_recovery_kind
+                initial_provider_recovery_kind = "none"
                 while True:
                     payload = self._build_payload(
                         messages,
@@ -3757,10 +3835,19 @@ class OpenRouterAdapter(BaseBackend):
                         no_executed_effect = (
                             effect_recovery["executed_tool_count"] == 0
                         )
+                        stream_inactivity_continuation = (
+                            _checkpoint_backed_stream_inactivity_continuation(
+                                exc,
+                                current_call_continuation=current_call_continuation,
+                            )
+                        )
                         can_transport_retry = bool(
                             not can_media_fallback
                             and recovery_attempts_used < retry_limit
-                            and _transient_provider_call_error(exc)
+                            and (
+                                stream_inactivity_continuation
+                                or _transient_provider_call_error(exc)
+                            )
                             and (
                                 current_call_continuation
                                 or (
@@ -3897,6 +3984,24 @@ class OpenRouterAdapter(BaseBackend):
                                 )
                             )
                             continue
+                        fallback_response = await self._attempt_provider_fallback(
+                            exc,
+                            messages=messages,
+                            request_id=str(request_id or ""),
+                            on_stream_event=on_stream_event,
+                            effect_recovery=effect_recovery,
+                            provider_calls=provider_calls,
+                            provider_transport_retry_count=(
+                                provider_transport_retry_count
+                            ),
+                            total_local_recovery_requests=(
+                                total_local_recovery_requests
+                            ),
+                            total_tool_calls=total_tool_calls,
+                            tool_loop_count=tool_loop_count,
+                        )
+                        if fallback_response is not None:
+                            return fallback_response
                         raise
                     provider_call_latency_ms = round(
                         (time.perf_counter() - provider_call_started) * 1000,
@@ -4401,6 +4506,11 @@ class OpenRouterAdapter(BaseBackend):
                 # normally transient.
                 failure.error_retryable = False
                 metadata["provider_local_recovery_exhausted"] = True
+            fallback_record = getattr(e, "hashi_provider_fallback", None)
+            if isinstance(fallback_record, Mapping) and fallback_record:
+                # The public report says whether fallback was attempted and,
+                # when it was not, the first concrete blocking reason.
+                metadata["provider_fallback"] = dict(fallback_record)
             metadata["meter"] = {"provider_calls": provider_calls}
             metadata["multimodal_routing"] = list(media_routing)
             metadata["multimodal_fallback_attempted"] = media_fallback_attempted
@@ -4412,6 +4522,159 @@ class OpenRouterAdapter(BaseBackend):
             for derivative in input_derivatives:
                 derivative.unlink(missing_ok=True)
 
+    async def _attempt_provider_fallback(
+        self,
+        exc: Exception,
+        *,
+        messages: list[dict[str, Any]],
+        request_id: str,
+        on_stream_event: StreamCallback,
+        effect_recovery: Mapping[str, Any],
+        provider_calls: list[dict[str, Any]],
+        provider_transport_retry_count: int,
+        total_local_recovery_requests: int,
+        total_tool_calls: int,
+        tool_loop_count: int,
+    ) -> BackendResponse | None:
+        """Evaluate the user fallback policy after same-target recovery failed.
+
+        Fallback runs only after the existing bounded same-target recovery
+        decision was exhausted.  A cross-Provider continuation reuses the
+        exact assembled messages and completed Tool results and executes no
+        Tool again; this method never grants the target a hidden fresh chain
+        of retries: exactly one additional paid call is consumed.
+        """
+
+        port = self._provider_fallback_port
+        evaluate = getattr(port, "evaluate_provider_fallback", None)
+        continue_on_target = getattr(port, "continue_on_target", None)
+        if not callable(evaluate) or not callable(continue_on_target):
+            return None
+        primary = _backend_failure_response(
+            exc,
+            duration_ms=0.0,
+            tool_call_count=total_tool_calls,
+            tool_loop_count=tool_loop_count,
+        )
+        primary_failure = {
+            "provider": str(getattr(self.config, "engine", "") or ""),
+            "model": str(getattr(self.config, "model", "") or ""),
+            "code": str(primary.error_code or type(exc).__name__),
+            "description": str(primary.error or exc),
+        }
+        try:
+            decision = evaluate(
+                source_provider=str(getattr(self.config, "engine", "") or ""),
+                source_model=str(getattr(self.config, "model", "") or ""),
+                tool_activity=bool(
+                    int(effect_recovery.get("executed_tool_count") or 0) > 0
+                ),
+                checkpoint_safe=bool(
+                    effect_recovery.get("safe_current_call_continuation")
+                ),
+                visible_partial_answer=False,
+                primary_failure=dict(primary_failure),
+            )
+        except Exception as evaluation_error:
+            decision = {
+                "allowed": False,
+                "disposition": "unavailable",
+                "reason": "incompatible_capability",
+                "target_label": "",
+                "evaluation_error": type(evaluation_error).__name__,
+            }
+        if not isinstance(decision, Mapping):
+            return None
+        record: dict[str, Any] = {
+            "attempted": False,
+            "disposition": str(decision.get("disposition") or "blocked"),
+            "reason": decision.get("reason"),
+            "target": str(decision.get("target_label") or ""),
+            "source": f"{primary_failure['provider']}/{primary_failure['model']}",
+            "mode": str(decision.get("mode") or ""),
+            "additional_calls": 0,
+            "additional_calls_limit": int(decision.get("additional_calls_limit") or 0),
+            "additional_calls_used": int(decision.get("additional_calls_used") or 0),
+            "primary_failure": dict(primary_failure),
+        }
+        if not decision.get("allowed"):
+            setattr(exc, "hashi_provider_fallback", record)
+            return None
+        record["attempted"] = True
+        record["disposition"] = "attempted-failed"
+        try:
+            target_response = await continue_on_target(
+                str(decision.get("target_label") or ""),
+                messages=[
+                    dict(item) if isinstance(item, Mapping) else item
+                    for item in messages
+                ],
+                request_id=str(request_id or ""),
+                on_stream_event=on_stream_event,
+                source_backend=self,
+            )
+        except Exception as fallback_error:
+            record["fallback_error"] = type(fallback_error).__name__
+            record["additional_calls"] = 1
+            setattr(exc, "hashi_provider_fallback", record)
+            return None
+        if not isinstance(target_response, BackendResponse):
+            record["fallback_error"] = "untyped_target_response"
+            setattr(exc, "hashi_provider_fallback", record)
+            return None
+        record["additional_calls"] = 1
+        if target_response.is_success:
+            record["disposition"] = "attempted-success"
+        else:
+            record["disposition"] = "attempted-failed"
+            record["fallback_error"] = str(target_response.error or "")
+        target_metadata = (
+            dict(target_response.stream_metadata)
+            if isinstance(target_response.stream_metadata, Mapping)
+            else {}
+        )
+        target_calls = list(
+            (target_metadata.get("meter") or {}).get("provider_calls") or []
+        )
+        merged_metadata: dict[str, Any] = {
+            **target_metadata,
+            "provider_fallback": record,
+            "meter": {"provider_calls": [*provider_calls, *target_calls]},
+            "provider_transport_retry_count": (
+                provider_transport_retry_count
+                + int(target_metadata.get("provider_transport_retry_count") or 0)
+            ),
+            "provider_local_recovery_count": (
+                total_local_recovery_requests
+                + int(target_metadata.get("provider_local_recovery_count") or 0)
+            ),
+            "provider_local_recovery_limit": max(
+                INVALID_TOOL_CALL_REPAIR_LIMIT,
+                int(target_metadata.get("provider_local_recovery_limit") or 0),
+            ),
+        }
+        return BackendResponse(
+            text=target_response.text,
+            duration_ms=target_response.duration_ms,
+            error=target_response.error,
+            is_success=target_response.is_success,
+            stop_reason=target_response.stop_reason,
+            usage=target_response.usage,
+            cost_usd=target_response.cost_usd,
+            tool_call_count=int(total_tool_calls)
+            + int(target_response.tool_call_count or 0),
+            tool_loop_count=int(tool_loop_count)
+            + int(target_response.tool_loop_count or 0),
+            stream_metadata=merged_metadata,
+            structured_data=target_response.structured_data,
+            error_code=target_response.error_code,
+            error_retryable=(False if not target_response.is_success else None),
+            http_status=target_response.http_status,
+            provider_request_id=target_response.provider_request_id,
+            retry_after_s=target_response.retry_after_s,
+            side_effects_possible=bool(target_response.side_effects_possible),
+            content=target_response.content,
+        )
     async def shutdown(self):
         if self.client is not None and not getattr(self.client, "is_closed", False):
             await self.client.aclose()

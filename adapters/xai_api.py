@@ -794,6 +794,7 @@ class XaiApiAdapter(OpenRouterAdapter):
         silent=False,
         on_stream_event=None,
         request_content=None,
+        continuation_messages=None,
     ):
         started = time.perf_counter()
         self._ensure_client()
@@ -813,4 +814,5 @@ class XaiApiAdapter(OpenRouterAdapter):
             silent=silent,
             on_stream_event=on_stream_event,
             request_content=request_content,
+            continuation_messages=continuation_messages,
         )

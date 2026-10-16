@@ -3803,7 +3803,52 @@ def backend_failure_fields(response: Any) -> dict[str, Any]:
         fields["tool_call_count"] = tool_call_count
     if bool(getattr(response, "side_effects_possible", False)):
         fields["side_effects_possible"] = True
+    metadata = getattr(response, "stream_metadata", None)
+    metadata = dict(metadata) if isinstance(metadata, Mapping) else {}
+    chain_details: Mapping[str, Any] = {}
+    her = metadata.get("her_v2")
+    if isinstance(her, Mapping):
+        chain = her.get("failure_chain")
+        primary_failure = (
+            chain.get("primary_failure") if isinstance(chain, Mapping) else None
+        )
+        details = (
+            primary_failure.get("details")
+            if isinstance(primary_failure, Mapping)
+            else None
+        )
+        if isinstance(details, Mapping):
+            chain_details = details
+    for source in (metadata, chain_details):
+        for source_key, public_key in (
+            ("provider_transport_retry_count", "same_target_retries"),
+            ("provider_local_recovery_count", "interaction_recovery_used"),
+            ("provider_local_recovery_limit", "interaction_recovery_limit"),
+            ("provider_turn_recovery_total", "turn_recovery_total"),
+        ):
+            parsed = _optional_counter(source.get(source_key))
+            if parsed is not None:
+                fields.setdefault(public_key, parsed)
+        if source.get("provider_local_recovery_exhausted") is True:
+            fields.setdefault("recovery_exhausted", True)
+        fallback = source.get("provider_fallback") or source.get("fallback_decision")
+        if isinstance(fallback, Mapping) and fallback:
+            fields.setdefault("fallback", dict(fallback))
+            primary = fallback.get("primary_failure")
+            if isinstance(primary, Mapping) and primary:
+                fields.setdefault("fallback_primary_failure", dict(primary))
     return fields
+
+
+def _optional_counter(value: Any) -> int | None:
+    """Return one bounded public counter, or None when it is not present."""
+
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def backend_failure_diagnostics(response: Any) -> dict[str, Any]:

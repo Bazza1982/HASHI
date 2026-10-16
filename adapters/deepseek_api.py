@@ -773,6 +773,7 @@ class DeepSeekAdapter(OpenRouterAdapter):
         silent=False,
         on_stream_event=None,
         request_content=None,
+        continuation_messages=None,
     ):
         return await super().generate_response(
             prompt,
@@ -781,4 +782,5 @@ class DeepSeekAdapter(OpenRouterAdapter):
             silent=silent,
             on_stream_event=on_stream_event,
             request_content=request_content,
+            continuation_messages=continuation_messages,
         )
