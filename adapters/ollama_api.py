@@ -49,12 +49,12 @@ class OllamaAdapter(OpenRouterAdapter):
         if configured is None:
             configured = extra.get("reasoning_effort")
         if configured is None:
-            configured = self.effort
+            configured = getattr(self, "effort", None)
         if type(configured) is bool:
             return configured
         normalized = str(configured or "").strip().casefold()
         if normalized in {"", "default", "auto"}:
-            return self.reasoning_enabled
+            return getattr(self, "reasoning_enabled", None)
         if normalized in {"off", "none", "zero", "false", "0", "disabled"}:
             return False
         if normalized in {"enabled", "on", "true", "1"}:
@@ -68,7 +68,7 @@ class OllamaAdapter(OpenRouterAdapter):
         return (
             self._native_context_enabled()
             or self._ollama_think() is not None
-            or urlsplit(self.ollama_url).path.endswith("/api/chat")
+            or urlsplit(str(getattr(self, "ollama_url", _DEFAULT_OLLAMA_URL))).path.endswith("/api/chat")
         )
 
     def _provider_evidence_url(self) -> str:
