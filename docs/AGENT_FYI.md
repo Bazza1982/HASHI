@@ -74,6 +74,10 @@ settle every turn. Prose grants no Tool authority. Continuations retain
 Session/Connector and replay only saved non-action completions; pending,
 conflict or unknown state cannot execute.
 
+HChat `agent_reply` uses `hchat:<reply-message-id>` as its canonical
+idempotency key. Direct FC presentation preserves correlated Superloop receipt
+continuation through the verified presentation Session.
+
 Network frontends preserve the user's original send time. PAO admits
 Workbench/Telegram only within their 30/60-second windows; older or invalid
 messages require one durable 15-minute confirmation before any Run.

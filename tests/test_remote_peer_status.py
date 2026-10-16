@@ -3162,18 +3162,23 @@ def test_agent_reply_sender_accepts_terminal_duplicate_as_delivery_success():
     manager._candidate_urls = lambda host, port, path: [
         f"http://{host}:{port}{path}"
     ]
-    manager._post_json = lambda _url, _payload, timeout: {
-        "ok": False,
-        "message_type": "error",
-        "body": {
-            "code": "duplicate_message",
-            "message": "Reply message already terminal",
-            "retryable": False,
-            "failed_message_id": "msg-1:reply",
-            "conversation_id": "conv-1",
-        },
-        "__http_status": 409,
-    }
+    sent = []
+
+    def post(_url, payload, timeout):
+        sent.append(payload)
+        return {
+            "ok": False,
+            "message_type": "error",
+            "body": {
+                "code": "duplicate_message",
+                "message": "Reply message already terminal",
+                "retryable": False,
+                "failed_message_id": "msg-1:reply",
+                "conversation_id": "conv-1",
+            },
+            "__http_status": 409,
+        }
+    manager._post_json = post
     item = {
         "message_id": "msg-1",
         "conversation_id": "conv-1",
@@ -3185,6 +3190,7 @@ def test_agent_reply_sender_accepts_terminal_duplicate_as_delivery_success():
     }
 
     assert asyncio.run(manager._send_agent_reply(item, "done")) is True
+    assert sent[0]["idempotency_key"] == "hchat:msg-1:reply"
 
 
 def test_agent_reply_accepts_and_records_legacy_missing_correlation(tmp_path):
