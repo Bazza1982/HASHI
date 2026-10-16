@@ -384,6 +384,28 @@ Existing completed synthetic results and wire evidence were retained for
 bounded paging verification without replaying their tools. No original
 business task was resumed and no unrelated GPU user was stopped.
 
+### 2026-10-16 capacity repair adoption outcome
+
+- Source `815882bf` commits only the nine scoped repair/test/decision files.
+  Three post-commit qualification checks passed, completing the deterministic
+  gate at 847 passing cases and one Windows-inapplicable POSIX skip.
+- Real saved-result paging passed at the unchanged 49,152 total window with
+  a stricter, isolated 17,000 input allowance: the service counted 16,801 and
+  generated one probe token. Earlier messages and the full saved result were
+  preserved, and no completed tool was replayed. This took 220.12 seconds
+  under the observed memory pressure; it is capacity evidence, not a speed pass.
+- One supported Agent6-only hot reboot reached terminal `succeeded`, with
+  targets exactly `[agent6]`. The new Worker is ACTIVE/ready/accepting.
+  All five changed runtime files match the source commit and immutable artifact;
+  the artifact records the same source commit.
+- Core identity/protected digest, other Worker identities, observed listeners,
+  the Ollama listener identity and the complete instance configuration hash
+  stayed unchanged. Provider/model and 48K/8K/90-second settings are preserved.
+- No original business task was replayed, no extra user notification sent, and
+  no push/merge performed. Complete business-task, long-input speed and speech
+  contention acceptance remain separate. Telegram destination validity remains
+  distinct from the repaired preservation of its primary backend error.
+
 ## Rollback and trial limits
 
 Retain the experiment on `feature-ollama`; do not merge or commit it implicitly.

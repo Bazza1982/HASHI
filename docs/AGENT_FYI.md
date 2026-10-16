@@ -10,10 +10,14 @@ Only newly completed tool outputs may get an explicit bounded page; full
 outputs remain private, hash-addressed and audited. Earlier task/PCM/results
 are not pruned. PAO Functions retain the original backend terminal if its
 error notification fails; the delivery failure is secondary evidence.
-357 related checks passed; Core-gate qualification still requires the source
-commit. Real one-token behavior and native overflow rejection were observed.
-Current GPU free memory was about 190 MiB: long prefill and a synthetic chain
-hit their test deadlines, so long-input/speech performance is not accepted.
+357 related checks passed; the Core gate passed 847 with one Windows skip
+after source commit qualification. Source `815882bf` was adopted through one
+Agent6-only hot reboot with terminal success, ready state and matching artifact
+bytes; Core, other Workers, services and configuration stayed unchanged.
+Real saved-result paging counted 16,801 against an isolated 17,000 input cap
+at the same 49,152 total window, without replay. Current GPU free memory was
+about 190 MiB: long prefill and a full synthetic chain hit their test deadlines,
+so long-input/speech performance is not accepted.
 See [repair decision](HERV3_OLLAMA_CONTEXT_PILOT.md#2026-10-16-capacity-admission-repair).
 
 
