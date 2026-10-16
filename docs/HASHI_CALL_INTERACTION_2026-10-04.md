@@ -1,5 +1,34 @@
 # Phone and Call interaction decision
 
+## 2026-10-17 current-turn raw live-frame bridge experiment
+
+The user approved an immediate HASHI3 experiment that keeps VoiceLAN MiniCPM-V
+as the continuous, free local visual narrator while also giving a capable main
+answer model direct visual evidence. Camera-on capture now targets two JPEG
+frames per second. Accepted frames feed both the existing latest-frame-wins
+MiniCPM-V observer and a separate bounded in-memory ten-second ring.
+
+At each caller message, the Call Function freezes the ring and evenly samples
+at most ten frames across that window, oldest to newest with the newest frame
+included. HERV3 resolves the exact stage provider/model capability after its
+profile is applied. Only a primary answer stage whose adapter supports image
+data URLs receives labelled structured images; a text-only model receives none.
+This is capability routing, not intent detection. The user turns the visual
+path off by turning the camera off.
+
+The MiniCPM-V description remains useful auxiliary untrusted context, but does
+not replace the raw images for a vision-capable answer model. A turn-specific
+image observation is no longer overwritten by the continuous generic observer.
+Raw frame bytes are removed from request metadata before PAO admission and
+canonical audit, are held only in the selected Agent Worker for that Run, and
+are cleared on completion or Worker shutdown. Camera-off or hangup clears the
+live ring for later turns without revoking an already accepted turn snapshot.
+Provider limits remain authoritative; DeepSeek keeps its documented 600-image,
+32 MiB per-image, 64 MiB decoded-image aggregate, and 48 MiB serialized-body
+checks. Protected Core remains unchanged. Source validation and physical Call
+acceptance are separate; see
+[experiment record](repairs/CALL_LIVE_FRAME_BRIDGE_EXPERIMENT_20261017.md).
+
 ## 2026-10-16 explicitly allow-listed private-LAN media targets
 
 The instance-owned Call target registry may now declare a target with

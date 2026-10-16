@@ -14,6 +14,8 @@ def test_video_policy_has_a_human_readable_readiness_window(tmp_path):
     assert policy["freshness_seconds"] == 20
     assert policy["responsive_seconds"] == 12
     assert policy["startup_timeout_seconds"] == 8
+    assert policy["interval_ms"] == 500
+    assert policy["max_observations_per_minute"] == 120
 
 
 def test_call_readiness_and_camera_do_not_depend_on_legacy_selection(tmp_path):
@@ -84,7 +86,7 @@ async def test_disabled_call_context_keeps_minimal_phone_readiness(tmp_path):
     assert info["route"] == "phone" and info["call_ready"] is False
     assert (
         info["camera_available"] is False
-        and info["video_policy"]["interval_ms"] >= 1000
+        and info["video_policy"]["interval_ms"] >= 500
     )
     assert "profile" not in info and "targets" not in info
     await service.close()

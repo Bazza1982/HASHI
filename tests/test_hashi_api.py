@@ -717,6 +717,44 @@ async def test_hashi_api_tool_loop_sends_full_prompt_once_then_only_tool_delta(
 
 
 @pytest.mark.asyncio
+async def test_hashi_api_transient_images_disable_gateway_continuation(tmp_path):
+    adapter = _adapter(tmp_path)
+    adapter.tool_registry = SimpleNamespace(
+        get_tool_definitions=lambda tiers=None: []
+    )
+    adapter._call_api_once = AsyncMock(
+        return_value=_APIResult("finished", None, "stop", 20, 5)
+    )
+    jpeg = bytes.fromhex("ffd8ffc00008080010001000ffd9")
+    transient_images = (
+        {
+            "data_url": "data:image/jpeg;base64,"
+            + base64.b64encode(jpeg).decode("ascii"),
+            "frame_sequence": 7,
+            "captured_at": "2026-10-17T06:00:00+00:00",
+        },
+    )
+
+    response = await adapter.generate_response(
+        "What changed?",
+        "request-live-image",
+        transient_images=transient_images,
+    )
+
+    assert response.is_success is True
+    payload = adapter._call_api_once.call_args.args[0]
+    headers = adapter._call_api_once.call_args.args[1]
+    assert "session_id" not in payload
+    assert "x-hashi-external-tool-session" not in {
+        key.casefold() for key in headers
+    }
+    user_content = payload["messages"][1]["content"]
+    assert user_content[-1]["image_url"]["url"] == transient_images[0]["data_url"]
+    continuation = response.stream_metadata["gateway_continuation"]
+    assert continuation["enabled"] is False
+
+
+@pytest.mark.asyncio
 async def test_hashi_api_inline_image_tool_rounds_keep_complete_conversation(
     tmp_path,
 ):

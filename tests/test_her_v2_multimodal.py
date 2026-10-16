@@ -22,6 +22,7 @@ from orchestrator.multimodal_contract import (
     attachment_manifest,
     canonical_request_content,
 )
+from orchestrator.frontend_call.transient_live_media import bind_live_frames
 
 
 _MISSING = object()
@@ -132,6 +133,7 @@ class _Backend:
         silent=False,
         on_stream_event=None,
         request_content=_MISSING,
+        transient_images=_MISSING,
     ):
         del silent
         self.calls.append(
@@ -140,6 +142,7 @@ class _Backend:
                 "request_id": request_id,
                 "is_retry": is_retry,
                 "request_content": request_content,
+                "transient_images": transient_images,
             }
         )
         if self.emit_tool_activity and on_stream_event is not None:
@@ -308,6 +311,51 @@ async def test_allow_tools_false_still_passes_native_media_to_stage_backend():
     assert backend.tool_registry is None
     assert result.media_routing[0]["route"] == "native"
     assert backend.shutdown_called is True
+
+
+@pytest.mark.asyncio
+async def test_primary_direct_passes_current_live_frames_only_to_visual_backend():
+    frame = {
+        "data_url": "data:image/jpeg;base64,/9j/wAAICAAQABD/2Q==",
+        "frame_sequence": 8,
+        "captured_at": "2026-10-17T06:20:00+11:00",
+    }
+    runtime = SimpleNamespace()
+    bind_live_frames(runtime, "request-media", (frame,))
+    backend = _Backend([BackendResponse(text="I can see it.", duration_ms=1)])
+    provider = HashiStageProvider(
+        backend_manager=_Manager(backend), runtime_context=runtime
+    )
+
+    await provider.invoke(_profile(), _request(Stage.DIRECT, None))
+
+    assert backend.calls[0]["transient_images"] == (frame,)
+
+
+@pytest.mark.asyncio
+async def test_primary_direct_does_not_pass_live_frames_to_text_only_backend():
+    frame = {
+        "data_url": "data:image/jpeg;base64,/9j/wAAICAAQABD/2Q==",
+        "frame_sequence": 8,
+        "captured_at": "2026-10-17T06:20:00+11:00",
+    }
+    runtime = SimpleNamespace()
+    bind_live_frames(runtime, "request-media", (frame,))
+    backend = _Backend([BackendResponse(text="Text answer.", duration_ms=1)])
+    backend.input_capability = InputCapability(
+        provider="fake-api",
+        model="native-image-model",
+        input_modalities=frozenset({"text"}),
+        input_transports={},
+        source="test",
+    )
+    provider = HashiStageProvider(
+        backend_manager=_Manager(backend), runtime_context=runtime
+    )
+
+    await provider.invoke(_profile(), _request(Stage.DIRECT, None))
+
+    assert backend.calls[0]["transient_images"] is _MISSING
 
 
 @pytest.mark.asyncio

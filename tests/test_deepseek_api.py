@@ -203,6 +203,45 @@ async def test_deepseek_vision_model_receives_native_image_content(tmp_path, mod
     assert tool_names.isdisjoint({"media_read", "vision_inspect"})
 
 
+@pytest.mark.asyncio
+async def test_deepseek_receives_recent_live_frames_as_labeled_structured_images(tmp_path):
+    adapter = _adapter(tmp_path, model="deepseek-flash")
+    adapter._call_api_once = AsyncMock(
+        return_value=_APIResult("seen", None, "stop", 10, 2)
+    )
+    frames = (
+        {
+            "data_url": "data:image/jpeg;base64,/9j/wAAICAAQABD/2Q==",
+            "frame_sequence": 4,
+            "captured_at": "2026-10-17T06:20:00+11:00",
+        },
+        {
+            "data_url": "data:image/jpeg;base64,/9j/wAAICAAQABD/2Q==",
+            "frame_sequence": 9,
+            "captured_at": "2026-10-17T06:20:05+11:00",
+        },
+    )
+
+    response = await adapter.generate_response(
+        "What am I holding?", "request-live-vision", transient_images=frames
+    )
+
+    assert response.is_success is True
+    outbound = adapter._call_api_once.call_args.args[0]
+    user_content = outbound["messages"][1]["content"]
+    assert [part["type"] for part in user_content] == [
+        "text",
+        "text",
+        "image_url",
+        "text",
+        "image_url",
+    ]
+    assert "recent live camera frame 1/2" in user_content[1]["text"].lower()
+    assert user_content[-1]["image_url"]["url"].startswith(
+        "data:image/jpeg;base64,"
+    )
+
+
 def _init_org(tmp_path, org_id: str = "ORG-001") -> None:
     identity = IdentityService.from_path(tmp_path / "state" / "enterprise.sqlite")
     identity.create_organization(org_id=org_id, name="Acme")

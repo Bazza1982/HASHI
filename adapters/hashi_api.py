@@ -32,7 +32,7 @@ import httpx
 
 from adapters.base import BackendCapabilities, BackendResponse, TokenUsage
 from adapters.openrouter_api import (
-    HASHI_COMPACTION_CAPABILITIES,
+    HASHI_COMPACTION_CAPABILITIES,  # noqa: F401 - reflected by Phone isolation gate
     INVALID_TOOL_CALL_REPAIR_LIMIT,
     _MEDIA_FALLBACK_TOOL_NAMES,
     OpenRouterAdapter,
@@ -945,6 +945,7 @@ class HashiApiAdapter(OpenRouterAdapter):
         continuation_messages: list[dict[str, Any]] | None = None,
         provider_call_limit: int | None = None,
         before_provider_call: Any = None,
+        transient_images=None,
     ) -> BackendResponse:
         if continuation_messages is not None:
             # The gateway keeps its own session/continuation contract; an
@@ -983,7 +984,11 @@ class HashiApiAdapter(OpenRouterAdapter):
 
         try:
             self._touch_activity()
-            messages, media_routing = self._initial_messages(prompt, request_content)
+            messages, media_routing = self._initial_messages(
+                prompt,
+                request_content,
+                transient_images=transient_images,
+            )
             outbound_messages = messages
             self._last_media_routing = media_routing
             normalized_request_content = normalize_request_content(request_content)
@@ -1002,7 +1007,11 @@ class HashiApiAdapter(OpenRouterAdapter):
             )
             # Gateway sessions intentionally exclude inline media. Text-only
             # tool stages qualify for the request-local continuation protocol.
-            if self.tool_registry is not None and not media_routing:
+            if (
+                self.tool_registry is not None
+                and not media_routing
+                and not transient_images
+            ):
                 gateway_session_id = f"hashi-tool-{uuid.uuid4().hex}"
 
             for loop_idx in count():

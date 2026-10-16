@@ -1,5 +1,13 @@
 # HASHI Agent FYI
 
+October 17 Call experiment: camera-on capture targets 2 fps; MiniCPM-V keeps
+continuous latest-frame-wins narration, while each caller turn freezes the last
+10 seconds and evenly samples at most 10 raw frames for a capability-qualified
+primary vision model. Frames are current-input-only and removed before PAO
+persistence/audit. Camera-off clears the buffer. See
+[Call decision](HASHI_CALL_INTERACTION_2026-10-04.md) and
+[experiment record](repairs/CALL_LIVE_FRAME_BRIDGE_EXPERIMENT_20261017.md).
+
 October 16: HERV3/DeepSeek Tool-returned screenshots must be promoted from
 legacy Base64 text into paired tool text plus user `image_url`. Enforce the
 official provider limits on the real serialized request; do not reuse the

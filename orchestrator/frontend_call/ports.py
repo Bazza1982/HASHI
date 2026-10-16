@@ -153,7 +153,16 @@ class HashiPorts:
             raise CallError("call_scope_changed", 409)
         return message
 
-    async def admit(self, owner, binding, turn_id, text, observation, captured_at):
+    async def admit(
+        self,
+        owner,
+        binding,
+        turn_id,
+        text,
+        observation,
+        captured_at,
+        frames=(),
+    ):
         self.validate(owner, binding)
         runtime = self.api._runtime_map()[binding["agent_id"]]
         # Speech stays verbatim; sealed media facts enter PCM through its typed
@@ -164,6 +173,12 @@ class HashiPorts:
             seal_connector_evidence,
         )
 
+        from orchestrator.frontend_call.transient_live_media import (
+            TRANSIENT_LIVE_FRAMES_METADATA_KEY,
+            encode_live_frames,
+            live_frame_facts,
+        )
+
         media = {
             "version": 2,
             "call_id": binding["call_id"],
@@ -171,6 +186,7 @@ class HashiPorts:
             **binding.get("call_context", {}),
             "captured_at": captured_at,
             "observation": observation,
+            "recent_frames": live_frame_facts(frames),
         }
         evidence = seal_connector_evidence(
             Path(self.api.config_path).parent,
@@ -180,6 +196,25 @@ class HashiPorts:
         if evidence is None:
             raise CallError("call_context_unqualified", 503)
         content = [{"type": "text", "text": execution_text}]
+        request_metadata = {
+            "session_id": binding["session_id"],
+            "owner_id": owner,
+            "session_surface": "workbench",
+            "session_channel_key": binding["client_id"],
+            "session_message_text": execution_text,
+            "session_message_display_text": text,
+            "session_message_content": content,
+            "frontend_client": {
+                "kind": "session_api",
+                "client_id": binding["client_id"],
+            },
+            "session_context_generation": binding["context_generation"],
+            CONNECTOR_EVIDENCE_METADATA_KEY: evidence,
+        }
+        if frames:
+            request_metadata[TRANSIENT_LIVE_FRAMES_METADATA_KEY] = encode_live_frames(
+                frames
+            )
         try:
             request_id = await runtime.enqueue_request(
                 runtime._primary_chat_id(),
@@ -188,21 +223,7 @@ class HashiPorts:
                 text[:160],
                 deliver_to_telegram=True,
                 idempotency_key=f"call:{binding['call_id']}:{turn_id}",
-                request_metadata={
-                    "session_id": binding["session_id"],
-                    "owner_id": owner,
-                    "session_surface": "workbench",
-                    "session_channel_key": binding["client_id"],
-                    "session_message_text": execution_text,
-                    "session_message_display_text": text,
-                    "session_message_content": content,
-                    "frontend_client": {
-                        "kind": "session_api",
-                        "client_id": binding["client_id"],
-                    },
-                    "session_context_generation": binding["context_generation"],
-                    CONNECTOR_EVIDENCE_METADATA_KEY: evidence,
-                },
+                request_metadata=request_metadata,
             )
             if not request_id:
                 raise CallError("call_admission_rejected", 409)

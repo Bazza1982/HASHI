@@ -1,7 +1,7 @@
 import asyncio
 import base64
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import pytest
 from orchestrator.frontend_call.config import CallConfig, validate_target
 from orchestrator.frontend_call.contract import CallError
@@ -51,6 +51,8 @@ def document(location="local"):
 class Ports:
     def __init__(self):
         self.accepted = []
+        self.accepted_bindings = []
+        self.accepted_frames = []
         self.persisted_openings = []
         self.cancelled = []
         self.phone = False
@@ -68,8 +70,12 @@ class Ports:
     def phone_busy(self, owner):
         return self.phone
 
-    async def admit(self, owner, binding, turn, text, observation, captured_at):
+    async def admit(
+        self, owner, binding, turn, text, observation, captured_at, frames=()
+    ):
         self.accepted.append((turn, text, observation, captured_at))
+        self.accepted_bindings.append(dict(binding))
+        self.accepted_frames.append(tuple(dict(frame) for frame in frames))
         return {"run_id": "run-1", "request_id": "req-1", "message_id": "msg-1"}
 
     def persist_opening(self, owner, binding, text):
@@ -470,6 +476,64 @@ async def test_camera_falls_back_when_frame_ingress_really_stops(tmp_path):
     finally:
         release.set()
         await service.close()
+
+
+async def test_video_turn_freezes_ten_evenly_sampled_frames_from_last_ten_seconds(
+    tmp_path,
+):
+    service, ports, adapters, base, clock = setup(tmp_path)
+    context = service.config.context("owner", base["agent_id"])
+    context["profile"]["vision"] = {"target_id": "eyes", "options": {}}
+    service.config.save(
+        "owner", base["agent_id"], context["revision"], context["profile"]
+    )
+    binding, _, _ = await start(service, base, video_requested=True)
+    newest = datetime.now(timezone.utc)
+    image = base64.b64encode(
+        bytes.fromhex("ffd8ffc00008080010001000ffd9")
+    ).decode()
+
+    for sequence in range(1, 22):
+        captured_at = newest - timedelta(seconds=(21 - sequence) * 0.45)
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "observe",
+                "frame_sequence": sequence,
+                "image_b64": image,
+                "captured_at": captured_at.isoformat(),
+            },
+        )
+        clock[0] += 0.5
+
+    adapters.wait = asyncio.Event()
+    await service.invoke(
+        "owner",
+        {
+            **binding,
+            "operation": "turn",
+            "sequence": 1,
+            "turn_id": "turn-live-frames",
+            "audio_b64": wav(),
+        },
+    )
+    await asyncio.sleep(0)
+    await service.invoke(
+        "owner", {**binding, "operation": "camera", "enabled": False}
+    )
+    adapters.wait.set()
+    await service.calls["call-1"].task
+
+    frames = ports.accepted_frames[0]
+    sequences = [frame["frame_sequence"] for frame in frames]
+    assert len(frames) == 10
+    assert sequences[0] == 1 and sequences[-1] == 21
+    assert sequences == sorted(set(sequences))
+    assert all(frame["image"].startswith(b"\xff\xd8") for frame in frames)
+    assert ports.accepted_bindings[0]["call_context"]["mode"] == "video"
+    assert service.calls["call-1"].frame_buffer == []
+    await service.close()
 
 
 def test_settings_redact_endpoints_credentials_and_check_revision(tmp_path):
