@@ -11,9 +11,13 @@ Differences from OpenRouter:
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
+import re
 from collections.abc import Mapping
+from typing import Any
 
 import httpx
 
@@ -37,8 +41,37 @@ from adapters.openrouter_api import (
     _tool_call_protocol_summary,
 )
 from adapters.stream_events import KIND_TEXT_DELTA, KIND_THINKING, StreamEvent
+from orchestrator.multimodal_contract import (
+    DEEPSEEK_MAX_IMAGES_PER_REQUEST,
+    DEEPSEEK_MAX_INLINE_IMAGE_BYTES,
+    DEEPSEEK_MAX_REQUEST_BODY_BYTES,
+    DEEPSEEK_MAX_TOTAL_IMAGE_BYTES,
+    MultimodalContractError,
+    validate_inline_image_data_url,
+)
 
 _DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
+_DEEPSEEK_IMAGE_MIME_TYPES = frozenset(
+    {"image/jpeg", "image/png", "image/gif", "image/webp"}
+)
+_DEEPSEEK_SCREENSHOT_TOOLS = frozenset(
+    {
+        "browser_screenshot",
+        "browser_session",
+        "desktop_screenshot",
+        "windows_screenshot",
+    }
+)
+_DEEPSEEK_DATA_URL_PATTERN = re.compile(
+    r"data:(?P<mime>image/(?:jpeg|png|gif|webp));base64,"
+    r"(?P<payload>[A-Za-z0-9+/=]+)",
+    flags=re.IGNORECASE,
+)
+_DEEPSEEK_LABELED_SCREENSHOT_PATTERN = re.compile(
+    r"(?P<label>(?:^screenshot:|\[screenshot\]\s+base64:))\s*"
+    r"(?P<payload>[A-Za-z0-9+/=]+)",
+    flags=re.IGNORECASE | re.MULTILINE,
+)
 
 HASHI_COMPACTION_CAPABILITIES = {
     "prompt_isolation": True,
@@ -67,6 +100,175 @@ HASHI_MODEL_CAPACITY_PROFILES = {
 
 _TEXT_TOOL_REPAIR_MARKER = "HASHI_DEEPSEEK_TEXT_TOOL_REPAIR"
 _TEXT_TOOL_REPAIR_CONTEXT_CHARACTERS = 16 * 1024
+
+
+def _tool_output_text(output: Any) -> str:
+    """Unwrap Smart Tool envelopes without exposing their serialized shell."""
+
+    if isinstance(output, Mapping):
+        parsed = output
+        raw = str(output)
+    else:
+        raw = str(output or "")
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            parsed = None
+    if isinstance(parsed, Mapping) and isinstance(parsed.get("data"), str):
+        return str(parsed["data"])
+    return raw
+
+
+def _mime_type_for_legacy_screenshot(payload: str) -> str:
+    try:
+        raw = base64.b64decode(payload, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise MultimodalContractError(
+            "screenshot tool returned malformed base64",
+            code="INVALID_MULTIMODAL_CONTENT",
+        ) from exc
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if raw.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if raw.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if len(raw) >= 12 and raw.startswith(b"RIFF") and raw[8:12] == b"WEBP":
+        return "image/webp"
+    raise MultimodalContractError(
+        "screenshot tool returned an unsupported image format",
+        code="MEDIA_SIGNATURE_UNVERIFIED",
+    )
+
+
+def _extract_legacy_screenshot_urls(text: str) -> tuple[str, list[str]]:
+    urls: list[str] = []
+
+    def replace_data_url(match: re.Match[str]) -> str:
+        urls.append(match.group(0))
+        return ""
+
+    stripped = _DEEPSEEK_DATA_URL_PATTERN.sub(replace_data_url, text)
+
+    def replace_label(match: re.Match[str]) -> str:
+        payload = match.group("payload")
+        mime_type = _mime_type_for_legacy_screenshot(payload)
+        urls.append(f"data:{mime_type};base64,{payload}")
+        return ""
+
+    stripped = _DEEPSEEK_LABELED_SCREENSHOT_PATTERN.sub(replace_label, stripped)
+    stripped = re.sub(r"[ \t]+\n", "\n", stripped)
+    stripped = re.sub(r"\n{3,}", "\n\n", stripped).strip()
+    return stripped, urls
+
+
+def _structured_tool_media(
+    content: list[dict[str, Any]] | None,
+) -> tuple[list[str], list[str]]:
+    texts: list[str] = []
+    urls: list[str] = []
+    for raw_part in content or []:
+        if not isinstance(raw_part, Mapping):
+            continue
+        part = dict(raw_part)
+        kind = str(part.get("type") or "").strip().casefold()
+        if kind == "text" and isinstance(part.get("text"), str):
+            text = str(part["text"]).strip()
+            if text:
+                texts.append(text)
+            continue
+        if kind == "image":
+            mime_type = str(
+                part.get("mimeType") or part.get("mime_type") or ""
+            ).strip().casefold()
+            payload = part.get("data")
+            if mime_type in _DEEPSEEK_IMAGE_MIME_TYPES and isinstance(payload, str):
+                urls.append(f"data:{mime_type};base64,{payload}")
+            continue
+        if kind == "image_url":
+            image_url = part.get("image_url")
+            if isinstance(image_url, Mapping):
+                url = image_url.get("url")
+            else:
+                url = image_url
+            if isinstance(url, str) and url.casefold().startswith("data:image/"):
+                urls.append(url)
+    return texts, urls
+
+
+def _validate_deepseek_payload(payload: Mapping[str, Any]) -> None:
+    """Enforce DeepSeek's published Vision limits on the actual wire body."""
+
+    image_count = 0
+    total_image_bytes = 0
+    for message in payload.get("messages") or []:
+        if not isinstance(message, Mapping):
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            if _DEEPSEEK_DATA_URL_PATTERN.search(content) or (
+                _DEEPSEEK_LABELED_SCREENSHOT_PATTERN.search(content)
+            ):
+                raise MultimodalContractError(
+                    "DeepSeek image bytes must use structured image_url content, not text",
+                    code="INVALID_MULTIMODAL_CONTENT",
+                )
+            continue
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, Mapping):
+                continue
+            kind = str(part.get("type") or "").strip().casefold()
+            if kind == "text":
+                text = str(part.get("text") or "")
+                if _DEEPSEEK_DATA_URL_PATTERN.search(text) or (
+                    _DEEPSEEK_LABELED_SCREENSHOT_PATTERN.search(text)
+                ):
+                    raise MultimodalContractError(
+                        "DeepSeek image bytes must use structured image_url content, not text",
+                        code="INVALID_MULTIMODAL_CONTENT",
+                    )
+                continue
+            if kind != "image_url":
+                continue
+            image_count += 1
+            image_url = part.get("image_url")
+            url = image_url.get("url") if isinstance(image_url, Mapping) else image_url
+            if not isinstance(url, str) or not url.casefold().startswith("data:"):
+                continue
+            mime_type, image_bytes = validate_inline_image_data_url(
+                url,
+                max_bytes=DEEPSEEK_MAX_INLINE_IMAGE_BYTES,
+            )
+            if mime_type not in _DEEPSEEK_IMAGE_MIME_TYPES:
+                raise MultimodalContractError(
+                    f"DeepSeek does not accept inline image format {mime_type!r}",
+                    code="MEDIA_SIGNATURE_UNVERIFIED",
+                )
+            total_image_bytes += image_bytes
+
+    if image_count > DEEPSEEK_MAX_IMAGES_PER_REQUEST:
+        raise MultimodalContractError(
+            "DeepSeek request exceeds the official 600-image limit",
+            code="MEDIA_LIMIT_EXCEEDED",
+        )
+    if total_image_bytes > DEEPSEEK_MAX_TOTAL_IMAGE_BYTES:
+        raise MultimodalContractError(
+            "DeepSeek request exceeds the official 64 MiB aggregate image limit",
+            code="MEDIA_LIMIT_EXCEEDED",
+        )
+    serialized = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    if len(serialized) > DEEPSEEK_MAX_REQUEST_BODY_BYTES:
+        raise MultimodalContractError(
+            "DeepSeek request exceeds the official 48 MiB request-body limit",
+            code="MEDIA_LIMIT_EXCEEDED",
+        )
 
 
 def _with_reasoning_content(result: _APIResult, reasoning_content: str) -> _APIResult:
@@ -378,7 +580,106 @@ class DeepSeekAdapter(OpenRouterAdapter):
             "Content-Type": "application/json",
         }
 
+    def _tool_result_messages(
+        self,
+        *,
+        tool_name: str,
+        tool_call_id: str,
+        output: Any,
+        content: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Promote Tool-returned images into DeepSeek's native user shape."""
+
+        output_text = _tool_output_text(output)
+        structured_texts, image_urls = _structured_tool_media(content)
+        if tool_name in _DEEPSEEK_SCREENSHOT_TOOLS:
+            output_text, legacy_urls = _extract_legacy_screenshot_urls(output_text)
+            image_urls.extend(legacy_urls)
+
+        unique_urls: list[str] = []
+        seen_urls: set[str] = set()
+        total_image_bytes = 0
+        for url in image_urls:
+            if url in seen_urls:
+                continue
+            mime_type, image_bytes = validate_inline_image_data_url(
+                url,
+                max_bytes=DEEPSEEK_MAX_INLINE_IMAGE_BYTES,
+            )
+            if mime_type not in _DEEPSEEK_IMAGE_MIME_TYPES:
+                raise MultimodalContractError(
+                    f"DeepSeek does not accept inline image format {mime_type!r}",
+                    code="MEDIA_SIGNATURE_UNVERIFIED",
+                )
+            seen_urls.add(url)
+            unique_urls.append(url)
+            total_image_bytes += image_bytes
+
+        if len(unique_urls) > DEEPSEEK_MAX_IMAGES_PER_REQUEST:
+            raise MultimodalContractError(
+                "DeepSeek Tool result exceeds the official 600-image limit",
+                code="MEDIA_LIMIT_EXCEEDED",
+            )
+        if total_image_bytes > DEEPSEEK_MAX_TOTAL_IMAGE_BYTES:
+            raise MultimodalContractError(
+                "DeepSeek Tool result exceeds the official 64 MiB aggregate image limit",
+                code="MEDIA_LIMIT_EXCEEDED",
+            )
+
+        text_parts: list[str] = []
+        for value in [output_text, *structured_texts]:
+            normalized = str(value or "").strip()
+            if normalized and normalized not in text_parts:
+                text_parts.append(normalized)
+        tool_text = "\n\n".join(text_parts)
+        if not unique_urls:
+            return [
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": tool_text,
+                }
+            ]
+
+        if not self.resolve_input_capability().supports("image", "data_url"):
+            omitted = (
+                "Image omitted: the selected DeepSeek model is not verified for "
+                "native image input."
+            )
+            return [
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": "\n\n".join(part for part in (tool_text, omitted) if part),
+                }
+            ]
+
+        if not tool_text:
+            tool_text = f"{tool_name} returned {len(unique_urls)} image(s)."
+        user_content: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": (
+                    f"Native image result from Tool {tool_name}; inspect the "
+                    "following image content."
+                ),
+            }
+        ]
+        user_content.extend(
+            {"type": "image_url", "image_url": {"url": url}}
+            for url in unique_urls
+        )
+        return [
+            {
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "content": tool_text,
+            },
+            {"role": "user", "content": user_content},
+        ]
+
     async def _call_api_once(self, payload, headers, on_stream_event) -> _APIResult:
+        _validate_deepseek_payload(payload)
         response = await self.client.post(_DEEPSEEK_URL, json=payload, headers=headers)
         await _read_http_error_body(response)
         response.raise_for_status()
@@ -483,6 +784,7 @@ class DeepSeekAdapter(OpenRouterAdapter):
         )
 
     async def _stream_api_once(self, payload, headers, on_stream_event) -> _APIResult:
+        _validate_deepseek_payload(payload)
         text_chunks: list[str] = []
         reasoning_chunks: list[str] = []
         tool_calls_acc: dict[int, dict] = {}

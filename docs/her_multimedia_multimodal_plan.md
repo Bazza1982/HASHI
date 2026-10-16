@@ -2,7 +2,7 @@
 
 - 原始方案：Feiyan，2026-08-13
 - 审阅与修订：HASHI1 整合，2026-08-13
-- 状态：已实施，等待线上灰度重载
+- 状态：已实施；2026-10-16 补齐 HERV3/DeepSeek 直接工具结果通路
 - 目标版本：HER `0.1.0-hashi.10`
 
 ## 1. 审阅结论
@@ -20,6 +20,11 @@ HASHI Python 网关增加 MCP `image` 块。HER `0.1.0-hashi.9` 会把整个 MCP
 原有 browser/desktop/Windows 截图工具继续保留兼容字符串返回值；HER 网关会在
 MCP 边界识别这些旧格式，验证、归一化并转换为真正的 image 块，因此不再把
 base64 当作普通文字交给模型。
+
+HERV3 的直接 Python provider 通路不经过 HER MCP 网关，因此必须在 adapter
+边界完成同样的语义提升。DeepSeek adapter 会从旧截图字符串或结构化 Tool
+内容中取出图片，保留短 tool 文字回执，再按 DeepSeek Vision 的 `image_url`
+格式发送；任何残留在文字块里的图片 data URL 都会在出站前被拒绝。
 
 原始方案还有以下需要修正的地方：
 
@@ -47,6 +52,12 @@ Telegram media path
   -> provider request
      Anthropic: tool_result image/source/base64
      OpenAI-compatible: paired tool text, then user image_url data URL
+
+Direct HERV3 screenshot Tool result
+  -> DeepSeek adapter Tool-result boundary
+     (strip legacy base64 text + validate image)
+  -> paired tool text, then user image_url data URL
+  -> serialized DeepSeek request-limit validation
 ```
 
 OpenAI-compatible 的图片位置遵循官方 vision 输入形式：图片以 URL、base64 data
@@ -89,8 +100,11 @@ URL 或 file ID 进入消息内容。HER 采用 data URL，并保留原有 tool 
   `media_root`；符号链接逃逸会被拒绝；
 - 网关 context schema 为 v2，并显式携带 `media_roots`；
 - `media_read` 不由普通 `allowed:["*"]` 自动启用，而是在 HER 网关生成时加入；
-- 单张模型图片最大 2.5 MB，总图片原始字节最大 4 MB，为 6 MiB 供应商请求上限
-  预留 base64 与其他消息空间；
+- `media_read`/HER MCP 的 2.5 MiB 单图、4 MiB 总图预算只属于本地归一化与旧
+  provider 通路，不能当成 DeepSeek 的供应商限制；
+- DeepSeek 直接通路采用官方限制：最多 600 张，普通 inline/外部图片单张
+  32 MiB，不使用 file ID 时图片合计 64 MiB，整个 Base64 JSON 请求体 48 MiB；
+  请求体按实际序列化字节校验，不用人为降低 decoded-image 上限来估算；
 - HASHI 工具审计只写安全元数据，不写 image content/base64；
 - 旧 browser/desktop/Windows 截图字符串在进入审计时也会遮罩 image base64；
 - HER 把当前回合图片写入进程私有临时目录，文件在关闭 MCP 时删除；
@@ -103,6 +117,9 @@ URL 或 file ID 进入消息内容。HER 采用 data URL，并保留原有 tool 
   `source={type:base64,media_type,data}`；
 - OpenAI-compatible：先发配对的 `role=tool` 文字回执，再发
   `role=user` 的 `image_url` data URL；
+- DeepSeek Vision：图片仅进入结构化 `image_url`；截图 Tool 的兼容字符串可被
+  识别，但 Base64 本身不得留在 `role=tool` 或 text part；支持 JPEG、PNG、GIF、
+  WebP。限制来源：<https://api-docs.deepseek.com/guides/vision/>（2026-10-16 核对）；
 - 并行工具调用：先连续发完全部 tool 回执，再发相应图片消息；
 - MCP `isError:true`：转换为真正的 HER tool error，不再伪装成成功字符串。
 
@@ -123,6 +140,9 @@ URL 或 file ID 进入消息内容。HER 采用 data URL，并保留原有 tool 
 - 打包：manifest、二进制 SHA-256、source commit、certification baseline 一致；
 - 端到端：打包后的 `hashi-her` 调用 HASHI MCP `media_read`，假 provider 捕获到
   `data:image/jpeg;base64,...`，而不是本地路径或 base64 文本占位。
+- DeepSeek：旧 Windows 截图字符串必须转为 tool+user/image_url，整份请求按官方
+  单图、总图、数量和 48 MiB 实际 JSON 边界校验；测试同时证明普通 OpenRouter
+  文本 Tool 结果不变、并行 Tool 顺序不变。
 
 ## 8. 发布与回滚
 

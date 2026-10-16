@@ -2871,6 +2871,7 @@ class OpenRouterAdapter(BaseBackend):
     ) -> tuple[dict[str, Any], ...]:
         """Execute all tool_calls and append tool result messages to `messages`."""
         effect_facts: list[dict[str, Any]] = []
+        deferred_tool_result_messages: list[dict[str, Any]] = []
         completed_bindings = _completed_tool_bindings(messages)
         for tc in tool_calls:
             fn = tc.get("function", {})
@@ -2939,12 +2940,21 @@ class OpenRouterAdapter(BaseBackend):
                         tool_call_id=tc_id,
                     )
                 )
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tc_id,
-                        "content": copy.deepcopy(completed[2]),
-                    }
+                translated_messages = self._tool_result_messages(
+                    tool_name=tool_name,
+                    tool_call_id=tc_id,
+                    output=copy.deepcopy(completed[2]),
+                    content=None,
+                )
+                messages.extend(
+                    message
+                    for message in translated_messages
+                    if message.get("role") == "tool"
+                )
+                deferred_tool_result_messages.extend(
+                    message
+                    for message in translated_messages
+                    if message.get("role") != "tool"
                 )
                 await self._emit(
                     on_stream_event,
@@ -3103,17 +3113,33 @@ class OpenRouterAdapter(BaseBackend):
                                  "tool_result_details": dict(result.details or {})
                              })
 
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tc_id,
-                "content": result.output,
-            })
+            translated_messages = self._tool_result_messages(
+                tool_name=tool_name,
+                tool_call_id=tc_id,
+                output=result.output,
+                content=getattr(result, "content", None),
+            )
+            messages.extend(
+                message
+                for message in translated_messages
+                if message.get("role") == "tool"
+            )
+            deferred_tool_result_messages.extend(
+                message
+                for message in translated_messages
+                if message.get("role") != "tool"
+            )
             if claim_id:
                 completed_bindings[claim_id] = (
                     binding[0],
                     binding[1],
                     copy.deepcopy(result.output),
                 )
+        # Provider follow-up messages (for example DeepSeek user image parts)
+        # must follow every tool-role result from the assistant's tool batch.
+        # Interleaving them would break the tool-call protocol when a batch
+        # contains more than one call.
+        messages.extend(deferred_tool_result_messages)
         return tuple(effect_facts)
 
     def _evaluate_tool_policy(self, tool_name: str, arguments: dict):
@@ -3153,6 +3179,30 @@ class OpenRouterAdapter(BaseBackend):
         if policy.decision.value == "approval_required":
             return f"Error: tool call requires approval by enterprise policy: {tool_name}"
         return f"Error: tool call blocked by enterprise policy: {tool_name}"
+
+    def _tool_result_messages(
+        self,
+        *,
+        tool_name: str,
+        tool_call_id: str,
+        output: Any,
+        content: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Translate one completed Tool result into provider messages.
+
+        Provider adapters may override this boundary when their wire protocol
+        supports structured media returned by a Tool.  The default deliberately
+        preserves the historical text-only shape.
+        """
+
+        del tool_name, content
+        return [
+            {
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "content": output,
+            }
+        ]
 
     # ------------------------------------------------------------------
     # Non-streaming single API call

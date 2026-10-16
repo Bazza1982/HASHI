@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import hashlib
 import json
 from pathlib import Path
@@ -32,7 +33,10 @@ from adapters.stream_events import (
 )
 from orchestrator.enterprise import IdentityService, PolicyEvaluator
 from orchestrator.her_v2.models import Effort, Stage, StageRequest
-from orchestrator.multimodal_contract import canonical_request_content
+from orchestrator.multimodal_contract import (
+    MultimodalContractError,
+    canonical_request_content,
+)
 from tools.registry import ToolRegistry, ToolResult
 
 
@@ -1157,6 +1161,165 @@ async def test_cancelled_tool_forwards_cleanup_before_propagating_cancellation(
         "status": "terminated",
         "process_reaped": True,
     }
+
+
+@pytest.mark.asyncio
+async def test_deepseek_tool_screenshot_is_native_image_not_base64_text(tmp_path):
+    adapter = _adapter(tmp_path, model="deepseek-flash")
+    data_url = (
+        "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
+        "/x8AAusB9Y9Wl0sAAAAASUVORK5CYII="
+    )
+
+    async def execute_screenshot(tool_name, arguments, tool_call_id=""):
+        del tool_name, arguments
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            output=json.dumps(
+                {
+                    "data": (
+                        "Windows screenshot OK — provider=helper-native, 1KB\n"
+                        f"{data_url}"
+                    ),
+                    "effect": "observed",
+                    "error": None,
+                    "status": "success",
+                    "warning": None,
+                }
+            ),
+        )
+
+    adapter.tool_registry.execute = execute_screenshot
+    messages = []
+    await adapter._run_tool_calls(
+        [
+            {
+                "id": "call_screenshot",
+                "type": "function",
+                "function": {"name": "windows_screenshot", "arguments": "{}"},
+            }
+        ],
+        messages,
+        on_stream_event=None,
+    )
+
+    assert [message["role"] for message in messages] == ["tool", "user"]
+    assert messages[0]["tool_call_id"] == "call_screenshot"
+    assert "Windows screenshot OK" in messages[0]["content"]
+    assert "base64" not in messages[0]["content"]
+    assert messages[1]["content"][0]["type"] == "text"
+    assert messages[1]["content"][1] == {
+        "type": "image_url",
+        "image_url": {"url": data_url},
+    }
+
+
+def test_deepseek_payload_requires_structured_image_content():
+    data_url = (
+        "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
+        "/x8AAusB9Y9Wl0sAAAAASUVORK5CYII="
+    )
+    deepseek_api._validate_deepseek_payload(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Inspect it."},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                }
+            ]
+        }
+    )
+
+    with pytest.raises(MultimodalContractError) as exc_info:
+        deepseek_api._validate_deepseek_payload(
+            {
+                "messages": [
+                    {"role": "tool", "content": f"screenshot follows: {data_url}"}
+                ]
+            }
+        )
+
+    assert exc_info.value.code == "INVALID_MULTIMODAL_CONTENT"
+
+
+def test_deepseek_payload_accepts_reported_screenshot_byte_size():
+    reported_size = 2_821_918
+    payload = b"\x89PNG\r\n\x1a\n" + b"\0" * (reported_size - 8)
+    data_url = "data:image/png;base64," + base64.b64encode(payload).decode("ascii")
+
+    deepseek_api._validate_deepseek_payload(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Inspect it."},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert len(data_url) > reported_size
+
+
+def test_deepseek_payload_enforces_actual_serialized_body_limit(monkeypatch):
+    monkeypatch.setattr(deepseek_api, "DEEPSEEK_MAX_REQUEST_BODY_BYTES", 128)
+
+    with pytest.raises(MultimodalContractError) as exc_info:
+        deepseek_api._validate_deepseek_payload(
+            {"messages": [{"role": "user", "content": "x" * 256}]}
+        )
+
+    assert exc_info.value.code == "MEDIA_LIMIT_EXCEEDED"
+
+
+@pytest.mark.asyncio
+async def test_deepseek_tool_batch_defers_image_followup_until_all_tool_results(
+    tmp_path,
+):
+    adapter = _adapter(tmp_path, model="deepseek-flash")
+    data_url = (
+        "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
+        "/x8AAusB9Y9Wl0sAAAAASUVORK5CYII="
+    )
+
+    async def execute(tool_name, arguments, tool_call_id=""):
+        del arguments
+        output = data_url if tool_name == "windows_screenshot" else "listed"
+        return ToolResult(tool_call_id=tool_call_id, output=output)
+
+    adapter.tool_registry.execute = execute
+    messages = []
+    await adapter._run_tool_calls(
+        [
+            {
+                "id": "call_screenshot",
+                "type": "function",
+                "function": {"name": "windows_screenshot", "arguments": "{}"},
+            },
+            {
+                "id": "call_list",
+                "type": "function",
+                "function": {"name": "file_list", "arguments": "{}"},
+            },
+        ],
+        messages,
+        on_stream_event=None,
+    )
+
+    assert [message["role"] for message in messages] == ["tool", "tool", "user"]
+    assert [message["tool_call_id"] for message in messages[:2]] == [
+        "call_screenshot",
+        "call_list",
+    ]
 
 
 @pytest.mark.asyncio

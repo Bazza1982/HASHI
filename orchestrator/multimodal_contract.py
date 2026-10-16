@@ -24,6 +24,13 @@ from typing import Any, Iterable, Mapping, Sequence
 CANONICAL_REQUEST_CONTENT_VERSION = 1
 HASHI_API_MAX_REQUEST_BYTES = 256 * 1024 * 1024
 HASHI_API_MAX_IMAGE_BYTES = 50 * 1024 * 1024
+# DeepSeek Vision limits published at https://api-docs.deepseek.com/guides/vision/
+# (verified 2026-10-16).  Keep these provider facts separate from the smaller
+# media_read normalization limits used by local fallback tools.
+DEEPSEEK_MAX_IMAGES_PER_REQUEST = 600
+DEEPSEEK_MAX_INLINE_IMAGE_BYTES = 32 * 1024 * 1024
+DEEPSEEK_MAX_TOTAL_IMAGE_BYTES = 64 * 1024 * 1024
+DEEPSEEK_MAX_REQUEST_BODY_BYTES = 48 * 1024 * 1024
 INPUT_MODALITIES = frozenset({"text", "image", "audio", "video", "document"})
 MEDIA_MODALITIES = INPUT_MODALITIES - {"text"}
 OUTPUT_MODALITIES = frozenset({"text", "image", "audio", "video", "file"})
@@ -655,14 +662,15 @@ def _registry_capability(provider: str, model: str) -> InputCapability | None:
         "total_bytes": 50 * 1024 * 1024,
     }
     if provider == "deepseek-api":
-        # DeepSeek accepts up to 600 images and 32 MiB per regular image.  Its
-        # HTTP body limit is 48 MiB, so cap decoded aggregate bytes at 32 MiB;
-        # base64 expansion then remains below the provider body boundary with
-        # room for the surrounding JSON and text prompt.
+        # The decoded-image and serialized-body limits are distinct official
+        # constraints.  The DeepSeek adapter enforces the 48 MiB body boundary
+        # after materialising the actual JSON instead of inventing a lower
+        # decoded aggregate limit to approximate Base64 expansion.
         limits = {
-            "item_count": 600,
-            "item_bytes": 32 * 1024 * 1024,
-            "total_bytes": 32 * 1024 * 1024,
+            "item_count": DEEPSEEK_MAX_IMAGES_PER_REQUEST,
+            "item_bytes": DEEPSEEK_MAX_INLINE_IMAGE_BYTES,
+            "total_bytes": DEEPSEEK_MAX_TOTAL_IMAGE_BYTES,
+            "request_body_bytes": DEEPSEEK_MAX_REQUEST_BODY_BYTES,
         }
     if provider == "hashi-api":
         # HASHI's serialized 256 MiB request limit is the aggregate boundary.
@@ -755,6 +763,7 @@ def _explicit_capability(
             "dimensions",
             "duration",
             "page_count",
+            "request_body_bytes",
         ):
             if key not in raw_limits:
                 continue

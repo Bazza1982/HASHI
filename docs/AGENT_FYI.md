@@ -1,5 +1,11 @@
 # HASHI Agent FYI
 
+October 16: HERV3/DeepSeek Tool-returned screenshots must be promoted from
+legacy Base64 text into paired tool text plus user `image_url`. Enforce the
+official provider limits on the real serialized request; do not reuse the
+smaller local `media_read` budget. See
+[repair](repairs/DEEPSEEK_TOOL_SCREENSHOT_MULTIMODAL_20261016.md).
+
 October 16: `/call` LAN targets accept only literal RFC 1918 IPv4 endpoints;
 DNS, loopback, link-local/public addresses and redirects stay blocked. Selection
 is per owner/Agent. See [Call decision](HASHI_CALL_INTERACTION_2026-10-04.md).
