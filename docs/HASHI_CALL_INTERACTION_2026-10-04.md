@@ -1,5 +1,23 @@
 # Phone and Call interaction decision
 
+## 2026-10-16 explicitly allow-listed private-LAN media targets
+
+The instance-owned Call target registry may now declare a target with
+`location: lan`. A LAN target uses the existing OpenAI-compatible media
+adapter, but its URL host must be a literal IPv4 address inside an RFC 1918
+private range. Hostnames, loopback, link-local, public addresses, embedded
+credentials, query strings and redirects remain unavailable. This keeps the
+endpoint an explicit operator choice and prevents provider or browser input
+from turning Call into a general network client.
+
+The first intended use is a VoiceLAN MiniCPM-V visual snapshot target. Target
+selection remains revisioned per owner/Agent and applies to the next Call;
+Gemini remains an available independent target. The Frontend Connector owns
+the target validation and adapter call, while the endpoint/model stay in local
+instance configuration. Protected Core, frame cadence, camera fallback, STT,
+TTS, Session authority and model reasoning are unchanged. Source validation,
+runtime adoption and a physical `/call` acceptance remain separate evidence.
+
 ## 2026-10-14 call-time context and multilingual filler variation
 
 The Call opening remains a separate, tool-free Agent utterance built from the

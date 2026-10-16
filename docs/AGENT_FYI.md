@@ -1,15 +1,17 @@
 # HASHI Agent FYI
 
-October 13: HASHI3/HASHI4 and Workbench use GitHub `main`; continue there,
-without new branches/worktrees. [Reconciliation](repairs/DEBUG_CALL_RECONCILIATION_20261013.md)
-preserves the repairs; source and runtime adoption remain separate.
+October 16: `/call` LAN targets accept only literal RFC 1918 IPv4 endpoints;
+DNS, loopback, link-local/public addresses and redirects stay blocked. Selection
+is per owner/Agent. See [Call decision](HASHI_CALL_INTERACTION_2026-10-04.md).
 
-October 13 Call camera decision: prepare the default camera during ringback;
-without a first frame use voice. A local preview is not Agent vision. After
-ingress starts, only stopped ingress or confirmed initial vision failure
-disables it; source swaps and stale snapshots cannot break newer state. Camera
-comments stay rare, relevant and natural. Phone/model/STT/TTS/Session ownership
-is unchanged. See [Call decision](HASHI_CALL_INTERACTION_2026-10-04.md).
+October 13: HASHI3/HASHI4 and Workbench use existing GitHub `main`; create no
+branch/worktree. Source and adoption remain separate. See
+[reconciliation](repairs/DEBUG_CALL_RECONCILIATION_20261013.md).
+
+October 13 Call: prepare the camera during ringback; without a first frame use
+voice. Preview is not Agent vision. Only stopped ingress or confirmed initial
+vision failure disables it; comments stay rare and relevant. See
+[Call decision](HASHI_CALL_INTERACTION_2026-10-04.md).
 
 ## Authority and ownership
 
@@ -20,12 +22,10 @@ product policy/imports. Core changes require explicit major-migration approval,
 version bump, label and independent review; flags grant nothing.
 
 Source, Worker adoption and delivery need separate proof. Tools cannot edit/kill
-Core/Python, read secrets or grant authority. FC→PAO `/reboot`: `min|same`
-replaces one Worker; `max` shared Functions/Workers, never Core/Remote.
-Only a same-live-Core successor confirms inherited broad receipts. Function
-code adopts by reboot; docs do not. Safety rejection is a delivered command with
-reasons; cold startup confirms no inherited receipt. Windows restarts need an
-exact actuator/exit code. See [reboot decision](HASHI_REBOOT_FAST_RELIABLE_PLAN_2026-10-14.md).
+Core/Python, read secrets or grant authority. `/reboot min|same` replaces one
+Worker; `max` replaces shared Functions/Workers, never Core/Remote. Function
+code adopts by reboot; docs do not. See
+[reboot decision](HASHI_REBOOT_FAST_RELIABLE_PLAN_2026-10-14.md).
 Workbench local configuration adoption keeps manager-level busy responses as
 `AGENT_BUSY` and retries only before a durable receipt exists. A durable
 `target_busy` outcome remains explicitly pending.
@@ -185,8 +185,3 @@ separate. [Older checkpoints](AGENT_FYI_HISTORY_MEDIA_20261009.md) grant no auth
 
 Lily Wiki requires new candidates plus consolidation/embed evidence; a Scheduler
 timestamp is insufficient.
-
-HERV3 safe stream continuation, opt-in `/fallback` (excluding phone/call/voice;
-bounded calls/cost), Tool-ID replay safety and clear exhausted-retry reports are
-reviewed on `debug-herv3`. Git/PR proves source delivery only; no reboot, paid
-live call, Worker adoption or live verification occurred.
