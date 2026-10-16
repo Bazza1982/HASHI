@@ -159,4 +159,4 @@ separate. [Older checkpoints](AGENT_FYI_HISTORY_MEDIA_20261009.md) grant no auth
 Lily Wiki requires new candidates plus consolidation/embed evidence; a Scheduler
 timestamp is insufficient.
 
-HERV3 stream-timeout continuation, the user-consented fallback policy (default OFF; `/fallback`; phone/call/voice excluded; explicit extra-call budget) and the split recovery/failure reporting landed on HASHI3 branch `debug-herv3` (base main `52181d1e`) as offline source work only: no merge, no push, no reboot, no live Provider or paid call, and no adoption/live verification yet. Reviewer: Lin Yueru.
+HERV3 stream-timeout continuation, the user-consented fallback policy (default OFF; `/fallback`; phone/call/voice excluded; explicit physical-call/cost budget), Tool-ID replay protection, and split recovery/failure reporting were prepared and independently reviewed on HASHI3 branch `debug-herv3` (base main `52181d1e`). Source delivery is tracked by Git/PR. No reboot, live Provider/paid call, running-generation adoption, or live verification has happened. Reviewer: Lin Yueru.

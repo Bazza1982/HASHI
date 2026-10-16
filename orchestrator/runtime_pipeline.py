@@ -3825,6 +3825,7 @@ def backend_failure_fields(response: Any) -> dict[str, Any]:
             ("provider_local_recovery_count", "interaction_recovery_used"),
             ("provider_local_recovery_limit", "interaction_recovery_limit"),
             ("provider_turn_recovery_total", "turn_recovery_total"),
+            ("provider_tool_repair_count", "tool_repair_count"),
         ):
             parsed = _optional_counter(source.get(source_key))
             if parsed is not None:

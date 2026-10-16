@@ -9,7 +9,9 @@ options.  Callback data stays stable and language-neutral.
 
 from __future__ import annotations
 
+import asyncio
 import html
+import time
 from dataclasses import replace
 from hashlib import blake2s
 from typing import Any
@@ -41,7 +43,16 @@ def _load(runtime: Any) -> policy_owner.FallbackPolicy:
     return policy
 
 
-def _save(runtime: Any, policy: policy_owner.FallbackPolicy) -> bool:
+def _load_for_update(runtime: Any) -> tuple[policy_owner.FallbackPolicy, Any]:
+    return policy_owner.read_policy(runtime, _actor(runtime), for_update=True)
+
+
+def _save(
+    runtime: Any,
+    policy: policy_owner.FallbackPolicy,
+    *,
+    document: Any,
+) -> bool:
     """Publish one policy under the read revision.
 
     A conflict or durability error leaves the prior policy active and reports
@@ -50,15 +61,102 @@ def _save(runtime: Any, policy: policy_owner.FallbackPolicy) -> bool:
 
     actor = _actor(runtime)
     try:
-        _current, document = policy_owner.read_policy(
-            runtime, actor, for_update=True
-        )
         policy_owner.write_policy(runtime, actor, policy, document=document)
     except ConfigConflictError:
         return False
     except (OSError, ValueError, UnicodeError):
         return False
     return True
+
+
+_PENDING_CONFIRMATIONS: dict[
+    tuple[int, str],
+    tuple[policy_owner.FallbackConfirmation, asyncio.Future[bool]],
+] = {}
+
+
+def _confirmation_key(runtime: Any, action_id: str) -> tuple[int, str]:
+    return id(runtime), str(action_id or "")
+
+
+def _interactive_chat_id(runtime: Any, request_id: str) -> int | None:
+    meta = getattr(runtime, "current_request_meta", None)
+    if not isinstance(meta, dict):
+        return None
+    active_id = str(meta.get("request_id") or "")
+    expected = str(request_id or "")
+    if active_id.removeprefix("hashi-request:") != expected.removeprefix(
+        "hashi-request:"
+    ):
+        return None
+    chat_id = meta.get("chat_id")
+    try:
+        return int(chat_id) if chat_id is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+async def request_fallback_confirmation(
+    runtime: Any,
+    confirmation: policy_owner.FallbackConfirmation,
+    *,
+    target_label: str,
+    request_id: str,
+) -> policy_owner.FallbackConfirmation | None:
+    """Ask the active Telegram user once; absent interaction fails closed."""
+
+    chat_id = _interactive_chat_id(runtime, request_id)
+    if chat_id is None:
+        return None
+    key = _confirmation_key(runtime, confirmation.action_id)
+    if key in _PENDING_CONFIRMATIONS:
+        return None
+    future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+    _PENDING_CONFIRMATIONS[key] = (confirmation, future)
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    ui_language.tr("fallback.ask.allow"),
+                    callback_data=(
+                        f"fallback:confirm:{confirmation.action_id}:allow"
+                    ),
+                ),
+                InlineKeyboardButton(
+                    ui_language.tr("fallback.ask.deny"),
+                    callback_data=(
+                        f"fallback:confirm:{confirmation.action_id}:deny"
+                    ),
+                ),
+            ]
+        ]
+    )
+    try:
+        from orchestrator import runtime_delivery
+
+        _duration, chunks = await runtime_delivery.send_long_message(
+            runtime,
+            chat_id=chat_id,
+            text=ui_language.tr(
+                "fallback.ask.prompt",
+                target=html.escape(str(target_label or "")),
+            ),
+            request_id=str(request_id or ""),
+            purpose="response_continuation",
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
+        if not chunks:
+            return None
+        timeout = max(0.0, float(confirmation.expires_at) - time.time())
+        if timeout <= 0:
+            return None
+        allowed = await asyncio.wait_for(future, timeout=timeout)
+        return confirmation if allowed else None
+    except TimeoutError:
+        return None
+    finally:
+        _PENDING_CONFIRMATIONS.pop(key, None)
 
 
 def _provider_options(runtime: Any) -> list[dict[str, Any]]:
@@ -91,6 +189,15 @@ def _privacy_label(runtime: Any) -> str:
     return ui_language.tr(
         f"fallback.privacy.{_privacy_policy(runtime).name.casefold()}"
     )
+
+
+def _source_label(source: str) -> str:
+    key = (
+        "fallback.sources.codex.short"
+        if source == policy_owner.SOURCE_CODEX_CLI
+        else "fallback.sources.herv3.short"
+    )
+    return ui_language.tr(key)
 
 
 def _on_off(value: bool) -> str:
@@ -255,27 +362,37 @@ def _sources_keyboard(runtime: Any) -> InlineKeyboardMarkup:
         (policy_owner.SOURCE_CODEX_CLI, "fallback.sources.codex.short"),
     ):
         rule = policy.source_rule(name)
-        marker = "✓ " if rule.enabled else ""
+        source_label = ui_language.tr(label_key)
         rows.append(
             [
                 InlineKeyboardButton(
-                    marker + ui_language.tr(label_key),
+                    ("✓ " if rule.enabled else "") + source_label,
                     callback_data=f"fallback:source:{name}",
                 )
             ]
         )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                ui_language.tr("fallback.sources.herv3_targets.short"),
-                callback_data=f"fallback:sourcekind:{policy_owner.SOURCE_HERV3}:herv3",
-            ),
-            InlineKeyboardButton(
-                ui_language.tr("fallback.sources.codex_targets.short"),
-                callback_data=f"fallback:sourcekind:{policy_owner.SOURCE_HERV3}:codex",
-            ),
-        ]
-    )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    ("✓ " if rule.allow_herv3_targets else "")
+                    + ui_language.tr(
+                        "fallback.sources.direction",
+                        source=source_label,
+                        target=ui_language.tr("fallback.sources.herv3_targets.short"),
+                    ),
+                    callback_data=f"fallback:sourcekind:{name}:herv3",
+                ),
+                InlineKeyboardButton(
+                    ("✓ " if rule.allow_codex_cli_targets else "")
+                    + ui_language.tr(
+                        "fallback.sources.direction",
+                        source=source_label,
+                        target=ui_language.tr("fallback.sources.codex_targets.short"),
+                    ),
+                    callback_data=f"fallback:sourcekind:{name}:codex",
+                ),
+            ]
+        )
     rows.append([InlineKeyboardButton(back_label(), callback_data="fallback:refresh")])
     return InlineKeyboardMarkup(rows)
 
@@ -290,6 +407,7 @@ def _budget_text(runtime: Any) -> str:
         ),
         facts=[
             ui_language.tr("fallback.budget.rule"),
+            _cost_label(policy),
             ui_language.tr(
                 "fallback.fact.unknown_cost",
                 state=_on_off(policy.allow_unknown_cost),
@@ -303,6 +421,26 @@ def _budget_text(runtime: Any) -> str:
 
 def _budget_keyboard(runtime: Any) -> InlineKeyboardMarkup:
     policy = _load(runtime)
+    cost_choices = (
+        ("none", None, ui_language.tr("fallback.cost.no_ceiling.short")),
+        ("5", 0.05, "$0.05"),
+        ("25", 0.25, "$0.25"),
+        ("100", 1.0, "$1.00"),
+    )
+    cost_buttons = []
+    for token, amount, label in cost_choices:
+        selected = (
+            policy.max_extra_cost_usd is None
+            if amount is None
+            else policy.max_extra_cost_usd is not None
+            and abs(float(policy.max_extra_cost_usd) - amount) < 0.000001
+        )
+        cost_buttons.append(
+            InlineKeyboardButton(
+                ("✓ " if selected else "") + label,
+                callback_data=f"fallback:cost:{token}",
+            )
+        )
     return InlineKeyboardMarkup(
         [
             [
@@ -312,6 +450,7 @@ def _budget_keyboard(runtime: Any) -> InlineKeyboardMarkup:
                 ),
                 InlineKeyboardButton("+", callback_data="fallback:budget:inc"),
             ],
+            cost_buttons,
             [
                 InlineKeyboardButton(
                     ("✓ " if policy.allow_unknown_cost else "")
@@ -326,7 +465,6 @@ def _budget_keyboard(runtime: Any) -> InlineKeyboardMarkup:
 
 def _privacy_text(runtime: Any) -> str:
     policy = _load(runtime)
-    name = _privacy_policy(runtime).name.casefold()
     narrowing = policy.effective_narrowing(int(_privacy_policy(runtime)))
     blocked = narrowing.get("blocked") is True
     return setting_card(
@@ -347,7 +485,6 @@ def _privacy_text(runtime: Any) -> str:
 
 def _privacy_keyboard(runtime: Any) -> InlineKeyboardMarkup:
     policy = _load(runtime)
-    name = _privacy_policy(runtime).name.casefold()
     blocked = policy.effective_narrowing(int(_privacy_policy(runtime))).get(
         "blocked"
     ) is True
@@ -393,8 +530,41 @@ def _same_model_candidates(runtime: Any) -> list[dict[str, Any]]:
                 "model": mapped_model,
                 "usable": usable,
                 "reason": reason,
+                "same_model": True,
             }
         )
+    return candidates
+
+
+def _model_candidates(runtime: Any, source: str) -> list[dict[str, Any]]:
+    if source == policy_owner.SOURCE_HERV3:
+        return _same_model_candidates(runtime)
+    if source != policy_owner.SOURCE_CODEX_CLI:
+        return []
+    candidates: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for option in _provider_options(runtime):
+        engine = str(option.get("engine") or "").strip().casefold()
+        if not engine or engine in {"codex-cli", "her-v2", "hashi-api"}:
+            continue
+        available = option.get("available") is not False
+        for raw_model in option.get("models") or []:
+            model = str(raw_model or "").strip()
+            key = (engine, model)
+            if not model or key in seen:
+                continue
+            seen.add(key)
+            candidates.append(
+                {
+                    "engine": engine,
+                    "model": model,
+                    "usable": bool(available),
+                    "reason": (
+                        "" if available else ui_language.tr("fallback.locked.key_missing")
+                    ),
+                    "same_model": False,
+                }
+            )
     return candidates
 
 
@@ -417,39 +587,67 @@ def _targets_keyboard(runtime: Any) -> InlineKeyboardMarkup:
     policy = _load(runtime)
     rows: list[list[InlineKeyboardButton]] = []
     for index, route in enumerate(policy.routes):
-        rows.append(
-            [
+        route_token = _token(route.key())
+        row: list[InlineKeyboardButton] = []
+        if index > 0:
+            row.append(
                 InlineKeyboardButton(
-                    f"✕ {index + 1}. {_target_label(route)[:40]}",
-                    callback_data=f"fallback:remove:{index}:{_token(route.key())}",
+                    "↑",
+                    callback_data=f"fallback:move:{index}:up:{route_token}",
                 )
-            ]
-        )
-    candidates = _same_model_candidates(runtime)
-    for index, candidate in enumerate(candidates):
-        marker = "" if candidate["usable"] else "🔒 "
-        label = f"{marker}{candidate['engine']} / {candidate['model']}"
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    label[:60],
-                    callback_data=(
-                        f"fallback:add:model:{index}:"
-                        f"{_token(candidate['engine'] + '/' + candidate['model'])}"
-                    ),
-                )
-            ]
-        )
-    codex_locked = not _codex_available(runtime)
-    rows.append(
-        [
-            InlineKeyboardButton(
-                ("🔒 " if codex_locked else "")
-                + ui_language.tr("fallback.target.codex"),
-                callback_data="fallback:add:codex:-:-",
             )
-        ]
-    )
+        row.append(
+            InlineKeyboardButton(
+                (
+                    f"✕ {index + 1}. {_source_label(route.source)} → "
+                    f"{_target_label(route)}"
+                )[:48],
+                callback_data=f"fallback:remove:{index}:{route_token}",
+            )
+        )
+        if index + 1 < len(policy.routes):
+            row.append(
+                InlineKeyboardButton(
+                    "↓",
+                    callback_data=f"fallback:move:{index}:down:{route_token}",
+                )
+            )
+        rows.append(row)
+
+    for source in policy_owner.FALLBACK_SOURCES:
+        source_label = _source_label(source)
+        candidates = _model_candidates(runtime, source)
+        for index, candidate in enumerate(candidates):
+            marker = "" if candidate["usable"] else "🔒 "
+            label = (
+                f"{marker}+ {source_label} → "
+                f"{candidate['engine']} / {candidate['model']}"
+            )
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        label[:60],
+                        callback_data=(
+                            f"fallback:add:model:{source}:{index}:"
+                            f"{_token(candidate['engine'] + '/' + candidate['model'])}"
+                        ),
+                    )
+                ]
+            )
+        if source == policy_owner.SOURCE_HERV3:
+            codex_locked = not _codex_available(runtime)
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        (
+                            ("🔒 " if codex_locked else "")
+                            + f"+ {source_label} → "
+                            + ui_language.tr("fallback.target.codex")
+                        )[:60],
+                        callback_data=f"fallback:add:codex:{source}:-",
+                    )
+                ]
+            )
     rows.append([InlineKeyboardButton(back_label(), callback_data="fallback:refresh")])
     return InlineKeyboardMarkup(rows)
 
@@ -485,13 +683,39 @@ async def callback_fallback(runtime: Any, update: Any, context: Any) -> None:
     parts = str(query.data or "").split(":")
     try:
         action = parts[1]
+        if action == "confirm":
+            action_id, answer = parts[2], parts[3]
+            pending = _PENDING_CONFIRMATIONS.get(
+                _confirmation_key(runtime, action_id)
+            )
+            if pending is None or answer not in {"allow", "deny"}:
+                raise ValueError(ui_language.tr("fallback.error.stale"))
+            _confirmation, future = pending
+            if future.done():
+                raise ValueError(ui_language.tr("fallback.error.stale"))
+            allowed = answer == "allow"
+            future.set_result(allowed)
+            await query.edit_message_text(
+                ui_language.tr(
+                    "fallback.ask.allowed"
+                    if allowed
+                    else "fallback.ask.denied"
+                )
+            )
+            await query.answer()
+            return
         if action == "refresh":
             pass
         elif action == "mode":
             mode = parts[2]
             if mode not in policy_owner.FALLBACK_MODES:
                 raise ValueError(ui_language.tr("fallback.error.stale"))
-            if not _save(runtime, replace(_load(runtime), mode=mode)):
+            policy, document = _load_for_update(runtime)
+            if not _save(
+                runtime,
+                replace(policy, mode=mode),
+                document=document,
+            ):
                 raise ValueError(ui_language.tr("fallback.save_failed"))
         elif action == "targets":
             await _render(runtime, query, _targets_text(runtime), _targets_keyboard(runtime))
@@ -499,23 +723,47 @@ async def callback_fallback(runtime: Any, update: Any, context: Any) -> None:
             return
         elif action == "budget":
             if len(parts) == 3 and parts[2] in {"inc", "dec"}:
-                policy = _load(runtime)
+                policy, document = _load_for_update(runtime)
                 delta = 1 if parts[2] == "inc" else -1
                 updated = replace(
                     policy,
                     max_additional_calls=max(0, policy.max_additional_calls + delta),
                 )
-                if not _save(runtime, updated):
+                if not _save(runtime, updated, document=document):
                     raise ValueError(ui_language.tr("fallback.save_failed"))
             elif len(parts) == 3 and parts[2] == "unknown":
+                policy, document = _load_for_update(runtime)
                 if not _save(
                     runtime,
                     replace(
-                        _load(runtime),
-                        allow_unknown_cost=not _load(runtime).allow_unknown_cost,
+                        policy,
+                        allow_unknown_cost=not policy.allow_unknown_cost,
                     ),
+                    document=document,
                 ):
                     raise ValueError(ui_language.tr("fallback.save_failed"))
+            await _render(
+                runtime, query, _budget_text(runtime), _budget_keyboard(runtime)
+            )
+            await query.answer()
+            return
+        elif action == "cost":
+            token = parts[2]
+            choices = {
+                "none": None,
+                "5": 0.05,
+                "25": 0.25,
+                "100": 1.0,
+            }
+            if token not in choices:
+                raise ValueError(ui_language.tr("fallback.error.stale"))
+            policy, document = _load_for_update(runtime)
+            if not _save(
+                runtime,
+                replace(policy, max_extra_cost_usd=choices[token]),
+                document=document,
+            ):
+                raise ValueError(ui_language.tr("fallback.save_failed"))
             await _render(
                 runtime, query, _budget_text(runtime), _budget_keyboard(runtime)
             )
@@ -529,8 +777,10 @@ async def callback_fallback(runtime: Any, update: Any, context: Any) -> None:
             return
         elif action == "source":
             name = parts[2]
-            policy = _load(runtime)
+            policy, document = _load_for_update(runtime)
             rule = policy.source_rule(name)
+            if name not in policy_owner.FALLBACK_SOURCES:
+                raise ValueError(ui_language.tr("fallback.error.stale"))
             updated = replace(
                 policy,
                 sources={
@@ -538,7 +788,7 @@ async def callback_fallback(runtime: Any, update: Any, context: Any) -> None:
                     name: replace(rule, enabled=not rule.enabled),
                 },
             )
-            if not _save(runtime, updated):
+            if not _save(runtime, updated, document=document):
                 raise ValueError(ui_language.tr("fallback.save_failed"))
             await _render(
                 runtime, query, _sources_text(runtime), _sources_keyboard(runtime)
@@ -547,7 +797,12 @@ async def callback_fallback(runtime: Any, update: Any, context: Any) -> None:
             return
         elif action == "sourcekind":
             name, kind = parts[2], parts[3]
-            policy = _load(runtime)
+            if (
+                name not in policy_owner.FALLBACK_SOURCES
+                or kind not in {"herv3", "codex"}
+            ):
+                raise ValueError(ui_language.tr("fallback.error.stale"))
+            policy, document = _load_for_update(runtime)
             rule = policy.source_rule(name)
             updated = replace(
                 policy,
@@ -568,7 +823,7 @@ async def callback_fallback(runtime: Any, update: Any, context: Any) -> None:
                     ),
                 },
             )
-            if not _save(runtime, updated):
+            if not _save(runtime, updated, document=document):
                 raise ValueError(ui_language.tr("fallback.save_failed"))
             await _render(
                 runtime, query, _sources_text(runtime), _sources_keyboard(runtime)
@@ -577,29 +832,65 @@ async def callback_fallback(runtime: Any, update: Any, context: Any) -> None:
             return
         elif action == "privacy":
             if len(parts) == 3 and parts[2] == "block":
-                policy = _load(runtime)
+                policy, document = _load_for_update(runtime)
                 name = _privacy_policy(runtime).name.casefold()
                 narrowing = dict(policy.privacy_narrowing)
                 current = dict(narrowing.get(name) or {})
-                current["blocked"] = not (current.get("blocked") is True)
+                current["blocked"] = current.get("blocked") is not True
                 narrowing[name] = current
-                if not _save(runtime, replace(policy, privacy_narrowing=narrowing)):
+                if not _save(
+                    runtime,
+                    replace(policy, privacy_narrowing=narrowing),
+                    document=document,
+                ):
                     raise ValueError(ui_language.tr("fallback.save_failed"))
             await _render(
                 runtime, query, _privacy_text(runtime), _privacy_keyboard(runtime)
             )
             await query.answer()
             return
+        elif action == "move":
+            index = int(parts[2])
+            direction = parts[3]
+            token = parts[4]
+            policy, document = _load_for_update(runtime)
+            if (
+                index < 0
+                or index >= len(policy.routes)
+                or direction not in {"up", "down"}
+            ):
+                raise ValueError(ui_language.tr("fallback.error.stale"))
+            route = policy.routes[index]
+            if _token(route.key()) != token:
+                raise ValueError(ui_language.tr("fallback.error.stale"))
+            position = index - 1 if direction == "up" else index + 1
+            if position < 0 or position >= len(policy.routes):
+                raise ValueError(ui_language.tr("fallback.error.stale"))
+            if not _save(
+                runtime,
+                policy.with_route(route, position=position),
+                document=document,
+            ):
+                raise ValueError(ui_language.tr("fallback.save_failed"))
+            await _render(
+                runtime, query, _targets_text(runtime), _targets_keyboard(runtime)
+            )
+            await query.answer()
+            return
         elif action == "remove":
             index = int(parts[2])
             token = parts[3]
-            policy = _load(runtime)
+            policy, document = _load_for_update(runtime)
             if index < 0 or index >= len(policy.routes):
                 raise ValueError(ui_language.tr("fallback.error.stale"))
             route = policy.routes[index]
             if _token(route.key()) != token:
                 raise ValueError(ui_language.tr("fallback.error.stale"))
-            if not _save(runtime, policy.without_route(route.key())):
+            if not _save(
+                runtime,
+                policy.without_route(route.key()),
+                document=document,
+            ):
                 raise ValueError(ui_language.tr("fallback.save_failed"))
             await _render(
                 runtime, query, _targets_text(runtime), _targets_keyboard(runtime)
@@ -608,18 +899,24 @@ async def callback_fallback(runtime: Any, update: Any, context: Any) -> None:
             return
         elif action == "add":
             kind = parts[2]
-            policy = _load(runtime)
+            source = parts[3]
+            if source not in policy_owner.FALLBACK_SOURCES:
+                raise ValueError(ui_language.tr("fallback.error.stale"))
+            policy, document = _load_for_update(runtime)
             if kind == "codex":
-                if not _codex_available(runtime):
+                if (
+                    source != policy_owner.SOURCE_HERV3
+                    or not _codex_available(runtime)
+                ):
                     raise ValueError(ui_language.tr("fallback.locked.runtime_missing"))
                 route = policy_owner.FallbackRoute(
-                    source=policy_owner.SOURCE_HERV3,
+                    source=source,
                     target_kind=policy_owner.TARGET_KIND_CODEX_CLI,
                 )
             elif kind == "model":
-                index = int(parts[3])
-                token = parts[4]
-                candidates = _same_model_candidates(runtime)
+                index = int(parts[4])
+                token = parts[5]
+                candidates = _model_candidates(runtime, source)
                 if index < 0 or index >= len(candidates):
                     raise ValueError(ui_language.tr("fallback.error.stale"))
                 candidate = candidates[index]
@@ -629,15 +926,15 @@ async def callback_fallback(runtime: Any, update: Any, context: Any) -> None:
                 ):
                     raise ValueError(ui_language.tr("fallback.error.stale"))
                 route = policy_owner.FallbackRoute(
-                    source=policy_owner.SOURCE_HERV3,
+                    source=source,
                     target_kind=policy_owner.TARGET_KIND_HERV3_MODEL,
                     provider=candidate["engine"],
                     model=candidate["model"],
-                    same_model=True,
+                    same_model=bool(candidate["same_model"]),
                 )
             else:
                 raise ValueError(ui_language.tr("fallback.error.stale"))
-            if not _save(runtime, policy.with_route(route)):
+            if not _save(runtime, policy.with_route(route), document=document):
                 raise ValueError(ui_language.tr("fallback.save_failed"))
             await _render(
                 runtime, query, _targets_text(runtime), _targets_keyboard(runtime)
@@ -651,4 +948,14 @@ async def callback_fallback(runtime: Any, update: Any, context: Any) -> None:
         )
         await query.answer()
     except (IndexError, KeyError, TypeError, ValueError) as exc:
+        if str(exc) == ui_language.tr("fallback.save_failed"):
+            try:
+                await _render(
+                    runtime,
+                    query,
+                    fallback_menu_text(runtime),
+                    fallback_menu_keyboard(runtime),
+                )
+            except Exception:
+                pass
         await query.answer(str(exc), show_alert=True)

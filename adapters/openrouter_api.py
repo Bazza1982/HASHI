@@ -2,8 +2,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import copy
 import hashlib
 import io
+import inspect
 import json
 import logging
 import os
@@ -126,6 +128,67 @@ def _nonexecuted_tool_fact(*, tool_name: str, tool_call_id: str) -> dict[str, An
     }
 
 
+def _canonical_tool_binding(
+    tool_name: Any,
+    raw_arguments: Any,
+) -> tuple[str, str]:
+    if isinstance(raw_arguments, Mapping):
+        arguments = dict(raw_arguments)
+    else:
+        parsed = json.loads(str(raw_arguments or "{}"))
+        if not isinstance(parsed, Mapping):
+            raise ValueError("Tool arguments must be a JSON object")
+        arguments = dict(parsed)
+    return (
+        str(tool_name or ""),
+        json.dumps(
+            arguments,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ),
+    )
+
+
+def _completed_tool_bindings(
+    messages: list[dict[str, Any]],
+) -> dict[str, tuple[str, str, Any]]:
+    """Project completed Tool IDs onto their exact request/result binding."""
+
+    pending: dict[str, tuple[str, str]] = {}
+    completed: dict[str, tuple[str, str, Any]] = {}
+    for message in messages:
+        if not isinstance(message, Mapping):
+            continue
+        role = str(message.get("role") or "")
+        if role == "assistant":
+            for call in message.get("tool_calls") or ():
+                if not isinstance(call, Mapping):
+                    continue
+                call_id = str(call.get("id") or "")
+                if not call_id or call_id in completed:
+                    continue
+                function = call.get("function") or {}
+                try:
+                    pending[call_id] = _canonical_tool_binding(
+                        function.get("name"),
+                        function.get("arguments", "{}"),
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+        elif role == "tool":
+            call_id = str(message.get("tool_call_id") or "")
+            binding = pending.get(call_id)
+            if call_id and binding is not None and call_id not in completed:
+                completed[call_id] = (
+                    binding[0],
+                    binding[1],
+                    copy.deepcopy(message.get("content")),
+                )
+    return completed
+
+
 def _effect_recovery_summary(
     facts: list[dict[str, Any]],
     *,
@@ -158,6 +221,18 @@ class ProviderContextCapacityPreflightError(RuntimeError):
     """The declared model capacity cannot hold the next text request."""
 
     hashi_error_code = "CONTEXT_CAPACITY_REJECTED"
+
+
+class _ProviderCallBudgetExhausted(RuntimeError):
+    """A fallback continuation reached its physical Provider-call limit."""
+
+    hashi_error_code = "PROVIDER_CALL_BUDGET_EXHAUSTED"
+
+
+class ProviderToolReplayError(RuntimeError):
+    """A completed or concurrent Tool call ID could not be reused safely."""
+
+    hashi_error_code = "PROVIDER_TOOL_REPLAY_BLOCKED"
 
 
 class _ProviderStreamInactivityTimeout(httpx.ReadTimeout):
@@ -1421,6 +1496,12 @@ def _backend_failure_response(
     elif explicit_code == "CONTEXT_CAPACITY_REJECTED":
         code = explicit_code
         description = "The prepared request exceeds the declared model context capacity."
+    elif explicit_code == "PROVIDER_CALL_BUDGET_EXHAUSTED":
+        code = explicit_code
+        description = "The authorised fallback Provider-call budget was exhausted."
+    elif explicit_code == "PROVIDER_TOOL_REPLAY_BLOCKED":
+        code = explicit_code
+        description = "A repeated Tool call could not be matched to its completed result."
     elif isinstance(error, MultimodalContractError):
         code = error.code
         description = str(error)
@@ -1760,6 +1841,8 @@ class OpenRouterAdapter(BaseBackend):
         # One resolved HERV3 fallback port; absent means fallback is not wired
         # for this request and no fallback metadata is produced.
         self._provider_fallback_port: Any = None
+        self._tool_replay_lock = threading.RLock()
+        self._inflight_tool_bindings: dict[str, tuple[str, str]] = {}
 
     async def _protect_outbound_payload(
         self,
@@ -1807,6 +1890,8 @@ class OpenRouterAdapter(BaseBackend):
         request_id: str,
         *,
         on_stream_event: StreamCallback = None,
+        provider_call_limit: int | None = None,
+        before_provider_call: Callable[[], Any] | None = None,
     ) -> BackendResponse:
         """Continue one already assembled provider conversation on this target.
 
@@ -1823,6 +1908,8 @@ class OpenRouterAdapter(BaseBackend):
             continuation_messages=[
                 dict(item) if isinstance(item, Mapping) else item for item in messages
             ],
+            provider_call_limit=provider_call_limit,
+            before_provider_call=before_provider_call,
         )
 
     def _new_her_v2_stream_inactivity_guard(
@@ -2784,6 +2871,7 @@ class OpenRouterAdapter(BaseBackend):
     ) -> tuple[dict[str, Any], ...]:
         """Execute all tool_calls and append tool result messages to `messages`."""
         effect_facts: list[dict[str, Any]] = []
+        completed_bindings = _completed_tool_bindings(messages)
         for tc in tool_calls:
             fn = tc.get("function", {})
             tool_name = fn.get("name", "unknown")
@@ -2835,6 +2923,36 @@ class OpenRouterAdapter(BaseBackend):
                     "tool_call_id": tc_id,
                     "content": result_text,
                 })
+                continue
+
+            binding = _canonical_tool_binding(tool_name, arguments)
+            completed = completed_bindings.get(str(tc_id or ""))
+            if completed is not None:
+                if binding != completed[:2]:
+                    raise ProviderToolReplayError(
+                        "completed Tool call ID was repeated with different "
+                        "name or arguments"
+                    )
+                effect_facts.append(
+                    _nonexecuted_tool_fact(
+                        tool_name=tool_name,
+                        tool_call_id=tc_id,
+                    )
+                )
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc_id,
+                        "content": copy.deepcopy(completed[2]),
+                    }
+                )
+                await self._emit(
+                    on_stream_event,
+                    KIND_TOOL_END,
+                    f"{tool_name}: reused completed result",
+                    tool_name=tool_name,
+                    metadata={**correlation, "reused_completed_result": True},
+                )
                 continue
 
             event_metadata: dict[str, Any] = {}
@@ -2932,25 +3050,42 @@ class OpenRouterAdapter(BaseBackend):
                 })
                 continue
 
-            # Execute
+            # Execute only after atomically claiming this Tool ID.
+            claim_id = str(tc_id or "")
+            if claim_id:
+                with self._tool_replay_lock:
+                    inflight = self._inflight_tool_bindings.get(claim_id)
+                    if inflight is not None:
+                        raise ProviderToolReplayError(
+                            "Tool call ID is already executing"
+                            if inflight == binding
+                            else "Tool call ID is already bound to another request"
+                        )
+                    self._inflight_tool_bindings[claim_id] = binding
             try:
-                result = await self.tool_registry.execute(
-                    tool_name, arguments, tool_call_id=tc_id
-                )
-            except asyncio.CancelledError as exc:
-                details = dict(getattr(exc, "hashi_tool_details", {}) or {})
-                await self._emit(
-                    on_stream_event,
-                    KIND_TOOL_END,
-                    f"{tool_name}: cancelled after cleanup",
-                    tool_name=tool_name,
-                    metadata={
-                        **correlation,
-                        "is_error": True,
-                        "tool_result_details": details,
-                    },
-                )
-                raise
+                try:
+                    result = await self.tool_registry.execute(
+                        tool_name, arguments, tool_call_id=tc_id
+                    )
+                except asyncio.CancelledError as exc:
+                    details = dict(getattr(exc, "hashi_tool_details", {}) or {})
+                    await self._emit(
+                        on_stream_event,
+                        KIND_TOOL_END,
+                        f"{tool_name}: cancelled after cleanup",
+                        tool_name=tool_name,
+                        metadata={
+                            **correlation,
+                            "is_error": True,
+                            "tool_result_details": details,
+                        },
+                    )
+                    raise
+            finally:
+                if claim_id:
+                    with self._tool_replay_lock:
+                        if self._inflight_tool_bindings.get(claim_id) == binding:
+                            self._inflight_tool_bindings.pop(claim_id, None)
 
             output_preview = result.output[:100].replace("\n", " ")
             effect_facts.append(
@@ -2973,6 +3108,12 @@ class OpenRouterAdapter(BaseBackend):
                 "tool_call_id": tc_id,
                 "content": result.output,
             })
+            if claim_id:
+                completed_bindings[claim_id] = (
+                    binding[0],
+                    binding[1],
+                    copy.deepcopy(result.output),
+                )
         return tuple(effect_facts)
 
     def _evaluate_tool_policy(self, tool_name: str, arguments: dict):
@@ -3523,6 +3664,8 @@ class OpenRouterAdapter(BaseBackend):
         on_stream_event: StreamCallback = None,
         request_content: Mapping[str, Any] | None = None,
         continuation_messages: list[dict[str, Any]] | None = None,
+        provider_call_limit: int | None = None,
+        before_provider_call: Callable[[], Any] | None = None,
     ) -> BackendResponse:
         started = time.perf_counter()
         self._ensure_client()
@@ -3532,6 +3675,8 @@ class OpenRouterAdapter(BaseBackend):
 
         audio_output = None
         use_streaming = on_stream_event is not None
+        if provider_call_limit is not None and int(provider_call_limit) <= 0:
+            raise _ProviderCallBudgetExhausted("Provider-call budget is exhausted")
 
         headers = self._request_headers()
 
@@ -3673,6 +3818,17 @@ class OpenRouterAdapter(BaseBackend):
                         if on_stream_event is not None
                         else None
                     )
+                    if (
+                        provider_call_limit is not None
+                        and provider_attempt_serial >= int(provider_call_limit)
+                    ):
+                        raise _ProviderCallBudgetExhausted(
+                            "Provider-call budget is exhausted"
+                        )
+                    if callable(before_provider_call):
+                        debit = before_provider_call()
+                        if inspect.isawaitable(debit):
+                            await debit
                     provider_attempt_serial += 1
                     provider_call_started = time.perf_counter()
                     provider_call_started_at = _utc_timestamp()
@@ -3820,6 +3976,11 @@ class OpenRouterAdapter(BaseBackend):
                             provider_call_count=provider_call_count,
                             tool_call_count=total_tool_calls,
                         )
+                        if (
+                            provider_call_limit is not None
+                            and provider_attempt_serial >= int(provider_call_limit)
+                        ):
+                            can_media_fallback = False
                         retry_limit = min(
                             INVALID_TOOL_CALL_REPAIR_LIMIT,
                             max(0, int(self.TRANSIENT_PROVIDER_CALL_RETRIES)),
@@ -3844,6 +4005,10 @@ class OpenRouterAdapter(BaseBackend):
                         can_transport_retry = bool(
                             not can_media_fallback
                             and recovery_attempts_used < retry_limit
+                            and (
+                                provider_call_limit is None
+                                or provider_attempt_serial < int(provider_call_limit)
+                            )
                             and (
                                 stream_inactivity_continuation
                                 or _transient_provider_call_error(exc)
@@ -4216,6 +4381,13 @@ class OpenRouterAdapter(BaseBackend):
                     terminal_decision = dict(decision)
                     break
 
+                if (
+                    provider_call_limit is not None
+                    and provider_attempt_serial >= int(provider_call_limit)
+                ):
+                    raise _ProviderCallBudgetExhausted(
+                        "Fallback target requested a Tool after its call budget ended"
+                    )
                 tool_loop_count += 1
                 total_tool_calls += len(result.tool_calls)
                 self.logger.debug(
@@ -4536,14 +4708,7 @@ class OpenRouterAdapter(BaseBackend):
         total_tool_calls: int,
         tool_loop_count: int,
     ) -> BackendResponse | None:
-        """Evaluate the user fallback policy after same-target recovery failed.
-
-        Fallback runs only after the existing bounded same-target recovery
-        decision was exhausted.  A cross-Provider continuation reuses the
-        exact assembled messages and completed Tool results and executes no
-        Tool again; this method never grants the target a hidden fresh chain
-        of retries: exactly one additional paid call is consumed.
-        """
+        """Run the ordered, consented fallback chain within one paid-call budget."""
 
         port = self._provider_fallback_port
         evaluate = getattr(port, "evaluate_provider_fallback", None)
@@ -4556,18 +4721,18 @@ class OpenRouterAdapter(BaseBackend):
             tool_call_count=total_tool_calls,
             tool_loop_count=tool_loop_count,
         )
+        source_provider = str(getattr(self.config, "engine", "") or "")
+        source_model = str(getattr(self.config, "model", "") or "")
         primary_failure = {
-            "provider": str(getattr(self.config, "engine", "") or ""),
-            "model": str(getattr(self.config, "model", "") or ""),
+            "provider": source_provider,
+            "model": source_model,
             "code": str(primary.error_code or type(exc).__name__),
             "description": str(primary.error or exc),
         }
-        # Fallback is reserved for recoverable failures (429, retryable 5xx,
-        # and the typed stream-inactivity timeout).  A permanent failure
-        # (400, auth, configuration, contract) never consults the user policy
-        # and never spends an additional paid call; the public report records
-        # the first concrete reason instead.
-        from orchestrator.model_fallback_policy import REASON_INELIGIBLE_FAILURE
+        from orchestrator.model_fallback_policy import (
+            REASON_INELIGIBLE_FAILURE,
+            REASON_NO_ALLOWED_TARGET,
+        )
 
         if not (
             _transient_provider_call_error(exc)
@@ -4581,130 +4746,262 @@ class OpenRouterAdapter(BaseBackend):
                     "disposition": "blocked",
                     "reason": REASON_INELIGIBLE_FAILURE,
                     "target": "",
-                    "source": (
-                        f"{primary_failure['provider']}/{primary_failure['model']}"
-                    ),
+                    "source": f"{source_provider}/{source_model}",
                     "mode": "",
                     "additional_calls": 0,
                     "additional_calls_limit": 0,
                     "additional_calls_used": 0,
                     "primary_failure": dict(primary_failure),
+                    "attempts": [],
                 },
             )
             return None
-        try:
-            decision = evaluate(
-                source_provider=str(getattr(self.config, "engine", "") or ""),
-                source_model=str(getattr(self.config, "model", "") or ""),
-                tool_activity=bool(
-                    int(effect_recovery.get("executed_tool_count") or 0) > 0
-                ),
-                checkpoint_safe=bool(
-                    effect_recovery.get("safe_current_call_continuation")
-                ),
-                visible_partial_answer=False,
-                primary_failure=dict(primary_failure),
-            )
-        except Exception as evaluation_error:
-            decision = {
-                "allowed": False,
-                "disposition": "unavailable",
-                "reason": "incompatible_capability",
-                "target_label": "",
-                "evaluation_error": type(evaluation_error).__name__,
+
+        attempted_routes: set[str] = set()
+        attempts: list[dict[str, Any]] = []
+        accumulated_target_calls: list[dict[str, Any]] = []
+        accumulated_transport_retries = 0
+        accumulated_local_recoveries = 0
+        accumulated_local_limit = INVALID_TOOL_CALL_REPAIR_LIMIT
+        physical_fallback_calls = 0
+        last_response: BackendResponse | None = None
+        last_metadata: dict[str, Any] = {}
+        current_failure = dict(primary_failure)
+        record: dict[str, Any] | None = None
+
+        while True:
+            try:
+                decision = evaluate(
+                    source_provider=source_provider,
+                    source_model=source_model,
+                    tool_activity=bool(
+                        int(effect_recovery.get("executed_tool_count") or 0) > 0
+                    ),
+                    checkpoint_safe=bool(
+                        effect_recovery.get("safe_current_call_continuation")
+                    ),
+                    visible_partial_answer=False,
+                    primary_failure=dict(current_failure),
+                )
+                if inspect.isawaitable(decision):
+                    decision = await decision
+            except Exception as evaluation_error:
+                decision = {
+                    "allowed": False,
+                    "disposition": "unavailable",
+                    "reason": "incompatible_capability",
+                    "target_label": "",
+                    "evaluation_error": type(evaluation_error).__name__,
+                }
+            if not isinstance(decision, Mapping):
+                break
+            target_label = str(decision.get("target_label") or "")
+            route_key = str(decision.get("route_key") or "")
+            if record is None:
+                record = {
+                    "attempted": False,
+                    "disposition": str(
+                        decision.get("disposition") or "blocked"
+                    ),
+                    "reason": decision.get("reason"),
+                    "target": target_label,
+                    "source": f"{source_provider}/{source_model}",
+                    "mode": str(decision.get("mode") or ""),
+                    "additional_calls": 0,
+                    "additional_calls_limit": int(
+                        decision.get("additional_calls_limit") or 0
+                    ),
+                    "additional_calls_used": int(
+                        decision.get("additional_calls_used") or 0
+                    ),
+                    "primary_failure": dict(primary_failure),
+                }
+            else:
+                record["reason"] = decision.get("reason")
+                record["target"] = target_label or record.get("target", "")
+                record["additional_calls_limit"] = int(
+                    decision.get("additional_calls_limit")
+                    or record.get("additional_calls_limit")
+                    or 0
+                )
+                record["additional_calls_used"] = max(
+                    int(record.get("additional_calls_used") or 0),
+                    int(decision.get("additional_calls_used") or 0),
+                )
+            if not decision.get("allowed"):
+                if attempts:
+                    record["disposition"] = "attempted-failed"
+                else:
+                    record["disposition"] = str(
+                        decision.get("disposition") or "blocked"
+                    )
+                break
+            route_identity = route_key or target_label
+            if not route_identity or route_identity in attempted_routes:
+                record["reason"] = REASON_NO_ALLOWED_TARGET
+                record["disposition"] = (
+                    "attempted-failed" if attempts else "unavailable"
+                )
+                break
+            attempted_routes.add(route_identity)
+            record["attempted"] = True
+            record["target"] = target_label
+            record["mode"] = str(decision.get("mode") or record.get("mode") or "")
+            attempt_record: dict[str, Any] = {
+                "route_key": route_key,
+                "target": target_label,
+                "disposition": "attempted-failed",
             }
-        if not isinstance(decision, Mapping):
-            return None
-        record: dict[str, Any] = {
-            "attempted": False,
-            "disposition": str(decision.get("disposition") or "blocked"),
-            "reason": decision.get("reason"),
-            "target": str(decision.get("target_label") or ""),
-            "source": f"{primary_failure['provider']}/{primary_failure['model']}",
-            "mode": str(decision.get("mode") or ""),
-            "additional_calls": 0,
-            "additional_calls_limit": int(decision.get("additional_calls_limit") or 0),
-            "additional_calls_used": int(decision.get("additional_calls_used") or 0),
-            "primary_failure": dict(primary_failure),
-        }
-        if not decision.get("allowed"):
-            setattr(exc, "hashi_provider_fallback", record)
-            return None
-        record["attempted"] = True
-        record["disposition"] = "attempted-failed"
-        try:
-            target_response = await continue_on_target(
-                str(decision.get("target_label") or ""),
-                messages=[
-                    dict(item) if isinstance(item, Mapping) else item
-                    for item in messages
-                ],
-                request_id=str(request_id or ""),
-                on_stream_event=on_stream_event,
-                source_backend=self,
+            try:
+                target_response = await continue_on_target(
+                    target_label,
+                    messages=[
+                        dict(item) if isinstance(item, Mapping) else item
+                        for item in messages
+                    ],
+                    request_id=str(request_id or ""),
+                    on_stream_event=on_stream_event,
+                    source_backend=self,
+                    route_key=route_key,
+                    additional_calls_limit=int(
+                        decision.get("additional_calls_limit") or 0
+                    ),
+                )
+            except Exception as fallback_error:
+                attempt_record["error"] = type(fallback_error).__name__
+                attempts.append(attempt_record)
+                record["fallback_error"] = type(fallback_error).__name__
+                record["additional_calls"] = physical_fallback_calls
+                current_failure = {
+                    "provider": target_label,
+                    "model": "",
+                    "code": type(fallback_error).__name__,
+                    "description": str(fallback_error),
+                }
+                continue
+            if not isinstance(target_response, BackendResponse):
+                attempt_record["error"] = "untyped_target_response"
+                attempts.append(attempt_record)
+                record["fallback_error"] = "untyped_target_response"
+                record["additional_calls"] = physical_fallback_calls
+                current_failure = {
+                    "provider": target_label,
+                    "model": "",
+                    "code": "untyped_target_response",
+                    "description": "fallback target returned an untyped response",
+                }
+                continue
+
+            target_metadata = (
+                dict(target_response.stream_metadata)
+                if isinstance(target_response.stream_metadata, Mapping)
+                else {}
             )
-        except Exception as fallback_error:
-            record["fallback_error"] = type(fallback_error).__name__
-            record["additional_calls"] = 1
-            setattr(exc, "hashi_provider_fallback", record)
-            return None
-        if not isinstance(target_response, BackendResponse):
-            record["fallback_error"] = "untyped_target_response"
-            setattr(exc, "hashi_provider_fallback", record)
-            return None
-        record["additional_calls"] = 1
-        if target_response.is_success:
-            record["disposition"] = "attempted-success"
-        else:
+            target_calls = list(
+                (target_metadata.get("meter") or {}).get("provider_calls") or []
+            )
+            physical_fallback_calls += len(target_calls)
+            accumulated_target_calls.extend(target_calls)
+            accumulated_transport_retries += int(
+                target_metadata.get("provider_transport_retry_count") or 0
+            )
+            accumulated_local_recoveries += int(
+                target_metadata.get("provider_local_recovery_count") or 0
+            )
+            accumulated_local_limit = max(
+                accumulated_local_limit,
+                int(target_metadata.get("provider_local_recovery_limit") or 0),
+            )
+            last_response = target_response
+            last_metadata = target_metadata
+            attempt_record["error_code"] = target_response.error_code
+            if target_response.is_success:
+                attempt_record["disposition"] = "attempted-success"
+            else:
+                attempt_record["error"] = str(target_response.error or "")
+            attempts.append(attempt_record)
+            record["additional_calls"] = physical_fallback_calls
+            record["additional_calls_used"] = max(
+                int(record.get("additional_calls_used") or 0),
+                min(
+                    int(
+                        record.get("additional_calls_limit")
+                        or physical_fallback_calls
+                    ),
+                    physical_fallback_calls,
+                ),
+            )
+            if target_response.is_success:
+                record["disposition"] = "attempted-success"
+                record["reason"] = None
+                record.pop("fallback_error", None)
+                break
             record["disposition"] = "attempted-failed"
             record["fallback_error"] = str(target_response.error or "")
-        target_metadata = (
-            dict(target_response.stream_metadata)
-            if isinstance(target_response.stream_metadata, Mapping)
-            else {}
+            current_failure = {
+                "provider": target_label,
+                "model": "",
+                "code": str(
+                    target_response.error_code or "PROVIDER_UNKNOWN"
+                ),
+                "description": str(target_response.error or ""),
+            }
+            if target_response.error_retryable is not True:
+                break
+
+        if record is None:
+            return None
+        record["attempts"] = attempts
+        record["all_fallback_attempts_failed"] = bool(
+            attempts and (last_response is None or not last_response.is_success)
         )
-        target_calls = list(
-            (target_metadata.get("meter") or {}).get("provider_calls") or []
-        )
+        if last_response is None:
+            setattr(exc, "hashi_provider_fallback", record)
+            return None
         merged_metadata: dict[str, Any] = {
-            **target_metadata,
+            **last_metadata,
             "provider_fallback": record,
-            "meter": {"provider_calls": [*provider_calls, *target_calls]},
+            "meter": {
+                "provider_calls": [
+                    *provider_calls,
+                    *accumulated_target_calls,
+                ]
+            },
             "provider_transport_retry_count": (
                 provider_transport_retry_count
-                + int(target_metadata.get("provider_transport_retry_count") or 0)
+                + accumulated_transport_retries
             ),
             "provider_local_recovery_count": (
                 total_local_recovery_requests
-                + int(target_metadata.get("provider_local_recovery_count") or 0)
+                + accumulated_local_recoveries
             ),
-            "provider_local_recovery_limit": max(
-                INVALID_TOOL_CALL_REPAIR_LIMIT,
-                int(target_metadata.get("provider_local_recovery_limit") or 0),
-            ),
+            "provider_local_recovery_limit": accumulated_local_limit,
         }
         return BackendResponse(
-            text=target_response.text,
-            duration_ms=target_response.duration_ms,
-            error=target_response.error,
-            is_success=target_response.is_success,
-            stop_reason=target_response.stop_reason,
-            usage=target_response.usage,
-            cost_usd=target_response.cost_usd,
+            text=last_response.text,
+            duration_ms=last_response.duration_ms,
+            error=last_response.error,
+            is_success=last_response.is_success,
+            stop_reason=last_response.stop_reason,
+            usage=last_response.usage,
+            cost_usd=last_response.cost_usd,
             tool_call_count=int(total_tool_calls)
-            + int(target_response.tool_call_count or 0),
+            + int(last_response.tool_call_count or 0),
             tool_loop_count=int(tool_loop_count)
-            + int(target_response.tool_loop_count or 0),
+            + int(last_response.tool_loop_count or 0),
             stream_metadata=merged_metadata,
-            structured_data=target_response.structured_data,
-            error_code=target_response.error_code,
-            error_retryable=(False if not target_response.is_success else None),
-            http_status=target_response.http_status,
-            provider_request_id=target_response.provider_request_id,
-            retry_after_s=target_response.retry_after_s,
-            side_effects_possible=bool(target_response.side_effects_possible),
-            content=target_response.content,
+            structured_data=last_response.structured_data,
+            error_code=last_response.error_code,
+            error_retryable=(
+                None if last_response.is_success else False
+            ),
+            http_status=last_response.http_status,
+            provider_request_id=last_response.provider_request_id,
+            retry_after_s=last_response.retry_after_s,
+            side_effects_possible=bool(last_response.side_effects_possible),
+            content=last_response.content,
         )
+
     async def shutdown(self):
         if self.client is not None and not getattr(self.client, "is_closed", False):
             await self.client.aclose()

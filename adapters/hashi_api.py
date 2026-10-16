@@ -943,6 +943,8 @@ class HashiApiAdapter(OpenRouterAdapter):
         on_stream_event: StreamCallback = None,
         request_content: Mapping[str, Any] | None = None,
         continuation_messages: list[dict[str, Any]] | None = None,
+        provider_call_limit: int | None = None,
+        before_provider_call: Any = None,
     ) -> BackendResponse:
         if continuation_messages is not None:
             # The gateway keeps its own session/continuation contract; an

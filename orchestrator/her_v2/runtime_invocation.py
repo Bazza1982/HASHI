@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import inspect
 import json
 import re
 import time
@@ -173,7 +174,7 @@ def _used_typed_media_fallback(value: Any) -> bool:
 
 
 class RuntimeInvocationMixin:
-    def _resolve_stage_fallback(
+    async def _resolve_stage_fallback(
         self,
         *,
         request: StageRequest,
@@ -195,12 +196,15 @@ class RuntimeInvocationMixin:
             and int(snapshot.get("text_event_count") or 0) > 0
         )
         try:
-            return resolve(
+            decision = resolve(
                 request=request,
                 selected=selected,
                 tool_started=bool(getattr(provider_activity, "tool_started", False)),
                 visible_partial_answer=visible_partial,
             )
+            if inspect.isawaitable(decision):
+                decision = await decision
+            return decision
         except Exception:
             return None
 
@@ -398,6 +402,7 @@ class RuntimeInvocationMixin:
         fallback_level = 0
         media_fallback_consumed = False
         attempt = 0
+        turn_local_recovery_total = 0
         while True:
             attempt += 1
             if state.control.stopped:
@@ -818,6 +823,10 @@ class RuntimeInvocationMixin:
                     human_description="The provider stage failed unexpectedly.",
                 )
             assert isinstance(last_error, StageInvocationError)
+            turn_local_recovery_total += max(
+                0,
+                int(last_error.details.get("provider_local_recovery_count") or 0),
+            )
             unobserved_side_effects = bool(
                 last_error.side_effects_possible and not provider_activity.tool_started
             )
@@ -843,7 +852,7 @@ class RuntimeInvocationMixin:
             elif not fallback_failure_eligible(last_error):
                 retry_reason = "fallback_failure_ineligible"
             else:
-                fallback_decision = self._resolve_stage_fallback(
+                fallback_decision = await self._resolve_stage_fallback(
                     request=request,
                     selected=selected,
                     provider_activity=provider_activity,
@@ -974,6 +983,10 @@ class RuntimeInvocationMixin:
                         side_effects_possible=possible_side_effects,
                         details={
                             "retry_reason": retry_reason,
+                            "provider_turn_recovery_total": (
+                                max(0, attempt - 1)
+                                + turn_local_recovery_total
+                            ),
                             "recovery_decision": recovery_decision,
                             "foreground_cleanup": cleanup or None,
                         },
@@ -983,6 +996,10 @@ class RuntimeInvocationMixin:
                     attempts=attempt,
                     details={
                         "retry_reason": retry_reason,
+                        "provider_turn_recovery_total": (
+                            max(0, attempt - 1)
+                            + turn_local_recovery_total
+                        ),
                         **(
                             {"fallback_decision": fallback_decision}
                             if fallback_decision

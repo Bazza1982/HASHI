@@ -411,6 +411,12 @@ evidence only; adoption and live verification have not happened.
   same-model Provider continuation; the HER stage layer consumes it for the
   pre-effect HERV3/Codex CLI switch.  See
   [model fallback policy](HASHI_MODEL_FALLBACK_POLICY.md).
+- Each fallback target is capped at one physical Provider request.  Completed
+  Tool IDs reuse their durable result binding and changed/concurrent repeats
+  fail closed.  The target inherits the source request's privacy, Tool,
+  invocation, reasoning, parameter, and stream-inactivity contract.  ASK
+  confirmation, both source directions, route ordering, revision-safe saves,
+  and configured finite cost estimates are wired through the same policy.
 - Terminal public failure reporting separates same-target retries, the
   interaction recovery used/limit, the Turn-wide cumulative count, and the
   fallback disposition, and says "already retried, but still failed" in the

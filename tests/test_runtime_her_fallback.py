@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
+
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -216,6 +219,11 @@ async def test_fallback_budget_and_unknown_cost_callbacks(tmp_path):
     )
     saved, _document = _read(runtime)
     assert saved.allow_unknown_cost is True
+    await callback_fallback(
+        runtime, _update(_query("fallback:cost:25")), SimpleNamespace()
+    )
+    saved, _document = _read(runtime)
+    assert saved.max_extra_cost_usd == 0.25
 
 
 @pytest.mark.asyncio
@@ -228,7 +236,7 @@ async def test_fallback_add_and_remove_exact_same_model_target(tmp_path):
         button
         for row in keyboard.inline_keyboard
         for button in row
-        if button.callback_data.startswith("fallback:add:model:")
+        if button.callback_data.startswith("fallback:add:model:herv3:")
     ]
     assert len(add_buttons) == 1
     query2 = _query(add_buttons[0].callback_data)
@@ -284,7 +292,8 @@ async def test_fallback_save_conflict_keeps_the_previous_policy(
     await callback_fallback(runtime, _update(query), SimpleNamespace())
     saved, _document = _read(runtime)
     assert saved.mode == policy_owner.MODE_OFF
-    assert query.edit_message_text.await_count == 0
+    assert query.edit_message_text.await_count == 1
+    assert "OFF" in query.edit_message_text.await_args.args[0]
     assert query.answer.await_args.kwargs.get("show_alert") is True
 
 
@@ -307,3 +316,116 @@ async def test_fallback_source_and_privacy_callbacks_stay_independent(tmp_path):
     )
     saved, _document = _read(runtime)
     assert saved.privacy_narrowing.get("provider_trust", {}).get("blocked") is True
+
+
+def test_fallback_submenus_expose_independent_directions_and_short_callbacks(
+    tmp_path,
+):
+    runtime = _runtime(tmp_path)
+    markups = (
+        fallback_menu._sources_keyboard(runtime),
+        fallback_menu._budget_keyboard(runtime),
+        fallback_menu._targets_keyboard(runtime),
+    )
+    payloads = [
+        button.callback_data
+        for markup in markups
+        for row in markup.inline_keyboard
+        for button in row
+        if button.callback_data
+    ]
+    assert {
+        "fallback:sourcekind:herv3:herv3",
+        "fallback:sourcekind:herv3:codex",
+        "fallback:sourcekind:codex-cli:herv3",
+        "fallback:sourcekind:codex-cli:codex",
+    }.issubset(set(payloads))
+    assert all(len(payload.encode("utf-8")) <= 64 for payload in payloads)
+    assert all(payload.isascii() for payload in payloads)
+
+
+@pytest.mark.asyncio
+async def test_fallback_codex_source_target_and_route_order_persist(tmp_path):
+    runtime = _runtime(tmp_path)
+    query = _query("fallback:targets")
+    await callback_fallback(runtime, _update(query), SimpleNamespace())
+    keyboard = query.edit_message_text.await_args.kwargs["reply_markup"]
+    codex_source_buttons = [
+        button
+        for row in keyboard.inline_keyboard
+        for button in row
+        if button.callback_data.startswith("fallback:add:model:codex-cli:")
+    ]
+    assert codex_source_buttons
+
+    added_codex = _query(codex_source_buttons[0].callback_data)
+    await callback_fallback(runtime, _update(added_codex), SimpleNamespace())
+    keyboard = added_codex.edit_message_text.await_args.kwargs["reply_markup"]
+    herv3_source_button = next(
+        button
+        for row in keyboard.inline_keyboard
+        for button in row
+        if button.callback_data.startswith("fallback:add:model:herv3:")
+    )
+    added_herv3 = _query(herv3_source_button.callback_data)
+    await callback_fallback(runtime, _update(added_herv3), SimpleNamespace())
+
+    saved, _document = _read(runtime)
+    assert [route.source for route in saved.routes] == [
+        policy_owner.SOURCE_CODEX_CLI,
+        policy_owner.SOURCE_HERV3,
+    ]
+    assert saved.routes[0].same_model is False
+    keyboard = added_herv3.edit_message_text.await_args.kwargs["reply_markup"]
+    move_up = next(
+        button
+        for row in keyboard.inline_keyboard
+        for button in row
+        if button.callback_data.startswith("fallback:move:1:up:")
+    )
+    await callback_fallback(
+        runtime, _update(_query(move_up.callback_data)), SimpleNamespace()
+    )
+    saved, _document = _read(runtime)
+    assert [route.source for route in saved.routes] == [
+        policy_owner.SOURCE_HERV3,
+        policy_owner.SOURCE_CODEX_CLI,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_fallback_ask_confirmation_is_bound_and_one_time(
+    tmp_path, monkeypatch
+):
+    from orchestrator import runtime_delivery
+
+    runtime = _runtime(tmp_path)
+    runtime.current_request_meta = {"request_id": "req-ask", "chat_id": 42}
+    send = AsyncMock(return_value=(0.0, ["sent"]))
+    monkeypatch.setattr(runtime_delivery, "send_long_message", send)
+    confirmation = policy_owner.FallbackConfirmation(
+        action_id="ask-once",
+        request_id="req-ask",
+        route_key="herv3|codex_cli|codex-cli|",
+        privacy_level=1,
+        budget_used_at_issue=0,
+        issued_at=time.time(),
+        expires_at=time.time() + 5.0,
+    )
+    waiter = asyncio.create_task(
+        fallback_menu.request_fallback_confirmation(
+            runtime,
+            confirmation,
+            target_label="Codex CLI",
+            request_id="req-ask",
+        )
+    )
+    await asyncio.sleep(0)
+    query = _query("fallback:confirm:ask-once:allow")
+    await callback_fallback(runtime, _update(query), SimpleNamespace())
+    assert await waiter == confirmation
+    assert send.await_args.kwargs["reply_markup"] is not None
+
+    stale = _query("fallback:confirm:ask-once:allow")
+    await callback_fallback(runtime, _update(stale), SimpleNamespace())
+    assert stale.answer.await_args.kwargs.get("show_alert") is True

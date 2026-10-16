@@ -8,11 +8,12 @@ import hashlib
 import inspect
 import json
 import logging
+import math
 import re
 import ssl
 import threading
 from contextlib import suppress
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -367,6 +368,10 @@ def _backend_response_error(
         "provider_local_recovery_count",
         "provider_local_recovery_limit",
         "provider_local_recovery_exhausted",
+        "provider_transport_retry_count",
+        "provider_tool_repair_count",
+        "provider_turn_recovery_total",
+        "provider_fallback",
         "provider_stream_inactivity",
         "transport_audit_path",
         "gateway_continuation",
@@ -2360,6 +2365,91 @@ def _fallback_actor(runtime: Any) -> str:
     return str(actor or "default")
 
 
+@dataclass(frozen=True)
+class Herv3ProviderContinuationContract:
+    """Typed request state that must survive a same-model Provider handover."""
+
+    privacy_level: int
+    tool_registry: Any
+    provider_call_observer: Any
+    invocation_context: Mapping[str, Any]
+    reasoning_enabled: bool | None
+    request_parameters: Mapping[str, Any]
+    stream_inactivity_timeout_s: float | None
+    herv3_privacy_scope: bool
+
+    @classmethod
+    def from_backend(
+        cls,
+        backend: Any,
+        *,
+        fallback_privacy_level: int,
+    ) -> "Herv3ProviderContinuationContract":
+        extra = dict(getattr(getattr(backend, "config", None), "extra", {}) or {})
+        parameter_names = (
+            "provider_reasoning",
+            "reasoning_effort",
+            "temperature",
+            "top_p",
+            "max_tokens",
+            "max_output_tokens",
+            "response_format",
+        )
+        return cls(
+            privacy_level=int(
+                getattr(backend, "privacy_level", fallback_privacy_level)
+            ),
+            tool_registry=getattr(backend, "tool_registry", None),
+            provider_call_observer=getattr(
+                backend, "_provider_call_observer", None
+            ),
+            invocation_context=dict(
+                getattr(backend, "_provider_invocation_context", {}) or {}
+            ),
+            reasoning_enabled=getattr(backend, "reasoning_enabled", None),
+            request_parameters={
+                name: copy.deepcopy(extra[name])
+                for name in parameter_names
+                if name in extra
+            },
+            stream_inactivity_timeout_s=getattr(
+                backend, "_her_v2_stream_inactivity_timeout_s", None
+            ),
+            herv3_privacy_scope=bool(
+                getattr(backend, "_herv3_privacy_scope", False)
+            ),
+        )
+
+    def apply(self, backend: Any) -> None:
+        backend.privacy_level = self.privacy_level
+        if self.tool_registry is not None and hasattr(backend, "tool_registry"):
+            backend.tool_registry = self.tool_registry
+        observer_setter = getattr(backend, "set_provider_call_observer", None)
+        if self.provider_call_observer is not None and callable(observer_setter):
+            observer_setter(self.provider_call_observer)
+        context_setter = getattr(backend, "set_provider_invocation_context", None)
+        if callable(context_setter):
+            context_setter(dict(self.invocation_context))
+        elif hasattr(backend, "_provider_invocation_context"):
+            backend._provider_invocation_context = dict(self.invocation_context)
+        reasoning_setter = getattr(backend, "set_reasoning_enabled", None)
+        if self.reasoning_enabled is not None and callable(reasoning_setter):
+            reasoning_setter(self.reasoning_enabled)
+        config = getattr(backend, "config", None)
+        if config is not None:
+            config.extra = {
+                **dict(getattr(config, "extra", {}) or {}),
+                **copy.deepcopy(dict(self.request_parameters)),
+            }
+        timeout_setter = getattr(
+            backend, "set_her_v2_stream_inactivity_timeout", None
+        )
+        if callable(timeout_setter):
+            timeout_setter(self.stream_inactivity_timeout_s)
+        if hasattr(backend, "_herv3_privacy_scope"):
+            backend._herv3_privacy_scope = self.herv3_privacy_scope
+
+
 class _Herv3ProviderFallbackPort:
     """Consume one resolved user-consented fallback decision for HERV3.
 
@@ -2423,7 +2513,12 @@ class _Herv3ProviderFallbackPort:
             "system",
         }
 
-    def _route_facts(self, policy: Any) -> dict[str, Any]:
+    def _route_facts(
+        self,
+        policy: Any,
+        *,
+        tool_activity: bool,
+    ) -> dict[str, Any]:
         from orchestrator import model_fallback_policy as policy_owner
         from orchestrator.flexible_backend_registry import canonical_backend_engine
 
@@ -2436,6 +2531,26 @@ class _Herv3ProviderFallbackPort:
             canonical_backend_engine(str(item.get("engine") or "")): item
             for item in options
         }
+        required_modalities = {"text"}
+        manifest = getattr(self.request, "attachment_manifest", ()) or ()
+        if not manifest:
+            try:
+                manifest = attachment_manifest(
+                    getattr(self.request, "request_content", None)
+                )
+            except Exception:
+                manifest = ()
+        for item in manifest:
+            if not isinstance(item, Mapping):
+                continue
+            modality = str(item.get("modality") or "").strip().casefold()
+            if modality:
+                required_modalities.add(modality)
+        needs_tools = bool(
+            tool_activity or getattr(self.request, "allow_tools", False)
+        )
+        reasoning = str(getattr(self.profile, "reasoning", "") or "").casefold()
+        needs_reasoning = reasoning not in {"", "none", "off", "false"}
         facts: dict[str, Any] = {}
         for route in policy.routes:
             if route.target_kind == policy_owner.TARGET_KIND_CODEX_CLI:
@@ -2443,9 +2558,8 @@ class _Herv3ProviderFallbackPort:
                 credential_ready = bool(
                     option is not None and option.get("available") is not False
                 )
-                # The stage layer may switch to Codex CLI only before any
-                # effect; the adapter continuation cannot carry messages into
-                # a CLI engine.
+                # A Codex CLI switch is a clean pre-effect stage selection.
+                # Cross-Provider message continuation stays HERV3-only.
                 capability_ok = bool(
                     credential_ready and self.purpose == "stage"
                 )
@@ -2464,7 +2578,119 @@ class _Herv3ProviderFallbackPort:
                 option is not None and option.get("available") is not False
             )
             models = [str(item) for item in (option or {}).get("models") or []]
-            capability_ok = bool(credential_ready and route.model in models)
+            model_ready = bool(credential_ready and route.model in models)
+            capability_ok = False
+            if model_ready:
+                try:
+                    backend = self.provider._create_provider_backend(
+                        route.provider,
+                        target_model=route.model,
+                    )
+                    capabilities = getattr(backend, "capabilities", None)
+                    input_modalities = {
+                        str(item).strip().casefold()
+                        for item in getattr(
+                            capabilities,
+                            "input_modalities",
+                            frozenset({"text"}),
+                        )
+                    }
+                    output_modalities = {
+                        str(item).strip().casefold()
+                        for item in getattr(
+                            capabilities,
+                            "output_modalities",
+                            frozenset({"text"}),
+                        )
+                    }
+                    tool_request_mode = str(
+                        getattr(capabilities, "tool_request_mode", "none")
+                        or "none"
+                    ).casefold()
+                    reasoning_transport = str(
+                        getattr(capabilities, "reasoning_transport", "absent")
+                        or "absent"
+                    ).casefold()
+                    continuation_mode = str(
+                        getattr(capabilities, "continuation_mode", "none")
+                        or "none"
+                    ).casefold()
+                    continuation = getattr(backend, "continue_generation", None)
+                    continuation_parameters = (
+                        inspect.signature(continuation).parameters
+                        if callable(continuation)
+                        else {}
+                    )
+                    continuation_accepts_call_limit = bool(
+                        "provider_call_limit" in continuation_parameters
+                        or any(
+                            parameter.kind is inspect.Parameter.VAR_KEYWORD
+                            for parameter in continuation_parameters.values()
+                        )
+                    )
+                    generation = getattr(backend, "generate_response", None)
+                    generation_parameters = (
+                        inspect.signature(generation).parameters
+                        if callable(generation)
+                        else {}
+                    )
+                    generation_accepts_call_limit = bool(
+                        "provider_call_limit" in generation_parameters
+                        or any(
+                            parameter.kind is inspect.Parameter.VAR_KEYWORD
+                            for parameter in generation_parameters.values()
+                        )
+                    )
+                    tools_ok = bool(
+                        not needs_tools
+                        or (
+                            getattr(capabilities, "supports_tool_use", False)
+                            and (
+                                getattr(capabilities, "function_calling", False)
+                                or tool_request_mode not in {"", "none", "absent"}
+                            )
+                        )
+                    )
+                    reasoning_ok = bool(
+                        not needs_reasoning
+                        or reasoning_transport not in {"", "none", "absent"}
+                    )
+                    continuation_ok = bool(
+                        (
+                            self.purpose == "stage"
+                            and route.provider != "hashi-api"
+                            and generation_accepts_call_limit
+                        )
+                        or (
+                            route.provider != "hashi-api"
+                            and callable(continuation)
+                            and continuation_accepts_call_limit
+                            and continuation_mode
+                            not in {"", "none", "absent", "unsupported"}
+                        )
+                    )
+                    capability_ok = bool(
+                        required_modalities.issubset(input_modalities)
+                        and "text" in output_modalities
+                        and tools_ok
+                        and reasoning_ok
+                        and continuation_ok
+                    )
+                except Exception:
+                    capability_ok = False
+            raw_cost = (option or {}).get("estimated_fallback_call_cost_usd")
+            try:
+                known_cost = (
+                    None
+                    if raw_cost is None or isinstance(raw_cost, bool)
+                    else float(raw_cost)
+                )
+                if known_cost is not None and (
+                    not math.isfinite(known_cost) or known_cost < 0
+                ):
+                    known_cost = None
+            except (TypeError, ValueError):
+                known_cost = None
             facts[route.key()] = policy_owner.FallbackRouteFacts(
                 credential_ready=credential_ready,
                 capability_ok=capability_ok,
@@ -2473,6 +2699,7 @@ class _Herv3ProviderFallbackPort:
                     if not credential_ready
                     else policy_owner.REASON_INCOMPATIBLE_CAPABILITY
                 ),
+                known_extra_cost_usd=known_cost,
             )
         return facts
 
@@ -2488,16 +2715,26 @@ class _Herv3ProviderFallbackPort:
         visible_partial_answer: bool,
     ) -> Any:
         from orchestrator import model_fallback_policy as policy_owner
+        from orchestrator.privacy_levels import PrivacyLevel
 
         key = self.provider._fallback_budget_key(self.request)
+        raw_privacy = getattr(
+            self.provider.backend_manager,
+            "privacy_level",
+            int(PrivacyLevel.PROVIDER_TRUST),
+        )
+        try:
+            privacy_level = int(PrivacyLevel(int(raw_privacy)))
+        except (TypeError, ValueError):
+            # Preserve the invalid state so the policy resolver can block it;
+            # silently substituting a valid level could widen its narrowing.
+            privacy_level = -1
         return policy_owner.FallbackRequestFacts(
             source=source,
             source_provider=source_provider,
             source_model=source_model,
             modality=self._modality(),
-            privacy_level=int(
-                getattr(self.provider.backend_manager, "privacy_level", 1) or 1
-            ),
+            privacy_level=privacy_level,
             tool_activity=bool(tool_activity),
             visible_partial_answer=bool(visible_partial_answer),
             checkpoint_safe=bool(checkpoint_safe),
@@ -2505,7 +2742,17 @@ class _Herv3ProviderFallbackPort:
             known_extra_cost_usd=None,
             interactive=self._interactive(),
             request_id=key,
-            route_facts=self._route_facts(policy),
+            route_facts=self._route_facts(
+                policy,
+                tool_activity=bool(tool_activity),
+            ),
+            excluded_route_keys=(
+                self.provider._fallback_routes_used(key)
+                if callable(
+                    getattr(self.provider, "_fallback_routes_used", None)
+                )
+                else frozenset()
+            ),
         )
 
     @staticmethod
@@ -2517,7 +2764,7 @@ class _Herv3ProviderFallbackPort:
             return "codex-cli"
         return f"{route.provider}/{route.model}"
 
-    def evaluate_provider_fallback(
+    async def evaluate_provider_fallback(
         self,
         *,
         source_provider: str,
@@ -2543,6 +2790,23 @@ class _Herv3ProviderFallbackPort:
             visible_partial_answer=visible_partial_answer,
         )
         decision = policy_owner.resolve_fallback_decision(policy, facts)
+        if (
+            decision.disposition == policy_owner.DISPOSITION_ASK_REQUIRED
+            and decision.confirmation is not None
+        ):
+            from orchestrator.runtime_her_fallback import (
+                request_fallback_confirmation,
+            )
+
+            confirmation = await request_fallback_confirmation(
+                runtime,
+                decision.confirmation,
+                target_label=self._target_label(decision),
+                request_id=facts.request_id,
+            )
+            if confirmation is not None:
+                facts = replace(facts, confirmation=confirmation)
+                decision = policy_owner.resolve_fallback_decision(policy, facts)
         return {
             "allowed": bool(decision.allowed),
             "disposition": decision.disposition,
@@ -2572,46 +2836,44 @@ class _Herv3ProviderFallbackPort:
         model = model.strip()
         if not engine or not model:
             raise ValueError("fallback target label must be engine/model")
-        backend = self.provider._create_provider_backend(engine, target_model=model)
+        budget_key = self.provider._fallback_budget_key(self.request)
+        route_key = str(kwargs.get("route_key") or "")
+        mark_route = getattr(self.provider, "_mark_fallback_route", None)
+        if route_key and callable(mark_route):
+            mark_route(budget_key, route_key)
+        backend = self.provider._create_provider_backend(
+            engine, target_model=model
+        )
         self.provider._track_active_backend(backend)
         try:
-            try:
-                backend.privacy_level = self.provider.backend_manager.privacy_level
-            except Exception:
-                pass
-            source_registry = getattr(source_backend, "tool_registry", None)
-            if source_registry is not None and hasattr(backend, "tool_registry"):
-                backend.tool_registry = source_registry
-            observer = getattr(source_backend, "_provider_call_observer", None)
-            observer_setter = getattr(backend, "set_provider_call_observer", None)
-            if observer is not None and callable(observer_setter):
-                observer_setter(observer)
-            invocation_context = getattr(
-                source_backend, "_provider_invocation_context", None
+            contract = Herv3ProviderContinuationContract.from_backend(
+                source_backend,
+                fallback_privacy_level=int(
+                    getattr(self.provider.backend_manager, "privacy_level", 1)
+                ),
             )
-            if isinstance(invocation_context, Mapping) and hasattr(
-                backend, "_provider_invocation_context"
-            ):
-                backend._provider_invocation_context = dict(invocation_context)
-            reasoning_enabled = getattr(source_backend, "reasoning_enabled", None)
-            reasoning_setter = getattr(backend, "set_reasoning_enabled", None)
-            if reasoning_enabled is not None and callable(reasoning_setter):
-                reasoning_setter(reasoning_enabled)
+            contract.apply(backend)
             if not await backend.initialize():
                 raise StageInvocationError(
                     "fallback target backend failed to initialize",
                     retryable=False,
                     code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
                 )
-            # Consume one explicit additional-call budget entry before the
-            # paid call; a duplicate callback cannot create another call.
-            self.provider._consume_fallback_budget(
-                self.provider._fallback_budget_key(self.request)
-            )
+            total_limit = int(kwargs.get("additional_calls_limit") or 0)
+
+            def debit_physical_call() -> None:
+                self.provider._consume_fallback_budget(
+                    budget_key,
+                    limit=total_limit,
+                    route_key=route_key,
+                )
+
             return await backend.continue_generation(
                 messages,
                 request_id,
                 on_stream_event=on_stream_event,
+                provider_call_limit=1,
+                before_provider_call=debit_physical_call,
             )
         finally:
             self.provider._untrack_active_backend(backend)
@@ -2694,6 +2956,7 @@ class HashiStageProvider(StageProvider):
         # One explicit additional-paid-call budget per request key; the
         # authoritative policy still owns the configured limit.
         self._provider_fallback_calls: dict[str, int] = {}
+        self._provider_fallback_routes: dict[str, set[str]] = {}
 
     def _create_provider_backend(self, engine: str, *, target_model: str):
         if int(getattr(self.backend_manager, "privacy_level", 1)) == 2:
@@ -2739,15 +3002,47 @@ class HashiStageProvider(StageProvider):
         with self._active_backend_lock:
             return int(self._provider_fallback_calls.get(str(key), 0))
 
-    def _consume_fallback_budget(self, key: str) -> int:
+    def _consume_fallback_budget(
+        self,
+        key: str,
+        *,
+        limit: int | None = None,
+        route_key: str = "",
+    ) -> int:
         with self._active_backend_lock:
-            value = int(self._provider_fallback_calls.get(str(key), 0)) + 1
+            current = int(self._provider_fallback_calls.get(str(key), 0))
+            if limit is not None and current >= max(0, int(limit)):
+                raise StageInvocationError(
+                    "fallback Provider-call budget is exhausted",
+                    retryable=False,
+                    code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+                )
+            value = current + 1
             self._provider_fallback_calls[str(key)] = value
+            if route_key:
+                self._provider_fallback_routes.setdefault(str(key), set()).add(
+                    str(route_key)
+                )
             while len(self._provider_fallback_calls) > 256:
                 self._provider_fallback_calls.pop(
                     next(iter(self._provider_fallback_calls))
                 )
             return value
+
+    def _fallback_routes_used(self, key: str) -> frozenset[str]:
+        with self._active_backend_lock:
+            return frozenset(self._provider_fallback_routes.get(str(key), set()))
+
+    def _mark_fallback_route(self, key: str, route_key: str) -> None:
+        if not route_key:
+            return
+        with self._active_backend_lock:
+            routes = self._provider_fallback_routes.setdefault(str(key), set())
+            routes.add(str(route_key))
+            while len(self._provider_fallback_routes) > 256:
+                self._provider_fallback_routes.pop(
+                    next(iter(self._provider_fallback_routes))
+                )
 
     def _bind_provider_fallback_port(
         self,
@@ -2764,7 +3059,7 @@ class HashiStageProvider(StageProvider):
             )
         )
 
-    def resolve_stage_provider_fallback(
+    async def resolve_stage_provider_fallback(
         self,
         *,
         request: StageRequest,
@@ -2806,6 +3101,23 @@ class HashiStageProvider(StageProvider):
             visible_partial_answer=bool(visible_partial_answer),
         )
         decision = policy_owner.resolve_fallback_decision(policy, facts)
+        if (
+            decision.disposition == policy_owner.DISPOSITION_ASK_REQUIRED
+            and decision.confirmation is not None
+        ):
+            from orchestrator.runtime_her_fallback import (
+                request_fallback_confirmation,
+            )
+
+            confirmation = await request_fallback_confirmation(
+                runtime,
+                decision.confirmation,
+                target_label=port._target_label(decision),
+                request_id=facts.request_id,
+            )
+            if confirmation is not None:
+                facts = replace(facts, confirmation=confirmation)
+                decision = policy_owner.resolve_fallback_decision(policy, facts)
         result = {
             "allowed": bool(decision.allowed),
             "disposition": decision.disposition,
@@ -2826,7 +3138,11 @@ class HashiStageProvider(StageProvider):
         if decision.allowed:
             # Consume the explicit budget entry before the paid switch.
             self._consume_fallback_budget(
-                self._fallback_budget_key(request)
+                self._fallback_budget_key(request),
+                limit=int(decision.additional_calls_limit),
+                route_key=(
+                    decision.route.key() if decision.route is not None else ""
+                ),
             )
         return result
 
@@ -4827,8 +5143,32 @@ class HashiStageProvider(StageProvider):
                 "silent": self.silent,
                 "on_stream_event": _capture,
             }
+            parameters = inspect.signature(backend.generate_response).parameters
+            accepts_extra_keywords = any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters.values()
+            )
+            if int(request.fallback_level or 0) > 0:
+                if (
+                    "provider_call_limit" in parameters
+                    or accepts_extra_keywords
+                ):
+                    # A selected fallback route owns exactly one physical
+                    # Provider request. The runtime may select another
+                    # authorised route later, but this target cannot open a
+                    # hidden retry chain outside the user's total budget.
+                    generation_kwargs["provider_call_limit"] = 1
+                elif str(profile.engine or "").strip().casefold() not in {
+                    "codex",
+                    "codex-cli",
+                    "codex-app-server",
+                }:
+                    raise StageInvocationError(
+                        "fallback target cannot enforce the Provider-call budget",
+                        retryable=False,
+                        code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
+                    )
             if provider_request_content is not None:
-                parameters = inspect.signature(backend.generate_response).parameters
                 if "request_content" not in parameters and not any(
                     parameter.kind is inspect.Parameter.VAR_KEYWORD
                     for parameter in parameters.values()

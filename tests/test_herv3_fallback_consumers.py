@@ -8,25 +8,27 @@ invoked adapter and its provider-call records -- never by a copied flag.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
+from adapters.base import BackendResponse
 from adapters.deepseek_api import DeepSeekAdapter
 from adapters.her_v2_provider import (
     _EvidenceRecordingToolRegistry,
     _Herv3ProviderFallbackPort,
+    HashiStageProvider,
+    Herv3ProviderContinuationContract,
 )
 from adapters.openrouter_api import _APIResult
 from orchestrator import model_fallback_policy as policy_owner
+from adapters.openrouter_api import ProviderToolReplayError
 from orchestrator.her_v2.audit import DurableAuditLog
 from orchestrator.her_v2.models import Effort, Stage, StageRequest
 from orchestrator.model_fallback_policy import (
-    MODE_ASK,
     MODE_AUTO,
-    SOURCE_CODEX_CLI,
     TARGET_KIND_CODEX_CLI,
     TARGET_KIND_HERV3_MODEL,
     FallbackPolicy,
@@ -255,6 +257,449 @@ async def test_herv3_fallback_blocked_reports_the_first_reason(monkeypatch, tmp_
     assert record["additional_calls"] == 0
 
 
+class _ChainedPort:
+    def __init__(self):
+        self.evaluations = []
+        self.targets = []
+
+    def evaluate_provider_fallback(self, **kwargs):
+        self.evaluations.append(kwargs)
+        index = len(self.evaluations) - 1
+        decisions = (
+            {
+                "allowed": True,
+                "disposition": "ready",
+                "reason": None,
+                "target_label": "openrouter-api/first-model",
+                "route_key": "herv3|herv3_model|openrouter-api|first-model",
+                "mode": "auto",
+                "additional_calls_limit": 2,
+                "additional_calls_used": 0,
+            },
+            {
+                "allowed": True,
+                "disposition": "ready",
+                "reason": None,
+                "target_label": "xai-api/second-model",
+                "route_key": "herv3|herv3_model|xai-api|second-model",
+                "mode": "auto",
+                "additional_calls_limit": 2,
+                "additional_calls_used": 1,
+            },
+        )
+        if index < len(decisions):
+            return decisions[index]
+        return {
+            "allowed": False,
+            "disposition": "unavailable",
+            "reason": "no_allowed_target",
+            "target_label": "",
+            "mode": "auto",
+            "additional_calls_limit": 2,
+            "additional_calls_used": 2,
+        }
+
+    async def continue_on_target(self, target_label, **kwargs):
+        del kwargs
+        self.targets.append(target_label)
+        if len(self.targets) == 1:
+            return BackendResponse(
+                text="",
+                duration_ms=5.0,
+                error="first target failed",
+                is_success=False,
+                error_code="PROVIDER_SERVER_ERROR",
+                error_retryable=True,
+                stream_metadata={
+                    "meter": {
+                        "provider_calls": [
+                            {"provider": "openrouter-api", "model": "first-model"}
+                        ]
+                    }
+                },
+            )
+        return BackendResponse(
+            text="second target worked",
+            duration_ms=7.0,
+            is_success=True,
+            stream_metadata={
+                "meter": {
+                    "provider_calls": [
+                        {"provider": "xai-api", "model": "second-model"}
+                    ]
+                }
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_fallback_chain_uses_next_ordered_route_once(tmp_path):
+    adapter = _adapter(tmp_path)
+    port = _ChainedPort()
+    adapter.set_provider_fallback_port(port)
+    response = await adapter._attempt_provider_fallback(
+        policy_owner_stream_timeout(),
+        messages=[{"role": "user", "content": "continue"}],
+        request_id="req-chain",
+        on_stream_event=None,
+        effect_recovery={
+            "executed_tool_count": 0,
+            "safe_current_call_continuation": True,
+        },
+        provider_calls=[{"provider": "deepseek-api", "model": "source"}],
+        provider_transport_retry_count=0,
+        total_local_recovery_requests=0,
+        total_tool_calls=0,
+        tool_loop_count=0,
+    )
+
+    assert response is not None and response.is_success is True
+    assert response.text == "second target worked"
+    assert port.targets == [
+        "openrouter-api/first-model",
+        "xai-api/second-model",
+    ]
+    record = response.stream_metadata["provider_fallback"]
+    assert record["additional_calls"] == 2
+    assert [item["disposition"] for item in record["attempts"]] == [
+        "attempted-failed",
+        "attempted-success",
+    ]
+    assert len(response.stream_metadata["meter"]["provider_calls"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_pre_call_fallback_failure_does_not_report_a_paid_call(tmp_path):
+    class PreCallFailurePort:
+        def __init__(self):
+            self.evaluations = 0
+
+        def evaluate_provider_fallback(self, **kwargs):
+            del kwargs
+            self.evaluations += 1
+            if self.evaluations == 1:
+                return {
+                    "allowed": True,
+                    "disposition": "ready",
+                    "reason": None,
+                    "target_label": "openrouter-api/target-model",
+                    "route_key": "herv3|herv3_model|openrouter-api|target-model",
+                    "mode": "auto",
+                    "additional_calls_limit": 1,
+                    "additional_calls_used": 0,
+                }
+            return {
+                "allowed": False,
+                "disposition": "unavailable",
+                "reason": "no_allowed_target",
+                "target_label": "",
+                "mode": "auto",
+                "additional_calls_limit": 1,
+                "additional_calls_used": 0,
+            }
+
+        async def continue_on_target(self, target_label, **kwargs):
+            del target_label, kwargs
+            raise RuntimeError("target initialization failed before request")
+
+    adapter = _adapter(tmp_path)
+    adapter.set_provider_fallback_port(PreCallFailurePort())
+    failure = policy_owner_stream_timeout()
+
+    response = await adapter._attempt_provider_fallback(
+        failure,
+        messages=[{"role": "user", "content": "continue"}],
+        request_id="req-pre-call-failure",
+        on_stream_event=None,
+        effect_recovery={
+            "executed_tool_count": 0,
+            "safe_current_call_continuation": True,
+        },
+        provider_calls=[],
+        provider_transport_retry_count=0,
+        total_local_recovery_requests=0,
+        total_tool_calls=0,
+        tool_loop_count=0,
+    )
+
+    assert response is None
+    record = failure.hashi_provider_fallback
+    assert record["attempted"] is True
+    assert record["additional_calls"] == 0
+    assert len(record["attempts"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_real_fallback_target_cannot_open_hidden_retry_chain(
+    monkeypatch, tmp_path
+):
+    target = _adapter(
+        tmp_path,
+        model="deepseek/deepseek-v4-flash",
+        engine="openrouter-api",
+    )
+    target.TRANSIENT_PROVIDER_CALL_RETRIES = 3
+    target.TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S = 0
+    physical_calls = []
+
+    async def initialize():
+        return True
+
+    async def shutdown():
+        return None
+
+    async def fail_stream(payload, headers, on_stream_event):
+        physical_calls.append(payload)
+        raise httpx.ConnectError(
+            "target unavailable",
+            request=httpx.Request("POST", "https://fallback.invalid/v1/chat"),
+        )
+
+    monkeypatch.setattr(target, "initialize", initialize)
+    monkeypatch.setattr(target, "shutdown", shutdown)
+    monkeypatch.setattr(target, "_stream_api_once", fail_stream)
+
+    class Manager:
+        privacy_level = int(PrivacyLevel.PROVIDER_TRUST)
+
+        def create_ephemeral_backend(self, engine, target_model=None):
+            assert engine == "openrouter-api"
+            assert target_model == "deepseek/deepseek-v4-flash"
+            return target
+
+    provider = HashiStageProvider(backend_manager=Manager())
+    request = _request("req-paid-cap")
+    port = _Herv3ProviderFallbackPort(
+        provider,
+        request,
+        SimpleNamespace(reasoning=None),
+        purpose="continuation",
+    )
+
+    async def capture(_event):
+        return None
+
+    response = await port.continue_on_target(
+        "openrouter-api/deepseek/deepseek-v4-flash",
+        messages=[{"role": "user", "content": "continue"}],
+        request_id="req-paid-cap",
+        on_stream_event=capture,
+        source_backend=_adapter(tmp_path),
+        route_key=HERV3_ROUTE.key(),
+        additional_calls_limit=1,
+    )
+
+    assert response.is_success is False
+    assert len(physical_calls) == 1
+    assert provider._fallback_budget_used("req-paid-cap") == 1
+    assert len(response.stream_metadata["meter"]["provider_calls"]) == 1
+
+
+def test_herv3_failure_report_says_retry_already_failed():
+    from adapters.her_v2_provider import _backend_response_error
+    from orchestrator import runtime_delivery, runtime_pipeline
+
+    wrapped = _backend_response_error(
+        BackendResponse(
+            text="",
+            duration_ms=10.0,
+            error="provider still unavailable",
+            is_success=False,
+            error_code="PROVIDER_SERVER_ERROR",
+            error_retryable=False,
+            stream_metadata={
+                "provider_transport_retry_count": 1,
+                "provider_local_recovery_count": 1,
+                "provider_local_recovery_limit": 1,
+                "provider_turn_recovery_total": 2,
+            },
+        ),
+        fallback="provider failed",
+    )
+    assert wrapped.details["provider_transport_retry_count"] == 1
+    final = BackendResponse(
+        text="",
+        duration_ms=10.0,
+        error=str(wrapped),
+        is_success=False,
+        error_code="PROVIDER_SERVER_ERROR",
+        stream_metadata={
+            "her_v2": {
+                "failure_chain": {
+                    "primary_failure": {"details": dict(wrapped.details)}
+                }
+            }
+        },
+    )
+    fields = runtime_pipeline.backend_failure_fields(final)
+    report = runtime_delivery.build_public_failure(
+        "her-v3",
+        str(wrapped),
+        locale="zh-CN",
+        error_context=fields,
+    )
+    assert "已重试 1 次，仍然失败。" in report["text"]
+    assert "整轮累计恢复动作：2 次。" in report["text"]
+
+
+def test_continuation_contract_preserves_request_semantics():
+    observer = object()
+    registry = object()
+    source = SimpleNamespace(
+        privacy_level=0,
+        tool_registry=registry,
+        _provider_call_observer=observer,
+        _provider_invocation_context={"request": {"id": "req-contract"}},
+        reasoning_enabled=False,
+        config=SimpleNamespace(
+            extra={
+                "reasoning_effort": "high",
+                "temperature": 0.2,
+                "max_output_tokens": 2048,
+            }
+        ),
+        _her_v2_stream_inactivity_timeout_s=17.0,
+        _herv3_privacy_scope=True,
+    )
+    applied = {}
+    target = SimpleNamespace(
+        privacy_level=2,
+        tool_registry=None,
+        config=SimpleNamespace(extra={"target_only": True}),
+        _herv3_privacy_scope=False,
+        set_provider_call_observer=lambda value: applied.update(observer=value),
+        set_provider_invocation_context=lambda value: applied.update(context=value),
+        set_reasoning_enabled=lambda value: applied.update(reasoning=value),
+        set_her_v2_stream_inactivity_timeout=lambda value: applied.update(
+            timeout=value
+        ),
+    )
+
+    contract = Herv3ProviderContinuationContract.from_backend(
+        source,
+        fallback_privacy_level=1,
+    )
+    contract.apply(target)
+
+    assert target.privacy_level == 0
+    assert target.tool_registry is registry
+    assert applied == {
+        "observer": observer,
+        "context": {"request": {"id": "req-contract"}},
+        "reasoning": False,
+        "timeout": 17.0,
+    }
+    assert target.config.extra == {
+        "target_only": True,
+        "reasoning_effort": "high",
+        "temperature": 0.2,
+        "max_output_tokens": 2048,
+    }
+    assert target._herv3_privacy_scope is True
+
+
+def _tool_call(call_id="tool-1", *, path="one.txt"):
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {
+            "name": "file_write",
+            "arguments": json.dumps({"path": path, "content": "once"}),
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_completed_tool_id_reuses_result_and_mutation_is_blocked(
+    monkeypatch, tmp_path
+):
+    adapter = _adapter(tmp_path)
+    calls = []
+
+    async def execute(tool_name, arguments, tool_call_id=""):
+        calls.append((tool_name, arguments, tool_call_id))
+        return ToolResult(tool_call_id=tool_call_id, output="unexpected")
+
+    adapter.tool_registry = SimpleNamespace(execute=execute)
+    original = _tool_call()
+    completed_messages = [
+        {"role": "assistant", "tool_calls": [original]},
+        {"role": "tool", "tool_call_id": "tool-1", "content": "saved"},
+    ]
+    await adapter._run_tool_calls(
+        [_tool_call()],
+        completed_messages,
+        None,
+    )
+    assert calls == []
+    assert completed_messages[-1] == {
+        "role": "tool",
+        "tool_call_id": "tool-1",
+        "content": "saved",
+    }
+
+    with pytest.raises(ProviderToolReplayError):
+        await adapter._run_tool_calls(
+            [_tool_call(path="changed.txt")],
+            [
+                {"role": "assistant", "tool_calls": [original]},
+                {"role": "tool", "tool_call_id": "tool-1", "content": "saved"},
+            ],
+            None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_duplicate_tool_id_is_atomic_within_and_across_batches(
+    monkeypatch, tmp_path
+):
+    adapter = _adapter(tmp_path)
+    monkeypatch.setattr(
+        adapter,
+        "_evaluate_tool_policy",
+        lambda *args, **kwargs: SimpleNamespace(allowed=True),
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def execute(tool_name, arguments, tool_call_id=""):
+        calls.append((tool_name, arguments, tool_call_id))
+        started.set()
+        await release.wait()
+        return ToolResult(tool_call_id=tool_call_id, output="saved")
+
+    adapter.tool_registry = SimpleNamespace(execute=execute)
+    first_messages = []
+    first = asyncio.create_task(
+        adapter._run_tool_calls([_tool_call("atomic")], first_messages, None)
+    )
+    await started.wait()
+    with pytest.raises(ProviderToolReplayError):
+        await adapter._run_tool_calls(
+            [_tool_call("atomic")],
+            [],
+            None,
+        )
+    release.set()
+    await first
+    assert len(calls) == 1
+
+    calls.clear()
+    release.set()
+    same_batch_messages = []
+    await adapter._run_tool_calls(
+        [_tool_call("delayed"), _tool_call("delayed")],
+        same_batch_messages,
+        None,
+    )
+    assert len(calls) == 1
+    assert [item["tool_call_id"] for item in same_batch_messages] == [
+        "delayed",
+        "delayed",
+    ]
+
+
 class _StubManager:
     def __init__(self, options):
         self.privacy_level = int(PrivacyLevel.PROVIDER_TRUST)
@@ -276,29 +721,44 @@ class _StubBridge:
     def _fallback_budget_used(self, key):
         return int(self.budget.get(key, 0))
 
-    def _consume_fallback_budget(self, key):
+    def _consume_fallback_budget(self, key, *, limit=None, route_key=""):
         self.budget[key] = int(self.budget.get(key, 0)) + 1
         return self.budget[key]
 
 
+    def _create_provider_backend(self, engine, *, target_model):
+        return SimpleNamespace(
+            capabilities=SimpleNamespace(
+                supports_tool_use=True,
+                function_calling=True,
+                tool_request_mode="native",
+                continuation_mode="reconstructed",
+                reasoning_transport="visible_optional",
+                input_modalities=frozenset({"text"}),
+                output_modalities=frozenset({"text"}),
+            ),
+            continue_generation=lambda *args, **kwargs: None,
+
+        )
 def _runtime(tmp_path):
     return SimpleNamespace(
         global_config=SimpleNamespace(bridge_home=tmp_path),
     )
 
 
-def _model_options(*, openrouter=True, codex=True):
+def _model_options(*, openrouter=True, codex=True, known_cost=None):
     options = []
     if openrouter:
-        options.append(
-            {
-                "name": "openrouter",
-                "engine": "openrouter-api",
-                "label": "openrouter",
-                "available": True,
-                "models": ["deepseek/deepseek-v4-flash"],
-            }
-        )
+        option = {
+            "name": "openrouter",
+            "engine": "openrouter-api",
+            "label": "openrouter",
+            "available": True,
+            "models": ["deepseek/deepseek-v4-flash"],
+        }
+        if known_cost is not None:
+            option["estimated_fallback_call_cost_usd"] = known_cost
+        options.append(option)
     if codex:
         options.append(
             {
@@ -318,7 +778,127 @@ def _save_policy(tmp_path, actor, policy):
     write_policy(runtime, actor, policy, document=document)
 
 
-def test_bridge_port_consumes_the_real_policy_and_defaults_off(
+@pytest.mark.parametrize("level", list(PrivacyLevel))
+def test_fallback_facts_preserve_every_privacy_level(tmp_path, level):
+    manager = _StubManager([])
+    manager.privacy_level = int(level)
+    request = _request("req-privacy")
+    profile = SimpleNamespace(
+        engine="deepseek-api",
+        model="deepseek-v4-flash",
+        reasoning=None,
+    )
+    port = _Herv3ProviderFallbackPort(
+        _StubBridge(_runtime(tmp_path), manager),
+        request,
+        profile,
+        purpose="continuation",
+    )
+    facts = port._facts(
+        policy=FallbackPolicy(),
+        source=policy_owner.SOURCE_HERV3,
+        source_provider=profile.engine,
+        source_model=profile.model,
+        tool_activity=False,
+        checkpoint_safe=True,
+        visible_partial_answer=False,
+    )
+    assert facts.privacy_level == int(level)
+
+
+@pytest.mark.asyncio
+async def test_bridge_port_blocks_an_invalid_privacy_value(tmp_path, monkeypatch):
+    from adapters import her_v2_provider as bridge_module
+
+    monkeypatch.setattr(bridge_module, "_fallback_actor", lambda runtime: "tester")
+    _save_policy(
+        tmp_path,
+        "tester",
+        FallbackPolicy(
+            mode=MODE_AUTO,
+            routes=(HERV3_ROUTE,),
+            max_additional_calls=1,
+            allow_unknown_cost=True,
+        ),
+    )
+    manager = _StubManager(_model_options())
+    manager.privacy_level = 99
+    profile = SimpleNamespace(
+        engine="deepseek-api",
+        model="deepseek-v4-flash",
+        reasoning=None,
+    )
+    port = _Herv3ProviderFallbackPort(
+        _StubBridge(_runtime(tmp_path), manager),
+        _request("req-invalid-privacy"),
+        profile,
+        purpose="continuation",
+    )
+
+    decision = await port.evaluate_provider_fallback(
+        source_provider=profile.engine,
+        source_model=profile.model,
+        tool_activity=False,
+        checkpoint_safe=True,
+        visible_partial_answer=False,
+        primary_failure={"code": "PROVIDER_SERVER_ERROR"},
+    )
+
+    assert decision["allowed"] is False
+    assert decision["reason"] == policy_owner.REASON_PRIVACY_BLOCKED
+
+
+@pytest.mark.asyncio
+async def test_route_facts_fail_closed_on_real_target_capability(tmp_path, monkeypatch):
+    manager = _StubManager(_model_options())
+    bridge = _StubBridge(_runtime(tmp_path), manager)
+    bridge._create_provider_backend = lambda *args, **kwargs: SimpleNamespace(
+        capabilities=SimpleNamespace(
+            supports_tool_use=False,
+            function_calling=False,
+            tool_request_mode="none",
+            continuation_mode="none",
+            reasoning_transport="absent",
+            input_modalities=frozenset({"text"}),
+            output_modalities=frozenset({"text"}),
+        )
+    )
+    request = _request("req-capability")
+    profile = SimpleNamespace(
+        engine="deepseek-api",
+        model="deepseek-v4-flash",
+        reasoning=None,
+    )
+    _save_policy(
+        tmp_path,
+        "tester",
+        FallbackPolicy(
+            mode=MODE_AUTO,
+            routes=(HERV3_ROUTE,),
+            max_additional_calls=1,
+            allow_unknown_cost=True,
+        ),
+    )
+    from adapters import her_v2_provider as bridge_module
+
+    monkeypatch.setattr(bridge_module, "_fallback_actor", lambda runtime: "tester")
+    port = _Herv3ProviderFallbackPort(
+        bridge, request, profile, purpose="continuation"
+    )
+    decision = await port.evaluate_provider_fallback(
+        source_provider=profile.engine,
+        source_model=profile.model,
+        tool_activity=False,
+        checkpoint_safe=True,
+        visible_partial_answer=False,
+        primary_failure={"code": "PROVIDER_SERVER_ERROR"},
+    )
+    assert decision["allowed"] is False
+    assert decision["reason"] == policy_owner.REASON_INCOMPATIBLE_CAPABILITY
+
+
+@pytest.mark.asyncio
+async def test_bridge_port_consumes_the_real_policy_and_defaults_off(
     tmp_path, monkeypatch
 ):
     from adapters import her_v2_provider as bridge_module
@@ -332,7 +912,7 @@ def test_bridge_port_consumes_the_real_policy_and_defaults_off(
     port = _Herv3ProviderFallbackPort(
         _StubBridge(_runtime(tmp_path), manager), request, profile, purpose="continuation"
     )
-    decision = port.evaluate_provider_fallback(
+    decision = await port.evaluate_provider_fallback(
         source_provider="deepseek-api",
         source_model="deepseek-v4-flash",
         tool_activity=True,
@@ -351,7 +931,7 @@ def test_bridge_port_consumes_the_real_policy_and_defaults_off(
         "tester",
         FallbackPolicy(mode=MODE_AUTO, routes=(HERV3_ROUTE,), max_additional_calls=1, allow_unknown_cost=True),
     )
-    decision = port.evaluate_provider_fallback(
+    decision = await port.evaluate_provider_fallback(
         source_provider="deepseek-api",
         source_model="deepseek-v4-flash",
         tool_activity=True,
@@ -370,7 +950,7 @@ def test_bridge_port_consumes_the_real_policy_and_defaults_off(
         profile,
         purpose="continuation",
     )
-    decision = locked.evaluate_provider_fallback(
+    decision = await locked.evaluate_provider_fallback(
         source_provider="deepseek-api",
         source_model="deepseek-v4-flash",
         tool_activity=True,
@@ -382,7 +962,55 @@ def test_bridge_port_consumes_the_real_policy_and_defaults_off(
     assert decision["reason"] == "missing_key_or_runtime"
 
 
-def test_bridge_stage_switch_is_pre_effect_and_budget_bounded(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_bridge_port_enforces_configured_route_cost_ceiling(
+    tmp_path, monkeypatch
+):
+    from adapters import her_v2_provider as bridge_module
+
+    monkeypatch.setattr(bridge_module, "_fallback_actor", lambda runtime: "tester")
+    _save_policy(
+        tmp_path,
+        "tester",
+        FallbackPolicy(
+            mode=MODE_AUTO,
+            routes=(HERV3_ROUTE,),
+            max_additional_calls=1,
+            max_extra_cost_usd=0.05,
+            allow_unknown_cost=True,
+        ),
+    )
+    request = _request("req-cost-ceiling")
+    profile = SimpleNamespace(
+        engine="deepseek-api",
+        model="deepseek-v4-flash",
+        reasoning=None,
+    )
+    port = _Herv3ProviderFallbackPort(
+        _StubBridge(
+            _runtime(tmp_path),
+            _StubManager(_model_options(known_cost=0.20)),
+        ),
+        request,
+        profile,
+        purpose="continuation",
+    )
+
+    decision = await port.evaluate_provider_fallback(
+        source_provider=profile.engine,
+        source_model=profile.model,
+        tool_activity=False,
+        checkpoint_safe=True,
+        visible_partial_answer=False,
+        primary_failure={"code": "PROVIDER_SERVER_ERROR"},
+    )
+
+    assert decision["allowed"] is False
+    assert decision["reason"] == policy_owner.REASON_BUDGET_EXHAUSTED
+
+
+@pytest.mark.asyncio
+async def test_bridge_stage_switch_is_pre_effect_and_budget_bounded(tmp_path, monkeypatch):
     from adapters import her_v2_provider as bridge_module
 
     monkeypatch.setattr(bridge_module, "_fallback_actor", lambda runtime: "tester")
@@ -406,7 +1034,7 @@ def test_bridge_stage_switch_is_pre_effect_and_budget_bounded(tmp_path, monkeypa
     profile = SimpleNamespace(engine="deepseek-api", model="deepseek-v4-flash")
     resolve = bridge_module.HashiStageProvider.resolve_stage_provider_fallback
 
-    result = resolve(
+    result = await resolve(
         bridge,
         request=request,
         selected=profile,
@@ -420,7 +1048,7 @@ def test_bridge_stage_switch_is_pre_effect_and_budget_bounded(tmp_path, monkeypa
     assert bridge.budget["req-stage"] == 1
 
     # A second switch cannot exceed the configured additional-call limit.
-    exhausted = resolve(
+    exhausted = await resolve(
         bridge,
         request=request,
         selected=profile,
@@ -432,7 +1060,7 @@ def test_bridge_stage_switch_is_pre_effect_and_budget_bounded(tmp_path, monkeypa
 
     # After any Tool execution the cross-engine switch is blocked.
     follow_up_request = _request("req-stage-2")
-    blocked = resolve(
+    blocked = await resolve(
         bridge,
         request=follow_up_request,
         selected=profile,
@@ -445,7 +1073,7 @@ def test_bridge_stage_switch_is_pre_effect_and_budget_bounded(tmp_path, monkeypa
     # Phone, call, and voice requests never reach target selection.
     phone_request = _request("req-stage-3")
     object.__setattr__(phone_request, "context", {"request_mode": "phone"})
-    excluded = resolve(
+    excluded = await resolve(
         bridge,
         request=phone_request,
         selected=profile,

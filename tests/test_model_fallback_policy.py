@@ -301,6 +301,17 @@ def test_every_current_privacy_policy_can_only_narrow(level):
     assert decision.blocking_reason == REASON_NO_ALLOWED_TARGET
 
 
+def test_invalid_privacy_policy_fails_closed():
+    decision = resolve_fallback_decision(
+        _auto_policy(HERV3_ROUTE),
+        _facts(HERV3_ROUTE, privacy_level=99),
+    )
+
+    assert decision.allowed is False
+    assert decision.blocking_reason == REASON_PRIVACY_BLOCKED
+    assert decision.additional_calls_limit == 0
+
+
 @pytest.mark.parametrize("modality", ["phone", "call", "voice"])
 def test_phone_call_and_voice_are_excluded_before_target_selection(modality):
     policy = _auto_policy(HERV3_ROUTE)
@@ -447,6 +458,28 @@ def test_unknown_cost_is_blocked_by_default_and_budget_stops_the_chain():
     assert over_ceiling.allowed is False
     assert over_ceiling.blocking_reason == REASON_BUDGET_EXHAUSTED
 
+    invalid_route_cost = resolve_fallback_decision(
+        policy,
+        _facts(
+            HERV3_ROUTE,
+            route_facts={
+                HERV3_ROUTE.key(): FallbackRouteFacts(
+                    credential_ready=True,
+                    capability_ok=True,
+                    known_extra_cost_usd=float("nan"),
+                )
+            },
+        ),
+    )
+    assert invalid_route_cost.allowed is False
+    assert invalid_route_cost.blocking_reason == REASON_UNKNOWN_COST
+
+
+@pytest.mark.parametrize("value", [False, float("nan"), float("inf"), -0.01])
+def test_invalid_cost_ceiling_is_rejected(value):
+    with pytest.raises(ValueError, match="max_extra_cost_usd"):
+        FallbackPolicy(max_extra_cost_usd=value)
+
 
 def test_ask_mode_binds_one_time_action_and_fails_closed_for_background():
     policy = _auto_policy(HERV3_ROUTE, mode=MODE_ASK)
@@ -586,3 +619,32 @@ def test_policy_defaults_off_and_never_stores_credentials():
     assert payload["mode"] == MODE_OFF
     serialized = json.dumps(payload)
     assert "key" not in serialized and "secret" not in serialized
+
+
+def test_excluded_route_is_never_reused_and_next_route_wins():
+    policy = _auto_policy(
+        HERV3_ROUTE,
+        SECOND_HERV3_ROUTE,
+        max_additional_calls=2,
+    )
+    decision = resolve_fallback_decision(
+        policy,
+        _facts(
+            HERV3_ROUTE,
+            excluded_route_keys=frozenset({HERV3_ROUTE.key()}),
+            route_facts={
+                HERV3_ROUTE.key(): FallbackRouteFacts(
+                    credential_ready=True,
+                    capability_ok=True,
+                    known_extra_cost_usd=0.01,
+                ),
+                SECOND_HERV3_ROUTE.key(): FallbackRouteFacts(
+                    credential_ready=True,
+                    capability_ok=True,
+                    known_extra_cost_usd=0.01,
+                ),
+            },
+        ),
+    )
+    assert decision.allowed is True
+    assert decision.route == SECOND_HERV3_ROUTE

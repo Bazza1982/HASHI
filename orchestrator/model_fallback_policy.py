@@ -28,6 +28,7 @@ Fallback differs from same-target recovery and whole-Turn replay:
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from dataclasses import dataclass, field, replace
@@ -260,6 +261,7 @@ class FallbackRouteFacts:
     credential_ready: bool = False
     capability_ok: bool = False
     capability_reason: str = REASON_INCOMPATIBLE_CAPABILITY
+    known_extra_cost_usd: float | None = None
 
 
 @dataclass(frozen=True)
@@ -389,9 +391,13 @@ class FallbackPolicy:
         calls = _non_negative_int(self.max_additional_calls, "max_additional_calls")
         object.__setattr__(self, "max_additional_calls", calls)
         if self.max_extra_cost_usd is not None:
+            if isinstance(self.max_extra_cost_usd, bool):
+                raise ValueError("max_extra_cost_usd must be a finite number")
             ceiling = float(self.max_extra_cost_usd)
-            if ceiling < 0:
-                raise ValueError("max_extra_cost_usd must be non-negative")
+            if not math.isfinite(ceiling) or ceiling < 0:
+                raise ValueError(
+                    "max_extra_cost_usd must be a finite non-negative number"
+                )
             object.__setattr__(self, "max_extra_cost_usd", ceiling)
         object.__setattr__(
             self,
@@ -597,6 +603,7 @@ class FallbackRequestFacts:
     request_id: str = ""
     confirmation: FallbackConfirmation | None = None
     route_facts: Mapping[str, FallbackRouteFacts] = field(default_factory=dict)
+    excluded_route_keys: frozenset[str] = frozenset()
 
     def facts_for(self, route: FallbackRoute) -> FallbackRouteFacts:
         value = (self.route_facts or {}).get(route.key())
@@ -642,7 +649,12 @@ def resolve_fallback_decision(
     timestamp = float(now if now is not None else time.time())
     source = str(facts.source or "").strip().casefold()
     modality = str(facts.modality or "text").strip().casefold()
-    limit = _narrowed_limit(policy, facts.privacy_level)
+    try:
+        PrivacyLevel(int(facts.privacy_level))
+        privacy_valid = True
+    except (TypeError, ValueError):
+        privacy_valid = False
+    limit = _narrowed_limit(policy, facts.privacy_level) if privacy_valid else 0
     allow_known = bool(policy.allow_unknown_cost)
 
     def decision(
@@ -684,6 +696,12 @@ def resolve_fallback_decision(
         )
 
     # 2. current privacy policy: narrowing only.
+    if not privacy_valid:
+        return decision(
+            allowed=False,
+            reason=REASON_PRIVACY_BLOCKED,
+            disposition=DISPOSITION_BLOCKED,
+        )
     narrowing = policy.effective_narrowing(facts.privacy_level)
     if narrowing.get("blocked") is True:
         return decision(
@@ -720,6 +738,9 @@ def resolve_fallback_decision(
         )
     first_reason: str | None = None
     for route in candidates:
+        if route.key() in facts.excluded_route_keys:
+            first_reason = first_reason or REASON_NO_ALLOWED_TARGET
+            continue
         if (
             route.target_kind == TARGET_KIND_HERV3_MODEL
             and not rule.allow_herv3_targets
@@ -764,7 +785,21 @@ def resolve_fallback_decision(
         if int(facts.budget_used) >= limit:
             first_reason = first_reason or REASON_BUDGET_EXHAUSTED
             continue
-        if facts.known_extra_cost_usd is None and not allow_known:
+        known_extra_cost_usd = (
+            route_facts.known_extra_cost_usd
+            if route_facts.known_extra_cost_usd is not None
+            else facts.known_extra_cost_usd
+        )
+        try:
+            if isinstance(known_extra_cost_usd, bool):
+                known_extra_cost_usd = None
+            elif known_extra_cost_usd is not None:
+                known_extra_cost_usd = float(known_extra_cost_usd)
+                if not math.isfinite(known_extra_cost_usd) or known_extra_cost_usd < 0:
+                    known_extra_cost_usd = None
+        except (TypeError, ValueError):
+            known_extra_cost_usd = None
+        if known_extra_cost_usd is None and not allow_known:
             if policy.mode == MODE_ASK and facts.interactive:
                 # The bound interactive confirmation is the user's explicit
                 # cost decision for an unknown price.
@@ -773,9 +808,9 @@ def resolve_fallback_decision(
                 first_reason = first_reason or REASON_UNKNOWN_COST
                 continue
         if (
-            facts.known_extra_cost_usd is not None
+            known_extra_cost_usd is not None
             and policy.max_extra_cost_usd is not None
-            and float(facts.known_extra_cost_usd) > float(policy.max_extra_cost_usd)
+            and float(known_extra_cost_usd) > float(policy.max_extra_cost_usd)
         ):
             first_reason = first_reason or REASON_BUDGET_EXHAUSTED
             continue

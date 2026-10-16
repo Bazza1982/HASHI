@@ -1444,6 +1444,7 @@ async def send_long_message(
     frontend_session_id: str | None = None,
     frontend_owner_id: str | None = None,
     frontend_outbox: bool = False,
+    reply_markup: Any = None,
     include_canonical_text: bool = True,
 ):
     """Send through Telegram, fencing canonical Run output with its FC outbox."""
@@ -1532,6 +1533,7 @@ async def send_long_message(
                 error_context=error_context,
                 frontend_event_id=str(publication["delivery_event_id"]),
                 frontend_session_id=str(publication["session_id"]),
+                reply_markup=reply_markup,
                 frontend_owner_id=str(publication["owner_id"]),
                 skip_local_capture=True,
                 outbox_outcome=outcome,
@@ -1568,6 +1570,7 @@ async def send_long_message(
             frontend_event_id=frontend_event_id,
             frontend_session_id=frontend_session_id,
             frontend_owner_id=frontend_owner_id,
+            reply_markup=reply_markup,
         )
 
     from orchestrator.admin_local_testing import capture_local_command_output
@@ -1604,6 +1607,7 @@ async def send_long_message(
             parse_mode=parse_mode,
             error_context=error_context,
             frontend_event_id=frontend_event_id,
+            reply_markup=reply_markup,
             frontend_session_id=frontend_session_id,
             frontend_owner_id=frontend_owner_id,
         )

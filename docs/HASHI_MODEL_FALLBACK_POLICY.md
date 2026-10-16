@@ -72,6 +72,13 @@ not authorised.  Consuming the additional-call budget invalidates the old
 action, so a duplicate or delayed confirmation cannot issue another paid
 call.
 
+The interactive Telegram consumer presents that bound action during the
+active request and resumes only after the authorised user accepts it.  The
+same `/fallback` menu can express HERV3 and Codex CLI sources independently,
+order exact routes, set the call/cost budget, and preserves the configuration
+revision read by each callback.  A concurrent save therefore produces a
+conflict instead of overwriting newer policy state.
+
 ## Attempt order and safety
 
 1. finish the existing bounded same-target local recovery decision;
@@ -85,7 +92,9 @@ call.
 3. select the first eligible target in the user's order;
 4. consume exactly one additional-call budget entry before issuing the paid
    call;
-5. never grant the fallback target a hidden fresh chain of retries.
+5. cap each selected target at one physical Provider request, so it never
+   receives a hidden fresh retry chain; then continue to the next eligible
+   route only while the user's total additional-call budget remains.
 
 After Tool activity, an allowed HERV3 target continues the exact assembled
 Provider messages and completed Tool results under the existing checkpoint
@@ -97,10 +106,23 @@ user-visible partial answer; afterwards it is reported as blocked.  The failed
 primary call may still be billable; that fact is reported without claiming an
 exact charge when usage is unknown.
 
+Completed Tool call IDs are checked before execution.  An exact re-emission
+reuses the already-bound result; a changed call with the same ID and a
+concurrent duplicate both fail closed.  Fallback continuation also carries a
+typed request contract containing the source privacy level, Tool registry,
+invocation context, reasoning/request parameters, and HERV3 stream-inactivity
+timeout.
+
 The hard enforceable default is the maximum count of additional calls.  A
 known configured ceiling is checked before the call with the best available
 bounded estimate; an unknown price requires `allow_unknown_cost=true` or an
 interactive confirmation.
+
+Provider options may expose an explicit
+`estimated_fallback_call_cost_usd`.  Only finite, non-negative configured
+values become known route costs; missing or malformed values remain unknown
+and cannot silently bypass the unknown-cost rule.  Invalid privacy facts also
+fail closed instead of being substituted with another privacy policy.
 
 ## Reporting
 
