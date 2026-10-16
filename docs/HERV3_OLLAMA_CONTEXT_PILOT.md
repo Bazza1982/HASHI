@@ -34,8 +34,8 @@ The native `/api/chat` request uses the existing capacity resolver and exact
 - `context_window_tokens` becomes the effective `options.num_ctx`;
 - `response_headroom_tokens` becomes `options.num_predict`;
 - `truncate: false` prevents the service from silently pruning the task;
-- an unknown capacity fails closed, and an estimated oversized input is
-  rejected without rewriting the task or completed tool results;
+- an unknown capacity fails closed; the native tokenizer admission check
+  enforces the response reserve before full generation (see the repair below);
 - exact-model `ollama_num_batch` and `ollama_num_gpu` optionally bound batch
   scratch memory and GPU layer placement without changing model weights.
 - native-only `ollama_keep_alive_seconds` optionally sets a nonnegative integer
@@ -43,8 +43,9 @@ The native `/api/chat` request uses the existing capacity resolver and exact
   prefix between tool rounds, then release the model allocation when idle.
   This is not a GPU quota, concurrency broker, or immediate voice preemption.
 
-The shared estimator is an estimate, not the model tokenizer. It provides an
-early check with an output reserve; it is not proof of an exact token fit.
+The shared estimator is not the model tokenizer and does not admit native
+Ollama requests. A bounded native probe now checks the exact privacy-filtered
+messages and tools against usable input capacity before full generation.
 The native service remains responsible for hard input rejection. A recognized
 native context-overflow rejection uses the existing typed capacity error.
 No completed tool is automatically replayed to recover capacity.
@@ -319,6 +320,69 @@ latency/token acceptance result from test doubles or merely accepting reboot.
   evidence. No push/merge, task replay or new model inference was performed.
 - User task testing, live latency/token comparison and voice contention remain
   separate acceptance items.
+
+### 2026-10-16 capacity-admission repair
+
+The user approved repairing the post-deployment capacity error. The recorded
+four inputs were 36,451 / 38,053 / 48,875 / 50,900 tokens, while the character
+estimator reported 25,751 / 26,859 / 36,315 / 38,106. The last two exceed the
+40,960 input allowance even though only the last exceeds the entire window.
+
+HERV3 owns the provider admission and model-facing tool-result projection, in
+Functions. PAO owns retaining the backend terminal across a secondary
+notification failure, also in Functions. No protected Core, PCM design,
+shared estimator/pricing rule, other Provider policy, or instance capacity
+configuration changes are required.
+
+- The native opt-in checks the exact final privacy-filtered messages/tools
+  with the service tokenizer before full generation. Ollama 0.35 exposes no
+  public exact count endpoint; a non-streaming request capped at **one token**
+  returns its actual input count. Zero is not a count-only generation budget.
+  The probe preserves the model/context/template controls and disables neither
+  thinking nor tools in the prompt, so the counted input matches generation.
+- Probe output and tool calls are never delivered or executed. Its physical
+  HTTP request, usage, latency and private wire evidence are recorded separately
+  with purpose `context_capacity_probe`. Invalid/missing counters, incomplete
+  termination, output beyond one token and insufficient input space fail closed.
+  No full generation follows a rejected probe.
+- Only newly completed tool results may receive explicit bounded pages, based
+  on remaining input room and a conservative UTF-8-byte allowance. The full
+  returned output is saved in private hash-addressed workspace artifacts and
+  canonical wire evidence before a page is substituted. PCM, the task and
+  earlier results are preserved. Paging is a model-facing projection, not a
+  claim that unshown content was read or a change to tool authority.
+- Each next complete payload still passes the native check. Saved results can
+  be read in smaller pages or searched; the original operation is not replayed.
+  If the task/history plus minimum receipts cannot fit, retain the typed
+  capacity failure rather than silently pruning authoritative material.
+- PAO persists the primary backend terminal first. If sending its error message
+  raises (including Telegram `Chat not found`), log a separate
+  `send_error_failed` event and record undelivered closeout. Do not replace the
+  capacity error, request ID or completed-tool evidence with `RUNTIME_EXCEPTION`.
+  This does not claim to repair the invalid Telegram destination itself.
+
+Seven regression cases first failed on the old implementation. A controlled
+disabled-check mutation covers the subsequent probe validity/no-execution
+guards. The final related run passed 357 cases across the adapter, native
+transport, accounting, HERV3 and PAO consumers. The deterministic Core gate
+passed 844, skipped one Windows-inapplicable POSIX case, and rejected three
+qualification cases solely because Function source was not yet committed.
+Post-commit qualification and live adoption are separate records.
+
+Real service checks confirmed one-token termination and the original 50,900
+input's typed overflow rejection before full generation. The first two
+synthetic tool rounds counted 14,366 and 16,510 tokens. Their following full
+generations reused 14,362 and 16,506 cached input tokens respectively; each
+following prefill took about 0.22 seconds. Thus the probe's prefill can be reused,
+but it is additional physical inference and its cost is not hidden.
+
+Current whole-device GPU free memory was about 190 MiB, below the earlier
+1,116 MiB observation. A 36K-input probe hit a 200-second deadline; the
+synthetic three-read chain hit its 240-second harness deadline after two reads.
+This is not successful long-input, complete-chain, or speech acceptance.
+Existing completed synthetic results and wire evidence were retained for
+bounded paging verification without replaying their tools. No original
+business task was resumed and no unrelated GPU user was stopped.
 
 ## Rollback and trial limits
 

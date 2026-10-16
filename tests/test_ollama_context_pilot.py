@@ -144,19 +144,6 @@ def test_native_context_preserves_task_and_completed_tool_results(tmp_path):
     assert payload["messages"][3]["tool_name"] == "file_read"
 
 
-def test_native_context_preflight_rejects_without_rewriting_history(tmp_path):
-    adapter = _adapter(tmp_path)
-    payload = adapter._build_payload(
-        [{"role": "user", "content": "task " * 100000}]
-    )
-    before = deepcopy(payload)
-
-    with pytest.raises(ProviderContextCapacityPreflightError):
-        adapter._preflight_payload_capacity(payload)
-
-    assert payload == before
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [False, True])
 async def test_native_context_tools_usage_and_wire_truth(tmp_path, streaming):
@@ -380,3 +367,188 @@ async def test_native_context_records_transport_failure_after_tool_fragment(tmp_
     assert protocol["transport_complete"] is False
     assert protocol["tool_calls"][0]["name"] == "file_read"
     assert protocol["wire_evidence"]["ndjson_events"]
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("actual_tokens", [40961, 48875, 50900, 0])
+async def test_native_capacity_uses_provider_count_before_full_generation(tmp_path, actual_tokens):
+    adapter = _adapter(tmp_path)
+    requests = []
+
+    def respond(request):
+        payload = json.loads(request.content)
+        requests.append(payload)
+        probe = payload["options"].get("num_predict") == 1
+        return httpx.Response(200, json={
+            "message": {"content": "" if probe else "would have generated"},
+            "done": True, "done_reason": "length" if probe else "stop",
+            "prompt_eval_count": actual_tokens, "eval_count": 1,
+        })
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        adapter.client = client
+        response = await adapter.generate_response("small character estimate", "capacity-regression")
+
+    assert response.is_success is False
+    assert response.error_code == "CONTEXT_CAPACITY_REJECTED"
+    assert len(requests) == 1
+    assert requests[0]["options"]["num_ctx"] == 49152
+    assert requests[0]["options"]["num_predict"] == 1
+    assert requests[0]["truncate"] is False
+    records = response.stream_metadata["meter"]["provider_calls"]
+    assert any(record.get("purpose") == "context_capacity_probe" for record in records)
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("overrides", [
+    {"eval_count": 8192},
+    {"eval_count": None},
+    {"prompt_eval_count": True},
+    {"prompt_eval_count": "40000"},
+    {"done_reason": None},
+])
+async def test_native_probe_without_complete_bounded_counts_cannot_admit_generation(tmp_path, overrides):
+    adapter = _adapter(tmp_path)
+    requests = []
+    def respond(request):
+        requests.append(json.loads(request.content))
+        chunk = {
+            "message": {"content": ""}, "done": True, "done_reason": "length",
+            "prompt_eval_count": 40000, "eval_count": 1,
+        }
+        chunk.update(overrides)
+        return httpx.Response(200, json=chunk)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        adapter.client = client
+        response = await adapter.generate_response("task", "invalid-counter-regression")
+    assert not response.is_success
+    assert response.error_code == "CONTEXT_CAPACITY_REJECTED"
+    assert len(requests) == 1
+
+@pytest.mark.asyncio
+async def test_native_capacity_probe_keeps_exact_boundary_and_separate_usage(tmp_path):
+    adapter = _adapter(tmp_path)
+    requests, visible = [], []
+
+    def respond(request):
+        payload = json.loads(request.content)
+        requests.append(payload)
+        probe = payload["options"].get("num_predict") == 1
+        return httpx.Response(200, json={
+            "message": {"content": "hidden" if probe else "answer"},
+            "done": True, "done_reason": "length" if probe else "stop",
+            "prompt_eval_count": 40960, "eval_count": 1 if probe else 3,
+        })
+
+    async def capture(event):
+        visible.append(event.summary)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        adapter.client = client
+        response = await adapter.generate_response(
+            " " * 200000 + "task", "boundary-regression", on_stream_event=capture
+        )
+
+    assert response.is_success, response.error
+    assert response.text == "answer"
+    assert "hidden" not in visible
+    assert [payload["options"]["num_predict"] for payload in requests] == [1, 8192]
+    assert requests[0]["messages"] == requests[1]["messages"]
+    records = response.stream_metadata["meter"]["provider_calls"]
+    assert len(records) == 2
+    assert records[0]["purpose"] == "context_capacity_probe"
+    assert records[0]["input"] == 40960
+    assert records[0]["output"] == 1
+
+
+
+@pytest.mark.asyncio
+async def test_capacity_probe_tool_calls_never_execute(tmp_path):
+    from tools.registry import ToolRegistry
+
+    sentinel = tmp_path / "must-not-exist.txt"
+    adapter = _adapter(tmp_path)
+    adapter.tool_registry = ToolRegistry(
+        allowed_tools=["file_write"], access_root=tmp_path,
+        workspace_dir=tmp_path, secrets={},
+    )
+    requests = []
+    def respond(request):
+        payload = json.loads(request.content)
+        requests.append(payload)
+        probe = payload["options"].get("num_predict") == 1
+        message = {"content": "answer"}
+        if probe:
+            message = {"tool_calls": [{
+                "function": {"name": "file_write", "arguments": {
+                    "path": str(sentinel), "content": "unwanted probe side effect",
+                }}
+            }]}
+        return httpx.Response(200, json={
+            "message": message, "done": True, "done_reason": "stop",
+            "prompt_eval_count": 100, "eval_count": 1,
+        })
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        adapter.client = client
+        response = await adapter.generate_response("only answer", "probe-no-tools")
+    assert response.is_success, response.error
+    assert response.tool_call_count == 0
+    assert len(requests) == 2
+    assert not sentinel.exists()
+
+@pytest.mark.asyncio
+async def test_native_tool_read_is_paged_with_original_result_saved_and_no_replay(tmp_path):
+    from tools.registry import ToolRegistry
+
+    source = tmp_path / "source.txt"
+    original = "".join(f"第{index}行：容量测试资料，需要保留。\n" for index in range(180))
+    source.write_text(original, encoding="utf-8")
+    adapter = _adapter(tmp_path)
+    adapter.tool_registry = ToolRegistry(
+        allowed_tools=["file_read"], access_root=tmp_path,
+        workspace_dir=tmp_path, secrets={},
+    )
+    requests = []
+    main_calls = 0
+
+    def respond(request):
+        nonlocal main_calls
+        payload = json.loads(request.content)
+        requests.append(payload)
+        probe = payload["options"].get("num_predict") == 1
+        result_text = "".join(
+            row.get("content", "") for row in payload["messages"] if row["role"] == "tool"
+        )
+        actual_count = 39000 + len(result_text.encode("utf-8")) // 2
+        message = {"content": ""}
+        if not probe:
+            main_calls += 1
+            if main_calls == 1:
+                message["tool_calls"] = [{
+                    "function": {"name": "file_read", "arguments": {"path": str(source)}}
+                }]
+            else:
+                message["content"] = "已根据可见资料说明结果及分页限制。"
+        return httpx.Response(200, json={
+            "message": message, "done": True,
+            "done_reason": "length" if probe else "stop",
+            "prompt_eval_count": actual_count, "eval_count": 1 if probe else 20,
+        })
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        adapter.client = client
+        response = await adapter.generate_response("read source once", "paging-regression")
+
+    assert response.is_success, response.error
+    assert response.tool_call_count == 1
+    assert main_calls == 2
+    tool_messages = [
+        row for row in requests[-1]["messages"] if row["role"] == "tool"
+    ]
+    assert len(tool_messages) == 1
+    assert "HASHI_OLLAMA_RESULT_PAGE" in tool_messages[0]["content"]
+    saved = list((tmp_path / "backend_state" / "ollama_tool_results").glob("*.txt"))
+    assert len(saved) == 1
+    assert original.rstrip() in saved[0].read_text(encoding="utf-8")
+    assert source.read_text(encoding="utf-8") == original
+    assert all(payload["options"]["num_ctx"] == 49152 for payload in requests)

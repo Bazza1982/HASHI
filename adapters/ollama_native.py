@@ -208,6 +208,13 @@ async def call_native_chat(adapter, payload, headers, on_stream_event) -> _APIRe
     finish_reason = "tool_calls" if tool_calls and native_reason == "stop" else native_reason
     translated = finish_reason != native_reason
     compatibility = {"native_done_reason": native_reason, "native_done": True}
+    compatibility["native_prompt_count_valid"] = (
+        type(final_chunk.get("prompt_eval_count")) is int
+        and final_chunk["prompt_eval_count"] > 0
+    )
+    compatibility["native_output_count_valid"] = (
+        type(final_chunk.get("eval_count")) is int and final_chunk["eval_count"] >= 0
+    )
     compatibility["native_performance"] = _native_performance(
         final_chunk, first_response_ms, first_answer_ms
     )

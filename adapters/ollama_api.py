@@ -51,6 +51,25 @@ class OllamaAdapter(OpenRouterAdapter):
     def _native_context_enabled(self) -> bool:
         return (getattr(self.config, "extra", None) or {}).get("ollama_native_context") is True
 
+    async def _prepare_payload_capacity(self, payload, *, request_id, provider_calls):
+        if self._native_context_enabled():
+            from adapters.ollama_capacity import check_native_capacity
+
+            await check_native_capacity(
+                self, payload, request_id=request_id, provider_calls=provider_calls
+            )
+
+    async def _run_tool_calls(self, tool_calls, messages, on_stream_event, **kwargs):
+        first_result = len(messages)
+        facts = await super()._run_tool_calls(
+            tool_calls, messages, on_stream_event, **kwargs
+        )
+        if self._native_context_enabled():
+            from adapters.ollama_capacity import page_new_tool_results
+
+            page_new_tool_results(self, messages, first_result)
+        return facts
+
     def _native_capacity(self):
         from orchestrator.context_compaction import resolve_capacity_profile
 
@@ -69,21 +88,10 @@ class OllamaAdapter(OpenRouterAdapter):
     def _preflight_payload_capacity(self, payload) -> None:
         if not self._native_context_enabled():
             return super()._preflight_payload_capacity(payload)
-        from orchestrator.context_compaction import estimate_tokens
-
-        capacity = self._native_capacity()
-        serialized = json.dumps(
-            {key: payload[key] for key in ("messages", "tools") if key in payload},
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        estimated = estimate_tokens(serialized)
-        if estimated > capacity.usable_input_tokens:
-            raise ProviderContextCapacityPreflightError(
-                f"Prepared Ollama request estimate {estimated} tokens exceeds "
-                f"usable input capacity {capacity.usable_input_tokens}; "
-                "the task and completed tool results have not been truncated."
-            )
+        # Character estimates can both undercount source/JSON and overcount
+        # compressible text. Admission uses the exact final payload in the
+        # asynchronous native check, after outbound privacy filtering.
+        self._native_capacity()
 
     def _define_capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(
@@ -231,14 +239,14 @@ class OllamaAdapter(OpenRouterAdapter):
         if self._native_context_enabled():
             from adapters.ollama_native import call_native_chat
 
-            return await call_native_chat(self, payload, headers, on_stream_event)
+            result = await call_native_chat(self, payload, headers, on_stream_event)
+            self._ollama_last_output_tokens = result.completion_tokens
+            return result
         return await super()._call_api_once(payload, headers, on_stream_event)
 
     async def _stream_api_once(self, payload, headers, on_stream_event) -> _APIResult:
         if self._native_context_enabled():
-            from adapters.ollama_native import call_native_chat
-
-            return await call_native_chat(self, payload, headers, on_stream_event)
+            return await self._call_api_once(payload, headers, on_stream_event)
         return await super()._stream_api_once(payload, headers, on_stream_event)
 
     async def generate_response(
@@ -250,6 +258,9 @@ class OllamaAdapter(OpenRouterAdapter):
         on_stream_event=None,
         request_content=None,
     ):
+        self._ollama_prompt_tokens = None
+        self._ollama_last_output_tokens = 0
+        self._ollama_capacity_probe_serial = 0
         return await super().generate_response(
             prompt,
             request_id,

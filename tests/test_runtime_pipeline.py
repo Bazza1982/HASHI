@@ -3959,6 +3959,44 @@ def test_persist_success_memory_skips_bridge_memory_and_handoff():
     assert runtime.project_chat_logger.exchanges == []
 
 
+
+@pytest.mark.asyncio
+async def test_backend_failure_delivery_exception_preserves_primary_terminal(monkeypatch):
+    runtime = _runtime()
+    item = _item()
+    response = SimpleNamespace(
+        error="Prepared input exceeds 40960 tokens",
+        error_code="CONTEXT_CAPACITY_REJECTED",
+        error_retryable=False, http_status=400,
+        provider_request_id="capacity-primary", tool_call_count=7,
+        side_effects_possible=False,
+    )
+    recorded = []
+
+    async def broken_delivery(**_kwargs):
+        raise BadRequest("Chat not found")
+
+    runtime.send_long_message = broken_delivery
+    monkeypatch.setattr(
+        runtime_cross_session, "record_turn_result",
+        lambda *args, **kwargs: recorded.append(kwargs),
+    )
+    await runtime_pipeline.handle_backend_error(
+        runtime, item, response, queued_at=datetime.now(),
+        queue_wait_s=0, backend_elapsed_s=0,
+    )
+
+    assert runtime.last_error == response.error
+    assert len(runtime.listener_payloads) == 1
+    terminal = runtime.listener_payloads[0]
+    assert terminal["error_code"] == "CONTEXT_CAPACITY_REJECTED"
+    assert terminal["provider_request_id"] == "capacity-primary"
+    assert terminal["tool_call_count"] == 7
+    assert terminal["error_retryable"] is False
+    assert recorded[0]["error"] == response.error
+    assert recorded[0]["delivered"] is False
+    assert any(event[0] == "send_error_failed" for event in runtime.maintenance_events)
+
 @pytest.mark.asyncio
 async def test_handle_backend_error_notifies_and_delivers_error():
     runtime = _runtime()

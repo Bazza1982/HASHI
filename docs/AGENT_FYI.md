@@ -1,5 +1,22 @@
 # HASHI Agent FYI
 
+October 16 capacity-admission repair: the user approved fixing the observed
+Ollama context rejection. Keep the 49,152/8,192/90-second baseline and PCM
+Persona. HERV3 Functions now use a native one-token probe of the final
+privacy-filtered payload; only a valid provider count within 40,960 permits
+full generation. Probe output/tools are never delivered or executed, and its
+physical call, tokens, latency and wire evidence are accounted separately.
+Only newly completed tool outputs may get an explicit bounded page; full
+outputs remain private, hash-addressed and audited. Earlier task/PCM/results
+are not pruned. PAO Functions retain the original backend terminal if its
+error notification fails; the delivery failure is secondary evidence.
+357 related checks passed; Core-gate qualification still requires the source
+commit. Real one-token behavior and native overflow rejection were observed.
+Current GPU free memory was about 190 MiB: long prefill and a synthetic chain
+hit their test deadlines, so long-input/speech performance is not accepted.
+See [repair decision](HERV3_OLLAMA_CONTEXT_PILOT.md#2026-10-16-capacity-admission-repair).
+
+
 October 16 Ollama presentation/provider correction: HERV3 publishes provider
 `ollama` and the configured model separately; `ollama-api` remains an internal
 adapter compatibility ID. Registered Model Provider names (including
