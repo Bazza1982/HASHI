@@ -2765,6 +2765,7 @@ class ProtocolManager:
         payload = {
             "message_type": "agent_reply",
             "message_id": reply_message_id,
+            "idempotency_key": f"hchat:{reply_message_id}",
             "conversation_id": item.get("conversation_id"),
             "in_reply_to": item.get("message_id"),
             "from_instance": self._instance_info.get("instance_id"),

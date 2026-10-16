@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -424,10 +425,16 @@ async def test_concurrent_telegram_commands_keep_audit_side_effects_isolated(
         active_slash_command_audit_session().add_side_effect("second_effect")
 
     def update(chat_id):
+        message = SimpleNamespace(
+            message_id=2000 + chat_id, text="/test",
+            date=datetime.now(timezone.utc),
+        )
         return SimpleNamespace(
             update_id=1000 + chat_id,
             effective_user=SimpleNamespace(id=42),
             effective_chat=SimpleNamespace(id=chat_id),
+            effective_message=message,
+            message=message,
             callback_query=None,
         )
 
@@ -478,7 +485,9 @@ async def test_native_telegram_command_is_durably_admitted_and_replay_safe(
     async def handler(_update, _context):
         calls.append("executed")
 
-    message = SimpleNamespace(message_id=321, text="/sys 1 on")
+    message = SimpleNamespace(
+        message_id=321, text="/sys 1 on", date=datetime.now(timezone.utc)
+    )
     update = SimpleNamespace(
         update_id=654321,
         effective_user=SimpleNamespace(id=42),
@@ -541,7 +550,9 @@ async def test_native_telegram_pending_command_is_not_reexecuted_after_unknown_c
     async def handler(_update, _context):
         calls.append("executed")
 
-    message = SimpleNamespace(message_id=322, text="/sys 1 on")
+    message = SimpleNamespace(
+        message_id=322, text="/sys 1 on", date=datetime.now(timezone.utc)
+    )
     update = SimpleNamespace(
         update_id=654322,
         effective_user=SimpleNamespace(id=42),

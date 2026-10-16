@@ -71,8 +71,11 @@ Capability rules:
 
 HChat attachment delivery is transactional: all selected files are staged,
 hashed, streamed, committed, copied into the target Session attachment store,
-and admitted with the message as one request. Any failed file, commit, or local
-admission fails the complete delivery rather than exposing a partial message.
+and admitted with the message as one request. Attachment commits preserve the
+same canonical message identity and freshness fields as ordinary HChat:
+`idempotency_key == hchat:<message_id>` and the sender's `originated_at`.
+Any failed file, commit, or local admission fails the complete delivery rather
+than exposing a partial message.
 The one permitted attachment-selection call is also fail-closed: a rejected,
 missing, or repeated selection aborts the complete HChat and its receipt names
 the failure instead of silently sending text alone. On WSL, a Windows absolute

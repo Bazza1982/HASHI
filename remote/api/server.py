@@ -636,6 +636,7 @@ class AttachmentCancelPayload(BaseModel):
 
 class ProtocolMessageWithAttachmentsPayload(BaseModel):
     message_id: str
+    idempotency_key: str
     conversation_id: str
     in_reply_to: Optional[str] = None
     from_instance: str
@@ -648,6 +649,7 @@ class ProtocolMessageWithAttachmentsPayload(BaseModel):
     ttl: int = 8
     route_trace: list[str] = []
     message_type: str = "agent_message"
+    originated_at: Optional[str] = None
     created_at: Optional[str] = None
     private_authorization_proofs: list[dict[str, Any]] = []
     authorization_resources: list[str] = []
@@ -3859,6 +3861,7 @@ def create_app(
         try:
             local_payload = ProtocolMessagePayload(
                 message_id=payload.message_id,
+                idempotency_key=payload.idempotency_key,
                 conversation_id=payload.conversation_id,
                 in_reply_to=payload.in_reply_to,
                 from_instance=payload.from_instance,
@@ -3874,6 +3877,7 @@ def create_app(
                 ttl=payload.ttl,
                 route_trace=payload.route_trace,
                 message_type=payload.message_type,
+                originated_at=payload.originated_at,
                 created_at=payload.created_at,
                 private_authorization_proofs=payload.private_authorization_proofs,
                 authorization_resources=payload.authorization_resources,

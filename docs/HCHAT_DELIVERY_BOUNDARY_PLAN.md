@@ -53,6 +53,12 @@ Delivery presentation contract:
 - Incoming terminal HChat/protocol replies instruct the receiving Agent to show
   the reply body verbatim in its one normal user-facing response. They continue
   to forbid acknowledgements and new HChat/protocol messages.
+- Every outbound `agent_reply` carries the canonical idempotency key
+  `hchat:<reply-message-id>`; receivers reject a different or missing key.
+- Direct Frontend Connector presentation does not erase controller workflow
+  evidence. A correlated Superloop reply remains eligible for receipt
+  continuation, using the verified presentation Session when no model Run
+  request ID exists.
 - Existing message IDs and queue idempotency remain authoritative. Repeated
   terminal replies do not enqueue a second request.
 - The remaining group/all legacy model-command path uses the same status

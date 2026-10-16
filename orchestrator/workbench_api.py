@@ -13045,10 +13045,16 @@ class WorkbenchApiServer:
             )
         record = result.get("record") or {}
         accepted = result.get("accepted") is True and record.get("status") in {"accepted", "running", "succeeded"}
+        rejection = (
+            result.get("reason")
+            or record.get("reason")
+            or "reboot rejected"
+        )
+        public_error = "AGENT_BUSY" if rejection == "busy" else rejection
         return web.json_response({"ok": accepted, "accepted": accepted,
             "operation_id": record.get("id"), "status": record.get("status"),
             "operation": result.get("operation"),
-            "error": None if accepted else result.get("reason") or record.get("reason") or "reboot rejected"},
+            "error": None if accepted else public_error},
             status=200 if accepted else 409)
 
     async def handle_reboot_presentation_ack(self, request):
