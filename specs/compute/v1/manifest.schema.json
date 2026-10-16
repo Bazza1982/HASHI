@@ -1,0 +1,248 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hashi.local/specs/compute/v1/manifest.schema.json",
+  "title": "HASHI Compute Capability Manifest v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "schema_version",
+    "name",
+    "version",
+    "config_revision",
+    "privacy_location",
+    "health",
+    "capacity",
+    "services"
+  ],
+  "properties": {
+    "schema": {"const": "hashi.compute.capabilities"},
+    "schema_version": {"const": 1},
+    "name": {"type": "string", "minLength": 1, "maxLength": 100},
+    "version": {"type": "string", "minLength": 1, "maxLength": 100},
+    "config_revision": {
+      "oneOf": [
+        {"type": "string", "minLength": 1, "maxLength": 100},
+        {"type": "integer", "minimum": 0}
+      ]
+    },
+    "privacy_location": {"enum": ["local", "lan", "internet"]},
+    "health": {"$ref": "#/$defs/health"},
+    "capacity": {"$ref": "#/$defs/capacity"},
+    "services": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "items": {"$ref": "#/$defs/service"}
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+    },
+    "path": {
+      "type": "string",
+      "pattern": "^/(?!/)(?!.*(?:^|/)\\.\\.?(?:/|$))[^?#\\r\\n]+$",
+      "maxLength": 500
+    },
+    "health": {
+      "type": "object",
+      "required": ["status", "path"],
+      "properties": {
+        "status": {"$ref": "#/$defs/identifier"},
+        "path": {"$ref": "#/$defs/path"}
+      },
+      "additionalProperties": true
+    },
+    "capacity": {
+      "type": "object",
+      "required": ["max_concurrency", "in_flight", "busy"],
+      "properties": {
+        "max_concurrency": {"type": "integer", "minimum": 1},
+        "in_flight": {"type": "integer", "minimum": 0},
+        "busy": {"type": "boolean"}
+      },
+      "additionalProperties": true
+    },
+    "image": {
+      "type": "object",
+      "required": ["max_count", "max_bytes", "max_total_bytes", "formats"],
+      "properties": {
+        "max_count": {"type": ["integer", "null"], "minimum": 1},
+        "max_bytes": {"type": ["integer", "null"], "minimum": 1},
+        "max_total_bytes": {"type": ["integer", "null"], "minimum": 1},
+        "formats": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.+-]{0,31}$"}
+        }
+      },
+      "additionalProperties": true
+    },
+    "audio": {
+      "type": "object",
+      "required": ["input_formats", "output_formats"],
+      "properties": {
+        "input_formats": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.+-]{0,31}$"}
+        },
+        "output_formats": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.+-]{0,31}$"}
+        }
+      },
+      "additionalProperties": true
+    },
+    "capabilities": {
+      "type": "object",
+      "required": [
+        "input_modalities",
+        "output_modalities",
+        "tools",
+        "thinking",
+        "context_length",
+        "image",
+        "audio"
+      ],
+      "properties": {
+        "input_modalities": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/identifier"}
+        },
+        "output_modalities": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/identifier"}
+        },
+        "tools": {"type": "boolean"},
+        "thinking": {"type": "boolean"},
+        "context_length": {"type": ["integer", "null"], "minimum": 1},
+        "image": {"$ref": "#/$defs/image"},
+        "audio": {"$ref": "#/$defs/audio"}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "input_modalities": {"contains": {"const": "image"}}
+            }
+          },
+          "then": {
+            "properties": {
+              "image": {
+                "properties": {
+                  "max_count": {"type": "integer", "minimum": 1},
+                  "max_bytes": {"type": "integer", "minimum": 1},
+                  "max_total_bytes": {"type": "integer", "minimum": 1},
+                  "formats": {"minItems": 1}
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "input_modalities": {"contains": {"const": "audio"}}
+            }
+          },
+          "then": {
+            "properties": {
+              "audio": {
+                "properties": {"input_formats": {"minItems": 1}}
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "output_modalities": {"contains": {"const": "audio"}}
+            }
+          },
+          "then": {
+            "properties": {
+              "audio": {
+                "properties": {"output_formats": {"minItems": 1}}
+              }
+            }
+          }
+        }
+      ],
+      "additionalProperties": true
+    },
+    "interface": {
+      "type": "object",
+      "required": ["id", "protocol", "method", "path", "streaming"],
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "protocol": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_.-]{0,95}$"
+        },
+        "method": {"enum": ["GET", "POST"]},
+        "path": {"$ref": "#/$defs/path"},
+        "streaming": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/identifier"}
+        }
+      },
+      "additionalProperties": true
+    },
+    "model": {
+      "type": "object",
+      "required": ["id", "selected", "capabilities", "interfaces"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "maxLength": 200},
+        "selected": {"type": "boolean"},
+        "status": {"$ref": "#/$defs/identifier"},
+        "capacity": {"$ref": "#/$defs/capacity"},
+        "capabilities": {"$ref": "#/$defs/capabilities"},
+        "interfaces": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/interface"}
+        }
+      },
+      "additionalProperties": true
+    },
+    "service": {
+      "type": "object",
+      "required": ["id", "kind", "enabled", "status", "capacity", "models"],
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "kind": {"$ref": "#/$defs/identifier"},
+        "enabled": {"type": "boolean"},
+        "status": {"$ref": "#/$defs/identifier"},
+        "capacity": {"$ref": "#/$defs/capacity"},
+        "capabilities": {"$ref": "#/$defs/capabilities"},
+        "interfaces": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/interface"}
+        },
+        "models": {
+          "type": "array",
+          "maxItems": 512,
+          "items": {"$ref": "#/$defs/model"}
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"models": {"maxItems": 0}}},
+          "then": {"required": ["capabilities", "interfaces"]}
+        }
+      ],
+      "additionalProperties": true
+    }
+  }
+}

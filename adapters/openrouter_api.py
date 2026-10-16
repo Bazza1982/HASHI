@@ -2587,15 +2587,24 @@ class OpenRouterAdapter(BaseBackend):
         request_content: Mapping[str, Any] | None,
         transient_images: Sequence[Mapping[str, Any]] | None = None,
     ) -> tuple[list[dict[str, Any]], tuple[dict[str, Any], ...]]:
+        def append_transient(
+            messages: list[dict[str, Any]],
+        ) -> list[dict[str, Any]]:
+            # A few provider-wire consumers deliberately borrow this message
+            # builder without constructing the full adapter.  When this turn
+            # carries no live frames, do not require the optional frame helper.
+            if not transient_images:
+                return messages
+            return self._append_transient_images(messages, transient_images)
+
         normalized = normalize_request_content(request_content)
         if normalized is None or not request_content_has_media(normalized):
             return (
-                self._append_transient_images(
+                append_transient(
                     [
                         {"role": "system", "content": self.sys_prompt},
                         {"role": "user", "content": prompt},
                     ],
-                    transient_images,
                 ),
                 (),
             )
@@ -2623,12 +2632,11 @@ class OpenRouterAdapter(BaseBackend):
                 attachment_id=first.attachment_id,
             )
         return (
-            self._append_transient_images(
+            append_transient(
                 [
                     {"role": "system", "content": self.sys_prompt},
                     {"role": "user", "content": content},
                 ],
-                transient_images,
             ),
             routing_decisions_payload(decisions),
         )

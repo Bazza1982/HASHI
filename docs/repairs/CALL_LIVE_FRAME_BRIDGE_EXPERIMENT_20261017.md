@@ -45,3 +45,14 @@ This record proves source behavior only. HASHI3 Worker adoption and a physical
 camera conversation remain separate and are pending until the authorized
 runtime is reloaded and the user performs the test. HASHI4 was not changed or
 restarted.
+
+## Subsequent default-gate compatibility correction
+
+The later full default gate exercised a provider-wire fixture that deliberately
+borrows OpenRouter's message builder without constructing a full adapter. The
+live-frame change had looked up the optional frame helper even when the turn
+contained no transient frames, so that fixture failed before rendering its
+ordinary text messages. The builder now returns the unchanged messages first
+when there are no transient frames and requires the helper only for an actual
+frame-bearing turn. This changes no provider request or capability decision;
+the previously failing test and the live-frame multimodal regressions pass.

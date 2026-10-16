@@ -1,5 +1,16 @@
 # HASHI Agent FYI
 
+October 17 Compute: local, LAN, and internet model services resolve through the
+PAO Function-layer Compute Service Directory. Configure one node, read its v1
+machine manifest, and persist only structured node/service/model references.
+Exact capability, privacy, health, concurrency, busy state, and interface
+checks fail closed; there is no silent LAN-to-internet fallback. The current
+Hashi Compute overview has a truthful compatibility adapter, while official
+limits remain unknown until advertised. Direct voice samples use the remote
+sample interface rather than local synthesis. Existing consumers migrate
+separately; no Workbench page was added. See
+[Compute directory](HASHI_COMPUTE_SERVICE_DIRECTORY.md).
+
 October 17 Call experiment: camera-on capture targets 2 fps; MiniCPM-V keeps
 continuous latest-frame-wins narration, while each caller turn freezes the last
 10 seconds and evenly samples at most 10 raw frames for a capability-qualified
