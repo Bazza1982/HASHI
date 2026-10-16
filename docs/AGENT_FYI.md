@@ -3,7 +3,10 @@
 October 16 Ollama reasoning: explicit `enabled/off` uses native boolean
 `think`; binary `/effort` controls derive from exact-model instance opt-ins.
 Native transport is independent of the context pilot. Keep local tags out of
-the shared catalogue. See [Ollama decision](HERV3_OLLAMA_CONTEXT_PILOT.md).
+the shared catalogue. Agent6 adopted `bfc97c81`; six short native switch calls
+and the 855-case deterministic gate passed (one platform skip). Other Workers
+retain their generation until separately adopted.
+See [Ollama decision](HERV3_OLLAMA_CONTEXT_PILOT.md).
 
 October 16 local Ollama pilot: Agent6 keeps the 49,152 context, 8,192 output
 reserve, 90-second idle release and main PCM Persona. Native admission probes

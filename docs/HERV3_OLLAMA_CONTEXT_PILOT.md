@@ -451,6 +451,28 @@ business-task, tool-quality or speech-concurrency acceptance. Their temporary
 residency ended after each model pair. Source commit, the full deterministic
 gate and Agent6 adoption must be recorded separately.
 
+### Boolean reasoning adoption evidence
+
+- Source commits `4b529d03` and `bfc97c81` contain the implementation and a
+  compatibility correction found by the complete deterministic gate.
+- The focused adapter/configuration/frontend/direct-consumer run passed 218
+  cases; the final complete deterministic gate passed 855 with one platform
+  skip. Core protection and whitespace checks passed.
+- Revisioned local configuration grants all three installed models and exactly
+  `enabled/off`. It preserves active backends, activation flags, the current
+  Agent6 model, existing capacity profiles and idle release. Other Workers
+  receive saved opt-ins only upon their own supported configuration adoption.
+- One Agent6-only hot reboot reached terminal `succeeded`. Its active profile
+  exposes all three models, both choices and the enabled default. All six
+  changed runtime/catalogue files match the immutable artifact and committed
+  source `bfc97c81`. Absence of a persisted effort override correctly inherits
+  the configured default; it is not an unset effective value.
+- Core identity/protected digest, other Worker identities, service listeners,
+  Ollama listener identity and the post-configuration file hash stayed intact.
+  No original business task was replayed. The six short model calls establish
+  boolean protocol behavior only; long-context speed, tool quality and speech
+  contention remain separate acceptance work.
+
 ## Rollback and trial limits
 
 Retain the experiment on `feature-ollama`; do not merge or commit it implicitly.
