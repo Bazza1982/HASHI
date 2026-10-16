@@ -957,6 +957,9 @@ is never fabricated to authorize a local configuration operation. The client
 checks the selected instance identity before submitting and waits for the
 authenticated PAO receipt to reach succeeded before dismissing the local page.
 Acceptance alone never claims completed adoption.
+The unified slash-command boundary preserves the public `AGENT_BUSY` response
+when the RebootManager is already occupied, so the local client can wait without
+creating a second receipt. A durable `target_busy` outcome remains pending.
 
 
 ## Basic chat projection and voice adaptation (2026-09-12)
