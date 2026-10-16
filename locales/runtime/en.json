@@ -509,6 +509,7 @@
     "error.fallback_reason.unknown_cost": "the extra cost is unknown",
     "error.fallback_reason.budget_exhausted": "the extra-call budget is exhausted",
     "error.fallback_reason.source_disabled": "fallback is disabled for this source",
+    "error.fallback_reason.ineligible_failure": "the primary failure is not a recoverable error type",
     "error.fallback_reason.unknown": "no reason was recorded",
     "error.truncated": "truncated",
     "activity.review_other": "Check result: {outcome}",

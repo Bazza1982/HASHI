@@ -72,6 +72,7 @@ REASON_MODALITY_EXCLUDED = "modality_excluded"
 REASON_UNKNOWN_COST = "unknown_cost"
 REASON_BUDGET_EXHAUSTED = "budget_exhausted"
 REASON_SOURCE_DISABLED = "source_disabled"
+REASON_INELIGIBLE_FAILURE = "ineligible_failure"
 
 DISPOSITION_DISABLED = "disabled"
 DISPOSITION_ASK_REQUIRED = "ask-required"

@@ -75,7 +75,13 @@ call.
 ## Attempt order and safety
 
 1. finish the existing bounded same-target local recovery decision;
-2. if it still fails, evaluate the effective user fallback policy;
+2. if it still fails and the failure class is recoverable -- 429, retryable
+   5xx, or the typed stream-inactivity timeout -- evaluate the effective
+   user fallback policy; the stage consumer uses the shared
+   `FALLBACK_ELIGIBLE_FAILURE_CODES` and the adapter consumer uses the same
+   transient-or-typed-timeout test, so a permanent failure (400, auth,
+   configuration, contract) never consults the policy and never spends an
+   additional paid call;
 3. select the first eligible target in the user's order;
 4. consume exactly one additional-call budget entry before issuing the paid
    call;

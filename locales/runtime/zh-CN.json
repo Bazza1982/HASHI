@@ -509,6 +509,7 @@
     "error.fallback_reason.unknown_cost": "额外费用未知",
     "error.fallback_reason.budget_exhausted": "额外调用预算已用尽",
     "error.fallback_reason.source_disabled": "该来源的 fallback 未启用",
+    "error.fallback_reason.ineligible_failure": "主要故障不属于可恢复的错误类型",
     "error.fallback_reason.unknown": "未记录原因",
     "error.truncated": "内容已截断",
     "activity.review_other": "检查结果：{outcome}",

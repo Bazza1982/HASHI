@@ -454,3 +454,50 @@ def test_bridge_stage_switch_is_pre_effect_and_budget_bounded(tmp_path, monkeypa
     )
     assert excluded["allowed"] is False
     assert excluded["reason"] == "modality_excluded"
+
+@pytest.mark.asyncio
+async def test_herv3_fallback_skips_permanent_failures(monkeypatch, tmp_path):
+    """A permanent failure (400) must never consult the policy or spend a call."""
+    import httpx
+
+    target = _adapter(
+        tmp_path, model="deepseek/deepseek-v4-flash", engine="openrouter-api"
+    )
+    port = _ScriptedPort(target)  # allowed=True: any consultation would fall back
+
+    adapter = _adapter(tmp_path)
+    adapter.TRANSIENT_PROVIDER_CALL_RETRIES = 1
+    adapter.TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S = 0
+    request = _request("req-permanent")
+    adapter.tool_registry = _checkpoint_registry(tmp_path, request)
+    adapter.set_provider_fallback_port(port)
+
+    def permanent_failure(payload, headers, on_stream_event):
+        req = httpx.Request("POST", "https://openrouter.example/v1/chat/completions")
+        raise httpx.HTTPStatusError(
+            "400 Bad Request",
+            request=req,
+            response=httpx.Response(400, request=req),
+        )
+
+    monkeypatch.setattr(adapter, "_stream_api_once", permanent_failure)
+
+    async def capture(_event):
+        return None
+
+    response = await adapter.generate_response(
+        "hello", "req-permanent", on_stream_event=capture
+    )
+
+    assert response.is_success is False
+    assert port.evaluations == [], (
+        "a permanent failure must not consult the fallback policy"
+    )
+    assert port.target_calls == [], (
+        "a permanent failure must not spend a paid fallback call"
+    )
+    record = response.stream_metadata["provider_fallback"]
+    assert record["attempted"] is False
+    assert record["disposition"] == "blocked"
+    assert record["reason"] == "ineligible_failure"
+    assert record["additional_calls"] == 0

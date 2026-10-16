@@ -4562,6 +4562,36 @@ class OpenRouterAdapter(BaseBackend):
             "code": str(primary.error_code or type(exc).__name__),
             "description": str(primary.error or exc),
         }
+        # Fallback is reserved for recoverable failures (429, retryable 5xx,
+        # and the typed stream-inactivity timeout).  A permanent failure
+        # (400, auth, configuration, contract) never consults the user policy
+        # and never spends an additional paid call; the public report records
+        # the first concrete reason instead.
+        from orchestrator.model_fallback_policy import REASON_INELIGIBLE_FAILURE
+
+        if not (
+            _transient_provider_call_error(exc)
+            or isinstance(exc, _ProviderStreamInactivityTimeout)
+        ):
+            setattr(
+                exc,
+                "hashi_provider_fallback",
+                {
+                    "attempted": False,
+                    "disposition": "blocked",
+                    "reason": REASON_INELIGIBLE_FAILURE,
+                    "target": "",
+                    "source": (
+                        f"{primary_failure['provider']}/{primary_failure['model']}"
+                    ),
+                    "mode": "",
+                    "additional_calls": 0,
+                    "additional_calls_limit": 0,
+                    "additional_calls_used": 0,
+                    "primary_failure": dict(primary_failure),
+                },
+            )
+            return None
         try:
             decision = evaluate(
                 source_provider=str(getattr(self.config, "engine", "") or ""),
