@@ -1,5 +1,15 @@
 # HASHI Agent FYI
 
+October 16 Ollama context budget: the native-context opt-in now projects
+conversation fields instead of complete history rows, indexes scheduler/tool
+reference material and preserves its full source privately by SHA256. PCM
+authority, the current task and active recovery evidence remain unchanged.
+Near capacity, HER closes tool use, retains completed results and probes the
+changed final payload independently; no completed action is replayed and the
+output reserve is not reduced. These are HERV3 Function changes. Source,
+native counts and Agent6 adoption need separate receipts.
+See [Ollama decision](HERV3_OLLAMA_CONTEXT_PILOT.md).
+
 October 16 Ollama reasoning: explicit `enabled/off` uses native boolean
 `think`; binary `/effort` controls derive from exact-model instance opt-ins.
 Native transport is independent of the context pilot. Keep local tags out of

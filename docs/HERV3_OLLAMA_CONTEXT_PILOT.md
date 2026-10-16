@@ -1,5 +1,52 @@
 # HERV3 Ollama context pilot
 
+## 2026-10-16 model-facing context budget repair
+
+The later request was rejected at 41,149 native input tokens against 40,960
+usable input, preserving the 8,192 output reserve. Initial input was already
+37,536 tokens. Full history rows included repeated route/lease metadata;
+scheduler recovery text and tool descriptions also crowded out new evidence.
+All eleven results were paged, but only 320 original characters reached the
+model; eight pages exposed no body. This is a context projection and tool-loop
+budget defect, not evidence that the underlying task exceeds model ability.
+
+The existing native-context opt-in owns this narrower provider adaptation:
+
+- The HERV3 compiler accepts an optional Model Provider reference projection.
+  Only the Ollama native-context adapter supplies this projection. Trusted PCM
+  system/persona text and the current request are not passed to the projector.
+- Historical conversation fields remain readable; execution identities, route
+  snapshots and revision metadata remain in the private full-source reference.
+  Unknown history formats, active recovery, unresolved effects and tool receipts
+  are preserved. Scheduler inventory and tool discovery descriptions become
+  indexes; full task instructions must be read before acting on recovery.
+- Every original reference is retained in a private SHA256-addressed file;
+  model-facing omission never means deletion or a claim that omitted content
+  was read. Shared PCM, Scheduler state and other Model Providers do not change.
+- New result pages still preserve complete outputs. When a batch cannot afford
+  useful pages, the following call closes tools rather than recursively reading
+  footer-only results. Within 2,048 tokens of the usable input limit, native
+  admission also closes tool use and checks the changed payload independently.
+- Closing reclaims future tool schemas and adds a runtime status notice. It
+  preserves the original task, trusted system text and earlier results, keeps
+  the configured output reserve and forbids execution of unexpected subsequent
+  tool calls. At most one close/reprobe recovery occurs per admission; if the
+  remaining payload still cannot fit, the existing typed error is retained.
+- There is no blind retry, tool replay, model switch, server truncation,
+  additional Persona rendering or silent reduction of the 48K/8K baseline.
+
+Four focused failures establish red/green evidence: the pre-fix implementation
+failed reference projection, completed-write recovery and low-space batch
+closure; disabling only the new execution guard in an isolated test process
+allowed an unadvertised write and failed its sentinel check. The mutation was
+process-local and never changed source. The owning adapter/compiler/runtime
+component run passed 182 cases. Rendering the captured first payload reduced
+its reference/user message from 81,984 to 43,820 characters (46.55%) while
+preserving system text, current request, active recovery and native schemas.
+Characters are not tokens. Native count, deterministic gate, source commit and
+targeted Worker adoption are recorded separately; the user owns business-task
+testing.
+
 ## Owner and approval
 
 HERV3 owns this Function-level provider adaptation. On 2026-10-15 the user

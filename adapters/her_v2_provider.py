@@ -4904,6 +4904,9 @@ class HashiStageProvider(StageProvider):
                                 context=request.context,
                                 fallback_persona=(source.guidance if source.usable else ""),
                                 tools_available=request.allow_tools,
+                                reference_projector=getattr(
+                                    backend, "project_main_references", None
+                                ),
                             )
                         else:
                             system_prompt = _direct_system_prompt(

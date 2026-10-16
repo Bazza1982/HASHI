@@ -77,6 +77,11 @@ class OllamaAdapter(OpenRouterAdapter):
     def _native_context_enabled(self) -> bool:
         return (getattr(self.config, "extra", None) or {}).get("ollama_native_context") is True
 
+    def project_main_references(self, refs):
+        from adapters.ollama_context import project_references
+
+        return project_references(self, refs)
+
     async def _prepare_payload_capacity(self, payload, *, request_id, provider_calls):
         if self._native_context_enabled():
             from adapters.ollama_capacity import check_native_capacity
@@ -86,6 +91,11 @@ class OllamaAdapter(OpenRouterAdapter):
             )
 
     async def _run_tool_calls(self, tool_calls, messages, on_stream_event, **kwargs):
+        if self._native_context_enabled() and getattr(self, "_ollama_context_closing", False):
+            raise ProviderContextCapacityPreflightError(
+                "Tool use was closed to preserve context capacity; the requested "
+                "tools were not executed. Completed results remain preserved."
+            )
         first_result = len(messages)
         facts = await super()._run_tool_calls(
             tool_calls, messages, on_stream_event, **kwargs
@@ -194,6 +204,11 @@ class OllamaAdapter(OpenRouterAdapter):
     ) -> dict:
         if audio_output is not None:
             raise ValueError("Ollama does not support native audio output")
+        if self._native_context_enabled() and getattr(self, "_ollama_context_closing", False):
+            from adapters.ollama_capacity import closing_messages
+
+            messages = closing_messages(messages)
+            allow_tools = False
         payload: dict = {
             "model": self.config.model,
             "messages": messages,
@@ -296,6 +311,7 @@ class OllamaAdapter(OpenRouterAdapter):
         self._ollama_prompt_tokens = None
         self._ollama_last_output_tokens = 0
         self._ollama_capacity_probe_serial = 0
+        self._ollama_context_closing = False
         return await super().generate_response(
             prompt,
             request_id,

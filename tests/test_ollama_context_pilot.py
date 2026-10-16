@@ -583,7 +583,9 @@ async def test_native_tool_read_is_paged_with_original_result_saved_and_no_repla
         result_text = "".join(
             row.get("content", "") for row in payload["messages"] if row["role"] == "tool"
         )
-        actual_count = 39000 + len(result_text.encode("utf-8")) // 2
+        # Leave room for the first read batch; a separate regression verifies
+        # that tool use closes when the initial payload is already near full.
+        actual_count = 37536 + len(result_text.encode("utf-8")) // 2
         message = {"content": ""}
         if not probe:
             main_calls += 1

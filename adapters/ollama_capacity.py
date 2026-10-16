@@ -21,7 +21,31 @@ from adapters.openrouter_api import (
 )
 
 
-async def check_native_capacity(adapter, payload, *, request_id, provider_calls):
+_CLOSING_NOTICE = (
+    "HERV3 capacity status: tool use is closed for this turn. This is not a new "
+    "user task. Answer the original request using only visible evidence and "
+    "state remaining work. Saved but unshown content has not been read. "
+    "Do not request or replay tools."
+)
+
+
+def closing_messages(messages):
+    rows = list(messages)
+    notice = {"role": "user", "content": _CLOSING_NOTICE}
+    if not rows or rows[-1] != notice:
+        rows.append(notice)
+    return rows
+
+
+def close_tool_loop(adapter, payload):
+    adapter._ollama_context_closing = True
+    payload.pop("tools", None)
+    payload["messages"] = closing_messages(payload["messages"])
+
+
+async def check_native_capacity(
+    adapter, payload, *, request_id, provider_calls, allow_close=True,
+):
     # Ollama 0.35 has no public tokenizer/count API. num_predict=0 selects its
     # default generation budget; it is NOT a count-only request. Use exactly
     # one token with the same messages/tools/template/context and no callbacks.
@@ -97,6 +121,19 @@ async def check_native_capacity(adapter, payload, *, request_id, provider_calls)
             "Ollama did not provide a valid bounded capacity probe; full generation "
             "was not started and no tools were executed by the probe."
         )
+    if (
+        allow_close and payload.get("tools")
+        and result.prompt_tokens > capacity.usable_input_tokens - 2048
+    ):
+        # Reclaim future tool schemas, not the task or completed evidence.
+        # The changed final payload must pass its own native probe. Never
+        # recover by replaying tools or shrinking the response reserve.
+        close_tool_loop(adapter, payload)
+        await check_native_capacity(
+            adapter, payload, request_id=request_id,
+            provider_calls=provider_calls, allow_close=False,
+        )
+        return
     if not fits:
         raise ProviderContextCapacityPreflightError(
             f"Ollama counted {result.prompt_tokens} input tokens; the usable input "
@@ -107,12 +144,12 @@ async def check_native_capacity(adapter, payload, *, request_id, provider_calls)
     adapter._ollama_prompt_tokens = result.prompt_tokens
 
 
-def _save_result(adapter, output):
+def _save_result(adapter, output, *, directory="ollama_tool_results"):
     from tools.private_files import protect_private_file
 
     raw = output.encode("utf-8")
     digest = hashlib.sha256(raw).hexdigest()
-    root = Path(adapter.config.workspace_dir) / "backend_state" / "ollama_tool_results"
+    root = Path(adapter.config.workspace_dir) / "backend_state" / directory
     try:
         if not root.exists():
             root.mkdir(parents=True, exist_ok=True)
@@ -149,6 +186,10 @@ def page_new_tool_results(adapter, messages, first_result):
     # UTF-8 bytes are a conservative page-size allowance, not a claimed token
     # count. The exact, complete next payload still passes the native probe.
     allowance = remaining // len(results)
+    if allowance < 1024:
+        # Do not invite repeated reads of footer-only pages. The next call
+        # closes tools and is independently counted without future schemas.
+        adapter._ollama_context_closing = True
     for row in results:
         original = row.get("content", "")
         if not isinstance(original, str) or len(original.encode("utf-8")) <= allowance:
@@ -159,14 +200,9 @@ def page_new_tool_results(adapter, messages, first_result):
             "total_chars": len(original), "shown_chars": 0, "next_line": 1,
         }
         instruction = (
-            "\nRead saved_result with small file_read offset/limit pages or log_query; "
-            "do not rerun the original tool. Unshown content has not been read by the model."
+            "\nRead saved_result with file_read offset/limit or log_query. "
+            "Unshown text is unread; never rerun the original tool."
         )
-        if remaining < 1024:
-            instruction += (
-                " Input space is nearly full; give a qualified answer from visible evidence "
-                "and disclose remaining work."
-            )
         def render(prefix):
             metadata["shown_chars"] = len(prefix)
             metadata["next_line"] = prefix.count("\n") + 1
