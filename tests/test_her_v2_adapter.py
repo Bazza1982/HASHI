@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from adapters import her_persona
 from adapters.base import BackendResponse, TokenUsage
 from adapters.deepseek_api import DeepSeekAdapter
 from adapters.hashi_api import HashiApiAdapter
@@ -16,6 +17,7 @@ from adapters.her_v2 import (
     HashiStageProvider,
     HERv2Adapter,
     _AdapterDelivery,
+    _ConfiguredPersonaPackager,
     _ExecutionStageCompactionProvider,
     _HChatDraftToolProvider,
     _backend_response_error,
@@ -1594,6 +1596,164 @@ async def test_adapter_binds_provider_commentary_to_persona_pipeline(tmp_path):
     assert commentary[0].phase == Stage.DIRECT.value
     assert commentary[0].provenance == "persona_packager"
     assert [item.stage for item in packager.commentaries] == [Stage.DIRECT]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "engine,adapter_engine",
+    [
+        ("ollama-api", "ollama-api"),
+        ("ollama", "ollama-api"),
+        ("deepseek-api", "deepseek-api"),
+        ("openrouter-api", "openrouter-api"),
+    ],
+)
+async def test_ollama_presentation_uses_only_pcm_main_call(tmp_path, engine, adapter_engine):
+    calls = []
+    events = []
+    persona = "Address the user as Captain; keep the PCM Persona intact."
+    final_text = "Captain, the main model completed the requested work."
+
+    class PresentationBackend(_FakeBackend):
+        async def generate_response(
+            self, prompt, request_id, is_retry=False, silent=False, on_stream_event=None
+        ):
+            calls.append((request_id, self.sys_prompt, prompt))
+            if ":persona-package:" in request_id:
+                return BackendResponse(text="Captain, the progress is ready.", duration_ms=1)
+            if ":final-style:" in request_id:
+                return BackendResponse(
+                    text=json.dumps(
+                        {"decision": "rewrite", "text": "Captain, the final was restyled."}
+                    ),
+                    duration_ms=1,
+                )
+            await on_stream_event(
+                StreamEvent(
+                    kind=KIND_COMMENTARY,
+                    summary="Raw provider progress",
+                    delivery_class=DELIVERY_USER_COMMENTARY,
+                )
+            )
+            return BackendResponse(text=final_text, duration_ms=1)
+
+    class PresentationManager(_FakeManager):
+        agent_mode = "fixed"
+
+        def create_ephemeral_backend(self, selected_engine, target_model=None):
+            assert selected_engine == adapter_engine
+            backend = PresentationBackend(self.system_md)
+            backend.input_capability = SimpleNamespace(
+                input_modalities=frozenset({"text"}), source="test"
+            )
+            backend.capabilities.output_modalities = frozenset({"text"})
+            self.backends.append(backend)
+            return backend
+
+    async def capture(event):
+        events.append(event)
+
+    profiles = {
+        name: {**profile, "engine": engine, "model": "configured/ollama-named-model"}
+        for name, profile in _profiles().items()
+    }
+    config = _agent_config(tmp_path, her_v2={"profiles": profiles}, effort="zero")
+    config.extra["final_style"] = True
+    config.system_md.write_text(
+        render_pcm_document(persona=persona, system="Follow HASHI policy."),
+        encoding="utf-8",
+    )
+    manager = PresentationManager(config.system_md)
+    provider = HashiStageProvider(backend_manager=manager, on_stream_event=capture)
+    config._her_v2_stage_provider = provider
+    adapter = HERv2Adapter(config, _global_config(tmp_path))
+
+    assert await adapter.initialize()
+    try:
+        response = await adapter.generate_response(
+            "Inspect the configured state",
+            "request-ollama-presentation",
+            on_stream_event=capture,
+        )
+    finally:
+        await adapter.shutdown()
+
+    assert response.is_success, response.text
+    main_calls = [
+        item
+        for item in calls
+        if ":persona-package:" not in item[0] and ":final-style:" not in item[0]
+    ]
+    persona_calls = [item for item in calls if ":persona-package:" in item[0]]
+    style_calls = [item for item in calls if ":final-style:" in item[0]]
+    commentary = [
+        event for event in events if event.delivery_class == DELIVERY_USER_COMMENTARY
+    ]
+    final_events = [event for event in events if event.delivery_class == DELIVERY_FINAL]
+    assert len(main_calls) == 1
+    assert persona in main_calls[0][1]
+    assert "Inspect the configured state" in main_calls[0][2]
+    if engine in {"ollama-api", "ollama"}:
+        assert persona_calls == []
+        assert style_calls == []
+        assert response.text == final_text
+        assert [event.summary for event in commentary] == ["Raw provider progress"]
+        assert commentary[0].provenance == "ollama_pcm_only"
+    else:
+        assert len(persona_calls) == 1
+        assert len(style_calls) == 1
+        assert response.text == "Captain, the final was restyled."
+        assert [event.summary for event in commentary] == [
+            "Captain, the progress is ready."
+        ]
+    assert len(final_events) == 1
+    assert final_events[0].summary == response.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["ollama-api", "ollama", "deepseek-api"])
+async def test_ollama_presentation_preserves_required_question_without_model_render(
+    engine,
+):
+    from unittest.mock import AsyncMock
+
+    provider = SimpleNamespace(
+        package_persona_commentary=AsyncMock(return_value="Captain, choose a target."),
+    )
+    source = her_persona.HERPersonaPackagingSource(
+        guidance="Address the user as Captain.",
+        display_name="Helper",
+        usable=True,
+        unavailable_reason=None,
+        content_sha256="persona-source",
+    )
+    renderer = _ConfiguredPersonaPackager(
+        provider=provider,
+        profile=ProviderProfile("lightweight", engine, "configured/model"),
+        source=source,
+        request_id="request-required-presentation",
+        logger=logging.getLogger("test-ollama-presentation"),
+    )
+    message = RequiredUserMessage(
+        event_id="question-target",
+        turn_id="turn-target",
+        kind="clarification",
+        text="Choose a target.",
+    )
+
+    result = await renderer.render(message)
+
+    assert result.source_event_id == message.event_id
+    assert result.kind == message.kind
+    assert result.fallback is False
+    if engine in {"ollama-api", "ollama"}:
+        provider.package_persona_commentary.assert_not_awaited()
+        assert result.text == message.text
+        assert result.provenance == "ollama_pcm_only"
+    else:
+        provider.package_persona_commentary.assert_awaited_once()
+        assert result.text == "Captain, choose a target."
+        assert result.provenance == "persona_packager"
 
 
 @pytest.mark.asyncio

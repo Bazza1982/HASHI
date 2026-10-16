@@ -242,6 +242,63 @@ successful adoption; preserve unrelated checkout/configuration changes.
   explicitly reserved subsequent functional testing. The earlier approximately
   1.1-GiB loaded-model margin remains a caution, not a voice acceptance pass.
 
+### 2026-10-16 Ollama-only PCM presentation
+
+The user approved a second, narrowly scoped experiment: when the resolved Model
+Provider is `ollama`, HERV3 must not start an auxiliary Persona commentary
+model call. Keep the main PCM projection and the main model's final message.
+A deployment correction also separates public Provider names from adapter IDs:
+Engine `her-v3`, Provider `ollama`, model set to the actual local model tag.
+The registry derives registered names and legacy adapter IDs in one place.
+This is HERV3 Function-layer policy with an Agent6 instance configuration
+correction; PCM, Core, context limits and reasoning settings are unchanged.
+
+The default Persona bridge now applies the rule before reserving an auxiliary
+request or invoking a provider:
+
+- Commentary retains its source event identity, stage and neutral text and is
+  delivered through the existing typed pipeline, with `ollama_pcm_only`
+  provenance. Progress is not globally disabled.
+- Required clarification questions retain their identity, kind and text and
+  remain deliverable; only the additional style inference is bypassed.
+- The optional final-style renderer returns `keep` with the exact main-model
+  draft, even when its saved preference is On. This does not rewrite the saved
+  preference; choosing a non-Ollama presentation profile restores its normal
+  behavior.
+- Selection follows the resolved Model Provider via the registry's adapter
+  identity, not a model-name substring, Agent identity or inference URL.
+  `ollama-api` stays a supported internal adapter ID. Public Provider values
+  use `ollama`, `deepseek`, etc.; model tags stay unchanged.
+  DeepSeek and OpenRouter presentation inference behavior is unchanged.
+- The existing `/commentary off` visibility gate remains downstream of the
+  pipeline. Hiding a rendered message is not evidence that inference was
+  avoided. This change does not modify that independent frontend preference.
+
+The preceding presentation-only checks passed 239 related cases. The deployment
+correction strengthens existing manager persistence/reload and real command
+scenarios: six cases first failed for unrecognised public Provider names,
+adapter IDs persisted as Provider values, and adapter suffixes displayed in
+menus. After correction, the three owning modules passed 131 cases, including
+the default-pipeline PCM-only Ollama and cloud presentation controls.
+
+The registry resolves both registered Provider names and legacy adapter IDs
+before allowlist comparison, model selection and backend construction. Saved
+HERV3 targets, status metadata and public menus publish Provider names without
+the adapter suffix; internal adapter authorization and models are retained.
+The independent full gate uses Python 3.12.13 and the exact standard dependency
+lock. Its pre-commit run passed 870 cases, skipped one and rejected three
+qualification cases solely because modified Function source was not committed.
+Re-run qualification after the authorized commit and record the final result.
+These checks do not measure live latency or prove running Worker adoption.
+
+The user subsequently approved committing this group and restarting Agent6,
+with the next real task reserved for the user. This authorizes only a supported
+Agent6 hot adoption, not a Core/shared/Ollama restart, another Agent reboot,
+push/merge or business-task replay. The preceding source checks do not prove
+adoption: record a terminal lifecycle receipt, changed Worker identity and
+matching committed/artifact bytes separately. Do not infer a new live
+latency/token acceptance result from test doubles or merely accepting reboot.
+
 ## Rollback and trial limits
 
 Retain the experiment on `feature-ollama`; do not merge or commit it implicitly.

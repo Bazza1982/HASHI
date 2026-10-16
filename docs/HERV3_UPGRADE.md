@@ -11,6 +11,18 @@ through a verified Agent-only hot reboot; its active profile publishes 48K/8K
 and 90-second idle residency. User task testing and actual voice contention
 remain separate acceptance items; the original 64K results stay historical.
 
+The October 16 Ollama-only presentation experiment bypasses auxiliary Persona
+commentary, clarification rendering and optional final-style inference when
+the resolved Model Provider is `ollama`. Public configuration and status name
+the Provider separately from its model; `ollama-api` is an internal adapter
+compatibility ID. Registered Provider names and legacy IDs both resolve through
+the registry. Neutral progress and required
+questions still cross their typed delivery boundaries; the exact main-model
+final answer and its PCM Persona remain intact. Other Model Providers retain
+their presentation calls. This is not the downstream `/commentary` visibility
+switch. See the [presentation decision](HERV3_OLLAMA_CONTEXT_PILOT.md#2026-10-16-ollama-only-pcm-presentation).
+Source verification and Agent6 Worker adoption must be reported separately.
+
 The 2026-10-04 [scoped-search Function change](HERV3_SCOPED_SEARCH.md) retains
 the single model/tool loop and direct Shell use. Execution facts drive technical
 verbose activity independently of commentary; AC heartbeat is not actual progress.

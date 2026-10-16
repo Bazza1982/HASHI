@@ -121,26 +121,48 @@ def test_v3_repairs_persisted_effort_incompatible_with_deepseek(tmp_path):
     assert manager.state_store.read()["backend_efforts"]["her-v2"] == "high"
 
 
-def test_v3_manager_persists_and_live_refreshes_model_target(tmp_path):
+@pytest.mark.parametrize(
+    "provider,engine,public_provider,initial_model,selected_model",
+    [
+        ("ollama", "ollama-api", "ollama", "local-gemma:31b", "local-qwen:27b"),
+        ("ollama-api", "ollama-api", "ollama", "local-gemma:31b", "local-qwen:27b"),
+        ("deepseek", "deepseek-api", "deepseek", "deepseek-v4-pro", "deepseek-flash"),
+        ("deepseek-api", "deepseek-api", "deepseek", "deepseek-v4-pro", "deepseek-flash"),
+    ],
+)
+def test_v3_manager_persists_and_live_refreshes_model_target(
+    tmp_path, provider, engine, public_provider, initial_model, selected_model
+):
     manager = _manager(tmp_path)
-    live_config = SimpleNamespace(engine="her-v2", extra={"her_v2": _raw_config()})
-    manager.current_backend = SimpleNamespace(
-        config=live_config,
-        _v2_config=None,
-    )
+    raw = {
+        "main": {"provider": provider, "model": initial_model},
+        "v3_provider_allowlist": [provider],
+    }
+    manager.config.allowed_backends[0]["her_v2"] = raw
+    manager.config.allowed_backends.append({
+        "engine": engine, "models": [initial_model, selected_model],
+    })
+    manager.global_config.her_providers["providers"][public_provider] = {
+        "engine": engine,
+    }
+    live_config = SimpleNamespace(engine="her-v2", extra={"her_v2": raw})
+    manager.current_backend = SimpleNamespace(config=live_config, _v2_config=None)
 
-    target = manager.prepare_her_v3_model("deepseek-flash")
+    target = manager.prepare_her_v3_model(selected_model)
     manager.apply_her_v3_target(target)
 
     assert manager.get_her_v3_target() == target
-    assert manager.current_backend._v2_config.profiles["main"].model == "deepseek-flash"
-    assert live_config.extra["her_v2"]["profiles"]["main"]["model"] == "deepseek-flash"
+    profiles = manager.current_backend._v2_config.profiles
+    assert {(p.engine, p.model) for p in profiles.values()} == {(engine, selected_model)}
+    assert live_config.extra["her_v2"]["main"]["provider"] == public_provider
     state = json.loads(manager.state_file.read_text(encoding="utf-8"))
     assert state[HER_V3_CONFIGURATION_STATE_KEY] == {
-        "provider": "deepseek-api",
-        "model": "deepseek-flash",
+        "provider": public_provider, "model": selected_model,
     }
     assert "her_v2_configuration" not in state
+    reloaded = _manager_reloaded(manager)
+    assert reloaded.get_her_v3_target() == target
+    assert reloaded._her_v3_provider_option(public_provider)["engine"] == engine
 
 
 @pytest.mark.parametrize("previous,expected", [("off", "high"), ("low", "low")])

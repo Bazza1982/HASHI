@@ -272,6 +272,26 @@ def canonical_backend_engine(engine: str | None) -> str:
     return HER_V2_ENGINE if value in RETIRED_HER_ENGINE_ALIASES else value
 
 
+def canonical_model_provider(provider: str | None) -> str:
+    """Resolve a Model Provider name to its registered inference adapter ID."""
+
+    value = canonical_backend_engine(provider)
+    candidate = value.casefold()
+    if candidate.endswith("-api") and candidate in BACKEND_REGISTRY:
+        return candidate
+    adapter = f"{candidate}-api"
+    return adapter if adapter in BACKEND_REGISTRY else value
+
+
+def public_model_provider(provider: str | None) -> str:
+    """Project Model Provider names without exposing inference adapter suffixes."""
+
+    engine = canonical_model_provider(provider)
+    if engine.endswith("-api") and engine in BACKEND_REGISTRY:
+        return engine.removesuffix("-api")
+    return engine
+
+
 def public_backend_engine(engine: str | None) -> str:
     """Return the product-facing Engine ID without exposing storage aliases."""
 

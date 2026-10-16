@@ -9,7 +9,8 @@ from typing import Any
 from orchestrator.flexible_backend_registry import (
     BACKEND_REGISTRY,
     HER_V2_ENGINE,
-    canonical_backend_engine,
+    canonical_model_provider,
+    public_model_provider,
     get_backend_label,
     get_default_model,
 )
@@ -27,7 +28,7 @@ class HERv3ModelTarget:
     model: str
 
     def __post_init__(self) -> None:
-        provider = canonical_backend_engine(self.provider)
+        provider = canonical_model_provider(self.provider)
         model = str(self.model or "").strip()
         if not provider or provider == "her-v2":
             raise ValueError("HERV3 target requires a concrete Provider")
@@ -46,7 +47,7 @@ class HERv3ModelTarget:
         )
 
     def to_dict(self) -> dict[str, str]:
-        return {"provider": self.provider, "model": self.model}
+        return {"provider": public_model_provider(self.provider), "model": self.model}
 
 @dataclass(frozen=True)
 class CompanionConfig:
@@ -101,7 +102,7 @@ def normalise_v3_config(raw: Mapping[str, Any]) -> dict[str, Any]:
             not isinstance(value, str) or not value.strip() for value in provider_allowlist
         ):
             raise ValueError("HERV3 provider allowlist must be a nonempty list of Providers")
-        provider_allowlist = [canonical_backend_engine(value) for value in provider_allowlist]
+        provider_allowlist = [canonical_model_provider(value) for value in provider_allowlist]
 
     profiles = raw.get("profiles") or {}
     roles = raw.get("stage_roles") or {}
@@ -144,7 +145,8 @@ def normalise_v3_config(raw: Mapping[str, Any]) -> dict[str, Any]:
     for profile in (primary, auxiliary):
         if not str(profile.get("engine") or "").strip() or not str(profile.get("model") or "").strip():
             raise ValueError("HERV3 model targets require provider and model")
-        if provider_allowlist is not None and canonical_backend_engine(profile["engine"]) not in provider_allowlist:
+        profile["engine"] = canonical_model_provider(profile["engine"])
+        if provider_allowlist is not None and profile["engine"] not in provider_allowlist:
             raise ValueError("HERV3 model target is outside the configured Provider allowlist")
         for key in ("provider_reasoning", "reasoning_effort", "_native_audio_route"):
             profile.pop(key, None)
@@ -226,7 +228,7 @@ def build_v3_provider_options(
 
     rows_by_engine: dict[str, list[Mapping[str, Any]]] = {}
     for row in allowed_backends:
-        engine = canonical_backend_engine(str(row.get("engine") or ""))
+        engine = canonical_model_provider(str(row.get("engine") or ""))
         if engine and engine != HER_V2_ENGINE:
             rows_by_engine.setdefault(engine, []).append(row)
 
@@ -236,7 +238,7 @@ def build_v3_provider_options(
         if not isinstance(raw_profile, Mapping):
             continue
         name = str(raw_name).strip()
-        engine = canonical_backend_engine(
+        engine = canonical_model_provider(
             str(
                 raw_profile.get("engine")
                 or (name if name.endswith("-api") else f"{name}-api")
@@ -254,7 +256,7 @@ def build_v3_provider_options(
             ordered.append(engine)
 
     options: list[dict[str, Any]] = []
-    allowed = {canonical_backend_engine(value) for value in allowed_providers} if allowed_providers is not None else None
+    allowed = {canonical_model_provider(value) for value in allowed_providers} if allowed_providers is not None else None
     for engine in ordered:
         if allowed is not None and engine not in allowed:
             continue

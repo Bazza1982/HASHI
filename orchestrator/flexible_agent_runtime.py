@@ -125,6 +125,7 @@ from orchestrator.flexible_backend_registry import (
     is_selectable_backend,
     normalize_model,
     public_backend_engine,
+    public_model_provider,
 )
 from orchestrator.runtime_effort_options import (
     backend_model_view,
@@ -2213,6 +2214,7 @@ class FlexibleAgentRuntime:
         delivery = telegram_delivery_failover.delivery_status_summary(self)
         display_policy = telegram_stream_policy.get_display_policy(self)
         public_backend = public_backend_engine(self.config.active_backend)
+        public_provider = public_model_provider(self.get_current_provider()) or None
         public_allowed_backends: list[dict[str, Any]] = []
         for configured in self.config.allowed_backends:
             row = dict(configured)
@@ -2240,7 +2242,7 @@ class FlexibleAgentRuntime:
                 row.update(
                     {
                         "engine": "her-v3",
-                        "provider": target.provider,
+                        "provider": public_model_provider(target.provider),
                         "model": target.model,
                         "models": list(option.get("models") or []) if option else [],
                         "effort": effort,
@@ -2263,11 +2265,11 @@ class FlexibleAgentRuntime:
             "engine": public_backend,
             "active_backend": public_backend,
             "model": self.get_current_model(),
-            "provider": self.get_current_provider(),
+            "provider": public_provider,
             "allowed_backends": public_allowed_backends,
             "privacy_level": int(getattr(self.backend_manager, "privacy_level", 1)),
             "backend_catalogue": runtime_backend_catalogue(self),
-            "active_provider": self.get_current_provider(),
+            "active_provider": public_provider,
             "workspace_dir": str(self.workspace_dir),
             "transcript_path": str(self.transcript_log_path),
             "online": bool(self.backend_ready),
@@ -8597,7 +8599,7 @@ class FlexibleAgentRuntime:
         if provider:
             facts.append(
                 f"<b>{html.escape(ui_language.tr('common.provider'))}</b> · "
-                f"<code>{html.escape(provider)}</code>"
+                f"<code>{html.escape(public_model_provider(provider))}</code>"
             )
         if self.config.active_backend == HER_V2_ENGINE:
             facts.extend(

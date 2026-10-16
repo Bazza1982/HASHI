@@ -1,5 +1,17 @@
 # HASHI Agent FYI
 
+October 16 Ollama presentation/provider correction: HERV3 publishes provider
+`ollama` and the configured model separately; `ollama-api` remains an internal
+adapter compatibility ID. Registered Model Provider names (including
+`deepseek`) round-trip through configuration, allowlists and saved selections.
+Ollama progress, required questions and optional final style pass through
+without an auxiliary model call; the main PCM Persona/final answer remain.
+Cloud inference behavior, capacities and Core are unchanged. The downstream
+`/commentary off` switch is still a visibility control. The user approved this
+group's commit and Agent6-only hot adoption, with task testing reserved for
+the user. Source checks and actual adoption are recorded separately.
+See [presentation decision](HERV3_OLLAMA_CONTEXT_PILOT.md#2026-10-16-ollama-only-pcm-presentation).
+
 October 16 Ollama deployment completed under explicit user approval: source
 commit `4dd4cb1a`, revisioned 48K/8K profile and Agent6-only hot adoption.
 Terminal receipt succeeded; the new ACTIVE/ready Worker publishes native
