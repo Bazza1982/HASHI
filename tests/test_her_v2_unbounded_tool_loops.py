@@ -80,21 +80,21 @@ async def test_gateway_adapter_continues_past_registry_limit_for_her_v2(
         monkeypatch.setattr(adapter, "_resolve_bearer", resolve_bearer)
 
     provider_payloads = []
-    tool_calls = [
-        {
-            "id": "call-1",
-            "type": "function",
-            "function": {
-                "name": "file_read",
-                "arguments": '{"path":"notes.txt"}',
-            },
-        }
-    ]
 
     async def call_api_once(payload, headers, on_stream_event):
         del headers, on_stream_event
         provider_payloads.append(payload)
         if len(provider_payloads) <= 4:
+            tool_calls = [
+                {
+                    "id": f"call-{len(provider_payloads)}",
+                    "type": "function",
+                    "function": {
+                        "name": "file_read",
+                        "arguments": '{"path":"notes.txt"}',
+                    },
+                }
+            ]
             return _APIResult(
                 text="",
                 tool_calls=tool_calls,

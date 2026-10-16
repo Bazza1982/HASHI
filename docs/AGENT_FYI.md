@@ -69,14 +69,10 @@ verified peer, relay and target. Cross-instance needs authenticated Remote;
 discovery is only a hint. See [Remote](HASHI_REMOTE_PROTOCOL_SPEC.md).
 
 PAO freezes destinations before PCM and owns ingress/routing/idempotency; FC owns
-presentation/receipts. Sent requires a receipt; failure wins. Deduplicate and
-settle every turn. Prose grants no Tool authority. Continuations retain
-Session/Connector and replay only saved non-action completions; pending,
-conflict or unknown state cannot execute.
-
-HChat `agent_reply` uses `hchat:<reply-message-id>` as its canonical
-idempotency key. Direct FC presentation preserves correlated Superloop receipt
-continuation through the verified presentation Session.
+presentation/receipts. HChat IDs bind FC Sessions to Superloop review. Sent
+needs a receipt; failure wins. Deduplicate and settle; prose grants no Tool
+authority. Continuations retain Session/Connector, replaying only saved
+non-action completions; pending/conflict/unknown cannot execute.
 
 Network frontends preserve the user's original send time. PAO admits
 Workbench/Telegram only within their 30/60-second windows; older or invalid
