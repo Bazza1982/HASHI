@@ -6,6 +6,7 @@ HER effort remains orchestration policy and is never represented here.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
@@ -769,19 +770,39 @@ def build_her_v2_provider_options(
             if row_models
             else registry_pro or registry_default or (models[-1] if models else "")
         )
-        options.append(
-            {
-                "name": name,
-                "engine": engine,
-                "label": get_backend_label(engine),
-                "status": status,
-                "models": models,
-                "fast_model": fast_model,
-                "pro_model": pro_model,
-                "available": reason is None,
-                "reason": reason,
-            }
-        )
+        known_fallback_cost = None
+        for raw_cost in [
+            profile.get("estimated_fallback_call_cost_usd"),
+            *(row.get("estimated_fallback_call_cost_usd") for row in rows),
+        ]:
+            if raw_cost is None:
+                continue
+            if isinstance(raw_cost, bool):
+                continue
+            try:
+                candidate_cost = float(raw_cost)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(candidate_cost) and candidate_cost >= 0:
+                known_fallback_cost = candidate_cost
+                break
+        option = {
+            "name": name,
+            "engine": engine,
+            "label": get_backend_label(engine),
+            "status": status,
+            "models": models,
+            "fast_model": fast_model,
+            "pro_model": pro_model,
+            "available": reason is None,
+            "reason": reason,
+        }
+        if known_fallback_cost is not None:
+            # This is an explicit, configured per-call estimate. Missing or
+            # invalid data remains unknown so AUTO stays fail-closed unless
+            # the user separately allows unknown cost.
+            option["estimated_fallback_call_cost_usd"] = known_fallback_cost
+        options.append(option)
     return options
 
 

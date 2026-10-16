@@ -394,6 +394,49 @@ async def test_safevoice_callback_confirms_into_batch_without_enqueuing():
     assert answers == ["Added to /long batch"]
 
 
+@pytest.mark.asyncio
+async def test_safevoice_callback_preserves_telegram_connector_on_confirm():
+    runtime = _runtime()
+    runtime._pending_voice["123"] = {
+        "prompt": "[Voice message transcription] send this",
+        "transcript": "send this",
+        "summary": "Voice: note.ogg",
+        "chat_id": 123,
+        "timestamp": "2026-10-16T00:00:00",
+        "long_batch": False,
+    }
+    edits = []
+    answers = []
+
+    class _Query:
+        data = "safevoice:yes:123"
+        from_user = SimpleNamespace(id=1)
+
+        async def edit_message_text(self, text, **kwargs):
+            edits.append({"text": text, **kwargs})
+
+        async def answer(self, text):
+            answers.append(text)
+
+    await FlexibleAgentRuntime.callback_safevoice(
+        runtime,
+        SimpleNamespace(callback_query=_Query()),
+        SimpleNamespace(),
+    )
+
+    assert runtime.enqueued == [
+        {
+            "chat_id": 123,
+            "prompt": "[Voice message transcription] send this",
+            "source": "voice_transcript",
+            "summary": "Voice: note.ogg",
+            "request_metadata": {"ingress_transport": "telegram"},
+        }
+    ]
+    assert "send this" in edits[0]["text"]
+    assert len(answers) == 1
+
+
 def test_pending_voice_keeps_original_position_after_later_media_arrives():
     runtime = _runtime()
     runtime_long.begin_batch(runtime, 123)

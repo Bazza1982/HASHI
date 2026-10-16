@@ -13,6 +13,7 @@ from orchestrator.her_v2.runtime_configuration import (
     HER_V2_CAPABILITY_REVISION,
     HER_V2_PRICING_REVISION,
     _loaded_pricing_revision,
+    build_her_v2_provider_options,
     resolve_her_v2_configuration,
 )
 from tools import token_tracker
@@ -802,3 +803,26 @@ def test_state_read_failure_cannot_overwrite_or_activate_candidate(
 
     assert publish_calls == []
     assert manager.get_her_v2_configuration() == before
+
+
+def test_provider_options_expose_only_valid_explicit_fallback_costs():
+    options = build_her_v2_provider_options(
+        [
+            {
+                "engine": "openrouter-api",
+                "models": ["deepseek/deepseek-v4-flash"],
+                "estimated_fallback_call_cost_usd": "0.0125",
+            },
+            {
+                "engine": "deepseek-api",
+                "models": ["deepseek-v4-flash"],
+                "estimated_fallback_call_cost_usd": False,
+            },
+        ],
+        {},
+        _her_v2_config(),
+    )
+    by_engine = {option["engine"]: option for option in options}
+
+    assert by_engine["openrouter-api"]["estimated_fallback_call_cost_usd"] == 0.0125
+    assert "estimated_fallback_call_cost_usd" not in by_engine["deepseek-api"]

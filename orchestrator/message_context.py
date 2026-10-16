@@ -31,6 +31,8 @@ PRIVATE_AUTHORIZATION_CONTENT_DIGEST_METADATA_KEY = (
     "_private_authorization_content_sha256"
 )
 CONNECTOR_EVIDENCE_METADATA_KEY = "_connector_evidence"
+NETWORK_INGRESS_SCOPE_CLAIM_KEY = "_network_ingress_scope"
+REMOTE_WORKBENCH_INGRESS_SCOPE = "remote_workbench"
 FRONTEND_INGRESS_ENVELOPE_METADATA_KEY = "_frontend_ingress_envelope"
 SOURCE_ID_MAX_LENGTH = 64
 SOURCE_DISPLAY_NAME_MAX_LENGTH = 128
@@ -507,6 +509,23 @@ def build_message_context_snapshot(
             for item in hchat.get("relay_chain") or ()
             if str(item).strip()
         ]
+        hchat_message_id = str(hchat.get("message_id") or "").strip()
+        hchat_idempotency = str(hchat.get("idempotency_key") or "").strip()
+        hchat_digest = str(hchat.get("payload_digest") or "").strip().casefold()
+        if (
+            hchat_message_id
+            and hchat_idempotency == f"hchat:{hchat_message_id}"
+            and re.fullmatch(r"sha256:[0-9a-f]{64}", hchat_digest)
+        ):
+            snapshot["hchat_message"] = {
+                "message_id": hchat_message_id,
+                "originated_at": str(hchat.get("originated_at") or "").strip(),
+                "message_type": str(
+                    hchat.get("message_type") or "agent_message"
+                ).strip().casefold(),
+                "idempotency_key": hchat_idempotency,
+                "payload_digest": hchat_digest,
+            }
         origin = hchat.get("origin_instance")
         if isinstance(origin, Mapping) and str(origin.get("id") or "").strip():
             snapshot["origin_instance"] = {
@@ -734,6 +753,8 @@ def project_root_for_runtime(runtime: Any) -> Path | None:
 __all__ = [
     "HCHAT_CONTEXT_METADATA_KEY",
     "CONNECTOR_EVIDENCE_METADATA_KEY",
+    "NETWORK_INGRESS_SCOPE_CLAIM_KEY",
+    "REMOTE_WORKBENCH_INGRESS_SCOPE",
     "MESSAGE_CONTEXT_METADATA_KEY",
     "MESSAGE_CONTEXT_TYPE",
     "MESSAGE_CONTEXT_VERSION",

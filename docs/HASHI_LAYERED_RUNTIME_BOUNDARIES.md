@@ -59,6 +59,7 @@ Current authoritative owners include:
 | Knowledge or lifecycle rule | Authoritative owner |
 |---|---|
 | Shared Engine/Model Provider compatibility baseline, models, effort, aliases, API-gateway eligibility | `orchestrator/flexible_backend_registry.py` |
+| User-consented model fallback policy, resolution gates, and additional-call budget | `orchestrator/model_fallback_policy.py` |
 | Instance model/effort opt-ins, explicit restrictions and effective Function-side choices | ignored `allowed_backends` configuration, resolved by `orchestrator/runtime_effort_options.py`; [model availability](HASHI_MODEL_AVAILABILITY.md) |
 | built-in slash handler, menu, help group, alias, sensitivity | `orchestrator/command_specs.py` |
 | shared Function manager construction | `orchestrator/manager_registry.py` |

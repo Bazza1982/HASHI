@@ -2205,6 +2205,7 @@ class _FakeBackend:
         self.privacy_level = None
         self.reasoning_enabled = None
         self.her_v2_stream_inactivity_timeout_s = None
+        self.provider_call_limit = None
         self.shutdown_called = False
         self.prompt = ""
         self.sys_prompt = "configured agent persona"
@@ -2222,10 +2223,17 @@ class _FakeBackend:
         return True
 
     async def generate_response(
-        self, prompt, request_id, is_retry=False, silent=False, on_stream_event=None
+        self,
+        prompt,
+        request_id,
+        is_retry=False,
+        silent=False,
+        on_stream_event=None,
+        provider_call_limit=None,
     ):
         del request_id, is_retry, silent
         self.prompt = prompt
+        self.provider_call_limit = provider_call_limit
         await on_stream_event(StreamEvent(kind=KIND_THINKING, summary="provider trace"))
         await on_stream_event(
             StreamEvent(kind=KIND_TOOL_START, summary="tool activity", tool_name="bash")
@@ -2286,6 +2294,35 @@ async def test_stage_provider_passes_only_the_typed_her_stream_guard():
     )
 
     assert manager.backends[0].her_v2_stream_inactivity_timeout_s == 300.0
+
+
+@pytest.mark.asyncio
+async def test_stage_fallback_target_receives_one_physical_call_limit():
+    manager = _FakeManager()
+    provider = HashiStageProvider(backend_manager=manager)
+    request = _stage_request(
+        Stage.EXECUTION,
+        allow_tools=False,
+        allow_side_effects=False,
+    )
+    request = StageRequest(
+        **{
+            **request.__dict__,
+            "attempt": 2,
+            "fallback_level": 1,
+        }
+    )
+
+    await provider.invoke(
+        ProviderProfile(
+            "execution",
+            "openrouter-api",
+            "configured/model",
+        ),
+        request,
+    )
+
+    assert manager.backends[0].provider_call_limit == 1
 
 
 class _ControlledForegroundToolBackend(_FakeBackend):

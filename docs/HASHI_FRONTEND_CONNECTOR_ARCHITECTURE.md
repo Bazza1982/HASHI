@@ -329,6 +329,34 @@ declared sender into a uniquely authenticated Agent. PCM and external clients
 receive only sanitized verification results, never shared secrets or raw
 proofs.
 
+#### Network message freshness and confirmation (implemented 2026-10-16)
+
+Every network Frontend Connector records `originated_at` when the user first
+submits a message and preserves it across local queueing, retry and reconnect.
+PAO records receipt time and owns the admission decision: an on-machine network
+frontend has a 30-second automatic window and a remote frontend has a 60-second
+window. Missing, invalid, non-UTC, implausibly future or older timestamps do not
+enter a Run. They create one durable, owner- and Session-bound confirmation that
+expires after 15 minutes. Confirm releases the immutable saved payload once;
+discard, expiry and Session-context supersession never execute it. Attachments
+and voice remain bound to the same saved message identity.
+
+The local TUI remains outside this network policy, but only Remote-sealed,
+prompt-bound connector evidence can establish that exemption. Caller-owned
+`surface`, client ID or idempotency strings never do so. Connectors discover the
+versioned freshness/confirmation capabilities and fail closed during mixed-
+version rollout rather than silently dropping the timestamp or confirmation
+receipt. Workbench renders pending and terminal states from the canonical API;
+terminal expiry remains visible with its reason.
+
+An authenticated Remote Workbench gateway replaces any caller-owned ingress
+marker with prompt-bound connector evidence before its loopback relay. PAO keeps
+the remote 60-second window only when that evidence verifies; an unsigned or
+invalid loopback claim remains subject to the local 30-second window.
+
+This behavior is user-approved and qualified on non-production HASHI3 and
+Workbench. Production adoption remains a separate, not-yet-claimed step.
+
 ### 6.2 Standard multi-attachment message admission
 
 Persistent Session API v1 is the standard external-frontend boundary for a

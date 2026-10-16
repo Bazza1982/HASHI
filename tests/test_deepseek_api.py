@@ -3015,3 +3015,386 @@ async def test_cancelled_stream_audits_observed_tool_fragment_without_execution(
     assert observed[0]["transport_state"] == "cancelled"
     assert observed[0]["tool_calls"][0]["id"] == "call-cancelled"
     assert observed[0]["tool_calls"][0]["complete"] is False
+
+
+def _typed_stream_inactivity_timeout(*, meaningful_response_started: bool):
+    from adapters.openrouter_api import _ProviderStreamInactivityGuard
+
+    guard = _ProviderStreamInactivityGuard(timeout_s=300.0)
+    guard.meaningful_response_started = bool(meaningful_response_started)
+    # Deterministic: the guard has already consumed its read-wait budget, so
+    # the real detector raises its typed timeout without waiting for 300s.
+    guard.waited_without_meaningful_s = guard.timeout_s
+    return guard._timeout_error(SimpleNamespace())
+
+
+def _checkpoint_evidence_registry(tmp_path, *, request_id: str, invocation_id: str, tools):
+    from orchestrator.her_v2.audit import DurableAuditLog
+
+    base = ToolRegistry(
+        list(tools),
+        tmp_path,
+        tmp_path,
+        {},
+        audit_context={"request_id": request_id},
+    )
+    return _EvidenceRecordingToolRegistry(
+        base,
+        StageRequest(
+            turn_id=f"turn-{invocation_id}",
+            request_ref=request_id,
+            invocation_id=invocation_id,
+            stage=Stage.EXECUTION,
+            role="primary",
+            attempt=1,
+            goal="Exercise the bounded stream-timeout continuation.",
+            classification=None,
+            effort=Effort.HIGH,
+            allow_tools=True,
+        ),
+        audit_log=DurableAuditLog(
+            tmp_path / "recovery.jsonl", tmp_path / "fallback.jsonl"
+        ),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "meaningful_response_started",
+    [True, False],
+    ids=["stream-idle", "response-start"],
+)
+async def test_herv3_stream_inactivity_timeout_continues_from_completed_checkpoints(
+    monkeypatch, tmp_path, meaningful_response_started
+):
+    from orchestrator.flexible_backend_registry import public_backend_engine
+
+    adapter = _adapter(tmp_path, model="deepseek-flash")
+    adapter.TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S = 0
+    observed_calls = []
+    adapter.set_provider_call_observer(observed_calls.append)
+    evidence = _checkpoint_evidence_registry(
+        tmp_path,
+        request_id="req-stream-checkpoint",
+        invocation_id="invocation-stream",
+        tools=["file_read", "file_write"],
+    )
+    adapter.tool_registry = evidence
+    executed = []
+    real_execute = evidence.execute
+
+    async def execute_with_receipts(tool_name, arguments, tool_call_id=""):
+        executed.append(tool_name)
+        if tool_name == "file_read":
+            digest = hashlib.sha256(b"tool output").hexdigest()
+            return ToolResult(
+                tool_call_id=tool_call_id,
+                output="tool output",
+                details={
+                    "receipt_completed": True,
+                    "receipt_status": "success",
+                    "effect_receipt": {
+                        "kind": "read",
+                        "tool_name": tool_name,
+                        "evidence_ref": f"tool:{tool_call_id}:sha256:{digest}",
+                        "revision": f"sha256:{digest}",
+                    },
+                },
+            )
+        return await real_execute(tool_name, arguments, tool_call_id)
+
+    monkeypatch.setattr(evidence, "execute", execute_with_receipts)
+    seen = []
+    timeout = _typed_stream_inactivity_timeout(
+        meaningful_response_started=meaningful_response_started
+    )
+    assert timeout.hashi_error_code == (
+        "PROVIDER_STREAM_IDLE_TIMEOUT"
+        if meaningful_response_started
+        else "PROVIDER_RESPONSE_START_TIMEOUT"
+    )
+    tool_calls = [
+        {
+            "id": "call-read",
+            "type": "function",
+            "function": {
+                "name": "file_read",
+                "arguments": json.dumps({"path": "observed.txt"}),
+            },
+        },
+        {
+            "id": "call-write",
+            "type": "function",
+            "function": {
+                "name": "file_write",
+                "arguments": json.dumps(
+                    {"path": "checkpoint.txt", "content": "saved exactly once"}
+                ),
+            },
+        },
+    ]
+
+    async def fake_stream(payload, headers, on_stream_event):
+        seen.append(json.dumps(payload["messages"], sort_keys=True, default=str))
+        if len(seen) == 1:
+            return _APIResult("", tool_calls, "tool_calls")
+        if len(seen) == 2:
+            await on_stream_event(
+                StreamEvent(kind=KIND_THINKING, summary="incomplete internal draft")
+            )
+            raise timeout
+        return _APIResult("continued final answer", None, "stop")
+
+    async def capture(_event):
+        return None
+
+    monkeypatch.setattr(adapter, "_stream_api_once", fake_stream)
+
+    response = await adapter.generate_response(
+        "inspect and save once",
+        "req-stream-checkpoint",
+        on_stream_event=capture,
+    )
+
+    assert response.is_success is True, response.error
+    assert response.text == "continued final answer"
+    assert len(seen) == 3
+    assert seen[1] == seen[2], "the continuation reuses the assembled messages"
+    assert "incomplete internal draft" not in seen[2]
+    assert "call-read" in seen[2] and "call-write" in seen[2]
+    assert executed == ["file_read", "file_write"]
+    assert (tmp_path / "checkpoint.txt").read_text(
+        encoding="utf-8"
+    ) == "saved exactly once"
+    assert response.stream_metadata["provider_transport_retry_count"] == 1
+    assert response.stream_metadata["provider_local_recovery_count"] == 1
+    assert response.stream_metadata["provider_local_recovery_limit"] == 3
+    calls = response.stream_metadata["meter"]["provider_calls"]
+    assert calls == observed_calls
+    assert [call["retry_count"] for call in calls] == [0, 0, 1]
+    failed_call = calls[1]
+    assert failed_call["decision"] == "retry_current_call_checkpoint"
+    assert failed_call["effect_recovery"]["safe_current_call_continuation"] is True
+    assert failed_call["effect_recovery"]["tools_replayed"] is False
+    assert failed_call["effect_recovery"]["completed_checkpoint_count"] == 1
+    assert calls[2]["recovery_kind"] == "current_call_checkpoint"
+    assert public_backend_engine("her-v2") == "her-v3"
+    assert "her-v2" not in json.dumps(failed_call, default=str)
+
+
+@pytest.mark.asyncio
+async def test_herv3_stream_inactivity_continuation_stops_at_the_shared_budget(
+    monkeypatch, tmp_path
+):
+    adapter = _adapter(tmp_path, model="deepseek-flash")
+    adapter.TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S = 0
+    observed_calls = []
+    adapter.set_provider_call_observer(observed_calls.append)
+    evidence = _checkpoint_evidence_registry(
+        tmp_path,
+        request_id="req-stream-exhaustion",
+        invocation_id="invocation-exhaustion",
+        tools=["file_write"],
+    )
+    adapter.tool_registry = evidence
+    executed = []
+    real_execute = evidence.execute
+
+    async def execute_once(tool_name, arguments, tool_call_id=""):
+        executed.append(tool_name)
+        return await real_execute(tool_name, arguments, tool_call_id)
+
+    monkeypatch.setattr(evidence, "execute", execute_once)
+    seen = []
+    tool_calls = [
+        {
+            "id": "call-write-once",
+            "type": "function",
+            "function": {
+                "name": "file_write",
+                "arguments": json.dumps(
+                    {"path": "once.txt", "content": "saved once"}
+                ),
+            },
+        }
+    ]
+
+    async def fake_stream(payload, headers, on_stream_event):
+        seen.append(json.dumps(payload["messages"], sort_keys=True, default=str))
+        if len(seen) == 1:
+            return _APIResult("", tool_calls, "tool_calls")
+        await on_stream_event(StreamEvent(kind=KIND_THINKING, summary="still idle"))
+        raise _typed_stream_inactivity_timeout(meaningful_response_started=True)
+
+    async def capture(_event):
+        return None
+
+    monkeypatch.setattr(adapter, "_stream_api_once", fake_stream)
+
+    response = await adapter.generate_response(
+        "save once",
+        "req-stream-exhaustion",
+        on_stream_event=capture,
+    )
+
+    assert response.is_success is False
+    assert response.error_code == "PROVIDER_STREAM_IDLE_TIMEOUT"
+    assert len(seen) == 5
+    assert len(set(seen[1:])) == 1
+    assert executed == ["file_write"]
+    assert (tmp_path / "once.txt").read_text(encoding="utf-8") == "saved once"
+    metadata = response.stream_metadata
+    assert metadata["provider_transport_retry_count"] == 3
+    assert metadata["provider_local_recovery_count"] == 3
+    assert metadata["provider_local_recovery_limit"] == 3
+    assert metadata["provider_local_recovery_exhausted"] is True
+    assert response.error_retryable is False
+    calls = metadata["meter"]["provider_calls"]
+    assert calls == observed_calls
+    assert [call["decision"] for call in calls[1:]] == [
+        "retry_current_call_checkpoint",
+        "retry_current_call_checkpoint",
+        "retry_current_call_checkpoint",
+        "return_provider_failure",
+    ]
+    assert calls[-1]["effect_recovery"]["tools_replayed"] is False
+    assert calls[-1]["effect_recovery"]["safe_current_call_continuation"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "proof", ["missing", "changed-output", "pending", "foreign-tool"]
+)
+async def test_herv3_stream_inactivity_requires_complete_checkpoint_evidence(
+    monkeypatch, tmp_path, proof
+):
+    from orchestrator.her_v2.audit import DurableAuditLog
+
+    adapter = _adapter(tmp_path, model="deepseek-flash")
+    adapter.TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S = 0
+    registry = ToolRegistry(
+        ["file_write"],
+        tmp_path,
+        tmp_path,
+        {},
+        audit_context={"request_id": "req-stream-proof"},
+    )
+    evidence = _EvidenceRecordingToolRegistry(
+        registry,
+        StageRequest(
+            turn_id="turn-proof",
+            request_ref="req-stream-proof",
+            invocation_id="invocation-proof",
+            stage=Stage.EXECUTION,
+            role="primary",
+            attempt=1,
+            goal="Write one canary.",
+            classification=None,
+            effort=Effort.HIGH,
+            allow_tools=True,
+        ),
+        audit_log=DurableAuditLog(
+            tmp_path / "recovery.jsonl", tmp_path / "fallback.jsonl"
+        ),
+    )
+    adapter.tool_registry = evidence
+    actual_execute = registry.execute
+    writes = []
+
+    async def execute_once(name, arguments, tool_call_id="", **kwargs):
+        writes.append(tool_call_id)
+        return await actual_execute(name, arguments, tool_call_id, **kwargs)
+
+    monkeypatch.setattr(registry, "execute", execute_once)
+    actual_evidence_execute = evidence.execute
+
+    async def execute_with_proof(name, arguments, tool_call_id="", **kwargs):
+        result = await actual_evidence_execute(name, arguments, tool_call_id, **kwargs)
+        if proof == "missing":
+            result.details.pop("continuation_checkpoint", None)
+        elif proof == "changed-output":
+            result.output += " altered after checkpoint"
+        elif proof == "pending":
+            result.details["receipt_completed"] = False
+        elif proof == "foreign-tool":
+            result.details["continuation_checkpoint"]["tool_name"] = "other-tool"
+        return result
+
+    monkeypatch.setattr(evidence, "execute", execute_with_proof)
+    seen = []
+
+    async def provider(payload, headers, callback):
+        seen.append(json.dumps(payload["messages"], sort_keys=True, default=str))
+        if len(seen) == 1:
+            return _APIResult(
+                "",
+                [
+                    {
+                        "id": "write-once",
+                        "type": "function",
+                        "function": {
+                            "name": "file_write",
+                            "arguments": json.dumps(
+                                {
+                                    "path": "checkpoint.txt",
+                                    "content": "saved exactly once",
+                                }
+                            ),
+                        },
+                    }
+                ],
+                "tool_calls",
+            )
+        raise _typed_stream_inactivity_timeout(meaningful_response_started=True)
+
+    monkeypatch.setattr(adapter, "_stream_api_once", provider)
+
+    async def capture(_event):
+        return None
+
+    response = await adapter.generate_response(
+        "Write once", "req-stream-proof", on_stream_event=capture
+    )
+
+    assert response.is_success is False
+    assert response.error_code == "PROVIDER_STREAM_IDLE_TIMEOUT"
+    assert len(seen) == 2, (
+        "unproven or mismatched results prohibit automatic continuation"
+    )
+    assert response.stream_metadata["provider_transport_retry_count"] == 0
+    assert response.stream_metadata["provider_local_recovery_count"] == 0
+    assert writes == ["write-once"]
+    failed_call = response.stream_metadata["meter"]["provider_calls"][-1]
+    assert failed_call["decision"] == "return_provider_failure"
+    assert failed_call["effect_recovery"]["safe_current_call_continuation"] is False
+
+
+@pytest.mark.asyncio
+async def test_herv3_stream_inactivity_does_not_retry_after_partial_answer_text(
+    monkeypatch, tmp_path
+):
+    adapter = _adapter(tmp_path, model="deepseek-flash")
+    adapter.TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S = 0
+    calls = 0
+
+    async def fake_stream(payload, headers, on_stream_event):
+        nonlocal calls
+        calls += 1
+        await on_stream_event(StreamEvent(kind=KIND_TEXT_DELTA, summary="partial"))
+        raise _typed_stream_inactivity_timeout(meaningful_response_started=True)
+
+    monkeypatch.setattr(adapter, "_stream_api_once", fake_stream)
+
+    async def capture(_event):
+        return None
+
+    response = await adapter.generate_response(
+        "answer",
+        "req-partial-timeout",
+        on_stream_event=capture,
+    )
+
+    assert response.is_success is False
+    assert response.error_code == "PROVIDER_STREAM_IDLE_TIMEOUT"
+    assert response.stream_metadata["provider_transport_retry_count"] == 0
+    assert calls == 1
