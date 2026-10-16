@@ -1,5 +1,14 @@
 # HERV3 upgrade: JEV experiment and simplified routing
 
+The 2026-10-15 [Ollama context pilot](HERV3_OLLAMA_CONTEXT_PILOT.md) is an
+MSI Agent6-only `feature-ollama` experiment: exact configured native context,
+no server truncation, native protocol evidence, and GPU qualification. It does
+not change PCM design or other providers; source and live adoption are separate.
+The October 16 continuation selects a 48K baseline and 8K output reserve,
+adds optional short idle residency/native timing evidence, and tests Qwen
+without forced CPU offload. Actual voice contention and Agent6 adoption
+remain separate acceptance items; the original 64K results stay historical.
+
 The 2026-10-04 [scoped-search Function change](HERV3_SCOPED_SEARCH.md) retains
 the single model/tool loop and direct Shell use. Execution facts drive technical
 verbose activity independently of commentary; AC heartbeat is not actual progress.

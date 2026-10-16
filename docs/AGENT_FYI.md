@@ -1,5 +1,36 @@
 # HASHI Agent FYI
 
+October 16 deployment approval: the user explicitly authorized committing the
+scoped Ollama changes, applying the 48K candidate and hot-rebooting MSI Agent6.
+No push/merge, other-Agent/shared-service restart, Core migration or task replay
+is authorized. Earlier candidate-only notes remain historical; deployment
+requires separate terminal receipt/Worker evidence. The user owns subsequent
+task testing. See [deployment scope](HERV3_OLLAMA_CONTEXT_PILOT.md#2026-10-16-deployment-authorization).
+
+October 16 Ollama continuation: the user selected 48K (49,152), with 8K
+reasoning/output reserve, to leave GPU capacity for local speech. Keep the
+`feature-ollama` HERV3 Function/instance-only scope; do not redesign PCM.
+Independent Qwen tests passed original-task render preservation, three real
+read-only tool rounds, and 39,537-input-token inference. Ollama reported full
+GPU placement, but whole-device minimum free memory was only 1,116 MiB with
+the local multimodal service resident. Active voice latency/peak memory and
+longer Agent6 acceptance remain unverified. The candidate adds optional
+90-second idle residency (idle release observed) and per-call native timings;
+180 related regression checks passed. Active Agent6 config and Workers remain
+unchanged pending the committed-source adoption gate.
+See [current pilot decision](HERV3_OLLAMA_CONTEXT_PILOT.md#2026-10-16-48k-continuation).
+
+October 15 scoped exception: the user authorized `feature-ollama` for MSI
+Agent6's HERV3/Ollama 64K trial and GPU observation. The opt-in native provider
+path preserves task/tool history and disables server truncation; other
+providers and PCM policy are unchanged. Source tests, Worker adoption and
+longer observation remain separate. No merge or broad restart is authorized.
+See [pilot decision](HERV3_OLLAMA_CONTEXT_PILOT.md).
+Initial source/independent native tests passed; Agent6 adoption was rejected
+because Function source must be committed. Its old Worker remains active and
+unadopted pilot configuration was restored. Do not describe this as an Agent6
+live or long-term acceptance pass.
+
 October 13: HASHI3/HASHI4 and Workbench use GitHub `main`; continue there,
 without new branches/worktrees. [Reconciliation](repairs/DEBUG_CALL_RECONCILIATION_20261013.md)
 preserves the repairs; source and runtime adoption remain separate.

@@ -10,12 +10,16 @@ Differences from OpenRouter:
 
 from __future__ import annotations
 
+import json
 import logging
+from copy import deepcopy
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from adapters.base import BackendCapabilities
 from adapters.openrouter_api import (
     OpenRouterAdapter,
+    ProviderContextCapacityPreflightError,
     _APIResult,
 )
 from orchestrator.pcm import load_pcm_document
@@ -42,7 +46,44 @@ class OllamaAdapter(OpenRouterAdapter):
         self.ollama_url = extra.get("ollama_url", _DEFAULT_OLLAMA_URL)
 
     def _provider_evidence_url(self) -> str:
-        return str(getattr(self, "ollama_url", _DEFAULT_OLLAMA_URL))
+        return self._chat_completions_url()
+
+    def _native_context_enabled(self) -> bool:
+        return (getattr(self.config, "extra", None) or {}).get("ollama_native_context") is True
+
+    def _native_capacity(self):
+        from orchestrator.context_compaction import resolve_capacity_profile
+
+        capacity = resolve_capacity_profile(
+            getattr(self.config, "_hashi_runtime", None),
+            self.config.engine,
+            self.config.model,
+            profile_options=getattr(self.config, "extra", None),
+        )
+        if capacity is None:
+            raise ProviderContextCapacityPreflightError(
+                "The Ollama context pilot requires an exact configured model capacity."
+            )
+        return capacity
+
+    def _preflight_payload_capacity(self, payload) -> None:
+        if not self._native_context_enabled():
+            return super()._preflight_payload_capacity(payload)
+        from orchestrator.context_compaction import estimate_tokens
+
+        capacity = self._native_capacity()
+        serialized = json.dumps(
+            {key: payload[key] for key in ("messages", "tools") if key in payload},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        estimated = estimate_tokens(serialized)
+        if estimated > capacity.usable_input_tokens:
+            raise ProviderContextCapacityPreflightError(
+                f"Prepared Ollama request estimate {estimated} tokens exceeds "
+                f"usable input capacity {capacity.usable_input_tokens}; "
+                "the task and completed tool results have not been truncated."
+            )
 
     def _define_capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(
@@ -72,7 +113,11 @@ class OllamaAdapter(OpenRouterAdapter):
 
         # Verify Ollama is reachable
         try:
-            resp = await self.client.get("http://localhost:11434/api/tags")
+            tags_url = "http://localhost:11434/api/tags"
+            if self._native_context_enabled():
+                parts = urlsplit(self._chat_completions_url())
+                tags_url = urlunsplit(parts._replace(path=parts.path[:-4] + "tags"))
+            resp = await self.client.get(tags_url)
             if resp.status_code == 200:
                 models = [m["name"] for m in resp.json().get("models", [])]
                 self.logger.info(f"Ollama connected. Available models: {models}")
@@ -93,7 +138,15 @@ class OllamaAdapter(OpenRouterAdapter):
         return self._ollama_headers()
 
     def _chat_completions_url(self) -> str:
-        return str(getattr(self, "ollama_url", _DEFAULT_OLLAMA_URL))
+        endpoint = str(getattr(self, "ollama_url", _DEFAULT_OLLAMA_URL))
+        if not self._native_context_enabled():
+            return endpoint
+        parts = urlsplit(endpoint)
+        if parts.path.endswith("/v1/chat/completions"):
+            parts = parts._replace(path=parts.path[:-20] + "/api/chat")
+        elif not parts.path.endswith("/api/chat"):
+            raise ValueError("Ollama context pilot requires a chat endpoint URL")
+        return urlunsplit(parts)
 
     def _build_payload(
         self,
@@ -126,15 +179,66 @@ class OllamaAdapter(OpenRouterAdapter):
                 ]
             if tool_defs:
                 payload["tools"] = tool_defs
+        if self._native_context_enabled():
+            capacity = self._native_capacity()
+            native_messages = deepcopy(messages)
+            tool_names = {}
+            for message in native_messages:
+                if not isinstance(message.get("content", ""), (str, type(None))):
+                    raise ValueError("The Ollama context pilot currently accepts text-only messages")
+                for call in message.get("tool_calls") or []:
+                    function = call["function"]
+                    tool_names[call.get("id")] = function["name"]
+                    arguments = function.get("arguments")
+                    if isinstance(arguments, str):
+                        arguments = json.loads(arguments)
+                    if not isinstance(arguments, dict):
+                        raise ValueError("Ollama tool arguments must be a JSON object")
+                    function["arguments"] = arguments
+                if message.get("role") == "tool":
+                    name = tool_names.get(message.get("tool_call_id"))
+                    if name:
+                        message["tool_name"] = name
+            payload["messages"] = native_messages
+            payload["options"] = {
+                "num_ctx": capacity.context_window_tokens,
+                "num_predict": capacity.response_headroom_tokens,
+            }
+            model_options = (getattr(self.config, "extra", None) or {}).get(
+                "model_capabilities", {}
+            ).get(self.config.model, {})
+            for parameter, minimum in (("num_batch", 1), ("num_gpu", 0)):
+                value = model_options.get("ollama_" + parameter)
+                if value is not None:
+                    if type(value) is not int or value < minimum:
+                        raise ValueError(f"Ollama {parameter} must be an integer >= {minimum}")
+                    payload["options"][parameter] = value
+            payload["truncate"] = False
+            payload["stream"] = bool(use_streaming)
+            keep_alive = (getattr(self.config, "extra", None) or {}).get(
+                "ollama_keep_alive_seconds"
+            )
+            if keep_alive is not None:
+                if type(keep_alive) is not int or keep_alive < 0:
+                    raise ValueError("Ollama idle residency must be nonnegative integer seconds")
+                payload["keep_alive"] = keep_alive
         return payload
 
     def _ollama_headers(self) -> dict:
         return {"Content-Type": "application/json"}
 
     async def _call_api_once(self, payload, headers, on_stream_event) -> _APIResult:
+        if self._native_context_enabled():
+            from adapters.ollama_native import call_native_chat
+
+            return await call_native_chat(self, payload, headers, on_stream_event)
         return await super()._call_api_once(payload, headers, on_stream_event)
 
     async def _stream_api_once(self, payload, headers, on_stream_event) -> _APIResult:
+        if self._native_context_enabled():
+            from adapters.ollama_native import call_native_chat
+
+            return await call_native_chat(self, payload, headers, on_stream_event)
         return await super()._stream_api_once(payload, headers, on_stream_event)
 
     async def generate_response(
