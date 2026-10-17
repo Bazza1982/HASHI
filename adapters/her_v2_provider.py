@@ -5191,6 +5191,44 @@ class HashiStageProvider(StageProvider):
                         },
                     )
                 generation_kwargs["request_content"] = provider_request_content
+            primary_visual_stage = bool(
+                not request.role.startswith("sub_agent:")
+                and (
+                    request.stage in {Stage.DIRECT, Stage.IMMEDIATE_RESPONSE}
+                    or primary_execution
+                )
+            )
+            supports_transient_images = bool(
+                "transient_images" in parameters or accepts_extra_keywords
+            )
+            if (
+                primary_visual_stage
+                and supports_transient_images
+                and int(getattr(backend, "privacy_level", 1)) != 2
+            ):
+                capability_resolver = getattr(
+                    backend, "resolve_input_capability", None
+                )
+                try:
+                    live_capability = (
+                        capability_resolver()
+                        if callable(capability_resolver)
+                        else getattr(backend, "input_capability", None)
+                    )
+                except Exception:
+                    live_capability = None
+                if live_capability is not None and live_capability.supports(
+                    "image", "data_url"
+                ):
+                    from orchestrator.frontend_call.transient_live_media import (
+                        live_frames_for,
+                    )
+
+                    transient_images = live_frames_for(
+                        self.runtime_context, request.request_ref
+                    )
+                    if transient_images:
+                        generation_kwargs["transient_images"] = transient_images
             self._bind_provider_fallback_port(backend, request, profile)
             provider_request_inflight = (
                 profile.engine,

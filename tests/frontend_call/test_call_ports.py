@@ -4,6 +4,9 @@ import pytest
 from orchestrator.session_store import SessionStore
 from orchestrator.frontend_call.ports import HashiPorts
 from orchestrator.frontend_call.contract import CallError
+from orchestrator.frontend_call.transient_live_media import (
+    TRANSIENT_LIVE_FRAMES_METADATA_KEY,
+)
 from orchestrator.frontend_call.spoken_context import build_call_time_context
 from orchestrator.frontend_live_voice.manager import LiveVoiceManager
 from orchestrator.frontend_live_voice.protocol import LiveVoiceError
@@ -100,6 +103,14 @@ async def test_real_session_store_is_the_only_message_and_result_owner(
         "Read this label.",
         "The label says AC.",
         "2026-10-03T00:00:00Z",
+        frames=(
+            {
+                "image": bytes.fromhex("ffd8ffc00008080010001000ffd9"),
+                "frame_sequence": 3,
+                "captured_at": "2026-10-03T00:00:00Z",
+                "captured_unix": 1790985600.0,
+            },
+        ),
     )
     assert (
         ports.result("owner", binding, result["run_id"])["text"]
@@ -123,6 +134,11 @@ async def test_real_session_store_is_the_only_message_and_result_owner(
     metadata = captured[0][1]["request_metadata"]
     assert metadata["session_surface"] == "workbench"
     assert metadata["frontend_client"]["kind"] == "session_api"
+    assert len(metadata[TRANSIENT_LIVE_FRAMES_METADATA_KEY]["frames"]) == 1
+    assert metadata["session_message_content"] == [
+        {"type": "text", "text": "Read this label."}
+    ]
+    assert "data:image" not in str(user)
     with pytest.raises(CallError):
         ports.validate("owner", {**binding, "context_generation": 999})
     with pytest.raises(Exception):

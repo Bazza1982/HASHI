@@ -207,7 +207,8 @@ def test_deepseek_v41_vision_capability_is_exact_and_size_bounded(model):
     assert vision.limits == {
         "item_count": 600,
         "item_bytes": 32 * 1024 * 1024,
-        "total_bytes": 32 * 1024 * 1024,
+        "total_bytes": 64 * 1024 * 1024,
+        "request_body_bytes": 48 * 1024 * 1024,
     }
 
 

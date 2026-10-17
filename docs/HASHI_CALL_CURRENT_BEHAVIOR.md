@@ -1,7 +1,9 @@
 # HASHI /call Current Behavior Contract
 
 Status: **Authoritative current behavior**
-Approved scope: user-directed Call recovery and main-only closeout on 2026-10-13
+Approved scope: user-directed Call recovery and main-only closeout on 2026-10-13;
+user-directed live-frame experiment on HASHI3 and complete-candidate promotion
+to GitHub `main` on 2026-10-17
 Owners: Frontend Connector (Workbench presentation/media) and PAO Call Function
 Engineering layers: external Workbench plus replaceable Layer 2 Functions
 Protected Core: unchanged
@@ -70,6 +72,25 @@ numeric response-length requirements are retired.
   failure disables local preview and continues by voice. A single failed upload
   or later observation does not erase the last still-usable observation or send
   extra frames.
+- **CALL-MEDIA-08** — While the camera is on, Call requests one JPEG frame every
+  500 ms. The configured local MiniCPM-V observer remains latest-frame-wins and
+  may produce up to 120 background observations per minute without building a
+  backlog. Accepted frames also enter a bounded in-memory ten-second buffer.
+- **CALL-MEDIA-09** — At each caller-turn boundary, Call freezes and evenly
+  samples at most ten frames across the preceding ten seconds, ordered oldest to
+  newest and including the newest usable frame. A primary answer stage receives
+  those frames as labelled structured images only when its exact provider/model
+  declares image plus data-URL support. Text-only models receive no raw frames.
+  MiniCPM-V text remains auxiliary untrusted context; the raw frames are the
+  primary visual evidence for a vision-capable answer model.
+- **CALL-MEDIA-10** — Turn frames are current-input-only volatile data. They are
+  removed before PAO Session admission and canonical request audit, never enter
+  Message content or history, and are cleared after the Run or on Worker
+  shutdown. Camera-off or hangup clears the live ring immediately, so later
+  turns receive no old frames; it does not revoke a snapshot already frozen for
+  an accepted turn. Provider adapters enforce their declared limits; DeepSeek
+  uses its documented provider limits rather than a smaller invented aggregate
+  budget.
 
 ## Connection sound and opening
 

@@ -1029,7 +1029,15 @@ class FlexibleAgentRuntime:
         from orchestrator import runtime_session
         from orchestrator.frontend_delivery import telegram_delivery_for_admission
 
-        admission_metadata = dict(request_metadata or {})
+        from orchestrator.frontend_call.transient_live_media import (
+            bind_live_frames,
+            discard_live_frames,
+            pop_live_frames_metadata,
+        )
+
+        request_metadata = dict(request_metadata or {})
+        transient_live_frames = pop_live_frames_metadata(request_metadata)
+        admission_metadata = dict(request_metadata)
         # A delayed Telegram Update may only pass the freshness gate while the
         # connector is replaying the immutable server-side record.  Bind that
         # release to the original idempotency key so a callback retry, worker
@@ -1524,7 +1532,13 @@ class FlexibleAgentRuntime:
             )
             from orchestrator import runtime_execution
             self._execution_admissions[item.request_id] = runtime_execution.snapshot(self)
-            await self.queue.put(item)
+            if transient_live_frames:
+                bind_live_frames(self, item.request_id, transient_live_frames)
+            try:
+                await self.queue.put(item)
+            except BaseException:
+                discard_live_frames(self, item.request_id)
+                raise
         self.message_logger.info(f"Queued {item.request_id} from {source} (summary={summary!r})")
         return item.request_id
 
@@ -12626,6 +12640,11 @@ class FlexibleAgentRuntime:
             registry = getattr(self, "_request_meta_by_id", None)
             if isinstance(registry, dict):
                 registry.pop(item.request_id, None)
+            from orchestrator.frontend_call.transient_live_media import (
+                discard_live_frames,
+            )
+
+            discard_live_frames(self, item.request_id)
             await runtime_lifecycle.release_capability_task(self, item.request_id)
             return
 
@@ -13171,6 +13190,11 @@ class FlexibleAgentRuntime:
             registry = getattr(self, "_request_meta_by_id", None)
             if isinstance(registry, dict):
                 registry.pop(item.request_id, None)
+            from orchestrator.frontend_call.transient_live_media import (
+                discard_live_frames,
+            )
+
+            discard_live_frames(self, item.request_id)
             runtime_pipeline.clear_context_compaction_request_state(
                 self,
                 item.request_id,

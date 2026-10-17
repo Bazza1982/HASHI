@@ -258,11 +258,11 @@ class CallConfig:
         if doc is None:
             doc, _ = self.read()
         policy = {
-            "interval_ms": 2000,
+            "interval_ms": 500,
             "freshness_seconds": 20,
             "responsive_seconds": 12,
             "startup_timeout_seconds": 8,
-            "max_observations_per_minute": 20,
+            "max_observations_per_minute": 120,
         }
         supplied = doc.get("video_policy", {})
         if not isinstance(supplied, dict) or set(supplied) - set(policy):
@@ -276,11 +276,11 @@ class CallConfig:
                 policy["responsive_seconds"], policy["freshness_seconds"]
             )
         bounds = {
-            "interval_ms": (1000, 10000),
+            "interval_ms": (500, 10000),
             "freshness_seconds": (3, 30),
             "responsive_seconds": (3, 30),
             "startup_timeout_seconds": (3, 20),
-            "max_observations_per_minute": (1, 60),
+            "max_observations_per_minute": (1, 120),
         }
         if any(
             type(policy[k]) is not int or not low <= policy[k] <= high
