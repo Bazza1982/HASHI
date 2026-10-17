@@ -54,8 +54,8 @@ async def test_backend_catalogue_exposes_public_selectable_registry(tmp_path):
         "default_effort": None,
         "privacy_levels": [0, 1, 2],
         "providers": {
-            "deepseek-api": {
-                "engine": "deepseek-api",
+            "deepseek": {
+                "engine": "deepseek",
                 "label": "deepseek",
                 "models": ["deepseek-flash", "deepseek-v4-pro"],
                 "default_model": "deepseek-v4-pro",
@@ -106,7 +106,7 @@ def test_offline_agent_metadata_projects_her_v3_provider_model_and_effort(tmp_pa
     assert metadata["allowed_backends"] == [
         {
             "engine": "her-v3",
-            "provider": "deepseek-api",
+            "provider": "deepseek",
             "model": "deepseek-v4-pro",
             "models": ["deepseek-flash", "deepseek-v4-pro"],
             "effort": "high",
@@ -169,3 +169,82 @@ async def test_catalogue_and_agent_creation_inherit_visible_native_codex_models(
         assert "hidden" not in get_available_models("codex-cli")
     (codex_home / "models_cache.json").unlink()
     assert "gpt-6-sol" in get_available_models("codex-cli")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "engine,public_provider,model,effort,choices",
+    [
+        ("deepseek-api", "deepseek", "deepseek-v4-pro", "high", ["off", "high", "max"]),
+        ("ollama-api", "ollama", "client-local", "enabled", ["enabled", "off"]),
+    ],
+)
+async def test_live_provider_resolves_shared_and_agent_reasoning_choices(
+    tmp_path, engine, public_provider, model, effort, choices
+):
+    from orchestrator.agent_creation_policy import runtime_backend_catalogue
+    from orchestrator.frontend_status import runtime_presentation_status
+    from orchestrator.her_v2.v3_config import (
+        HERv3ModelTarget,
+        build_v3_provider_options,
+    )
+
+    server = _server(tmp_path)
+    local = {
+        "engine": "ollama-api",
+        "models": ["client-local"],
+        "available_models": ["client-local"],
+        "model_efforts": {"client-local": ["enabled", "off"]},
+    }
+    profiles = server.global_config.her_providers["providers"]
+    profiles["ollama"] = local
+    rows = [
+        {"engine": "deepseek-api", "models": ["deepseek-flash", "deepseek-v4-pro"]},
+        local,
+        {
+            "engine": "her-v2",
+            "effort": effort,
+            "her_v2": {
+                "main": {"provider": engine, "model": model},
+                "v3_provider_allowlist": ["deepseek-api", "ollama-api"],
+            },
+        },
+    ]
+    target = HERv3ModelTarget(engine, model)
+    main = SimpleNamespace(engine=engine, model=model)
+    runtime = SimpleNamespace(
+        name="catalogue-client",
+        global_config=server.global_config,
+        config=SimpleNamespace(active_backend="her-v2", allowed_backends=rows),
+        get_current_model=lambda: model,
+        _get_current_effort=lambda: effort,
+        backend_manager=SimpleNamespace(
+            privacy_level=1,
+            secrets={"deepseek-api_key": "synthetic-test-credential"},
+            current_backend=SimpleNamespace(
+                _v2_config=SimpleNamespace(profiles={"main": main})
+            ),
+            get_her_v3_provider_options=lambda: build_v3_provider_options(
+                rows, profiles, target, ["deepseek-api", "ollama-api"]
+            ),
+        ),
+    )
+
+    status = runtime_presentation_status(runtime)
+    selected = status["her_v3"]["main"]
+    assert selected == {"provider": public_provider, "model": model}
+    response = await server.handle_backend_catalogue(object())
+    shared = json.loads(response.text)["backends"]["her-v3"]
+    effective = runtime_backend_catalogue(runtime)
+    assert effective["ok"] is True
+    for catalogue in (shared, effective["backends"]["her-v3"]):
+        # A client must be able to use the live identity as an exact lookup key.
+        option = catalogue["providers"][selected["provider"]]
+        assert option["engine"] == selected["provider"]
+        assert selected["model"] in option["models"]
+        assert option["model_efforts"][selected["model"]] == choices
+        assert status["effort"] in option["model_efforts"][selected["model"]]
+        assert catalogue["providers"]["ollama"]["models"] == ["client-local"]
+    # Projection must not rewrite the actual inference adapter or instance policy.
+    assert main.engine == target.provider == engine
+    assert rows[-1]["her_v2"]["main"]["provider"] == engine

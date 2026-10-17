@@ -125,6 +125,7 @@ from orchestrator.flexible_backend_registry import (
     is_selectable_backend,
     normalize_model,
     public_backend_engine,
+    public_model_provider,
 )
 from orchestrator.runtime_effort_options import (
     backend_model_view,
@@ -2255,6 +2256,7 @@ class FlexibleAgentRuntime:
         delivery = telegram_delivery_failover.delivery_status_summary(self)
         display_policy = telegram_stream_policy.get_display_policy(self)
         public_backend = public_backend_engine(self.config.active_backend)
+        public_provider = public_model_provider(self.get_current_provider()) or None
         public_allowed_backends: list[dict[str, Any]] = []
         for configured in self.config.allowed_backends:
             row = dict(configured)
@@ -2282,7 +2284,7 @@ class FlexibleAgentRuntime:
                 row.update(
                     {
                         "engine": "her-v3",
-                        "provider": target.provider,
+                        "provider": public_model_provider(target.provider),
                         "model": target.model,
                         "models": list(option.get("models") or []) if option else [],
                         "effort": effort,
@@ -2305,11 +2307,11 @@ class FlexibleAgentRuntime:
             "engine": public_backend,
             "active_backend": public_backend,
             "model": self.get_current_model(),
-            "provider": self.get_current_provider(),
+            "provider": public_provider,
             "allowed_backends": public_allowed_backends,
             "privacy_level": int(getattr(self.backend_manager, "privacy_level", 1)),
             "backend_catalogue": runtime_backend_catalogue(self),
-            "active_provider": self.get_current_provider(),
+            "active_provider": public_provider,
             "workspace_dir": str(self.workspace_dir),
             "transcript_path": str(self.transcript_log_path),
             "online": bool(self.backend_ready),
@@ -8596,6 +8598,14 @@ class FlexibleAgentRuntime:
             buttons.append([InlineKeyboardButton(label, callback_data=f"model:{model}")])
         return InlineKeyboardMarkup(buttons)
 
+    def _is_binary_reasoning(self) -> bool:
+        return set(self._get_available_efforts()) == {"enabled", "off"}
+
+    def _effort_display_value(self, effort: str) -> str:
+        if self._is_binary_reasoning() and effort in {"enabled", "off"}:
+            return ui_language.tr(f"menu.her.reasoning.level.{effort}")
+        return effort
+
     def _effort_keyboard(
         self,
         current_effort: Optional[str] = None,
@@ -8605,7 +8615,7 @@ class FlexibleAgentRuntime:
         active = current_effort or self._get_current_effort()
         buttons = []
         for effort in self._get_available_efforts():
-            visible_effort = effort
+            visible_effort = self._effort_display_value(effort)
             label = selected_label(visible_effort, effort == active)
             callback_data = f"effort:{source}:{effort}" if source else f"effort:{effort}"
             buttons.append([InlineKeyboardButton(label, callback_data=callback_data)])
@@ -8615,7 +8625,7 @@ class FlexibleAgentRuntime:
                     InlineKeyboardButton(
                         ui_language.tr(
                             "menu.effort.keep",
-                            effort=active or ui_language.tr("common.default"),
+                            effort=self._effort_display_value(active) if active else ui_language.tr("common.default"),
                         ),
                         callback_data=f"effort:{source}:keep",
                     )
@@ -8628,7 +8638,9 @@ class FlexibleAgentRuntime:
     def _build_effort_followup_text(self) -> str:
         available = self._get_available_efforts()
         current = self._get_current_effort() or (available[0] if available else "n/a")
-        if self.config.active_backend == HER_V2_ENGINE:
+        if self._is_binary_reasoning():
+            consequence = ui_language.tr("menu.effort.binary_effect")
+        elif self.config.active_backend == HER_V2_ENGINE:
             consequence = ui_language.tr("menu.effort.her_effect")
         else:
             consequence = ui_language.tr("menu.effort.standard_effect")
@@ -8640,7 +8652,7 @@ class FlexibleAgentRuntime:
         if provider:
             facts.append(
                 f"<b>{html.escape(ui_language.tr('common.provider'))}</b> · "
-                f"<code>{html.escape(provider)}</code>"
+                f"<code>{html.escape(public_model_provider(provider))}</code>"
             )
         if self.config.active_backend == HER_V2_ENGINE:
             facts.extend(
@@ -8654,7 +8666,11 @@ class FlexibleAgentRuntime:
                 f"<b>{html.escape(ui_language.tr('common.model'))}</b> · "
                 f"<code>{html.escape(self.get_current_model())}</code>"
             )
-        if self.config.active_backend == HER_V2_ENGINE:
+        if self._is_binary_reasoning():
+            current_display = self._effort_display_value(current)
+            title = ui_language.tr("menu.effort.binary_title")
+            action = ui_language.tr("menu.effort.binary_action")
+        elif self.config.active_backend == HER_V2_ENGINE:
             current_display = current
             title = ui_language.tr("menu.effort.her_title")
             action = ui_language.tr("menu.effort.her_action")
@@ -8891,7 +8907,9 @@ class FlexibleAgentRuntime:
             return
 
         current_effort = self._get_current_effort() or available[0]
-        if self.config.active_backend == HER_V2_ENGINE:
+        if self._is_binary_reasoning():
+            consequence = ui_language.tr("menu.effort.binary_effect")
+        elif self.config.active_backend == HER_V2_ENGINE:
             consequence = ui_language.tr("menu.effort.her_effect")
         else:
             consequence = ui_language.tr("menu.effort.standard_effect_direct")
@@ -8905,7 +8923,10 @@ class FlexibleAgentRuntime:
                 f"<b>{html.escape(ui_language.tr('common.model'))}</b> · "
                 f"<code>{html.escape(self.get_current_model())}</code>"
             ]
-        if self.config.active_backend == HER_V2_ENGINE:
+        if self._is_binary_reasoning():
+            effort_title = ui_language.tr("menu.effort.binary_title")
+            current_display = self._effort_display_value(current_effort)
+        elif self.config.active_backend == HER_V2_ENGINE:
             effort_title = ui_language.tr("menu.effort.her_title")
             current_display = current_effort
         else:

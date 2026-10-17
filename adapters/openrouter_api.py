@@ -575,6 +575,7 @@ def _effective_protocol_parameters(payload: Mapping[str, Any]) -> dict[str, Any]
         "top_p",
         "modalities",
         "reasoning_effort",
+        "think",
     ):
         if key in payload:
             value = payload.get(key)
@@ -1773,6 +1774,15 @@ class OpenRouterAdapter(BaseBackend):
     TRANSIENT_PROVIDER_CALL_RETRIES = INVALID_TOOL_CALL_REPAIR_LIMIT
     TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S = 1.0
     TRANSIENT_PROVIDER_CALL_RETRY_MAX_DELAY_S = 5.0
+
+    async def _prepare_payload_capacity(
+        self,
+        payload: dict,
+        *,
+        request_id: str,
+        provider_calls: list[dict],
+    ) -> None:
+        """Optional provider-native check of the final, privacy-filtered payload."""
 
     def _preflight_payload_capacity(self, payload: Mapping[str, Any]) -> None:
         """Reject a clearly oversized text payload before an HTTP call.
@@ -3935,6 +3945,17 @@ class OpenRouterAdapter(BaseBackend):
                     # second check governs the exact text payload that will be
                     # audited and sent over HTTP.
                     self._preflight_payload_capacity(payload)
+                    capacity_start = len(provider_calls)
+                    await self._prepare_payload_capacity(
+                        payload,
+                        request_id=str(request_id or ""),
+                        provider_calls=provider_calls,
+                    )
+                    provider_call_count += len(provider_calls) - capacity_start
+                    for capacity_call in provider_calls[capacity_start:]:
+                        total_prompt += int(capacity_call.get("input") or 0)
+                        total_completion += int(capacity_call.get("output") or 0)
+                        total_thinking += int(capacity_call.get("thinking") or 0)
                     provider_call_emitted_text = False
                     effective_parameters = _effective_protocol_parameters(payload)
 

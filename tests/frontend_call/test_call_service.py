@@ -570,19 +570,19 @@ def test_config_allows_literal_private_lan_targets_only():
     target.update(
         {
             "location": "lan",
-            "base_url": "http://192.168.50.41:48254/v1",
+            "base_url": "http://10.23.45.67:48254/v1",
             "model": "minicpm-v-4.6",
         }
     )
 
-    assert validate_target(target)["base_url"] == "http://192.168.50.41:48254/v1"
+    assert validate_target(target)["base_url"] == "http://10.23.45.67:48254/v1"
 
     for base_url in (
         "http://127.0.0.1:48254/v1",
         "http://169.254.169.254/v1",
         "http://8.8.8.8/v1",
         "http://vision.local:48254/v1",
-        "ftp://192.168.50.41:48254/v1",
+        "ftp://10.23.45.67:48254/v1",
     ):
         with pytest.raises(CallError, match="call_lan_target_not_private"):
             validate_target({**target, "base_url": base_url})

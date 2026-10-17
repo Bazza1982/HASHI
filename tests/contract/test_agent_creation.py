@@ -253,7 +253,7 @@ def test_creation_grants_only_installed_backends_and_authorized_credentialed_pro
     view = service.creation_catalogue()
     assert view["backends"]["claude-cli"]["available"] is False
     assert view["backends"]["claude-cli"]["reason"] == "backend_not_installed"
-    assert view["backends"]["her-v3"]["providers"]["openrouter-api"]["available"] is False
+    assert view["backends"]["her-v3"]["providers"]["openrouter"]["available"] is False
     assert view["backends"]["codex-cli"]["model_efforts"]["gpt-6-astra"] == []
     with pytest.raises(InvalidEffortError):
         service.create(AgentCreationSpec(name="bad-effort", backend="codex-cli", effort="high"))

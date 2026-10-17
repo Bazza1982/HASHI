@@ -9,7 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-No unreleased changes are recorded yet.
+### Added
+
+- Opt-in native Ollama chat with exact-model context/output budgets, native
+  tokenizer admission probes, explicit idle residency and request timing evidence.
+- Exact-model binary Ollama reasoning controls using native `think`, with
+  localized On/Off choices independent of reasoning display and capacity opt-ins.
+
+### Changed
+
+- Reduce model-facing Ollama reference overhead while retaining complete private
+  sources; page new tool results and close tool use near capacity without
+  replaying completed actions, dropping the task or reducing the output reserve.
+- Keep Ollama main PCM and final answers while bypassing auxiliary style calls;
+  preserve required questions and neutral progress delivery.
+
+### Fixed
+
+- Align public HERV3 Provider identities across catalogues, live/offline status
+  and creation so model/reasoning controls match the selected Provider; retain
+  legacy adapter input compatibility and instance restrictions.
+- Preserve the primary backend terminal error when a secondary error-notification
+  delivery fails.
+
+See [the Ollama decision](docs/HERV3_OLLAMA_CONTEXT_PILOT.md) for configuration,
+measured capacity reduction, historical canaries and remaining performance limits.
+These Function changes do not enable an instance opt-in or adopt a running Worker.
 
 ---
 
