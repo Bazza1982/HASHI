@@ -143,12 +143,13 @@ def test_chinese_menu_bodies_and_buttons_do_not_keep_english_shells(tmp_path) ->
     assert group_keyboard.inline_keyboard[-1][0].text == "新建群组"
 
     assert "<b>语音风格</b> · 未设置" in voice_text
-    assert "<b>语音生成方式</b>" in voice_text
-    assert "将原始音频直接交给音频模型" in voice_text
-    assert "<b>原生语音回复形式</b> · 语音 + 文字 · 仅控制原生语音回复" in voice_text
-    assert [button.text for button in voice_keyboard[0]] == [
-        "原生音频模型",
-        "文字模型 + TTS",
+    assert "<b>回复规则</b> · 所有回复 · 关闭语音" in voice_text
+    assert "<b>语音路线</b>" in voice_text
+    assert "<b>外部服务降级</b> · 已阻止" in voice_text
+    assert [row[0].text for row in voice_keyboard] == [
+        "📋 回复规则",
+        "🧭 TTS 服务与降级",
+        "🎨 语义语音风格",
     ]
 
     assert "<b>当前</b> · 核心模型" in wrapper_text

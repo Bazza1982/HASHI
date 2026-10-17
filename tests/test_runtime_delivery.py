@@ -101,6 +101,46 @@ def _runtime(tmp_path: Path, *, connected: bool = True, bot_error=None):
     )
 
 
+def test_suppress_run_delivery_projection_terminally_settles_claim(
+    tmp_path, monkeypatch
+):
+    runtime = _runtime(tmp_path)
+    completions = []
+    store = SimpleNamespace(
+        complete_delivery_outbox=lambda **fields: completions.append(fields)
+    )
+    claim = {"outbox_id": "outbox-1", "lease_token": "lease-1"}
+    monkeypatch.setattr(
+        "orchestrator.runtime_session.claim_run_delivery_outbox",
+        lambda current_runtime, **fields: {
+            "managed": True,
+            "state": "claimed",
+            "claim": claim,
+        },
+    )
+    monkeypatch.setattr(
+        "orchestrator.runtime_session.ensure_store", lambda current_runtime: store
+    )
+
+    state = runtime_delivery.suppress_run_delivery_projection(
+        runtime,
+        request_id="req-voice-only",
+        surface="telegram",
+        channel_key="123",
+        reason="tts_audio_only",
+    )
+
+    assert state == "suppressed"
+    assert completions == [
+        {
+            "outbox_id": "outbox-1",
+            "lease_token": "lease-1",
+            "status": "suppressed",
+            "error_code": "tts_audio_only",
+        }
+    ]
+
+
 def test_telegram_inline_keyboard_round_trips_through_standard_actions(tmp_path):
     runtime = _runtime(tmp_path)
     context = runtime_delivery.telegram_presentation_context(

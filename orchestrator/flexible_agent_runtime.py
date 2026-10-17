@@ -2973,7 +2973,6 @@ class FlexibleAgentRuntime:
     def tui_voice_state(self) -> dict[str, Any]:
         """Return the shared Agent voice identity without Telegram UI state."""
 
-        policy = self.voice_manager.native_policy
         return {
             "profile": self.voice_manager.get_voice_profile_id(),
             "profiles": [
@@ -2981,7 +2980,7 @@ class FlexibleAgentRuntime:
                 for profile_id, profile in self.voice_manager.get_voice_profiles()
             ],
             "reply_mode": self.voice_manager.get_reply_mode(),
-            "reply_content": str(policy.get("reply_content") or "audio_and_text"),
+            "reply_content": self.voice_manager.get_reply_content(),
             "voice_reply_enabled": self.voice_manager.get_reply_mode() != "off",
         }
 
@@ -3893,7 +3892,15 @@ class FlexibleAgentRuntime:
         )
         return InlineKeyboardMarkup(rows)
 
-    def _voice_keyboard(self, view: str = "main") -> InlineKeyboardMarkup:
+    def _voice_keyboard(
+        self,
+        view: str = "main",
+        *,
+        catalogue: Any = None,
+        route_index: int = 0,
+        service_id: str | None = None,
+        page: int = 0,
+    ) -> InlineKeyboardMarkup:
         if view == "voices":
             active_alias = self.voice_manager.get_active_preset_alias()
             rows = [
@@ -3919,50 +3926,95 @@ class FlexibleAgentRuntime:
             )
             return InlineKeyboardMarkup(rows)
 
+        if view == "main":
+            return InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton(ui_language.tr("voice.button.rules"), callback_data="voice:view:rules")],
+                    [InlineKeyboardButton(ui_language.tr("voice.button.routes"), callback_data="voice:view:routes")],
+                    [InlineKeyboardButton(ui_language.tr("voice.button.profiles"), callback_data="voice:view:profiles")],
+                ]
+            )
+        if view == "rules":
+            return self._voice_rules_keyboard()
+        if view == "profiles":
+            return self._voice_profiles_keyboard()
+        if view == "routes":
+            return self._voice_routes_keyboard()
+        return self._voice_route_keyboard(
+            view,
+            catalogue=catalogue,
+            route_index=route_index,
+            service_id=service_id,
+            page=page,
+        )
+
+    def _voice_rules_keyboard(self) -> InlineKeyboardMarkup:
         mode = self.voice_manager.get_reply_mode()
-        native = self.voice_manager.native_policy
+        reply_content = self.voice_manager.get_reply_content()
+        trigger = self.voice_manager.get_reply_trigger()
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        selected_label(ui_language.tr("voice.mode.native"), mode == "native"),
+                        callback_data="voice:mode:native",
+                    ),
+                    InlineKeyboardButton(
+                        selected_label(ui_language.tr("voice.mode.tts"), mode == "tts"),
+                        callback_data="voice:mode:tts",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        selected_label(ui_language.tr("voice.mode.off"), mode == "off"),
+                        callback_data="voice:mode:off",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        selected_label(ui_language.tr("voice.trigger.all"), trigger == "all"),
+                        callback_data="voice:trigger:all",
+                    ),
+                    InlineKeyboardButton(
+                        selected_label(
+                            ui_language.tr("voice.trigger.voice_message"),
+                            trigger == "voice_message",
+                        ),
+                        callback_data="voice:trigger:voice_message",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        selected_label(
+                            ui_language.tr("voice.reply.audio_and_text"),
+                            reply_content == "audio_and_text",
+                        ),
+                        callback_data="voice:content:both",
+                    ),
+                    InlineKeyboardButton(
+                        selected_label(
+                            ui_language.tr("voice.reply.audio_only"),
+                            reply_content == "audio_only",
+                        ),
+                        callback_data="voice:content:audio",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        selected_label(
+                            ui_language.tr("voice.reply.text_only"),
+                            reply_content == "text_only",
+                        ),
+                        callback_data="voice:content:text",
+                    )
+                ],
+                [InlineKeyboardButton(back_label(), callback_data="voice:back:main")],
+            ]
+        )
+
+    def _voice_profiles_keyboard(self) -> InlineKeyboardMarkup:
         profile_id = self.voice_manager.get_voice_profile_id()
-        rows = [
-            [
-                InlineKeyboardButton(
-                    selected_label(ui_language.tr("voice.mode.native"), mode == "native"),
-                    callback_data="voice:mode:native",
-                ),
-                InlineKeyboardButton(
-                    selected_label(ui_language.tr("voice.mode.tts"), mode == "tts"),
-                    callback_data="voice:mode:tts",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    selected_label(ui_language.tr("voice.mode.off"), mode == "off"),
-                    callback_data="voice:mode:off",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    selected_label(
-                        ui_language.tr("voice.reply.audio_and_text"),
-                        native["reply_content"] == "audio_and_text",
-                    ),
-                    callback_data="voice:content:both",
-                ),
-                InlineKeyboardButton(
-                    selected_label(
-                        ui_language.tr("voice.reply.audio_only"),
-                        native["reply_content"] == "audio_only",
-                    ),
-                    callback_data="voice:content:audio",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    ui_language.tr("voice.tts.choose"),
-                    callback_data="voice:view:voices",
-                ),
-            ],
-        ]
-        profile_buttons = [
+        buttons = [
             InlineKeyboardButton(
                 selected_label(
                     ui_language.tr(f"voice.profile.{candidate}"),
@@ -3970,13 +4022,199 @@ class FlexibleAgentRuntime:
                 ),
                 callback_data=f"voice:profile:{candidate}",
             )
-            for candidate, profile in self.voice_manager.get_voice_profiles()
+            for candidate, _profile in self.voice_manager.get_voice_profiles()
         ]
+        rows = [buttons[index:index + 2] for index in range(0, len(buttons), 2)]
+        rows.append([InlineKeyboardButton(back_label(), callback_data="voice:back:main")])
+        return InlineKeyboardMarkup(rows)
+
+    def _voice_routes_keyboard(self) -> InlineKeyboardMarkup:
+        routes = self.voice_manager.get_tts_routes()
+        rows = [
+            [
+                InlineKeyboardButton(
+                    (
+                        ui_language.tr("voice.route.preferred")
+                        if index == 0
+                        else ui_language.tr("voice.route.fallback", index=index)
+                    )
+                    + " · "
+                    + self.voice_manager.tts_route_label(route),
+                    callback_data=f"voice:route:{index}",
+                )
+            ]
+            for index, route in enumerate(routes)
+        ]
+        if len(routes) < 8:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        ui_language.tr(
+                            "voice.button.add_preferred"
+                            if not routes
+                            else "voice.button.add_fallback"
+                        ),
+                        callback_data=f"voice:services:{len(routes)}",
+                    )
+                ]
+            )
+        external = bool(
+            self.voice_manager.get_state().get("external_fallback_enabled")
+        )
         rows.extend(
-            profile_buttons[index:index + 2]
-            for index in range(0, len(profile_buttons), 2)
+            [
+                [InlineKeyboardButton(ui_language.tr("voice.button.recommended_local"), callback_data="voice:recommended:local")],
+                [InlineKeyboardButton(ui_language.tr("voice.button.recommended_advanced"), callback_data="voice:recommended:advanced")],
+                [
+                    InlineKeyboardButton(
+                        selected_label(ui_language.tr("voice.button.external_fallback"), external),
+                        callback_data=f"voice:external:{'off' if external else 'on'}",
+                    )
+                ],
+                [InlineKeyboardButton(back_label(), callback_data="voice:back:main")],
+            ]
         )
         return InlineKeyboardMarkup(rows)
+
+    def _voice_route_keyboard(
+        self,
+        view: str,
+        *,
+        catalogue: Any,
+        route_index: int,
+        service_id: str | None,
+        page: int,
+    ) -> InlineKeyboardMarkup:
+        if catalogue is None:
+            raise RuntimeError("Voice service catalogue is required for this view.")
+        selected = int(route_index)
+        if view == "services":
+            rows = []
+            for service in catalogue.services:
+                privacy_icon = "🛡️" if service.privacy == "local_private" else "🌐"
+                status_icon = "" if service.available else " ⚠️"
+                rows.append(
+                    [
+                        InlineKeyboardButton(
+                            f"{privacy_icon} {self.voice_manager.voice_service_summary_label(service)}{status_icon}",
+                            callback_data=f"voice:service:{selected}:{service.id}",
+                        )
+                    ]
+                )
+            rows.append([InlineKeyboardButton(back_label(), callback_data="voice:back:routes")])
+            return InlineKeyboardMarkup(rows)
+
+        routes = self.voice_manager.get_tts_routes()
+        if selected < 0 or selected >= len(routes):
+            raise RuntimeError("Voice route position is invalid.")
+        route = routes[selected]
+        service = catalogue.matching_route(route)
+        if view == "route":
+            rows = [
+                [
+                    InlineKeyboardButton(
+                        ui_language.tr(
+                            "voice.button.service",
+                            service=self.voice_manager.voice_service_summary_label(service),
+                        ),
+                        callback_data=f"voice:services:{selected}",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        ui_language.tr("voice.button.voice", voice=str(route.get("voice") or "—")),
+                        callback_data=f"voice:voicepage:{selected}:{service.id}:0",
+                    )
+                ],
+            ]
+            if service.supports_speed:
+                rows.append([InlineKeyboardButton(ui_language.tr("voice.button.speed"), callback_data=f"voice:speedview:{selected}")])
+            if service.supports_style:
+                rows.append([InlineKeyboardButton(ui_language.tr("voice.button.performance"), callback_data=f"voice:styleview:{selected}")])
+            moves = []
+            if selected > 0:
+                moves.append(InlineKeyboardButton(ui_language.tr("voice.button.move_up"), callback_data=f"voice:move:{selected}:up"))
+            if selected + 1 < len(routes):
+                moves.append(InlineKeyboardButton(ui_language.tr("voice.button.move_down"), callback_data=f"voice:move:{selected}:down"))
+            if moves:
+                rows.append(moves)
+            if len(routes) > 1:
+                rows.append([InlineKeyboardButton(ui_language.tr("voice.button.delete_fallback"), callback_data=f"voice:delete:{selected}")])
+            rows.append([InlineKeyboardButton(back_label(), callback_data="voice:back:routes")])
+            return InlineKeyboardMarkup(rows)
+
+        if view == "service_voices":
+            requested_service = catalogue.service(str(service_id or ""))
+            if requested_service.id != service.id:
+                raise RuntimeError("Voice service changed; reopen this route.")
+            per_page = 8
+            pages = max(1, (len(service.voices) + per_page - 1) // per_page)
+            current_page = max(0, min(int(page), pages - 1))
+            start = current_page * per_page
+            privacy_icon = "🛡️" if service.privacy == "local_private" else "🌐"
+            rows = []
+            for absolute_index, voice in enumerate(service.voices[start:start + per_page], start=start):
+                metadata = " · ".join(value for value in (voice.language, voice.gender) if value)
+                label = f"{privacy_icon} {voice.label}"
+                if metadata:
+                    label += f" · {metadata}"
+                if not voice.callable:
+                    label += " · ⓘ"
+                rows.append(
+                    [
+                        InlineKeyboardButton(
+                            selected_label(label, voice.id == route.get("voice")),
+                            callback_data=f"voice:pick:{selected}:{service.id}:{absolute_index}",
+                        )
+                    ]
+                )
+            nav = []
+            if current_page > 0:
+                nav.append(InlineKeyboardButton("←", callback_data=f"voice:voicepage:{selected}:{service.id}:{current_page - 1}"))
+            if current_page + 1 < pages:
+                nav.append(InlineKeyboardButton("→", callback_data=f"voice:voicepage:{selected}:{service.id}:{current_page + 1}"))
+            if nav:
+                rows.append(nav)
+            rows.append([InlineKeyboardButton(back_label(), callback_data=f"voice:route:{selected}")])
+            return InlineKeyboardMarkup(rows)
+
+        if view == "speed":
+            current = float((route.get("options") or {}).get("speed", 1.0))
+            values = (0.75, 1.0, 1.25, 1.5)
+            rows = [
+                [
+                    InlineKeyboardButton(
+                        selected_label(f"{value:g}×", abs(current - value) < 0.001),
+                        callback_data=f"voice:setspeed:{selected}:{value:g}",
+                    )
+                    for value in values[index:index + 2]
+                ]
+                for index in range(0, len(values), 2)
+            ]
+            rows.append([InlineKeyboardButton(back_label(), callback_data=f"voice:route:{selected}")])
+            return InlineKeyboardMarkup(rows)
+
+        if view == "style":
+            current = str((route.get("options") or {}).get("style") or "")
+            styles = (
+                ("normal", ""),
+                ("warm", "Speak warmly and naturally."),
+                ("lively", "Speak with lively, energetic expression."),
+                ("formal", "Speak in a calm, formal presentation style."),
+                ("story", "Narrate expressively like a storyteller."),
+            )
+            rows = [
+                [
+                    InlineKeyboardButton(
+                        selected_label(ui_language.tr(f"voice.style.{token}"), current == instruction),
+                        callback_data=f"voice:setstyle:{selected}:{token}",
+                    )
+                ]
+                for token, instruction in styles
+            ]
+            rows.append([InlineKeyboardButton(back_label(), callback_data=f"voice:route:{selected}")])
+            return InlineKeyboardMarkup(rows)
+        raise RuntimeError("Unknown Voice menu view.")
 
     def _phone_voice_label(self, voice: str) -> str:
         label = self.phone_manager.VOICE_LABELS.get(voice, voice.title())
@@ -4109,6 +4347,7 @@ class FlexibleAgentRuntime:
         media_type_override: str | None = None,
         filename_override: str | None = None,
         preview_id: str = "",
+        payload_override: bytes | None = None,
     ) -> int:
         """Send prerecorded UI previews without creating a conversation Turn."""
 
@@ -4146,7 +4385,11 @@ class FlexibleAgentRuntime:
                 voice=profile_label,
             )
             try:
-                payload = path.read_bytes()
+                payload = (
+                    bytes(payload_override)
+                    if payload_override is not None
+                    else path.read_bytes()
+                )
                 publication_id = (
                     "voice-profile-preview:"
                     + hashlib.sha256(
@@ -4552,6 +4795,84 @@ class FlexibleAgentRuntime:
         text, markup = self._build_agents_view(orchestrator)
         await query.edit_message_text(text, reply_markup=markup, parse_mode="HTML")
 
+    async def _edit_voice_view(
+        self,
+        query: Any,
+        view: str,
+        *,
+        route_index: int = 0,
+        service_id: str | None = None,
+        page: int = 0,
+        catalogue: Any = None,
+    ) -> Any:
+        live = catalogue
+        if view in {"route", "services", "service_voices", "speed", "style"}:
+            live = live or await self.voice_manager.get_voice_service_catalogue()
+        if view == "main":
+            text = self.voice_manager.voice_menu_text()
+        elif view == "rules":
+            text = self.voice_manager.voice_rules_menu_text()
+        elif view == "routes":
+            text = self.voice_manager.voice_routes_menu_text()
+        elif view == "profiles":
+            text = self.voice_manager.voice_profiles_menu_text()
+        elif view == "route":
+            text = self.voice_manager.voice_route_menu_text(route_index, live)
+        elif view == "services":
+            text = self.voice_manager.voice_services_menu_text(route_index, live)
+        elif view == "service_voices":
+            service = live.service(str(service_id or ""))
+            per_page = 8
+            pages = max(1, (len(service.voices) + per_page - 1) // per_page)
+            current_page = max(0, min(int(page), pages - 1))
+            text = self.voice_manager.voice_choices_menu_text(
+                route_index,
+                service,
+                page=current_page,
+                pages=pages,
+            )
+            page = current_page
+        elif view == "speed":
+            route = self.voice_manager.get_tts_routes()[int(route_index)]
+            service = live.matching_route(route)
+            if not service.supports_speed:
+                raise RuntimeError("The selected voice service does not support speed control.")
+            text = self.voice_manager.voice_speed_menu_text(route_index, service)
+        elif view == "style":
+            route = self.voice_manager.get_tts_routes()[int(route_index)]
+            service = live.matching_route(route)
+            if not service.supports_style:
+                raise RuntimeError("The selected voice service does not support performance style.")
+            text = self.voice_manager.voice_style_menu_text(route_index, service)
+        else:
+            raise RuntimeError("Unknown Voice menu view.")
+        await query.edit_message_text(
+            text,
+            reply_markup=self._voice_keyboard(
+                view,
+                catalogue=live,
+                route_index=route_index,
+                service_id=service_id,
+                page=page,
+            ),
+            parse_mode="HTML",
+        )
+        return live
+
+    @staticmethod
+    def _voice_style_instruction(token: str) -> str:
+        styles = {
+            "normal": "",
+            "warm": "Speak warmly and naturally.",
+            "lively": "Speak with lively, energetic expression.",
+            "formal": "Speak in a calm, formal presentation style.",
+            "story": "Narrate expressively like a storyteller.",
+        }
+        key = str(token or "").strip().casefold()
+        if key not in styles:
+            raise RuntimeError("Unknown performance style.")
+        return styles[key]
+
     async def callback_voice(self, update: Update, context: Any):
         query = update.callback_query
         if not self._is_authorized_user(query.from_user.id):
@@ -4572,33 +4893,222 @@ class FlexibleAgentRuntime:
             )
             await query.answer()
             return
-        if action == "back":
-            await query.edit_message_text(
-                self.voice_manager.voice_menu_text(),
-                reply_markup=self._voice_keyboard(),
-                parse_mode="HTML",
-            )
+        if action == "view" and value in {"rules", "routes", "profiles"}:
+            try:
+                await self._edit_voice_view(query, value)
+            except Exception as exc:
+                await query.answer(str(exc), show_alert=True)
+                return
             await query.answer()
+            return
+        if action == "back":
+            target = value if value in {"main", "routes"} else "main"
+            await self._edit_voice_view(query, target)
+            await query.answer()
+            return
+        if action in {
+            "route",
+            "services",
+            "service",
+            "voicepage",
+            "pick",
+            "speedview",
+            "setspeed",
+            "styleview",
+            "setstyle",
+            "move",
+            "delete",
+            "external",
+            "recommended",
+            "trigger",
+        }:
+            try:
+                if action == "route":
+                    selected = int(value)
+                    await self._edit_voice_view(query, "route", route_index=selected)
+                    notice = None
+                elif action == "services":
+                    selected = int(value)
+                    await self._edit_voice_view(query, "services", route_index=selected)
+                    notice = None
+                elif action == "service":
+                    selected_text, selected_service = value.split(":", 1)
+                    selected = int(selected_text)
+                    notice = await self.voice_manager.set_tts_route_service(
+                        selected, selected_service
+                    )
+                    await self._edit_voice_view(query, "route", route_index=selected)
+                elif action == "voicepage":
+                    selected_text, selected_service, selected_page = value.split(":", 2)
+                    selected = int(selected_text)
+                    await self._edit_voice_view(
+                        query,
+                        "service_voices",
+                        route_index=selected,
+                        service_id=selected_service,
+                        page=int(selected_page),
+                    )
+                    notice = None
+                elif action == "pick":
+                    selected_text, selected_service, voice_position = value.split(":", 2)
+                    selected = int(selected_text)
+                    catalogue = await self.voice_manager.get_voice_service_catalogue()
+                    service = catalogue.service(selected_service)
+                    position = int(voice_position)
+                    if position < 0 or position >= len(service.voices):
+                        raise RuntimeError("Voice catalogue changed; reopen the picker.")
+                    voice = service.voices[position]
+                    notice = await self.voice_manager.set_catalogue_tts_route_voice(
+                        selected,
+                        selected_service,
+                        voice.id,
+                        catalogue=catalogue,
+                    )
+                    # Reuse this exact live catalogue so the selected index and
+                    # the downloaded audition cannot drift between refreshes.
+                    await self._edit_voice_view(
+                        query,
+                        "service_voices",
+                        route_index=selected,
+                        service_id=selected_service,
+                        page=position // 8,
+                        catalogue=catalogue,
+                    )
+                    try:
+                        preview = await self.voice_manager.download_tts_route_preview(
+                            selected,
+                            locale=ui_language.preferred_locale(self, update),
+                            catalogue=catalogue,
+                        )
+                    except Exception:
+                        # The exact catalogue selection is already durable.  A
+                        # missing/stale audition is informational and must not
+                        # make a successful voice change look rolled back.
+                        self.logger.warning(
+                            "Unable to download catalogue TTS audition",
+                            exc_info=True,
+                        )
+                        preview = None
+                        notice = ui_language.tr("voice.tts.preview.unavailable")
+                    if preview is not None:
+                        caption = ui_language.tr(
+                            "voice.catalogue.preview.caption",
+                            service=self.voice_manager.voice_service_summary_label(service),
+                            voice=voice.label,
+                            privacy=self.voice_manager.voice_service_privacy_label(service),
+                        )
+                        sent = await self._send_voice_profile_previews(
+                            update,
+                            f"catalogue:{selected_service}:{voice.id}",
+                            (("tts", Path(preview.filename)),),
+                            caption_override=caption,
+                            media_type_override=preview.media_type,
+                            filename_override=preview.filename,
+                            preview_id=str(getattr(query, "id", "")),
+                            payload_override=preview.payload,
+                        )
+                        if not sent:
+                            notice = ui_language.tr("voice.tts.preview.unavailable")
+                elif action == "speedview":
+                    selected = int(value)
+                    await self._edit_voice_view(query, "speed", route_index=selected)
+                    notice = None
+                elif action == "setspeed":
+                    selected_text, speed_text = value.split(":", 1)
+                    selected = int(selected_text)
+                    catalogue = await self.voice_manager.get_voice_service_catalogue()
+                    service = catalogue.matching_route(
+                        self.voice_manager.get_tts_routes()[selected]
+                    )
+                    if not service.supports_speed:
+                        raise RuntimeError(
+                            "The selected voice service does not support speed control."
+                        )
+                    speed = float(speed_text)
+                    if (
+                        service.speed_min is not None
+                        and speed < float(service.speed_min)
+                    ) or (
+                        service.speed_max is not None
+                        and speed > float(service.speed_max)
+                    ):
+                        raise RuntimeError("Voice speed is outside the service capability.")
+                    notice = self.voice_manager.set_tts_route_speed(selected, speed)
+                    await self._edit_voice_view(
+                        query, "speed", route_index=selected, catalogue=catalogue
+                    )
+                elif action == "styleview":
+                    selected = int(value)
+                    await self._edit_voice_view(query, "style", route_index=selected)
+                    notice = None
+                elif action == "setstyle":
+                    selected_text, style_token = value.split(":", 1)
+                    selected = int(selected_text)
+                    catalogue = await self.voice_manager.get_voice_service_catalogue()
+                    service = catalogue.matching_route(
+                        self.voice_manager.get_tts_routes()[selected]
+                    )
+                    if not service.supports_style:
+                        raise RuntimeError(
+                            "The selected voice service does not support performance style."
+                        )
+                    notice = self.voice_manager.set_tts_route_style(
+                        selected, self._voice_style_instruction(style_token)
+                    )
+                    await self._edit_voice_view(
+                        query, "style", route_index=selected, catalogue=catalogue
+                    )
+                elif action == "move":
+                    selected_text, direction = value.split(":", 1)
+                    selected = int(selected_text)
+                    notice = self.voice_manager.move_tts_route(
+                        selected, -1 if direction == "up" else 1
+                    )
+                    await self._edit_voice_view(query, "routes")
+                elif action == "delete":
+                    notice = self.voice_manager.delete_tts_route(int(value))
+                    await self._edit_voice_view(query, "routes")
+                elif action == "external":
+                    notice = self.voice_manager.set_external_fallback_enabled(
+                        value == "on"
+                    )
+                    await self._edit_voice_view(query, "routes")
+                elif action == "recommended":
+                    notice = await self.voice_manager.apply_recommended_local_routes(
+                        advanced=value == "advanced"
+                    )
+                    await self._edit_voice_view(query, "routes")
+                else:
+                    notice = self.voice_manager.set_reply_trigger(value)
+                    await self._edit_voice_view(query, "rules")
+            except Exception as exc:
+                await query.answer(str(exc), show_alert=True)
+                return
+            await query.answer(notice or "")
             return
         try:
             if action == "mode":
                 message = self.voice_manager.set_reply_mode(value)
+                render_view = "rules"
                 preview_profile = self.voice_manager.get_voice_profile_id()
                 selected_mode = self.voice_manager.get_reply_mode()
                 if preview_profile and selected_mode in {"native", "tts"}:
                     preview_renderers = (selected_mode,)
             elif action == "profile":
                 message = self.voice_manager.set_voice_profile(value)
+                render_view = "profiles"
                 preview_profile = value
                 preview_renderers = ("native", "tts")
             elif action == "content":
                 message = self.voice_manager.set_native_reply_content(value)
+                render_view = "rules"
             # Keep callbacks from already-open legacy menus valid until those
             # Telegram messages naturally age out.
             elif action == "toggle":
                 message = self.voice_manager.set_reply_mode(
                     "tts" if value == "on" else "off"
                 )
+                render_view = "rules"
             elif action == "use":
                 message = self.voice_manager.apply_voice_preset(value)
                 render_view = "voices"
@@ -4626,16 +5136,14 @@ class FlexibleAgentRuntime:
                 preview_preset,
                 telegram=tts_preview_telegram,
             )
-        text = (
-            self.voice_manager.voice_choice_menu_text()
-            if render_view == "voices"
-            else self.voice_manager.voice_menu_text()
-        )
-        await query.edit_message_text(
-            text,
-            reply_markup=self._voice_keyboard(render_view),
-            parse_mode="HTML",
-        )
+        if render_view == "voices":
+            await query.edit_message_text(
+                self.voice_manager.voice_choice_menu_text(),
+                reply_markup=self._voice_keyboard("voices"),
+                parse_mode="HTML",
+            )
+        else:
+            await self._edit_voice_view(query, render_view)
         callback_notice = message or ui_language.tr("common.updated")
         if preview_profile and not preview_assets:
             callback_notice = ui_language.tr("voice.preview.unavailable")
@@ -6107,6 +6615,113 @@ class FlexibleAgentRuntime:
                     update, self.voice_manager.set_reply_mode(args[1])
                 )
             except RuntimeError as exc:
+                await self._reply_text(update, str(exc))
+            return
+        if mode == "trigger":
+            if len(args) != 2:
+                await self._reply_text(
+                    update,
+                    ui_language.tr(
+                        "voice.usage_command",
+                        command="/voice trigger <all|voice_message>",
+                    ),
+                )
+                return
+            try:
+                await self._reply_text(
+                    update, self.voice_manager.set_reply_trigger(args[1])
+                )
+            except RuntimeError as exc:
+                await self._reply_text(update, str(exc))
+            return
+        if mode == "external":
+            if len(args) != 2 or args[1].casefold() not in {"on", "off"}:
+                await self._reply_text(
+                    update,
+                    ui_language.tr(
+                        "voice.usage_command",
+                        command="/voice external <on|off>",
+                    ),
+                )
+                return
+            await self._reply_text(
+                update,
+                self.voice_manager.set_external_fallback_enabled(
+                    args[1].casefold() == "on"
+                ),
+            )
+            return
+        if mode == "recommended":
+            if len(args) > 2 or (
+                len(args) == 2 and args[1].casefold() not in {"local", "advanced"}
+            ):
+                await self._reply_text(
+                    update,
+                    ui_language.tr(
+                        "voice.usage_command",
+                        command="/voice recommended [local|advanced]",
+                    ),
+                )
+                return
+            try:
+                await self._reply_text(
+                    update,
+                    await self.voice_manager.apply_recommended_local_routes(
+                        advanced=len(args) == 2 and args[1].casefold() == "advanced"
+                    ),
+                )
+            except RuntimeError as exc:
+                await self._reply_text(update, str(exc))
+            return
+        if mode in {"speed", "style"}:
+            if len(args) < 3:
+                command = (
+                    "/voice speed <position> <0.5-2.0>"
+                    if mode == "speed"
+                    else "/voice style <position> <instructions|clear>"
+                )
+                await self._reply_text(
+                    update,
+                    ui_language.tr("voice.usage_command", command=command),
+                )
+                return
+            try:
+                selected = int(args[1]) - 1
+                routes = self.voice_manager.get_tts_routes()
+                if selected < 0 or selected >= len(routes):
+                    raise RuntimeError("Voice route position is invalid.")
+                catalogue = await self.voice_manager.get_voice_service_catalogue()
+                service = catalogue.matching_route(routes[selected])
+                if mode == "speed":
+                    if not service.supports_speed:
+                        raise RuntimeError(
+                            "The selected voice service does not support speed control."
+                        )
+                    speed = float(args[2])
+                    if (
+                        service.speed_min is not None
+                        and speed < float(service.speed_min)
+                    ) or (
+                        service.speed_max is not None
+                        and speed > float(service.speed_max)
+                    ):
+                        raise RuntimeError(
+                            "Voice speed is outside the service capability."
+                        )
+                    result = self.voice_manager.set_tts_route_speed(selected, speed)
+                else:
+                    if not service.supports_style:
+                        raise RuntimeError(
+                            "The selected voice service does not support performance style."
+                        )
+                    instruction = " ".join(args[2:])
+                    if instruction.casefold() in {"clear", "reset", "off"}:
+                        instruction = ""
+                    result = self.voice_manager.set_tts_route_style(
+                        selected, instruction
+                    )
+                await self._reply_text(update, result)
+            except (RuntimeError, ValueError) as exc:
                 await self._reply_text(update, str(exc))
             return
         if mode == "target":
@@ -13010,7 +13625,10 @@ class FlexibleAgentRuntime:
                         else "transport_returned_no_receipt"
                     )
                 receipt_chunk_count = chunk_count
-                await self._send_voice_reply(item.chat_id, visible_text, item.request_id)
+                if self.voice_manager.should_synthesize_reply(voice_origin=False):
+                    await self._send_voice_reply(
+                        item.chat_id, visible_text, item.request_id
+                    )
                 if receipt_delivered:
                     await self._send_meter_cost_tail(
                         item,

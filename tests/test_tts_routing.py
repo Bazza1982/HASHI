@@ -74,18 +74,20 @@ def test_english_is_compatible_with_every_known_voice():
         provider="edge",
         voice_name="zh-CN-XiaoxiaoNeural",
         provider_options={},
-        requested_style="warm_female",
+        requested_style=None,
         text="Please read this answer in the locally appropriate accent.",
         source_language="en",
         presets=PRESETS,
         profiles=PROFILES,
+        voice_profile="warm_female",
     )
 
     assert route.language.language == "en"
     assert route.voice_name == "zh-CN-XiaoxiaoNeural"
     assert route.adapted_from_voice is None
-    assert route.style_applied is False
-    assert route.style_reason == "provider_style_unsupported"
+    assert route.requested_style is None
+    assert route.style_applied is None
+    assert route.style_reason is None
 
 
 def test_japanese_temporarily_switches_xiaoxiao_to_same_provider_voice():
@@ -93,11 +95,12 @@ def test_japanese_temporarily_switches_xiaoxiao_to_same_provider_voice():
         provider="edge",
         voice_name="zh-CN-XiaoxiaoNeural",
         provider_options={"voice": "zh-CN-XiaoxiaoNeural"},
-        requested_style="warm_female",
+        requested_style=None,
         text="これは日本語の文章です。すぐに読み上げてください。",
         source_language="zh-CN",
         presets=PRESETS,
         profiles=PROFILES,
+        voice_profile="warm_female",
     )
 
     assert route.provider == "edge"

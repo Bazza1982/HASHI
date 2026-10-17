@@ -19,6 +19,7 @@ from telegram.error import BadRequest, RetryAfter
 
 from orchestrator import (
     runtime_cross_session,
+    runtime_delivery,
     runtime_delivery_order,
     runtime_retry,
     runtime_session,
@@ -2335,6 +2336,46 @@ def wrap_her_persona_stream(
                 )
                 provisional_messages.pop(target_event_id, None)
                 return True
+            if resolution in {"final", "clarification"}:
+                from orchestrator.native_audio_delivery import (
+                    native_reply_content_policy,
+                )
+
+                manager = getattr(runtime, "voice_manager", None)
+                should_synthesize = getattr(
+                    manager, "should_synthesize_reply", None
+                )
+                native_enabled = getattr(manager, "native_audio_enabled", None)
+                metadata = getattr(item, "request_metadata", None)
+                voice_origin = bool(
+                    isinstance(metadata, Mapping)
+                    and metadata.get("voice_origin")
+                )
+                native_requested = False
+                if voice_origin and callable(native_enabled):
+                    try:
+                        native_requested = bool(native_enabled("telegram"))
+                    except TypeError:
+                        native_requested = bool(native_enabled())
+                tts_requested = bool(
+                    callable(should_synthesize)
+                    and should_synthesize(voice_origin=voice_origin)
+                )
+                if (
+                    native_reply_content_policy(runtime, item) == "audio_only"
+                    and (native_requested or tts_requested)
+                ):
+                    delete_message = getattr(runtime.app.bot, "delete_message", None)
+                    if not callable(delete_message):
+                        return False
+                    await delete_message(
+                        chat_id=item.chat_id,
+                        message_id=provisional.message_id,
+                    )
+                    provisional_messages.pop(target_event_id, None)
+                    # False keeps the canonical final pending for the later
+                    # audio delivery boundary instead of claiming text final.
+                    return False
             raw_text = normalize_user_visible_paths(
                 str(getattr(event, "summary", "") or "").strip()
             )
@@ -4646,6 +4687,43 @@ async def handle_success_delivery(
     call_reply = is_call_request(item)
     native_parts = [] if call_reply else audio_parts(getattr(response, "content", ()))
     native_policy = "text_only" if call_reply else native_reply_content_policy(runtime, item)
+    request_metadata = getattr(item, "request_metadata", None)
+    voice_origin = bool(
+        isinstance(request_metadata, Mapping)
+        and request_metadata.get("voice_origin")
+    )
+    raw_response_metadata = getattr(response, "stream_metadata", None)
+    response_metadata = (
+        raw_response_metadata
+        if isinstance(raw_response_metadata, Mapping)
+        else {}
+    )
+    native_fallback = bool(response_metadata.get("native_audio_fallback"))
+    manager = getattr(runtime, "voice_manager", None)
+    native_enabled = getattr(manager, "native_audio_enabled", None)
+    should_synthesize = getattr(manager, "should_synthesize_reply", None)
+    force_voice = bool(
+        native_policy != "text_only"
+        and (
+            native_fallback
+            or (
+                voice_origin
+                and callable(native_enabled)
+                and native_enabled()
+            )
+        )
+    )
+    automatic_voice = bool(
+        native_policy != "text_only"
+        and callable(should_synthesize)
+        and should_synthesize(voice_origin=voice_origin)
+    )
+    tts_requested = bool(
+        response_text
+        and not native_parts
+        and not call_reply
+        and (force_voice or automatic_voice)
+    )
     cos_handled = False
     safe_core_raw = extract_memory_plus_update_details(response.text).visible_text
     await runtime._send_wrapper_verbose_trace(item, safe_core_raw, visible_text, wrapper_result)
@@ -4685,7 +4763,25 @@ async def handle_success_delivery(
                 purpose="native_audio_final",
             )
         )
-    delivery_text = "" if native_policy == "audio_only" and native_parts else response_text
+    tts_audio_only = native_policy == "audio_only" and tts_requested
+    delivery_text = (
+        ""
+        if native_policy == "audio_only" and (native_parts or tts_requested)
+        else response_text
+    )
+    if (
+        tts_audio_only
+        and answer_stream_state is not None
+        and answer_stream_state.placeholder is not None
+    ):
+        try:
+            await runtime.app.bot.delete_message(
+                chat_id=item.chat_id,
+                message_id=answer_stream_state.placeholder.message_id,
+            )
+        except Exception:
+            pass
+        answer_stream_state = None
     receipt_disposition = "transport_returned_no_receipt"
     try:
         typed_route = _typed_run_delivery_route(item)
@@ -4838,11 +4934,79 @@ async def handle_success_delivery(
             if native_delivered
             else "native_audio_fallback_failed"
         )
+    tts_delivered = False
+    tts_delivery_unknown = False
+    tts_text_fallback_delivered = False
+    if tts_requested:
+        if force_voice:
+            voice_result = await runtime._send_voice_reply(
+                item.chat_id,
+                response_text,
+                item.request_id,
+                force=True,
+            )
+        else:
+            voice_result = await runtime._send_voice_reply(
+                item.chat_id,
+                response_text,
+                item.request_id,
+            )
+        tts_delivered = voice_result is True
+        tts_delivery_unknown = voice_result is None
+        if tts_audio_only:
+            if tts_delivered:
+                receipt_disposition = "tts_audio_delivered"
+            elif tts_delivery_unknown:
+                # An ambiguous media receipt must never trigger a second send.
+                receipt_disposition = "tts_audio_delivery_unknown"
+            else:
+                fallback_elapsed_s, fallback_chunks = await runtime.send_long_message(
+                    chat_id=item.chat_id,
+                    text=response_text,
+                    request_id=item.request_id,
+                    purpose="tts_audio_failed_text_fallback",
+                    frontend_outbox=True,
+                    include_canonical_text=True,
+                )
+                send_elapsed_s += fallback_elapsed_s
+                chunk_count += fallback_chunks
+                tts_text_fallback_delivered = fallback_chunks > 0
+                receipt_disposition = (
+                    "tts_audio_failed_text_fallback"
+                    if fallback_chunks > 0
+                    else "tts_audio_and_text_fallback_failed"
+                )
+            if tts_delivered or tts_delivery_unknown:
+                try:
+                    settlement = runtime_delivery.suppress_run_delivery_projection(
+                        runtime,
+                        request_id=item.request_id,
+                        surface="telegram",
+                        channel_key=str(item.chat_id),
+                        reason="tts_audio_only",
+                    )
+                    if settlement not in {"suppressed", "completed", "unmanaged"}:
+                        runtime.logger.warning(
+                            "Voice-only canonical delivery was not settled for %s "
+                            "(outbox state=%s)",
+                            item.request_id,
+                            settlement,
+                        )
+                except Exception as exc:
+                    # The audio outcome is already accepted or ambiguous.  A
+                    # settlement fault must never trigger a duplicate text send.
+                    runtime.logger.warning(
+                        "Voice-only canonical delivery settlement failed for %s (%s)",
+                        item.request_id,
+                        type(exc).__name__,
+                    )
     final_delivered = bool(
         delivered_at_initial_resolution
         or stream_finalization.final_delivered
         or (stream_finalization.fallback_required and chunk_count > 0)
         or native_delivered
+        or tts_delivered
+        or tts_text_fallback_delivered
     )
     await record_her_v2_transport_receipt(
         runtime,
@@ -4850,7 +5014,7 @@ async def handle_success_delivery(
         response,
         delivered=final_delivered,
         disposition=receipt_disposition,
-        chunk_count=chunk_count + int(native_delivered),
+        chunk_count=chunk_count + int(native_delivered) + int(tts_delivered),
         error_type=(
             type(native_delivery_error).__name__
             if native_delivery_error is not None
@@ -4881,40 +5045,6 @@ async def handle_success_delivery(
         delivered=bool(final_delivered or hchat_delivered),
         completion_path="foreground",
     )
-    if not native_parts and not call_reply:
-        request_metadata = getattr(item, "request_metadata", None)
-        voice_origin = bool(
-            isinstance(request_metadata, Mapping)
-            and request_metadata.get("voice_origin")
-        )
-        raw_response_metadata = getattr(response, "stream_metadata", None)
-        response_metadata = (
-            raw_response_metadata
-            if isinstance(raw_response_metadata, Mapping)
-            else {}
-        )
-        native_fallback = bool(response_metadata.get("native_audio_fallback"))
-        manager = getattr(runtime, "voice_manager", None)
-        native_enabled = getattr(manager, "native_audio_enabled", None)
-        force_voice = bool(
-            native_fallback
-            or (
-                voice_origin
-                and callable(native_enabled)
-                and native_enabled()
-            )
-        )
-        if force_voice:
-            await runtime._send_voice_reply(
-                item.chat_id,
-                response_text,
-                item.request_id,
-                force=True,
-            )
-        else:
-            await runtime._send_voice_reply(
-                item.chat_id, response_text, item.request_id
-            )
     if final_delivered:
         await _publish_post_final_presentations(
             runtime,

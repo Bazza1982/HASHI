@@ -16,9 +16,10 @@ import time
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable, Mapping
 
 from orchestrator import ui_language
+from orchestrator.compute_services import ComputeServiceError, ComputeServicesConfig
 from orchestrator.config_json import ConfigConflictError, read_config_json, write_config_json
 from orchestrator.tts_routing import fallback_providers, normalize_language, resolve_tts_route
 from orchestrator.tts_providers import build_provider, list_provider_names
@@ -44,6 +45,12 @@ from orchestrator.voice_synthesizer import (
     safe_voice_error_detail,
     spoken_text_language,
 )
+from orchestrator.voice_services import (
+    VoiceChoice,
+    VoiceService,
+    VoiceServiceCatalogue,
+    discover_voice_services,
+)
 from orchestrator.command_ui import setting_card
 
 
@@ -63,6 +70,8 @@ def _provider_label(provider_name: str) -> str:
         "piper": "Piper TTS",
         "kokoro": "Kokoro TTS",
         "coqui": "Coqui TTS",
+        "hashi_compute": "Hashi Compute TTS",
+        "openai_compatible": "Gemini TTS via OpenRouter",
     }.get(str(provider_name or "").strip().casefold(), f"{provider_name or 'TTS'} provider")
 
 
@@ -190,6 +199,7 @@ class VoiceManager:
     VOICE_PREVIEW_VERSION = PRODUCT_VOICE_PREVIEW_VERSION
     VOICE_PREVIEW_RENDERERS = ("native", "tts")
     DEFAULT_STATE = {
+        "schema_version": 2,
         "enabled": False,
         "mode": "text_and_voice",
         "provider": _default_tts_provider(),
@@ -198,9 +208,23 @@ class VoiceManager:
         "max_chars": 1200,
         "provider_options": {},
         # A user-facing semantic profile is independent from the concrete TTS
-        # voice. Providers that support style may apply it; others ignore it
-        # safely. None means the user has not chosen a style.
+        # voice and from provider-specific performance instructions.  It may
+        # guide selection of a compatible voice, but never becomes a style
+        # prompt.  None means the user has not chosen a semantic profile.
         "voice_profile": None,
+        # Ordered, complete TTS routes.  Index 0 is the preferred route; every
+        # later entry is an explicit fallback.  Endpoint URLs, credentials and
+        # privacy labels are resolved from their owning service catalogues and
+        # are never trusted from this Agent-owned file.
+        "tts_routes": [],
+        "external_fallback_enabled": False,
+        # Controls when text-model replies receive a TTS rendition.  It is
+        # deliberately independent from the synthesis mode and route chain.
+        "reply_trigger": "all",
+        # Controls the delivered reply shape for every voice path.  The
+        # nested native copy remains a compatibility mirror for native-audio
+        # terminal overrides; this top-level value is the Agent default.
+        "reply_content": "audio_and_text",
         # Voice is available, but automatic speech requires explicit opt-in.
         # A user's saved off/native/tts choice remains exact.
         "native": {
@@ -580,12 +604,14 @@ class VoiceManager:
         native_capabilities: list[dict] | None = None,
         preview_asset_root: Path | None = None,
         tts_preview_asset_root: Path | None = None,
+        project_root: Path | None = None,
     ):
         self.workspace_dir = workspace_dir
         self.media_dir = media_dir
         self.state_path = workspace_dir / "voice_state.json"
         self.output_dir = media_dir / "voice"
         self.ffmpeg_cmd = ffmpeg_cmd
+        self.project_root = Path(project_root or self.PROJECT_ROOT).resolve()
         self.preview_asset_root = Path(
             preview_asset_root or DEFAULT_VOICE_PREVIEW_ASSET_ROOT
         ).resolve()
@@ -600,27 +626,49 @@ class VoiceManager:
         self.voice_audit_path = self.workspace_dir / "logs" / "voice_synthesis.jsonl"
         self._voice_audit_lock = threading.Lock()
 
-    def _active_provider_failure(self, provider_name: str) -> VoiceProviderFailure | None:
-        name = str(provider_name or "").strip().casefold()
-        current = self._provider_cooldowns.get(name)
+    def _active_provider_failure(self, cooldown_key: str) -> VoiceProviderFailure | None:
+        key = str(cooldown_key or "").strip().casefold()
+        current = self._provider_cooldowns.get(key)
         if current is None:
             return None
         unavailable_until, failure = current
         if time.monotonic() >= unavailable_until:
-            self._provider_cooldowns.pop(name, None)
+            self._provider_cooldowns.pop(key, None)
             return None
         return VoiceProviderFailure(
-            name,
+            failure.provider,
             failure.code,
-            f"{failure.reason} {_provider_label(name)} is temporarily bypassed after that failure.",
+            f"{failure.reason} {_provider_label(failure.provider)} is temporarily bypassed after that failure.",
             False,
         )
 
-    def _remember_provider_failure(self, failure: VoiceProviderFailure) -> None:
-        self._provider_cooldowns[failure.provider] = (
+    def _remember_provider_failure(
+        self,
+        failure: VoiceProviderFailure,
+        *,
+        cooldown_key: str | None = None,
+    ) -> None:
+        key = str(cooldown_key or failure.provider).strip().casefold()
+        self._provider_cooldowns[key] = (
             time.monotonic() + self.PROVIDER_FAILURE_COOLDOWN_SECONDS,
             failure,
         )
+
+    @classmethod
+    def _tts_route_cooldown_key(cls, route: Mapping[str, Any]) -> str:
+        provider = cls._provider_for_tts_route(route)
+        if provider == "hashi_compute":
+            return "|".join(
+                (
+                    provider,
+                    str(route.get("node_id") or ""),
+                    str(route.get("offering_id") or ""),
+                    str(route.get("model") or ""),
+                )
+            ).casefold()
+        if provider == "openai_compatible":
+            return f"{provider}|{route.get('model') or ''}".casefold()
+        return provider
 
     def _default_piper_exe(self) -> str:
         piper_exe = Path(sys.executable).with_name("piper.exe")
@@ -698,7 +746,13 @@ class VoiceManager:
             if (
                 provider == payload.get("provider")
                 and voice_name == payload.get("voice_name")
-                and provider_options == (payload.get("provider_options") or {})
+                and (
+                    provider_options == (payload.get("provider_options") or {})
+                    or self._durable_route_options(provider_options)
+                    == self._durable_route_options(
+                        payload.get("provider_options") or {}
+                    )
+                )
             ):
                 return alias
         return None
@@ -1115,7 +1169,6 @@ class VoiceManager:
 
     def voice_menu_text(self) -> str:
         state = self._load()
-        native = self._native_policy_from_state(state)
         mode = self.get_reply_mode()
         profile_id = self._voice_profile_from_state(state)
         profile_label = (
@@ -1123,50 +1176,298 @@ class VoiceManager:
             if profile_id
             else ui_language.tr("voice.profile.unset")
         )
-        reply_labels = {
-            key: ui_language.tr(f"voice.reply.{key}")
-            for key in ("audio_and_text", "audio_only", "text_only")
-        }
         mode_label = ui_language.tr(f"voice.mode.{mode}")
         current = f"<b>{html.escape(mode.upper())}</b>"
         if ui_language.current_locale() != ui_language.DEFAULT_LOCALE:
             current = f"<b>{html.escape(mode_label)}</b> · <code>{html.escape(mode)}</code>"
-        native_label = ui_language.tr("voice.mode.native")
-        tts_label = ui_language.tr("voice.mode.tts")
-        off_label = ui_language.tr("voice.mode.off")
-        return setting_card(
-            "🔊",
-            "Voice",
-            current=current,
-            facts=[
-                f"<b>{html.escape(ui_language.tr('voice.field.mode'))}</b>",
+        trigger_label = ui_language.tr(
+            f"voice.trigger.{self.get_reply_trigger()}"
+        )
+        reply_content_label = ui_language.tr(
+            f"voice.reply.{self.get_reply_content()}"
+        )
+        route_facts = [
+            f"<b>{html.escape(ui_language.tr('voice.section.rules'))}</b> · "
+            f"{html.escape(trigger_label)} · {html.escape(mode_label)} · "
+            f"{html.escape(reply_content_label)}",
+            f"<b>{html.escape(ui_language.tr('voice.section.routes'))}</b>",
+        ]
+        routes = self.get_tts_routes()
+        if routes:
+            for index, route in enumerate(routes):
+                role = (
+                    ui_language.tr("voice.route.preferred")
+                    if index == 0
+                    else ui_language.tr("voice.route.fallback", index=index)
+                )
+                route_facts.append(
+                    f"• <b>{html.escape(role)}</b> · "
+                    f"{html.escape(self.tts_route_label(route))} · "
+                    f"{html.escape(self.tts_route_privacy_label(route))}"
+                )
+        else:
+            route_facts.append(
+                f"• {html.escape(ui_language.tr('voice.route.not_configured'))}"
+            )
+        route_facts.extend(
+            [
                 (
-                    f"• <b>{html.escape(native_label)}</b> · "
-                    f"{html.escape(ui_language.tr('voice.mode.native.description'))}"
-                ),
-                (
-                    f"• <b>{html.escape(tts_label)}</b> · "
-                    f"{html.escape(ui_language.tr('voice.mode.tts.description'))}"
-                ),
-                (
-                    f"• <b>{html.escape(off_label)}</b> · "
-                    f"{html.escape(ui_language.tr('voice.mode.off.description'))}"
-                ),
-                (
-                    f"<b>{html.escape(ui_language.tr('voice.field.reply'))}</b> · "
-                    f"{html.escape(reply_labels[native['reply_content']])} · "
-                    f"{html.escape(ui_language.tr('voice.reply.scope'))}"
-                ),
-                (
-                    f"<b>{html.escape(ui_language.tr('voice.field.tts_voice'))}</b> · "
-                    f"{html.escape(self.active_tts_voice_label())}"
+                    f"<b>{html.escape(ui_language.tr('voice.external.title'))}</b> · "
+                    + html.escape(
+                        ui_language.tr(
+                            "voice.external.allowed"
+                            if state.get("external_fallback_enabled")
+                            else "voice.external.blocked"
+                        )
+                    )
                 ),
                 (
                     f"<b>{html.escape(ui_language.tr('voice.field.voice'))}</b> · "
                     f"{html.escape(str(profile_label))}"
                 ),
+            ]
+        )
+        return setting_card(
+            "🔊",
+            ui_language.tr("voice.title"),
+            current=current,
+            facts=route_facts,
+            action=ui_language.tr("voice.menu.action"),
+        )
+
+    @staticmethod
+    def voice_service_privacy_label(service: VoiceService) -> str:
+        if service.privacy == "local_private":
+            return ui_language.tr(
+                "voice.privacy.local_lan"
+                if service.location == "lan"
+                else "voice.privacy.local_device"
+            )
+        return ui_language.tr("voice.privacy.external")
+
+    @staticmethod
+    def voice_service_label(service: VoiceService) -> str:
+        if service.service == "hashi_compute":
+            return ui_language.tr(
+                "voice.service.hashi_advanced"
+                if service.supports_style
+                else "voice.service.hashi"
+            )
+        key = {
+            "windows": "voice.service.windows",
+            "edge": "voice.service.edge",
+            "kokoro": "voice.service.kokoro",
+            "openrouter": "voice.service.openrouter",
+        }.get(service.service)
+        return ui_language.tr(key) if key else service.label
+
+    @staticmethod
+    def voice_service_availability_label(service: VoiceService) -> str:
+        status = str(service.availability or "").strip().casefold()
+        if service.available and status in {"ready", "busy", "installed"}:
+            return ui_language.tr("voice.availability.ready")
+        key = {
+            "not installed": "voice.availability.unavailable",
+            "no installed voice detected": "voice.availability.no_voice",
+            "voice catalogue unavailable": "voice.availability.catalogue_unavailable",
+            "requires configured openrouter credential": "voice.availability.credential_missing",
+            "credential not configured": "voice.availability.credential_missing",
+        }.get(status)
+        return ui_language.tr(key) if key else str(service.availability)
+
+    @classmethod
+    def voice_service_summary_label(cls, service: VoiceService) -> str:
+        label = cls.voice_service_label(service)
+        model = str(service.model or "").strip()
+        return f"{label} · {model}" if model else label
+
+    def voice_rules_menu_text(self) -> str:
+        mode = self.get_reply_mode()
+        reply_content_label = ui_language.tr(
+            f"voice.reply.{self.get_reply_content()}"
+        )
+        return setting_card(
+            "📋",
+            ui_language.tr("voice.rules.title"),
+            current=html.escape(ui_language.tr(f"voice.mode.{mode}")),
+            facts=[
+                f"<b>{html.escape(ui_language.tr('voice.rules.when'))}</b> · "
+                f"{html.escape(ui_language.tr(f'voice.trigger.{self.get_reply_trigger()}'))}",
+                f"<b>{html.escape(ui_language.tr('voice.rules.how'))}</b> · "
+                f"{html.escape(ui_language.tr(f'voice.mode.{mode}'))}",
+                f"<b>{html.escape(ui_language.tr('voice.field.reply'))}</b> · "
+                f"{html.escape(reply_content_label)} · "
+                f"{html.escape(ui_language.tr('voice.reply.scope'))}",
             ],
-            action=ui_language.tr("voice.action"),
+            action=ui_language.tr("voice.rules.action"),
+        )
+
+    def voice_routes_menu_text(self) -> str:
+        state = self._load()
+        routes = self.get_tts_routes()
+        facts: list[str] = []
+        if routes:
+            for index, route in enumerate(routes):
+                role = (
+                    ui_language.tr("voice.route.preferred")
+                    if index == 0
+                    else ui_language.tr("voice.route.fallback", index=index)
+                )
+                facts.append(
+                    f"<b>{html.escape(role)}</b> · "
+                    f"{html.escape(self.tts_route_label(route))} · "
+                    f"{html.escape(self.tts_route_privacy_label(route))}"
+                )
+        else:
+            facts.append(html.escape(ui_language.tr("voice.route.not_configured")))
+        facts.append(
+            f"<b>{html.escape(ui_language.tr('voice.external.title'))}</b> · "
+            + html.escape(
+                ui_language.tr(
+                    "voice.external.allowed"
+                    if state.get("external_fallback_enabled")
+                    else "voice.external.blocked"
+                )
+            )
+        )
+        return setting_card(
+            "🧭",
+            ui_language.tr("voice.routes.title"),
+            current=ui_language.tr("voice.routes.current", count=len(routes)),
+            facts=facts,
+            action=ui_language.tr("voice.routes.action"),
+        )
+
+    def voice_route_menu_text(
+        self,
+        index: int,
+        catalogue: VoiceServiceCatalogue,
+    ) -> str:
+        routes = self.get_tts_routes()
+        selected = int(index)
+        if selected < 0 or selected >= len(routes):
+            raise RuntimeError("Voice route position is invalid.")
+        route = routes[selected]
+        role = (
+            ui_language.tr("voice.route.preferred")
+            if selected == 0
+            else ui_language.tr("voice.route.fallback", index=selected)
+        )
+        try:
+            service = catalogue.matching_route(route)
+            service_label = self.voice_service_label(service)
+            privacy = self.voice_service_privacy_label(service)
+            speed = (
+                str((route.get("options") or {}).get("speed", 1.0))
+                if service.supports_speed
+                else ui_language.tr("voice.capability.unsupported")
+            )
+            style = (
+                str((route.get("options") or {}).get("style") or ui_language.tr("voice.style.normal"))
+                if service.supports_style
+                else ui_language.tr("voice.capability.unsupported")
+            )
+        except RuntimeError:
+            service_label = self.tts_route_label(route)
+            privacy = self.tts_route_privacy_label(route)
+            speed = ui_language.tr("voice.capability.unavailable")
+            style = ui_language.tr("voice.capability.unavailable")
+        return setting_card(
+            "🎛️",
+            ui_language.tr("voice.route.title", role=role),
+            current=html.escape(service_label),
+            facts=[
+                f"<b>{html.escape(ui_language.tr('voice.field.tts_voice'))}</b> · "
+                f"{html.escape(str(route.get('voice') or '—'))}",
+                f"<b>{html.escape(ui_language.tr('voice.field.engine'))}</b> · "
+                f"{html.escape(str(route.get('model') or ui_language.tr('voice.engine.built_in')))}",
+                f"<b>{html.escape(ui_language.tr('voice.field.privacy'))}</b> · {html.escape(privacy)}",
+                f"<b>{html.escape(ui_language.tr('voice.field.speed'))}</b> · {html.escape(speed)}",
+                f"<b>{html.escape(ui_language.tr('voice.field.performance'))}</b> · {html.escape(style)}",
+            ],
+            action=ui_language.tr("voice.route.action"),
+        )
+
+    def voice_services_menu_text(
+        self,
+        index: int,
+        catalogue: VoiceServiceCatalogue,
+    ) -> str:
+        facts = [
+            f"<b>{html.escape(self.voice_service_summary_label(service))}</b> · "
+            f"{html.escape(self.voice_service_privacy_label(service))} · "
+            f"{html.escape(self.voice_service_availability_label(service))}"
+            for service in catalogue.services
+        ]
+        return setting_card(
+            "🏭",
+            ui_language.tr("voice.services.title"),
+            current=ui_language.tr("voice.services.position", position=int(index) + 1),
+            facts=facts,
+            action=ui_language.tr("voice.services.action"),
+        )
+
+    def voice_choices_menu_text(
+        self,
+        index: int,
+        service: VoiceService,
+        *,
+        page: int,
+        pages: int,
+    ) -> str:
+        return setting_card(
+            "🗣️",
+            ui_language.tr("voice.choices.title"),
+            current=html.escape(self.voice_service_summary_label(service)),
+            facts=[
+                f"<b>{html.escape(ui_language.tr('voice.field.privacy'))}</b> · "
+                f"{html.escape(self.voice_service_privacy_label(service))}",
+                ui_language.tr(
+                    "voice.choices.page",
+                    page=page + 1,
+                    pages=max(1, pages),
+                    count=len(service.voices),
+                ),
+                ui_language.tr("voice.choices.catalogue_rule"),
+            ],
+            action=ui_language.tr("voice.choices.action", position=int(index) + 1),
+        )
+
+    def voice_speed_menu_text(self, index: int, service: VoiceService) -> str:
+        route = self.get_tts_routes()[int(index)]
+        speed = float((route.get("options") or {}).get("speed", 1.0))
+        return setting_card(
+            "⏱️",
+            ui_language.tr("voice.speed.title"),
+            current=f"{speed:g}×",
+            facts=[html.escape(service.label)],
+            action=ui_language.tr("voice.speed.action"),
+        )
+
+    def voice_style_menu_text(self, index: int, service: VoiceService) -> str:
+        route = self.get_tts_routes()[int(index)]
+        style = str((route.get("options") or {}).get("style") or "").strip()
+        return setting_card(
+            "🎭",
+            ui_language.tr("voice.performance.title"),
+            current=html.escape(style or ui_language.tr("voice.style.normal")),
+            facts=[html.escape(service.label)],
+            action=ui_language.tr("voice.performance.action", position=int(index) + 1),
+        )
+
+    def voice_profiles_menu_text(self) -> str:
+        profile_id = self.get_voice_profile_id()
+        current = (
+            ui_language.tr(f"voice.profile.{profile_id}")
+            if profile_id
+            else ui_language.tr("voice.profile.unset")
+        )
+        return setting_card(
+            "🎨",
+            ui_language.tr("voice.profiles.title"),
+            current=html.escape(current),
+            facts=[html.escape(ui_language.tr("voice.profiles.effect"))],
+            action=ui_language.tr("voice.profiles.action"),
         )
 
     def voice_preview_path(
@@ -1287,8 +1588,590 @@ class VoiceManager:
         native = copy.deepcopy(self.DEFAULT_STATE["native"])
         if isinstance(raw_native, dict):
             native.update(raw_native)
+        legacy_reply_content = (
+            raw_native.get("reply_content")
+            if isinstance(raw_native, dict)
+            else None
+        )
+        reply_content = self._normalise_reply_content(
+            data.get("reply_content", legacy_reply_content)
+        )
+        merged["reply_content"] = reply_content
+        native["reply_content"] = reply_content
         merged["native"] = self._normalise_native_policy(native)
+        routes = data.get("tts_routes")
+        if isinstance(routes, list):
+            merged["tts_routes"] = [
+                self._normalise_tts_route(route) for route in routes
+            ]
+        elif data:
+            provider = str(data.get("provider") or _default_tts_provider()).strip().casefold()
+            # Old presets may contain executable/cache paths.  Those are
+            # re-derived from the qualified local preset at synthesis time;
+            # only portable voice controls belong in the durable route.
+            legacy_options = self._durable_route_options(
+                data.get("provider_options") or {}
+            )
+            merged["tts_routes"] = [
+                self._normalise_tts_route(
+                    {
+                        "service": provider,
+                        "voice": data.get("voice_name"),
+                        "options": legacy_options,
+                    }
+                )
+            ]
+        else:
+            merged["tts_routes"] = []
+        merged["schema_version"] = 2
+        merged["external_fallback_enabled"] = bool(
+            data.get("external_fallback_enabled", False)
+        )
+        reply_trigger = str(
+            data.get("reply_trigger") or self.DEFAULT_STATE["reply_trigger"]
+        ).strip().casefold()
+        merged["reply_trigger"] = (
+            reply_trigger
+            if reply_trigger in {"all", "voice_message"}
+            else self.DEFAULT_STATE["reply_trigger"]
+        )
         return merged
+
+    @staticmethod
+    def _durable_route_options(raw: object) -> dict[str, Any]:
+        if not isinstance(raw, Mapping):
+            return {}
+        allowed = {"speed", "style", "rate_percent", "lang_code"}
+        return {
+            str(key).strip().casefold(): value
+            for key, value in raw.items()
+            if str(key).strip().casefold() in allowed
+        }
+
+    @staticmethod
+    def _normalise_tts_route(raw: object) -> dict[str, Any]:
+        if not isinstance(raw, Mapping):
+            raise RuntimeError("Voice route must be an object.")
+        service = str(raw.get("service") or "").strip().casefold()
+        if service not in {
+            "edge",
+            "windows",
+            "macos",
+            "piper",
+            "kokoro",
+            "coqui",
+            "hashi_compute",
+            "openrouter",
+        }:
+            raise RuntimeError(f"Unknown voice service: {service or 'empty'}.")
+
+        def optional(key: str, maximum: int = 200) -> str | None:
+            value = str(raw.get(key) or "").strip()
+            if len(value) > maximum or any(ord(character) < 32 for character in value):
+                raise RuntimeError(f"Voice route {key} is invalid.")
+            return value or None
+
+        options = raw.get("options") or {}
+        if not isinstance(options, Mapping) or len(options) > 16:
+            raise RuntimeError("Voice route options are invalid.")
+        normalized_options: dict[str, Any] = {}
+        for key, value in options.items():
+            name = str(key or "").strip().casefold()
+            if name not in {"speed", "style", "rate_percent", "lang_code"}:
+                raise RuntimeError(f"Unsupported voice route option: {name or 'empty'}.")
+            if name == "speed":
+                if type(value) not in {int, float} or not 0.5 <= float(value) <= 2.0:
+                    raise RuntimeError("Voice speed must be between 0.5 and 2.0.")
+                value = float(value)
+            elif name == "rate_percent":
+                if type(value) is not int or not -100 <= value <= 100:
+                    raise RuntimeError("Voice rate percent must be between -100 and 100.")
+            else:
+                value = str(value or "").strip()
+                maximum = 500 if name == "style" else 8
+                if not value or len(value) > maximum or any(ord(char) < 32 for char in value):
+                    raise RuntimeError(f"Voice route {name} is invalid.")
+            normalized_options[name] = value
+        node_id = optional("node_id", 100)
+        offering_id = optional("offering_id", 100)
+        model = optional("model", 200)
+        voice = optional("voice", 160)
+        if service == "hashi_compute" and not all((node_id, offering_id, model, voice)):
+            raise RuntimeError(
+                "Hashi Compute routes require node, offering, model, and voice."
+            )
+        if service == "openrouter" and not all((model, voice)):
+            raise RuntimeError("OpenRouter routes require model and voice.")
+        return {
+            "service": service,
+            "node_id": node_id,
+            "offering_id": offering_id,
+            "model": model,
+            "voice": voice,
+            "options": normalized_options,
+        }
+
+    def tts_route_privacy(self, route: Mapping[str, Any]) -> tuple[str, str]:
+        service = str(route.get("service") or "").strip().casefold()
+        if service == "hashi_compute":
+            node_id = str(route.get("node_id") or "").strip()
+            try:
+                _document, nodes = ComputeServicesConfig(
+                    self.project_root / "compute_services.json"
+                ).read()
+            except ComputeServiceError:
+                return "unknown", "unknown"
+            node = next((item for item in nodes if item.id == node_id), None)
+            if node is None:
+                return "unknown", "unknown"
+            if node.location in {"local", "lan"}:
+                return "local_private", node.location
+            return "external", "network"
+        if service in {"windows", "macos", "piper", "kokoro", "coqui"}:
+            return "local_private", "device"
+        return "external", "network"
+
+    def tts_route_privacy_label(self, route: Mapping[str, Any]) -> str:
+        level, location = self.tts_route_privacy(route)
+        if level == "local_private":
+            return ui_language.tr(
+                "voice.privacy.local_lan"
+                if location == "lan"
+                else "voice.privacy.local_device"
+            )
+        if level == "external":
+            return ui_language.tr("voice.privacy.external")
+        return ui_language.tr("voice.privacy.unknown")
+
+    @staticmethod
+    def tts_route_label(route: Mapping[str, Any]) -> str:
+        service = str(route.get("service") or "").strip().casefold()
+        advanced = (
+            str(route.get("offering_id") or "").strip().casefold()
+            == "advanced_tts"
+            or "minicpm" in str(route.get("model") or "").casefold()
+        )
+        labels = {
+            "hashi_compute": ui_language.tr(
+                "voice.service.hashi_advanced"
+                if advanced
+                else "voice.service.hashi"
+            ),
+            "windows": ui_language.tr("voice.service.windows"),
+            "macos": "macOS TTS",
+            "edge": ui_language.tr("voice.service.edge"),
+            "openrouter": ui_language.tr("voice.service.openrouter"),
+            "piper": "Piper TTS",
+            "kokoro": ui_language.tr("voice.service.kokoro"),
+            "coqui": "Coqui TTS",
+        }
+        label = labels.get(service, service or "TTS")
+        model = str(route.get("model") or "").strip()
+        if model:
+            label = f"{label} / {model}"
+        voice = str(route.get("voice") or "").strip()
+        return f"{label} · {voice}" if voice else label
+
+    def get_tts_routes(self) -> list[dict[str, Any]]:
+        return copy.deepcopy(self._load().get("tts_routes") or [])
+
+    def replace_tts_routes(self, routes: object) -> str:
+        if not isinstance(routes, list) or not 1 <= len(routes) <= 8:
+            raise RuntimeError("Voice routes must contain between 1 and 8 entries.")
+        normalized = [self._normalise_tts_route(route) for route in routes]
+
+        def mutate(state: dict) -> None:
+            state["schema_version"] = 2
+            state["tts_routes"] = copy.deepcopy(normalized)
+            primary = normalized[0]
+            state["provider"] = self._provider_for_tts_route(primary)
+            state["voice_name"] = primary.get("voice")
+            state["provider_options"] = dict(primary.get("options") or {})
+
+        self._update(mutate)
+        return "Voice route updated."
+
+    def set_external_fallback_enabled(self, enabled: bool) -> str:
+        self._update(
+            lambda state: state.__setitem__(
+                "external_fallback_enabled", bool(enabled)
+            )
+        )
+        return ui_language.tr(
+            "voice.notice.external_allowed"
+            if enabled
+            else "voice.notice.external_blocked"
+        )
+
+    def get_reply_trigger(self) -> str:
+        value = str(self._load().get("reply_trigger") or "all").strip().casefold()
+        return value if value in {"all", "voice_message"} else "all"
+
+    @staticmethod
+    def _normalise_reply_content(value: object) -> str:
+        aliases = {
+            "both": "audio_and_text",
+            "audio": "audio_only",
+            "text": "text_only",
+        }
+        normalized = str(value or "audio_and_text").strip().casefold()
+        normalized = aliases.get(normalized, normalized)
+        return (
+            normalized
+            if normalized in {"audio_and_text", "audio_only", "text_only"}
+            else "audio_and_text"
+        )
+
+    def get_reply_content(self) -> str:
+        """Return this Agent's default reply shape for every voice path."""
+
+        return self._normalise_reply_content(self._load().get("reply_content"))
+
+    def set_reply_content(self, content: str) -> str:
+        normalized = self._normalise_reply_content(content)
+        raw = str(content or "").strip().casefold()
+        if raw not in {
+            "both",
+            "audio",
+            "text",
+            "audio_and_text",
+            "audio_only",
+            "text_only",
+        }:
+            raise RuntimeError("Reply content must be both, audio, or text.")
+
+        def mutate(state: dict) -> None:
+            state["reply_content"] = normalized
+            native = self._native_policy_from_state(state)
+            native["reply_content"] = normalized
+            state["native"] = native
+
+        self._update(mutate)
+        return f"Reply content set to {normalized}."
+
+    def set_reply_trigger(self, trigger: str) -> str:
+        aliases = {"voice": "voice_message", "messages": "all"}
+        normalized = aliases.get(
+            str(trigger or "").strip().casefold(),
+            str(trigger or "").strip().casefold(),
+        )
+        if normalized not in {"all", "voice_message"}:
+            raise RuntimeError("Voice reply trigger must be all or voice_message.")
+        self._update(lambda state: state.__setitem__("reply_trigger", normalized))
+        return ui_language.tr(f"voice.notice.trigger_{normalized}")
+
+    def should_synthesize_reply(self, *, voice_origin: bool = False) -> bool:
+        """Return whether an ordinary text-model reply should receive TTS."""
+
+        if self.get_reply_mode() != "tts" or self.get_reply_content() == "text_only":
+            return False
+        trigger = self.get_reply_trigger()
+        return trigger == "all" or bool(voice_origin)
+
+    def _catalogue_voice_choices(self) -> dict[str, tuple[VoiceChoice, ...]]:
+        choices: dict[str, list[VoiceChoice]] = {
+            "edge": [],
+            "windows": [],
+            "kokoro": [],
+        }
+        for _alias, preset, availability in self.get_voice_presets():
+            provider = str(preset.get("provider") or "").strip().casefold()
+            if provider not in choices:
+                continue
+            if provider in {"windows", "kokoro"} and availability != "ready":
+                continue
+            choices[provider].append(
+                VoiceChoice(
+                    id=str(preset.get("voice_name") or ""),
+                    label=str(preset.get("label") or preset.get("voice_name") or ""),
+                    language=str(preset.get("locale") or "") or None,
+                    gender=str(preset.get("gender") or "") or None,
+                    options=self._durable_route_options(
+                        preset.get("provider_options") or {}
+                    ),
+                )
+            )
+        return {key: tuple(value) for key, value in choices.items()}
+
+    async def get_voice_service_catalogue(self, *, client: Any = None) -> VoiceServiceCatalogue:
+        catalogue = await discover_voice_services(
+            self.project_root,
+            client=client,
+            secrets=self._secrets,
+            built_in_voices=self._catalogue_voice_choices(),
+        )
+        services = []
+        for service in catalogue.services:
+            if service.id == "edge":
+                service = replace(
+                    service,
+                    available=self._provider_status("edge") == "installed",
+                    availability=self._provider_status("edge"),
+                )
+            elif service.id == "device-kokoro":
+                service = replace(
+                    service,
+                    available=self._provider_status("kokoro") == "installed",
+                    availability=self._provider_status("kokoro"),
+                )
+            elif service.id == "openrouter-gemini":
+                configured = any(
+                    bool(self._secrets.get(key))
+                    for key in (
+                        "openrouter_key",
+                        "openrouter-api_key",
+                        "openrouter_api_key",
+                    )
+                )
+                service = replace(
+                    service,
+                    available=configured,
+                    availability=("ready" if configured else "credential not configured"),
+                )
+            services.append(service)
+        return VoiceServiceCatalogue(tuple(services), catalogue.errors)
+
+    @staticmethod
+    def _preferred_service_voice(service: VoiceService) -> VoiceChoice:
+        preferred_ids = (
+            "zf_001",
+            "Microsoft Huihui Desktop",
+            "zh-CN-XiaoxiaoNeural",
+        )
+        by_id = {voice.id: voice for voice in service.voices}
+        for voice_id in preferred_ids:
+            if voice_id in by_id:
+                return by_id[voice_id]
+        selected = next((voice for voice in service.voices if voice.callable), None)
+        if selected is None and service.voices:
+            selected = service.voices[0]
+        if selected is None:
+            raise RuntimeError(f"Voice service has no catalogue voices: {service.label}.")
+        return selected
+
+    async def apply_recommended_local_routes(
+        self,
+        *,
+        advanced: bool = False,
+        client: Any = None,
+    ) -> str:
+        """Install a privacy-preserving route chain from live service metadata."""
+
+        catalogue = await self.get_voice_service_catalogue(client=client)
+        local_compute = [
+            service
+            for service in catalogue.services
+            if service.service == "hashi_compute"
+            and service.privacy == "local_private"
+            and service.available
+            and service.voices
+        ]
+        ordinary = next(
+            (service for service in local_compute if not service.supports_style),
+            None,
+        )
+        expressive = next(
+            (service for service in local_compute if service.supports_style),
+            None,
+        )
+        windows = next(
+            (
+                service
+                for service in catalogue.services
+                if service.service == "windows"
+                and service.available
+                and service.voices
+            ),
+            None,
+        )
+        selected_services: list[VoiceService] = []
+        if advanced:
+            if expressive is None:
+                raise RuntimeError("Hashi Compute advanced TTS is unavailable.")
+            selected_services.append(expressive)
+        if ordinary is None:
+            raise RuntimeError("Hashi Compute TTS is unavailable.")
+        selected_services.append(ordinary)
+        if windows is not None:
+            selected_services.append(windows)
+        if not selected_services:
+            raise RuntimeError("No local private voice service is currently available.")
+        routes = []
+        for service in selected_services:
+            options: dict[str, Any] = {}
+            if service.supports_speed:
+                options["speed"] = 1.0
+            routes.append(
+                service.route(
+                    self._preferred_service_voice(service).id,
+                    options=options,
+                )
+            )
+        self.replace_tts_routes(routes)
+        return ui_language.tr(
+            "voice.notice.recommended_advanced"
+            if advanced
+            else "voice.notice.recommended_local"
+        )
+
+    async def set_tts_route_service(
+        self,
+        index: int,
+        service_id: str,
+        *,
+        client: Any = None,
+    ) -> str:
+        catalogue = await self.get_voice_service_catalogue(client=client)
+        service = catalogue.service(service_id)
+        if not service.available:
+            raise RuntimeError(f"Voice service is unavailable: {service.availability}.")
+        voice = self._preferred_service_voice(service)
+        options: dict[str, Any] = {}
+        if service.supports_speed:
+            options["speed"] = 1.0
+        route = service.route(voice.id, options=options)
+        routes = self.get_tts_routes()
+        selected = int(index)
+        if selected < 0 or selected > len(routes) or selected >= 8:
+            raise RuntimeError("Voice route position is invalid.")
+        if selected == len(routes):
+            routes.append(route)
+        else:
+            routes[selected] = route
+        self.replace_tts_routes(routes)
+        return f"Voice route {selected + 1} set to {service.label}."
+
+    async def set_catalogue_tts_route_voice(
+        self,
+        index: int,
+        service_id: str,
+        voice_id: str,
+        *,
+        client: Any = None,
+        catalogue: VoiceServiceCatalogue | None = None,
+    ) -> str:
+        """Persist an exact catalogue voice without treating preview metadata as a lock."""
+
+        live = catalogue or await self.get_voice_service_catalogue(client=client)
+        service = live.service(service_id)
+        routes = self.get_tts_routes()
+        selected = int(index)
+        if selected < 0 or selected >= len(routes):
+            raise RuntimeError("Voice route position is invalid.")
+        configured_service = live.matching_route(routes[selected])
+        if configured_service.id != service.id:
+            raise RuntimeError("Voice service changed; reopen this route and try again.")
+        voice = next((item for item in service.voices if item.id == voice_id), None)
+        if voice is None:
+            raise RuntimeError("Voice is no longer present in the service catalogue.")
+        # `callable` is catalogue status metadata, not a second permission gate.
+        voice_option_keys = {
+            str(key).strip().casefold()
+            for item in service.voices
+            for key in item.options
+        }
+        options = dict(routes[selected].get("options") or {})
+        for key in voice_option_keys:
+            options.pop(key, None)
+        routes[selected]["voice"] = voice.id
+        routes[selected]["options"] = {**dict(voice.options), **options}
+        self.replace_tts_routes(routes)
+        return f"Voice route {selected + 1} voice updated."
+
+    async def download_tts_route_preview(
+        self,
+        index: int,
+        *,
+        locale: str,
+        catalogue: VoiceServiceCatalogue | None = None,
+        client: Any = None,
+    ) -> Any | None:
+        routes = self.get_tts_routes()
+        selected = int(index)
+        if selected < 0 or selected >= len(routes):
+            raise RuntimeError("Voice route position is invalid.")
+        live = catalogue or await self.get_voice_service_catalogue(client=client)
+        service = live.matching_route(routes[selected])
+        if service.compute_directory is None:
+            return None
+        return await service.compute_directory.download_preview(
+            str(routes[selected].get("voice") or ""),
+            locale,
+        )
+
+    def set_tts_route_voice(self, index: int, voice_id: str) -> str:
+        routes = self.get_tts_routes()
+        selected = int(index)
+        if selected < 0 or selected >= len(routes):
+            raise RuntimeError("Voice route position is invalid.")
+        voice = str(voice_id or "").strip()
+        if not voice or len(voice) > 160 or any(ord(char) < 32 for char in voice):
+            raise RuntimeError("Voice identifier is invalid.")
+        routes[selected]["voice"] = voice
+        self.replace_tts_routes(routes)
+        return f"Voice route {selected + 1} voice updated."
+
+    def set_tts_route_speed(self, index: int, speed: float) -> str:
+        routes = self.get_tts_routes()
+        selected = int(index)
+        if selected < 0 or selected >= len(routes):
+            raise RuntimeError("Voice route position is invalid.")
+        value = float(speed)
+        if not 0.5 <= value <= 2.0:
+            raise RuntimeError("Voice speed must be between 0.5 and 2.0.")
+        options = routes[selected].setdefault("options", {})
+        options["speed"] = value
+        # The new service-neutral speed is authoritative.  Keeping the old
+        # Edge-only percentage beside it would silently override the menu.
+        options.pop("rate_percent", None)
+        self.replace_tts_routes(routes)
+        return f"Voice route {selected + 1} speed set to {value:g}."
+
+    def set_tts_route_style(self, index: int, style: str | None) -> str:
+        routes = self.get_tts_routes()
+        selected = int(index)
+        if selected < 0 or selected >= len(routes):
+            raise RuntimeError("Voice route position is invalid.")
+        value = str(style or "").strip()
+        if len(value) > 500 or any(ord(char) < 32 for char in value):
+            raise RuntimeError("Performance style is invalid.")
+        options = routes[selected].setdefault("options", {})
+        if value:
+            options["style"] = value
+        else:
+            options.pop("style", None)
+        self.replace_tts_routes(routes)
+        return f"Voice route {selected + 1} performance style updated."
+
+    def move_tts_route(self, index: int, direction: int) -> str:
+        routes = self.get_tts_routes()
+        selected = int(index)
+        target = selected + (1 if int(direction) > 0 else -1)
+        if selected < 0 or selected >= len(routes) or target < 0 or target >= len(routes):
+            raise RuntimeError("Voice route cannot move in that direction.")
+        routes[selected], routes[target] = routes[target], routes[selected]
+        self.replace_tts_routes(routes)
+        return "Voice fallback order updated."
+
+    def delete_tts_route(self, index: int) -> str:
+        routes = self.get_tts_routes()
+        selected = int(index)
+        if selected < 0 or selected >= len(routes):
+            raise RuntimeError("Voice route position is invalid.")
+        routes.pop(selected)
+        if not routes:
+            raise RuntimeError("At least one TTS route is required.")
+        self.replace_tts_routes(routes)
+        return "Voice fallback removed."
+
+    @staticmethod
+    def _provider_for_tts_route(route: Mapping[str, Any]) -> str:
+        service = str(route.get("service") or "").strip().casefold()
+        if service == "hashi_compute":
+            return "hashi_compute"
+        if service == "openrouter":
+            return "openai_compatible"
+        return service
 
     def _load(self) -> dict:
         try:
@@ -1526,21 +2409,9 @@ class VoiceManager:
         return f"Native format set to {native['format'] or 'capability-selected default'}."
 
     def set_native_reply_content(self, content: str) -> str:
-        aliases = {
-            "both": "audio_and_text",
-            "audio": "audio_only",
-            "text": "text_only",
-        }
-        normalized = aliases.get(str(content or "").strip().casefold(), str(content or "").strip().casefold())
-        if normalized not in {"audio_and_text", "audio_only", "text_only"}:
-            raise RuntimeError("Reply content must be both, audio, or text.")
-        def mutate(state: dict) -> None:
-            native = self._native_policy_from_state(state)
-            native["reply_content"] = normalized
-            state["native"] = native
+        """Compatibility alias for the Agent-wide voice reply rule."""
 
-        self._update(mutate)
-        return f"Native reply content set to {normalized}."
+        return self.set_reply_content(content)
 
     def set_native_fallback(self, fallback: str) -> str:
         aliases = {"local": "local_chain", "none": "native_only"}
@@ -1672,6 +2543,22 @@ class VoiceManager:
             state["provider"] = preset["provider"]
             state["voice_name"] = preset["voice_name"]
             state["provider_options"] = dict(preset.get("provider_options") or {})
+            route = self._normalise_tts_route(
+                {
+                    "service": preset["provider"],
+                    "voice": preset["voice_name"],
+                    "options": self._durable_route_options(
+                        preset.get("provider_options") or {}
+                    ),
+                }
+            )
+            routes = list(state.get("tts_routes") or [])
+            if routes:
+                routes[0] = route
+            else:
+                routes.append(route)
+            state["schema_version"] = 2
+            state["tts_routes"] = routes
 
         self._update(mutate)
         return f"Voice preset set to {alias}: {preset['label']}."
@@ -1792,9 +2679,42 @@ class VoiceManager:
         if not force and not state.get("enabled"):
             return None
 
-        primary_name = str(
-            state.get("provider") or _default_tts_provider()
-        ).strip().casefold()
+        configured_specs = [
+            self._normalise_tts_route(item)
+            for item in (state.get("tts_routes") or [])
+        ]
+        if configured_specs:
+            primary_spec = configured_specs[0]
+            fallback_specs = configured_specs[1:]
+            primary_name = self._provider_for_tts_route(primary_spec)
+            primary_voice = primary_spec.get("voice")
+            primary_options = dict(primary_spec.get("options") or {})
+        else:
+            primary_name = str(
+                state.get("provider") or _default_tts_provider()
+            ).strip().casefold()
+            primary_spec = {
+                "service": primary_name,
+                "node_id": None,
+                "offering_id": None,
+                "model": None,
+                "voice": state.get("voice_name"),
+                "options": dict(state.get("provider_options") or {}),
+            }
+            primary_voice = state.get("voice_name")
+            primary_options = dict(state.get("provider_options") or {})
+            available_providers = set(self.list_providers())
+            fallback_specs = [
+                {
+                    "service": name,
+                    "node_id": None,
+                    "offering_id": None,
+                    "model": None,
+                    "voice": None,
+                    "options": {},
+                }
+                for name in fallback_providers(primary_name, available_providers)
+            ]
         style_id = self._voice_profile_from_state(state)
         max_attempts = max(0, int(max_retries)) + 1
         max_chars = (
@@ -1802,18 +2722,64 @@ class VoiceManager:
             if max_chars_override is not None
             else int(state.get("max_chars", 1200))
         )
-        primary_route = resolve_tts_route(
-            provider=primary_name,
-            voice_name=state.get("voice_name"),
-            provider_options=state.get("provider_options") or {},
-            requested_style=style_id,
-            text=text,
-            source_language=source_language,
-            presets=self.VOICE_PRESETS,
-            profiles=self.VOICE_PROFILES,
+        def resolve_spec(spec: Mapping[str, Any], *, fallback: bool = False):
+            provider = self._provider_for_tts_route(spec)
+            options: dict[str, Any] = {}
+            selected_voice = str(spec.get("voice") or "").strip()
+            if selected_voice:
+                for alias, declared in self.VOICE_PRESETS.items():
+                    if (
+                        str(declared.get("provider") or "").strip().casefold()
+                        == provider
+                        and str(declared.get("voice_name") or "").strip()
+                        == selected_voice
+                    ):
+                        preset = self._preset_payload(alias) or {}
+                        # Rehydrate runtime-owned executable/cache settings
+                        # without persisting them in the portable route.
+                        options.update(preset.get("provider_options") or {})
+                        break
+            options.update(spec.get("options") or {})
+            service = str(spec.get("service") or "").strip().casefold()
+            if service in {"hashi_compute", "openrouter"}:
+                options["service"] = service
+                options["model"] = spec.get("model")
+                options["node_id"] = spec.get("node_id")
+                options["offering_id"] = spec.get("offering_id")
+            requested_style = options.get("style")
+            return resolve_tts_route(
+                provider=provider,
+                voice_name=spec.get("voice"),
+                provider_options=options,
+                requested_style=requested_style,
+                text=text,
+                source_language=(
+                    primary_route.language.language or source_language
+                    if fallback
+                    else source_language
+                ),
+                presets=self.VOICE_PRESETS,
+                profiles=self.VOICE_PROFILES,
+                voice_profile=style_id,
+            )
+
+        primary_route = resolve_spec(primary_spec)
+        primary_privacy = self.tts_route_privacy(primary_spec)[0]
+        external_allowed = bool(state.get("external_fallback_enabled"))
+        blocked_fallbacks: list[str] = []
+        permitted_fallback_specs: list[dict[str, Any]] = []
+        for spec in fallback_specs:
+            if (
+                primary_privacy != "external"
+                and self.tts_route_privacy(spec)[0] == "external"
+                and not external_allowed
+            ):
+                blocked_fallbacks.append(self.tts_route_label(spec))
+                continue
+            permitted_fallback_specs.append(spec)
+        fallback_chain = tuple(
+            self._provider_for_tts_route(spec) for spec in permitted_fallback_specs
         )
-        available_providers = set(self.list_providers())
-        fallback_chain = fallback_providers(primary_name, available_providers)
         attempts: list[dict[str, object]] = []
         audit: dict[str, object] = {
             "event": "tts_synthesis",
@@ -1825,11 +2791,14 @@ class VoiceManager:
             "text_characters": len(str(text)),
             "configured": {
                 "provider": primary_name,
-                "voice_name": state.get("voice_name"),
-                "style": style_id,
+                "voice_name": primary_voice,
+                "voice_profile": style_id,
+                "performance_style": primary_options.get("style"),
                 "provider_option_keys": sorted(
-                    str(key) for key in (state.get("provider_options") or {})
+                    str(key) for key in primary_options
                 ),
+                "route": copy.deepcopy(primary_spec),
+                "external_fallback_enabled": external_allowed,
             },
             "language": primary_route.language.as_dict(),
             "routing": {
@@ -1844,6 +2813,7 @@ class VoiceManager:
                     "capability_source": primary_route.capability_source,
                 },
                 "fallback_candidates": list(fallback_chain),
+                "privacy_blocked_candidates": blocked_fallbacks,
             },
             "attempts": attempts,
         }
@@ -1895,13 +2865,29 @@ class VoiceManager:
                 f"_{route.provider}_{attempt}"
             )
             try:
-                provider = build_provider(route.provider, ffmpeg_cmd=self.ffmpeg_cmd)
+                route_rate = int(state.get("rate", 0))
+                configured_speed = route.provider_options.get("speed")
+                if configured_speed is not None and route.provider in {
+                    "edge",
+                    "windows",
+                    "macos",
+                }:
+                    route_rate = max(
+                        -10,
+                        min(10, round((float(configured_speed) - 1.0) * 10)),
+                    )
+                provider = build_provider(
+                    route.provider,
+                    ffmpeg_cmd=self.ffmpeg_cmd,
+                    project_root=self.project_root,
+                    secrets=self._secrets,
+                )
                 asset = await provider.synthesize(
                     text=text,
                     output_dir=self.output_dir,
                     stem=stem,
                     voice_name=route.voice_name,
-                    rate=int(state.get("rate", 0)),
+                    rate=route_rate,
                     max_chars=max_chars,
                     provider_options=route.provider_options,
                 )
@@ -1947,7 +2933,8 @@ class VoiceManager:
                 None,
             )
 
-        primary_failure = self._active_provider_failure(primary_name)
+        primary_cooldown_key = self._tts_route_cooldown_key(primary_spec)
+        primary_failure = self._active_provider_failure(primary_cooldown_key)
         primary_asset: VoiceAsset | None = None
         if primary_failure is None:
             for attempt in range(max_attempts):
@@ -1957,7 +2944,7 @@ class VoiceManager:
                     phase="primary",
                 )
                 if primary_asset is not None:
-                    self._provider_cooldowns.pop(primary_name, None)
+                    self._provider_cooldowns.pop(primary_cooldown_key, None)
                     notice = self._routing_notice(
                         primary_route=primary_route,
                         final_route=primary_route,
@@ -2003,9 +2990,14 @@ class VoiceManager:
         assert primary_failure is not None
         failures: list[VoiceProviderFailure] = [primary_failure]
         if primary_failure.code != "tts_language_unsupported":
-            self._remember_provider_failure(primary_failure)
+            self._remember_provider_failure(
+                primary_failure,
+                cooldown_key=primary_cooldown_key,
+            )
 
-        for fallback_name in fallback_chain:
+        for fallback_spec in permitted_fallback_specs:
+            fallback_name = self._provider_for_tts_route(fallback_spec)
+            fallback_cooldown_key = self._tts_route_cooldown_key(fallback_spec)
             logger.warning(
                 "Voice provider %s failed: %s [%s]. Trying monotonic fallback %s.",
                 primary_name,
@@ -2013,17 +3005,8 @@ class VoiceManager:
                 primary_failure.code,
                 fallback_name,
             )
-            fallback_route = resolve_tts_route(
-                provider=fallback_name,
-                voice_name=None,
-                provider_options={},
-                requested_style=style_id,
-                text=text,
-                source_language=primary_route.language.language or source_language,
-                presets=self.VOICE_PRESETS,
-                profiles=self.VOICE_PROFILES,
-            )
-            active_failure = self._active_provider_failure(fallback_name)
+            fallback_route = resolve_spec(fallback_spec, fallback=True)
+            active_failure = self._active_provider_failure(fallback_cooldown_key)
             if active_failure is not None:
                 failures.append(active_failure)
                 attempts.append(
@@ -2048,9 +3031,12 @@ class VoiceManager:
                 assert fallback_failure is not None
                 failures.append(fallback_failure)
                 if fallback_failure.code != "tts_language_unsupported":
-                    self._remember_provider_failure(fallback_failure)
+                    self._remember_provider_failure(
+                        fallback_failure,
+                        cooldown_key=fallback_cooldown_key,
+                    )
                 continue
-            self._provider_cooldowns.pop(fallback_name, None)
+            self._provider_cooldowns.pop(fallback_cooldown_key, None)
             notice = self._routing_notice(
                 primary_route=primary_route,
                 final_route=fallback_route,

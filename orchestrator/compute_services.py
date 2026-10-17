@@ -1607,7 +1607,7 @@ class ComputeServicesConfig:
 
 
 class ComputeServiceClient:
-    """Bounded, no-redirect reader for one configured compute node."""
+    """Bounded, no-redirect client for one configured compute node."""
 
     def __init__(
         self,
@@ -1745,6 +1745,71 @@ class ComputeServiceClient:
             if not payload:
                 raise ComputeServiceError("compute_resource_rejected")
             return payload, "audio/wav" if media_type == "audio/x-wav" else media_type
+        except asyncio.CancelledError:
+            raise
+        except ComputeServiceError:
+            raise
+        except (aiohttp.ClientError, OSError, TimeoutError) as exc:
+            raise ComputeServiceError("compute_node_unreachable") from exc
+
+    async def post_json_resource_bytes(
+        self,
+        node: ComputeNode,
+        path: str,
+        payload: Mapping[str, Any],
+        *,
+        maximum: int = MAX_RESOURCE_BYTES,
+    ) -> tuple[bytes, str]:
+        """POST bounded JSON to a declared relative interface and return audio."""
+
+        selected = _validate_path(path, code="compute_resource_invalid")
+        if not isinstance(payload, Mapping):
+            raise ComputeServiceError("compute_resource_invalid")
+        if type(maximum) is not int or not 1 <= maximum <= MAX_RESOURCE_BYTES:
+            raise ComputeServiceError("compute_resource_invalid")
+        headers = self._headers(node)
+        headers["Accept"] = "audio/*"
+        try:
+            async with self.session_factory(
+                timeout=aiohttp.ClientTimeout(total=max(node.timeout_seconds, 30.0)),
+                trust_env=False,
+            ) as session:
+                async with session.post(
+                    node.url(selected),
+                    headers=headers,
+                    json=dict(payload),
+                    allow_redirects=False,
+                ) as response:
+                    if response.status not in {200, 201}:
+                        raise ComputeServiceError("compute_resource_rejected")
+                    media_type = (
+                        response.headers.get("Content-Type", "")
+                        .split(";", 1)[0]
+                        .strip()
+                        .casefold()
+                    )
+                    allowed = {
+                        "audio/mpeg",
+                        "audio/ogg",
+                        "audio/opus",
+                        "audio/wav",
+                        "audio/x-wav",
+                    }
+                    if media_type not in allowed:
+                        raise ComputeServiceError(
+                            "compute_resource_content_type_invalid"
+                        )
+                    chunks: list[bytes] = []
+                    total = 0
+                    async for chunk in response.content.iter_chunked(16384):
+                        total += len(chunk)
+                        if total > maximum:
+                            raise ComputeServiceError("compute_resource_too_large")
+                        chunks.append(chunk)
+            content = b"".join(chunks)
+            if not content:
+                raise ComputeServiceError("compute_resource_rejected")
+            return content, "audio/wav" if media_type == "audio/x-wav" else media_type
         except asyncio.CancelledError:
             raise
         except ComputeServiceError:

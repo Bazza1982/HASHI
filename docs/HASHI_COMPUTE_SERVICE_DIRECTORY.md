@@ -7,6 +7,14 @@ Call TTS instance adoption are implemented and user-accepted on
 publication, production promotion, and each additional consumer migration
 remain separate facts.
 
+The global Agent `/voice` consumer is now implemented in HASHI3 source: it
+derives ordinary and advanced TTS as separate services, including exact voices,
+supported controls, direct samples, and privacy. A direct provider smoke check
+also generated OGG audio through both discovered LAN offerings, including the
+advanced expressive interface. Worker adoption and frontend live acceptance
+remain separate; see the
+[global voice routing decision](repairs/GLOBAL_VOICE_SERVICE_ROUTING_DECISION_20261017.md).
+
 ## Decision
 
 HASHI treats model execution as a configured compute service, independently of
@@ -188,3 +196,6 @@ acceptance, 57 of 59 catalogue voices were exposed for live speech; the two
 remaining entries were explicitly preview-only and rejected live synthesis.
 The scoped configuration, chronology, and evidence are recorded in
 [Hashi Compute TTS adoption and advanced-voice evaluation](call/HASHI_COMPUTE_ADVANCED_TTS_2026-10-17.md).
+The later global `/voice` consumer keeps Call selection independent and records
+its own source, privacy, routing, and delivery evidence in the
+[global voice routing decision](repairs/GLOBAL_VOICE_SERVICE_ROUTING_DECISION_20261017.md).

@@ -1634,6 +1634,52 @@ async def send_long_message(
     )
 
 
+def suppress_run_delivery_projection(
+    runtime: Any,
+    *,
+    request_id: str,
+    surface: str,
+    channel_key: str,
+    reason: str,
+) -> str:
+    """Settle a canonical Run destination when policy intentionally emits no projection.
+
+    Voice-only delivery publishes its audio as a separate connector-local media
+    event.  Once that send is accepted (or becomes ambiguous), the canonical
+    text destination must be terminally suppressed so a later outbox worker
+    cannot emit duplicate text.
+    """
+
+    from orchestrator.runtime_session import (
+        claim_run_delivery_outbox,
+        ensure_store,
+    )
+
+    claim_result = claim_run_delivery_outbox(
+        runtime,
+        request_id=request_id,
+        surface=surface,
+        channel_key=channel_key,
+        worker_id=(
+            f"fc-{surface}-suppress-{getattr(runtime, 'name', 'agent')}-"
+            f"{uuid4().hex}"
+        ),
+    )
+    if claim_result is None:
+        return "unmanaged"
+    state = str(claim_result.get("state") or "unknown")
+    if state != "claimed":
+        return state
+    claim = claim_result["claim"]
+    ensure_store(runtime).complete_delivery_outbox(
+        outbox_id=str(claim["outbox_id"]),
+        lease_token=str(claim["lease_token"]),
+        status="suppressed",
+        error_code=str(reason or "policy_suppressed"),
+    )
+    return "suppressed"
+
+
 async def typing_loop(runtime: Any, chat_id: int, stop_event: asyncio.Event):
     if not runtime.telegram_connected:
         return

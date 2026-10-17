@@ -453,7 +453,7 @@ def test_native_mode_fails_closed_without_a_complete_audio_capability(tmp_path):
     assert manager.state_path.exists() is False
 
 
-def test_voice_menu_explains_generation_and_separates_native_reply_format(tmp_path):
+def test_voice_menu_separates_rules_routes_and_semantic_style(tmp_path):
     manager = _manager(tmp_path)
     manager.set_native_target("openrouter-api", "openai/gpt-audio-mini")
     manager.set_reply_mode("auto")
@@ -463,36 +463,36 @@ def test_voice_menu_explains_generation_and_separates_native_reply_format(tmp_pa
 
     menu = manager.voice_menu_text()
     keyboard = runtime._voice_keyboard().inline_keyboard
+    rules = manager.voice_rules_menu_text()
+    rules_keyboard = runtime._voice_keyboard("rules").inline_keyboard
 
     assert "<b>Current</b> · <b>NATIVE</b>" in menu
-    assert "<b>Voice generation</b>" in menu
-    assert "Voice messages go directly to an audio model" in menu
-    assert "Speech is transcribed, a text model answers" in menu
-    assert "<b>Default TTS voice</b> · Auto (follows request language)" in menu
+    assert "<b>Reply rules</b>" in menu
+    assert "<b>Voice route</b>" in menu
     assert "<b>Voice style</b> · 👩 Clear" in menu
-    assert "<b>Native reply format</b> · Audio + text · native replies only" in menu
+    assert "<b>When to speak</b> · All replies" in rules
+    assert "<b>How to generate voice</b> · Native audio model" in rules
+    assert (
+        "<b>Reply format</b> · Audio + text · "
+        "applies to every voice path for this Agent"
+    ) in rules
     assert "Native target" not in menu
     assert "Retention" not in menu
     assert "Audio-model tools" not in menu
 
-    assert len(keyboard) == 6
-    assert [len(row) for row in keyboard] == [2, 1, 2, 1, 2, 2]
+    assert len(keyboard) == 3
     assert [[button.text for button in row] for row in keyboard] == [
-        ["✓ Native audio model", "Text model + TTS"],
-        ["Voice off"],
-        ["✓ Audio + text", "Audio only"],
-        ["🗣️ Choose default TTS voice"],
-        ["👩 Warm", "✓ 👩 Clear"],
-        ["👨 Warm", "👨 Calm"],
+        ["📋 Reply rules"],
+        ["🧭 TTS services and fallbacks"],
+        ["🎨 Semantic voice style"],
     ]
     assert [[button.callback_data for button in row] for row in keyboard] == [
-        ["voice:mode:native", "voice:mode:tts"],
-        ["voice:mode:off"],
-        ["voice:content:both", "voice:content:audio"],
-        ["voice:view:voices"],
-        ["voice:profile:warm_female", "voice:profile:clear_female"],
-        ["voice:profile:warm_male", "voice:profile:calm_male"],
+        ["voice:view:rules"],
+        ["voice:view:routes"],
+        ["voice:view:profiles"],
     ]
+    assert [len(row) for row in rules_keyboard] == [2, 1, 2, 2, 1, 1]
+    assert rules_keyboard[-2][0].callback_data == "voice:content:text"
 
 
 @pytest.mark.asyncio
@@ -552,7 +552,7 @@ async def test_voice_profile_callback_updates_both_renderers_without_growing_men
     assert state["voice_name"] is None
     assert len(query.edits) == 1
     assert "native echo" not in query.edits[0][0]
-    assert len(query.edits[0][1]["reply_markup"].inline_keyboard) == 6
+    assert len(query.edits[0][1]["reply_markup"].inline_keyboard) == 3
     assert query.answers[0][0].startswith("Voice set to 👨 Calm")
     assert [call["chat_id"] for call in sent_previews] == [99, 99]
     assert [call["caption"] for call in sent_previews] == [

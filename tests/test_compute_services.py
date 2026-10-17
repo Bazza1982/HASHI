@@ -806,6 +806,11 @@ class _FakeSession:
         self.receipt.update(kwargs)
         return self.response
 
+    def post(self, url, **kwargs):
+        self.receipt["url"] = url
+        self.receipt.update(kwargs)
+        return self.response
+
 
 class _FakeSessionFactory:
     def __init__(self, response):
@@ -845,6 +850,48 @@ async def test_manifest_client_is_bounded_and_never_follows_redirects():
     with pytest.raises(ComputeServiceError, match="manifest_invalid"):
         await ComputeServiceClient(session_factory=malformed).fetch_manifest(
             _lan_node()
+        )
+
+
+@pytest.mark.asyncio
+async def test_compute_audio_post_is_bounded_typed_and_never_redirects():
+    payload = b"RIFF\x24\x00\x00\x00WAVEaudio"
+    factory = _FakeSessionFactory(
+        _FakeResponse(payload, status=201, content_type="audio/x-wav")
+    )
+    content, media_type = await ComputeServiceClient(
+        session_factory=factory
+    ).post_json_resource_bytes(
+        _lan_node(),
+        "/v1/audio/speech",
+        {"model": "kokoro-82m", "input": "hello", "voice": "zf_001"},
+    )
+
+    assert content == payload
+    assert media_type == "audio/wav"
+    assert factory.receipt["url"] == "http://192.168.1.50:19446/v1/audio/speech"
+    assert factory.receipt["json"]["voice"] == "zf_001"
+    assert factory.receipt["headers"]["Accept"] == "audio/*"
+    assert factory.receipt["allow_redirects"] is False
+    assert factory.receipt["session"]["trust_env"] is False
+
+    redirect = _FakeSessionFactory(
+        _FakeResponse(payload, status=302, content_type="audio/wav")
+    )
+    with pytest.raises(ComputeServiceError, match="compute_resource_rejected"):
+        await ComputeServiceClient(session_factory=redirect).post_json_resource_bytes(
+            _lan_node(), "/v1/audio/speech", {"input": "hello"}
+        )
+
+    oversized = _FakeSessionFactory(
+        _FakeResponse(b"12345", content_type="audio/wav")
+    )
+    with pytest.raises(ComputeServiceError, match="compute_resource_too_large"):
+        await ComputeServiceClient(session_factory=oversized).post_json_resource_bytes(
+            _lan_node(),
+            "/v1/audio/speech",
+            {"input": "hello"},
+            maximum=4,
         )
 
 

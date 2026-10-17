@@ -34,6 +34,7 @@ from adapters.stream_events import (
 from orchestrator import (
     runtime_cross_session,
     runtime_debug_reporting,
+    runtime_delivery,
     runtime_pipeline,
     runtime_retry,
     runtime_session,
@@ -386,7 +387,7 @@ def _runtime():
     runtime._send_wrapper_verbose_trace = _send_wrapper_verbose_trace
     runtime.voice_replies = []
 
-    async def _send_voice_reply(chat_id, text, request_id):
+    async def _send_voice_reply(chat_id, text, request_id, force=False):
         runtime.voice_replies.append((chat_id, text, request_id))
         return True
 
@@ -4208,6 +4209,11 @@ async def test_handle_success_delivery_sends_response_and_routes_hchat(monkeypat
     )
 
     runtime = _runtime()
+    runtime.voice_manager = SimpleNamespace(
+        native_policy={"reply_content": "audio_and_text"},
+        native_audio_enabled=lambda: False,
+        should_synthesize_reply=lambda *, voice_origin=False: True,
+    )
     item = _item(prompt="user text")
     call_media = {"version": 2, "call_id": "call-1", "turn_id": "turn-1", "mode": "voice"}
     # An unsealed caller hint must not suppress ordinary voice preferences.
@@ -4262,6 +4268,135 @@ async def test_handle_success_delivery_sends_response_and_routes_hchat(monkeypat
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_tts_audio_only_suppresses_telegram_text_after_audio_delivery(monkeypatch):
+    runtime = _runtime()
+    runtime.voice_manager = SimpleNamespace(
+        native_policy={"reply_content": "audio_only"},
+        native_audio_enabled=lambda: False,
+        should_synthesize_reply=lambda *, voice_origin=False: True,
+    )
+    settlements = []
+    monkeypatch.setattr(
+        runtime_delivery,
+        "suppress_run_delivery_projection",
+        lambda current_runtime, **fields: settlements.append(
+            (current_runtime, fields)
+        )
+        or "suppressed",
+    )
+
+    await runtime_pipeline.handle_success_delivery(
+        runtime,
+        _item(prompt="user text"),
+        SimpleNamespace(text="core text"),
+        visible_text="voice-only answer",
+        wrapper_result=None,
+        is_bridge_request=False,
+        session_reset_source="session_reset",
+        queued_at=datetime.now(),
+        queue_wait_s=0,
+        backend_elapsed_s=0,
+        audit_collector=None,
+    )
+
+    assert not hasattr(runtime, "sent_message")
+    assert runtime.voice_replies == [(123, "voice-only answer", "req-1")]
+    assert settlements == [
+        (
+            runtime,
+            {
+                "request_id": "req-1",
+                "surface": "telegram",
+                "channel_key": "123",
+                "reason": "tts_audio_only",
+            },
+        )
+    ]
+    # Text-only transports still receive the canonical answer.
+    assert runtime.hchat_routes == [("req-1", "voice-only answer")]
+
+
+@pytest.mark.asyncio
+async def test_tts_audio_only_ambiguous_audio_suppresses_text_without_retry(monkeypatch):
+    runtime = _runtime()
+    runtime.voice_manager = SimpleNamespace(
+        native_policy={"reply_content": "audio_only"},
+        native_audio_enabled=lambda: False,
+        should_synthesize_reply=lambda *, voice_origin=False: True,
+    )
+
+    async def _ambiguous_voice(chat_id, text, request_id, force=False):
+        runtime.voice_replies.append((chat_id, text, request_id))
+        return None
+
+    runtime._send_voice_reply = _ambiguous_voice
+    settlements = []
+    monkeypatch.setattr(
+        runtime_delivery,
+        "suppress_run_delivery_projection",
+        lambda current_runtime, **fields: settlements.append(fields) or "suppressed",
+    )
+
+    await runtime_pipeline.handle_success_delivery(
+        runtime,
+        _item(prompt="user text"),
+        SimpleNamespace(text="core text"),
+        visible_text="ambiguous voice answer",
+        wrapper_result=None,
+        is_bridge_request=False,
+        session_reset_source="session_reset",
+        queued_at=datetime.now(),
+        queue_wait_s=0,
+        backend_elapsed_s=0,
+        audit_collector=None,
+    )
+
+    assert not hasattr(runtime, "sent_message")
+    assert settlements == [
+        {
+            "request_id": "req-1",
+            "surface": "telegram",
+            "channel_key": "123",
+            "reason": "tts_audio_only",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tts_audio_only_falls_back_to_text_after_confirmed_audio_failure():
+    runtime = _runtime()
+    runtime.voice_manager = SimpleNamespace(
+        native_policy={"reply_content": "audio_only"},
+        native_audio_enabled=lambda: False,
+        should_synthesize_reply=lambda *, voice_origin=False: True,
+    )
+
+    async def _fail_voice(chat_id, text, request_id, force=False):
+        runtime.voice_replies.append((chat_id, text, request_id))
+        return False
+
+    runtime._send_voice_reply = _fail_voice
+
+    await runtime_pipeline.handle_success_delivery(
+        runtime,
+        _item(prompt="user text"),
+        SimpleNamespace(text="core text"),
+        visible_text="recoverable answer",
+        wrapper_result=None,
+        is_bridge_request=False,
+        session_reset_source="session_reset",
+        queued_at=datetime.now(),
+        queue_wait_s=0,
+        backend_elapsed_s=0,
+        audit_collector=None,
+    )
+
+    assert runtime.voice_replies == [(123, "recoverable answer", "req-1")]
+    assert runtime.sent_message["text"] == "recoverable answer"
+    assert runtime.sent_message["purpose"] == "tts_audio_failed_text_fallback"
 
 
 @pytest.mark.asyncio
@@ -4801,6 +4936,64 @@ async def test_her_v2_stream_callback_returns_receipts_and_resolves_provisional_
 
 
 @pytest.mark.asyncio
+async def test_her_v2_audio_only_keeps_final_pending_for_tts_delivery():
+    runtime = _runtime()
+    runtime.config.active_backend = "her-v2"
+    runtime.backend_manager.current_backend.effort = "medium"
+    runtime._commentary = True
+    runtime.voice_manager = SimpleNamespace(
+        native_policy={"reply_content": "audio_only"},
+        native_audio_enabled=lambda terminal=None: False,
+        should_synthesize_reply=lambda *, voice_origin=False: True,
+    )
+    telegram_stream_policy.set_typing_enabled(runtime, False)
+
+    async def _send_text(chat_id, text, **kwargs):
+        return await runtime.app.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode=kwargs.get("parse_mode"),
+        )
+
+    runtime._send_text = _send_text
+    item = _item(request_id="req-her-v2-audio-only", prompt="hello")
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        item,
+        audit_active=False,
+        audit_collector=None,
+    )
+
+    accepted = await feedback.on_stream_event(
+        StreamEvent(
+            kind=KIND_ACKNOWLEDGEMENT,
+            summary="I am checking.",
+            event_id="turn-audio:immediate",
+            delivery_class=DELIVERY_USER_COMMENTARY,
+            origin="her_v2",
+            phase="immediate",
+        )
+    )
+    resolved = await feedback.on_stream_event(
+        StreamEvent(
+            kind=KIND_INITIAL_RESOLUTION,
+            summary="Final voice answer.",
+            event_id="turn-audio:resolution",
+            delivery_class="internal",
+            origin="her_v2",
+            phase="initial_resolution",
+            resolution="final",
+            target_event_id="turn-audio:immediate",
+        )
+    )
+
+    assert accepted is True
+    assert resolved is False
+    assert runtime.app.bot.edits == []
+    assert runtime.app.bot.deleted == [{"chat_id": 123, "message_id": 77}]
+
+
+@pytest.mark.asyncio
 async def test_quiet_mode_keeps_initial_resolution_available_and_silent():
     runtime = _runtime()
     runtime.config.active_backend = "her-v2"
@@ -5328,6 +5521,11 @@ async def test_finalize_streamed_answer_without_deltas_deletes_placeholder_and_f
 @pytest.mark.asyncio
 async def test_handle_success_delivery_promotes_streamed_final_after_wrapper_text():
     runtime = _runtime()
+    runtime.voice_manager = SimpleNamespace(
+        native_policy={"reply_content": "audio_and_text"},
+        native_audio_enabled=lambda: False,
+        should_synthesize_reply=lambda *, voice_origin=False: True,
+    )
     item = _item(prompt="user text")
     meter_tails = []
     herv2_cards = []

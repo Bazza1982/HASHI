@@ -1,5 +1,13 @@
 # HASHI Agent FYI
 
+October 17 global voice: `/voice` now separates Agent-wide reply rules,
+provider/service, engine/model, exact voice, supported speed/style, privacy, and
+an ordered preferred/fallback chain. Hashi Compute ordinary and advanced TTS are
+separate local-private services; Windows/device Kokoro are local-private, while
+Edge and OpenRouter are external and require explicit fallback permission.
+`/call` remains independent. See the
+[decision](repairs/GLOBAL_VOICE_SERVICE_ROUTING_DECISION_20261017.md).
+
 October 17 Compute: PAO's Function directory resolves local/LAN/internet
 services from revisioned manifests. Capability/privacy/health/capacity/interface
 mismatches fail closed; no privacy fallback. Consumers migrate separately. See
@@ -196,11 +204,14 @@ Agent deletion/cleanup receipts.
 three, oldest first. Skip cost/command/progress. Telegram needs a receipt;
 Workbench/TUI play locally; reboot receipts never prove playback.
 
-TTS logs omit secrets. `/voice` selects labelled voice/preview; >=90%
-unsupported text switches within provider (English exempt). Workbench uses its
-display locale, others `/language`. Visible fallback is paid/network to
-free/local only; Windows Edge may use named SAPI. `/call` is unchanged. See
-[routing](repairs/TTS_LANGUAGE_ROUTING_DECISION_20261015.md) and
+TTS logs omit secrets. `/voice` is per Agent and derives services and voices
+from their owning catalogues. It keeps reply rules, exact route controls, and
+semantic profile independent. Ordered external fallbacks require explicit
+permission; privacy is shown before selection. >=90% unsupported text may still
+adapt within the selected provider (English exempt). Workbench uses its display
+locale, others `/language`. `/call` is unchanged. See
+[global routing](repairs/GLOBAL_VOICE_SERVICE_ROUTING_DECISION_20261017.md),
+[language routing](repairs/TTS_LANGUAGE_ROUTING_DECISION_20261015.md), and
 [fallback](repairs/VOICE_PROVIDER_FALLBACK_REPAIR_20261014.md).
 
 Deploys add Edge/Kokoro/SAPI without changing settings; the 957 MB portable keeps

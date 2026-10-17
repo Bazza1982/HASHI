@@ -146,6 +146,18 @@ _PROVIDER_PROFILES: dict[str, dict[str, Any]] = {
         "style_support": "unknown",
         "fallbacks": (),
     },
+    "hashi_compute": {
+        "cost": "local",
+        "locality": "lan",
+        "style_support": "supported",
+        "fallbacks": (),
+    },
+    "openai_compatible": {
+        "cost": "external",
+        "locality": "network",
+        "style_support": "supported",
+        "fallbacks": (),
+    },
 }
 
 
@@ -376,12 +388,12 @@ def voice_language_profile(
 def _profile_voice(
     provider: str,
     language: str,
-    requested_style: str | None,
+    voice_profile: str | None,
     profiles: Mapping[str, Mapping[str, Any]],
 ) -> str | None:
-    if provider != "edge" or not requested_style:
+    if provider != "edge" or not voice_profile:
         return None
-    profile = profiles.get(requested_style) or {}
+    profile = profiles.get(voice_profile) or {}
     candidate = str((profile.get("tts_voices") or {}).get(language) or "").strip()
     return candidate or None
 
@@ -390,14 +402,14 @@ def _provider_voice_for_language(
     provider: str,
     language: str,
     *,
-    requested_style: str | None,
+    voice_profile: str | None,
     presets: Mapping[str, Mapping[str, Any]],
     profiles: Mapping[str, Mapping[str, Any]],
 ) -> tuple[str | None, dict[str, Any], str] | None:
     if provider in _AUTO_LANGUAGE_PROVIDERS:
         return None, {"language_hint": language}, "provider_auto_language"
 
-    styled = _profile_voice(provider, language, requested_style, profiles)
+    styled = _profile_voice(provider, language, voice_profile, profiles)
     if styled:
         match = _matching_preset(provider, styled, presets)
         options = dict(match[1].get("provider_options") or {}) if match else {}
@@ -427,11 +439,13 @@ def resolve_tts_route(
     source_language: object,
     presets: Mapping[str, Mapping[str, Any]],
     profiles: Mapping[str, Mapping[str, Any]],
+    voice_profile: object = None,
 ) -> TTSRoute:
     provider_name = str(provider or "").strip().casefold()
     selected_voice = str(voice_name or "").strip() or None
     options = dict(provider_options or {})
     style = str(requested_style or "").strip().casefold() or None
+    semantic_profile = str(voice_profile or "").strip().casefold() or None
     selected_capability = voice_language_profile(
         provider=provider_name,
         voice_name=selected_voice,
@@ -473,7 +487,7 @@ def resolve_tts_route(
         candidate = _provider_voice_for_language(
             provider_name,
             target_language,
-            requested_style=style,
+            voice_profile=semantic_profile,
             presets=presets,
             profiles=profiles,
         )
@@ -493,7 +507,7 @@ def resolve_tts_route(
         candidate = _provider_voice_for_language(
             provider_name,
             assessment.language,
-            requested_style=style,
+            voice_profile=semantic_profile,
             presets=presets,
             profiles=profiles,
         )
