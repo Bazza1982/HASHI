@@ -18,10 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Configured HASHI3's ignored Call profile to use the live-tested MiniCPM
-  advanced TTS `zf_001` voice while retaining the previous TTS targets for
-  rollback. Instance configuration and physical listening evidence remain
-  outside the tracked release.
+- Configured HASHI3's ignored Call profile to use Hashi Compute's low-latency
+  Kokoro `zf_001` voice after live Call and controlled latency comparisons.
+  The advanced MiniCPM target and previous TTS targets remain available for
+  explicit selection or rollback; instance configuration remains outside the
+  tracked release.
 
 ---
 

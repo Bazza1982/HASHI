@@ -178,4 +178,4 @@ refresh failure fencing, direct sample URL rendering, and revisioned
 configuration. A live read from Hashi Compute proves only discovery
 interoperability, not downstream model execution. The first Call TTS adoption
 and its live synthesis evidence are recorded separately in
-[Hashi Compute advanced TTS](call/HASHI_COMPUTE_ADVANCED_TTS_2026-10-17.md).
+[Hashi Compute TTS adoption and advanced-voice evaluation](call/HASHI_COMPUTE_ADVANCED_TTS_2026-10-17.md).
