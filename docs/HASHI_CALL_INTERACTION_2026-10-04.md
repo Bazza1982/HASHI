@@ -29,6 +29,12 @@ checks. Protected Core remains unchanged. Source validation and physical Call
 acceptance are separate; see
 [experiment record](repairs/CALL_LIVE_FRAME_BRIDGE_EXPERIMENT_20261017.md).
 
+After the current HASHI3 Call and Workbench echo corrections were tested, the
+user reported temporarily stable behavior and explicitly approved publishing
+the complete latest Call candidate to GitHub `main`. That publication decision
+does not convert source validation into a physical acceptance claim for raw
+live-frame delivery; those evidence classes remain separate.
+
 ## 2026-10-16 explicitly allow-listed private-LAN media targets
 
 The instance-owned Call target registry may now declare a target with

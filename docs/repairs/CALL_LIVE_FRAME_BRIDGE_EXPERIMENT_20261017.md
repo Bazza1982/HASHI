@@ -56,3 +56,13 @@ ordinary text messages. The builder now returns the unchanged messages first
 when there are no transient frames and requires the helper only for an actual
 frame-bearing turn. This changes no provider request or capability decision;
 the previously failing test and the live-frame multimodal regressions pass.
+
+## Main promotion decision
+
+On 2026-10-17, after continued HASHI3 Call testing and the paired Workbench
+echo-stability correction, the user explicitly approved moving the latest Call
+upgrade and all associated HASHI3 candidate changes into GitHub `main`. The
+candidate first incorporated the two newer remote-main commits without conflict.
+Publication approval is recorded separately from runtime adoption: it does not
+claim that the raw live-frame path received a physical camera acceptance that
+was not observed.

@@ -2,7 +2,8 @@
 
 Status: **Authoritative current behavior**
 Approved scope: user-directed Call recovery and main-only closeout on 2026-10-13;
-user-directed live-frame experiment on HASHI3 on 2026-10-17
+user-directed live-frame experiment on HASHI3 and complete-candidate promotion
+to GitHub `main` on 2026-10-17
 Owners: Frontend Connector (Workbench presentation/media) and PAO Call Function
 Engineering layers: external Workbench plus replaceable Layer 2 Functions
 Protected Core: unchanged
