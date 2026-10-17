@@ -1098,9 +1098,7 @@ class CallService:
                 live_frame_count=len(turn_frames),
                 reason="user_input_priority" if active_before else "sequential_input",
             )
-            task = asyncio.create_task(
-                self._run(call, turn, audio, image, turn_frames)
-            )
+            task = asyncio.create_task(self._run(call, turn, audio, image, turn_frames))
             call.task = task
             call.turn_tasks[turn_id] = task
             call.active_turns[turn_id] = turn

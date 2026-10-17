@@ -489,9 +489,7 @@ async def test_video_turn_freezes_ten_evenly_sampled_frames_from_last_ten_second
     )
     binding, _, _ = await start(service, base, video_requested=True)
     newest = datetime.now(timezone.utc)
-    image = base64.b64encode(
-        bytes.fromhex("ffd8ffc00008080010001000ffd9")
-    ).decode()
+    image = base64.b64encode(bytes.fromhex("ffd8ffc00008080010001000ffd9")).decode()
 
     for sequence in range(1, 22):
         captured_at = newest - timedelta(seconds=(21 - sequence) * 0.45)
@@ -519,9 +517,7 @@ async def test_video_turn_freezes_ten_evenly_sampled_frames_from_last_ten_second
         },
     )
     await asyncio.sleep(0)
-    await service.invoke(
-        "owner", {**binding, "operation": "camera", "enabled": False}
-    )
+    await service.invoke("owner", {**binding, "operation": "camera", "enabled": False})
     adapters.wait.set()
     await service.calls["call-1"].task
 

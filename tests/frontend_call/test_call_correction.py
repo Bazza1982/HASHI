@@ -85,8 +85,7 @@ async def test_disabled_call_context_keeps_minimal_phone_readiness(tmp_path):
     info = await service.invoke("owner", {**base, "operation": "context"})
     assert info["route"] == "phone" and info["call_ready"] is False
     assert (
-        info["camera_available"] is False
-        and info["video_policy"]["interval_ms"] >= 500
+        info["camera_available"] is False and info["video_policy"]["interval_ms"] >= 500
     )
     assert "profile" not in info and "targets" not in info
     await service.close()
