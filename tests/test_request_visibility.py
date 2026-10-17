@@ -11,6 +11,11 @@ from orchestrator import runtime_session, runtime_transfer
 from orchestrator import runtime_cross_session, runtime_delivery_order
 from orchestrator.frontend_delivery import RUN_DELIVERY_ROUTE_METADATA_KEY
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+from orchestrator.frontend_call.transient_live_media import (
+    TRANSIENT_LIVE_FRAMES_METADATA_KEY,
+    encode_live_frames,
+    live_frames_for,
+)
 from orchestrator.session_store import SessionStore
 
 
@@ -20,6 +25,72 @@ def _runtime_for_admission():
     runtime.backend_manager = SimpleNamespace(_read_state_dict=lambda: {})
     runtime._execution_admissions = {}
     return runtime
+
+
+@pytest.mark.asyncio
+async def test_live_frames_leave_request_metadata_before_session_admission(
+    tmp_path, monkeypatch
+):
+    runtime = _runtime_for_admission()
+    runtime.name = "visibility"
+    runtime.global_config = SimpleNamespace(project_root=None)
+    runtime.next_request_id = lambda: "req-live-frames"
+    runtime.session_store = SimpleNamespace(session_workspace=lambda *args: tmp_path)
+    runtime.message_logger = Mock()
+    runtime.request_activity = Mock()
+    runtime.queue = asyncio.Queue()
+    monkeypatch.setattr(
+        runtime_session,
+        "accept_request",
+        lambda *args, **kwargs: (
+            {"session_id": "session-live", "context_generation": 1},
+            SimpleNamespace(
+                replayed=False,
+                run_id="run-live",
+                message_id="message-live",
+                request_id="req-live-frames",
+            ),
+            "user:123",
+            "workbench",
+            "default",
+        ),
+    )
+    monkeypatch.setattr(
+        runtime_session,
+        "resolve_request_session",
+        lambda *args, **kwargs: (
+            {"session_id": "session-live", "context_generation": 1},
+            "user:123",
+            "workbench",
+            "default",
+        ),
+    )
+    monkeypatch.setattr(
+        runtime_session, "session_workzone_state", lambda *args, **kwargs: {}
+    )
+    encoded = encode_live_frames(
+        (
+            {
+                "image": bytes.fromhex("ffd8ffc00008080010001000ffd9"),
+                "frame_sequence": 1,
+                "captured_at": "2026-10-17T06:20:00+11:00",
+            },
+        )
+    )
+
+    result = await runtime.enqueue_request(
+        123,
+        "What am I holding?",
+        "api",
+        "live frame privacy",
+        request_metadata={TRANSIENT_LIVE_FRAMES_METADATA_KEY: encoded},
+    )
+
+    item = runtime.queue.get_nowait()
+    assert result == item.request_id == "req-live-frames"
+    assert TRANSIENT_LIVE_FRAMES_METADATA_KEY not in item.request_metadata
+    assert "data:image" not in json.dumps(item.request_metadata)
+    assert len(live_frames_for(runtime, result)) == 1
 
 
 @pytest.mark.asyncio

@@ -19,6 +19,11 @@ from .diagnostics import (
 )
 from .transcription import spoken_transcription
 from .billing import MediaBilling, wav_seconds
+from .transient_live_media import (
+    LIVE_FRAME_BUFFER_LIMIT,
+    LIVE_FRAME_LIMIT,
+    LIVE_FRAME_WINDOW_SECONDS,
+)
 from .contract import (
     CallError,
     PROTOCOL,
@@ -90,6 +95,7 @@ class Call:
     frame_digest: str = ""
     vision_task: asyncio.Task | None = None
     vision_pending: dict = field(default_factory=dict)
+    frame_buffer: list = field(default_factory=list)
     observation: dict = field(default_factory=dict)
     observation_changed: asyncio.Event = field(default_factory=asyncio.Event)
     vision_error: str = ""
@@ -325,7 +331,10 @@ class CallService:
 
     def _camera_off(self, call, reason="camera_disabled"):
         changed = (
-            call.camera_enabled or bool(call.vision_pending) or bool(call.observation)
+            call.camera_enabled
+            or bool(call.vision_pending)
+            or bool(call.frame_buffer)
+            or bool(call.observation)
         )
         previous_epoch = call.camera_epoch
         frame_age_ms = (
@@ -350,6 +359,7 @@ class CallService:
                 reason=reason,
             )
         call.vision_pending.clear()
+        call.frame_buffer.clear()
         call.observation.clear()
         call.vision_error = ""
         call.observation_changed.set()
@@ -382,6 +392,31 @@ class CallService:
             camera_epoch=call.camera_epoch,
             reason=reason,
         )
+
+    @staticmethod
+    def _select_turn_frames(call, cutoff_unix):
+        if not call.camera_enabled:
+            return ()
+        oldest = float(cutoff_unix) - LIVE_FRAME_WINDOW_SECONDS
+        eligible = sorted(
+            (
+                frame
+                for frame in call.frame_buffer
+                if oldest <= float(frame.get("captured_unix") or 0) <= cutoff_unix + 3
+            ),
+            key=lambda frame: (
+                float(frame.get("captured_unix") or 0),
+                int(frame.get("frame_sequence") or 0),
+            ),
+        )
+        if len(eligible) <= LIVE_FRAME_LIMIT:
+            return tuple(dict(frame) for frame in eligible)
+        last = len(eligible) - 1
+        indexes = [
+            round(position * last / (LIVE_FRAME_LIMIT - 1))
+            for position in range(LIVE_FRAME_LIMIT)
+        ]
+        return tuple(dict(eligible[index]) for index in indexes)
 
     def _startup_timeout(self, call):
         return (
@@ -952,13 +987,29 @@ class CallService:
             pending_replaced = bool(call.vision_pending)
             call.frame_sequence, call.frame_digest = sequence, fingerprint
             call.camera_last_frame_at = self.clock()
-            call.vision_pending = {
+            frame = {
                 "image": image,
                 "image_digest": hashlib.sha256(image).hexdigest(),
                 "frame_sequence": sequence,
                 "captured_at": body["captured_at"],
                 "captured_unix": captured,
             }
+            cutoff = time.time()
+            call.frame_buffer.append(dict(frame))
+            call.frame_buffer = sorted(
+                (
+                    item
+                    for item in call.frame_buffer
+                    if cutoff - LIVE_FRAME_WINDOW_SECONDS
+                    <= float(item.get("captured_unix") or 0)
+                    <= cutoff + 3
+                ),
+                key=lambda item: (
+                    float(item.get("captured_unix") or 0),
+                    int(item.get("frame_sequence") or 0),
+                ),
+            )[-LIVE_FRAME_BUFFER_LIMIT:]
+            call.vision_pending = frame
             emit(
                 "frame_accepted",
                 **self._facts(call),
@@ -1002,6 +1053,7 @@ class CallService:
                     or len(body["captured_at"]) > 40
                 ):
                     raise CallError("call_capture_time_invalid")
+            turn_frames = self._select_turn_frames(call, time.time())
             if call.speech_task:
                 if call.speech_task.cancel():
                     emit(
@@ -1024,6 +1076,7 @@ class CallService:
                 "phase": "transcribing",
                 "speech_segments": [],
                 "captured_at": body.get("captured_at") if image else None,
+                "live_frame_count": len(turn_frames),
             }
             call.turn = turn
             call.turn_digests[sequence] = fingerprint
@@ -1042,9 +1095,10 @@ class CallService:
                 camera_epoch=call.camera_epoch,
                 camera_enabled=call.camera_enabled,
                 pending_tasks=active_before,
+                live_frame_count=len(turn_frames),
                 reason="user_input_priority" if active_before else "sequential_input",
             )
-            task = asyncio.create_task(self._run(call, turn, audio, image))
+            task = asyncio.create_task(self._run(call, turn, audio, image, turn_frames))
             call.task = task
             call.turn_tasks[turn_id] = task
             call.active_turns[turn_id] = turn
@@ -1476,7 +1530,7 @@ class CallService:
                 **error_facts(exc, "call_opening_failed"),
             )
 
-    async def _run(self, call, turn, audio, image):
+    async def _run(self, call, turn, audio, image, turn_frames=()):
         start = self.clock()
         stage, stage_started = "stt", start
         try:
@@ -1534,6 +1588,7 @@ class CallService:
                 return
             turn["text"] = text
             observation = ""
+            had_turn_image = bool(image)
             if image:
                 turn["phase"] = "observing"
                 stage, stage_started = "vision", self.clock()
@@ -1576,7 +1631,7 @@ class CallService:
                     duration_ms=elapsed_ms(self.clock, start),
                 )
                 return
-            if not image and call.camera_enabled:
+            if not had_turn_image and call.camera_enabled:
                 # STT runs alongside the continuous observer; do not serially
                 # invoke another vision model for every spoken utterance.
                 if (
@@ -1620,7 +1675,11 @@ class CallService:
                     {
                         **call.binding,
                         "call_context": {
-                            "mode": "video" if call.camera_enabled else "voice",
+                            "mode": (
+                                "video"
+                                if turn_frames or call.camera_enabled
+                                else "voice"
+                            ),
                             "camera": current_camera,
                             "observed_at": datetime.now(timezone.utc).isoformat(),
                             "freshness_seconds": call.video_policy["freshness_seconds"],
@@ -1630,6 +1689,7 @@ class CallService:
                     text,
                     observation,
                     turn.get("captured_at"),
+                    turn_frames,
                 )
             turn.update(result)
             emit(

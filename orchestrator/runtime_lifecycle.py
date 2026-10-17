@@ -276,6 +276,9 @@ async def shutdown(runtime: Any) -> None:
         clean = process_stopped and clean
         if process_stopped:
             runtime.process_task = None
+    from orchestrator.frontend_call.transient_live_media import clear_live_frames
+
+    clear_live_frames(runtime)
     clean = (
         await _run_shutdown_step(
             runtime,
@@ -744,8 +747,12 @@ async def _process_single_item(runtime: Any, item: Any) -> None:
             background_ids = getattr(runtime, "_background_request_ids", set())
             if item.request_id not in background_ids:
                 from orchestrator.runtime_control import consume_user_interrupt
+                from orchestrator.frontend_call.transient_live_media import (
+                    discard_live_frames,
+                )
 
                 consume_user_interrupt(runtime, item.request_id)
+                discard_live_frames(runtime, item.request_id)
                 runtime_cancel.requested_ids(runtime).discard(item.request_id)
                 runtime_cancel.finalizing_ids(runtime).discard(item.request_id)
                 registry = getattr(runtime, "_request_meta_by_id", None)

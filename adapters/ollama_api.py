@@ -307,6 +307,7 @@ class OllamaAdapter(OpenRouterAdapter):
         continuation_messages=None,
         provider_call_limit=None,
         before_provider_call=None,
+        transient_images=None,
     ):
         self._ollama_prompt_tokens = None
         self._ollama_last_output_tokens = 0
@@ -322,4 +323,5 @@ class OllamaAdapter(OpenRouterAdapter):
             continuation_messages=continuation_messages,
             provider_call_limit=provider_call_limit,
             before_provider_call=before_provider_call,
+            transient_images=transient_images,
         )
