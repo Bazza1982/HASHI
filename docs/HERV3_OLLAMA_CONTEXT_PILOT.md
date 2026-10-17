@@ -1,5 +1,98 @@
 # HERV3 Ollama context pilot
 
+## Current status and integration scope — 2026-10-18
+
+Publication of `feature-ollama` to GitHub `main` through a pull request is now
+explicitly approved. This supersedes the earlier branch-retention restriction;
+the dated records below retain their original source, test and deployment scope.
+Publication does not enable the pilot on other Agents, restart services, replay
+a task, or establish production performance.
+
+HERV3 owns the native Provider adaptation in Functions. PAO retains tool
+authority, instance configuration and terminal/delivery state; PCM retains
+its existing authority and content. Frontend Connectors derive model and
+reasoning controls from the same effective Provider/model choices.
+
+| Capability | Implemented behavior | Boundary |
+| --- | --- | --- |
+| Native context | Opt-in `/api/chat`, exact-model capacity, output reserve and `truncate: false` | Existing compatibility callers keep their route unless native controls are selected |
+| Admission | Tokenizer probe of the final privacy-filtered payload before generation | One generated probe token is physical inference, separately metered; it is not a free count endpoint |
+| Tool results | Bounded pages of new results, with complete private source and hashes retained | Completed operations are never replayed to recover space |
+| Reference projection | Smaller history fields and discovery/recovery indexes | Current request, trusted PCM, active recovery and unresolved effects retain their authority |
+| Near capacity | Close tool use, preserve results and independently reprobe the changed payload | Unexpected later tool calls are rejected; the output reserve is not reduced |
+| Reasoning | Exact-model `enabled/off` maps to native boolean `think` | A separate opt-in from capacity; it does not invent graded strength or grant capability to every model |
+| Presentation | Ollama main PCM/final answer stay; auxiliary style inference is bypassed | Required questions and neutral progress still use their normal delivery boundaries |
+| Public selection | Provider names match catalogue keys, live/offline state and creation | Legacy adapter IDs remain valid input; internal adapter grants are preserved |
+
+### Instance configuration
+
+Configure an existing Agent's Ollama row through its normal revisioned
+configuration owner. The following is an example row, not a new global default.
+Replace the model tag with one actually installed and qualified for these
+controls, retain the instance's existing endpoint, and size the capacity for
+the device and concurrent workloads:
+
+```json
+{
+  "engine": "ollama-api",
+  "model": "example-local-model:tag",
+  "models": ["example-local-model:tag"],
+  "available_models": ["example-local-model:tag"],
+  "ollama_native_context": true,
+  "ollama_keep_alive_seconds": 90,
+  "model_capabilities": {
+    "example-local-model:tag": {
+      "context_window_tokens": 49152,
+      "response_headroom_tokens": 8192,
+      "ollama_num_batch": 128
+    }
+  },
+  "model_efforts": {
+    "example-local-model:tag": ["enabled", "off"]
+  },
+  "effort": "enabled"
+}
+```
+
+The corresponding existing HERV3 main target selects Provider `ollama` and the
+same exact model tag; its Provider allowlist must permit that target. Register
+the Provider through the instance's existing provider configuration so public
+catalogues can discover it. Local tags and capacities do not belong in the
+shared registry or frontend code. An explicit empty `available_models` or
+per-model effort list remains an authoritative restriction.
+
+The local pilot uses 49,152 total tokens, 40,960 usable input and an 8,192
+combined reasoning/answer reserve; these are configured trial values. Optional
+batch/GPU-layer controls are exact-model settings, not a shared GPU quota.
+A 90-second idle residency is neither immediate speech preemption nor a
+cross-Worker scheduler. Native thinking alone does not enable this capacity
+pilot; `/think` remains a display preference.
+
+### What the measurements establish
+
+The same captured request counted 37,536 native input tokens originally and
+14,735 after reference reduction: 60.74% fewer input tokens, retaining the
+8,192-token output reserve. The latter one-token probe took 156.93 seconds.
+This proves a capacity reduction for that payload, not a latency improvement.
+The earlier 180-second timeout remains part of the record.
+
+Earlier synthetic 48K checks include a correct 39,537-input-token cold-model
+marker run and a short three-read tool chain. Those preceded later admission
+and projection changes; they are not a controlled before/after benchmark of
+the final branch. Six short real-model calls separately verified binary
+thinking on the three configured local models. Full business-task quality,
+long-input speed and concurrent STT/TTS memory/latency remain unaccepted.
+
+The dated records below establish supported Agent6 adoption for the earlier
+pilot, presentation, capacity, binary-reasoning and reference-budget generations.
+For the later FC identity correction, a post-restart read-only API check now
+returns matching public Provider names and the selected reasoning value.
+That is runtime projection evidence, not graphical or selection-write
+acceptance. A GitHub merge never proves Worker adoption: per-Agent changes use
+their scoped supported reboot; shared FC changes require the existing shared
+`/reboot max` adoption while targets are idle. No adoption is performed by this
+documentation/publication task.
+
 ## 2026-10-16 model-facing context budget repair
 
 The later request was rejected at 41,149 native input tokens against 40,960
@@ -540,8 +633,9 @@ gate and Agent6 adoption must be recorded separately.
 
 ## Rollback and trial limits
 
-Retain the experiment on `feature-ollama`; do not merge or commit it implicitly.
-Rollback uses the revisioned instance configuration writer to remove the pilot
+Main promotion is explicitly approved in the current integration scope above;
+instance deployment and acceptance remain separately controlled. Rollback uses
+the revisioned instance configuration writer to remove the pilot
 opt-in and restore only this profile's saved capacity/memory fields, then an
 Agent6-only supported hot reboot. Do not restore an old whole configuration
 document, replay the old business request, kill unrelated GPU users, modify

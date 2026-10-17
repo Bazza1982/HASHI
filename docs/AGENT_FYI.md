@@ -1,16 +1,8 @@
 # HASHI Agent FYI
 
-October 18 Ollama: main promotion is explicitly approved; native context stays
-opt-in. Exact native admission, bounded result pages and private full-source
-indexes preserve the task/output reserve; no tool replay. Binary reasoning is
-model-specific; main PCM stays, auxiliary style calls are bypassed. The local
-48K/8K/90-second trial and lower input counts do not establish long-task speed
-or voice concurrency. See [Ollama status/configuration](HERV3_OLLAMA_CONTEXT_PILOT.md).
-
-October 18 FC: public Provider names now match across catalogues and live/offline
-status; legacy adapter IDs remain accepted as input. Model/effort choices retain
-instance restrictions. Post-restart API identity is verified; graphical
-acceptance remains separate. See [HERV3 configuration](HERV3_UPGRADE.md#configuration).
+October 18: Ollama native context, binary reasoning and main promotion:
+[status/limits](HERV3_OLLAMA_CONTEXT_PILOT.md). Public Provider identities now
+match live metadata; legacy IDs remain accepted. See [HERV3](HERV3_UPGRADE.md).
 
 October 17 Compute: local/LAN/internet model services resolve through PAO's
 Function-layer Compute Service Directory. Register from a v1 manifest and persist
