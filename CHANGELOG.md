@@ -9,7 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-No unreleased changes are recorded yet.
+### Added
+
+- Added strict discovery support for the native Hashi Compute v0.2.0 machine
+  manifest, including its LAN privacy boundary, flat service/model ownership,
+  relative interfaces, modality and audio declarations, concurrency, busy
+  state, service/configuration versions, and explicit unknown values.
+
+### Changed
+
+- Configured HASHI3's ignored Call profile to use the live-tested MiniCPM
+  advanced TTS `zf_001` voice while retaining the previous TTS targets for
+  rollback. Instance configuration and physical listening evidence remain
+  outside the tracked release.
 
 ---
 

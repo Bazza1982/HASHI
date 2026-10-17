@@ -203,6 +203,12 @@ Deploys add Edge/Kokoro/SAPI without changing settings; the 957 MB portable keep
 Edge/SAPI/Piper, omits Kokoro/Torch. See
 [deployment](repairs/FREE_TTS_DEPLOYMENT_DECISION_20261015.md).
 
+Compute discovery accepts the formal HASHI schema, native Hashi Compute v0.2.0
+manifest, and bounded legacy overview. HASHI3 Call selects the tested
+`minicpm-o-4.5-zh-female` / `zf_001` target from revisioned local config;
+expressive instructions remain unsupported and physical listening is separate.
+See [adoption](call/HASHI_COMPUTE_ADVANCED_TTS_2026-10-17.md).
+
 See [Call](HASHI_CALL_INTERACTION_2026-10-04.md); device acceptance is separate.
 [Older checkpoints](AGENT_FYI_HISTORY_MEDIA_20261009.md) grant no authority.
 

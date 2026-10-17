@@ -142,6 +142,212 @@ def _formal_manifest(*, busy=False):
     }
 
 
+def _hashi_compute_manifest(*, busy=False):
+    return {
+        "format": "hashi-compute.manifest",
+        "version": 1,
+        "schema_url": "/v1/manifest/schema",
+        "observed_at": "2026-10-17T00:00:00+00:00",
+        "service": {
+            "name": "Hashi Compute",
+            "version": "0.2.0",
+            "base_url": "http://192.168.1.50:19446/v1",
+            "configuration_revision": 38,
+            "startup_revision": 38,
+            "listener_restart_required": False,
+        },
+        "gateway": {
+            "max_in_flight": 16,
+            "max_request_bytes": 67108864,
+            "timeout_seconds": 120,
+            "in_flight": 0,
+            "busy": False,
+            "at_capacity": False,
+        },
+        "health": {
+            "live": "/health/live",
+            "ready": "/health/ready",
+            "lightweight": "/health",
+            "lightweight_probes_backends": False,
+        },
+        "privacy": {
+            "client_access_location": "lan",
+            "upstream_network_policy": "local_or_lan",
+            "relative_to": "compute_server",
+        },
+        "models": [
+            {
+                "id": "minicpm-o-4.5-zh-female",
+                "service_id": "advanced-voice",
+                "available": True,
+                "availability": "available",
+                "capabilities": ["speech"],
+                "modalities": {
+                    "input": {
+                        "text": "supported",
+                        "image": "unsupported",
+                        "audio": "unsupported",
+                    },
+                    "output": {
+                        "text": "unsupported",
+                        "image": "unsupported",
+                        "audio": "supported",
+                    },
+                },
+                "interfaces": [
+                    {
+                        "path": "/v1/audio/speech",
+                        "method": "POST",
+                        "request_encoding": "application/json",
+                        "streaming": {
+                            "support": "unsupported",
+                            "modes": [],
+                            "audio_chunks": False,
+                        },
+                    },
+                    {
+                        "path": "/v1/audio/speech/expressive",
+                        "method": "POST",
+                        "request_encoding": "application/json",
+                        "streaming": {
+                            "support": "unsupported",
+                            "modes": [],
+                            "audio_chunks": False,
+                        },
+                    },
+                ],
+                "image": {
+                    "support": "unsupported",
+                    "max_count": None,
+                    "max_bytes_each": None,
+                    "max_pixels_each": None,
+                    "formats": None,
+                    "transports": None,
+                    "remote_url_fetch": None,
+                },
+                "audio": {
+                    "input_formats": [],
+                    "output_formats": ["wav", "mp3", "pcm"],
+                    "sample_rate_hz": 24000,
+                    "channels": 1,
+                    "pcm_encoding": "signed_16_bit_little_endian",
+                    "max_duration_seconds": 80,
+                    "max_upload_bytes": None,
+                    "max_output_bytes": 4194304,
+                    "languages": {
+                        "supported": ["zh", "en"],
+                        "unsupported": ["ja"],
+                        "scope": "served_speech",
+                        "source": "https://huggingface.co/openbmb/MiniCPM-o-4_5",
+                    },
+                },
+                "features": {
+                    "tools": {
+                        "support": "unsupported",
+                        "scope": "served_api",
+                        "source": "qualified_adapter_v1",
+                    },
+                    "thinking": {
+                        "support": "unsupported",
+                        "scope": "served_api",
+                        "source": "qualified_adapter_v1",
+                    },
+                },
+                "context": {
+                    "model_max_tokens": None,
+                    "served_context_tokens": None,
+                },
+                "runtime": {
+                    "readiness": "ready",
+                    "busy": busy,
+                    "at_capacity": busy,
+                    "in_flight": 1 if busy else 0,
+                    "inference_parallelism": 1,
+                },
+                "privacy": {
+                    "processing_location": "local",
+                    "relative_to": "compute_server",
+                    "source": "configured_upstream",
+                    "external_calls": "not_attested",
+                },
+                "service_version": "0.3.0",
+                "service_generation": "generation-1",
+            }
+        ],
+        "services": [
+            {
+                "id": "advanced-voice",
+                "name": "MiniCPM advanced voice",
+                "kind": "advanced_tts",
+                "enabled": True,
+                "status": "ready",
+            }
+        ],
+        "resources": {
+            "voice_library": "/v1/voice-library",
+            "speech_catalogue": "/v1/speech/catalogue",
+            "configuration_export": "/v1/speech/profiles",
+        },
+        "discovery": {
+            "metadata_cache_seconds": 30,
+            "runtime_sampled_per_request": True,
+            "inference_performed": False,
+        },
+    }
+
+
+def test_hashi_compute_manifest_projects_deployed_advanced_speech_contract():
+    snapshot = parse_compute_manifest(
+        _lan_node(manifest_path="/v1/manifest"),
+        _hashi_compute_manifest(),
+    )
+
+    assert snapshot.schema_version == 1
+    assert snapshot.source_format == "hashi_compute_manifest"
+    assert snapshot.service_version == "0.2.0"
+    assert snapshot.config_revision == "38"
+    assert snapshot.privacy_location == "lan"
+    assert snapshot.health.status == "ready"
+    assert snapshot.health.path == "/health"
+    assert snapshot.capacity.max_concurrency == 16
+
+    voice = snapshot.offering("advanced-voice", "minicpm-o-4.5-zh-female")
+    assert voice.kind == "advanced_tts"
+    assert voice.input_modalities == frozenset({"text"})
+    assert voice.output_modalities == frozenset({"audio"})
+    assert voice.audio.output_formats == ("wav", "mp3", "pcm")
+    assert voice.capacity.max_concurrency == 1
+    assert voice.interface("openai.audio.speech").method == "POST"
+    assert (
+        voice.interface_url(snapshot.node, "hashi.audio.speech.expressive")
+        == "http://192.168.1.50:19446/v1/audio/speech/expressive"
+    )
+
+    requirements = ComputeRequirements(
+        input_modalities=frozenset({"text"}),
+        output_modalities=frozenset({"audio"}),
+        protocols=frozenset({"openai.audio.speech"}),
+        locations=frozenset({"lan"}),
+    )
+    resolved = snapshot.catalogue().resolve(
+        ComputeReference("studio-gpu", "advanced-voice", "minicpm-o-4.5-zh-female"),
+        requirements,
+    )
+    assert resolved.offering is voice
+
+
+def test_hashi_compute_manifest_fails_closed_on_privacy_or_busy_state():
+    mismatch = _hashi_compute_manifest()
+    mismatch["privacy"]["client_access_location"] = "internet"
+    with pytest.raises(ComputeServiceError, match="manifest_location_mismatch"):
+        parse_compute_manifest(_lan_node(), mismatch)
+
+    busy = parse_compute_manifest(_lan_node(), _hashi_compute_manifest(busy=True))
+    ref = ComputeReference("studio-gpu", "advanced-voice", "minicpm-o-4.5-zh-female")
+    with pytest.raises(ComputeServiceError, match="service_busy"):
+        busy.catalogue().resolve(ref)
+
+
 def test_formal_manifest_projects_every_required_machine_capability():
     snapshot = parse_compute_manifest(_lan_node(), _formal_manifest())
 

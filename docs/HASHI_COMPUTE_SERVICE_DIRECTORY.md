@@ -1,8 +1,10 @@
 # HASHI Compute Service Directory
 
 Status: accepted PAO/Function decision; v1 consumer interface implemented on
-HASHI3 `debug-deepseek` on 2026-10-17. Runtime adoption and each downstream
-consumer migration are separate facts.
+HASHI3 on 2026-10-17. The native Hashi Compute v0.2.0 manifest reader and first
+Call TTS instance adoption are implemented on `feature-hashi-compute`.
+Runtime source adoption and each downstream consumer migration remain separate
+facts.
 
 ## Decision
 
@@ -74,8 +76,16 @@ The normative machine-readable shape is
 The default discovery path is `/.well-known/hashi-compute`. It is deliberately
 separate from `/v1/capabilities`, which may remain a model-specific business
 endpoint (for example, voice-model capability lookup). An instance can override
-the manifest path for a transitional or differently hosted service; the current
-Hashi Compute compatibility entry uses `/api/overview` explicitly.
+the manifest path for a transitional or differently hosted service.
+
+Hashi Compute v0.2.0 publishes its own versioned first-party manifest at
+`/v1/manifest`, identified by `format=hashi-compute.manifest` and
+`version=1`. HASHI accepts that shape as
+`source_format=hashi_compute_manifest`: it maps the flat model declarations
+and service ownership into the same immutable catalogue while retaining
+declared unknowns. The configured node origin and location remain authoritative;
+the service's displayed base URL and internal worker URLs are never routing
+authority.
 
 The manifest declares service version, configuration revision, privacy
 location, a lightweight JSON health endpoint, global and per-service
@@ -114,17 +124,24 @@ must not synthesize a local substitute and call it the provider's sample.
 
 ## Compatibility and truthfulness
 
-Until Hashi Compute publishes v1, the directory can read its current
-`/api/overview` response. The compatibility adapter derives only semantics
-explicit in the service kind or advertised endpoint: STT is audio-to-text, TTS
-is text-to-audio, vision is text/image-to-text, and Ollama chat is text-to-text.
-It accepts declared tool/thinking flags and context length. Missing image
-limits, formats, streaming details, and maximum concurrency remain unknown.
+For older deployments, the directory can still read `/api/overview`. That
+legacy adapter derives only semantics explicit in the service kind or advertised
+endpoint: STT is audio-to-text, TTS is text-to-audio, vision is
+text/image-to-text, and Ollama chat is text-to-text. It accepts declared
+tool/thinking flags and context length. Missing image limits, formats, streaming
+details, and maximum concurrency remain unknown.
 
 The compatibility adapter ignores each service's internal `base_url` (for
 example, a server-side `127.0.0.1` worker) and routes only through the
 configured public node origin. Compatibility is visible as
 `source_format=legacy_overview`; it is not represented as full v1 compliance.
+
+The native v0.2.0 reader validates the declared client-access location against
+the configured boundary, derives interface protocols only from relative paths,
+and fails closed on unknown versions, inconsistent modality claims, busy
+capacity, or incomplete required fields. A null or absent served-context value
+stays unknown; a theoretical model maximum never authorizes a minimum-context
+request.
 
 ## Resolution and availability
 
@@ -155,7 +172,10 @@ Worker by itself. Each consumer migration must preserve its own persistence,
 failure, and live-acceptance tests.
 
 Focused validation covers the formal schema, current overview compatibility,
-privacy-boundary validation, no-redirect/bounded discovery, exact capability
-resolution, busy rejection, refresh failure fencing, direct sample URL
-rendering, and revisioned configuration. A live read from Hashi Compute proves
-only discovery interoperability, not downstream model execution.
+the native Hashi Compute manifest, privacy-boundary validation,
+no-redirect/bounded discovery, exact capability resolution, busy rejection,
+refresh failure fencing, direct sample URL rendering, and revisioned
+configuration. A live read from Hashi Compute proves only discovery
+interoperability, not downstream model execution. The first Call TTS adoption
+and its live synthesis evidence are recorded separately in
+[Hashi Compute advanced TTS](call/HASHI_COMPUTE_ADVANCED_TTS_2026-10-17.md).
