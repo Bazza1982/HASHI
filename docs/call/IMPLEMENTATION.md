@@ -1,9 +1,10 @@
 # Turn-based call media connector — implementation and local qualification
 
-Status: first implementation for the `feature-call` branch. Not a production
-release, and not evidence of live device/provider qualification. See the PRD
-alongside this file. This document resolves implementation choices left open in
-that design without changing `/phone`.
+Status: implemented. The HASHI3 private-LAN Hashi Compute profile was
+device/provider tested and user-accepted on `feature-hashi-compute`; GitHub
+publication and production release remain separate facts. See the PRD alongside
+this file. This document resolves implementation choices left open in that
+design without changing `/phone`.
 
 ## Ownership and delivered behavior
 
@@ -41,13 +42,15 @@ video of the Agent; the Agent uses its existing static avatar.
    independently selected conforming hosted APIs or managed local sidecars;
    it is not a dependency on OpenAI's hosting. Unsupported protocols need a real
    adapter, not a renamed base URL.
-4. Local targets must be explicit loopback HTTP/HTTPS services on the **HASHI
-   host**, not the device displaying the client. Provision native dependencies
-   in isolated sidecars; do not install them in a running Core interpreter.
-   Cloud targets require HTTPS. Browser-submitted URLs, keys, headers, model IDs
-   or owner IDs are never accepted. Credentials use the existing secret resolver
-   (`secrets://name` or `env://NAME`), or the older `credential_env` field,
-   and are never returned to the client.
+4. Targets with `location: local` must be explicit loopback HTTP/HTTPS services
+   on the **HASHI host**, not the device displaying the client. Targets with
+   `location: lan` must use an explicit RFC 1918 IPv4 origin and never DNS,
+   redirects, link-local, loopback, or public addresses. Provision native
+   dependencies in isolated sidecars; do not install them in a running Core
+   interpreter. Cloud targets require HTTPS. Browser-submitted URLs, keys,
+   headers, model IDs or owner IDs are never accepted. Credentials use the
+   existing secret resolver (`secrets://name` or `env://NAME`), or the older
+   `credential_env` field, and are never returned to the client.
 5. STT is `POST {base_url}/audio/transcriptions` (multipart WAV, `model`, JSON
    response containing `text`). TTS is `POST {base_url}/audio/speech` (JSON
    `model`, `input`, `voice`, `response_format`), returning MP3 or WAV. OpenRouter
@@ -80,7 +83,13 @@ video of the Agent; the Agent uses its existing static avatar.
    downloads the catalogue's locale-matched sample with bounded, no-redirect
    transport, publishes it through the existing frontend media path, and
    deletes the temporary delivery file. If discovery fails, the saved selection
-   remains and no other provider or voice is substituted.
+   remains and no other provider or voice is substituted. A preview proves only
+   that the declared sample exists. It does not prove that the live speech
+   endpoint exposes that voice; retain and display the provider's
+   `callable`/`availability` facts and require live synthesis evidence before
+   claiming conversational support. The current HASHI3 acceptance evidence is
+   recorded in
+   [Hashi Compute TTS adoption](HASHI_COMPUTE_ADVANCED_TTS_2026-10-17.md).
 
 A selected cloud target requires explicit per-call consent and a current Agent
 privacy projection of level 0 or 1. Level 2 and unknown/old Worker projections
@@ -133,6 +142,9 @@ are capped at 12 × 600-character segments; code blocks, large tables and URLs a
 not read aloud. The full canonical answer remains in text. No extra rewriting LLM
 is called. Provider usage/currency metering is not implemented; use provider
 billing during initial qualification, and never infer a dollar total from duration.
+The accepted HASHI3 LAN profile uses no metered external media API, but that
+does not make hardware, electricity, administration, or a separately selected
+Engine/Model Provider free.
 
 ## Files and preservation boundary
 

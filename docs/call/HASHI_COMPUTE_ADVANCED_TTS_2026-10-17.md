@@ -1,9 +1,10 @@
 # Hashi Compute TTS adoption and advanced-voice evaluation (2026-10-17)
 
-Status: implemented, compared, and directly live-tested on HASHI3
-`feature-hashi-compute`. Hashi Compute Kokoro is selected for Call; the
-advanced target remains available but unselected. Promotion to another
-instance remains a separate fact.
+Status: implemented, compared, and accepted through an audible HASHI3 Call on
+`feature-hashi-compute`. Hashi Compute Kokoro is selected for Call; expanded
+live voice exposure is active, and the advanced target remains available but
+unselected. GitHub publication and promotion to another instance remain
+separate facts.
 
 ## Authority and ownership
 
@@ -11,6 +12,9 @@ The user explicitly requested that HASHI3 use Hashi Compute advanced TTS, run a
 live test, and perform the work on `feature-hashi-compute`. After successful
 end-to-end playback exposed substantially higher round-trip latency, the user
 approved ordinary Hashi Compute TTS for video and voice Calls.
+After the service's live voice exposure was expanded, the user separately
+confirmed successful audible Call operation and accepted the private LAN
+profile as the no-metered-external-media path.
 
 - Functional owners: PAO Compute Service Directory and Frontend Connector Call
   TTS adapter.
@@ -33,16 +37,18 @@ advanced target. The selected service-generated OpenAI-compatible Call TTS
 target is:
 
 - model: `kokoro-82m`;
-- voice: `zf_001` (年轻4);
+- default/fallback voice: `zf_001` (年轻4);
+- accepted owner/Agent profile voice: `zf_072` (童声2);
 - format: 24 kHz mono WAV;
 - speed: `1`; and
 - endpoint contract: ordinary `/v1/audio/speech`.
 
-The default Call profile and the one existing profile explicitly routed to Call
-select the ordinary target. Existing STT and vision choices are unchanged. The
-advanced `minicpm-o-4.5-zh-female` / `zf_001` target remains available for an
-explicit future choice or comparison. Call reads the revisioned instance
-configuration for the next Call; no Core restart or hot reboot was used.
+The default Call profile retains `zf_001`; the existing owner/Agent profile
+selects `zf_072`. Both route to the same ordinary Kokoro target. Existing STT
+and vision choices are unchanged. The advanced
+`minicpm-o-4.5-zh-female` / `zf_001` target remains available for an explicit
+future choice or comparison. Call reads the revisioned instance configuration
+for the next Call; no Core restart or hot reboot was used.
 
 The current Call adapter intentionally uses ordinary speech synthesis. Although
 the service advertises `/v1/audio/speech/expressive`, Call does not send
@@ -73,17 +79,29 @@ After the switch, HASHI's actual Call adapter read the persisted default and
 completed three sequential syntheses in 1.41-1.53 seconds, with a 1.49-second
 median. Each response was a valid 24 kHz mono WAV. This proves discovery,
 revisioned selection, provider synthesis, and HASHI format validation. The
-user's next new Call remains the final audible acceptance of the selected
-ordinary target.
+user later selected `zf_072` from the Compute-owned catalogue.
+
+Before expanded service exposure, the 15:51 HASHI3 opening synthesis for
+`zf_072` received HTTP 400 `voice_not_found`, so no audio asset existed for
+the client to play. After the service update, the same HASHI adapter and voice
+returned a valid 24 kHz mono WAV containing 3.182 seconds of audio. The user
+then separately confirmed successful audible end-to-end Call behavior. This
+distinguishes service synthesis, HASHI delivery, and human listening evidence.
+
+For the accepted HASHI3 profile, Call media processing is routed to the
+configured private LAN Hashi Compute node rather than a metered external media
+API. This is the documented meaning of the no-per-call-provider-cost result; it
+does not claim that hardware, electricity, administration, or a separately
+selected Engine/Model Provider has no cost.
 
 ## Voice catalogue menu
 
 The Call settings menu now resolves the selected TTS target back to the exact
 configured Compute node, model, and speech interface. It reads the manifest's
 declared `speech_catalogue` resource rather than maintaining a second voice
-list. The current Kokoro catalogue contains 59 voices and marks 6 callable for
-live synthesis. All 59 are grouped by language and structured gender and all 59
-can be selected for Call. HASHI treats inclusion in the matched Hashi Compute
+list. The current Kokoro catalogue contains 59 voices and marks 57 callable for
+live synthesis. All 59 are grouped by language and structured gender, and all
+59 can be selected for Call. HASHI treats inclusion in the matched Hashi Compute
 catalogue as the voice allowlist; the catalogue's `callable` value remains
 provider metadata rather than a second HASHI permission gate. Missing gender is
 shown as unlabelled rather than inferred from an ID or display name.
@@ -97,16 +115,19 @@ generates a second preview nor bundles a copy of the Compute sample set.
 
 Live HASHI3 discovery rendered all 59 entries across 10 groups and exposed all
 59 as selectable. It downloaded the selected voice's Chinese WAV sample
-directly. This is source-level and direct-service evidence; the running Agent
-still requires its normal Function adoption before the revised menu can be
-accepted through the external frontend.
+directly. That was initially source-level and direct-service evidence. The
+later external-frontend selection and audible Call establish running HASHI3
+Function adoption and user acceptance; they do not establish GitHub or
+production promotion.
 
-The catalogue currently reports 53 of those voices as `voice_not_exposed` with
-an `offline_preview` synthesis scope. A direct live synthesis probe of one such
-voice (`zf_042`) was rejected by the current Compute inference endpoint, using
-both its short ID and catalogue key. HASHI now permits the selection as required,
-but successful conversational synthesis for those entries also requires Hashi
-Compute to expose them through its speech endpoint.
+The catalogue initially reported 53 voices as `voice_not_exposed`; a direct
+probe confirmed that this was a real speech-endpoint limitation rather than a
+HASHI playback fault. After service activation, 57 of 59 entries report
+`callable`, including the accepted `zf_072`, and live synthesis succeeds.
+The remaining `zm_009` and `af_heart` entries are explicitly
+`voice_not_exposed` with `offline_preview` scope. Direct requests for both
+return HTTP 400 `voice_not_found`. Their previews remain valid, but they are
+not evidence of conversational synthesis.
 
 ## Focused validation
 
@@ -121,6 +142,9 @@ Compute to expose them through its speech endpoint.
 - The catalogue picker passed direct live discovery and preview download against
   the configured Hashi Compute v0.2.0 node without copying catalogue data.
 
-Source review, commit, runtime Function adoption, final ordinary-target listening,
-GitHub publication, and promotion to another instance must continue to be
-reported separately.
+- Post-activation live discovery reported 57 callable voices out of 59.
+- The actual HASHI adapter produced a valid `zf_072` WAV, and the user
+  separately confirmed audible end-to-end Call success.
+
+Source review, documentation commit, GitHub publication, and promotion to
+another instance must continue to be reported separately.

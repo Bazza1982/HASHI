@@ -20,11 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   descriptions, the catalogue count, and direct catalogue-hosted previews.
   Every voice supplied by the matched catalogue can be selected; HASHI does not
   maintain a second voice allowlist.
+- Qualified the HASHI3 private-LAN Call media path with direct synthesis and
+  user listening. At acceptance, Hashi Compute exposed 57 of 59 catalogue
+  voices for live speech; `zf_072` passed audible end-to-end Call, while the
+  two remaining entries stayed explicitly preview-only.
 
 ### Changed
 
 - Configured HASHI3's ignored Call profile to use Hashi Compute's low-latency
-  Kokoro `zf_001` voice after live Call and controlled latency comparisons.
+  Kokoro target after live Call and controlled latency comparisons. `zf_001`
+  remains the default; the accepted owner/Agent profile selects `zf_072`.
   The advanced MiniCPM target and previous TTS targets remain available for
   explicit selection or rollback; instance configuration remains outside the
   tracked release.

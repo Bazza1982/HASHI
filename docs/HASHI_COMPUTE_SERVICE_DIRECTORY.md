@@ -2,9 +2,10 @@
 
 Status: accepted PAO/Function decision; v1 consumer interface implemented on
 HASHI3 on 2026-10-17. The native Hashi Compute v0.2.0 manifest reader and first
-Call TTS instance adoption are implemented on `feature-hashi-compute`.
-Runtime source adoption and each downstream consumer migration remain separate
-facts.
+Call TTS instance adoption are implemented and user-accepted on
+`feature-hashi-compute`. That acceptance is scoped to HASHI3; GitHub
+publication, production promotion, and each additional consumer migration
+remain separate facts.
 
 ## Decision
 
@@ -182,5 +183,8 @@ no-redirect/bounded discovery, exact capability resolution, busy rejection,
 refresh failure fencing, declared resource and direct sample URL rendering, and
 revisioned configuration. A live read from Hashi Compute proves only discovery
 interoperability, not downstream model execution. The first Call TTS adoption
-and its live synthesis evidence are recorded separately in
+now has separate direct-adapter synthesis and user listening evidence. At
+acceptance, 57 of 59 catalogue voices were exposed for live speech; the two
+remaining entries were explicitly preview-only and rejected live synthesis.
+The scoped configuration, chronology, and evidence are recorded in
 [Hashi Compute TTS adoption and advanced-voice evaluation](call/HASHI_COMPUTE_ADVANCED_TTS_2026-10-17.md).
