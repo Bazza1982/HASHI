@@ -393,6 +393,18 @@ capability check into multiple legacy chat submissions, because that would
 change one user action into multiple Messages and Turns. Upload staging is not
 a Run and may be cleaned up later by retention policy.
 
+When PAO accepts the Run, every committed non-voice attachment moves from
+upload staging into the target Agent's private home at
+`.attachments/{session_id}/{message_id}/`. The durable Message and the
+current canonical request content both receive that bound path before Agent
+execution; the central staging file is removed only after the Session
+transaction commits. Ordinary file tools may therefore read the attachment in
+later turns through that Agent's existing home scope, while another Agent's
+scope cannot authorize the path. Session attachment cleanup and owner purge
+remove the bound bytes and empty private directories. Agent homes and the
+`.attachments` subtree remain Git-ignored. Safe Voice audio retains its
+separately owned managed-audio lifecycle.
+
 ### 6.3 Standard assistant attachment output
 
 An Agent responding to a conforming external frontend binds generated or
