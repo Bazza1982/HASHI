@@ -36,9 +36,11 @@ HASHI_COMPUTE_MANIFEST_VERSION = 1
 COMPUTE_CONFIG_VERSION = 1
 DEFAULT_COMPUTE_MANIFEST_PATH = "/.well-known/hashi-compute"
 MAX_MANIFEST_BYTES = 2 * 1024 * 1024
+MAX_RESOURCE_BYTES = 4 * 1024 * 1024
 MAX_NODES = 64
 MAX_SERVICES = 256
 MAX_MODELS_PER_SERVICE = 512
+MAX_RESOURCES = 64
 
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 _PROTOCOL = re.compile(r"^[a-z][a-z0-9_.-]{0,95}$")
@@ -119,6 +121,21 @@ def _validate_path(
     if "{" in without_templates or "}" in without_templates:
         raise ComputeServiceError(code)
     return path
+
+
+def _resources(value: Any) -> Mapping[str, str]:
+    if not isinstance(value, Mapping) or len(value) > MAX_RESOURCES:
+        raise ComputeServiceError("manifest_resource_invalid")
+    result: dict[str, str] = {}
+    for raw_name, raw_path in value.items():
+        name = _identifier(raw_name, code="manifest_resource_invalid")
+        if name in result:
+            raise ComputeServiceError("manifest_resource_invalid")
+        result[name] = _validate_path(
+            raw_path,
+            code="manifest_resource_invalid",
+        )
+    return MappingProxyType(result)
 
 
 @dataclass(frozen=True)
@@ -518,6 +535,7 @@ class ComputeNodeSnapshot:
     health: ComputeHealth
     capacity: ComputeCapacity
     offerings: tuple[ComputeOffering, ...]
+    resources: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
     reachable: bool = True
     error_code: str | None = None
 
@@ -530,6 +548,16 @@ class ComputeNodeSnapshot:
 
     def catalogue(self) -> "ComputeCatalogue":
         return ComputeCatalogue((self,))
+
+    def resource_path(self, name: str) -> str:
+        selected = _identifier(name, code="compute_resource_invalid")
+        try:
+            return self.resources[selected]
+        except KeyError as exc:
+            raise ComputeServiceError("compute_resource_not_found") from exc
+
+    def resource_url(self, name: str) -> str:
+        return self.node.url(self.resource_path(name))
 
 
 @dataclass(frozen=True)
@@ -1401,9 +1429,8 @@ def _parse_hashi_compute_manifest(
     keys = [(item.service_id, item.model_id) for item in offerings]
     if len(keys) != len(set(keys)):
         raise ComputeServiceError("manifest_offering_duplicate")
-    if not isinstance(payload.get("resources"), Mapping) or not isinstance(
-        payload.get("discovery"), Mapping
-    ):
+    resources = _resources(payload.get("resources"))
+    if not isinstance(payload.get("discovery"), Mapping):
         raise ComputeServiceError("manifest_capabilities_incomplete")
     if payload["discovery"].get("inference_performed") is not False:
         raise ComputeServiceError("manifest_invalid")
@@ -1418,6 +1445,7 @@ def _parse_hashi_compute_manifest(
         health=health,
         capacity=capacity,
         offerings=tuple(offerings),
+        resources=resources,
     )
 
 
@@ -1515,6 +1543,7 @@ def parse_compute_manifest(
     keys = [(item.service_id, item.model_id) for item in offerings]
     if len(keys) != len(set(keys)):
         raise ComputeServiceError("manifest_offering_duplicate")
+    resources = _resources(payload.get("resources", {}))
     return ComputeNodeSnapshot(
         node=node,
         schema_version=schema_version,
@@ -1526,6 +1555,7 @@ def parse_compute_manifest(
         health=health,
         capacity=capacity,
         offerings=tuple(offerings),
+        resources=resources,
     )
 
 
@@ -1658,6 +1688,69 @@ class ComputeServiceClient:
             node,
             await self._get_json(node, node.manifest_path),
         )
+
+    async def fetch_json_resource(
+        self,
+        node: ComputeNode,
+        path: str,
+    ) -> Mapping[str, Any]:
+        selected = _validate_path(path, code="compute_resource_invalid")
+        return await self._get_json(node, selected)
+
+    async def fetch_resource_bytes(
+        self,
+        node: ComputeNode,
+        path: str,
+    ) -> tuple[bytes, str]:
+        selected = _validate_path(path, code="compute_resource_invalid")
+        headers = self._headers(node)
+        headers["Accept"] = "audio/*"
+        try:
+            async with self.session_factory(
+                timeout=aiohttp.ClientTimeout(total=node.timeout_seconds),
+                trust_env=False,
+            ) as session:
+                async with session.get(
+                    node.url(selected),
+                    headers=headers,
+                    allow_redirects=False,
+                ) as response:
+                    if response.status != 200:
+                        raise ComputeServiceError("compute_resource_rejected")
+                    media_type = (
+                        response.headers.get("Content-Type", "")
+                        .split(";", 1)[0]
+                        .strip()
+                        .casefold()
+                    )
+                    allowed = {
+                        "audio/mpeg",
+                        "audio/ogg",
+                        "audio/opus",
+                        "audio/wav",
+                        "audio/x-wav",
+                    }
+                    if media_type not in allowed:
+                        raise ComputeServiceError(
+                            "compute_resource_content_type_invalid"
+                        )
+                    chunks: list[bytes] = []
+                    total = 0
+                    async for chunk in response.content.iter_chunked(16384):
+                        total += len(chunk)
+                        if total > MAX_RESOURCE_BYTES:
+                            raise ComputeServiceError("compute_resource_too_large")
+                        chunks.append(chunk)
+            payload = b"".join(chunks)
+            if not payload:
+                raise ComputeServiceError("compute_resource_rejected")
+            return payload, "audio/wav" if media_type == "audio/x-wav" else media_type
+        except asyncio.CancelledError:
+            raise
+        except ComputeServiceError:
+            raise
+        except (aiohttp.ClientError, OSError, TimeoutError) as exc:
+            raise ComputeServiceError("compute_node_unreachable") from exc
 
     async def probe_health(
         self,

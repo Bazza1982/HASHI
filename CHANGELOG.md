@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   manifest, including its LAN privacy boundary, flat service/model ownership,
   relative interfaces, modality and audio declarations, concurrency, busy
   state, service/configuration versions, and explicit unknown values.
+- Added live Hashi Compute voice discovery to the Call settings menu. The full
+  catalogue is grouped by language and declared gender, with names,
+  descriptions, availability counts, and direct catalogue-hosted previews.
+  Callable voices can be selected; other entries are visibly locked and remain
+  preview-only.
 
 ### Changed
 
@@ -23,6 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The advanced MiniCPM target and previous TTS targets remain available for
   explicit selection or rollback; instance configuration remains outside the
   tracked release.
+- Call now persists only a provider-verified selected voice and fallback label;
+  the full Hashi Compute voice catalogue and preview assets remain owned by the
+  service instead of being copied into HASHI configuration or source.
 
 ---
 

@@ -76,6 +76,32 @@ revisioned selection, provider synthesis, and HASHI format validation. The
 user's next new Call remains the final audible acceptance of the selected
 ordinary target.
 
+## Voice catalogue menu
+
+The Call settings menu now resolves the selected TTS target back to the exact
+configured Compute node, model, and speech interface. It reads the manifest's
+declared `speech_catalogue` resource rather than maintaining a second voice
+list. The current Kokoro catalogue contains 59 voices and marks 6 callable for
+live synthesis. All 59 are grouped by language and structured gender. The 6
+callable voices can be selected; the remaining 53 are visibly locked and remain
+preview-only. Missing gender is shown as unlabelled rather than inferred from an
+ID or display name.
+
+Buttons show the catalogue display name and description. Selecting a callable
+voice persists only the verified voice ID and a short fallback label in the
+revisioned Call profile. Clicking a locked voice does not write configuration.
+For either kind, a matching locale preview is downloaded directly from the
+sample path declared by the Compute catalogue, sent through the existing
+frontend media publication path, and discarded after delivery. HASHI neither
+generates a second preview nor bundles a copy of the Compute sample set.
+
+Live HASHI3 discovery rendered all 59 entries across 10 groups: 6 selectable and
+53 locked preview-only. It downloaded a locked voice's Chinese WAV sample
+directly while the selected `zf_001` profile and configuration file remained
+unchanged. This is source-level and direct-service evidence; the running Agent
+still requires its normal Function adoption before the revised menu can be
+accepted through the external frontend.
+
 ## Focused validation
 
 - Red evidence: both new native-manifest tests failed before implementation
@@ -86,6 +112,8 @@ ordinary target.
   from the configured LAN origin.
 - The active HASHI3 Call profile passed revisioned configuration validation and
   three live adapter syntheses with the selected ordinary target.
+- The catalogue picker passed direct live discovery and preview download against
+  the configured Hashi Compute v0.2.0 node without copying catalogue data.
 
 Source review, commit, runtime Function adoption, final ordinary-target listening,
 GitHub publication, and promotion to another instance must continue to be

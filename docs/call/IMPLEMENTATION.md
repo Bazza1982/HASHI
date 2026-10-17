@@ -21,9 +21,10 @@ foreground-call interlock with `/phone`. Ending media does not cancel an accepte
 Agent task. The ordinary Agent approval and tool boundaries remain in force.
 
 Native image-to-Engine delivery, streaming STT, word-aligned captions, continuous
-video reasoning, provider voice-directory discovery, and voice-cloning are **not**
-in this first implementation. Each is an optional capability, not simulated by
-this implementation. The UI's camera is a real **user-side preview**, not generated
+video reasoning, and voice-cloning are **not** in this first implementation.
+Each is an optional capability, not simulated by this implementation. Hashi
+Compute voice-directory discovery was added later as an exact, opt-in Function
+integration. The UI's camera is a real **user-side preview**, not generated
 video of the Agent; the Agent uses its existing static avatar.
 
 ## Instance configuration (disabled by default)
@@ -67,6 +68,18 @@ video of the Agent; the Agent uses its existing static avatar.
 7. Use the client's settings to select target IDs and supported options. Writes
    update only the current owner/Agent profile, using the existing revisioned
    configuration primitive. A conflict requires reload; no blind overwrites.
+8. A Call TTS target that exactly matches a configured Hashi Compute node,
+   model, and `openai.audio.speech` interface derives its voice picker from the
+   node's declared `speech_catalogue` resource. The picker shows the full
+   catalogue, grouped by language and structured gender, with each voice's name
+   and description. Voices marked callable can be selected; other entries are
+   visibly locked and preview-only. Missing gender remains explicitly
+   unlabelled. Selecting a callable voice persists only that verified ID and a
+   fallback display label; it does not copy the provider catalogue. Preview
+   downloads the catalogue's locale-matched sample with bounded, no-redirect
+   transport, publishes it through the existing frontend media path, and
+   deletes the temporary delivery file. If discovery fails, the saved selection
+   remains and no other provider or voice is substituted.
 
 A selected cloud target requires explicit per-call consent and a current Agent
 privacy projection of level 0 or 1. Level 2 and unknown/old Worker projections

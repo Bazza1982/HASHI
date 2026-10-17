@@ -420,3 +420,57 @@ class CallConfig:
         profiles[digest([owner, agent])] = profile
         self._write(doc)
         return self.context(owner, agent)
+
+    def save_discovered_voice(
+        self,
+        owner,
+        agent,
+        revision,
+        profile,
+        *,
+        target_id,
+        voice_id,
+        voice_label,
+    ):
+        """Persist one provider-verified choice without copying its whole catalogue."""
+
+        doc, targets = self.read()
+        if revision != doc.revision:
+            raise CallError("call_configuration_changed", 409)
+        if (
+            not isinstance(voice_id, str)
+            or not 1 <= len(voice_id) <= 160
+            or not isinstance(voice_label, str)
+            or not 1 <= len(voice_label) <= 50
+        ):
+            raise CallError("call_voice_unavailable", 409)
+        row = next(
+            (
+                item
+                for item in doc.get("targets", [])
+                if isinstance(item, dict) and item.get("id") == target_id
+            ),
+            None,
+        )
+        if row is None or row.get("kind") != "tts":
+            raise CallError("call_target_unavailable", 409)
+        voices = row.get("voices")
+        if not isinstance(voices, list):
+            raise CallError("call_configuration_invalid", 503)
+        if voice_id not in voices:
+            if len(voices) >= 200:
+                raise CallError("call_voices_invalid", 503)
+            voices.append(voice_id)
+        styles = row.setdefault("voice_styles", {})
+        if not isinstance(styles, dict):
+            raise CallError("call_configuration_invalid", 503)
+        styles[voice_id] = voice_label
+        targets[target_id] = validate_target(row)
+        profile = self.validate_profile(profile, targets)
+        profiles = doc.setdefault("profiles", {})
+        key = digest([owner, agent])
+        if len(profiles) >= 200 and key not in profiles:
+            raise CallError("call_profile_limit", 429)
+        profiles[key] = profile
+        self._write(doc)
+        return self.context(owner, agent)

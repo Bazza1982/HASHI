@@ -99,6 +99,11 @@ declares:
 - tool calling, thinking, and context length; and
 - service status and capacity.
 
+The native manifest's named resources are also validated as bounded relative
+paths and exposed through the immutable node snapshot. Consumers therefore use
+declarations such as `speech_catalogue` without copying an endpoint or accepting
+an absolute URL from the service response.
+
 An image-capable model must provide positive official image limits and at least
 one format. An audio input/output must list its formats. Unknown values for a
 modality the model does not support are represented by `null` or an empty list;
@@ -174,8 +179,8 @@ failure, and live-acceptance tests.
 Focused validation covers the formal schema, current overview compatibility,
 the native Hashi Compute manifest, privacy-boundary validation,
 no-redirect/bounded discovery, exact capability resolution, busy rejection,
-refresh failure fencing, direct sample URL rendering, and revisioned
-configuration. A live read from Hashi Compute proves only discovery
+refresh failure fencing, declared resource and direct sample URL rendering, and
+revisioned configuration. A live read from Hashi Compute proves only discovery
 interoperability, not downstream model execution. The first Call TTS adoption
 and its live synthesis evidence are recorded separately in
 [Hashi Compute TTS adoption and advanced-voice evaluation](call/HASHI_COMPUTE_ADVANCED_TTS_2026-10-17.md).

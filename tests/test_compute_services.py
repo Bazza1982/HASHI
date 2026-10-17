@@ -310,6 +310,11 @@ def test_hashi_compute_manifest_projects_deployed_advanced_speech_contract():
     assert snapshot.health.status == "ready"
     assert snapshot.health.path == "/health"
     assert snapshot.capacity.max_concurrency == 16
+    assert snapshot.resource_path("speech_catalogue") == "/v1/speech/catalogue"
+    assert (
+        snapshot.resource_url("speech_catalogue")
+        == "http://192.168.1.50:19446/v1/speech/catalogue"
+    )
 
     voice = snapshot.offering("advanced-voice", "minicpm-o-4.5-zh-female")
     assert voice.kind == "advanced_tts"
@@ -334,6 +339,13 @@ def test_hashi_compute_manifest_projects_deployed_advanced_speech_contract():
         requirements,
     )
     assert resolved.offering is voice
+
+
+def test_hashi_compute_manifest_rejects_untrusted_resource_urls():
+    manifest = _hashi_compute_manifest()
+    manifest["resources"]["speech_catalogue"] = "https://example.invalid/voices"
+    with pytest.raises(ComputeServiceError, match="manifest_resource_invalid"):
+        parse_compute_manifest(_lan_node(), manifest)
 
 
 def test_hashi_compute_manifest_fails_closed_on_privacy_or_busy_state():
@@ -833,4 +845,40 @@ async def test_manifest_client_is_bounded_and_never_follows_redirects():
     with pytest.raises(ComputeServiceError, match="manifest_invalid"):
         await ComputeServiceClient(session_factory=malformed).fetch_manifest(
             _lan_node()
+        )
+
+
+@pytest.mark.asyncio
+async def test_compute_resource_audio_is_bounded_and_never_follows_redirects():
+    wav = b"RIFF" + b"\x00" * 4 + b"WAVE" + b"\x00" * 32
+    factory = _FakeSessionFactory(_FakeResponse(wav, content_type="audio/wav"))
+    payload, media_type = await ComputeServiceClient(
+        session_factory=factory
+    ).fetch_resource_bytes(_lan_node(), "/v1/speech/samples/test.wav")
+
+    assert payload == wav
+    assert media_type == "audio/wav"
+    assert (
+        factory.receipt["url"] == "http://192.168.1.50:19446/v1/speech/samples/test.wav"
+    )
+    assert factory.receipt["allow_redirects"] is False
+    assert factory.receipt["session"]["trust_env"] is False
+
+    redirect = _FakeSessionFactory(
+        _FakeResponse(b"", status=302, content_type="audio/wav")
+    )
+    with pytest.raises(ComputeServiceError, match="compute_resource_rejected"):
+        await ComputeServiceClient(session_factory=redirect).fetch_resource_bytes(
+            _lan_node(), "/v1/speech/samples/test.wav"
+        )
+
+    oversized = _FakeSessionFactory(
+        _FakeResponse(
+            b"x" * (4 * 1024 * 1024 + 1),
+            content_type="audio/wav",
+        )
+    )
+    with pytest.raises(ComputeServiceError, match="compute_resource_too_large"):
+        await ComputeServiceClient(session_factory=oversized).fetch_resource_bytes(
+            _lan_node(), "/v1/speech/samples/test.wav"
         )
