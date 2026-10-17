@@ -11,8 +11,8 @@ from types import SimpleNamespace
 from collections.abc import Mapping
 
 from orchestrator.flexible_backend_registry import (
-    BACKEND_REGISTRY, HER_V2_ENGINE, canonical_backend_engine,
-    public_backend_engine, get_backend_entry, get_available_models,
+    BACKEND_REGISTRY, HER_V2_ENGINE, canonical_backend_engine, canonical_model_provider,
+    public_backend_engine, public_model_provider, get_backend_entry, get_available_models,
     get_secret_lookup_order, is_selectable_backend,
 )
 from orchestrator.runtime_effort_options import get_available_efforts, get_available_models as effective_models
@@ -92,7 +92,8 @@ def build_effective_backend_catalogue(rows, profiles, *, availability=None, priv
                 except ValueError:
                     provider_ok, provider_reason = False, "privacy_incompatible"
                 available = bool(option["available"] and provider_ok)
-                providers[provider] = {**option, "available": available,
+                public_provider = public_model_provider(provider)
+                providers[public_provider] = {**option, "engine": public_provider, "available": available,
                     "reason": None if available else provider_reason or "provider_unavailable",
                     "model_efforts": {model: get_available_efforts(provider, model, allowed_backends=rows, provider=True)
                                       for model in option["models"]}}
@@ -155,7 +156,7 @@ def runtime_backend_catalogue(runtime):
             # configured allowlist and dynamic privacy gate.
             live_options = {option["engine"]: option for option in manager.get_her_v3_provider_options()}
             for engine, option in her["providers"].items():
-                live = live_options.get(engine)
+                live = live_options.get(canonical_model_provider(engine))
                 if not live or not live.get("available"):
                     option.update(available=False, reason="provider_unavailable")
         return {"ok": True, "backends": backends}

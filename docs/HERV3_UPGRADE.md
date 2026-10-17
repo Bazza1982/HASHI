@@ -201,6 +201,18 @@ Provider, `/model` selects one of that Provider's real model IDs, and both chang
 persist immediately for subsequent turns. Old route buttons are rejected rather
 than allowed to change ignored settings.
 
+Public Provider identity is consistent across shared, creation and per-Agent
+catalogues, offline metadata and live presentation: the `providers` dictionary
+key and its entry's `engine` use the same public name, such as `deepseek` or
+`ollama`, as the current runtime Provider. Clients can resolve that exact
+Provider/model pair without guessing adapter suffixes or adding duplicate
+model options. Model and reasoning choices still derive from the effective
+resolver, including instance overrides and explicit empty restrictions.
+Registered `-api` adapter IDs remain accepted as legacy input; creation
+normalizes them at the Provider boundary and retains canonical adapter IDs in
+internal configuration and grants. No identity migration or configuration
+rewrite is needed for existing Agents.
+
 `/effort` is model reasoning only and is derived from the selected Provider/model.
 DeepSeek exposes exactly `off`, `high`, and `max`; those values control the
 DeepSeek request's thinking mode and never select a HASHI workflow. The Backend

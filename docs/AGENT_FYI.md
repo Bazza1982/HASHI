@@ -1,5 +1,15 @@
 # HASHI Agent FYI
 
+October 18 FC Provider identity: shared, creation and Agent catalogues now use
+public Provider names matching live/offline presentation, so exact model and
+reasoning lookups resolve without adapter-suffix guesses. Legacy `-api` inputs
+remain accepted and new creation retains canonical internal grants. Shared
+choices respect instance model restrictions and reasoning overrides. Six red
+regressions became green; 95 focused checks and the existing external client's
+deployed selection policy passed against new FC responses. Source adoption
+and graphical acceptance remain pending the user's reserved `/reboot max`.
+See [HERV3 configuration](HERV3_UPGRADE.md#configuration).
+
 October 16 Ollama context budget: the native-context opt-in now projects
 conversation fields instead of complete history rows, indexes scheduler/tool
 reference material and preserves its full source privately by SHA256. PCM

@@ -859,14 +859,15 @@ async def test_add_agent_api_persists_her_orchestration_effort(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_herv3_creation_uses_explicit_provider_and_rejects_ambiguous_model(tmp_path):
+@pytest.mark.parametrize("provider", ["openrouter", "openrouter-api"])
+async def test_herv3_creation_uses_explicit_provider_and_rejects_ambiguous_model(tmp_path, provider):
     server = _server(tmp_path)
     server.global_config.her_providers["providers"]["openrouter"] = {
         "engine": "openrouter-api", "models": ["gpt-5.6-sol"],
         "default_model": "gpt-5.6-sol", "status": "stable",
     }
     spec = {"name": "explicit-provider", "backend": "her-v3",
-            "provider": "openrouter-api", "model": "gpt-5.6-sol", "effort": "high"}
+            "provider": provider, "model": "gpt-5.6-sol", "effort": "high"}
     created = await server.handle_admin_add_agent(_Request(payload=spec))
     assert created.status == 201, created.text
     stored = read_config_json(server.config_path)

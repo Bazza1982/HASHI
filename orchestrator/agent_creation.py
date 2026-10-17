@@ -33,6 +33,8 @@ from orchestrator.flexible_backend_registry import (
     REMOVED_ENGINE_IDS,
     apply_backend_policy_defaults,
     canonical_backend_engine,
+    canonical_model_provider,
+    public_model_provider,
     get_available_models,
     get_backend_entry,
     get_default_model,
@@ -181,7 +183,7 @@ def _tier_choice(
         )
     seed: HERv3ModelTarget | None = None
     for name, profile in provider_profiles.items():
-        engine = canonical_backend_engine(
+        engine = canonical_model_provider(
             str(
                 profile.get("engine")
                 or (name if str(name).endswith("-api") else f"{name}-api")
@@ -237,7 +239,7 @@ def build_her_backend_row(
     seed = HERv3ModelTarget(engine, pro_model)
     options = build_v3_provider_options([], provider_profiles, seed)
     selected = seed
-    requested_provider = canonical_backend_engine(str(provider or "").strip())
+    requested_provider = canonical_model_provider(provider)
     available = [option for option in options if option.get("available")]
     if requested_provider:
         available = [option for option in available if option["engine"] == requested_provider]
@@ -284,7 +286,7 @@ def build_her_backend_row(
     if choices:
         row["effort"] = requested_effort
     row["her_v2"] = {
-        "main": selected.to_dict(),
+        "main": {"provider": selected.provider, "model": selected.model},
         "audit_failure_terminal": "ERROR",
         "shadow_mode": False,
         "user_idle_timeout_s": 300,
@@ -400,7 +402,7 @@ def _granted_policy_rows(spec, rows, catalogue, selected):
             result.append(deepcopy(selected))
         elif engine == HER_V2_ENGINE:
             providers = entry["providers"]
-            configured = (row.get("her_v2") or {}).get("main", {}).get("provider")
+            configured = public_model_provider((row.get("her_v2") or {}).get("main", {}).get("provider"))
             provider = configured if providers.get(configured, {}).get("available") else next(key for key, value in providers.items() if value.get("available"))
             result.append(_build_policy_backend_row(AgentCreationSpec(
                 name=spec.name, backend=engine, provider=provider,
@@ -427,8 +429,8 @@ def _build_policy_backend_row(spec, rows, catalogue):
     if engine == HER_V2_ENGINE:
         providers = entry["providers"]
         default_provider = (result.get("her_v2") or {}).get("main", {}).get("provider")
-        provider = canonical_backend_engine(spec.provider or default_provider)
-        option = providers.get(provider)
+        provider = canonical_model_provider(spec.provider or default_provider)
+        option = providers.get(public_model_provider(provider))
         if not option or not option.get("available"):
             raise InvalidBackendError("HERV3 Provider is not allowed or available in the creation template")
         model = str(spec.model or option.get("default_model") or "").strip()
@@ -437,7 +439,9 @@ def _build_policy_backend_row(spec, rows, catalogue):
         choices = option["model_efforts"].get(model, [])
         result["her_v2"]["main"] = {"provider": provider, "model": model}
         # Freeze the effective granted Provider set, including credentials and privacy.
-        result["her_v2"]["v3_provider_allowlist"] = [key for key, value in providers.items() if value.get("available")]
+        result["her_v2"]["v3_provider_allowlist"] = [
+            canonical_model_provider(key) for key, value in providers.items() if value.get("available")
+        ]
     else:
         model = str(spec.model or entry.get("default_model") or "").strip()
         if engine == "claude-cli":
