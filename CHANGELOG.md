@@ -17,9 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   state, service/configuration versions, and explicit unknown values.
 - Added live Hashi Compute voice discovery to the Call settings menu. The full
   catalogue is grouped by language and declared gender, with names,
-  descriptions, availability counts, and direct catalogue-hosted previews.
-  Callable voices can be selected; other entries are visibly locked and remain
-  preview-only.
+  descriptions, the catalogue count, and direct catalogue-hosted previews.
+  Every voice supplied by the matched catalogue can be selected; HASHI does not
+  maintain a second voice allowlist.
 
 ### Changed
 

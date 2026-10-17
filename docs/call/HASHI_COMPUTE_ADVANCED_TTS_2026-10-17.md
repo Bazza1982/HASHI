@@ -82,25 +82,31 @@ The Call settings menu now resolves the selected TTS target back to the exact
 configured Compute node, model, and speech interface. It reads the manifest's
 declared `speech_catalogue` resource rather than maintaining a second voice
 list. The current Kokoro catalogue contains 59 voices and marks 6 callable for
-live synthesis. All 59 are grouped by language and structured gender. The 6
-callable voices can be selected; the remaining 53 are visibly locked and remain
-preview-only. Missing gender is shown as unlabelled rather than inferred from an
-ID or display name.
+live synthesis. All 59 are grouped by language and structured gender and all 59
+can be selected for Call. HASHI treats inclusion in the matched Hashi Compute
+catalogue as the voice allowlist; the catalogue's `callable` value remains
+provider metadata rather than a second HASHI permission gate. Missing gender is
+shown as unlabelled rather than inferred from an ID or display name.
 
-Buttons show the catalogue display name and description. Selecting a callable
+Buttons show the catalogue display name and description. Selecting any listed
 voice persists only the verified voice ID and a short fallback label in the
-revisioned Call profile. Clicking a locked voice does not write configuration.
-For either kind, a matching locale preview is downloaded directly from the
-sample path declared by the Compute catalogue, sent through the existing
+revisioned Call profile. A matching locale preview is downloaded directly from
+the sample path declared by the Compute catalogue, sent through the existing
 frontend media publication path, and discarded after delivery. HASHI neither
 generates a second preview nor bundles a copy of the Compute sample set.
 
-Live HASHI3 discovery rendered all 59 entries across 10 groups: 6 selectable and
-53 locked preview-only. It downloaded a locked voice's Chinese WAV sample
-directly while the selected `zf_001` profile and configuration file remained
-unchanged. This is source-level and direct-service evidence; the running Agent
+Live HASHI3 discovery rendered all 59 entries across 10 groups and exposed all
+59 as selectable. It downloaded the selected voice's Chinese WAV sample
+directly. This is source-level and direct-service evidence; the running Agent
 still requires its normal Function adoption before the revised menu can be
 accepted through the external frontend.
+
+The catalogue currently reports 53 of those voices as `voice_not_exposed` with
+an `offline_preview` synthesis scope. A direct live synthesis probe of one such
+voice (`zf_042`) was rejected by the current Compute inference endpoint, using
+both its short ID and catalogue key. HASHI now permits the selection as required,
+but successful conversational synthesis for those entries also requires Hashi
+Compute to expose them through its speech endpoint.
 
 ## Focused validation
 

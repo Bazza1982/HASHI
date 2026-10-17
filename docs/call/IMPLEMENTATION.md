@@ -72,10 +72,11 @@ video of the Agent; the Agent uses its existing static avatar.
    model, and `openai.audio.speech` interface derives its voice picker from the
    node's declared `speech_catalogue` resource. The picker shows the full
    catalogue, grouped by language and structured gender, with each voice's name
-   and description. Voices marked callable can be selected; other entries are
-   visibly locked and preview-only. Missing gender remains explicitly
-   unlabelled. Selecting a callable voice persists only that verified ID and a
-   fallback display label; it does not copy the provider catalogue. Preview
+   and description. Every voice supplied by the matched catalogue can be
+   selected; HASHI does not reinterpret provider metadata as another allowlist.
+   Missing gender remains explicitly unlabelled. Selecting a voice persists
+   only that verified ID and a fallback display label; it does not copy the
+   provider catalogue. Preview
    downloads the catalogue's locale-matched sample with bounded, no-redirect
    transport, publishes it through the existing frontend media path, and
    deletes the temporary delivery file. If discovery fails, the saved selection

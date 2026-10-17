@@ -183,7 +183,6 @@ class CallSettings:
             + escape(
                 tr(
                     "call.voice.catalogue.count",
-                    available=len(catalogue.callable_voices),
                     total=catalogue.total,
                 )
             )
@@ -350,25 +349,14 @@ class CallSettings:
                     facts = self._voice_facts(directory, current_voice, key)
                     for voice in voices:
                         option_label = self._voice_option_label(voice)
-                        if voice.callable:
-                            label = selected_label(
-                                option_label,
-                                profile["tts"]["voice_id"] == voice.id,
-                            )
-                            action = "cvoice"
-                        else:
-                            label = (
-                                "🔒 "
-                                + option_label
-                                + " · "
-                                + tr("call.voice.preview_only")
-                            )
-                            action = "vpreview"
                         rows.append(
                             [
                                 button(
-                                    label,
-                                    action,
+                                    selected_label(
+                                        option_label,
+                                        profile["tts"]["voice_id"] == voice.id,
+                                    ),
+                                    "cvoice",
                                     voice.id,
                                 )
                             ]
@@ -497,8 +485,6 @@ class CallSettings:
                 voice = directory.catalogue.voice(value)
             except ComputeServiceError as exc:
                 raise CallError("call_voice_unavailable", 409) from exc
-            if not voice.callable:
-                raise CallError("call_voice_unavailable", 409)
             profile["tts"]["voice_id"] = voice.id
             page = self._voice_page(directory, voice.id)
             self.config.save_discovered_voice(
@@ -511,20 +497,6 @@ class CallSettings:
                 voice_label=voice.label[:50],
             )
             return page
-        elif action == "vpreview":
-            target = next(
-                t for t in ctx["targets"] if t["id"] == profile["tts"]["target_id"]
-            )
-            directory = self._directory_for(target)
-            if directory is None:
-                raise CallError("call_voice_catalogue_unavailable", 503)
-            try:
-                voice = directory.catalogue.voice(value)
-            except ComputeServiceError as exc:
-                raise CallError("call_voice_unavailable", 409) from exc
-            if voice.callable:
-                raise CallError("call_menu_invalid")
-            return self._voice_page(directory, voice.id)
         elif action == "option":
             kind, key_index, index = value.split(".")
             target = next(
@@ -558,9 +530,7 @@ class CallSettings:
         directory = self._directory_for(target)
         if directory is not None:
             try:
-                selected_voice = directory.catalogue.voice(voice)
-                if voice_id is None and not selected_voice.callable:
-                    raise ComputeServiceError("speech_voice_unavailable")
+                directory.catalogue.voice(voice)
                 downloaded = await directory.download_preview(
                     voice,
                     ui_language.current_locale(),
@@ -649,7 +619,7 @@ async def callback(runtime, update, context):
     try:
         _, action, value, revision = query.data.split(":", 3)
         settings = CallSettings(runtime)
-        if action in {"voice", "cvoice", "vpreview", "preview"} or (
+        if action in {"voice", "cvoice", "preview"} or (
             action == "view" and (value == "voice" or value.startswith("voice."))
         ):
             await settings.prepare_voice_directory()
@@ -661,11 +631,8 @@ async def callback(runtime, update, context):
             == "telegram"
         )
         preview = (
-            await settings.preview(
-                telegram=telegram,
-                voice_id=value if action == "vpreview" else None,
-            )
-            if action in {"voice", "cvoice", "vpreview", "preview"}
+            await settings.preview(telegram=telegram)
+            if action in {"voice", "cvoice", "preview"}
             else None
         )
         if action != "preview":

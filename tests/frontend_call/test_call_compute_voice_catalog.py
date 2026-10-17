@@ -96,11 +96,11 @@ def _catalogue_payload():
                     },
                     {
                         "id": "zf_hidden",
-                        "label": "未开放",
+                        "label": "少女",
                         "gender": "female",
                         "language": "fr",
                         "language_name": "法语",
-                        "note": "仅供目录试听",
+                        "note": "清亮，约15岁",
                         "callable": False,
                         "availability": "voice_not_exposed",
                         "auditions": [_audition("zh", "zf_hidden")],
@@ -319,7 +319,7 @@ async def test_compute_voice_menu_groups_metadata_and_downloads_catalogue_previe
         assert "英语 · 男声 · 1" in labels
         assert "法语 · 女声 · 1" in labels
         assert "年轻4" in text and "自然轻度沙哑感，约18岁" in text
-        assert "3 / 4" in text
+        assert "4 个音色 · 全部可选择" in text
 
         group_pages = [
             button.callback_data.split(":", 3)[2]
@@ -329,8 +329,8 @@ async def test_compute_voice_menu_groups_metadata_and_downloads_catalogue_previe
         ]
         selection = None
         selection_label = ""
-        locked_preview = None
-        locked_label = ""
+        formerly_restricted = None
+        formerly_restricted_label = ""
         group_buttons = []
         for page in group_pages:
             _group_text, group_keyboard = settings.render(page)
@@ -340,13 +340,18 @@ async def test_compute_voice_menu_groups_metadata_and_downloads_catalogue_previe
                     if button.callback_data.startswith("call:cvoice:am_michael:"):
                         selection = button.callback_data
                         selection_label = button.text
-                    if button.callback_data.startswith("call:vpreview:zf_hidden:"):
-                        locked_preview = button.callback_data
-                        locked_label = button.text
+                    if button.callback_data.startswith("call:cvoice:zf_hidden:"):
+                        formerly_restricted = button.callback_data
+                        formerly_restricted_label = button.text
         assert selection is not None
         assert "成熟2" in selection_label and "沙哑，约40岁" in selection_label
-        assert locked_preview is not None
-        assert "未开放" in locked_label and "仅试听" in locked_label
+        assert formerly_restricted is not None
+        assert "少女" in formerly_restricted_label
+        assert "🔒" not in formerly_restricted_label
+        assert not any(
+            button.callback_data.startswith("call:vpreview:")
+            for button in group_buttons
+        )
         assert all(
             len(button.callback_data.encode()) <= 64
             for button in [
@@ -355,36 +360,22 @@ async def test_compute_voice_menu_groups_metadata_and_downloads_catalogue_previe
             ]
         )
 
-        _, action, value, revision = locked_preview.split(":", 3)
-        assert settings.apply(action, value, revision).startswith("voice.")
-        locked_delivery = await settings.preview(
-            telegram=False,
-            voice_id=value,
-        )
-        unchanged = settings.config.context(settings.owner, settings.agent)
-        assert unchanged["profile"]["tts"]["voice_id"] == "zf_001"
-
-        _, action, value, revision = selection.split(":", 3)
+        _, action, value, revision = formerly_restricted.split(":", 3)
         assert settings.apply(action, value, revision).startswith("voice.")
         preview = await settings.preview(telegram=False)
 
     context = settings.config.context(settings.owner, settings.agent)
-    assert context["profile"]["tts"]["voice_id"] == "am_michael"
+    assert context["profile"]["tts"]["voice_id"] == "zf_hidden"
     _doc, targets = settings.config.read()
-    assert "am_michael" in targets["hashicompute-kokoro"]["voices"]
-    assert targets["hashicompute-kokoro"]["voice_styles"]["am_michael"] == "成熟2"
-    assert locked_delivery.payload == _wav_bytes()
-    assert locked_delivery.media_type == "audio/wav"
+    assert "zf_hidden" in targets["hashicompute-kokoro"]["voices"]
+    assert targets["hashicompute-kokoro"]["voice_styles"]["zf_hidden"] == "少女"
     assert preview.payload == _wav_bytes()
     assert preview.media_type == "audio/wav"
-    assert client.paths == [
-        "/v1/speech/samples/zf_hidden-zh.wav",
-        "/v1/speech/samples/am_michael-zh.wav",
-    ]
+    assert client.paths == ["/v1/speech/samples/zf_hidden-zh.wav"]
 
 
 @pytest.mark.asyncio
-async def test_preview_only_callback_publishes_catalogue_audio_without_saving(
+async def test_catalogue_callback_selects_every_listed_voice_and_publishes_audio(
     tmp_path,
     monkeypatch,
 ):
@@ -439,11 +430,10 @@ async def test_preview_only_callback_publishes_catalogue_audio_without_saving(
         _reply_text=AsyncMock(),
     )
     settings = CallSettings(runtime)
-    before = (tmp_path / "call_profiles.json").read_bytes()
     revision = settings.config.context(settings.owner, settings.agent)["revision"][:12]
     query = SimpleNamespace(
-        id="locked-preview-1",
-        data=f"call:vpreview:zf_hidden:{revision}",
+        id="catalogue-selection-1",
+        data=f"call:cvoice:zf_hidden:{revision}",
         from_user=SimpleNamespace(id=7),
         edit_message_text=AsyncMock(),
         answer=AsyncMock(),
@@ -456,13 +446,16 @@ async def test_preview_only_callback_publishes_catalogue_audio_without_saving(
     with ui_language.language_scope(None, locale="zh-CN"):
         await callback(runtime, update, SimpleNamespace())
 
-    assert (tmp_path / "call_profiles.json").read_bytes() == before
+    context = settings.config.context(settings.owner, settings.agent)
+    assert context["profile"]["tts"]["voice_id"] == "zf_hidden"
+    _doc, targets = settings.config.read()
+    assert "zf_hidden" in targets["hashicompute-kokoro"]["voices"]
     assert captured["profile_id"] == "call:kokoro-82m:zf_hidden"
     assert captured["payload"] == _wav_bytes()
     assert captured["media_type"] == "audio/wav"
     assert captured["filename"] == "zf_hidden-zh.wav"
     assert captured["preview_id"] == query.id
-    assert "未开放" in captured["caption"]
+    assert "少女" in captured["caption"]
     assert client.paths == ["/v1/speech/samples/zf_hidden-zh.wav"]
     query.edit_message_text.assert_awaited_once()
     query.answer.assert_awaited_once_with(None, show_alert=False)
