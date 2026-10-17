@@ -121,6 +121,8 @@ from orchestrator.flexible_backend_registry import (
     HER_V3_ENGINE,
     is_selectable_backend,
     canonical_backend_engine,
+    canonical_model_provider,
+    public_model_provider,
     get_available_models,
     get_backend_entry,
     get_provider_reasoning_efforts,
@@ -1858,7 +1860,7 @@ class WorkbenchApiServer:
                         if target is not None:
                             public_row.update(
                                 {
-                                    "provider": target.provider,
+                                    "provider": public_model_provider(target.provider),
                                     "model": target.model,
                                     "models": get_available_models(target.provider),
                                     "effort": {
@@ -4636,7 +4638,7 @@ class WorkbenchApiServer:
                 for name, raw_profile in raw_profiles.items():
                     if not isinstance(raw_profile, dict):
                         continue
-                    provider = canonical_backend_engine(
+                    provider = canonical_model_provider(
                         str(
                             raw_profile.get("engine")
                             or (
@@ -4649,21 +4651,20 @@ class WorkbenchApiServer:
                     provider_entry = get_backend_entry(provider)
                     if not provider_entry:
                         continue
-                    models = list(
-                        dict.fromkeys(
-                            str(value).strip()
-                            for value in [
-                                *(raw_profile.get("models") or []),
-                                raw_profile.get("default_model"),
-                                raw_profile.get("model"),
-                                raw_profile.get("fast_model"),
-                                raw_profile.get("pro_model"),
-                                *get_available_models(provider),
-                            ]
-                            if str(value or "").strip()
-                            and str(value).strip().casefold() != "role-configured"
-                        )
-                    )
+                    model_policy = {
+                        **raw_profile,
+                        "engine": provider,
+                        "models": [
+                            *(raw_profile.get("models") or []),
+                            raw_profile.get("fast_model"),
+                            raw_profile.get("pro_model"),
+                        ],
+                    }
+                    models = [
+                        model
+                        for model in runtime_available_models(provider, backend=model_policy)
+                        if model.casefold() != "role-configured"
+                    ]
                     default_model = str(
                         raw_profile.get("pro_model")
                         or raw_profile.get("default_model")
@@ -4671,14 +4672,19 @@ class WorkbenchApiServer:
                         or provider_entry.get("default_model")
                         or next(iter(models), "")
                     ).strip()
+                    if default_model not in models:
+                        default_model = next(iter(models), "")
                     status = str(raw_profile.get("status") or "stable").strip().lower()
-                    providers[provider] = {
-                        "engine": provider,
+                    public_provider = public_model_provider(provider)
+                    providers[public_provider] = {
+                        "engine": public_provider,
                         "label": str(provider_entry.get("label") or provider),
                         "models": models,
                         "default_model": default_model or None,
                         "model_efforts": {
-                            model: get_provider_reasoning_efforts(provider, model)
+                            model: runtime_available_efforts(
+                                provider, model, allowed_backends=[model_policy], provider=True
+                            )
                             for model in models
                         },
                         "available": status != "disabled" and bool(models),

@@ -3,7 +3,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from orchestrator.flexible_backend_registry import HER_V2_ENGINE, public_backend_engine
+from orchestrator.flexible_backend_registry import (
+    HER_V2_ENGINE, public_backend_engine, public_model_provider,
+)
 
 
 def _optional_bool(runtime: Any, name: str) -> bool | None:
@@ -48,7 +50,7 @@ def runtime_presentation_status(runtime: Any) -> dict[str, Any]:
     profiles = getattr(config, "profiles", None)
     main = profiles.get("main") if isinstance(profiles, dict) else None
     if main is not None:
-        provider = str(getattr(main, "engine", "") or "")
+        provider = public_model_provider(getattr(main, "engine", ""))
         model = str(getattr(main, "model", "") or "")
         if provider and model:
             result["her_v3"] = {"main": {"provider": provider, "model": model}}

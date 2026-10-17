@@ -1,5 +1,31 @@
 # HERV3 upgrade: JEV experiment and simplified routing
 
+The [Ollama context pilot](HERV3_OLLAMA_CONTEXT_PILOT.md) began on 2026-10-15
+as an Agent6-only `feature-ollama` experiment and is explicitly approved for
+main promotion on 2026-10-18. It remains an instance opt-in: exact configured
+native context, no server truncation, native protocol evidence and GPU
+qualification. The current configuration guide, capacity/admission repairs,
+binary reasoning and measured acceptance limits are in its owning decision. It does
+not change PCM design or other providers; source and live adoption are separate.
+The October 16 continuation selects a 48K baseline and 8K output reserve,
+adds optional short idle residency/native timing evidence, and tests Qwen
+without forced CPU offload. Agent6 subsequently adopted committed source
+through a verified Agent-only hot reboot; its active profile publishes 48K/8K
+and 90-second idle residency. User task testing and actual voice contention
+remain separate acceptance items; the original 64K results stay historical.
+
+The October 16 Ollama-only presentation experiment bypasses auxiliary Persona
+commentary, clarification rendering and optional final-style inference when
+the resolved Model Provider is `ollama`. Public configuration and status name
+the Provider separately from its model; `ollama-api` is an internal adapter
+compatibility ID. Registered Provider names and legacy IDs both resolve through
+the registry. Neutral progress and required
+questions still cross their typed delivery boundaries; the exact main-model
+final answer and its PCM Persona remain intact. Other Model Providers retain
+their presentation calls. This is not the downstream `/commentary` visibility
+switch. See the [presentation decision](HERV3_OLLAMA_CONTEXT_PILOT.md#2026-10-16-ollama-only-pcm-presentation).
+Source verification and Agent6 Worker adoption must be reported separately.
+
 The 2026-10-04 [scoped-search Function change](HERV3_SCOPED_SEARCH.md) retains
 the single model/tool loop and direct Shell use. Execution facts drive technical
 verbose activity independently of commentary; AC heartbeat is not actual progress.
@@ -178,11 +204,29 @@ Provider, `/model` selects one of that Provider's real model IDs, and both chang
 persist immediately for subsequent turns. Old route buttons are rejected rather
 than allowed to change ignored settings.
 
+Public Provider identity is consistent across shared, creation and per-Agent
+catalogues, offline metadata and live presentation: the `providers` dictionary
+key and its entry's `engine` use the same public name, such as `deepseek` or
+`ollama`, as the current runtime Provider. Clients can resolve that exact
+Provider/model pair without guessing adapter suffixes or adding duplicate
+model options. Model and reasoning choices still derive from the effective
+resolver, including instance overrides and explicit empty restrictions.
+Registered `-api` adapter IDs remain accepted as legacy input; creation
+normalizes them at the Provider boundary and retains canonical adapter IDs in
+internal configuration and grants. No identity migration or configuration
+rewrite is needed for existing Agents.
+
 `/effort` is model reasoning only and is derived from the selected Provider/model.
 DeepSeek exposes exactly `off`, `high`, and `max`; those values control the
 DeepSeek request's thinking mode and never select a HASHI workflow. The Backend
 catalogue exposes Provider-specific models and effort choices rather than copied
 HER-wide placeholders.
+
+HERV3 Provider menus and target validation derive model choices through
+`runtime_effort_options`. An instance's `allowed_backends.available_models`
+restriction also applies inside HERV3, including an empty list. Shared defaults
+and Provider metadata cannot reintroduce excluded models; a Provider's default
+selection must be one of its effective models.
 
 Some Provider/model pairs use a binary reasoning option, such as `off` or
 `enabled`. The selected value must reach that Provider unchanged, including

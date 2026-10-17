@@ -20,6 +20,7 @@ from typing import Any, Callable, Mapping, Sequence
 import httpx
 
 from adapters import her_persona
+from orchestrator.flexible_backend_registry import canonical_model_provider
 from adapters.base import BackendResponse, TokenUsage
 from adapters.openrouter_api import ProviderCallObserverError
 from adapters.stream_events import (
@@ -4903,6 +4904,9 @@ class HashiStageProvider(StageProvider):
                                 context=request.context,
                                 fallback_persona=(source.guidance if source.usable else ""),
                                 tools_available=request.allow_tools,
+                                reference_projector=getattr(
+                                    backend, "project_main_references", None
+                                ),
                             )
                         else:
                             system_prompt = _direct_system_prompt(
@@ -6110,6 +6114,10 @@ class HashiStageProvider(StageProvider):
                 await backend.shutdown()
 
 
+def _pcm_only_presentation(profile: ProviderProfile) -> bool:
+    return canonical_model_provider(profile.engine) == "ollama-api"
+
+
 class _ConfiguredFinalStyleRenderer(FinalStyleRenderer):
     """Use the auxiliary profile for one fail-open presentation-only check."""
 
@@ -6130,6 +6138,13 @@ class _ConfiguredFinalStyleRenderer(FinalStyleRenderer):
         self.render_index = 0
 
     async def render(self, request: FinalStyleRequest) -> FinalStyleResult:
+        if _pcm_only_presentation(self.profile):
+            return FinalStyleResult(
+                source_event_id=request.event_id,
+                decision="keep",
+                text=request.draft_text,
+                provenance="ollama_pcm_only",
+            )
         effective = request
         if self.source.usable and not any(
             item.authority == "persona" for item in request.requirements
@@ -6233,6 +6248,13 @@ class _ConfiguredPersonaPackager(PersonaPackager, RequiredPersonaRenderer):
         self.package_index = 0
 
     async def package(self, commentary: NeutralCommentary) -> PackagedCommentary:
+        if _pcm_only_presentation(self.profile):
+            return PackagedCommentary(
+                source_event_id=commentary.event_id,
+                stage=commentary.stage,
+                text=commentary.text,
+                provenance="ollama_pcm_only",
+            )
         if not self.source.usable:
             return self._fallback(
                 commentary,
@@ -6295,6 +6317,13 @@ class _ConfiguredPersonaPackager(PersonaPackager, RequiredPersonaRenderer):
         )
 
     async def render(self, message: RequiredUserMessage) -> RenderedRequiredMessage:
+        if _pcm_only_presentation(self.profile):
+            return RenderedRequiredMessage(
+                source_event_id=message.event_id,
+                kind=message.kind,
+                text=message.text,
+                provenance="ollama_pcm_only",
+            )
         if not self.source.usable:
             return self._required_fallback(
                 message,

@@ -4319,14 +4319,35 @@ async def handle_backend_error(
             completion_path="foreground",
         )
         return
-    send_elapsed_s, chunk_count = await runtime.send_long_message(
-        chat_id=item.chat_id,
-        text=err_msg,
-        request_id=item.request_id,
-        purpose="error",
-        error_context=failure_context,
-        frontend_outbox=True,
-    )
+    try:
+        send_elapsed_s, chunk_count = await runtime.send_long_message(
+            chat_id=item.chat_id,
+            text=err_msg,
+            request_id=item.request_id,
+            purpose="error",
+            error_context=failure_context,
+            frontend_outbox=True,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as delivery_exc:
+        # The backend terminal was already persisted above. A connector failure
+        # is secondary and must not escape into RUNTIME_EXCEPTION closeout.
+        runtime.error_logger.error(
+            "Backend error delivery failed for %s (primary_code=%s, delivery=%s): %s",
+            item.request_id, failure_fields.get("error_code") or "untyped",
+            type(delivery_exc).__name__, _safe_excerpt(str(delivery_exc), 300),
+        )
+        runtime._log_maintenance(
+            item, "send_error_failed", primary_error_code=failure_fields.get("error_code"),
+            delivery_error_type=type(delivery_exc).__name__,
+            delivery_error_excerpt=_safe_excerpt(str(delivery_exc), 300),
+        )
+        runtime_cross_session.record_turn_result(
+            runtime, item, response=response, error=err_msg,
+            delivered=False, completion_path="foreground",
+        )
+        return
     total_elapsed_s = (
         max(0.0, time.monotonic() - queued_monotonic)
         if queued_monotonic is not None

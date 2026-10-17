@@ -9,7 +9,7 @@ from orchestrator import telegram_stream_policy
 from orchestrator.audit_mode import load_audit_config, visible_audit_criteria
 from orchestrator.command_ui import card_title
 from orchestrator.config import DEFAULT_AGENT_MODE
-from orchestrator.flexible_backend_registry import public_backend_engine
+from orchestrator.flexible_backend_registry import public_backend_engine, public_model_provider
 from orchestrator.memory_plus_mode import get_memory_plus_status, is_memory_plus_enabled
 from orchestrator.wrapper_mode import load_wrapper_config, visible_wrapper_slots
 
@@ -321,7 +321,7 @@ def build_status_text(runtime, detailed: bool = False, *, update: Any | None = N
     if provider:
         lines.append(
             f"<b>{html.escape(ui_language.tr('common.provider'))}</b> · "
-            f"<code>{html.escape(str(provider))}</code>"
+            f"<code>{html.escape(public_model_provider(provider))}</code>"
         )
     lines.extend(
         [

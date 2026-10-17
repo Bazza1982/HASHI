@@ -1,5 +1,9 @@
 # HASHI Agent FYI
 
+October 18: Ollama native context, binary reasoning and main promotion:
+[status/limits](HERV3_OLLAMA_CONTEXT_PILOT.md). Public Provider identities now
+match live metadata; legacy IDs remain accepted. See [HERV3](HERV3_UPGRADE.md).
+
 October 17 Compute: local/LAN/internet model services resolve through PAO's
 Function-layer Compute Service Directory. Register from a v1 manifest and persist
 structured node/service/model references. Capability, privacy, health,
