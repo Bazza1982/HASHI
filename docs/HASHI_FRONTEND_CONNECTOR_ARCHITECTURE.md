@@ -335,7 +335,10 @@ Every network Frontend Connector records `originated_at` when the user first
 submits a message and preserves it across local queueing, retry and reconnect.
 PAO records receipt time and owns the admission decision: an on-machine network
 frontend has a 30-second automatic window and a remote frontend has a 60-second
-window. Missing, invalid, non-UTC, implausibly future or older timestamps do not
+window. A Session API request that omits the required `originated_at` field is a
+frontend protocol incompatibility, not evidence of delay: PAO rejects it with
+HTTP 409 and `frontend_message_protocol_incompatible`, without creating a Run
+or confirmation. Invalid, non-UTC, implausibly future or older timestamps do not
 enter a Run. They create one durable, owner- and Session-bound confirmation that
 expires after 15 minutes. Confirm releases the immutable saved payload once;
 discard, expiry and Session-context supersession never execute it. Attachments
