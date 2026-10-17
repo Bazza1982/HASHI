@@ -467,7 +467,12 @@ class FlexibleBackendManager:
     ):
         self._save_state(active_model=active_model)
 
-    def set_privacy_level(self, level: int | str | PrivacyLevel) -> PrivacyLevel:
+    def set_privacy_level(
+        self,
+        level: int | str | PrivacyLevel,
+        *,
+        expected_current_level: int | None = None,
+    ) -> PrivacyLevel:
         parsed = require_level_available(level)
         require_backend_compatibility(self.config.active_backend, parsed)
         if parsed is PrivacyLevel.BASIC_REDACTION:
@@ -487,6 +492,14 @@ class FlexibleBackendManager:
                 )
 
         def update_state(state: dict[str, Any]) -> dict[str, Any]:
+            if expected_current_level is not None:
+                persisted_level = parse_privacy_level(
+                    state.get("privacy_level", self.privacy_level)
+                )
+                if persisted_level != expected_current_level:
+                    raise PrivacyPolicyError(
+                        "privacy setting changed; refresh before applying"
+                    )
             self._apply_managed_state_fields(state)
             state["privacy_level"] = int(parsed)
             return state

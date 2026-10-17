@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import asyncio
 import base64
 import binascii
@@ -368,6 +367,18 @@ def _saml_assertion_xml_from_payload(payload: dict) -> str:
         raise ValueError("SAMLResponse must be base64 encoded XML") from exc
 
 
+class _FrontendSettingsRequest:
+    """Narrow adapter for reusing HASHI's existing scheduler owner handlers."""
+
+    def __init__(self, *, name: str, payload: dict | None = None, job_id: str = ""):
+        self.match_info = {"name": name, "job_id": job_id}
+        self.query = {}
+        self._payload = dict(payload or {})
+
+    async def json(self):
+        return dict(self._payload)
+
+
 class WorkbenchApiServer:
     TRANSFER_ACCEPT_PREFIX = "TRANSFER_ACCEPTED "
     FORK_ACCEPT_PREFIX = "FORK_ACCEPTED "
@@ -676,6 +687,38 @@ class WorkbenchApiServer:
             self.handle_v2_frontend_capabilities,
         )
         self.app.router.add_get("/api/v1/agents", self.handle_v1_agents)
+        self.app.router.add_get(
+            "/api/v1/agents/{agent_id}/settings/privacy",
+            self.handle_v1_agent_settings_privacy_get,
+        )
+        self.app.router.add_patch(
+            "/api/v1/agents/{agent_id}/settings/privacy",
+            self.handle_v1_agent_settings_privacy_set,
+        )
+        self.app.router.add_get(
+            "/api/v1/agents/{agent_id}/settings/permissions",
+            self.handle_v1_agent_settings_permissions_get,
+        )
+        self.app.router.add_patch(
+            "/api/v1/agents/{agent_id}/settings/permissions",
+            self.handle_v1_agent_settings_permissions_set,
+        )
+        self.app.router.add_get(
+            "/api/v1/agents/{agent_id}/settings/activity",
+            self.handle_v1_agent_settings_activity_get,
+        )
+        self.app.router.add_post(
+            "/api/v1/agents/{agent_id}/settings/activity",
+            self.handle_v1_agent_settings_activity_create,
+        )
+        self.app.router.add_patch(
+            "/api/v1/agents/{agent_id}/settings/activity/jobs/{job_id}",
+            self.handle_v1_agent_settings_activity_update,
+        )
+        self.app.router.add_delete(
+            "/api/v1/agents/{agent_id}/settings/activity/jobs/{job_id}",
+            self.handle_v1_agent_settings_activity_delete,
+        )
 
         def session_handler(handler):
             return (
@@ -5757,6 +5800,163 @@ class WorkbenchApiServer:
             user = self._enterprise_user_from_request(request)
             return f"enterprise:{user.id}" if user is not None else None
         return SessionStore.owner_id_for(self.global_config)
+    @staticmethod
+    def _frontend_settings_capability() -> dict[str, Any]:
+        return {
+            "type": "hashi.frontend-settings",
+            "version": 1,
+            "authority": "HASHI Frontend Connector",
+            "scope": "authenticated_owner_agent",
+            "target_fields": ["instance_id", "agent_id"],
+            "operation_envelope": {
+                "type": "hashi.frontend-settings-operation",
+                "version": 1,
+                "required_fields": ["request_id", "target", "operation", "payload"],
+            },
+            "operations": [
+                "privacy.read",
+                "privacy.set_level",
+                "permissions.read",
+                "permissions.set_access_scope",
+                "activity.scheduler.list",
+                "activity.scheduler.create",
+                "activity.scheduler.update",
+                "activity.scheduler.delete",
+            ],
+            "privacy_levels": [0, 1, 2],
+            "autonomy_risk_ladder": False,
+        }
+
+    def _frontend_settings_target(self, request, instance_id: str):
+        expected_instance = str(
+            getattr(self.global_config, "instance_id", "") or ""
+        ).strip()
+        if not expected_instance:
+            return None, None, web.json_response(
+                {"ok": False, "error_code": "instance_identity_unavailable"},
+                status=503,
+            )
+        requested_instance = str(instance_id or "").strip()
+        if not requested_instance:
+            return None, None, web.json_response(
+                {"ok": False, "error_code": "settings_target_required"},
+                status=400,
+            )
+        if requested_instance != expected_instance:
+            return None, None, web.json_response(
+                {"ok": False, "error_code": "settings_target_instance_mismatch"},
+                status=409,
+            )
+        requested_agent = str(
+            request.match_info.get("agent_id") or ""
+        ).strip().casefold()
+        runtime = self._runtime_map().get(requested_agent)
+        if runtime is None:
+            return None, None, web.json_response(
+                {"ok": False, "error_code": "agent_not_found"},
+                status=404,
+            )
+        target = {
+            "instance_id": expected_instance,
+            "agent_id": str(getattr(runtime, "name", requested_agent)).casefold(),
+        }
+        return runtime, target, None
+
+    async def _frontend_settings_envelope(
+        self, request, *, operation: str, expected_instance: str | None = None
+    ):
+        if self._strict_authenticated_owner(request) is None:
+            return None, None, None, web.json_response(
+                {"ok": False, "error_code": "not_authenticated"},
+                status=401,
+            )
+        try:
+            envelope = await request.json()
+        except Exception:
+            return None, None, None, web.json_response(
+                {"ok": False, "error_code": "settings_envelope_invalid"},
+                status=400,
+            )
+        if not isinstance(envelope, dict):
+            return None, None, None, web.json_response(
+                {"ok": False, "error_code": "settings_envelope_invalid"},
+                status=400,
+            )
+        request_id = str(envelope.get("request_id") or "").strip()
+        if (
+            envelope.get("type") != "hashi.frontend-settings-operation"
+            or envelope.get("version") != 1
+            or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", request_id)
+            or envelope.get("operation") != operation
+            or not isinstance(envelope.get("target"), dict)
+            or not isinstance(envelope.get("payload"), dict)
+        ):
+            return None, None, None, web.json_response(
+                {"ok": False, "error_code": "settings_envelope_invalid"},
+                status=400,
+            )
+        runtime, target, error = self._frontend_settings_target(
+            request, envelope["target"].get("instance_id")
+        )
+        if error is not None:
+            return None, None, None, error
+        if (
+            str(envelope["target"].get("agent_id") or "").strip().casefold()
+            != target["agent_id"]
+        ):
+            return None, None, None, web.json_response(
+                {"ok": False, "error_code": "settings_target_agent_mismatch"},
+                status=409,
+            )
+        if expected_instance and target["instance_id"] != expected_instance:
+            return None, None, None, web.json_response(
+                {"ok": False, "error_code": "settings_target_instance_mismatch"},
+                status=409,
+            )
+        return runtime, target, envelope, None
+
+    @staticmethod
+    def _frontend_settings_scheduler_response(
+        response, *, target: dict[str, str], request_id: str
+    ):
+        try:
+            result = json.loads(response.body.decode("utf-8"))
+        except (AttributeError, UnicodeDecodeError, json.JSONDecodeError):
+            return web.json_response(
+                {"ok": False, "error_code": "scheduler_response_invalid"},
+                status=502,
+            )
+        if not isinstance(result, dict):
+            return web.json_response(
+                {"ok": False, "error_code": "scheduler_response_invalid"},
+                status=502,
+            )
+        if response.status >= 400 or result.get("ok") is False:
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error_code": str(
+                        result.get("error_code")
+                        or result.get("error")
+                        or "scheduler_operation_failed"
+                    )[:240],
+                    "contract": {"type": "hashi.frontend-settings", "version": 1},
+                    "request_id": request_id,
+                    "target": target,
+                },
+                status=response.status,
+            )
+        return web.json_response(
+            {
+                "ok": True,
+                "contract": {"type": "hashi.frontend-settings", "version": 1},
+                "request_id": request_id,
+                "target": target,
+                "result": result,
+            },
+            status=response.status,
+            headers={"Cache-Control": "private, no-store"},
+        )
 
     async def _authorize_live_voice(
         self, request, operation: str, payload: dict
@@ -6067,6 +6267,7 @@ class WorkbenchApiServer:
             "message_source": public_source_capabilities(),
             "private_authorization": public_private_authorization_capabilities(),
             "private_authorization_proof_version": 1,
+            "settings": self._frontend_settings_capability(),
             "agent_deletion": {
                 "version": "1.0",
                 "supported": True,
@@ -6263,6 +6464,496 @@ class WorkbenchApiServer:
             "event_source": "persistent_session_events",
         }
         return web.json_response(capabilities)
+
+    async def handle_v1_agent_settings_privacy_get(self, request):
+        if self._strict_authenticated_owner(request) is None:
+            return web.json_response(
+                {"ok": False, "error_code": "not_authenticated"}, status=401
+            )
+        runtime, target, error = self._frontend_settings_target(
+            request, request.query.get("instance_id")
+        )
+        if error is not None:
+            return error
+        manager = getattr(runtime, "backend_manager", None)
+        config = getattr(runtime, "config", None)
+        backend = str(getattr(config, "active_backend", "") or "")
+        if manager is None or not backend:
+            return web.json_response(
+                {"ok": False, "error_code": "privacy_settings_unavailable"},
+                status=503,
+            )
+        from orchestrator.flexible_backend_registry import get_supported_privacy_levels
+        from orchestrator.runtime_privacy import current_privacy_level
+
+        return web.json_response(
+            {
+                "ok": True,
+                "contract": {"type": "hashi.frontend-settings", "version": 1},
+                "target": target,
+                "authority": "HASHI privacy policy",
+                "privacy": {
+                    "current_level": int(current_privacy_level(runtime)),
+                    "backend": backend,
+                    "supported_levels": list(get_supported_privacy_levels(backend)),
+                },
+            },
+            headers={"Cache-Control": "private, no-store"},
+        )
+
+    async def handle_v1_agent_settings_privacy_set(self, request):
+        runtime, target, envelope, error = await self._frontend_settings_envelope(
+            request, operation="privacy.set_level"
+        )
+        if error is not None:
+            return error
+        payload = envelope["payload"]
+        level = payload.get("level")
+        expected_level = payload.get("expected_current_level")
+        if (
+            isinstance(level, bool)
+            or not isinstance(level, int)
+            or level not in {0, 1, 2}
+            or isinstance(expected_level, bool)
+            or not isinstance(expected_level, int)
+            or expected_level not in {0, 1, 2}
+        ):
+            return web.json_response(
+                {"ok": False, "error_code": "privacy_level_invalid"}, status=400
+            )
+        from orchestrator.runtime_privacy import (
+            _set_level,
+            _verify_level_two_detector,
+            current_privacy_level,
+        )
+        from orchestrator.privacy_levels import PrivacyPolicyError
+
+        current_level = int(current_privacy_level(runtime))
+        if current_level != expected_level:
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error_code": "privacy_state_changed",
+                    "current_level": current_level,
+                },
+                status=409,
+            )
+        confirm_downgrade = payload.get("confirm_downgrade", False)
+        accept_level_two_risk = payload.get("accept_level_two_risk", False)
+        if not isinstance(confirm_downgrade, bool) or not isinstance(
+            accept_level_two_risk, bool
+        ):
+            return web.json_response(
+                {"ok": False, "error_code": "privacy_confirmation_invalid"},
+                status=400,
+            )
+        if level < current_level and not confirm_downgrade:
+            return web.json_response(
+                {"ok": False, "error_code": "privacy_downgrade_confirmation_required"},
+                status=409,
+            )
+        if level == 2 and current_level < 2 and not accept_level_two_risk:
+            return web.json_response(
+                {"ok": False, "error_code": "privacy_level_two_acceptance_required"},
+                status=409,
+            )
+        try:
+            if level == 2 and current_level < 2:
+                await _verify_level_two_detector()
+            notice = _set_level(
+                runtime,
+                level,
+                confirmed=confirm_downgrade,
+                expected_current_level=expected_level,
+            )
+        except PrivacyPolicyError as exc:
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error_code": "privacy_policy_rejected",
+                    "error": str(exc)[:240],
+                },
+                status=409,
+            )
+        except OSError:
+            return web.json_response(
+                {"ok": False, "error_code": "settings_persistence_uncertain"},
+                status=503,
+            )
+        except (TypeError, ValueError) as exc:
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error_code": "privacy_level_invalid",
+                    "error": str(exc)[:240],
+                },
+                status=400,
+            )
+        manager = runtime.backend_manager
+        backend = str(getattr(runtime.config, "active_backend", "") or "")
+        from orchestrator.flexible_backend_registry import get_supported_privacy_levels
+        from orchestrator.runtime_privacy import current_privacy_level
+
+        return web.json_response(
+            {
+                "ok": True,
+                "contract": {"type": "hashi.frontend-settings", "version": 1},
+                "request_id": envelope["request_id"],
+                "target": target,
+                "authority": "HASHI privacy policy",
+                "notice": notice,
+                "privacy": {
+                    "current_level": int(current_privacy_level(runtime)),
+                    "backend": backend,
+                    "supported_levels": list(get_supported_privacy_levels(backend)),
+                },
+            },
+            headers={"Cache-Control": "private, no-store"},
+        )
+
+    async def handle_v1_agent_settings_activity_get(self, request):
+        if self._strict_authenticated_owner(request) is None:
+            return web.json_response(
+                {"ok": False, "error_code": "not_authenticated"}, status=401
+            )
+        runtime, target, error = self._frontend_settings_target(
+            request, request.query.get("instance_id")
+        )
+        if error is not None:
+            return error
+        request_id = f"read-{uuid4().hex}"
+        response = await self.handle_agent_scheduler_jobs(
+            _FrontendSettingsRequest(name=runtime.name)
+        )
+        return self._frontend_settings_scheduler_response(
+            response, target=target, request_id=request_id
+        )
+
+    async def handle_v1_agent_settings_activity_create(self, request):
+        runtime, target, envelope, error = await self._frontend_settings_envelope(
+            request, operation="activity.scheduler.create"
+        )
+        if error is not None:
+            return error
+        payload = dict(envelope["payload"])
+        response = await self.handle_agent_scheduler_create(
+            _FrontendSettingsRequest(name=runtime.name, payload=payload)
+        )
+        return self._frontend_settings_scheduler_response(
+            response, target=target, request_id=envelope["request_id"]
+        )
+
+    async def handle_v1_agent_settings_activity_update(self, request):
+        runtime, target, envelope, error = await self._frontend_settings_envelope(
+            request, operation="activity.scheduler.update"
+        )
+        if error is not None:
+            return error
+        job_id = str(request.match_info.get("job_id") or "").strip()
+        if not job_id:
+            return web.json_response(
+                {"ok": False, "error_code": "scheduler_job_id_required"},
+                status=400,
+            )
+        response = await self.handle_agent_scheduler_update(
+            _FrontendSettingsRequest(
+                name=runtime.name,
+                job_id=job_id,
+                payload=dict(envelope["payload"]),
+            )
+        )
+        return self._frontend_settings_scheduler_response(
+            response, target=target, request_id=envelope["request_id"]
+        )
+
+    async def handle_v1_agent_settings_activity_delete(self, request):
+        runtime, target, envelope, error = await self._frontend_settings_envelope(
+            request, operation="activity.scheduler.delete"
+        )
+        if error is not None:
+            return error
+        payload = dict(envelope["payload"])
+        if payload.pop("explicit_user_confirmation", None) is not True:
+            return web.json_response(
+                {"ok": False, "error_code": "explicit_user_confirmation_required"},
+                status=403,
+            )
+        payload["authorization"] = "explicit_user_authorization"
+        job_id = str(request.match_info.get("job_id") or "").strip()
+        if not job_id:
+            return web.json_response(
+                {"ok": False, "error_code": "scheduler_job_id_required"},
+                status=400,
+            )
+        response = await self.handle_agent_scheduler_delete(
+            _FrontendSettingsRequest(
+                name=runtime.name,
+                job_id=job_id,
+                payload=payload,
+            )
+        )
+        return self._frontend_settings_scheduler_response(
+            response, target=target, request_id=envelope["request_id"]
+        )
+    def _frontend_settings_permission_config(self, runtime, *, raw_config=None):
+        """Resolve the selected Agent's active HASHI filesystem scope."""
+        from orchestrator.config import VALID_ACCESS_SCOPES
+        from orchestrator.config_json import read_config_json
+        from orchestrator.flexible_backend_registry import (
+            canonical_backend_engine,
+            public_backend_engine,
+        )
+
+        manager = getattr(runtime, "backend_manager", None)
+        manager_config = getattr(manager, "config", None)
+        engine = canonical_backend_engine(
+            getattr(manager_config, "active_backend", None)
+            or getattr(getattr(runtime, "config", None), "active_backend", None)
+        )
+        if manager is None or not engine:
+            raise ValueError("permissions_settings_unavailable")
+        document = raw_config if raw_config is not None else read_config_json(self.config_path)
+        agent = next(
+            (row for row in document.get("agents", [])
+             if isinstance(row, dict)
+             and str(row.get("name") or "").strip().casefold()
+             == str(runtime.name).strip().casefold()),
+            None,
+        )
+        if agent is None:
+            raise ValueError("agent_not_found")
+        backend_row = next(
+            (row for row in (agent.get("allowed_backends") or [])
+             if canonical_backend_engine(
+                 row.get("engine") if isinstance(row, dict) else row
+             ) == engine),
+            None,
+        )
+        if backend_row is None:
+            raise ValueError("permissions_settings_unavailable")
+        configured_scope = backend_row.get("access_scope") if isinstance(backend_row, dict) else None
+        scope = str(configured_scope or agent.get("access_scope") or "project").strip().casefold()
+        adapter = getattr(getattr(manager, "current_backend", None), "config", None)
+        live_scope = str(getattr(adapter, "access_scope", scope) or scope).strip().casefold()
+        if scope not in VALID_ACCESS_SCOPES or live_scope not in VALID_ACCESS_SCOPES:
+            raise ValueError("permissions_settings_unavailable")
+        if scope != live_scope:
+            raise RuntimeError("permissions_state_changed")
+        return {
+            "backend": public_backend_engine(engine),
+            "access_scope": scope,
+            "supported_access_scopes": ["workspace", "project", "drive"],
+        }
+
+    async def handle_v1_agent_settings_permissions_get(self, request):
+        if self._strict_authenticated_owner(request) is None:
+            return web.json_response(
+                {"ok": False, "error_code": "not_authenticated"}, status=401
+            )
+        runtime, target, error = self._frontend_settings_target(
+            request, request.query.get("instance_id")
+        )
+        if error is not None:
+            return error
+        try:
+            permissions = self._frontend_settings_permission_config(runtime)
+        except ValueError as exc:
+            code = str(exc)
+            return web.json_response(
+                {"ok": False, "error_code": code},
+                status=404 if code == "agent_not_found" else 503,
+            )
+        except RuntimeError:
+            return web.json_response(
+                {"ok": False, "error_code": "permissions_state_changed"}, status=409
+            )
+        return web.json_response(
+            {
+                "ok": True,
+                "contract": {"type": "hashi.frontend-settings", "version": 1},
+                "target": target,
+                "authority": "HASHI Agent access policy",
+                "permissions": permissions,
+            },
+            headers={"Cache-Control": "private, no-store"},
+        )
+
+    async def handle_v1_agent_settings_permissions_set(self, request):
+        runtime, target, envelope, error = await self._frontend_settings_envelope(
+            request, operation="permissions.set_access_scope"
+        )
+        if error is not None:
+            return error
+        payload = envelope["payload"]
+        if set(payload) != {
+            "backend", "expected_current_scope", "access_scope", "confirm_scope_expansion"
+        }:
+            return web.json_response(
+                {"ok": False, "error_code": "permissions_payload_invalid"}, status=400
+            )
+        from orchestrator.config import VALID_ACCESS_SCOPES
+        from orchestrator.config_json import (
+            ConfigConflictError,
+            ConfigDurabilityError,
+            read_config_json,
+            write_config_json,
+        )
+        from orchestrator.flexible_backend_registry import canonical_backend_engine
+
+        new_scope = str(payload.get("access_scope") or "").strip().casefold()
+        expected_scope = str(payload.get("expected_current_scope") or "").strip().casefold()
+        supplied_backend = canonical_backend_engine(payload.get("backend"))
+        confirm_expansion = payload.get("confirm_scope_expansion")
+        if (new_scope not in VALID_ACCESS_SCOPES or expected_scope not in VALID_ACCESS_SCOPES
+                or not supplied_backend or not isinstance(confirm_expansion, bool)):
+            return web.json_response(
+                {"ok": False, "error_code": "permissions_payload_invalid"}, status=400
+            )
+
+        manager = getattr(runtime, "backend_manager", None)
+        manager_config = getattr(manager, "config", None)
+        manager_backends = getattr(manager_config, "allowed_backends", None)
+        active_backend = canonical_backend_engine(getattr(manager_config, "active_backend", None))
+        switch_backend = getattr(manager, "switch_backend", None)
+        if (manager is None or not callable(switch_backend)
+                or not isinstance(manager_backends, list) or supplied_backend != active_backend):
+            return web.json_response(
+                {"ok": False, "error_code": "permissions_settings_unavailable"}, status=503
+            )
+
+        async with self._agent_config_lock:
+            try:
+                document = read_config_json(self.config_path)
+            except (OSError, ValueError):
+                return web.json_response(
+                    {"ok": False, "error_code": "permissions_settings_unavailable"}, status=503
+                )
+            agent = next(
+                (row for row in document.get("agents", [])
+                 if isinstance(row, dict)
+                 and str(row.get("name") or "").strip().casefold() == target["agent_id"]),
+                None,
+            )
+            if agent is None:
+                return web.json_response(
+                    {"ok": False, "error_code": "agent_not_found"}, status=404
+                )
+            backend_rows = agent.get("allowed_backends")
+            if not isinstance(backend_rows, list):
+                return web.json_response(
+                    {"ok": False, "error_code": "permissions_settings_unavailable"}, status=503
+                )
+            row_index = next(
+                (i for i, row in enumerate(backend_rows)
+                 if canonical_backend_engine(
+                     row.get("engine") if isinstance(row, dict) else row
+                 ) == active_backend),
+                None,
+            )
+            manager_index = next(
+                (i for i, row in enumerate(manager_backends)
+                 if isinstance(row, dict)
+                 and canonical_backend_engine(row.get("engine")) == active_backend),
+                None,
+            )
+            if row_index is None or manager_index is None:
+                return web.json_response(
+                    {"ok": False, "error_code": "permissions_settings_unavailable"}, status=503
+                )
+
+            raw_row = backend_rows[row_index]
+            raw_scope = raw_row.get("access_scope") if isinstance(raw_row, dict) else None
+            current_scope = str(raw_scope or agent.get("access_scope") or "project").strip().casefold()
+            if current_scope not in VALID_ACCESS_SCOPES:
+                return web.json_response(
+                    {"ok": False, "error_code": "permissions_settings_unavailable"}, status=503
+                )
+            try:
+                live = self._frontend_settings_permission_config(runtime, raw_config=document)
+            except (ValueError, RuntimeError):
+                return web.json_response(
+                    {"ok": False, "error_code": "permissions_state_changed"}, status=409
+                )
+            if (live["backend"] != payload["backend"] or current_scope != expected_scope
+                    or live["access_scope"] != expected_scope):
+                return web.json_response(
+                    {"ok": False, "error_code": "permissions_state_changed",
+                     "permissions": live},
+                    status=409,
+                )
+            rank = {"workspace": 0, "project": 1, "drive": 2}
+            if rank[new_scope] > rank[current_scope] and not confirm_expansion:
+                return web.json_response(
+                    {"ok": False,
+                     "error_code": "permission_scope_expansion_confirmation_required"},
+                    status=409,
+                )
+            if new_scope == current_scope:
+                return web.json_response(
+                    {"ok": True, "request_id": envelope["request_id"],
+                     "target": target, "permissions": live},
+                    headers={"Cache-Control": "private, no-store"},
+                )
+
+            if isinstance(raw_row, dict):
+                raw_row["access_scope"] = new_scope
+            else:
+                backend_rows[row_index] = {"engine": raw_row, "access_scope": new_scope}
+            manager_row = manager_backends[manager_index]
+            had_scope = "access_scope" in manager_row
+            old_manager_scope = manager_row.get("access_scope")
+            manager_row["access_scope"] = new_scope
+            previous_model = getattr(manager, "_active_model_override", None)
+            try:
+                applied = await switch_backend(active_backend, target_model=previous_model)
+            except Exception:
+                applied = False
+            if not applied:
+                if had_scope:
+                    manager_row["access_scope"] = old_manager_scope
+                else:
+                    manager_row.pop("access_scope", None)
+                return web.json_response(
+                    {"ok": False, "error_code": "permissions_runtime_apply_failed"}, status=503
+                )
+            try:
+                write_config_json(self.config_path, document)
+            except ConfigDurabilityError:
+                return web.json_response(
+                    {"ok": False, "error_code": "settings_persistence_uncertain"}, status=503
+                )
+            except (ConfigConflictError, OSError, ValueError) as exc:
+                if had_scope:
+                    manager_row["access_scope"] = old_manager_scope
+                else:
+                    manager_row.pop("access_scope", None)
+                try:
+                    rolled_back = bool(
+                        await switch_backend(active_backend, target_model=previous_model)
+                    )
+                except Exception:
+                    rolled_back = False
+                if not rolled_back:
+                    return web.json_response(
+                        {"ok": False, "error_code": "settings_persistence_uncertain"},
+                        status=503,
+                    )
+                code = ("permissions_state_changed" if isinstance(exc, ConfigConflictError)
+                        else "permissions_persistence_failed")
+                return web.json_response({"ok": False, "error_code": code},
+                                         status=409 if code == "permissions_state_changed" else 503)
+
+        permissions = {
+            "backend": payload["backend"],
+            "access_scope": new_scope,
+            "supported_access_scopes": ["workspace", "project", "drive"],
+        }
+        return web.json_response(
+            {"ok": True, "contract": {"type": "hashi.frontend-settings", "version": 1},
+             "request_id": envelope["request_id"], "target": target,
+             "authority": "HASHI Agent access policy", "permissions": permissions},
+            headers={"Cache-Control": "private, no-store"},
+        )
 
     async def handle_v1_agents(self, request):
         owner = self._v1_owner_id(request)

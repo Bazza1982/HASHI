@@ -23,7 +23,7 @@ from orchestrator.flexible_backend_manager import (
     FlexibleBackendManager,
 )
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
-from orchestrator.privacy_levels import PrivacyLevel
+from orchestrator.privacy_levels import PrivacyLevel, PrivacyPolicyError
 from orchestrator.wrapper_mode import load_wrapper_config
 
 
@@ -354,6 +354,21 @@ def test_privacy_defaults_to_level_one_and_persists_level_zero(tmp_path):
     reloaded = _make_manager(workspace)
     assert reloaded.privacy_level is PrivacyLevel.OFF
 
+
+def test_privacy_write_rejects_a_stale_expected_current_level(tmp_path):
+    workspace = tmp_path / "agent"
+    manager = _make_manager(workspace)
+    manager.state_store.replace({"privacy_level": 1, "unrelated": {"keep": True}})
+
+    with pytest.raises(PrivacyPolicyError, match="privacy setting changed"):
+        manager.set_privacy_level(PrivacyLevel.OFF, expected_current_level=0)
+
+    state = _read_state(workspace)
+    assert state["privacy_level"] == 1
+    assert state["unrelated"] == {"keep": True}
+
+    manager.set_privacy_level(PrivacyLevel.OFF, expected_current_level=1)
+    assert _read_state(workspace)["privacy_level"] == 0
 
 def test_backend_effort_survives_manager_reload(tmp_path):
     workspace = tmp_path / "agent"
