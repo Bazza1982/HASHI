@@ -728,7 +728,7 @@ Commands are connector entry points into domain contracts.
 | `/handoff` | Session continuity operation | PCM assembles the continuity payload |
 | `/clear` | Coordinate Session/media/Engine cleanup | Connector media and selected Engine participate |
 | `/jobs`, `/loop`, `/bg` | Job and outer orchestration lifecycle | Connector renders status |
-| `/stop`, `/steer` | Agent-wide durable stop epoch, stale-callback fencing, or directed new-Run/Turn coordination | Selected Engine terminates its internal work |
+| `/stop`, `/steer` | Agent-wide durable stop epoch, stale-callback fencing, and typed Run lineage. A native in-flight steer records same-Run continuation; interruption fallback creates a parent-linked successor Run/Turn | Selected Engine either steers its live Turn or terminates internal work for durable reconstruction |
 | `/debug on|off` | Instance-level automatic terminal-failure forwarding preference | HChat transports one diagnosis assignment; the Connector renders status |
 
 HER-specific effort, Habit, Meditation, provider, and model settings reach HER

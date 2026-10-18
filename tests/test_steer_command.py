@@ -182,6 +182,88 @@ async def test_cmd_steer_stops_clears_queue_and_enqueues_continuation():
 
 
 @pytest.mark.asyncio
+async def test_cmd_steer_uses_native_provider_turn_without_rebuilding_run():
+    replies: list[str] = []
+    shutdown = AsyncMock()
+    enqueue = AsyncMock()
+    native_steer = AsyncMock(
+        return_value={
+            "kind": "codex_app_server_native_steer",
+            "method": "turn/steer",
+            "status": "accepted",
+            "source_request_id": "req-old",
+            "provider_thread_id": "thread-old",
+            "provider_turn_id": "turn-old",
+            "accepted_turn_id": "turn-old",
+            "evidence_ref": "codex-app-server:thread-old:turn-old:steer:abc123",
+        }
+    )
+
+    async def _reply(_update, text, **_kwargs):
+        replies.append(text)
+
+    queue: asyncio.Queue = asyncio.Queue()
+    await queue.put(object())
+    await queue.put(object())
+    backend = SimpleNamespace(shutdown=shutdown, steer_active=native_steer)
+    runtime = SimpleNamespace(
+        name="xishi",
+        logger=SimpleNamespace(warning=lambda *a, **k: None),
+        config=SimpleNamespace(active_backend="codex-cli", engine="codex-cli"),
+        queue=queue,
+        backend_manager=SimpleNamespace(current_backend=backend),
+        current_request_meta={
+            "request_id": "req-old",
+            "chat_id": 42,
+            "prompt": "Implement feature X end to end",
+            "source": "text",
+            "summary": "Feature X",
+            "hashi_run_id": "run-old",
+        },
+        last_prompt=SimpleNamespace(
+            prompt="Implement feature X end to end", chat_id=42
+        ),
+        is_generating=True,
+        _is_authorized_user=lambda _uid: True,
+        _reply_text=_reply,
+        enqueue_request=enqueue,
+    )
+    msg = SimpleNamespace(
+        text="/steer focus on failing tests first",
+        chat=SimpleNamespace(id=42),
+    )
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=1),
+        effective_chat=SimpleNamespace(id=42),
+        effective_message=msg,
+        message=msg,
+    )
+    context = SimpleNamespace(args=["focus", "on", "failing", "tests", "first"])
+
+    receipt = await runtime_control.cmd_steer(runtime, update, context)
+
+    native_steer.assert_awaited_once_with(
+        "focus on failing tests first", request_id="req-old"
+    )
+    shutdown.assert_not_awaited()
+    enqueue.assert_not_awaited()
+    assert queue.empty()
+    assert getattr(runtime, "_user_interrupt", None) is None
+    assert context.derived_request_id == "req-old"
+    assert receipt["version"] == 2
+    assert receipt["old_run"]["run_id"] == "run-old"
+    assert receipt["old_run"]["terminal"] is None
+    assert receipt["new_run"]["run_id"] == "run-old"
+    assert receipt["new_run"]["created"] is False
+    assert receipt["new_run"]["relationship"] == "continued_in_place"
+    assert receipt["continuation"]["provider_turn_id"] == "turn-old"
+    assert receipt["continuation"]["old_run_id"] == "run-old"
+    assert receipt["continuation"]["continuing_run_id"] == "run-old"
+    assert replies and "Steered in place" in replies[0]
+    assert "same Run" in replies[0]
+
+
+@pytest.mark.asyncio
 async def test_cmd_steer_idle_sends_plain_direction_without_wrapper():
     replies: list[str] = []
     enqueued: list[tuple] = []

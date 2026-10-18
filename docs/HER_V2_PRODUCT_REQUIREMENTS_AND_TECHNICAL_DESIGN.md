@@ -447,18 +447,28 @@ only within the user's original goal and authority.
 
 ### 4.5 `/steer` authority
 
-`/steer` is treated as stop plus new instructions.
+HERV3 treats `/steer` as a typed interruption followed by a separately
+classified successor Run. This is the recovery path for API Providers that do
+not expose a native in-flight steer operation. A live Codex App Server Turn is
+owned by the Codex adapter and may instead accept native `turn/steer` in place;
+that path does not terminate or recreate the HASHI Run.
 
-When `/steer` is accepted:
+When HERV3 accepts the interruption path:
 
 1. the active turn and its sub-agents are stopped;
-2. the old turn reaches terminal state `STOPPED` with reason `STEERED`;
+2. the old turn reaches terminal state `STEERED`, distinct from cancellation;
 3. no plan, classification, or goal from the stopped turn remains authoritative;
-4. a new turn begins;
+4. a new Run and Turn begin with immutable parent-Run and parent-request links;
 5. Triage derives the new goal from the latest relevant context together with the steer message;
 6. the new goal may be a replacement, extension, or slight modification of the earlier goal.
 
-The new turn receives a new immutable Triage decision.
+The new turn receives a new immutable Triage decision. HERV3 privately retains
+exact Provider messages, exposed reasoning fields, and Tool results only after
+a complete Provider response or complete Tool batch. The successor may replay
+that context only for the same Provider, model, and stage. Partial streamed or
+uncommitted reasoning is not replayed. Receipts and PCM projections expose the
+checkpoint digest and boundary, never the private reasoning or raw Provider
+context.
 
 ### 4.6 Tool capability authority
 
@@ -1799,7 +1809,9 @@ HERV2 is ready for production rollout only when:
 - every Triage classification has deterministic transition tests;
 - a recorded Triage classification cannot be mutated within the turn;
 - Direct Response produces exactly one user-facing response;
-- `/steer` terminates the old turn and starts a separately classified new turn;
+- HERV3 `/steer` terminates the old Turn as `STEERED`, starts a separately
+  classified successor Run/Turn, and binds both sides to private complete-boundary
+  continuation evidence without exposing Provider reasoning;
 - Direct (`zero`), Fast path (`low`), Planned (`medium`), Adaptive (`high`),
   Reviewed (`xhigh`), and Assured (`max`) policies follow the required stage matrix;
 - Direct (`zero`) performs exactly one Direct call on Quick with default
@@ -1881,7 +1893,9 @@ The following decisions are authoritative for HERV2:
    operational expression of user intent for the active turn.
 2. Triage is authoritative and immutable for that turn.
 3. Planning and Replanning may not change classification or goal.
-4. `/steer` stops the old turn and starts a newly triaged turn with new instructions.
+4. HERV3 `/steer` marks the old Turn `STEERED` and starts a linked, newly
+   triaged successor Run/Turn. Only complete private Provider checkpoints may
+   be replayed, and their raw reasoning never enters PCM or a visible receipt.
 5. Lifecycle order is strict; stage content is flexible.
 6. Each eligible ordinary provider operation has exactly one safe
    fresh-connection recovery, but neither attempt nor any HER stage has an

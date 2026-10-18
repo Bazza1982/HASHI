@@ -1,145 +1,125 @@
-# Telegram `/steer` — mid-task course correction
+# Typed `/steer` — mid-task course correction
 
-**Status:** Implemented and smoke-tested  
-**Date:** 2026-07-19  
-**Commits:**
+**Status:** Implemented; source, runtime adoption, and live acceptance are recorded separately
+**Updated:** 2026-10-18
 
-| Commit | Change |
-| --- | --- |
-| `a28ece3` | Original global `/steer` implementation and Telegram menu |
-| `ba8952f` | Idle: plain new request (no mid-task wrapper) |
-| `f39473c` | Suppress false `❌ Backend error` on intentional kill |
+## Ownership
 
-## What it is
+Workbench, Telegram, and Session API submit the same typed `/steer` operation.
+Frontend Connector owns ingress and presentation, PAO owns Run identity and the
+receipt, and the selected Engine owns its in-flight execution. HERV3 owns its
+private Provider recovery context.
 
-`/steer <direction>` is a **global** Telegram command available on **all
-supported Flex Agent execution modes, backends, and models**. It is like
-`/stop` followed by a new instruction, with one critical difference:
+A frontend must not emulate steer with `/stop` followed by an ordinary message.
+That loses the typed relationship and cannot produce an authoritative receipt.
 
-- **Progress is kept** — interim thinking, workspace files, artefacts, tool results, CLI session state, and partial answers are **not** discarded.
-- **No session reset** — the agent continues from the current state unless the new direction explicitly requires a wipe/reset.
+## Behavior
 
-Telegram bot menu label: **Stop and continue with new direction**.
+`/steer <direction>` adds a course correction to active work while preserving
+valid progress and current authority. The execution path depends on what the
+selected Engine can actually do:
 
-## Usage
-
-```text
-/steer also include unit tests for the auth module
-/steer use the existing OAuth helper instead of a new client
-```
-
-Empty `/steer` replies with usage help (busy vs idle behavior summarized).
-
-## Busy vs idle
-
-| Agent state | What happens | Prompt the model sees | Queue `source` | Interrupt backend? |
-| --- | --- | --- | --- | --- |
-| **Busy** (generating, or queue non-empty) | Stop current turn immediately, clear queued messages, re-init backend best-effort, enqueue continuity follow-up | Full mid-task **steer wrapper** + original task context | `steer` | Yes |
-| **Idle** | Enqueue direction only — **no** mid-task wrapper | Your direction text **as-is** | `text` | No |
-
-### Busy — mid-task wrapper
-
-The model receives a prompt built by `build_steer_prompt()` in `orchestrator/runtime_control.py`:
-
-```text
-[HASHI /steer — mid-task course correction]
-The user interrupted the previous turn to add direction. This is NOT a new blank task.
-Requirements:
-1. Stop the previous approach only where it conflicts with the new direction.
-2. KEEP all interim progress already made: workspace files, artefacts, tool results, CLI session state, partial answers, and thinking already produced.
-3. Do NOT call session-reset flows, wipe workspaces, or discard completed sub-steps unless the new direction explicitly requires it.
-4. Continue from the current state and incorporate the additional direction below.
-
-Active backend/engine at interrupt: <backend>
-
-Additional direction / requirement from the user:
-<your direction>
-
---- Original task context (for continuity; do not restart from zero) ---
-<original prompt, max 12000 chars>
---- End original task context ---
-```
-
-- `Active backend/engine…` is omitted when no backend name is available.
-- Original task block is omitted when no current/last prompt can be captured.
-- Original prompt longer than **12000** characters is truncated with `…[original task truncated]`.
-
-Typical Telegram ack (busy):
-
-```text
-🧭 Steered: stopped <backend>, cleared N queued, continuing with new direction (req-…).
-```
-
-### Idle — plain new request
-
-When the agent is idle, HASHI does **not** wrap the text. The direction is enqueued like a normal chat message.
-
-```text
-You send:   /steer also include unit tests
-Model gets: also include unit tests
-```
-
-Typical Telegram ack (idle):
-
-```text
-🧭 Agent was idle — queued your text as a new request (…) (no steer wrapper).
-```
-
-## `/steer` vs `/stop`
-
-| | `/stop` | `/steer <direction>` (busy) | `/steer <direction>` (idle) |
+| State and Engine | Execution | Run relationship | Queue |
 | --- | --- | --- | --- |
-| Kill active backend | Yes | Yes | No |
-| Clear queue | Yes | Yes | No |
-| Continue with new work | No | Yes (wrapped) | Yes (plain text) |
-| Keep artefacts / session | Yes (nothing discarded by design) | Yes | N/A |
-| False Backend error suppressed | Yes (`user_stop`) | Yes (`user_steer`) | N/A |
+| Live Codex App Server Turn | Send native `turn/steer` with the active Thread and expected Turn | The same HASHI Run and Provider Turn continue in place | Clear READY for this Session; preserve FUTURE |
+| HERV3 or another Engine without native in-flight steer | Mark the old Turn `STEERED`, interrupt it, and enqueue a linked successor | A new Run/Turn records the old Run as parent plus continuation evidence | Clear READY for this Session; preserve FUTURE |
+| Idle | Enqueue the direction as an ordinary request | A normal new Run | Existing queue rules |
 
-## False Backend error suppression
+Native steer is used only when the Codex adapter can prove that a real App Server
+Turn is still active. An absent, stale, rejected, or timed-out native operation
+falls back to the durable successor path.
 
-Intentional process kills (for example Grok CLI **exit code `-9` / SIGKILL**) previously showed:
+## Codex App Server mapping
 
-```text
-❌ Backend error (grok-cli) | req-…
-Flex Backend Error (grok-cli): Grok CLI exited with code -9
+The adapter sends the documented App Server operation:
+
+```json
+{
+  "method": "turn/steer",
+  "params": {
+    "threadId": "<active-thread>",
+    "input": [{"type": "text", "text": "<direction>"}],
+    "expectedTurnId": "<active-turn>"
+  }
+}
 ```
 
-That is **not** a failure for `/stop` or busy `/steer`. The pipeline now:
+The response must acknowledge that exact Turn ID. HASHI does not report native
+success from a write, click, interrupt, or newly started Turn.
 
-1. Calls `mark_user_interrupt(runtime, "user_stop" | "user_steer")` **before** shutdown.
-2. On non-zero exit, `consume_user_interrupt` matches the current request.
-3. Logs a soft interrupt and **does not** deliver `❌ Backend error` to Telegram for that turn.
+OpenAI reference:
+[Codex App Server](https://developers.openai.com/codex/app-server.md).
 
-You should see the stop/steer acknowledgement, not a red Backend error line.
+## HERV3 continuation
 
-## Coverage
+HERV3 API Providers do not expose Codex App Server's native operation. Their
+steer path therefore creates a successor Run and preserves continuity at safe,
+auditable boundaries:
 
-| Surface | Status |
-| --- | --- |
-| Flex Agents (`FlexibleAgentRuntime`) in every execution mode | ✅ `cmd_steer` → `runtime_control.cmd_steer` |
-| All backends via `backend.shutdown()` / `backend_manager` | ✅ |
-| Telegram `BotCommand` menu | ✅ `steer` |
-| Command binding table | ✅ `CommandBinding("steer", "cmd_steer")` |
+- complete Provider messages are checkpointed privately after a complete
+  Provider response or a complete Tool batch;
+- exposed Provider reasoning fields and completed Tool results remain part of
+  that private context;
+- replay requires the same Provider, model, and HERV3 stage;
+- partial streamed or uncommitted reasoning is never treated as replayable;
+- PCM, visible messages, and steer receipts contain only boundary metadata,
+  digests, and evidence references, never raw private reasoning.
+
+The successor still receives a fresh Triage decision. Earlier plans and goals do
+not remain authoritative merely because their Provider context was retained.
+
+## Receipt contract
+
+Every accepted busy steer returns a typed `hashi.steer-receipt` with:
+
+- `old_run`: the active request and Run;
+- `new_run`: either the parent-linked successor or the same Run with
+  `relationship=continued_in_place` and `created=false`;
+- `continuation`: the Provider Turn acknowledgement or HERV3 recovery evidence.
+
+A native receipt must not invent a new Run. A reconstruction receipt must not
+claim success until the successor request and its Run identity exist.
+
+## Fallback prompt
+
+When reconstruction is required, `build_steer_prompt()` supplies the new
+direction, the bounded original task, and explicit continuity rules. It keeps
+workspace artefacts, completed Tool results, and valid progress, but it grants
+no new authority and does not revive a cancelled action.
+
+Intentional backend termination is marked before shutdown so its process exit is
+not presented as an unexpected Backend error.
+
+## User-visible expectations
+
+A native steer acknowledgement states that the same Run continued in place and
+shows the Old Run, New Run, and continuation evidence reference. A reconstructed
+steer acknowledgement shows the distinct old and new Run identities and the
+evidence linking them.
+
+An empty `/steer` shows usage. When idle, the direction is delivered unchanged
+without a mid-task wrapper.
 
 ## Implementation map
 
 | Piece | Location |
 | --- | --- |
-| Command handler, busy/idle branch, wrapper builder | `orchestrator/runtime_control.py` |
-| Interrupt mark / consume | `mark_user_interrupt`, `consume_user_interrupt` |
-| Flex pipeline error suppress | `orchestrator/runtime_pipeline.py` |
-| Lifecycle double-notify avoid | `orchestrator/runtime_lifecycle.py` |
-| Menu + bindings | `orchestrator/runtime_command_binding.py` |
-| Tests | `tests/test_steer_command.py` |
+| Shared command behavior and typed receipt | `orchestrator/runtime_control.py` |
+| Native App Server operation | `adapters/codex_app_server.py` |
+| Codex backend delegation | `adapters/codex_cli.py` |
+| HERV3 private checkpoint and successor handoff | `orchestrator/her_v2/session_store.py`, `adapters/her_v2.py` |
+| Provider boundary capture and replay | `adapters/openrouter_api.py`, `adapters/her_v2_provider.py` |
+| Frontend command binding | `orchestrator/runtime_command_binding.py` |
+| Tests | `tests/test_steer_command.py`, `tests/test_codex_api_tool_bridge.py`, HERV3 Provider/control tests |
 
-## Smoke checklist
+## Acceptance
 
-1. **Busy steer** — start a long turn, send `/steer testing steer now`. Expect: ack, mid-task wrapper on the next turn, **no** `❌ Backend error … -9`.
-2. **Idle steer** — with agent idle, send `/steer hello`. Expect: plain prompt `hello`, ack says “no steer wrapper”.
-3. **Empty steer** — `/steer` alone shows usage (busy vs idle described).
-4. **Artefacts** — busy steer during a multi-step task should continue without wiping workspace files.
-
-## Related
-
-- Operator one-liner: [AGENT_FYI.md](AGENT_FYI.md) (`/steer` under Important Commands)
-- Changelog: [CHANGELOG.md](../CHANGELOG.md) (Unreleased — Added / Fixed)
+1. All frontends reach the same typed operation.
+2. Native Codex steer targets the exact active Turn and creates no second Run.
+3. Unsupported native steer uses the linked successor path.
+4. HERV3 preserves complete private Provider context and does not expose raw
+   reasoning.
+5. Receipts identify old Run, continuing/new Run, and continuation evidence.
+6. READY is cleared only for the affected Session and delayed FUTURE work remains.
+7. Runtime adoption and live frontend delivery are verified separately from
+   source and offline tests.

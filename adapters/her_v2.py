@@ -1592,6 +1592,7 @@ class HERv2Adapter(BaseBackend):
         frozen_route: dict[str, Any] = {}
         wip_parity: dict[str, Any] = {}
         canonical_recovery_context: dict[str, Any] | None = None
+        private_provider_context: dict[str, Any] | None = None
         pcm_runtime_context: dict[str, Any] = {}
         if (
             not self._initialized
@@ -1756,6 +1757,20 @@ class HERv2Adapter(BaseBackend):
                     error=exc,
                 )
             if canonical_recovery_context:
+                try:
+                    private_provider_context = (
+                        self._session_coordinator.store.provider_context_for_turn(
+                            fixed_turn.session_id,
+                            fixed_turn.turn_id,
+                        )
+                    )
+                except Exception as exc:
+                    return self._fixed_control_failure_response(
+                        accepted=fixed_turn,
+                        started=started,
+                        operation="private provider recovery readback",
+                        error=exc,
+                    )
                 pcm_runtime_context["active_turn_recovery"] = dict(
                     canonical_recovery_context
                 )
@@ -1957,6 +1972,20 @@ class HERv2Adapter(BaseBackend):
                     error=exc,
                 )
             raise
+        if (
+            isinstance(provider, HashiStageProvider)
+            and fixed_turn is not None
+            and self._session_coordinator is not None
+        ):
+            provider.bind_provider_context(
+                observer=lambda checkpoint: (
+                    self._session_coordinator.record_provider_context_checkpoint(
+                        fixed_turn,
+                        checkpoint,
+                    )
+                ),
+                recovery=private_provider_context,
+            )
         runtime_config = replace(
             turn_config,
             # The shared /timeout command is idle-only.  Bind its live value

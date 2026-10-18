@@ -336,6 +336,46 @@ def test_steered_turn_is_recoverable_once_while_cancelled_turn_is_not(tmp_path):
             },
         ),
     )
+    provider_messages = [
+        {"role": "system", "content": "private system context"},
+        {"role": "user", "content": "Do the original work"},
+        {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "Inspect the file before changing it.",
+            "tool_calls": [
+                {
+                    "id": "read",
+                    "type": "function",
+                    "function": {
+                        "name": "file_read",
+                        "arguments": '{"path":"target.txt"}',
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "read", "content": "old content"},
+    ]
+    checkpoint = coordinator.record_provider_context_checkpoint(
+        steered,
+        {
+            "provider": "deepseek-api",
+            "model": "deepseek-reasoner",
+            "stage": "execution",
+            "boundary": "completed_tool_batch",
+            "messages": provider_messages,
+            "reasoning": [
+                {
+                    "state": "available",
+                    "content": "Inspect the file before changing it.",
+                }
+            ],
+            "provider_request_id": "provider-read",
+            "invocation_id": "turn-steered:execution:1",
+        },
+    )
+    assert checkpoint["available"] is True
+    assert checkpoint["reasoning_count"] == 1
 
     closed = coordinator.steer(
         steered,
@@ -354,6 +394,8 @@ def test_steered_turn_is_recoverable_once_while_cancelled_turn_is_not(tmp_path):
     assert evidence["evidence_ref"].endswith(f":{steered.turn_id}")
     assert evidence["recovery_disposition"] == "steered"
     assert evidence["tool_receipt_count"] == 1
+    assert evidence["provider_context"]["available"] is True
+    assert evidence["provider_context"]["reasoning_count"] == 1
     assert evidence["evidence_digest"].startswith("sha256:")
 
     successor = _accept(coordinator, "turn-successor", "Continue differently")
@@ -364,6 +406,14 @@ def test_steered_turn_is_recoverable_once_while_cancelled_turn_is_not(tmp_path):
     assert context["interrupted_turn_id"] == steered.turn_id
     assert context["recovery_disposition"] == "steered"
     assert context["tool_receipts"][0]["tool_call_id"] == "read"
+    assert context["provider_context_checkpoint"]["available"] is True
+    assert "Inspect the file" not in json.dumps(context)
+    private_context = coordinator.store.provider_context_for_turn(
+        successor.session_id,
+        successor.turn_id,
+    )
+    assert private_context["messages"] == provider_messages
+    assert private_context["reasoning"][0]["content"].startswith("Inspect")
 
     coordinator.complete(successor, assistant_text="Done")
     cancelled = _accept(coordinator, "turn-cancelled", "Stop this")

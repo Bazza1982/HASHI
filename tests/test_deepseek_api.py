@@ -1365,6 +1365,8 @@ async def test_deepseek_tool_batch_defers_image_followup_until_all_tool_results(
 async def test_deepseek_tool_loop_preserves_reasoning_content_non_stream(monkeypatch, tmp_path):
     adapter = _adapter(tmp_path)
     seen_messages = []
+    checkpoints = []
+    adapter.set_provider_context_observer(checkpoints.append)
     tool_calls = [
         {
             "id": "call_1",
@@ -1409,6 +1411,24 @@ async def test_deepseek_tool_loop_preserves_reasoning_content_non_stream(monkeyp
     assert response.text == "done"
     assert response.tool_call_count == 1
     assert response.tool_loop_count == 1
+    assert [item["boundary"] for item in checkpoints] == [
+        "completed_tool_batch",
+        "completed_provider_response",
+    ]
+    tool_boundary = checkpoints[0]
+    checkpoint_assistant = next(
+        item
+        for item in tool_boundary["messages"]
+        if item.get("role") == "assistant"
+    )
+    assert (
+        checkpoint_assistant["reasoning_content"]
+        == "Need to inspect the directory."
+    )
+    assert any(item.get("role") == "tool" for item in tool_boundary["messages"])
+    assert tool_boundary["reasoning"][0]["content"] == (
+        "Need to inspect the directory."
+    )
     provider_calls = response.stream_metadata["meter"]["provider_calls"]
     usage_fields = {
         "input",
@@ -1459,6 +1479,34 @@ async def test_deepseek_tool_loop_preserves_reasoning_content_non_stream(monkeyp
         "completed",
     ]
     assert len({call["provider_request_id"] for call in provider_calls}) == 2
+
+
+@pytest.mark.asyncio
+async def test_provider_context_observer_never_checkpoints_partial_reasoning(
+    monkeypatch, tmp_path
+):
+    adapter = _adapter(tmp_path)
+    checkpoints = []
+    started = asyncio.Event()
+    release = asyncio.Event()
+    adapter.set_provider_context_observer(checkpoints.append)
+
+    async def incomplete_call(payload, headers, on_stream_event):
+        del payload, headers, on_stream_event
+        started.set()
+        await release.wait()
+        raise AssertionError("cancelled call must not complete")
+
+    monkeypatch.setattr(adapter, "_call_api_once", incomplete_call)
+    task = asyncio.create_task(
+        adapter.generate_response("inspect safely", "req-partial-reasoning")
+    )
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert checkpoints == []
 
 
 @pytest.mark.asyncio

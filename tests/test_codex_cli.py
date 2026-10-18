@@ -128,6 +128,27 @@ def _build_adapter(tmp_path: Path, *, model: str = "gpt-5.4") -> CodexCLIAdapter
 
 
 @pytest.mark.asyncio
+async def test_codex_adapter_delegates_steer_only_to_active_app_server(tmp_path):
+    adapter = _build_adapter(tmp_path)
+    assert await adapter.steer_active("new direction", request_id="req-1") is None
+
+    calls = []
+
+    class Bridge:
+        async def steer_active(self, direction, *, request_id=""):
+            calls.append((direction, request_id))
+            return {"status": "accepted", "provider_turn_id": "turn-1"}
+
+    adapter._active_app_server_bridge = Bridge()
+    evidence = await adapter.steer_active(
+        "new direction", request_id="req-1"
+    )
+
+    assert calls == [("new direction", "req-1")]
+    assert evidence == {"status": "accepted", "provider_turn_id": "turn-1"}
+
+
+@pytest.mark.asyncio
 async def test_codex_normal_generate_attaches_validated_native_image_path(
     tmp_path, monkeypatch
 ):

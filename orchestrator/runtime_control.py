@@ -549,6 +549,36 @@ async def _steer_continuation_evidence(
     }
 
 
+async def _native_steer_active(
+    runtime: Any,
+    direction: str,
+    *,
+    request_id: str,
+) -> dict[str, Any] | None:
+    """Use a backend's real in-flight steer operation when one is available."""
+
+    backend_manager = getattr(runtime, "backend_manager", None)
+    backend = getattr(backend_manager, "current_backend", None)
+    if backend is None:
+        backend = getattr(runtime, "backend", None)
+    steer = getattr(backend, "steer_active", None)
+    if not callable(steer):
+        return None
+    try:
+        evidence = steer(str(direction or ""), request_id=str(request_id or ""))
+        if inspect.isawaitable(evidence):
+            evidence = await evidence
+    except Exception as exc:
+        runtime.logger.warning(
+            "Native steer unavailable; using durable successor path: %s",
+            type(exc).__name__,
+        )
+        return None
+    if not isinstance(evidence, dict) or evidence.get("status") != "accepted":
+        return None
+    return dict(evidence)
+
+
 def _command_request_route(
     runtime: Any, update: Any
 ) -> tuple[Any, dict[str, Any], bool] | None:
@@ -985,6 +1015,66 @@ async def cmd_steer(
             f"{f' ({request_id})' if request_id else ''}.",
         )
         return
+
+    native_evidence = None
+    if not focus_mode:
+        native_evidence = await _native_steer_active(
+            runtime,
+            direction,
+            request_id=active_request_id,
+        )
+    if native_evidence is not None:
+        dropped = await _clear_request_queue(
+            runtime, session_id=command_session_id
+        )
+        delayed_preserved = await runtime_pending.delayed_count(
+            runtime, session_id=command_session_id
+        )
+        if active_request_id:
+            context.derived_request_id = active_request_id
+        continuation = {
+            **native_evidence,
+            "old_run_id": active_run_id or None,
+            "continuing_run_id": active_run_id or None,
+            "relationship": "continued_in_place",
+        }
+        steer_receipt = {
+            "type": "hashi.steer-receipt",
+            "version": 2,
+            "status": "accepted",
+            "old_run": {
+                "request_id": active_request_id or None,
+                "run_id": active_run_id or None,
+                "terminal": None,
+                "state": "in_progress",
+            },
+            "new_run": {
+                "request_id": active_request_id or None,
+                "run_id": active_run_id or None,
+                "parent_run_id": None,
+                "continues_run_id": active_run_id or None,
+                "relationship": "continued_in_place",
+                "created": False,
+            },
+            "continuation": continuation,
+        }
+        await _reply(
+            runtime,
+            update,
+            "🧭 Steered in place.\n"
+            f"Codex accepted native turn/steer; cleared {dropped} queued message(s).\n"
+            + (
+                f"Preserved {delayed_preserved} delayed message(s); use /recall to cancel them.\n"
+                if delayed_preserved
+                else ""
+            )
+            + "The active provider Turn and HASHI Run continued without interruption.\n"
+            + f"Old Run: {active_run_id or 'unavailable'}\n"
+            + f"New Run: {active_run_id or 'unavailable'} (same Run, continued in place)\n"
+            + "Continuation evidence: "
+            + f"{continuation.get('evidence_ref') or 'unavailable'}.",
+        )
+        return steer_receipt
 
     # Mark before kill so exit -9 / SIGKILL is not reported as ❌ Backend error.
     interrupt_reason = "user_focus" if focus_mode else "user_steer"

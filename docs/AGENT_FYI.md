@@ -130,11 +130,11 @@ Privacy Level 2 is HERV3/DeepSeek only, needs risk acceptance and blocks on
 local-detector failure. Its dependencies use a separate interpreter; install or
 synthetic readiness does not activate privacy or prove Worker adoption.
 
-Model/provider cards share a contract; chat-only models disclose no tools.
-`/style` preserves facts and meters separately. Fallback is opt-in: warn before
-switching and never replay uncertain/committed effects. Reject malformed Tool
-batches before effects. `/stop`, `/retry`, `/resend`, `/steer` differ; recovery
-cannot restore revoked authority. Show typed progress, not private reasoning.
+Model/provider cards share a contract; chat-only means no tools. `/style` keeps
+facts and meters separately. Fallback is opt-in; never replay uncertain or
+committed effects. Reject bad Tool batches before effects. Controls differ.
+Native Codex `/steer` keeps Run; HERV3 links a successor to completed private
+Provider checkpoints. Receipts omit reasoning; recovery cannot restore authority.
 
 ## UI, media, and Phone
 

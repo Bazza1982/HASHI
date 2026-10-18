@@ -354,6 +354,13 @@ class ProviderCallObserverError(RuntimeError):
 ProviderCallObserver = Callable[[Mapping[str, Any]], None]
 
 
+class ProviderContextObserverError(RuntimeError):
+    """A complete provider continuation boundary could not be persisted."""
+
+
+ProviderContextObserver = Callable[[Mapping[str, Any]], None]
+
+
 def _argument_string_values(value: Any) -> set[str]:
     if isinstance(value, str):
         return {value}
@@ -1844,6 +1851,7 @@ class OpenRouterAdapter(BaseBackend):
         self.tool_registry = None   # Injected by FlexibleBackendManager if tools configured
         self._audio_asset_store: AudioAssetStore | None = None
         self._provider_call_observer: ProviderCallObserver | None = None
+        self._provider_context_observer: ProviderContextObserver | None = None
         self._provider_invocation_context: dict[str, Any] = {}
         self._active_provider_wire_context: dict[str, Any] = {}
         self._her_v2_stream_inactivity_timeout_s: float | None = None
@@ -2043,6 +2051,55 @@ class OpenRouterAdapter(BaseBackend):
         """Install a synchronous durable observer for physical HTTP calls."""
 
         self._provider_call_observer = observer
+
+    def set_provider_context_observer(
+        self,
+        observer: ProviderContextObserver | None,
+    ) -> None:
+        """Install a durable observer for complete continuation boundaries."""
+
+        self._provider_context_observer = observer
+
+    def _observe_provider_context(
+        self,
+        *,
+        boundary: str,
+        messages: Sequence[Mapping[str, Any]],
+        request_id: str,
+        result: _APIResult,
+        provider_request_id: str,
+    ) -> None:
+        observer = getattr(self, "_provider_context_observer", None)
+        if observer is None:
+            return
+        reasoning_content = str(result.reasoning_content or "")
+        reasoning = (
+            [
+                {
+                    "provider_request_id": str(provider_request_id or ""),
+                    "state": str(result.reasoning_state or "available"),
+                    "content": reasoning_content,
+                }
+            ]
+            if reasoning_content
+            else []
+        )
+        checkpoint = {
+            "format": "hashi-provider-context-boundary-v1",
+            "boundary": str(boundary),
+            "request_id": str(request_id or ""),
+            "provider_request_id": str(provider_request_id or ""),
+            "messages": [copy.deepcopy(dict(item)) for item in messages],
+            "reasoning": reasoning,
+        }
+        try:
+            observer(checkpoint)
+        except ProviderContextObserverError:
+            raise
+        except Exception as exc:
+            raise ProviderContextObserverError(
+                "complete provider context could not be durably checkpointed"
+            ) from exc
 
     def set_provider_invocation_context(self, context: Mapping[str, Any]) -> None:
         """Bind HER/PAO identifiers to private protocol-forensic records."""
@@ -4533,6 +4590,37 @@ class OpenRouterAdapter(BaseBackend):
                 # The protocol decision is persisted synchronously above. No
                 # tool side effect may occur before that durable boundary.
                 if not bool(decision.get("execute_tools")):
+                    if bool(decision.get("success")):
+                        final_assistant: dict[str, Any] = {
+                            "role": "assistant",
+                            "content": (
+                                result.text
+                                if result.text
+                                else (
+                                    json.dumps(
+                                        result.structured_data,
+                                        ensure_ascii=False,
+                                        separators=(",", ":"),
+                                    )
+                                    if result.structured_data is not None
+                                    else ""
+                                )
+                            ),
+                        }
+                        self._augment_assistant_tool_message(
+                            final_assistant, result
+                        )
+                        self._observe_provider_context(
+                            boundary="completed_provider_response",
+                            messages=[*messages, final_assistant],
+                            request_id=request_id,
+                            result=result,
+                            provider_request_id=str(
+                                last_provider_call_record.get(
+                                    "provider_request_id", ""
+                                )
+                            ),
+                        )
                     terminal_decision = dict(decision)
                     break
 
@@ -4609,6 +4697,15 @@ class OpenRouterAdapter(BaseBackend):
                     }
                     for call in result.tool_calls
                     if isinstance(call, Mapping)
+                )
+                self._observe_provider_context(
+                    boundary="completed_tool_batch",
+                    messages=messages,
+                    request_id=request_id,
+                    result=result,
+                    provider_request_id=str(
+                        last_provider_call_record.get("provider_request_id", "")
+                    ),
                 )
 
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
@@ -4805,6 +4902,8 @@ class OpenRouterAdapter(BaseBackend):
 
         except asyncio.CancelledError:
             self.logger.warning(f"Request cancelled for {request_id}")
+            raise
+        except ProviderContextObserverError:
             raise
         except ProviderCallObserverError:
             raise

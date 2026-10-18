@@ -2469,6 +2469,101 @@ class _FakeManager:
 
 
 @pytest.mark.asyncio
+async def test_stage_provider_replays_matching_private_provider_context_once():
+    class ContinuationBackend(_FakeBackend):
+        def __init__(self, system_md=None):
+            super().__init__(system_md)
+            self.continuation_messages = None
+            self.context_observer = None
+
+        def set_provider_context_observer(self, observer):
+            self.context_observer = observer
+
+        async def generate_response(
+            self,
+            prompt,
+            request_id,
+            is_retry=False,
+            silent=False,
+            on_stream_event=None,
+            continuation_messages=None,
+            provider_call_limit=None,
+        ):
+            del request_id, is_retry, silent, on_stream_event
+            self.prompt = prompt
+            self.provider_call_limit = provider_call_limit
+            self.continuation_messages = continuation_messages
+            return BackendResponse(
+                text='{"disposition":"COMPLETED","summary":"continued"}',
+                duration_ms=1,
+            )
+
+    class ContinuationManager(_FakeManager):
+        def create_ephemeral_backend(self, engine, target_model=None):
+            assert (engine, target_model) == (
+                "openrouter-api",
+                "configured/model",
+            )
+            backend = ContinuationBackend(self.system_md)
+            self.backends.append(backend)
+            return backend
+
+    private_messages = [
+        {"role": "system", "content": "execution contract"},
+        {"role": "user", "content": "original work"},
+        {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "Inspect before editing.",
+            "tool_calls": [
+                {
+                    "id": "call-read",
+                    "type": "function",
+                    "function": {"name": "file_read", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call-read", "content": "evidence"},
+    ]
+    manager = ContinuationManager()
+    provider = HashiStageProvider(backend_manager=manager)
+    persisted = []
+    provider.bind_provider_context(
+        observer=persisted.append,
+        recovery={
+            "format": "herv3-provider-context-v1",
+            "provider": "openrouter-api",
+            "model": "configured/model",
+            "stage": "execution",
+            "boundary": "completed_tool_batch",
+            "message_count": len(private_messages),
+            "messages": private_messages,
+            "reasoning_count": 1,
+            "reasoning": [
+                {"state": "available", "content": "Inspect before editing."}
+            ],
+        },
+    )
+
+    request = _stage_request(
+        Stage.EXECUTION,
+        allow_tools=False,
+        allow_side_effects=False,
+    )
+    await provider.invoke(
+        ProviderProfile("execution", "openrouter-api", "configured/model"),
+        request,
+    )
+
+    backend = manager.backends[0]
+    assert backend.context_observer is not None
+    assert backend.continuation_messages[:-1] == private_messages
+    assert backend.continuation_messages[-1]["role"] == "user"
+    assert "Do the requested work" in backend.continuation_messages[-1]["content"]
+    assert persisted == []
+
+
+@pytest.mark.asyncio
 async def test_stage_provider_passes_only_the_typed_her_stream_guard():
     manager = _FakeManager()
     provider = HashiStageProvider(backend_manager=manager)

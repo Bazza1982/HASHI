@@ -107,6 +107,7 @@ class CodexCLIAdapter(BaseBackend):
         self._request_lock = asyncio.Lock()
         self._active_read_tasks: list[asyncio.Task] = []
         self._external_tool_processes: set[object] = set()
+        self._active_app_server_bridge: CodexAppServerToolBridge | None = None
         self._external_mcp_server_names: tuple[str, ...] | None = None
         self._external_mcp_server_transport_types: dict[str, str] = {}
         self.effort = ((self.config.extra or {}).get("effort") or "medium").lower()
@@ -410,16 +411,34 @@ class CodexCLIAdapter(BaseBackend):
             on_process_stopped=self._external_tool_processes.discard,
             force_kill=force_kill,
         )
-        return await bridge.run(
-            messages,
-            tools,
-            request_id,
-            tool_choice=tool_choice,
-            parallel_tool_calls=parallel_tool_calls,
-            use_streaming=use_streaming,
-            on_stream_event=on_stream_event,
-            workspace_dir=tool_workspace,
-        )
+        self._active_app_server_bridge = bridge
+        try:
+            return await bridge.run(
+                messages,
+                tools,
+                request_id,
+                tool_choice=tool_choice,
+                parallel_tool_calls=parallel_tool_calls,
+                use_streaming=use_streaming,
+                on_stream_event=on_stream_event,
+                workspace_dir=tool_workspace,
+            )
+        finally:
+            if self._active_app_server_bridge is bridge:
+                self._active_app_server_bridge = None
+
+    async def steer_active(
+        self,
+        direction: str,
+        *,
+        request_id: str = "",
+    ) -> dict | None:
+        """Steer the live app-server turn in place when that transport is active."""
+
+        bridge = self._active_app_server_bridge
+        if bridge is None:
+            return None
+        return await bridge.steer_active(direction, request_id=request_id)
 
     async def generate_structured_response(
         self,
