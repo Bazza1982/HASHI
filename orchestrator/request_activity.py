@@ -273,33 +273,33 @@ class RequestActivityStore:
             )
             record["started_at"] = record.get("started_at") or event["timestamp"]
 
-    def publish_stream(self, request_id: str, event: object) -> None:
+    def publish_stream(self, request_id: str, event: object) -> bool:
         try:
             kind = str(getattr(event, "kind", "progress") or "progress")
             activity = None
             if kind == "tool_activity":
                 activity = _tool_activity_fields(getattr(event, "metadata", None))
                 if activity is None or activity.get("request_id") not in {"", request_id}:
-                    return
+                    return False
             model_route_fields: dict[str, Any] = {}
             if kind == "model_route":
                 metadata = getattr(event, "metadata", None)
                 if not isinstance(metadata, Mapping):
-                    return
+                    return False
                 route_status = str(metadata.get("route_status") or "")
                 if (
                     metadata.get("engine") != HER_V3_ENGINE
                     or route_status not in {"selected", "returned"}
                 ):
-                    return
+                    return False
                 provider = _safe_text(metadata.get("model_provider"), limit=160).strip()
                 model = _safe_text(metadata.get("model"), limit=240).strip()
                 try:
                     attempt = int(metadata.get("attempt"))
                 except (TypeError, ValueError):
-                    return
+                    return False
                 if not provider or not model or not 1 <= attempt <= 1_000_000:
-                    return
+                    return False
                 model_route_fields = {
                     "engine": HER_V3_ENGINE,
                     "model_provider": provider,
@@ -327,20 +327,20 @@ class RequestActivityStore:
             with self._lock:
                 record = self._requests.get(str(request_id or ""))
                 if record is None:
-                    return
+                    return False
                 if record.get("terminal"):
-                    return
+                    return False
                 if activity is not None:
                     generation = activity["function_generation"]
                     if record["activity_generation"] not in {None, generation}:
-                        return
+                        return False
                     record["activity_generation"] = generation
                     key = activity["operation_id"] + ":" + activity["tool_call_id"]
                     snapshots = record["tool_activities"]
                     previous = snapshots.get(key)
                     if previous and (previous["update_sequence"] >= activity["update_sequence"] or
                                      previous["state"] in {"completed", "failed", "interrupted", "cleanup_pending"}):
-                        return
+                        return False
                     snapshots[key] = activity
                     snapshots.move_to_end(key)
                     while len(snapshots) > 32:
@@ -350,7 +350,7 @@ class RequestActivityStore:
                     # Quiet snapshots are not chat events. Poll can project the
                     # latest one when verbose is enabled during a running tool.
                     if not activity["visible_update"]:
-                        return
+                        return False
                     status = activity["state"]
                 if kind == "tool_end":
                     details = (getattr(event, "metadata", None) or {}).get("tool_result_details") or {}
@@ -362,7 +362,7 @@ class RequestActivityStore:
                     existing.get("event_id") == event_id
                     for existing in record.get("events") or ()
                 ):
-                    return
+                    return False
                 self._append_unlocked(
                     record,
                     kind=kind,
@@ -456,12 +456,14 @@ class RequestActivityStore:
                     # stays stable when another transport page is interleaved.
                     previous = record["events"][-2] if len(record["events"]) > 1 else {}
                     projected["block_id"] = previous.get("block_id", previous.get("sequence")) if previous.get("presentation_channel") == channel else projected["sequence"]
+                return bool(enabled)
         except Exception as exc:  # display telemetry must not break generation
             self.logger.warning(
                 "Request activity stream event dropped for %s (%s)",
                 _safe_text(request_id, limit=160),
                 type(exc).__name__,
             )
+            return False
 
     def complete(
         self,

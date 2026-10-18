@@ -2138,6 +2138,14 @@ def wrap_her_persona_stream(
     )
     provisional_messages: dict[str, _ProvisionalTelegramMessage] = {}
     provisional_audio_events: set[str] = set()
+    workbench_activity_delivery = bool(
+        activity_store is not None
+        and str(getattr(item, "session_surface", "") or "").strip().casefold()
+        == "workbench"
+    )
+    activity_presented_event_ids: set[str] = set()
+    presentation_requested = bool(delivery_requested or workbench_activity_delivery)
+    presentation_blocked = bool(delivery_blocked and not workbench_activity_delivery)
     bot = getattr(getattr(runtime, "app", None), "bot", None)
     initial_resolution_capable = bool(
         callable(getattr(runtime, "_send_text", None))
@@ -2293,6 +2301,16 @@ def wrap_her_persona_stream(
         return bool(transport_accepted or audio_accepted)
 
     async def _commentary_presenter(event):
+        event_id = str(getattr(event, "event_id", "") or "").strip()
+        activity_accepted = bool(
+            workbench_activity_delivery
+            and event_id
+            and event_id in activity_presented_event_ids
+        )
+        if activity_accepted and (
+            not delivery_requested or bool(getattr(event, "required", False))
+        ):
+            return True
         if getattr(event, "kind", None) == "voice_warning":
             return await _send_event(
                 event, purpose="native_audio_fallback_warning", commentary=False
@@ -2309,6 +2327,14 @@ def wrap_her_persona_stream(
         return await _send_event(event, purpose=purpose, commentary=True)
 
     async def _control_presenter(event):
+        event_id = str(getattr(event, "event_id", "") or "").strip()
+        if (
+            workbench_activity_delivery
+            and event_id
+            and event_id in activity_presented_event_ids
+            and (not delivery_requested or bool(getattr(event, "required", False)))
+        ):
+            return True
         return await _send_event(event, purpose="her_control")
 
     async def _initial_resolution_presenter(event):
@@ -2444,9 +2470,9 @@ def wrap_her_persona_stream(
         delivery_class = str(getattr(event, "delivery_class", "") or "")
         suppression_reason = event_suppression_reason
         if not suppression_reason and delivery_class == "user_commentary":
-            if not delivery_requested:
+            if not presentation_requested:
                 suppression_reason = "delivery_not_requested"
-            elif delivery_blocked:
+            elif presentation_blocked:
                 suppression_reason = "delivery_blocked"
             elif (
                 not bool(getattr(event, "required", False))
@@ -2456,7 +2482,7 @@ def wrap_her_persona_stream(
         elif (
             delivery_class == "control"
             and bool(getattr(event, "required", False))
-            and not delivery_requested
+            and not presentation_requested
         ):
             suppression_reason = "delivery_not_requested"
         if suppression_reason:
@@ -2483,7 +2509,10 @@ def wrap_her_persona_stream(
                     f"error_type={type(exc).__name__}"
                 )
         if activity_store is not None:
-            activity_store.publish_stream(item.request_id, event)
+            activity_presented = activity_store.publish_stream(item.request_id, event)
+            event_id = str(getattr(event, "event_id", "") or "").strip()
+            if workbench_activity_delivery and activity_presented is True and event_id:
+                activity_presented_event_ids.add(event_id)
 
     router = HERMessageRouter(
         request_id=item.request_id,
@@ -2499,8 +2528,8 @@ def wrap_her_persona_stream(
         think_enabled=lambda: bool(getattr(runtime, "_think", False)),
         commentary_enabled=lambda: bool(getattr(runtime, "_commentary", True)),
         persist_event=_persist_event,
-        delivery_requested=delivery_requested,
-        delivery_blocked=delivery_blocked,
+        delivery_requested=presentation_requested,
+        delivery_blocked=presentation_blocked,
     )
 
     async def callback(event):
