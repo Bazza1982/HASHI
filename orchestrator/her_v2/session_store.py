@@ -1030,6 +1030,47 @@ class HerSessionStore:
             row = connection.execute(query, arguments).fetchone()
         return self._recovery_dict(row)
 
+    def interruption_evidence_for_request(
+        self, request_id: str
+    ) -> dict[str, Any] | None:
+        """Return a privacy-safe receipt for one interrupted provider Turn."""
+
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT recovery.*, turn.request_id AS source_request_id,
+                       turn.status AS turn_status
+                FROM her_active_turn_recovery AS recovery
+                JOIN her_turns AS turn
+                  ON turn.session_id = recovery.session_id
+                 AND turn.turn_id = recovery.turn_id
+                WHERE turn.request_id = ?
+                ORDER BY turn.accepted_at DESC LIMIT 1
+                """,
+                (str(request_id),),
+            ).fetchone()
+        state = self._recovery_dict(row)
+        if state is None:
+            return None
+        evidence = {
+            "kind": "herv3_active_turn_recovery",
+            "source_request_id": str(state.get("source_request_id") or ""),
+            "turn_id": str(state.get("turn_id") or ""),
+            "turn_status": str(state.get("turn_status") or ""),
+            "recovery_disposition": str(
+                state.get("recovery_disposition") or ""
+            ),
+            "safe_to_resume": bool(state.get("safe_to_resume")),
+            "tool_receipt_count": len(state.get("tool_receipts") or []),
+            "side_effect_count": len(state.get("side_effects") or []),
+            "evidence_ref": (
+                f"herv3:{state.get('session_id')}:{state.get('turn_id')}"
+            ),
+        }
+        evidence["evidence_digest"] = _digest(evidence)
+        return evidence
+
+
     def unresolved_side_effects_for_turn(
         self,
         session_id: str,
@@ -2553,7 +2594,7 @@ class HerSessionStore:
             effects = _array(recovery["side_effects_json"]) if recovery else []
             unresolved = self._unresolved_side_effects(effects)
             turn_status = str(turn["status"])
-            if turn_status in {"completed", "cancelled"}:
+            if turn_status in {"completed", "cancelled", "steered"}:
                 return self._turn_dict(turn) or {}
             if turn_status == "failed":
                 same_execution_repair = bool(
@@ -2681,8 +2722,12 @@ class HerSessionStore:
         turn_id: str,
         reason: str,
         execution_owner_id: str = "",
+        _terminal_status: str = "cancelled",
     ) -> dict[str, Any]:
-        """Cancel one active turn without closing its durable session."""
+        """Close an interrupted Turn without closing its durable session."""
+
+        if _terminal_status not in {"cancelled", "steered"}:
+            raise ValueError("_terminal_status must be cancelled or steered")
 
         now = _utc_now()
         with self._transaction() as connection:
@@ -2693,9 +2738,11 @@ class HerSessionStore:
             if turn is None:
                 raise HerSessionStoreError("unknown_turn", "HER turn is unknown.")
             self._assert_execution_owner(dict(turn), execution_owner_id)
-            if str(turn["status"]) in {"completed", "failed", "cancelled"}:
+            if str(turn["status"]) in {
+                "completed", "failed", "cancelled", "steered"
+            }:
                 return self._turn_dict(turn) or {}
-            clean_reason = str(reason or "HER turn was cancelled.")
+            clean_reason = str(reason or f"HER turn was {_terminal_status}.")
             recovery = connection.execute(
                 """
                 SELECT * FROM her_active_turn_recovery
@@ -2710,7 +2757,7 @@ class HerSessionStore:
             )
             remaining_work.update(
                 {
-                    "status": "cancelled",
+                    "status": _terminal_status,
                     "reason": clean_reason[:2000],
                     "unresolved_side_effects": unresolved,
                 }
@@ -2718,11 +2765,11 @@ class HerSessionStore:
             connection.execute(
                 """
                 UPDATE her_turns
-                SET assistant_text = '', error_text = ?, status = 'cancelled',
+                SET assistant_text = '', error_text = ?, status = ?,
                     completed_at = ?
                 WHERE session_id = ? AND turn_id = ?
                 """,
-                (clean_reason, now, session_id, turn_id),
+                (clean_reason, _terminal_status, now, session_id, turn_id),
             )
             row = connection.execute(
                 "SELECT state_version FROM her_sessions WHERE session_id = ?",
@@ -2736,8 +2783,8 @@ class HerSessionStore:
             self._next_event(
                 connection,
                 session_id=session_id,
-                event_id=f"{turn_id}:cancelled",
-                kind="turn_cancelled",
+                event_id=f"{turn_id}:{_terminal_status}",
+                kind=f"turn_{_terminal_status}",
                 payload={
                     "turn_id": turn_id,
                     "state_version": state_version,
@@ -2745,7 +2792,9 @@ class HerSessionStore:
                     "unresolved_side_effect_count": len(unresolved),
                 },
             )
-            disposition = "UNKNOWN_SIDE_EFFECT" if unresolved else "cancelled"
+            disposition = (
+                "UNKNOWN_SIDE_EFFECT" if unresolved else _terminal_status
+            )
             connection.execute(
                 """
                 UPDATE her_active_turn_recovery
@@ -2762,7 +2811,7 @@ class HerSessionStore:
                     turn_id,
                 ),
             )
-            if not unresolved:
+            if _terminal_status == "cancelled" and not unresolved:
                 self._archive_recovery_ancestors(
                     connection,
                     session_id=session_id,
@@ -2774,6 +2823,24 @@ class HerSessionStore:
                 (session_id, turn_id),
             ).fetchone()
             return self._turn_dict(updated) or {}
+
+    def steer_turn(
+        self,
+        *,
+        session_id: str,
+        turn_id: str,
+        reason: str,
+        execution_owner_id: str = "",
+    ) -> dict[str, Any]:
+        """End one Turn for /steer while retaining its canonical continuation."""
+
+        return self.cancel_turn(
+            session_id=session_id,
+            turn_id=turn_id,
+            reason=reason,
+            execution_owner_id=execution_owner_id,
+            _terminal_status="steered",
+        )
 
     def reconcile_interrupted_turns(
         self,

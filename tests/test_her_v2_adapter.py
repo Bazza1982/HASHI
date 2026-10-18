@@ -116,6 +116,8 @@ async def test_session_handle_reuses_worker_services_without_recovery_or_learnin
     assert child._session_coordinator is owner._session_coordinator
     assert child._learning is owner._learning
     assert child._active_runtimes is not owner._active_runtimes
+    assert child._wip_active_journals is owner._wip_active_journals
+    assert child._canonical_active_turns is owner._canonical_active_turns
     child._session_id='native-child'
     assert owner._session_id is None
     await child.shutdown()
@@ -577,6 +579,44 @@ async def test_user_stop_shutdown_cancels_fixed_turn_before_runtime_cleanup():
         ),
         ("shutdown", "USER_STOP"),
     ]
+
+@pytest.mark.asyncio
+async def test_user_steer_shutdown_preserves_fixed_turn_for_successor():
+    events = []
+    accepted = SimpleNamespace(turn_id="turn-active")
+
+    class _Coordinator:
+        def steer(self, turn, *, reason):
+            events.append(("steer", turn.turn_id, reason))
+            return {"status": "steered"}
+
+    class _Runtime:
+        async def shutdown(self, *, reason):
+            events.append(("shutdown", reason))
+
+    adapter = object.__new__(HERv2Adapter)
+    adapter.config = SimpleNamespace(
+        _hashi_runtime=SimpleNamespace(
+            _user_interrupt={"reason": "user_steer"},
+        )
+    )
+    adapter.logger = logging.getLogger("test.herv3.user-steer")
+    adapter._session_coordinator = _Coordinator()
+    adapter._canonical_active_turns = {"hashi-request:request-active": accepted}
+    adapter._active_runtimes = {"request-active": _Runtime()}
+    adapter._learning = None
+
+    await adapter.shutdown()
+
+    assert events == [
+        (
+            "steer",
+            "turn-active",
+            "HASHI /steer preserved the active HER turn for continuation.",
+        ),
+        ("shutdown", "STEERED"),
+    ]
+
 
 
 @pytest.mark.asyncio

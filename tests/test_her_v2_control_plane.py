@@ -315,6 +315,66 @@ def test_interrupted_unreceipted_side_effect_is_truthfully_unknown(tmp_path):
     )["status"] == "archived"
 
 
+def test_steered_turn_is_recoverable_once_while_cancelled_turn_is_not(tmp_path):
+    coordinator = HerBackendSessionCoordinator(tmp_path / "state")
+    steered = _accept(coordinator, "turn-steered", "Do the original work")
+    coordinator.store.record_runtime_event(
+        session_id=steered.session_id,
+        turn_id=steered.turn_id,
+        record=_runtime_event(
+            steered.turn_id,
+            "turn-steered:tool:read:receipt",
+            "tool_receipt",
+            tool_call_id="read",
+            receipt={
+                "tool_call_id": "read",
+                "tool_name": "file_read",
+                "status": "success",
+                "read_only": True,
+                "completed": True,
+                "output_sha256": "sha256:read",
+            },
+        ),
+    )
+
+    closed = coordinator.steer(
+        steered,
+        reason="The user supplied a new direction.",
+    )
+
+    assert closed["status"] == "steered"
+    recovery = coordinator.store.active_turn_recovery(
+        steered.session_id, steered.turn_id
+    )
+    assert recovery["status"] == "terminated"
+    assert recovery["recovery_disposition"] == "steered"
+    evidence = coordinator.store.interruption_evidence_for_request(
+        "turn-steered"
+    )
+    assert evidence["evidence_ref"].endswith(f":{steered.turn_id}")
+    assert evidence["recovery_disposition"] == "steered"
+    assert evidence["tool_receipt_count"] == 1
+    assert evidence["evidence_digest"].startswith("sha256:")
+
+    successor = _accept(coordinator, "turn-successor", "Continue differently")
+    context = coordinator.store.consume_recovery_context(
+        session_id=successor.session_id,
+        current_turn_id=successor.turn_id,
+    )
+    assert context["interrupted_turn_id"] == steered.turn_id
+    assert context["recovery_disposition"] == "steered"
+    assert context["tool_receipts"][0]["tool_call_id"] == "read"
+
+    coordinator.complete(successor, assistant_text="Done")
+    cancelled = _accept(coordinator, "turn-cancelled", "Stop this")
+    coordinator.cancel(cancelled, reason="The user stopped the task.")
+    next_turn = _accept(coordinator, "turn-after-cancel", "A separate task")
+    assert coordinator.store.consume_recovery_context(
+        session_id=next_turn.session_id,
+        current_turn_id=next_turn.turn_id,
+    ) is None
+
+
 def test_candidate_worker_does_not_reconcile_a_live_owner_turn(tmp_path):
     root = tmp_path / "state"
     production = HerBackendSessionCoordinator(

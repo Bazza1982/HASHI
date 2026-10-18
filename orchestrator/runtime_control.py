@@ -495,6 +495,60 @@ def _meta_session_id(meta: dict[str, Any] | None) -> str:
     return str(meta.get("hashi_session_id") or meta.get("session_id") or "")
 
 
+def _request_run_id(
+    runtime: Any,
+    request_id: str,
+    *,
+    request_meta: dict[str, Any] | None = None,
+) -> str:
+    if isinstance(request_meta, dict):
+        candidate = str(
+            request_meta.get("hashi_run_id")
+            or request_meta.get("run_id")
+            or ""
+        )
+        if candidate:
+            return candidate
+    store = getattr(runtime, "session_store", None)
+    lookup = getattr(store, "get_run_by_request", None)
+    if not callable(lookup) or not request_id:
+        return ""
+    try:
+        run = lookup(
+            str(request_id),
+            agent_id=str(getattr(runtime, "name", "")),
+        )
+    except Exception:
+        return ""
+    return str(run.get("run_id") or "") if isinstance(run, dict) else ""
+
+
+async def _steer_continuation_evidence(
+    runtime: Any, request_id: str
+) -> dict[str, Any]:
+    backend_manager = getattr(runtime, "backend_manager", None)
+    backend = getattr(backend_manager, "current_backend", None)
+    resolver = getattr(backend, "steer_continuation_evidence", None)
+    if callable(resolver):
+        try:
+            evidence = resolver(str(request_id or ""))
+            if inspect.isawaitable(evidence):
+                evidence = await evidence
+            if isinstance(evidence, dict) and evidence:
+                return dict(evidence)
+        except Exception as exc:
+            runtime.logger.warning(
+                "Steer continuation evidence readback failed: %s",
+                type(exc).__name__,
+            )
+    return {
+        "kind": "request_interrupt_marker",
+        "source_request_id": str(request_id or ""),
+        "status": "continuation_requested",
+        "evidence_ref": f"request:{request_id}:user_steer",
+    }
+
+
 def _command_request_route(
     runtime: Any, update: Any
 ) -> tuple[Any, dict[str, Any], bool] | None:
@@ -512,15 +566,22 @@ async def _enqueue_command_request(
     prompt: str,
     source: str,
     summary: str,
+    request_metadata_updates: dict[str, Any] | None = None,
     **options: Any,
 ) -> Any:
     route = _command_request_route(runtime, update)
     if route is not None:
         chat_id, request_metadata, deliver_to_telegram = route
-        options.setdefault("request_metadata", request_metadata)
+        merged_request_metadata = dict(request_metadata)
+        merged_request_metadata.update(dict(request_metadata_updates or {}))
+        options.setdefault("request_metadata", merged_request_metadata)
         options.setdefault("deliver_to_telegram", deliver_to_telegram)
     else:
         chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
+        if request_metadata_updates:
+            options.setdefault(
+                "request_metadata", dict(request_metadata_updates)
+            )
     return await runtime.enqueue_request(
         chat_id,
         prompt,
@@ -809,7 +870,7 @@ async def cmd_steer(
     context: Any,
     *,
     command_name: str = "steer",
-) -> None:
+) -> dict[str, Any] | None:
     """Course-correct mid-task, or send a plain new request when idle.
 
     Busy: stop immediately, keep progress/artefacts, enqueue the steer wrapper.
@@ -838,6 +899,12 @@ async def cmd_steer(
         or ""
     )
     active_meta = _active_request_meta(runtime)
+    active_request_id = str(
+        (active_meta or {}).get("request_id") or ""
+    )
+    active_run_id = _request_run_id(
+        runtime, active_request_id, request_meta=active_meta
+    )
     command_session_id = _command_session_id(runtime, update)
     active_session_id = _meta_session_id(active_meta)
     busy = bool(active_meta) or bool(
@@ -937,6 +1004,9 @@ async def cmd_steer(
         ),
         request_meta=active_meta,
     )
+    continuation_evidence = await _steer_continuation_evidence(
+        runtime, active_request_id
+    )
     dropped = await _clear_request_queue(
         runtime, session_id=command_session_id
     )
@@ -975,7 +1045,34 @@ async def cmd_steer(
         continuation_prompt,
         "focus" if focus_mode else "steer",
         summary,
+        request_metadata_updates={
+            **({"parent_run_id": active_run_id} if active_run_id else {}),
+            "steer_parent_request_id": active_request_id,
+            "steer_continuation_evidence": continuation_evidence,
+        },
     )
+
+    if request_id:
+        context.derived_request_id = request_id
+    new_run_id = _request_run_id(runtime, str(request_id or ""))
+    steer_receipt = {
+        "type": (
+            "hashi.focus-receipt" if focus_mode else "hashi.steer-receipt"
+        ),
+        "version": 1,
+        "status": "accepted" if request_id else "outcome_unknown",
+        "old_run": {
+            "request_id": active_request_id or None,
+            "run_id": active_run_id or None,
+            "terminal": "steered",
+        },
+        "new_run": {
+            "request_id": str(request_id or "") or None,
+            "run_id": new_run_id or None,
+            "parent_run_id": active_run_id or None,
+        },
+        "continuation": continuation_evidence,
+    }
 
     if focus_mode:
         await _reply(
@@ -1005,9 +1102,12 @@ async def cmd_steer(
                 else ""
             )
             + f"Kept interim progress, thinking, and workspace artefacts.\n"
-            f"Queued continuation with your new direction"
-            f"{f' (request {request_id})' if request_id else ''}.",
+            + f"Old Run: {active_run_id or 'unavailable'}\n"
+            + f"New Run: {new_run_id or 'unavailable'}\n"
+            + "Continuation evidence: "
+            + f"{continuation_evidence.get('evidence_ref') or 'unavailable'}.",
         )
+    return steer_receipt
 
 
 @session_control

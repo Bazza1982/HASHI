@@ -92,7 +92,7 @@ async def test_cmd_steer_stops_clears_queue_and_enqueues_continuation():
         replies.append(text)
 
     async def _enqueue(chat_id, prompt, source, summary, **_kwargs):
-        enqueued.append((chat_id, prompt, source, summary))
+        enqueued.append((chat_id, prompt, source, summary, _kwargs))
         return "req-steer-1"
 
     queue: asyncio.Queue = asyncio.Queue()
@@ -114,13 +114,29 @@ async def test_cmd_steer_stops_clears_queue_and_enqueues_continuation():
             "prompt": "Implement feature X end to end",
             "source": "text",
             "summary": "Feature X",
+            "hashi_run_id": "run-old",
         },
-        last_prompt=SimpleNamespace(prompt="Implement feature X end to end", chat_id=42),
+        last_prompt=SimpleNamespace(
+            prompt="Implement feature X end to end", chat_id=42
+        ),
         is_generating=True,
         _is_authorized_user=lambda _uid: True,
         _reply_text=_reply,
         _notify_right_brain_interrupted=lambda *a, **k: None,
         enqueue_request=_enqueue,
+        session_store=SimpleNamespace(
+            get_run_by_request=lambda request_id, **_kwargs: {
+                "request_id": request_id,
+                "run_id": "run-new",
+            }
+        ),
+    )
+    runtime.backend_manager.current_backend.steer_continuation_evidence = (
+        lambda request_id: {
+            "kind": "herv3_active_turn_recovery",
+            "source_request_id": request_id,
+            "evidence_ref": "herv3:session-1:turn-old",
+        }
     )
     text = "/steer also include xxx in your tasks"
     msg = SimpleNamespace(text=text, chat=SimpleNamespace(id=42))
@@ -130,24 +146,34 @@ async def test_cmd_steer_stops_clears_queue_and_enqueues_continuation():
         effective_message=msg,
         message=msg,
     )
-    await runtime_control.cmd_steer(
-        runtime,
-        update,
-        SimpleNamespace(args=["also", "include", "xxx", "in", "your", "tasks"]),
+    context = SimpleNamespace(
+        args=["also", "include", "xxx", "in", "your", "tasks"]
     )
+    receipt = await runtime_control.cmd_steer(runtime, update, context)
 
     shutdown.assert_awaited()
     assert queue.empty()
     assert len(enqueued) == 1
-    chat_id, prompt, source, summary = enqueued[0]
+    chat_id, prompt, source, summary, options = enqueued[0]
     assert chat_id == 42
     assert source == "steer"
+    assert options["request_metadata"]["parent_run_id"] == "run-old"
+    assert context.derived_request_id == "req-steer-1"
+    assert receipt["type"] == "hashi.steer-receipt"
+    assert receipt["old_run"]["run_id"] == "run-old"
+    assert receipt["new_run"]["run_id"] == "run-new"
+    assert receipt["new_run"]["parent_run_id"] == "run-old"
+    assert (
+        receipt["continuation"]["evidence_ref"]
+        == "herv3:session-1:turn-old"
+    )
     assert "also include xxx" in prompt
     assert "Implement feature X end to end" in prompt
     assert "KEEP all interim progress" in prompt
     assert replies and "Steered" in replies[0]
-    assert "req-steer-1" in replies[0]
-    # Intentional kill marker so exit -9 is not shown as ❌ Backend error
+    assert "run-old" in replies[0]
+    assert "run-new" in replies[0]
+    # Intentional kill marker so exit -9 is not shown as backend error.
     assert getattr(runtime, "_user_interrupt", None) is not None
     assert runtime._user_interrupt["reason"] == "user_steer"
     assert runtime._user_interrupt["request_id"] == "req-old"

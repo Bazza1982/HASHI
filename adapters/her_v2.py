@@ -776,6 +776,37 @@ class HERv2Adapter(BaseBackend):
             return dict(current)
         return {}
 
+    def _close_interrupted_fixed_turn(
+        self,
+        accepted: AcceptedHerTurn,
+        *,
+        request_id: str,
+        fallback_reason: str,
+    ) -> dict[str, Any]:
+        """Close a fixed Turn according to the typed user interruption."""
+
+        if self._session_coordinator is None:
+            return {}
+        try:
+            from orchestrator.runtime_control import peek_user_interrupt
+
+            interrupt_reason = peek_user_interrupt(
+                self._runtime_context(), str(request_id or "") or None
+            )
+        except Exception:
+            interrupt_reason = None
+        if interrupt_reason in {"user_steer", "user_focus"}:
+            return self._session_coordinator.steer(
+                accepted,
+                reason=(
+                    "HASHI /steer preserved the active HER turn for continuation."
+                ),
+            )
+        return self._session_coordinator.cancel(
+            accepted,
+            reason=str(fallback_reason or "HASHI cancelled the active HER turn."),
+        )
+
     def _schedule_execution_stage_compaction(self, request_id: str) -> bool:
         runtime = self._runtime_context()
         if runtime is None:
@@ -926,6 +957,7 @@ class HERv2Adapter(BaseBackend):
                 # A Session handle is an execution owner, not a Worker startup.
                 # Reconciliation and learning lifecycle remain with the owner.
                 for name in (
+                    "_wip_active_journals", "_canonical_active_turns",
                     "_session_coordinator", "_ledger_store", "_wip_journal", "_audit_log", "_learning",
                     "_habit_execution_lock", "_habit_meditation_execution_lock",
                     "_habit_dream_execution_lock", "_habit_dream_run_lock",
@@ -1141,6 +1173,18 @@ class HERv2Adapter(BaseBackend):
         # A closed epoch is never resumed under the old ID.
         self._session_id = None
         return False
+
+    def steer_continuation_evidence(
+        self, request_id: str
+    ) -> dict[str, Any] | None:
+        """Expose only the durable continuation receipt, never provider reasoning."""
+
+        if self._session_coordinator is None:
+            return None
+        return self._session_coordinator.store.interruption_evidence_for_request(
+            str(request_id or "")
+        )
+
 
     def _new_stage_provider(
         self,
@@ -2142,9 +2186,10 @@ class HERv2Adapter(BaseBackend):
                 )
             finally:
                 if fixed_turn is not None and self._session_coordinator is not None:
-                    self._session_coordinator.cancel(
+                    self._close_interrupted_fixed_turn(
                         fixed_turn,
-                        reason="HASHI cancelled the active HER turn.",
+                        request_id=request_id,
+                        fallback_reason="HASHI cancelled the active HER turn.",
                     )
             raise
         except BaseException as exc:
@@ -2377,9 +2422,10 @@ class HERv2Adapter(BaseBackend):
                     ),
                 }
             if stopped:
-                closed_turn = self._session_coordinator.cancel(
+                closed_turn = self._close_interrupted_fixed_turn(
                     fixed_turn,
-                    reason=error,
+                    request_id=request_id,
+                    fallback_reason=error,
                 )
             else:
                 closed_turn = self._session_coordinator.complete(
@@ -2710,20 +2756,30 @@ class HERv2Adapter(BaseBackend):
             "user_stop": "USER_STOP",
             "user_retry": "USER_STOP",
         }.get(raw_reason, "RUNTIME_SHUTDOWN")
-        if reason == "USER_STOP" and self._session_coordinator is not None:
+        if reason in {"USER_STOP", "STEERED"} and self._session_coordinator is not None:
             # /stop must release the durable fixed-session turn before the
             # outer request task can be cancelled. Otherwise cancellation
             # during request-local service cleanup can leave this row active
             # even though the HASHI Run is already durably stopped.
-            for accepted in tuple(self._canonical_active_turns.values()):
+            for request_ref, accepted in tuple(
+                self._canonical_active_turns.items()
+            ):
                 try:
-                    self._session_coordinator.cancel(
+                    self._close_interrupted_fixed_turn(
                         accepted,
-                        reason="HASHI /stop cancelled the active HER turn.",
+                        request_id=str(request_ref).removeprefix(
+                            "hashi-request:"
+                        ),
+                        fallback_reason=(
+                            "HASHI /stop cancelled the active HER turn."
+                            if reason == "USER_STOP"
+                            else "HASHI /steer preserved the active HER turn "
+                            "for continuation."
+                        ),
                     )
                 except HerFixedProtocolError as exc:
                     self.logger.warning(
-                        "HERV3 fixed-turn cancellation during /stop failed: %s",
+                        "HERV3 fixed-turn interruption close failed: %s",
                         exc.code,
                     )
         active = tuple(self._active_runtimes.values())

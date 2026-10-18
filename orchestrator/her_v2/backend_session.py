@@ -721,6 +721,17 @@ class HerBackendSessionCoordinator:
         except HerSessionStoreError as exc:
             raise HerFixedProtocolError(exc.code, str(exc)) from exc
 
+    def steer(self, accepted: AcceptedHerTurn, *, reason: str) -> dict[str, Any]:
+        try:
+            return self.store.steer_turn(
+                session_id=accepted.session_id,
+                turn_id=accepted.turn_id,
+                reason=str(reason or "HER turn was steered."),
+                execution_owner_id=self.execution_owner["owner_id"],
+            )
+        except HerSessionStoreError as exc:
+            raise HerFixedProtocolError(exc.code, str(exc)) from exc
+
     def cancel(self, accepted: AcceptedHerTurn, *, reason: str) -> dict[str, Any]:
         try:
             return self.store.cancel_turn(
