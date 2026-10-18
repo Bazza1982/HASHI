@@ -735,6 +735,94 @@ async def test_pao_persists_the_same_route_projected_into_pcm(
 
 
 @pytest.mark.asyncio
+async def test_pao_steer_successor_inherits_parent_run_delivery_route(
+    tmp_path, monkeypatch
+):
+    runtime = _runtime_for_admission()
+    runtime.name = "visibility"
+    runtime.global_config = SimpleNamespace(
+        project_root=tmp_path,
+        bridge_home=tmp_path,
+        instance_id="HASHI2",
+        authorized_id=123,
+    )
+    request_ids = iter(("req-parent", "req-successor", "req-telegram-successor"))
+    runtime.next_request_id = lambda: next(request_ids)
+    runtime.session_store = SessionStore(
+        tmp_path / "state" / "sessions.sqlite3", instance_id="HASHI2"
+    )
+    runtime.message_logger = Mock()
+    runtime.request_activity = Mock()
+    runtime.queue = asyncio.Queue()
+    monkeypatch.setattr(
+        runtime_session, "session_workzone_state", lambda *args, **kwargs: {}
+    )
+    monkeypatch.setattr(
+        runtime_delivery_order, "register_turn", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        runtime_cross_session, "capture_reply_target", lambda *args, **kwargs: None
+    )
+
+    await runtime.enqueue_request(
+        123,
+        "parent task",
+        "session-api",
+        "parent",
+        request_metadata={
+            "session_surface": "workbench",
+            "session_channel_key": "hashi-workbench-v2:hashi3",
+        },
+    )
+    parent_item = runtime.queue.get_nowait()
+    parent_run = runtime.session_store.get_run_by_request(parent_item.request_id)
+    parent_route = parent_run["delivery_route"]
+
+    await runtime.enqueue_request(
+        123,
+        "steered continuation",
+        "steer",
+        "successor",
+        request_metadata={
+            "session_id": parent_run["session_id"],
+            "owner_id": "user:123",
+            "session_surface": "workbench",
+            "session_channel_key": "default",
+            "parent_run_id": parent_run["run_id"],
+            "steer_parent_request_id": parent_item.request_id,
+        },
+    )
+    successor_item = runtime.queue.get_nowait()
+    successor_run = runtime.session_store.get_run_by_request(successor_item.request_id)
+
+    assert successor_run["parent_run_id"] == parent_run["run_id"]
+    assert successor_item.request_metadata[RUN_DELIVERY_ROUTE_METADATA_KEY] == parent_route
+    assert successor_run["delivery_route"] == parent_route
+
+    await runtime.enqueue_request(
+        123,
+        "steered from Telegram",
+        "steer",
+        "telegram successor",
+        request_metadata={
+            "session_id": parent_run["session_id"],
+            "owner_id": "user:123",
+            "session_surface": "telegram",
+            "session_channel_key": "123",
+            "parent_run_id": parent_run["run_id"],
+            "steer_parent_request_id": parent_item.request_id,
+        },
+    )
+    telegram_item = runtime.queue.get_nowait()
+    telegram_route = telegram_item.request_metadata[RUN_DELIVERY_ROUTE_METADATA_KEY]
+
+    assert telegram_route["primary"] == {
+        "surface": "telegram",
+        "channel_key": "123",
+    }
+
+
+@pytest.mark.asyncio
 async def test_pao_uses_central_mirror_switches_for_tui_admission(tmp_path, monkeypatch):
     from orchestrator.connector_delivery_preferences import set_connector_preference
     from orchestrator.frontend_delivery import tui_request_metadata

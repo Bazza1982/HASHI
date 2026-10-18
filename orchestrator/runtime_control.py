@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import inspect
 import re
 import time
@@ -609,7 +608,6 @@ async def _enqueue_command_request(
         )
 
         chat_id, request_metadata, deliver_to_telegram = route
-        inherited_delivery_route: dict[str, Any] | None = None
         parent_session_id = _meta_session_id(continuation_parent_meta)
         if (
             parent_session_id
@@ -621,8 +619,6 @@ async def _enqueue_command_request(
                 if isinstance(parent_request_metadata, dict)
                 else None
             )
-            if isinstance(parent_route, dict):
-                inherited_delivery_route = copy.deepcopy(parent_route)
             telegram_destination = route_destination(parent_route, "telegram")
             parent_channel = str(
                 (telegram_destination or {}).get("channel_key") or ""
@@ -635,10 +631,6 @@ async def _enqueue_command_request(
                     chat_id = candidate_chat_id
         merged_request_metadata = dict(request_metadata)
         merged_request_metadata.update(dict(request_metadata_updates or {}))
-        if inherited_delivery_route is not None:
-            merged_request_metadata[RUN_DELIVERY_ROUTE_METADATA_KEY] = (
-                inherited_delivery_route
-            )
         options.setdefault("request_metadata", merged_request_metadata)
         options.setdefault("deliver_to_telegram", deliver_to_telegram)
     else:
@@ -1241,7 +1233,7 @@ async def cmd_steer(
                 if delayed_preserved
                 else ""
             )
-            + f"Kept interim progress, thinking, and workspace artefacts.\n"
+            + "Kept interim progress, thinking, and workspace artefacts.\n"
             + f"Old Run: {active_run_id or 'unavailable'}\n"
             + f"New Run: {new_run_id or 'unavailable'}\n"
             + "Continuation evidence: "

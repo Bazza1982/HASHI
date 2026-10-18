@@ -239,9 +239,6 @@ async def test_steer_successor_reuses_parent_telegram_destination(monkeypatch):
     args, kwargs = enqueue.await_args
     assert args[0] == 7430217666
     assert kwargs["request_metadata"]["session_id"] == "session-1"
-    assert (
-        kwargs["request_metadata"][RUN_DELIVERY_ROUTE_METADATA_KEY] == parent_route
-    )
 
 
 @pytest.mark.asyncio
