@@ -183,7 +183,10 @@ before outer cleanup. See [stop contract](HASHI_AGENT_STOP_FENCE_DECISION.md).
 Media bind one draft/instance/Agent/Run; Remote sends managed bytes and grants
 HERV3 no wider authority. Safe Voice requires typed confirm/discard and
 idempotency; discard stale media. `/voice` uses validated Function/local media;
-Workbench gets Session audio, Telegram its renderer.
+Workbench gets Session audio, Telegram its renderer. Workbench keeps
+`voice_message` audio durable but hides its generic attachment/player and any
+transport-only bubble; ordinary audio remains visible. Its Safe Voice
+confirmation card sizes to content.
 
 Phone binds to the owner's foreground Conversation until hang-up. Actions get
 bounded original PCM/Conversation/job evidence, excluding scheduled prompts;

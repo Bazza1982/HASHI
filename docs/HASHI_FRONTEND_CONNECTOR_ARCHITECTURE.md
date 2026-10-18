@@ -1054,6 +1054,14 @@ Safe Voice still presents a confirmation preview, and confirm/discard use the
 typed Session voice-transcript decision endpoint. The audio is never converted
 to plain text by the connector, and no decision is automatic.
 
+Workbench treats the `voice_message` attachment as transport and recovery
+evidence rather than a generic user audio attachment. Its normal transcript
+view omits that attachment and its player while retaining the durable record;
+ordinary audio attachments remain visible. A transport-only message occupies
+no chat bubble, while any confirmed transcript text remains normal user
+content. The Safe Voice confirmation card is content-sized and does not reserve
+unused vertical space for a one-line status.
+
 Attachment stage retries are bound to a client idempotency key and canonical
 metadata digest. Identical retries reuse the same attachment; changed metadata
 conflicts. Uploading the identical bytes and committing an already committed
