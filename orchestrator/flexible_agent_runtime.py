@@ -3633,6 +3633,22 @@ class FlexibleAgentRuntime:
             media_kind = "photo"
         prompt, summary = self._build_media_prompt(media_kind, filename, caption=caption, emoji=emoji)
         rendered_prompt = prompt.replace("{local_path}", str(local_path))
+        request_content = None
+        if media_kind.lower() == "photo":
+            request_content, manifest = runtime_media._single_attachment_request(
+                rendered_prompt,
+                media_kind=media_kind,
+                filename=filename,
+                local_path=local_path,
+                transport={"caption": caption},
+            )
+            request_metadata = {
+                **dict(request_metadata or {}),
+                **runtime_media._single_attachment_metadata(
+                    request_content,
+                    manifest,
+                ),
+            }
         return await self.enqueue_request(
             self._primary_chat_id(),
             rendered_prompt,
@@ -3640,6 +3656,7 @@ class FlexibleAgentRuntime:
             summary,
             deliver_to_telegram=deliver_to_telegram,
             request_metadata=request_metadata,
+            request_content=request_content,
             idempotency_key=idempotency_key,
         )
 

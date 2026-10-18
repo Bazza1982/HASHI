@@ -35,6 +35,15 @@ bounded, sent transiently to that exact LAN service, then removed from the
 request sent to the selected cloud model. Only the bounded visual description
 and original request continue downstream.
 
+## Frontend media admission invariant
+
+Every image ingress, including Workbench multipart upload, must construct the
+same canonical request content and attachment manifest before queue admission.
+A local file path embedded in rendered prompt text is not attachment authority
+and cannot drive capability routing. The manifest carries the server-staged
+path, media type, size and digest so HERV3 can validate identity and choose the
+visual route before any Model Provider call.
+
 ## Warning and privacy contract
 
 The fallback emits one required `fallback_warning` per request. It names the

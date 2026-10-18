@@ -19,6 +19,37 @@ def runtime(*, safe_voice=False):
 
 
 @pytest.mark.asyncio
+async def test_api_image_preserves_canonical_attachment_for_model_routing(tmp_path):
+    target = runtime()
+    image = tmp_path / "upload.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\nvisual-test")
+
+    result = await FlexibleAgentRuntime.enqueue_api_media(
+        target,
+        image,
+        "photo",
+        "upload.png",
+        caption="Describe this image.",
+        request_metadata={"session_id": "session-image"},
+    )
+
+    assert result == "request-voice"
+    call = target.enqueue_request.await_args
+    content = call.kwargs["request_content"]
+    manifest = call.kwargs["request_metadata"]["attachment_manifest"]
+    assert content["version"] == 1
+    assert len(manifest) == 1
+    attachment = manifest[0]
+    assert attachment["modality"] == "image"
+    assert attachment["mime_type"] == "image/png"
+    assert attachment["filename"] == "upload.png"
+    assert attachment["local_ref"] == str(image)
+    assert attachment["size_bytes"] == image.stat().st_size
+    assert len(attachment["sha256"]) == 64
+    assert call.kwargs["request_metadata"]["session_id"] == "session-image"
+
+
+@pytest.mark.asyncio
 async def test_basic_voice_uses_local_transcript_and_stable_digest_across_upload_paths(tmp_path, monkeypatch):
     target = runtime()
     transcriber = SimpleNamespace(transcribe=AsyncMock(return_value="This is a voice test."))
