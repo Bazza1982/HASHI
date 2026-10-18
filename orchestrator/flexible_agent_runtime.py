@@ -3634,6 +3634,7 @@ class FlexibleAgentRuntime:
         prompt, summary = self._build_media_prompt(media_kind, filename, caption=caption, emoji=emoji)
         rendered_prompt = prompt.replace("{local_path}", str(local_path))
         request_content = None
+        staged_attachment_ids: tuple[str, ...] = ()
         if media_kind.lower() == "photo":
             request_content, manifest = runtime_media._single_attachment_request(
                 rendered_prompt,
@@ -3649,16 +3650,51 @@ class FlexibleAgentRuntime:
                     manifest,
                 ),
             }
-        return await self.enqueue_request(
-            self._primary_chat_id(),
-            rendered_prompt,
-            source,
-            summary,
-            deliver_to_telegram=deliver_to_telegram,
-            request_metadata=request_metadata,
-            request_content=request_content,
-            idempotency_key=idempotency_key,
-        )
+            from orchestrator.telegram_media_admission import admit_session_media
+
+            (
+                rendered_prompt,
+                request_content,
+                request_metadata,
+                staged_attachment_ids,
+            ) = await asyncio.to_thread(
+                admit_session_media,
+                self,
+                source=source,
+                chat_id=self._primary_chat_id(),
+                prompt=rendered_prompt,
+                request_content=request_content,
+                request_metadata=request_metadata,
+                idempotency_key=idempotency_key,
+            )
+        try:
+            request_id = await self.enqueue_request(
+                self._primary_chat_id(),
+                rendered_prompt,
+                source,
+                summary,
+                deliver_to_telegram=deliver_to_telegram,
+                request_metadata=request_metadata,
+                request_content=request_content,
+                idempotency_key=idempotency_key,
+            )
+        except BaseException:
+            if staged_attachment_ids:
+                await asyncio.to_thread(
+                    self.session_store.discard_unbound_attachments,
+                    session_id=request_metadata["session_id"],
+                    owner_id=request_metadata["owner_id"],
+                    attachment_ids=staged_attachment_ids,
+                )
+            raise
+        if not request_id and staged_attachment_ids:
+            await asyncio.to_thread(
+                self.session_store.discard_unbound_attachments,
+                session_id=request_metadata["session_id"],
+                owner_id=request_metadata["owner_id"],
+                attachment_ids=staged_attachment_ids,
+            )
+        return request_id
 
     def bind_handlers(self):
         runtime_command_binding.bind_flexible_runtime_handlers(self)

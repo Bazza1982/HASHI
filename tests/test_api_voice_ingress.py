@@ -4,7 +4,10 @@ from unittest.mock import AsyncMock
 import pytest
 
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
-from orchestrator import runtime_media, voice_transcriber
+from orchestrator import runtime_media, runtime_session, voice_transcriber
+from orchestrator.session_attachment_authorization import (
+    current_run_attachment_grants,
+)
 from orchestrator.session_store import SessionStore, IdempotencyConflict
 
 
@@ -47,6 +50,93 @@ async def test_api_image_preserves_canonical_attachment_for_model_routing(tmp_pa
     assert attachment["size_bytes"] == image.stat().st_size
     assert len(attachment["sha256"]) == 64
     assert call.kwargs["request_metadata"]["session_id"] == "session-image"
+
+
+@pytest.mark.asyncio
+async def test_api_image_is_bound_to_current_session_before_backend_read(tmp_path):
+    target = runtime()
+    target.name = "image-agent"
+    target.global_config = SimpleNamespace(authorized_id=7, instance_id="TEST")
+    target.media_dir = tmp_path
+    target.session_store = SessionStore(
+        tmp_path / "sessions.sqlite3", instance_id="TEST"
+    )
+    session = target.session_store.resolve_primary_session(
+        owner_id="owner", agent_id=target.name, establish=True
+    )
+    captured = {}
+
+    async def enqueue_request(chat_id, prompt, source, summary, **kwargs):
+        captured.update(kwargs)
+        _, accepted, owner, _, _ = runtime_session.accept_request(
+            target,
+            request_id="req-image",
+            chat_id=chat_id,
+            prompt=prompt,
+            source=source,
+            request_metadata=kwargs["request_metadata"],
+            request_content=kwargs["request_content"],
+            idempotency_key=kwargs.get("idempotency_key"),
+        )
+        assert accepted is not None
+        fence = target.session_store.mark_request_running(
+            accepted.request_id, worker_id="image-worker"
+        )
+        run = target.session_store.get_run_by_request(accepted.request_id)
+        target._request_meta_by_id = {
+            accepted.request_id: {
+                "request_id": accepted.request_id,
+                "hashi_session_id": session["session_id"],
+                "hashi_run_id": accepted.run_id,
+                "hashi_message_id": run["user_message_id"],
+                "hashi_fencing_token": fence,
+                "owner_id": owner,
+                "context_generation": session["context_generation"],
+            }
+        }
+        return accepted.request_id
+
+    target.enqueue_request = enqueue_request
+    image = tmp_path / "session-upload.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\nsession-visual-test")
+
+    result = await FlexibleAgentRuntime.enqueue_api_media(
+        target,
+        image,
+        "photo",
+        "session-upload.png",
+        caption="Describe this image.",
+        request_metadata={
+            "session_id": session["session_id"],
+            "owner_id": "owner",
+            "session_surface": "workbench",
+            "session_channel_key": "default",
+        },
+        idempotency_key="image-ingress:1",
+    )
+
+    assert result == "req-image"
+    content = captured["request_content"]
+    part = next(item for item in content["parts"] if item["type"] == "media")
+    assert part["local_ref"] != str(image)
+    assert captured["request_metadata"]["session_message_content"] == [
+        {"type": "text", "text": next(
+            item["text"] for item in content["parts"] if item["type"] == "text"
+        )},
+        {
+            "type": "attachment",
+            "attachment_id": part["attachment_id"],
+            "caption": "Describe this image.",
+        },
+    ]
+    grants = current_run_attachment_grants(
+        SimpleNamespace(runtime=target, config=SimpleNamespace(name=target.name)),
+        result,
+        content,
+    )
+    assert len(grants) == 1
+    assert grants[0].attachment_id == part["attachment_id"]
+    assert str(grants[0].path) == part["local_ref"]
 
 
 @pytest.mark.asyncio
