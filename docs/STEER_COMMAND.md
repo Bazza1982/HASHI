@@ -142,5 +142,7 @@ without a mid-task wrapper.
 - Implementation: the branch restores a verified HERV3 Session binding before
   accepting the linked successor and keeps Workbench as the primary Connector
   when a parent Telegram mirror channel is recovered.
-- Offline verification: the focused HERV3, steer, and message-context suites
-  passed (144 tests).
+- Offline verification: the focused HERV3, steer, message-context, and request
+  visibility suites passed (166 tests). The curated Core gate passed 860 tests
+  with 1 conditional skip. Runtime adoption and live Workbench acceptance are
+  still separate and pending.
