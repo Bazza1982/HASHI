@@ -22,7 +22,7 @@ selected Engine can actually do:
 | State and Engine | Execution | Run relationship | Queue |
 | --- | --- | --- | --- |
 | Live Codex App Server Turn | Send native `turn/steer` with the active Thread and expected Turn | The same HASHI Run and Provider Turn continue in place | Clear READY for this Session; preserve FUTURE |
-| HERV3 or another Engine without native in-flight steer | Mark the old Turn `STEERED`, interrupt it, and enqueue a linked successor | A new Run/Turn records the old Run as parent plus continuation evidence | Clear READY for this Session; preserve FUTURE |
+| HERV3 or another Engine without native in-flight steer | Mark the old Turn `STEERED`, interrupt it, and enqueue a linked successor | PAO marks the old Run `superseded`; the new Run records it as parent plus continuation evidence | Clear READY for this Session; preserve FUTURE |
 | Idle | Enqueue the direction as an ordinary request | A normal new Run | Existing queue rules |
 
 Native steer is used only when the Codex adapter can prove that a real App Server
@@ -76,6 +76,12 @@ Every accepted busy steer returns a typed `hashi.steer-receipt` with:
 - `new_run`: either the parent-linked successor or the same Run with
   `relationship=continued_in_place` and `created=false`;
 - `continuation`: the Provider Turn acknowledgement or HERV3 recovery evidence.
+
+For a reconstructed steer, `new_run` and `continuation` both carry the old and
+new Run relationship. The command wrapper must return this value unchanged so
+Workbench and Session API receive the same receipt that Telegram renders. The
+successor keeps the same Session and resolves its Connector route with the
+original Run's authenticated Telegram destination instead of a placeholder.
 
 A native receipt must not invent a new Run. A reconstruction receipt must not
 claim success until the successor request and its Run identity exist.

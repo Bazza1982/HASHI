@@ -10955,10 +10955,10 @@ class FlexibleAgentRuntime:
         await runtime_control.cmd_stop(self, update, context)
 
     async def cmd_steer(self, update: Update, context: Any):
-        await runtime_control.cmd_steer(self, update, context)
+        return await runtime_control.cmd_steer(self, update, context)
 
     async def cmd_focus(self, update: Update, context: Any):
-        await runtime_control.cmd_focus(self, update, context)
+        return await runtime_control.cmd_focus(self, update, context)
 
     async def cmd_recall(self, update: Update, context: Any):
         await runtime_control.cmd_recall(self, update, context)

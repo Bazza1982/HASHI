@@ -160,9 +160,16 @@ async def test_cmd_steer_stops_clears_queue_and_enqueues_continuation():
     assert options["request_metadata"]["parent_run_id"] == "run-old"
     assert context.derived_request_id == "req-steer-1"
     assert receipt["type"] == "hashi.steer-receipt"
+    assert receipt["version"] == 2
     assert receipt["old_run"]["run_id"] == "run-old"
     assert receipt["new_run"]["run_id"] == "run-new"
     assert receipt["new_run"]["parent_run_id"] == "run-old"
+    assert receipt["new_run"]["continues_run_id"] == "run-old"
+    assert receipt["new_run"]["relationship"] == "linked_successor"
+    assert receipt["new_run"]["created"] is True
+    assert receipt["continuation"]["old_run_id"] == "run-old"
+    assert receipt["continuation"]["new_run_id"] == "run-new"
+    assert receipt["continuation"]["relationship"] == "linked_successor"
     assert (
         receipt["continuation"]["evidence_ref"]
         == "herv3:session-1:turn-old"
@@ -179,6 +186,79 @@ async def test_cmd_steer_stops_clears_queue_and_enqueues_continuation():
     assert runtime._user_interrupt["request_id"] == "req-old"
     assert runtime_control.consume_user_interrupt(runtime, "req-old") == "user_steer"
     assert runtime_control.consume_user_interrupt(runtime, "req-old") is None
+
+
+@pytest.mark.asyncio
+async def test_steer_successor_reuses_parent_telegram_destination(monkeypatch):
+    from orchestrator.frontend_delivery import freeze_run_delivery_route
+
+    enqueue = AsyncMock(return_value="req-new")
+    runtime = SimpleNamespace(enqueue_request=enqueue)
+    monkeypatch.setattr(
+        runtime_control,
+        "_command_request_route",
+        lambda _runtime, _update: (
+            0,
+            {
+                "session_id": "session-1",
+                "owner_id": "user:7",
+                "session_surface": "session-api",
+                "session_channel_key": "client-1",
+            },
+            False,
+        ),
+    )
+    parent_meta = {
+        "hashi_session_id": "session-1",
+        "chat_id": 7430217666,
+        "request_metadata": {
+            "_run_delivery_route": freeze_run_delivery_route(
+                message_source_id="session_api",
+                session_surface="session-api",
+                session_channel_key="client-1",
+                chat_id=7430217666,
+                telegram_requested=True,
+            )
+        },
+    }
+
+    request_id = await runtime_control._enqueue_command_request(
+        runtime,
+        SimpleNamespace(),
+        "continue",
+        "steer",
+        "Steer: continue",
+        continuation_parent_meta=parent_meta,
+    )
+
+    assert request_id == "req-new"
+    args, kwargs = enqueue.await_args
+    assert args[0] == 7430217666
+    assert kwargs["request_metadata"]["session_id"] == "session-1"
+
+
+@pytest.mark.asyncio
+async def test_runtime_steer_and_focus_wrappers_return_typed_receipts(monkeypatch):
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    steer_receipt = {"type": "hashi.steer-receipt", "version": 2}
+    focus_receipt = {"type": "hashi.focus-receipt", "version": 2}
+    steer = AsyncMock(return_value=steer_receipt)
+    focus = AsyncMock(return_value=focus_receipt)
+    monkeypatch.setattr(runtime_control, "cmd_steer", steer)
+    monkeypatch.setattr(runtime_control, "cmd_focus", focus)
+    runtime = SimpleNamespace()
+    update = SimpleNamespace()
+    context = SimpleNamespace()
+
+    assert (
+        await FlexibleAgentRuntime.cmd_steer(runtime, update, context)
+        == steer_receipt
+    )
+    assert (
+        await FlexibleAgentRuntime.cmd_focus(runtime, update, context)
+        == focus_receipt
+    )
 
 
 @pytest.mark.asyncio

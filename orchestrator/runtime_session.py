@@ -1231,6 +1231,16 @@ def finish_request_from_listener(runtime: Any, request_id: str, payload: Mapping
         session_dir = getattr(runtime, "session_dir", None)
         if session_dir is not None:
             failure_context["diagnostic_log"] = str(Path(session_dir) / "errors.log")
+    interrupt_reason = str(payload.get("interrupt_reason") or "")
+    interrupted = not success and payload.get("interrupted") is True
+    failure_state = "failed"
+    if interrupted and interrupt_reason == "user_stop":
+        failure_state = "stopped"
+    elif interrupted and interrupt_reason in {"user_steer", "user_focus"}:
+        # A typed course correction replaces this Run with its linked
+        # successor.  PAO records that lifecycle boundary as superseded;
+        # HERV3 separately records the interrupted Turn as STEERED.
+        failure_state = "superseded"
     completed_run = store.finish_request(
         request_id,
         success=success,
@@ -1243,12 +1253,7 @@ def finish_request_from_listener(runtime: Any, request_id: str, payload: Mapping
         assistant_source=public_backend_engine(_active_engine(runtime)) or runtime.name,
         error_text=str(payload.get("error") or "") or None,
         error_context=failure_context,
-        failure_state=(
-            "stopped"
-            if not success and payload.get("interrupted") is True
-            and payload.get("interrupt_reason") == "user_stop"
-            else "failed"
-        ),
+        failure_state=failure_state,
     )
     if completed_run is not None and completed_run.get("state") == "completed":
         try:

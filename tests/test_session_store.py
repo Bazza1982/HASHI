@@ -509,7 +509,7 @@ def test_listener_marks_confirmed_user_stop_as_stopped_not_failed(tmp_path, monk
     store = _store(tmp_path)
     owner = "user:7"
     session = store.create_session(owner_id=owner, agent_id="lily")
-    for request_id in ("phone-stop", "backend-error"):
+    for request_id in ("phone-stop", "steered-run", "backend-error"):
         store.accept_run(
             session_id=session["session_id"], owner_id=owner, agent_id="lily",
             request_id=request_id, text="check", source="workbench",
@@ -530,9 +530,21 @@ def test_listener_marks_confirmed_user_stop_as_stopped_not_failed(tmp_path, monk
     runtime_session.finish_request_from_listener(runtime, "backend-error", {
         "success": False, "error": "backend failed",
     })
+    runtime_session.finish_request_from_listener(runtime, "steered-run", {
+        "success": False, "error": "Interrupted by user_steer",
+        "interrupted": True, "interrupt_reason": "user_steer",
+    })
 
-    assert store.get_run_by_request("phone-stop", owner_id=owner)["state"] == "stopped"
-    assert store.get_run_by_request("backend-error", owner_id=owner)["state"] == "failed"
+    stopped = store.get_run_by_request("phone-stop", owner_id=owner)
+    steered = store.get_run_by_request("steered-run", owner_id=owner)
+    failed = store.get_run_by_request("backend-error", owner_id=owner)
+    assert stopped["state"] == "stopped"
+    assert steered["state"] == "superseded"
+    assert steered["error_code"] == "run_superseded"
+    assert failed["state"] == "failed"
+    assert failed["error_code"] == "run_failed"
+    events = store.events(session["session_id"], owner_id=owner)
+    assert [event["kind"] for event in events].count("run.superseded") == 1
 
 
 def test_reconcile_durable_user_stop_receipt_marks_only_matching_run_stopped(tmp_path):

@@ -8404,7 +8404,7 @@ class WorkbenchApiServer:
             return self._v1_error(exc)
 
     async def handle_v1_session_command_invocation(self, request):
-        """Admit one TUI command against an owner-scoped, generation-bound Session."""
+        """Admit one typed command against an owner-scoped, generation-bound Session."""
 
         owner = self._v1_owner_id(request)
         if owner is None:
@@ -8461,29 +8461,6 @@ class WorkbenchApiServer:
             ):
                 raise ValueError("command context generation is invalid")
 
-            frontend_command = normalize_compatibility_operation(
-                "tui.command",
-                {
-                    "kind": "command",
-                    "name": command,
-                    "arguments": arguments,
-                },
-            )
-            from orchestrator.frontend_connector_registry import (
-                get_connector_customization,
-            )
-
-            local_override = get_connector_customization(
-                "tui",
-                kind="command_override",
-                key=command,
-            )
-            if local_override and local_override.get("route") == "connector_local":
-                raise ValueError(
-                    f"registered Connector-local command /{command} "
-                    "must be handled by tui"
-                )
-
             session_id = str(request.match_info.get("session_id") or "")
             session = self.session_store.get_session(
                 session_id, owner_id=owner, include_deleted=False
@@ -8536,6 +8513,31 @@ class WorkbenchApiServer:
                             status=403,
                         )
 
+            connector_id = "tui" if connector_claims is not None else "session_api"
+            compatibility_adapter_id = f"{connector_id}.command"
+            frontend_command = normalize_compatibility_operation(
+                compatibility_adapter_id,
+                {
+                    "kind": "command",
+                    "name": command,
+                    "arguments": arguments,
+                },
+            )
+            from orchestrator.frontend_connector_registry import (
+                get_connector_customization,
+            )
+
+            local_override = get_connector_customization(
+                connector_id,
+                kind="command_override",
+                key=command,
+            )
+            if local_override and local_override.get("route") == "connector_local":
+                raise ValueError(
+                    f"registered Connector-local command /{command} "
+                    f"must be handled by {connector_id}"
+                )
+
             if command == "telegram":
                 return web.json_response(
                     {
@@ -8573,8 +8575,19 @@ class WorkbenchApiServer:
             instance_id = str(
                 getattr(self.global_config, "instance_id", "") or ""
             ).strip().upper()
+            command_surface = "tui" if connector_id == "tui" else "session-api"
+            ingress_transport = (
+                "tui-session-command"
+                if connector_id == "tui"
+                else "session-api-command"
+            )
+            source_channel = (
+                "tui_session_command"
+                if connector_id == "tui"
+                else "session_api_command"
+            )
             connection_binding = hashlib.sha256(
-                f"tui-session-command-v1\0{instance_id}\0{session_id}\0{client_id}".encode(
+                f"{ingress_transport}-v1\0{instance_id}\0{session_id}\0{client_id}".encode(
                     "utf-8"
                 )
             ).hexdigest()
@@ -8589,17 +8602,17 @@ class WorkbenchApiServer:
             metadata = {
                 "actor_id": actor,
                 "instance_id": instance_id,
-                "session_surface": "tui",
+                "session_surface": command_surface,
                 "session_channel_key": client_id,
                 "owner_id": owner,
                 "session_id": session_id,
                 "context_generation": context_generation,
                 "connection_binding": connection_binding,
-                "connector_id": "tui",
-                "ingress_transport": "tui-session-command",
-                "source_channel": "tui_session_command",
+                "connector_id": connector_id,
+                "ingress_transport": ingress_transport,
+                "source_channel": source_channel,
                 "frontend_operation": frontend_command["operation"],
-                "fc_compatibility_adapter_id": "tui.command",
+                "fc_compatibility_adapter_id": compatibility_adapter_id,
             }
             if connector_claims is not None:
                 metadata["origin_instance"] = str(
@@ -8621,6 +8634,7 @@ class WorkbenchApiServer:
                         "client_id": client_id,
                         "command": command,
                         "context_generation": context_generation,
+                        "connector_id": connector_id,
                         "origin_instance": metadata.get("origin_instance")
                         or instance_id,
                         "session_id": session_id,

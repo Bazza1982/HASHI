@@ -597,11 +597,38 @@ async def _enqueue_command_request(
     source: str,
     summary: str,
     request_metadata_updates: dict[str, Any] | None = None,
+    continuation_parent_meta: dict[str, Any] | None = None,
     **options: Any,
 ) -> Any:
     route = _command_request_route(runtime, update)
     if route is not None:
         chat_id, request_metadata, deliver_to_telegram = route
+        parent_session_id = _meta_session_id(continuation_parent_meta)
+        if (
+            parent_session_id
+            and parent_session_id == str(request_metadata.get("session_id") or "")
+        ):
+            parent_request_metadata = continuation_parent_meta.get("request_metadata")
+            from orchestrator.frontend_delivery import (
+                RUN_DELIVERY_ROUTE_METADATA_KEY,
+                route_destination,
+            )
+
+            parent_route = (
+                parent_request_metadata.get(RUN_DELIVERY_ROUTE_METADATA_KEY)
+                if isinstance(parent_request_metadata, dict)
+                else None
+            )
+            telegram_destination = route_destination(parent_route, "telegram")
+            parent_channel = str(
+                (telegram_destination or {}).get("channel_key") or ""
+            ).strip()
+            if re.fullmatch(r"-?[1-9]\d*", parent_channel):
+                chat_id = int(parent_channel)
+            else:
+                candidate_chat_id = continuation_parent_meta.get("chat_id")
+                if isinstance(candidate_chat_id, int) and candidate_chat_id != 0:
+                    chat_id = candidate_chat_id
         merged_request_metadata = dict(request_metadata)
         merged_request_metadata.update(dict(request_metadata_updates or {}))
         options.setdefault("request_metadata", merged_request_metadata)
@@ -1135,22 +1162,34 @@ async def cmd_steer(
         continuation_prompt,
         "focus" if focus_mode else "steer",
         summary,
+        continuation_parent_meta=active_meta,
         request_metadata_updates={
             **({"parent_run_id": active_run_id} if active_run_id else {}),
             "steer_parent_request_id": active_request_id,
-            "steer_continuation_evidence": continuation_evidence,
+            "steer_continuation_evidence": {
+                **continuation_evidence,
+                "old_run_id": active_run_id or None,
+                "relationship": "linked_successor",
+            },
         },
     )
 
     if request_id:
         context.derived_request_id = request_id
     new_run_id = _request_run_id(runtime, str(request_id or ""))
+    linked_continuation = {
+        **continuation_evidence,
+        "old_run_id": active_run_id or None,
+        "new_run_id": new_run_id or None,
+        "parent_run_id": active_run_id or None,
+        "relationship": "linked_successor",
+    }
     steer_receipt = {
         "type": (
             "hashi.focus-receipt" if focus_mode else "hashi.steer-receipt"
         ),
-        "version": 1,
-        "status": "accepted" if request_id else "outcome_unknown",
+        "version": 2,
+        "status": "accepted" if request_id and new_run_id else "outcome_unknown",
         "old_run": {
             "request_id": active_request_id or None,
             "run_id": active_run_id or None,
@@ -1160,8 +1199,11 @@ async def cmd_steer(
             "request_id": str(request_id or "") or None,
             "run_id": new_run_id or None,
             "parent_run_id": active_run_id or None,
+            "continues_run_id": active_run_id or None,
+            "relationship": "linked_successor",
+            "created": bool(request_id and new_run_id),
         },
-        "continuation": continuation_evidence,
+        "continuation": linked_continuation,
     }
 
     if focus_mode:
@@ -1195,15 +1237,17 @@ async def cmd_steer(
             + f"Old Run: {active_run_id or 'unavailable'}\n"
             + f"New Run: {new_run_id or 'unavailable'}\n"
             + "Continuation evidence: "
-            + f"{continuation_evidence.get('evidence_ref') or 'unavailable'}.",
+            + f"{linked_continuation.get('evidence_ref') or 'unavailable'}.",
         )
     return steer_receipt
 
 
 @session_control
-async def cmd_focus(runtime: Any, update: Any, context: Any) -> None:
+async def cmd_focus(
+    runtime: Any, update: Any, context: Any
+) -> dict[str, Any] | None:
     """Apply a predefined one-off scope correction using the /steer control path."""
-    await cmd_steer(runtime, update, context, command_name="focus")
+    return await cmd_steer(runtime, update, context, command_name="focus")
 
 
 @session_control
