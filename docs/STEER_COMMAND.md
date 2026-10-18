@@ -144,5 +144,18 @@ without a mid-task wrapper.
   when a parent Telegram mirror channel is recovered.
 - Offline verification: the focused HERV3, steer, message-context, and request
   visibility suites passed (166 tests). The curated Core gate passed 860 tests
-  with 1 conditional skip. Runtime adoption and live Workbench acceptance are
-  still separate and pending.
+  with 1 conditional skip.
+- Runtime adoption: the authorised HASHI3 Functions hot reboot completed with
+  11 Agents online. The current generation contains the same corrected HERV3,
+  PAO, message-context, and delivery-route sources as this branch.
+- Live Workbench acceptance: DeepSeek Flash/off and Pro/max were each assigned
+  a file-backed task and then steered only after the original Turn had recorded
+  its tool result. Both successors returned the exact retained marker, created
+  one linked child Run, consumed recovery context once, and made no new tool
+  call. Flash/off completed in about 2.3 seconds and Pro/max in about 5.5
+  seconds after successor acceptance. A foreground Workbench repeat displayed
+  the final and cleared the working preview automatically in about 5.2 seconds.
+- Delivery boundary: Workbench remained the primary destination and completed.
+  The configured optional Telegram mirrors for these Workbench-only Agents
+  failed truthfully because their Telegram connectors were disconnected; this
+  is not a steer recovery or primary-delivery success claim.
