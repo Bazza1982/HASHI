@@ -20,6 +20,7 @@ from typing import Any, Callable, Mapping, Sequence
 import httpx
 
 from adapters import her_persona
+from orchestrator import ui_language
 from orchestrator.flexible_backend_registry import canonical_model_provider
 from adapters.base import BackendResponse, TokenUsage
 from adapters.openrouter_api import (
@@ -2907,6 +2908,8 @@ class HashiStageProvider(StageProvider):
         usage_observer: Callable[[PerCallUsageLineItem], None] | None = None,
         default_recovery_kind: str = "none",
         capability_cache_path: Path | str | None = None,
+        compute_services_config_path: Path | str | None = None,
+        compute_vision_projector: Any = None,
         **removed_options: Any,
     ) -> None:
         # One-generation hot-reload membrane: an already-running HER adapter
@@ -2942,6 +2945,12 @@ class HashiStageProvider(StageProvider):
             if capability_cache_path is not None
             else None
         )
+        self.compute_services_config_path = (
+            Path(compute_services_config_path).expanduser().resolve()
+            if compute_services_config_path is not None
+            else None
+        )
+        self._compute_vision_projector = compute_vision_projector
         self._active_backend_lock = threading.RLock()
         self._active_backends: dict[int, Any] = {}
         self._persona_invocation_serial = 0
@@ -2957,6 +2966,8 @@ class HashiStageProvider(StageProvider):
         self._derived_text_audio_cache: dict[str, Mapping[str, Any]] = {}
         self._derived_text_audio_paths: set[Path] = set()
         self._derived_text_audio_lock = asyncio.Lock()
+        self._lan_vision_projection_cache: dict[str, Any] = {}
+        self._visual_fallback_warning_keys: set[str] = set()
         # Per-stage cost line items (Zelda /meter contract).  Populated at the
         # moment each stage/Persona invocation returns, while the real
         # profile.engine / profile.model / stage are still known.
@@ -4053,6 +4064,337 @@ class HashiStageProvider(StageProvider):
             )
         return tuple(catalogue)
 
+    def _configured_same_provider_models(self, profile: ProviderProfile) -> tuple[str, ...]:
+        """Return only this Agent's ordered, available models for one Provider."""
+
+        options: list[Mapping[str, Any]] = []
+        for getter_name in (
+            "get_her_v3_provider_options",
+            "get_her_v2_provider_options",
+        ):
+            getter = getattr(self.backend_manager, getter_name, None)
+            if not callable(getter):
+                continue
+            try:
+                options = [item for item in getter() if isinstance(item, Mapping)]
+            except Exception:
+                options = []
+            if options:
+                break
+        selected_engine = canonical_model_provider(profile.engine)
+        for option in options:
+            option_engine = canonical_model_provider(str(option.get("engine") or ""))
+            if option_engine != selected_engine or option.get("available") is False:
+                continue
+            result: list[str] = []
+            for raw in option.get("models") or ():
+                model = str(raw or "").strip()
+                if model and model not in result:
+                    result.append(model)
+            return tuple(result)
+        return ()
+
+    @staticmethod
+    def _backend_input_capability(backend: Any):
+        resolver = getattr(backend, "resolve_input_capability", None)
+        return (
+            resolver()
+            if callable(resolver)
+            else getattr(backend, "input_capability", None)
+        )
+
+    async def _shutdown_unselected_backend(self, backend: Any) -> None:
+        shutdown = getattr(backend, "shutdown", None)
+        if callable(shutdown):
+            with suppress(Exception):
+                await shutdown()
+
+    def _lan_vision_projector(self):
+        if self._compute_vision_projector is not None:
+            return self._compute_vision_projector
+        if self.compute_services_config_path is None:
+            return None
+        from orchestrator.compute_vision import LanComputeVisionProjector
+
+        self._compute_vision_projector = LanComputeVisionProjector(
+            self.compute_services_config_path
+        )
+        return self._compute_vision_projector
+
+    async def _prepare_visual_fallback(
+        self,
+        profile: ProviderProfile,
+        request: StageRequest,
+        backend: Any,
+    ) -> tuple[
+        ProviderProfile,
+        StageRequest,
+        Any,
+        Mapping[str, Any] | None,
+        tuple[dict[str, Any], ...],
+        str,
+    ]:
+        """Resolve image handling before any Model Provider call is started."""
+
+        if request.force_local_media_fallback:
+            return profile, request, backend, None, (), ""
+        image_manifest = tuple(
+            item
+            for item in request.attachment_manifest
+            if str(item.get("modality") or "").strip().casefold() == "image"
+        )
+        if not image_manifest:
+            return profile, request, backend, None, (), ""
+        try:
+            canonical_manifest = attachment_manifest(request.request_content)
+        except MultimodalContractError as exc:
+            raise StageInvocationError(
+                str(exc),
+                retryable=False,
+                code=exc.code,
+                human_description="The stage received invalid canonical attachment metadata.",
+                details={"attachment_id": exc.attachment_id or None},
+            ) from exc
+        if tuple(request.attachment_manifest) != canonical_manifest:
+            raise StageInvocationError(
+                "stage attachment manifest does not match canonical request content",
+                retryable=False,
+                code=ProviderFailureCode.INVALID_MULTIMODAL_CONTENT,
+                human_description="Attachment identity changed before visual fallback routing.",
+            )
+        roots_resolver = getattr(backend, "authorized_media_roots", None)
+        if callable(roots_resolver):
+            try:
+                validate_authorized_media_references(
+                    request.request_content,
+                    authorized_roots=roots_resolver(),
+                )
+            except MultimodalContractError as exc:
+                raise StageInvocationError(
+                    str(exc),
+                    retryable=False,
+                    code=exc.code,
+                    human_description=(
+                        "A required image failed integrity or access validation before "
+                        "visual fallback routing."
+                    ),
+                    details={"attachment_id": exc.attachment_id or None},
+                ) from exc
+
+        fallback_modalities = (
+            _media_fallback_modalities(self.tool_registry)
+            if request.allow_tools and self.tool_registry is not None
+            else frozenset()
+        )
+        capability = self._backend_input_capability(backend)
+        current_decisions = (
+            route_request_content(
+                request.request_content,
+                capability,
+                fallback_modalities=fallback_modalities,
+            )
+            if capability is not None
+            else ()
+        )
+        if current_decisions and all(
+            item.route == "native"
+            for item in current_decisions
+            if item.modality == "image"
+        ):
+            return profile, request, backend, None, (), ""
+
+        for candidate_model in self._configured_same_provider_models(profile):
+            if candidate_model == profile.model:
+                continue
+            try:
+                candidate = self._create_provider_backend(
+                    profile.engine,
+                    target_model=candidate_model,
+                )
+            except Exception:
+                continue
+            selected = False
+            try:
+                candidate_capability = self._backend_input_capability(candidate)
+                if candidate_capability is None:
+                    continue
+                decisions = route_request_content(
+                    request.request_content,
+                    candidate_capability,
+                    fallback_modalities=fallback_modalities,
+                )
+                image_native = bool(decisions) and all(
+                    item.route == "native"
+                    for item in decisions
+                    if item.modality == "image"
+                )
+                routes_usable = all(item.route != "unsupported" for item in decisions)
+                supports_tools, controls_tools = _backend_tool_control(candidate)
+                tools_usable = bool(
+                    not request.allow_tools or (supports_tools and controls_tools)
+                )
+                if not (image_native and routes_usable and tools_usable):
+                    continue
+                selected = True
+                old_model = profile.model
+                self._untrack_active_backend(backend)
+                await self._shutdown_unselected_backend(backend)
+                backend = candidate
+                self._track_active_backend(backend)
+                profile = replace(profile, model=candidate_model)
+                notice = {
+                    "text": ui_language.tr(
+                        "her.media_fallback.same_provider_warning",
+                        provider=profile.engine,
+                        failed_model=old_model,
+                        target_model=candidate_model,
+                    ),
+                    "metadata": {
+                        "fallback_type": "same_provider_visual_model",
+                        "provider": profile.engine,
+                        "failed_model": old_model,
+                        "target_model": candidate_model,
+                        "default_model_changed": False,
+                    },
+                }
+                return profile, request, backend, notice, (), ""
+            finally:
+                if not selected:
+                    await self._shutdown_unselected_backend(candidate)
+
+        projector = self._lan_vision_projector()
+        if projector is None:
+            return profile, request, backend, None, (), "compute_not_configured"
+        projection_key = "|".join(
+            (
+                str(request.request_ref or request.turn_id),
+                *(str(item.get("sha256") or "") for item in image_manifest),
+            )
+        )
+        projection = self._lan_vision_projection_cache.get(projection_key)
+        if projection is None:
+            try:
+                projection = await projector.project(
+                    request.request_content,
+                    question=request.goal,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - expose only a stable fallback code
+                failure_code = str(getattr(exc, "code", "compute_vision_failed") or "")
+                return profile, request, backend, None, (), failure_code
+            self._lan_vision_projection_cache[projection_key] = projection
+
+        image_ids = {
+            str(item.get("attachment_id") or "") for item in image_manifest
+        }
+        remaining_ids = {
+            str(item.get("attachment_id") or "")
+            for item in request.attachment_manifest
+            if str(item.get("attachment_id") or "") not in image_ids
+        }
+        remaining_content = subset_request_content(
+            request.request_content,
+            remaining_ids,
+        )
+        projected_goal = (
+            f"[LAN HASHI Compute Vision analysis]\n{projection.text}\n\n"
+            f"[Original user request]\n{request.goal}"
+        )
+        projected_context = dict(request.context)
+        pcm_input = projected_context.get("pcm_input")
+        if projected_context.get("her_v3") and isinstance(pcm_input, Mapping):
+            projected_context["pcm_input"] = {
+                **dict(pcm_input),
+                "current_request": projected_goal,
+            }
+        request = replace(
+            request,
+            goal=projected_goal,
+            context=projected_context,
+            request_content=remaining_content,
+            attachment_manifest=attachment_manifest(remaining_content),
+        )
+        routing = tuple(
+            {
+                "attachment_id": str(item.get("attachment_id") or ""),
+                "item_index": item.get("item_index"),
+                "modality": "image",
+                "route": "lan_compute_vision",
+                "reason": "same_provider_visual_model_unavailable",
+                "transport": "data_uri_base64",
+                "compute_node": str(projection.node_id),
+                "compute_service": str(projection.service_id),
+                "compute_model": str(projection.model_id),
+                "privacy_location": "lan",
+            }
+            for item in image_manifest
+        )
+        notice = {
+            "text": ui_language.tr(
+                "her.media_fallback.lan_vision_warning",
+                provider=profile.engine,
+                model=profile.model,
+                vision_model=str(projection.model_id),
+            ),
+            "metadata": {
+                "fallback_type": "lan_compute_vision",
+                "provider": profile.engine,
+                "model": profile.model,
+                "vision_model": str(projection.model_id),
+                "privacy_location": "lan",
+                "raw_image_sent_to_selected_provider": False,
+                "derived_text_forwarded": True,
+                "default_model_changed": False,
+            },
+        }
+        return profile, request, backend, notice, routing, ""
+
+    async def _deliver_visual_fallback_warning(
+        self,
+        notice: Mapping[str, Any],
+        request: StageRequest,
+    ) -> None:
+        warning_key = str(request.request_ref or request.turn_id)
+        if warning_key in self._visual_fallback_warning_keys:
+            return
+        if self.on_stream_event is None:
+            accepted = False
+        else:
+            try:
+                accepted = await self.on_stream_event(
+                    StreamEvent(
+                        kind="fallback_warning",
+                        summary=str(notice.get("text") or ""),
+                        event_id=(
+                            f"{request.invocation_id or request.turn_id}:"
+                            "visual-fallback:warning"
+                        ),
+                        delivery_class=DELIVERY_USER_COMMENTARY,
+                        origin="her_v2:visual_fallback",
+                        phase=request.stage.value,
+                        required=True,
+                        provenance="herv3_visual_fallback",
+                        metadata=dict(notice.get("metadata") or {}),
+                    )
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                accepted = False
+        if accepted is False:
+            raise StageInvocationError(
+                "visual fallback warning could not be delivered",
+                retryable=False,
+                code=ProviderFailureCode.MEDIA_FALLBACK_UNAVAILABLE,
+                human_description=(
+                    "The visual fallback was not used because its required user "
+                    "notice could not be delivered."
+                ),
+                details={"reason": "fallback_warning_delivery_failed"},
+            )
+        self._visual_fallback_warning_keys.add(warning_key)
+
     async def invoke(
         self, profile: ProviderProfile, request: StageRequest
     ) -> StageResponse:
@@ -4112,6 +4454,9 @@ class HashiStageProvider(StageProvider):
                     ),
                     validation_source="runtime_voice_boundary",
                 )
+        visual_fallback_notice: Mapping[str, Any] | None = None
+        visual_fallback_routing: tuple[dict[str, Any], ...] = ()
+        visual_fallback_error = ""
         try:
             backend = self._create_provider_backend(
                 profile.engine, target_model=profile.model
@@ -4124,6 +4469,19 @@ class HashiStageProvider(StageProvider):
                 human_description="The configured provider backend could not be created.",
             ) from exc
         self._track_active_backend(backend)
+        try:
+            (
+                profile,
+                request,
+                backend,
+                visual_fallback_notice,
+                visual_fallback_routing,
+                visual_fallback_error,
+            ) = await self._prepare_visual_fallback(profile, request, backend)
+        except BaseException:
+            self._untrack_active_backend(backend)
+            await self._shutdown_unselected_backend(backend)
+            raise
 
         # Provider reasoning remains provider-specific and never receives the
         # HER effort label.  Adapters may consume either the explicit option or
@@ -4303,7 +4661,7 @@ class HashiStageProvider(StageProvider):
             backend.tool_registry = selected_registry
         fallback_registry = selected_registry
         backend.privacy_level = self.backend_manager.privacy_level
-        media_routing: tuple[dict[str, Any], ...] = ()
+        media_routing: tuple[dict[str, Any], ...] = visual_fallback_routing
         provider_request_content = request.request_content
         media_preflight_error: StageInvocationError | None = None
         local_fallback_modalities = (
@@ -4523,7 +4881,27 @@ class HashiStageProvider(StageProvider):
                     capability,
                     fallback_modalities=local_fallback_modalities,
                 )
-                media_routing = (*media_routing, *routing_decisions_payload(decisions))
+                routed_payload = routing_decisions_payload(decisions)
+                if (
+                    visual_fallback_notice is not None
+                    and (visual_fallback_notice.get("metadata") or {}).get(
+                        "fallback_type"
+                    )
+                    == "same_provider_visual_model"
+                ):
+                    routed_payload = tuple(
+                        {
+                            **dict(item),
+                            "route": "same_provider_visual_model",
+                            "reason": "selected_model_has_no_native_image_route",
+                            "target_model": profile.model,
+                        }
+                        if item.get("modality") == "image"
+                        and item.get("route") == "native"
+                        else dict(item)
+                        for item in routed_payload
+                    )
+                media_routing = (*media_routing, *routed_payload)
                 force_local_unavailable = False
                 if request.force_local_media_fallback:
                     can_force_local = (
@@ -4609,6 +4987,11 @@ class HashiStageProvider(StageProvider):
                             "media_routing": list(media_routing),
                             "model": profile.model,
                             "modality": first.modality,
+                            **(
+                                {"lan_vision_fallback_error": visual_fallback_error}
+                                if visual_fallback_error
+                                else {}
+                            ),
                         },
                     )
                 elif request.stage is Stage.IMMEDIATE_RESPONSE and non_native:
@@ -4627,6 +5010,11 @@ class HashiStageProvider(StageProvider):
                             "media_routing": list(media_routing),
                             "model": profile.model,
                             "modality": first.modality,
+                            **(
+                                {"lan_vision_fallback_error": visual_fallback_error}
+                                if visual_fallback_error
+                                else {}
+                            ),
                         },
                     )
                 elif unsupported:
@@ -4645,6 +5033,11 @@ class HashiStageProvider(StageProvider):
                             "media_routing": list(media_routing),
                             "model": profile.model,
                             "modality": first.modality,
+                            **(
+                                {"lan_vision_fallback_error": visual_fallback_error}
+                                if visual_fallback_error
+                                else {}
+                            ),
                         },
                     )
         reasoning_chunks: list[str] = []
@@ -4812,6 +5205,11 @@ class HashiStageProvider(StageProvider):
             await self.on_stream_event(event)
 
         try:
+            if visual_fallback_notice is not None:
+                await self._deliver_visual_fallback_warning(
+                    visual_fallback_notice,
+                    request,
+                )
             if media_preflight_error is not None:
                 raise media_preflight_error
             initialized = await backend.initialize()

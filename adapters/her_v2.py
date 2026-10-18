@@ -248,6 +248,14 @@ class HERv2Adapter(BaseBackend):
     def _runtime_context(self) -> Any:
         return getattr(self.config, "_hashi_runtime", None)
 
+    def _compute_services_config_path(self) -> Path | None:
+        root = getattr(self.global_config, "bridge_home", None) or getattr(
+            self.global_config,
+            "project_root",
+            None,
+        )
+        return Path(root) / "compute_services.json" if root else None
+
     def _final_style_enabled(self) -> bool:
         """Resolve the workspace switch at turn start for immediate on/off changes."""
 
@@ -1245,6 +1253,7 @@ class HERv2Adapter(BaseBackend):
             usage_observer=usage_observer,
             default_recovery_kind=default_recovery_kind,
             capability_cache_path=self._model_capability_cache_path(),
+            compute_services_config_path=self._compute_services_config_path(),
         )
 
     def _provider_retry_policy(self) -> ProviderRetryPolicy:

@@ -1,5 +1,13 @@
 # HASHI Agent FYI
 
+October 18 visual fallback: image requests first use the selected model, then an
+allowed visual model from the same Model Provider, then LAN HASHI Compute Vision.
+The switch is request-only and warned once; it never changes the Agent default or
+silently crosses to another cloud Provider. On the LAN route, raw images are
+removed before the selected cloud model receives derived text. Source on HASHI3
+`debug-issues-oct`; Worker/live adoption remains unverified. See
+[decision](repairs/HERV3_VISUAL_FALLBACK_20261018.md).
+
 October 18: Ollama native context, binary reasoning and main promotion:
 [status/limits](HERV3_OLLAMA_CONTEXT_PILOT.md). Public Provider identities now
 match live metadata; legacy IDs remain accepted. See [HERV3](HERV3_UPGRADE.md).

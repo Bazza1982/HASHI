@@ -1,8 +1,10 @@
 # HASHI Compute Service Directory
 
 Status: accepted PAO/Function decision; v1 consumer interface implemented on
-HASHI3 `debug-deepseek` on 2026-10-17. Runtime adoption and each downstream
-consumer migration are separate facts.
+HASHI3 `debug-deepseek` on 2026-10-17. The HERV3 visual-fallback consumer and
+`hashi-compute.manifest` compatibility were implemented on HASHI3
+`debug-issues-oct` on 2026-10-18. Runtime adoption and each downstream consumer
+migration remain separate facts.
 
 ## Decision
 
@@ -114,17 +116,27 @@ must not synthesize a local substitute and call it the provider's sample.
 
 ## Compatibility and truthfulness
 
-Until Hashi Compute publishes v1, the directory can read its current
-`/api/overview` response. The compatibility adapter derives only semantics
-explicit in the service kind or advertised endpoint: STT is audio-to-text, TTS
-is text-to-audio, vision is text/image-to-text, and Ollama chat is text-to-text.
-It accepts declared tool/thinking flags and context length. Missing image
-limits, formats, streaming details, and maximum concurrency remain unknown.
+The directory also reads Hashi Compute's typed
+`format=hashi-compute.manifest`, version 1 response. It maps each advertised
+model, modality, relative interface, image limit, audio format,
+tool/thinking capability, runtime readiness and capacity into the same immutable
+catalogue. It verifies `privacy.client_access_location` against the configured
+node and ignores the service's advertised base URL. Unreported values such as a
+total image-byte limit remain unknown rather than being inferred.
+
+For older deployments, the directory can still read `/api/overview`. That
+compatibility adapter derives only semantics explicit in the service kind or
+advertised endpoint: STT is audio-to-text, TTS is text-to-audio, vision is
+text/image-to-text, and Ollama chat is text-to-text. It accepts declared
+tool/thinking flags and context length. Missing image limits, formats, streaming
+details, and maximum concurrency remain unknown.
 
 The compatibility adapter ignores each service's internal `base_url` (for
 example, a server-side `127.0.0.1` worker) and routes only through the
 configured public node origin. Compatibility is visible as
-`source_format=legacy_overview`; it is not represented as full v1 compliance.
+`source_format=legacy_overview` or `source_format=hashi_compute_manifest`;
+neither is represented as compliance with the separate normative
+`hashi.compute.capabilities` schema.
 
 ## Resolution and availability
 
@@ -153,6 +165,34 @@ selections are migrated deliberately. This change does not rewrite saved
 profiles, create a Workbench page, start a polling daemon, or adopt a running
 Worker by itself. Each consumer migration must preserve its own persistence,
 failure, and live-acceptance tests.
+
+### HERV3 visual fallback consumer
+
+For an image-bearing stage, HERV3 resolves routes before the first Model
+Provider call:
+
+1. use the selected exact model when it has a verified native image route;
+2. otherwise temporarily use the first configured, allowed image-capable model
+   from the same Model Provider, provided it also satisfies the stage's tool and
+   remaining-media contract;
+3. if that Provider has no usable visual model, resolve a LAN-only
+   text+image-to-text service through this directory and project the image to
+   derived text; and
+4. if none is available, retain the typed modality error.
+
+“Same Provider” means the configured Provider engine, not a model-vendor name.
+The temporary choice never persists or changes the Agent default. It never
+silently selects another cloud Provider. LAN projection removes raw image parts
+before the selected cloud model is called; that model receives the derived text
+and original request. The required user warning states both facts and is emitted
+at most once per request. If it cannot be delivered, the downstream cloud call
+does not start.
+
+Canonical attachment identity, authorized path, size and digest are validated
+before either fallback. LAN projections are cached for the request so later
+HERV3 stages do not re-run the vision model for the same image. Raw image bytes
+remain transient and are not written to PCM, configuration or the catalogue.
+See [the owning repair decision](repairs/HERV3_VISUAL_FALLBACK_20261018.md).
 
 Focused validation covers the formal schema, current overview compatibility,
 privacy-boundary validation, no-redirect/bounded discovery, exact capability
