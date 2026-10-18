@@ -1262,6 +1262,67 @@ class HerSessionStore:
         evidence["evidence_digest"] = _digest(evidence)
         return evidence
 
+    def verified_steer_session_id(
+        self,
+        evidence: Mapping[str, Any] | None,
+        *,
+        instance_id: str,
+        agent_id: str,
+        owner_id: str,
+        hashi_conversation_id: str,
+        context_generation: int,
+        workzone_identity: str,
+    ) -> str | None:
+        """Resolve one /steer receipt under its authoritative HASHI binding."""
+
+        candidate = dict(evidence or {})
+        if str(candidate.get("kind") or "") != "herv3_active_turn_recovery":
+            return None
+        source_request_id = str(candidate.get("source_request_id") or "")
+        if not source_request_id:
+            return None
+        canonical = self.interruption_evidence_for_request(source_request_id)
+        if canonical is None:
+            return None
+        if (
+            str(canonical.get("turn_status") or "") != "steered"
+            or str(canonical.get("recovery_disposition") or "") != "steered"
+        ):
+            return None
+        for key in ("evidence_ref", "evidence_digest", "turn_id"):
+            supplied = str(candidate.get(key) or "")
+            if not supplied or supplied != str(canonical.get(key) or ""):
+                return None
+        reference = str(canonical.get("evidence_ref") or "")
+        prefix = "herv3:"
+        if not reference.startswith(prefix):
+            return None
+        identity = reference[len(prefix) :]
+        session_id, separator, turn_id = identity.partition(":")
+        if (
+            not separator
+            or not session_id
+            or turn_id != str(canonical.get("turn_id") or "")
+        ):
+            return None
+        with self._lock, self._connect() as connection:
+            session = connection.execute(
+                "SELECT * FROM her_sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        if session is None or str(session["status"] or "") != "open":
+            return None
+        self._assert_binding(
+            session,
+            instance_id=instance_id,
+            agent_id=agent_id,
+            owner_id=owner_id,
+            hashi_conversation_id=hashi_conversation_id,
+            context_generation=context_generation,
+            workzone_identity=workzone_identity,
+        )
+        return session_id
+
 
     def unresolved_side_effects_for_turn(
         self,

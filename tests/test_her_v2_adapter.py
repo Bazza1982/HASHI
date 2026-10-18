@@ -544,6 +544,142 @@ async def test_adapter_fixed_backend_keeps_one_session_and_accepts_incremental_t
 
 
 @pytest.mark.asyncio
+async def test_fixed_steer_successor_rebinds_verified_session_and_private_context(
+    tmp_path,
+):
+    config = _agent_config(tmp_path)
+    config._her_v2_stage_provider = _DirectProvider()
+    runtime = SimpleNamespace(
+        backend_manager=SimpleNamespace(agent_mode="fixed"),
+        _request_meta_by_id={},
+        current_request_meta={},
+    )
+    config._hashi_runtime = runtime
+    adapter = HERv2Adapter(config, _global_config(tmp_path))
+    assert await adapter.initialize() is True
+
+    sections = [
+        {
+            "key": "permanent_system",
+            "title": "PERMANENT SYSTEM INSTRUCTIONS",
+            "text": "Follow policy.",
+            "authority": "permanent_system",
+            "rank": 0,
+            "protected": True,
+            "metadata": {},
+            "order": 0,
+        },
+        {
+            "key": "current_user_request",
+            "title": "CURRENT USER REQUEST",
+            "text": "placeholder",
+            "authority": "current_user",
+            "rank": 3,
+            "protected": True,
+            "metadata": {},
+            "order": 1,
+        },
+    ]
+    prompt_payload = {
+        "transport_snapshot": {"version": 1, "sections": sections}
+    }
+
+    def metadata(request_id, *, evidence=None):
+        value = {
+            "request_id": request_id,
+            "hashi_session_id": "hashi-session-steer",
+            "hashi_message_id": f"message-{request_id}",
+            "context_generation": 1,
+            "session_workspace": str(tmp_path / "session-steer"),
+        }
+        if evidence is not None:
+            value["request_metadata"] = {
+                "steer_continuation_evidence": {
+                    **evidence,
+                    "old_run_id": "run-old",
+                    "relationship": "linked_successor",
+                }
+            }
+        return value
+
+    first_meta = metadata("request-before-steer")
+    first_transport, _ = adapter.prepare_fixed_turn_input(
+        prompt_payload=prompt_payload,
+        user_message="Inspect the marker and then wait.",
+        request_id=first_meta["request_id"],
+        request_meta=first_meta,
+    )
+    interrupted = adapter._session_coordinator.accept(first_transport)
+    original_session_id = interrupted.session_id
+    provider_messages = [
+        {"role": "system", "content": "execution contract"},
+        {"role": "user", "content": "Inspect the marker and then wait."},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-marker",
+                    "type": "function",
+                    "function": {"name": "file_read", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-marker",
+            "content": "MARKER_FROM_COMPLETED_TOOL",
+        },
+    ]
+    adapter._session_coordinator.record_provider_context_checkpoint(
+        interrupted,
+        {
+            "provider": "deepseek-api",
+            "model": "deepseek-flash",
+            "stage": "direct",
+            "boundary": "completed_tool_batch",
+            "messages": provider_messages,
+        },
+    )
+    adapter._session_coordinator.steer(
+        interrupted,
+        reason="User supplied a new direction.",
+    )
+    evidence = (
+        adapter._session_coordinator.store.interruption_evidence_for_request(
+            first_meta["request_id"]
+        )
+    )
+    assert evidence is not None
+
+    # Reproduce the live failure: /steer rebuilt the request-local adapter and
+    # therefore began the successor without its in-memory HER Session binding.
+    adapter._session_id = None
+    second_meta = metadata("request-after-steer", evidence=evidence)
+    second_transport, second_audit = adapter.prepare_fixed_turn_input(
+        prompt_payload=prompt_payload,
+        user_message="Use the completed marker without reading it again.",
+        request_id=second_meta["request_id"],
+        request_meta=second_meta,
+    )
+
+    assert adapter._session_id == original_session_id
+    assert second_audit["operation"] == "append_turn"
+    successor = adapter._session_coordinator.accept(second_transport)
+    recovery = adapter._session_coordinator.store.consume_recovery_context(
+        session_id=successor.session_id,
+        current_turn_id=successor.turn_id,
+    )
+    assert recovery["interrupted_turn_id"] == interrupted.turn_id
+    private_context = (
+        adapter._session_coordinator.store.provider_context_for_turn(
+            successor.session_id,
+            successor.turn_id,
+        )
+    )
+    assert private_context["messages"] == provider_messages
+
+@pytest.mark.asyncio
 async def test_user_stop_shutdown_cancels_fixed_turn_before_runtime_cleanup():
     events = []
     accepted = SimpleNamespace(turn_id="turn-active")

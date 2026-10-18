@@ -134,7 +134,9 @@ Model/provider cards share a contract; chat-only means no tools. `/style` keeps
 facts and meters separately. Fallback is opt-in; never replay uncertain or
 committed effects. Reject bad Tool batches before effects. Controls differ.
 Native Codex `/steer` keeps Run; HERV3 links a successor to completed private
-Provider checkpoints. Receipts omit reasoning; recovery cannot restore authority.
+Provider checkpoints and rebinds only a verified same-conversation HERV3
+Session. The command frontend remains primary; configured mirrors stay mirrors.
+Receipts omit reasoning; recovery cannot restore authority.
 
 ## UI, media, and Phone
 

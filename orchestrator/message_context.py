@@ -287,6 +287,17 @@ def _legacy_source_id(source: str, chat_id: Any, metadata: Mapping[str, Any]) ->
         return "whatsapp"
     if surface == "telegram":
         return "telegram"
+    if surface == "tui":
+        return "tui"
+    if surface in {
+        "workbench",
+        "backend-api",
+        "backend_api",
+        "api",
+        "session-api",
+        "session_api",
+    }:
+        return "api"
     if normalized == "tui":
         return "tui"
     if normalized in {"api", "session-api"}:

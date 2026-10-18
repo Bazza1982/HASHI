@@ -58,6 +58,9 @@ auditable boundaries:
 
 - complete Provider messages are checkpointed privately after a complete
   Provider response or a complete Tool batch;
+- before accepting the successor Turn, HERV3 rebinds only a durable steer
+  receipt that resolves to the same open HERV3 Session and matches the full
+  HASHI instance, Agent, owner, conversation, generation, and Workzone binding;
 - exposed Provider reasoning fields and completed Tool results remain part of
   that private context;
 - replay requires the same Provider, model, and HERV3 stage;
@@ -80,8 +83,10 @@ Every accepted busy steer returns a typed `hashi.steer-receipt` with:
 For a reconstructed steer, `new_run` and `continuation` both carry the old and
 new Run relationship. The command wrapper must return this value unchanged so
 Workbench and Session API receive the same receipt that Telegram renders. The
-successor keeps the same Session and resolves its Connector route with the
-original Run's authenticated Telegram destination instead of a placeholder.
+successor keeps the same HASHI Session. Its command surface remains the primary
+Connector destination. An authenticated Telegram destination inherited from
+the parent remains a mirror for a Workbench command and remains primary only
+when the command itself came from Telegram.
 
 A native receipt must not invent a new Run. A reconstruction receipt must not
 claim success until the successor request and its Run identity exist.
@@ -129,3 +134,13 @@ without a mid-task wrapper.
 6. READY is cleared only for the affected Session and delayed FUTURE work remains.
 7. Runtime adoption and live frontend delivery are verified separately from
    source and offline tests.
+
+## 2026-10-18 HASHI3 correction record
+
+- Approval: the user authorized work on HASHI3 branch `debug-herv3`, a HASHI3
+  hot reboot, and live Workbench acceptance.
+- Implementation: the branch restores a verified HERV3 Session binding before
+  accepting the linked successor and keeps Workbench as the primary Connector
+  when a parent Telegram mirror channel is recovered.
+- Offline verification: the focused HERV3, steer, and message-context suites
+  passed (144 tests).

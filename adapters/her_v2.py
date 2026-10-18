@@ -63,6 +63,7 @@ from orchestrator.her_v2.retry import (
     DEFAULT_PROVIDER_RETRY_POLICY,
     ProviderRetryPolicy,
 )
+from orchestrator.her_v2.session_store import HerSessionStoreError
 from orchestrator.her_v2.runtime import HERv2Runtime
 from orchestrator.her_v2.v3_config import normalise_v3_config
 from orchestrator import final_style_policy
@@ -1090,6 +1091,7 @@ class HERv2Adapter(BaseBackend):
             raise HerFixedProtocolError(
                 "session_core_unavailable", "HER fixed-session core is not initialized."
             )
+        self._adopt_verified_steer_session(request_meta)
         if not self._session_id:
             self._session_id = f"her-{uuid.uuid4().hex}"
         snapshot = prompt_payload.get("transport_snapshot")
@@ -1153,6 +1155,40 @@ class HERv2Adapter(BaseBackend):
                 or self.config.workspace_dir
             ),
         }
+
+    def _adopt_verified_steer_session(
+        self, request_meta: Mapping[str, Any]
+    ) -> None:
+        """Restore the interrupted HER Session before opening a successor Turn."""
+
+        request_metadata = request_meta.get("request_metadata")
+        if not isinstance(request_metadata, Mapping):
+            return
+        evidence = request_metadata.get("steer_continuation_evidence")
+        if not isinstance(evidence, Mapping):
+            return
+        if str(evidence.get("kind") or "") != "herv3_active_turn_recovery":
+            return
+        if self._session_coordinator is None:
+            raise HerFixedProtocolError(
+                "session_core_unavailable",
+                "HER fixed-session core is not initialized.",
+            )
+        try:
+            session_id = (
+                self._session_coordinator.store.verified_steer_session_id(
+                    evidence,
+                    **self._fixed_session_binding(request_meta),
+                )
+            )
+        except HerSessionStoreError as exc:
+            raise HerFixedProtocolError(exc.code, str(exc)) from exc
+        if not session_id:
+            raise HerFixedProtocolError(
+                "invalid_steer_continuation",
+                "The /steer continuation receipt is invalid or no longer resumable.",
+            )
+        self._session_id = session_id
 
     def can_resume_fixed_session(self) -> bool:
         """Confirm that an outer HASHI binding has durable HER state behind it."""
