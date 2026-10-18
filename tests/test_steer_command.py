@@ -190,7 +190,10 @@ async def test_cmd_steer_stops_clears_queue_and_enqueues_continuation():
 
 @pytest.mark.asyncio
 async def test_steer_successor_reuses_parent_telegram_destination(monkeypatch):
-    from orchestrator.frontend_delivery import freeze_run_delivery_route
+    from orchestrator.frontend_delivery import (
+        RUN_DELIVERY_ROUTE_METADATA_KEY,
+        freeze_run_delivery_route,
+    )
 
     enqueue = AsyncMock(return_value="req-new")
     runtime = SimpleNamespace(enqueue_request=enqueue)
@@ -208,17 +211,18 @@ async def test_steer_successor_reuses_parent_telegram_destination(monkeypatch):
             False,
         ),
     )
+    parent_route = freeze_run_delivery_route(
+        message_source_id="session_api",
+        session_surface="session-api",
+        session_channel_key="client-1",
+        chat_id=7430217666,
+        telegram_requested=True,
+    )
     parent_meta = {
         "hashi_session_id": "session-1",
         "chat_id": 7430217666,
         "request_metadata": {
-            "_run_delivery_route": freeze_run_delivery_route(
-                message_source_id="session_api",
-                session_surface="session-api",
-                session_channel_key="client-1",
-                chat_id=7430217666,
-                telegram_requested=True,
-            )
+            RUN_DELIVERY_ROUTE_METADATA_KEY: parent_route
         },
     }
 
@@ -235,6 +239,9 @@ async def test_steer_successor_reuses_parent_telegram_destination(monkeypatch):
     args, kwargs = enqueue.await_args
     assert args[0] == 7430217666
     assert kwargs["request_metadata"]["session_id"] == "session-1"
+    assert (
+        kwargs["request_metadata"][RUN_DELIVERY_ROUTE_METADATA_KEY] == parent_route
+    )
 
 
 @pytest.mark.asyncio
