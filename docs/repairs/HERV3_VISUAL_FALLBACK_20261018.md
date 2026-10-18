@@ -1,8 +1,10 @@
 # HERV3 Visual Fallback Decision — 2026-10-18
 
-Status: approved and implemented in HASHI3 source on `debug-issues-oct`;
-focused offline validation passed. No Worker reboot, production adoption or
-end-to-end frontend acceptance is claimed.
+Status: approved, implemented and hot-loaded in HASHI3 on `debug-issues-oct`.
+The same-Provider path passed real Workbench image acceptance. The LAN projector
+passed a real service canary; the full all-text-Provider route remains explicitly
+unverified because that temporary Provider failed its independent tool-isolation
+preflight before model execution. No HASHI4/production adoption is claimed.
 
 ## Ownership and boundary
 
@@ -40,9 +42,11 @@ and original request continue downstream.
 Every image ingress, including Workbench multipart upload, must construct the
 same canonical request content and attachment manifest before queue admission.
 A local file path embedded in rendered prompt text is not attachment authority
-and cannot drive capability routing. The manifest carries the server-staged
-path, media type, size and digest so HERV3 can validate identity and choose the
-visual route before any Model Provider call.
+and cannot drive capability routing. Connector uploads are copied into PAO's
+Session attachment store, committed, and referenced by the admitted user
+Message. The manifest carries that server-staged path, media type, size and
+digest so HERV3 can validate the exact current-Run grant and choose the visual
+route before any Model Provider call.
 
 ## Warning and privacy contract
 
@@ -50,6 +54,11 @@ The fallback emits one required `fallback_warning` per request. It names the
 temporary same-Provider model, or states that LAN Vision received the raw image
 and the selected cloud model receives derived text only. If warning delivery is
 rejected or unavailable, HERV3 makes no downstream cloud call.
+
+For Workbench, a presentation-enabled Request Activity record is the local
+delivery receipt. Required warnings remain visible even when optional
+commentary is off. Other frontend routes continue to require their transport
+receipt; merely generating or logging a warning is not delivery.
 
 “LAN/local” describes the configured client-to-compute boundary. HASHI does not
 claim more than the service attests. Raw image bytes are transient and are not
@@ -70,3 +79,17 @@ Tests cover native routing, ordered same-Provider selection, unchanged default
 model, one required warning, one physical Model Provider call, LAN raw-image
 removal, LAN projection caching, typed failure preservation, manifest privacy
 boundary validation and configured-origin URL construction.
+
+## HASHI3 live evidence — 2026-10-19
+
+- Worker hot reboot adopted the Function changes while the Core process stayed
+  unchanged.
+- A real Workbench PNG request started with `deepseek-v4-pro`, presented the
+  required warning, returned through `deepseek-flash`, accurately described the
+  Voice menu, completed successfully, and left the configured model unchanged.
+- A real LAN projector canary resolved `hashi-compute / vision / minicpm-v-4.6`
+  from the Compute Service Directory and accurately recognized the same image.
+- An attempted full LAN-route request using the all-text Antigravity catalogue
+  stopped at its separate HASHI tool-isolation preflight. This is not recorded
+  as a LAN fallback failure or as full end-to-end LAN acceptance.
+- The test Agent was restored to `deepseek / deepseek-flash` after validation.
