@@ -41,7 +41,7 @@ _MAX_STATE_BYTES = 512 * 1024
 _WATCH_INTERVAL_SECONDS = 0.25
 _MAX_DELIVERY_ATTEMPTS = 5
 _MAX_EXECUTION_ATTEMPTS = 5
-_EMPTY_LOCK_STALE_SECONDS = 1.0
+_LOCK_STALE_SECONDS = 1.0
 
 
 class AgentMoveManager:
@@ -562,13 +562,15 @@ def _already_stopped(message: str) -> bool:
 
 def _orphaned_lock(path: Path) -> bool:
     try:
+        if time.time() - path.stat().st_mtime >= _LOCK_STALE_SECONDS:
+            return True
+    except OSError:
+        return False
+    try:
         parts = path.read_text(encoding="utf-8", errors="replace").split()
         pid = int(next(part.removeprefix("pid=") for part in parts if part.startswith("pid=")))
     except (OSError, StopIteration, TypeError, ValueError):
-        try:
-            return time.time() - path.stat().st_mtime >= _EMPTY_LOCK_STALE_SECONDS
-        except OSError:
-            return False
+        return False
     return not process_is_alive(pid)
 
 

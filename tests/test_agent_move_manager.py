@@ -443,6 +443,24 @@ def test_empty_lock_left_by_crash_is_reclaimed_after_stale_window(tmp_path):
     assert not lock_path.exists()
 
 
+def test_stale_lock_from_live_process_is_reclaimed(tmp_path, monkeypatch):
+    lock_path = tmp_path / "agent-move-autofinalize.json.lock"
+    lock_path.write_text("pid=1234\n", encoding="utf-8")
+    old = time.time() - 10
+    os.utime(lock_path, (old, old))
+    monkeypatch.setattr(move_manager, "process_is_alive", lambda _pid: True)
+
+    assert move_manager._orphaned_lock(lock_path) is True
+
+
+def test_fresh_lock_from_live_process_is_preserved(tmp_path, monkeypatch):
+    lock_path = tmp_path / "agent-move-autofinalize.json.lock"
+    lock_path.write_text("pid=1234\n", encoding="utf-8")
+    monkeypatch.setattr(move_manager, "process_is_alive", lambda _pid: True)
+
+    assert move_manager._orphaned_lock(lock_path) is False
+
+
 @pytest.mark.asyncio
 async def test_explicit_retry_reopens_exhausted_operation(tmp_path, monkeypatch):
     kernel, _stopped = _kernel(tmp_path)
