@@ -183,7 +183,13 @@ async def _verify_level_two_detector() -> None:
         raise PrivacyPolicyError(str(exc)) from exc
 
 
-def _set_level(runtime: Any, requested: int, *, confirmed: bool = False) -> str:
+def _set_level(
+    runtime: Any,
+    requested: int,
+    *,
+    confirmed: bool = False,
+    expected_current_level: int | None = None,
+) -> str:
     current = current_privacy_level(runtime)
     target = PrivacyLevel(requested)
     if _busy(runtime):
@@ -200,7 +206,12 @@ def _set_level(runtime: Any, requested: int, *, confirmed: bool = False) -> str:
                 supported=", ".join(str(item) for item in supported),
             )
         )
-    runtime.backend_manager.set_privacy_level(target)
+    if expected_current_level is None:
+        runtime.backend_manager.set_privacy_level(target)
+    else:
+        runtime.backend_manager.set_privacy_level(
+            target, expected_current_level=expected_current_level
+        )
     if target is PrivacyLevel.OFF:
         return ui_language.tr("privacy.changed.0")
     if target is PrivacyLevel.PROVIDER_TRUST:

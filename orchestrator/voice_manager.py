@@ -47,6 +47,14 @@ from orchestrator.voice_synthesizer import (
 from orchestrator.command_ui import setting_card
 
 
+def _optional_module_available(module_name: str) -> bool:
+    """Probe an optional provider without trusting partially loaded test/plugin stubs."""
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
 def _default_tts_provider() -> str:
     if sys.platform == "win32":
         return "windows"
@@ -641,7 +649,7 @@ class VoiceManager:
         if name == "edge":
             return (
                 "installed"
-                if isolated_tts_configured() or importlib.util.find_spec("edge_tts")
+                if isolated_tts_configured() or _optional_module_available("edge_tts")
                 else "not installed"
             )
         if name == "piper":
@@ -649,13 +657,13 @@ class VoiceManager:
             executable_available = Path(exe).is_file() or shutil.which(exe) is not None
             return (
                 "installed"
-                if importlib.util.find_spec("piper") or executable_available
+                if _optional_module_available("piper") or executable_available
                 else "not installed"
             )
         if name == "kokoro":
             return (
                 "installed"
-                if isolated_tts_supports("kokoro") or importlib.util.find_spec("kokoro")
+                if isolated_tts_supports("kokoro") or _optional_module_available("kokoro")
                 else "not installed"
             )
         if name == "coqui":
@@ -673,7 +681,7 @@ class VoiceManager:
             provider_options.setdefault("exe", self._default_piper_exe())
             provider_options.setdefault("python_exe", self._default_python_exe())
             provider_options.setdefault(
-                "module_mode", importlib.util.find_spec("piper") is not None
+                "module_mode", _optional_module_available("piper")
             )
         if payload.get("provider") == "kokoro":
             try:

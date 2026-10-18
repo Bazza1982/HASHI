@@ -83,8 +83,8 @@
       "allowed_backends": [
         {
           "engine": "her-v2",
-          "model": "role-configured",
-          "effort": "high",
+          "model": "deepseek-flash",
+          "effort": "off",
           "permission_mode": "danger-full-access",
           "access_scope": "drive",
           "idle_timeout_sec": 300,
@@ -97,37 +97,15 @@
             "shadow_mode": false,
             "user_idle_timeout_s": 300,
             "audit_failure_terminal": "ERROR",
-            "stage_reasoning": {
-              "immediate_response": "none",
-              "triage": "none"
+            "main": {
+              "provider": "deepseek-api",
+              "model": "deepseek-flash",
+              "reasoning": "off"
             },
-            "profiles": {
-              "lightweight": {
-                "engine": "deepseek-api",
-                "model": "deepseek-flash",
-                "reasoning": "high"
-              },
-              "triage": {
-                "engine": "deepseek-api",
-                "model": "deepseek-flash",
-                "reasoning": "high"
-              },
-              "premium": {
-                "engine": "deepseek-api",
-                "model": "deepseek-v4-pro",
-                "reasoning": "high"
-              },
-              "reviewer": {
-                "engine": "deepseek-api",
-                "model": "deepseek-v4-pro",
-                "reasoning": "max"
-              },
-              "orchestrator": {
-                "engine": "deepseek-api",
-                "model": "deepseek-v4-pro",
-                "reasoning": "max"
-              }
-            }
+            "v3_provider_allowlist": [
+              "deepseek-api",
+              "openai-compatible-api"
+            ]
           }
         }
       ]

@@ -47,6 +47,24 @@ def _manager(tmp_path: Path) -> VoiceManager:
     )
 
 
+def test_optional_provider_probe_treats_spec_less_stubs_as_unavailable(
+    tmp_path, monkeypatch,
+):
+    def invalid_spec(_name):
+        raise ValueError("edge_tts.__spec__ is None")
+
+    monkeypatch.setattr(voice_manager_module.importlib.util, "find_spec", invalid_spec)
+    monkeypatch.setattr(voice_manager_module, "isolated_tts_configured", lambda: False)
+    monkeypatch.setattr(voice_manager_module, "isolated_tts_supports", lambda _name: False)
+    monkeypatch.setattr(voice_manager_module.shutil, "which", lambda _name: None)
+
+    manager = _manager(tmp_path)
+    assert manager._provider_status("edge") == "not installed"
+    assert manager._provider_status("piper") == "not installed"
+    assert manager._provider_status("kokoro") == "not installed"
+    assert manager._preset_payload("pcn")["provider_options"]["module_mode"] is False
+
+
 def _prepare_runtime_for_fc(runtime, tmp_path: Path) -> None:
     runtime.name = "voice-test"
     runtime.workspace_dir = tmp_path / "workspace"

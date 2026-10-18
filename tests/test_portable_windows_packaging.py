@@ -199,7 +199,10 @@ def test_portable_profile_has_one_her_engine_and_configurable_regional_providers
     assert agent.access_scope == "drive"
     assert global_config.canonical_audit["buffer_flush_timeout_seconds"] == 120
     assert [item["engine"] for item in agent.allowed_backends] == ["her-v2"]
-    assert {item["engine"] for item in manager.get_her_v2_provider_options()} == {
+    target = manager.get_her_v3_target()
+    assert target.provider == "deepseek-api"
+    assert target.model == "deepseek-flash"
+    assert {item["engine"] for item in manager.get_her_v3_provider_options()} == {
         "deepseek-api",
         "openai-compatible-api",
     }
@@ -225,15 +228,25 @@ def test_portable_remote_is_one_click_with_seven_day_tokens():
     }
 
 
-def test_portable_her_keeps_execution_reasoning_but_makes_front_door_stages_fast():
+def test_portable_fresh_install_defaults_to_herv3_deepseek_flash_with_reasoning_off():
     config = json.loads((TEMPLATES / "agents.json").read_text(encoding="utf-8"))
-    her = config["agents"][0]["allowed_backends"][0]["her_v2"]
+    profile = config["agents"][0]["allowed_backends"][0]
+    her = profile["her_v2"]
 
-    assert her["profiles"]["lightweight"]["reasoning"] == "high"
-    assert her["stage_reasoning"] == {
-        "immediate_response": "none",
-        "triage": "none",
+    assert config["agents"][0]["active_backend"] == "her-v2"
+    assert profile["model"] == "deepseek-flash"
+    assert profile["effort"] == "off"
+    assert her["main"] == {
+        "provider": "deepseek-api",
+        "model": "deepseek-flash",
+        "reasoning": "off",
     }
+    assert her["v3_provider_allowlist"] == [
+        "deepseek-api",
+        "openai-compatible-api",
+    ]
+    assert "profiles" not in her
+    assert "stage_reasoning" not in her
 
 
 def test_portable_launcher_explicitly_grants_all_host_filesystem_drives():
