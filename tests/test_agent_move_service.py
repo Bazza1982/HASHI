@@ -273,6 +273,8 @@ def test_schema5_commit_prepends_history_idempotently_and_rollback_preserves_tar
         package_path,
         source_instance="HASHI1",
         transfer_mode="identity_memory",
+        include_agent_secrets=True,
+        secret_passphrase="shared-secret",
     )
     staged = stage_agent_move(
         target,
@@ -280,10 +282,15 @@ def test_schema5_commit_prepends_history_idempotently_and_rollback_preserves_tar
         expected_sha256=package_sha256(package_path),
         source_instance="HASHI1",
         operation="move",
+        secret_passphrase="shared-secret",
     )
 
-    committed = commit_agent_move(target, staged["package_id"])
-    replayed = commit_agent_move(target, staged["package_id"])
+    committed = commit_agent_move(
+        target, staged["package_id"], secret_passphrase="shared-secret"
+    )
+    replayed = commit_agent_move(
+        target, staged["package_id"], secret_passphrase="shared-secret"
+    )
 
     resolved = target_store.resolve_session(
         owner_id="user:7",
@@ -342,6 +349,8 @@ def test_schema5_commit_failure_compensates_conversation_import(tmp_path, monkey
         package_path,
         source_instance="HASHI1",
         transfer_mode="identity_memory",
+        include_agent_secrets=True,
+        secret_passphrase="shared-secret",
     )
     staged = stage_agent_move(
         target,
@@ -349,6 +358,7 @@ def test_schema5_commit_failure_compensates_conversation_import(tmp_path, monkey
         expected_sha256=package_sha256(package_path),
         source_instance="HASHI1",
         operation="move",
+        secret_passphrase="shared-secret",
     )
     monkeypatch.setattr(
         service,
@@ -359,7 +369,9 @@ def test_schema5_commit_failure_compensates_conversation_import(tmp_path, monkey
     )
 
     with pytest.raises(AgentMoveError, match="injected post-history failure"):
-        commit_agent_move(target, staged["package_id"])
+        commit_agent_move(
+            target, staged["package_id"], secret_passphrase="shared-secret"
+        )
 
     target_store = SessionStore(
         target / "state" / "sessions.sqlite3", instance_id="HASHI2"
@@ -618,7 +630,7 @@ def test_schema2_stage_failure_removes_only_incomplete_transaction(tmp_path, mon
     ).read_bytes() == source_identity_before
 
 
-def test_activation_blocks_when_agent_credential_was_not_packaged(tmp_path):
+def test_move_preflight_blocks_when_agent_credential_was_not_packaged(tmp_path):
     source, target, _ = _roots(tmp_path)
     package_path = tmp_path / "without-secrets.hashi-agent"
     package = create_agent_move_package(
@@ -628,16 +640,23 @@ def test_activation_blocks_when_agent_credential_was_not_packaged(tmp_path):
         source_instance="HASHI1",
         include_agent_secrets=False,
     )
-    stage_agent_move(
-        target,
-        package_path.read_bytes(),
-        expected_sha256=package_sha256(package_path),
-        source_instance="HASHI1",
-    )
-    commit_agent_move(target, package.package_id)
-
     with pytest.raises(AgentMoveError, match="credentials are incomplete"):
-        activate_agent_move(target, package.package_id)
+        stage_agent_move(
+            target,
+            package_path.read_bytes(),
+            expected_sha256=package_sha256(package_path),
+            source_instance="HASHI1",
+            operation="move",
+            target_agent_id="zelda",
+        )
+
+    assert not (
+        target
+        / "state"
+        / "agent_moves"
+        / "incoming"
+        / package.package_id
+    ).exists()
 
 
 def test_activation_rollback_does_not_overwrite_an_intervening_writer(
@@ -774,6 +793,61 @@ def test_target_id_resolution_uses_first_free_suffix_and_rejects_explicit_collis
             operation="clone",
             requested_agent_id="ZeLdA",
         )
+
+
+def test_staged_transfer_reserves_target_id_for_later_preflight(tmp_path):
+    _source, target, package_path = _roots(tmp_path)
+    stage_agent_move(
+        target,
+        package_path.read_bytes(),
+        expected_sha256=package_sha256(package_path),
+        source_instance="HASHI1",
+        target_instance="HASHI2",
+        secret_passphrase="shared-secret",
+        operation="move",
+        target_agent_id="zelda",
+    )
+
+    resolved = resolve_agent_transfer_target(
+        target,
+        "zelda",
+        operation="move",
+    )
+
+    assert resolved["target_agent_id"] == "zelda_1"
+
+
+def test_terminal_transfer_journal_does_not_reserve_released_target_id(tmp_path):
+    _source, target, package_path = _roots(tmp_path)
+    staged = stage_agent_move(
+        target,
+        package_path.read_bytes(),
+        expected_sha256=package_sha256(package_path),
+        source_instance="HASHI1",
+        target_instance="HASHI2",
+        secret_passphrase="shared-secret",
+        operation="move",
+        target_agent_id="zelda",
+    )
+    state_path = (
+        target
+        / "state"
+        / "agent_moves"
+        / "incoming"
+        / staged["package_id"]
+        / "state.json"
+    )
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["status"] = "completed"
+    _write_json(state_path, state)
+
+    resolved = resolve_agent_transfer_target(
+        target,
+        "zelda",
+        operation="move",
+    )
+
+    assert resolved["target_agent_id"] == "zelda"
 
 
 def test_schema3_move_finalization_then_source_cleanup_is_complete(tmp_path):
@@ -1052,8 +1126,10 @@ def test_schema3_clone_is_active_without_telegram_and_schedules_stay_disabled(
     assert package.access_requirements["telegram_secret_included"] is False
 
 
-@pytest.mark.parametrize("tamper", ["config", "secret", "schedule"])
-def test_finalization_rejects_target_state_changed_after_commit(tmp_path, tamper):
+@pytest.mark.parametrize("runtime_change", ["config", "secret", "schedule", "workspace"])
+def test_finalization_accepts_live_target_changes_after_activation(
+    tmp_path, runtime_change
+):
     source, target, _ = _roots(tmp_path)
     source_secrets = json.loads((source / "secrets.json").read_text())
     source_secrets["zelda_api_key"] = "safe-agent-key"
@@ -1086,15 +1162,15 @@ def test_finalization_rejects_target_state_changed_after_commit(tmp_path, tamper
     )
     activate_agent_move(target, staged["package_id"])
 
-    if tamper == "config":
+    if runtime_change == "config":
         agents = json.loads((target / "agents.json").read_text())
         agents["agents"][0]["access_scope"] = "workspace"
         _write_json(target / "agents.json", agents)
-    elif tamper == "secret":
+    elif runtime_change == "secret":
         secrets = json.loads((target / "secrets.json").read_text())
         secrets["zelda_copy_api_key"] = "changed"
         _write_json(target / "secrets.json", secrets)
-    else:
+    elif runtime_change == "schedule":
         tasks = json.loads((target / "tasks.json").read_text())
         imported = next(
             item
@@ -1103,13 +1179,20 @@ def test_finalization_rejects_target_state_changed_after_commit(tmp_path, tamper
         )
         imported["schedule"] = "changed"
         _write_json(target / "tasks.json", tasks)
+    else:
+        memory = target / "workspaces" / "zelda_copy" / "memory" / "facts.md"
+        memory.write_text("normal Memory+ rollover", encoding="utf-8")
 
-    with pytest.raises(AgentMoveError, match="differ"):
-        finalize_agent_move(
-            target,
-            staged["package_id"],
-            runtime_online=True,
-        )
+    finalized = finalize_agent_move(
+        target,
+        staged["package_id"],
+        runtime_online=True,
+    )
+
+    assert finalized["status"] == "completed"
+    assert finalized["target_verification"] == {"runtime_online": True}
+    if runtime_change == "workspace":
+        assert memory.read_text(encoding="utf-8") == "normal Memory+ rollover"
 
 
 def test_source_deactivation_disables_schedules_and_restore_is_lossless(tmp_path):

@@ -3,7 +3,8 @@
 The source sends an opaque ``agent-move-v1`` archive.  The receiver validates
 and stages it without touching live configuration, then performs an explicit
 inactive import.  Activation is a separate operation so a source can be
-disabled first and restored if the target refuses activation.
+disabled first.  Once a new Move records forward intent, every retry continues
+that same cutover; it never restores the source or rolls back the target.
 """
 
 from __future__ import annotations
@@ -45,7 +46,6 @@ from orchestrator.flexible_backend_registry import (
     normalize_allowed_backends,
 )
 from orchestrator.process_execution import process_is_alive
-from orchestrator.pcm import PCMValidationError, canonical_agent_md, load_pcm_document
 from orchestrator.telegram_delivery_state import (
     adopt_transferred_state,
     retire_agent_state,
@@ -343,6 +343,11 @@ def stage_agent_move(
                 secret_passphrase,
                 target_agent_id=selected_agent_id,
             )
+            if transfer_operation == "move" and credential_status["missing_keys"]:
+                raise AgentMoveError(
+                    "target credentials are incomplete: "
+                    + ", ".join(credential_status["missing_keys"])
+                )
             record = {
                 "schema_version": MOVE_STATE_SCHEMA_VERSION,
                 "package_id": package.package_id,
@@ -447,7 +452,7 @@ def commit_agent_move(
                 source_instance=str(record.get("source_instance") or ""),
             )
             if operation == "legacy_move"
-            else _assert_exact_target_available(root, target_agent_id)
+            else None
         )
         if bool(dormant) != bool(record.get("replaces_dormant_source")) or (
             dormant
@@ -776,18 +781,7 @@ def activate_agent_move(hashi_root: Path | str, package_id: str) -> dict[str, An
             record_dir / "package.hashi-agent", verify=True
         )
         target_agent_id = str(record.get("target_agent_id") or package.agent_id)
-        credentials = _credential_status(
-            root,
-            package,
-            None,
-            decrypt=False,
-            target_agent_id=target_agent_id,
-        )
-        if credentials["missing_keys"]:
-            raise AgentMoveError(
-                "target credentials are incomplete: "
-                + ", ".join(credentials["missing_keys"])
-            )
+        credentials = dict(record.get("credential_status") or {})
 
         path = root / "agents.json"
         original = path.read_bytes()
@@ -824,7 +818,13 @@ def finalize_agent_move(
     *,
     runtime_online: bool,
 ) -> dict[str, Any]:
-    """Verify the live target, then discard all rollback payload data."""
+    """Finish an already-started target without revalidating mutable state.
+
+    Package integrity, compatibility, credentials and importability are
+    decided before activation.  Once activation starts, normal runtime writes
+    are not a second veto.  ``runtime_online`` is only the receipt that the
+    forward start step has completed; false remains retryable.
+    """
 
     root = _root(hashi_root)
     with _mutation_lock(root):
@@ -846,19 +846,8 @@ def finalize_agent_move(
                 raise AgentMoveError(
                     "target Agent is not online in the Workbench/API runtime"
                 )
-            if not package_path.is_file():
-                raise AgentMoveError(
-                    "target verification package is missing before verification"
-                )
-            package = read_agent_move_package(
-                package_path,
-                verify=True,
-                target_platform=str(record.get("target_environment") or "")
-                or None,
-            )
-            verification = _verify_target_import(root, record, package)
             record["target_verified"] = True
-            record["target_verification"] = verification
+            record["target_verification"] = {"runtime_online": True}
             record["verified_at"] = utc_now_iso()
 
         record["status"] = "target_finalizing"
@@ -1608,13 +1597,6 @@ def _assert_target_available(
     return None
 
 
-def _assert_exact_target_available(root: Path, agent_id: str) -> None:
-    occupied = _occupied_agent_ids(root)
-    collision = occupied.get(agent_id.casefold())
-    if collision is not None:
-        raise AgentMoveError(f"target already has Agent '{collision}'")
-
-
 def _occupied_agent_ids(root: Path) -> dict[str, str]:
     occupied: dict[str, str] = {}
     data = _load_json(root / "agents.json")
@@ -1626,6 +1608,20 @@ def _occupied_agent_ids(root: Path) -> dict[str, str]:
     if workspace_parent.is_dir():
         for workspace in workspace_parent.iterdir():
             occupied.setdefault(workspace.name.casefold(), workspace.name)
+    incoming = _move_root(root) / "incoming"
+    if incoming.is_dir():
+        for transaction in incoming.iterdir():
+            state_path = transaction / "state.json"
+            if not state_path.is_file():
+                continue
+            state = _load_json(state_path)
+            if str(state.get("status") or "") in {"completed", "rolled_back"}:
+                continue
+            reserved = str(
+                state.get("target_agent_id") or state.get("agent_id") or ""
+            ).strip()
+            if reserved:
+                occupied.setdefault(reserved.casefold(), reserved)
     return occupied
 
 
@@ -2036,193 +2032,6 @@ def _stage_warnings(
     return list(dict.fromkeys(warnings))
 
 
-def _verify_target_import(
-    root: Path,
-    record: Mapping[str, Any],
-    package: AgentMoveArchive,
-) -> dict[str, Any]:
-    package_id = str(record.get("package_id") or "")
-    target_agent_id = str(record.get("target_agent_id") or package.agent_id)
-    agents = _load_json(root / "agents.json")
-    row = _find_owned_agent(agents, target_agent_id, package_id)
-    if row.get("is_active") is not True:
-        raise AgentMoveError("target Agent registry entry is not active")
-    if str(row.get("workspace_dir") or "") != f"workspaces/{target_agent_id}":
-        raise AgentMoveError("target Agent workspace path was not rebuilt portably")
-    source_bound = sorted(
-        field for field in _SOURCE_BOUND_CONFIG_FIELDS if field in row
-    )
-    if source_bound:
-        raise AgentMoveError(
-            "target Agent config retained source-bound fields: "
-            + ", ".join(source_bound)
-        )
-    expected_config_hash = str(record.get("imported_config_hash") or "")
-    if expected_config_hash and _agent_config_hash(row) != expected_config_hash:
-        raise AgentMoveError("target Agent config differs from the committed import")
-
-    workspace = root / "workspaces" / target_agent_id
-    if not workspace.is_dir() or workspace.is_symlink():
-        raise AgentMoveError("target Agent workspace is unavailable")
-    try:
-        load_pcm_document(canonical_agent_md(workspace), workspace_dir=workspace)
-    except PCMValidationError as exc:
-        raise AgentMoveError(f"target Agent identity is invalid: {exc}") from exc
-    pcm_digest = _file_sha256(canonical_agent_md(workspace))
-    if pcm_digest != str(package.checksums.get("identity/agent.md") or ""):
-        raise AgentMoveError("target Agent PCM identity differs from the package")
-
-    verified_files = 0
-    for item in package.workspace_metadata.get("files", []) or []:
-        if not isinstance(item, Mapping):
-            continue
-        relative = str(item.get("path") or "")
-        expected = str(package.checksums.get(f"workspace/{relative}") or "")
-        path = workspace / Path(*relative.split("/"))
-        if not path.is_file() or path.is_symlink():
-            raise AgentMoveError(
-                f"target Agent workspace file is missing: {relative}"
-            )
-        if expected and _file_sha256(path) != expected:
-            raise AgentMoveError(
-                f"target Agent workspace file differs from the package: {relative}"
-            )
-        verified_files += 1
-
-    secrets = _load_json_or_default(root / "secrets.json", {})
-    if not isinstance(secrets, dict):
-        raise AgentMoveError("target secrets.json must contain a JSON object")
-    required = {
-        str(item)
-        for item in record.get("imported_required_secret_keys", []) or []
-        if str(item)
-    }
-    missing = sorted(required - set(secrets))
-    if missing:
-        raise AgentMoveError(
-            "target Agent credentials are incomplete: " + ", ".join(missing)
-        )
-    expected_secret_hashes = record.get("imported_secret_hashes")
-    if isinstance(expected_secret_hashes, Mapping):
-        changed = sorted(
-            str(key)
-            for key, expected in expected_secret_hashes.items()
-            if str(key) not in secrets
-            or _secret_value_hash(secrets[str(key)]) != str(expected)
-        )
-        if changed:
-            raise AgentMoveError(
-                "target Agent credentials differ from the committed import: "
-                + ", ".join(changed)
-            )
-    if _record_operation(record) == "clone":
-        telegram_key = str(row.get("telegram_token_key") or target_agent_id)
-        if telegram_key in secrets and secrets.get(telegram_key):
-            raise AgentMoveError("cloned Agent unexpectedly has a Telegram token")
-
-    tasks = _load_json_or_default(
-        root / "tasks.json",
-        {"version": 1, "heartbeats": [], "crons": [], "nudges": []},
-    )
-    imported_task_ids = record.get("imported_task_ids") or {}
-    verified_tasks = 0
-    for section in ("heartbeats", "crons", "nudges"):
-        rows = [item for item in tasks.get(section, []) if isinstance(item, dict)]
-        by_id = {str(item.get("id") or ""): item for item in rows}
-        for task_id in imported_task_ids.get(section, []) or []:
-            item = by_id.get(str(task_id))
-            if (
-                item is None
-                or item.get("enabled") is not False
-                or item.get("agent") != target_agent_id
-                or item.get("import_package_id") != package_id
-            ):
-                raise AgentMoveError(
-                    f"target imported schedule is missing or active: {section}/{task_id}"
-                )
-            expected_task_hash = str(
-                ((record.get("imported_task_hashes") or {}).get(section) or {}).get(
-                    str(task_id)
-                )
-                or ""
-            )
-            if expected_task_hash and _secret_value_hash(item) != expected_task_hash:
-                raise AgentMoveError(
-                    "target imported schedule differs from the committed draft: "
-                    f"{section}/{task_id}"
-                )
-            verified_tasks += 1
-
-    if package.agent_capability is not None:
-        capability = _find_agent_capability(
-            _load_json_or_default(root / "agent_capabilities.json", {"agents": []}),
-            target_agent_id,
-        )
-        if capability is None or capability.get("transfer_package_id") != package_id:
-            raise AgentMoveError("target Agent capability declaration was not imported")
-        expected_capability = dict(package.agent_capability)
-        expected_capability.pop("id", None)
-        expected_capability["name"] = target_agent_id
-        actual_capability = dict(capability)
-        actual_capability.pop("transfer_package_id", None)
-        if actual_capability != expected_capability:
-            raise AgentMoveError(
-                "target Agent capability differs from the committed import"
-            )
-
-    continuity_status = None
-    if package.conversation_continuity is not None:
-        continuity_status = _session_store(root).conversation_continuity_import_status(
-            package_id
-        )
-        if continuity_status is None:
-            raise AgentMoveError(
-                "target conversation continuity import is missing"
-            )
-        expected_digest = str(
-            package.conversation_continuity.get("capsule_digest") or ""
-        )
-        if (
-            continuity_status.get("capsule_digest") != expected_digest
-            or continuity_status.get("owner_id") != _configured_session_owner_id(root)
-            or continuity_status.get("agent_id") != target_agent_id
-            or continuity_status.get("history_mode")
-            != str(package.manifest.get("history_mode") or "")
-        ):
-            raise AgentMoveError(
-                "target conversation continuity import differs from the package"
-            )
-        expected_messages = int(
-            (package.conversation_continuity.get("summary") or {}).get(
-                "eligible_message_count"
-            )
-            or 0
-        )
-        if int(continuity_status.get("satisfied_messages") or 0) != expected_messages:
-            raise AgentMoveError(
-                "target conversation continuity message count is incomplete"
-            )
-
-    return {
-        "registry": True,
-        "runtime_online": True,
-        "identity": True,
-        "workspace_files": verified_files,
-        "credentials": len(required),
-        "disabled_schedules": verified_tasks,
-        "conversation_messages": int(
-            (continuity_status or {}).get("imported_messages") or 0
-        ),
-        "history_mode": str(package.manifest.get("history_mode") or "none"),
-        "telegram_configured": bool(
-            _record_operation(record) != "clone"
-            and package.access_requirements.get("telegram_secret_included")
-        ),
-        "cross_platform": record.get("source_environment")
-        != record.get("target_environment"),
-    }
-
-
 def _strip_target_transaction_markers(
     root: Path,
     record: Mapping[str, Any],
@@ -2236,13 +2045,8 @@ def _strip_target_transaction_markers(
         for row in _agent_rows(agents)
         if str(row.get("name") or row.get("id") or "") == agent_id
     ]
-    if len(matches) != 1 or matches[0].get("is_active") is not True:
-        raise AgentMoveError("verified target Agent registry entry is unavailable")
-    row = matches[0]
-    owner = row.get("transfer_package_id")
-    if owner not in {None, package_id}:
-        raise AgentMoveError("target Agent registry ownership changed during cleanup")
-    if owner == package_id:
+    row = matches[0] if len(matches) == 1 else None
+    if row is not None and row.get("transfer_package_id") == package_id:
         for key in _SOURCE_TRANSFER_FIELDS:
             row.pop(key, None)
         _atomic_json(agents_path, agents)
@@ -2257,8 +2061,6 @@ def _strip_target_transaction_markers(
         for item in tasks.get(section, []) or []:
             if not isinstance(item, dict) or item.get("import_package_id") != package_id:
                 continue
-            if item.get("enabled") is not False or item.get("agent") != agent_id:
-                raise AgentMoveError("imported schedule changed before final cleanup")
             for key in ("import_package_id", "import_source_instance"):
                 item.pop(key, None)
             changed_tasks = True
@@ -2269,12 +2071,10 @@ def _strip_target_transaction_markers(
     if capabilities_path.exists():
         capabilities = _load_json_or_default(capabilities_path, {"agents": []})
         capability = _find_agent_capability(capabilities, agent_id)
-        if capability is not None:
-            owner = capability.get("transfer_package_id")
-            if owner not in {None, package_id}:
-                raise AgentMoveError(
-                    "target Agent capability ownership changed during cleanup"
-                )
+        if (
+            capability is not None
+            and capability.get("transfer_package_id") == package_id
+        ):
             capability.pop("transfer_package_id", None)
             _atomic_json(capabilities_path, capabilities)
 
@@ -2301,14 +2101,6 @@ def _find_agent_capability(data: Any, agent_id: str) -> dict[str, Any] | None:
         value = entries.get(key) if key is not None else None
         return value if isinstance(value, dict) else None
     raise AgentMoveError("Agent capabilities must be a list or object")
-
-
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _surgical_target_rollback(root: Path, record: Mapping[str, Any]) -> None:

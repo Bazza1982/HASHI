@@ -354,14 +354,22 @@ class AgentMoveManager:
                 failed_outbound = await asyncio.to_thread(get_outbound_move, self.root, package_id)
             except Exception:
                 failed_outbound = {}
-            retry = attempts < _MAX_EXECUTION_ATTEMPTS and not failed_outbound.get("rollback_completed")
+            failed_operation = str(
+                failed_outbound.get("operation") or record.get("operation") or ""
+            )
+            retry = not failed_outbound.get("rollback_completed") and (
+                failed_operation == "move"
+                or attempts < _MAX_EXECUTION_ATTEMPTS
+            )
             self._update(
                 package_id,
                 status="retry_wait" if retry else "needs_recovery",
                 failed_at=utc_now_iso(),
                 last_error=str(exc),
                 next_attempt_at=(
-                    time.time() + 3 ** (attempts - 1) if retry else None
+                    time.time() + min(60, 3 ** min(attempts - 1, 4))
+                    if retry
+                    else None
                 ),
             )
             bridge_logger.warning(

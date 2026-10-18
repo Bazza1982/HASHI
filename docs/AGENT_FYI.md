@@ -1,5 +1,12 @@
 # HASHI Agent FYI
 
+October 19 Agent Move: staging is the single mutable-state qualification gate.
+Confirmation records forward-only intent; later Memory+, workspace, config,
+credential or schedule changes cannot invalidate the accepted package. Runtime
+and cleanup failures retry forward without target rollback or source restore;
+cancel is available only before confirmation. See
+[Agent Move](HASHI_AGENT_MOVE_V1.md#forward-only-move-decision-2026-10-19).
+
 October 18 visual fallback: image requests first use the selected model, then an
 allowed visual model from the same Model Provider, then LAN HASHI Compute Vision.
 The switch is request-only and warned once; it never changes the Agent default or
