@@ -1243,6 +1243,7 @@ class HerSessionStore:
             "source_request_id": str(state.get("source_request_id") or ""),
             "turn_id": str(state.get("turn_id") or ""),
             "turn_status": str(state.get("turn_status") or ""),
+            "recovery_status": str(state.get("status") or ""),
             "recovery_disposition": str(
                 state.get("recovery_disposition") or ""
             ),
@@ -1286,7 +1287,10 @@ class HerSessionStore:
             return None
         if (
             str(canonical.get("turn_status") or "") != "steered"
-            or str(canonical.get("recovery_disposition") or "") != "steered"
+            or str(canonical.get("recovery_status") or "") != "terminated"
+            or str(canonical.get("recovery_disposition") or "")
+            not in {"steered", "stopped"}
+            or not bool(canonical.get("safe_to_resume"))
         ):
             return None
         for key in ("evidence_ref", "evidence_digest", "turn_id"):

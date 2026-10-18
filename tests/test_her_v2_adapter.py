@@ -645,12 +645,33 @@ async def test_fixed_steer_successor_rebinds_verified_session_and_private_contex
         interrupted,
         reason="User supplied a new direction.",
     )
+    # The live provider can publish its terminal STOPPED transition after the
+    # HASHI control path has already marked the Turn as steered.  The Turn
+    # remains authoritatively steered, while the recovery projection's
+    # disposition becomes "stopped".
+    adapter._session_coordinator.store.record_runtime_event(
+        session_id=interrupted.session_id,
+        turn_id=interrupted.turn_id,
+        execution_owner_id=adapter._session_coordinator.execution_owner["owner_id"],
+        record={
+            "event_id": "late-provider-stopped-after-steer",
+            "event": "transition",
+            "stage": "direct",
+            "payload": {
+                "from": "GENERATING",
+                "to": "STOPPED",
+            },
+        },
+    )
     evidence = (
         adapter._session_coordinator.store.interruption_evidence_for_request(
             first_meta["request_id"]
         )
     )
     assert evidence is not None
+    assert evidence["turn_status"] == "steered"
+    assert evidence["recovery_disposition"] == "stopped"
+    assert evidence["safe_to_resume"] is True
 
     # Reproduce the live failure: /steer rebuilt the request-local adapter and
     # therefore began the successor without its in-memory HER Session binding.
