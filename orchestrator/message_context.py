@@ -283,21 +283,8 @@ def _legacy_source_id(source: str, chat_id: Any, metadata: Mapping[str, Any]) ->
         # Runtime work remains a system source even when the Connector needs a
         # Telegram chat ID for its eventual notification.
         return "hashi.internal"
-    if surface == "whatsapp" or normalized.startswith("wa:"):
+    if normalized.startswith("wa:"):
         return "whatsapp"
-    if surface == "telegram":
-        return "telegram"
-    if surface == "tui":
-        return "tui"
-    if surface in {
-        "workbench",
-        "backend-api",
-        "backend_api",
-        "api",
-        "session-api",
-        "session_api",
-    }:
-        return "api"
     if normalized == "tui":
         return "tui"
     if normalized in {"api", "session-api"}:
@@ -308,10 +295,44 @@ def _legacy_source_id(source: str, chat_id: Any, metadata: Mapping[str, Any]) ->
         ("protocol:message", "protocol:reply", "hchat-reply:")
     ):
         return "hchat"
+    # /steer and /focus are control transports, not frontend identities. Their
+    # successor message stays on the parent Conversation surface even when a
+    # Telegram mirror supplies a non-zero chat ID.
+    if normalized in {"steer", "focus"}:
+        if surface == "whatsapp":
+            return "whatsapp"
+        if surface == "telegram":
+            return "telegram"
+        if surface == "tui":
+            return "tui"
+        if surface in {
+            "workbench",
+            "backend-api",
+            "backend_api",
+            "api",
+            "session-api",
+            "session_api",
+        }:
+            return "api"
+    if surface == "whatsapp":
+        return "whatsapp"
+    if surface == "telegram":
+        return "telegram"
+    if surface == "tui":
+        return "tui"
     if chat_id not in (None, 0, "0", ""):
         # Telegram command/media handlers retain many legacy source labels.
         # Explicit API/HChat/internal cases above take precedence.
         return "telegram"
+    if surface in {
+        "workbench",
+        "backend-api",
+        "backend_api",
+        "api",
+        "session-api",
+        "session_api",
+    }:
+        return "api"
     return "unknown"
 
 
