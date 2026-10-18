@@ -107,6 +107,27 @@ class HerBackendSessionCoordinator:
             execution_owner_id=self.execution_owner["owner_id"],
         )
 
+    def record_provider_context_checkpoint(
+        self,
+        accepted: AcceptedHerTurn,
+        checkpoint: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return self.store.record_provider_context_checkpoint(
+            session_id=accepted.session_id,
+            turn_id=accepted.turn_id,
+            provider=str(checkpoint.get("provider") or ""),
+            model=str(checkpoint.get("model") or ""),
+            stage=str(checkpoint.get("stage") or ""),
+            boundary=str(checkpoint.get("boundary") or ""),
+            messages=tuple(checkpoint.get("messages") or ()),
+            reasoning=tuple(checkpoint.get("reasoning") or ()),
+            provider_request_id=str(
+                checkpoint.get("provider_request_id") or ""
+            ),
+            invocation_id=str(checkpoint.get("invocation_id") or ""),
+            execution_owner_id=self.execution_owner["owner_id"],
+        )
+
     @staticmethod
     def encode(payload: Mapping[str, Any]) -> str:
         return HER_FIXED_ENVELOPE_PREFIX + _canonical(dict(payload))
@@ -716,6 +737,17 @@ class HerBackendSessionCoordinator:
                 turn_id=accepted.turn_id,
                 assistant_text=str(assistant_text or ""),
                 error_text=str(error_text or ""),
+                execution_owner_id=self.execution_owner["owner_id"],
+            )
+        except HerSessionStoreError as exc:
+            raise HerFixedProtocolError(exc.code, str(exc)) from exc
+
+    def steer(self, accepted: AcceptedHerTurn, *, reason: str) -> dict[str, Any]:
+        try:
+            return self.store.steer_turn(
+                session_id=accepted.session_id,
+                turn_id=accepted.turn_id,
+                reason=str(reason or "HER turn was steered."),
                 execution_owner_id=self.execution_owner["owner_id"],
             )
         except HerSessionStoreError as exc:

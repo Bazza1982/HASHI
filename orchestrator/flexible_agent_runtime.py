@@ -1133,6 +1133,7 @@ class FlexibleAgentRuntime:
             RUN_DELIVERY_ROUTE_METADATA_KEY,
             configured_whatsapp_mirror_channel,
             freeze_run_delivery_route,
+            normalize_run_delivery_route,
             owner_mirror_for_admission,
             route_destination,
         )
@@ -1239,7 +1240,7 @@ class FlexibleAgentRuntime:
             request_metadata=metadata,
             state_root=getattr(self.global_config, "bridge_home", None),
         )
-        from orchestrator.session_store import SessionConflict
+        from orchestrator.session_store import SessionConflict, SessionNotFound
 
         reply_reference = None
         reply_event_id = str(metadata.get("reply_to_event_id") or "").strip()
@@ -1323,7 +1324,7 @@ class FlexibleAgentRuntime:
         )
         if source_fact["id"] == "whatsapp" and telegram_requested:
             chat_id = int(getattr(self.global_config, "authorized_id", 0) or 0)
-        metadata[RUN_DELIVERY_ROUTE_METADATA_KEY] = freeze_run_delivery_route(
+        delivery_route = freeze_run_delivery_route(
             message_source_id=str(source_fact["id"]),
             session_surface=resolved_surface,
             session_channel_key=resolved_channel_key,
@@ -1334,6 +1335,63 @@ class FlexibleAgentRuntime:
             primary_channel_key=primary_channel_key,
             terminal_exchange=bool(metadata.get("system_exchange_terminal")),
         )
+        parent_run_id = str(metadata.get("parent_run_id") or "").strip()
+        parent_request_id = str(
+            metadata.get("steer_parent_request_id") or ""
+        ).strip()
+        if (
+            str(source or "").strip().casefold() in {"steer", "focus"}
+            and parent_run_id
+            and parent_request_id
+        ):
+            try:
+                parent_run = await asyncio.to_thread(
+                    runtime_session.ensure_store(self).get_run,
+                    parent_run_id,
+                    owner_id=resolved_owner,
+                )
+            except SessionNotFound:
+                parent_run = None
+            if (
+                parent_run is not None
+                and str(parent_run.get("session_id") or "")
+                == str(resolved_session["session_id"])
+                and str(parent_run.get("agent_id") or "").strip().casefold()
+                == str(self.name).strip().casefold()
+                and str(parent_run.get("request_id") or "") == parent_request_id
+            ):
+                try:
+                    parent_delivery_route = normalize_run_delivery_route(
+                        parent_run.get("delivery_route")
+                    )
+                except ValueError:
+                    self.error_logger.error(
+                        "Rejected invalid parent Run delivery route for %s",
+                        parent_run_id,
+                    )
+                else:
+                    parent_primary = parent_delivery_route.get("primary")
+                    current_primary = delivery_route.get("primary")
+                    if (
+                        isinstance(parent_primary, Mapping)
+                        and isinstance(current_primary, Mapping)
+                        and parent_primary.get("surface")
+                        == current_primary.get("surface")
+                    ):
+                        delivery_route = freeze_run_delivery_route(
+                            message_source_id=str(source_fact["id"]),
+                            session_surface=resolved_surface,
+                            session_channel_key=resolved_channel_key,
+                            chat_id=chat_id,
+                            telegram_requested=telegram_requested,
+                            whatsapp_requested=whatsapp_requested,
+                            whatsapp_channel_key=whatsapp_channel,
+                            primary_channel_key=parent_primary.get("channel_key"),
+                            terminal_exchange=bool(
+                                metadata.get("system_exchange_terminal")
+                            ),
+                        )
+        metadata[RUN_DELIVERY_ROUTE_METADATA_KEY] = delivery_route
         # The legacy execution flag is now only a derived instruction to the
         # Telegram Connector. Other connector callbacks use the same frozen
         # route and cannot be enabled or disabled by this boolean.
@@ -10955,10 +11013,10 @@ class FlexibleAgentRuntime:
         await runtime_control.cmd_stop(self, update, context)
 
     async def cmd_steer(self, update: Update, context: Any):
-        await runtime_control.cmd_steer(self, update, context)
+        return await runtime_control.cmd_steer(self, update, context)
 
     async def cmd_focus(self, update: Update, context: Any):
-        await runtime_control.cmd_focus(self, update, context)
+        return await runtime_control.cmd_focus(self, update, context)
 
     async def cmd_recall(self, update: Update, context: Any):
         await runtime_control.cmd_recall(self, update, context)

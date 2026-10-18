@@ -116,6 +116,8 @@ async def test_session_handle_reuses_worker_services_without_recovery_or_learnin
     assert child._session_coordinator is owner._session_coordinator
     assert child._learning is owner._learning
     assert child._active_runtimes is not owner._active_runtimes
+    assert child._wip_active_journals is owner._wip_active_journals
+    assert child._canonical_active_turns is owner._canonical_active_turns
     child._session_id='native-child'
     assert owner._session_id is None
     await child.shutdown()
@@ -542,6 +544,163 @@ async def test_adapter_fixed_backend_keeps_one_session_and_accepts_incremental_t
 
 
 @pytest.mark.asyncio
+async def test_fixed_steer_successor_rebinds_verified_session_and_private_context(
+    tmp_path,
+):
+    config = _agent_config(tmp_path)
+    config._her_v2_stage_provider = _DirectProvider()
+    runtime = SimpleNamespace(
+        backend_manager=SimpleNamespace(agent_mode="fixed"),
+        _request_meta_by_id={},
+        current_request_meta={},
+    )
+    config._hashi_runtime = runtime
+    adapter = HERv2Adapter(config, _global_config(tmp_path))
+    assert await adapter.initialize() is True
+
+    sections = [
+        {
+            "key": "permanent_system",
+            "title": "PERMANENT SYSTEM INSTRUCTIONS",
+            "text": "Follow policy.",
+            "authority": "permanent_system",
+            "rank": 0,
+            "protected": True,
+            "metadata": {},
+            "order": 0,
+        },
+        {
+            "key": "current_user_request",
+            "title": "CURRENT USER REQUEST",
+            "text": "placeholder",
+            "authority": "current_user",
+            "rank": 3,
+            "protected": True,
+            "metadata": {},
+            "order": 1,
+        },
+    ]
+    prompt_payload = {
+        "transport_snapshot": {"version": 1, "sections": sections}
+    }
+
+    def metadata(request_id, *, evidence=None):
+        value = {
+            "request_id": request_id,
+            "hashi_session_id": "hashi-session-steer",
+            "hashi_message_id": f"message-{request_id}",
+            "context_generation": 1,
+            "session_workspace": str(tmp_path / "session-steer"),
+        }
+        if evidence is not None:
+            value["request_metadata"] = {
+                "steer_continuation_evidence": {
+                    **evidence,
+                    "old_run_id": "run-old",
+                    "relationship": "linked_successor",
+                }
+            }
+        return value
+
+    first_meta = metadata("request-before-steer")
+    first_transport, _ = adapter.prepare_fixed_turn_input(
+        prompt_payload=prompt_payload,
+        user_message="Inspect the marker and then wait.",
+        request_id=first_meta["request_id"],
+        request_meta=first_meta,
+    )
+    interrupted = adapter._session_coordinator.accept(first_transport)
+    original_session_id = interrupted.session_id
+    provider_messages = [
+        {"role": "system", "content": "execution contract"},
+        {"role": "user", "content": "Inspect the marker and then wait."},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-marker",
+                    "type": "function",
+                    "function": {"name": "file_read", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-marker",
+            "content": "MARKER_FROM_COMPLETED_TOOL",
+        },
+    ]
+    adapter._session_coordinator.record_provider_context_checkpoint(
+        interrupted,
+        {
+            "provider": "deepseek-api",
+            "model": "deepseek-flash",
+            "stage": "direct",
+            "boundary": "completed_tool_batch",
+            "messages": provider_messages,
+        },
+    )
+    adapter._session_coordinator.steer(
+        interrupted,
+        reason="User supplied a new direction.",
+    )
+    # The live provider can publish its terminal STOPPED transition after the
+    # HASHI control path has already marked the Turn as steered.  The Turn
+    # remains authoritatively steered, while the recovery projection's
+    # disposition becomes "stopped".
+    adapter._session_coordinator.store.record_runtime_event(
+        session_id=interrupted.session_id,
+        turn_id=interrupted.turn_id,
+        execution_owner_id=adapter._session_coordinator.execution_owner["owner_id"],
+        record={
+            "event_id": "late-provider-stopped-after-steer",
+            "event": "transition",
+            "stage": "direct",
+            "payload": {
+                "from": "GENERATING",
+                "to": "STOPPED",
+            },
+        },
+    )
+    evidence = (
+        adapter._session_coordinator.store.interruption_evidence_for_request(
+            first_meta["request_id"]
+        )
+    )
+    assert evidence is not None
+    assert evidence["turn_status"] == "steered"
+    assert evidence["recovery_disposition"] == "stopped"
+    assert evidence["safe_to_resume"] is True
+
+    # Reproduce the live failure: /steer rebuilt the request-local adapter and
+    # therefore began the successor without its in-memory HER Session binding.
+    adapter._session_id = None
+    second_meta = metadata("request-after-steer", evidence=evidence)
+    second_transport, second_audit = adapter.prepare_fixed_turn_input(
+        prompt_payload=prompt_payload,
+        user_message="Use the completed marker without reading it again.",
+        request_id=second_meta["request_id"],
+        request_meta=second_meta,
+    )
+
+    assert adapter._session_id == original_session_id
+    assert second_audit["operation"] == "append_turn"
+    successor = adapter._session_coordinator.accept(second_transport)
+    recovery = adapter._session_coordinator.store.consume_recovery_context(
+        session_id=successor.session_id,
+        current_turn_id=successor.turn_id,
+    )
+    assert recovery["interrupted_turn_id"] == interrupted.turn_id
+    private_context = (
+        adapter._session_coordinator.store.provider_context_for_turn(
+            successor.session_id,
+            successor.turn_id,
+        )
+    )
+    assert private_context["messages"] == provider_messages
+
+@pytest.mark.asyncio
 async def test_user_stop_shutdown_cancels_fixed_turn_before_runtime_cleanup():
     events = []
     accepted = SimpleNamespace(turn_id="turn-active")
@@ -577,6 +736,44 @@ async def test_user_stop_shutdown_cancels_fixed_turn_before_runtime_cleanup():
         ),
         ("shutdown", "USER_STOP"),
     ]
+
+@pytest.mark.asyncio
+async def test_user_steer_shutdown_preserves_fixed_turn_for_successor():
+    events = []
+    accepted = SimpleNamespace(turn_id="turn-active")
+
+    class _Coordinator:
+        def steer(self, turn, *, reason):
+            events.append(("steer", turn.turn_id, reason))
+            return {"status": "steered"}
+
+    class _Runtime:
+        async def shutdown(self, *, reason):
+            events.append(("shutdown", reason))
+
+    adapter = object.__new__(HERv2Adapter)
+    adapter.config = SimpleNamespace(
+        _hashi_runtime=SimpleNamespace(
+            _user_interrupt={"reason": "user_steer"},
+        )
+    )
+    adapter.logger = logging.getLogger("test.herv3.user-steer")
+    adapter._session_coordinator = _Coordinator()
+    adapter._canonical_active_turns = {"hashi-request:request-active": accepted}
+    adapter._active_runtimes = {"request-active": _Runtime()}
+    adapter._learning = None
+
+    await adapter.shutdown()
+
+    assert events == [
+        (
+            "steer",
+            "turn-active",
+            "HASHI /steer preserved the active HER turn for continuation.",
+        ),
+        ("shutdown", "STEERED"),
+    ]
+
 
 
 @pytest.mark.asyncio
@@ -2426,6 +2623,101 @@ class _FakeManager:
             backend.config.extra["model_tool_support"] = self.model_tool_support
         self.backends.append(backend)
         return backend
+
+
+@pytest.mark.asyncio
+async def test_stage_provider_replays_matching_private_provider_context_once():
+    class ContinuationBackend(_FakeBackend):
+        def __init__(self, system_md=None):
+            super().__init__(system_md)
+            self.continuation_messages = None
+            self.context_observer = None
+
+        def set_provider_context_observer(self, observer):
+            self.context_observer = observer
+
+        async def generate_response(
+            self,
+            prompt,
+            request_id,
+            is_retry=False,
+            silent=False,
+            on_stream_event=None,
+            continuation_messages=None,
+            provider_call_limit=None,
+        ):
+            del request_id, is_retry, silent, on_stream_event
+            self.prompt = prompt
+            self.provider_call_limit = provider_call_limit
+            self.continuation_messages = continuation_messages
+            return BackendResponse(
+                text='{"disposition":"COMPLETED","summary":"continued"}',
+                duration_ms=1,
+            )
+
+    class ContinuationManager(_FakeManager):
+        def create_ephemeral_backend(self, engine, target_model=None):
+            assert (engine, target_model) == (
+                "openrouter-api",
+                "configured/model",
+            )
+            backend = ContinuationBackend(self.system_md)
+            self.backends.append(backend)
+            return backend
+
+    private_messages = [
+        {"role": "system", "content": "execution contract"},
+        {"role": "user", "content": "original work"},
+        {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "Inspect before editing.",
+            "tool_calls": [
+                {
+                    "id": "call-read",
+                    "type": "function",
+                    "function": {"name": "file_read", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call-read", "content": "evidence"},
+    ]
+    manager = ContinuationManager()
+    provider = HashiStageProvider(backend_manager=manager)
+    persisted = []
+    provider.bind_provider_context(
+        observer=persisted.append,
+        recovery={
+            "format": "herv3-provider-context-v1",
+            "provider": "openrouter-api",
+            "model": "configured/model",
+            "stage": "execution",
+            "boundary": "completed_tool_batch",
+            "message_count": len(private_messages),
+            "messages": private_messages,
+            "reasoning_count": 1,
+            "reasoning": [
+                {"state": "available", "content": "Inspect before editing."}
+            ],
+        },
+    )
+
+    request = _stage_request(
+        Stage.EXECUTION,
+        allow_tools=False,
+        allow_side_effects=False,
+    )
+    await provider.invoke(
+        ProviderProfile("execution", "openrouter-api", "configured/model"),
+        request,
+    )
+
+    backend = manager.backends[0]
+    assert backend.context_observer is not None
+    assert backend.continuation_messages[:-1] == private_messages
+    assert backend.continuation_messages[-1]["role"] == "user"
+    assert "Do the requested work" in backend.continuation_messages[-1]["content"]
+    assert persisted == []
 
 
 @pytest.mark.asyncio

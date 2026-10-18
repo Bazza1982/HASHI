@@ -98,6 +98,7 @@ class _FakeAppServerProcess:
         forbidden_item_type=None,
         host_method=None,
         fail_after_tools=False,
+        hold_turn=False,
     ):
         self.pid = 4321
         self.returncode = None
@@ -110,6 +111,7 @@ class _FakeAppServerProcess:
         self.forbidden_item_type = forbidden_item_type
         self.host_method = host_method
         self.fail_after_tools = fail_after_tools
+        self.hold_turn = hold_turn
         self.received = []
         self.thread_params = None
         self.injected_items = None
@@ -217,6 +219,8 @@ class _FakeAppServerProcess:
                     "result": {"turn": {"id": self.turn_id}},
                 }
             )
+            if self.hold_turn:
+                return
             if self.forbidden_item_type:
                 self.stdout.emit(
                     {
@@ -323,6 +327,34 @@ class _FakeAppServerProcess:
                         },
                     }
                 )
+        elif method == "turn/steer":
+            self.stdout.emit(
+                {"id": request_id, "result": {"turnId": self.turn_id}}
+            )
+            self.stdout.emit(
+                {
+                    "method": "item/completed",
+                    "params": {
+                        "threadId": self.thread_id,
+                        "turnId": self.turn_id,
+                        "item": {
+                            "type": "agentMessage",
+                            "id": "answer-after-steer",
+                            "phase": "final_answer",
+                            "text": self.final_text,
+                        },
+                    },
+                }
+            )
+            self.stdout.emit(
+                {
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": self.thread_id,
+                        "turn": {"id": self.turn_id, "status": "completed"},
+                    },
+                }
+            )
         elif method == "turn/interrupt":
             self.stdout.emit({"id": request_id, "result": {}})
             self.stdout.emit(
@@ -603,6 +635,61 @@ def test_codex_alias_is_deterministic_and_bounded_for_long_names():
     assert first_alias == codex_dynamic_tool_name(first_name)
     assert first_alias != second_alias
     assert len(first_alias) == len(second_alias) == 64
+
+
+@pytest.mark.asyncio
+async def test_codex_app_server_native_steer_targets_the_live_turn(monkeypatch):
+    fake = _FakeAppServerProcess(final_text="continued answer", hold_turn=True)
+
+    async def create_subprocess(*_args, **_kwargs):
+        return fake
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+    bridge = CodexAppServerToolBridge(
+        command="codex",
+        model="gpt-5.6-luna",
+        effort="medium",
+        idle_timeout_sec=5,
+    )
+    run_task = asyncio.create_task(
+        bridge.run(
+            [{"role": "user", "content": "Start the task"}],
+            [],
+            "req-native-steer",
+            tool_choice="none",
+        )
+    )
+    for _ in range(100):
+        if bridge._active_turn_id:
+            break
+        await asyncio.sleep(0)
+    assert bridge._active_turn_id == fake.turn_id
+
+    evidence = await bridge.steer_active(
+        "Focus on the failing tests first.",
+        request_id="req-native-steer",
+    )
+    response = await run_task
+
+    steer_request = next(
+        item for item in fake.received if item.get("method") == "turn/steer"
+    )
+    assert steer_request["params"] == {
+        "threadId": fake.thread_id,
+        "input": [
+            {"type": "text", "text": "Focus on the failing tests first."}
+        ],
+        "expectedTurnId": fake.turn_id,
+    }
+    assert evidence["method"] == "turn/steer"
+    assert evidence["provider_turn_id"] == fake.turn_id
+    assert evidence["accepted_turn_id"] == fake.turn_id
+    assert evidence["source_request_id"] == "req-native-steer"
+    assert response.is_success is True
+    assert response.text == "continued answer"
+    assert not any(
+        item.get("method") == "turn/interrupt" for item in fake.received
+    )
 
 
 @pytest.mark.asyncio

@@ -4340,7 +4340,9 @@ class SessionStore:
             state = "completed" if success else str(failure_state or "failed")
             if state not in TERMINAL_RUN_STATES:
                 state = "failed"
-            error_code = None if success else "run_failed"
+            error_code = None if success else (
+                "run_superseded" if state == "superseded" else "run_failed"
+            )
             connection.execute(
                 """
                 UPDATE runs SET state = ?, final_message_id = ?, error_code = ?,

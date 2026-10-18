@@ -51,6 +51,7 @@ _CODEX_DYNAMIC_TOOL_MAX_LENGTH = 64
 _CODEX_DYNAMIC_TOOL_DIGEST_LENGTH = 16
 _CODEX_DYNAMIC_TOOL_STEM_RE = re.compile(r"[^A-Za-z0-9_-]")
 _PROVIDER_ACTIVITY_MIN_INTERVAL_SEC = 1.0
+_CONTROL_RESPONSE_TIMEOUT_SEC = 15.0
 
 
 class CodexAppServerError(RuntimeError):
@@ -451,6 +452,14 @@ class CodexAppServerToolBridge:
         self.on_process_started = on_process_started
         self.on_process_stopped = on_process_stopped
         self.force_kill = force_kill
+        self._write_lock = asyncio.Lock()
+        self._active_lock = asyncio.Lock()
+        self._active_proc: Any | None = None
+        self._active_thread_id = ""
+        self._active_turn_id = ""
+        self._active_request_id = ""
+        self._control_serial = 0
+        self._pending_control: dict[str, asyncio.Future[dict[str, Any]]] = {}
 
     def _command(self) -> list[str]:
         command = [
@@ -493,8 +502,133 @@ class CodexAppServerToolBridge:
         if proc.stdin is None:
             raise CodexAppServerError("Codex app-server stdin is unavailable")
         data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        proc.stdin.write((data + "\n").encode("utf-8"))
-        await proc.stdin.drain()
+        async with self._write_lock:
+            proc.stdin.write((data + "\n").encode("utf-8"))
+            await proc.stdin.drain()
+
+    async def _publish_active_turn(
+        self,
+        *,
+        proc: Any,
+        thread_id: str,
+        turn_id: str,
+        request_id: str,
+    ) -> None:
+        async with self._active_lock:
+            self._active_proc = proc
+            self._active_thread_id = str(thread_id)
+            self._active_turn_id = str(turn_id)
+            self._active_request_id = str(request_id)
+
+    async def _clear_active_turn(self, proc: Any, *, reason: str) -> None:
+        pending: list[asyncio.Future[dict[str, Any]]] = []
+        async with self._active_lock:
+            if self._active_proc is not proc:
+                return
+            self._active_proc = None
+            self._active_thread_id = ""
+            self._active_turn_id = ""
+            self._active_request_id = ""
+            pending = list(self._pending_control.values())
+            self._pending_control.clear()
+        for waiter in pending:
+            if not waiter.done():
+                waiter.set_exception(CodexAppServerError(reason))
+
+    async def _resolve_control_response(self, message: Mapping[str, Any]) -> bool:
+        raw_id = message.get("id")
+        if raw_id is None:
+            return False
+        request_id = str(raw_id)
+        async with self._active_lock:
+            waiter = self._pending_control.pop(request_id, None)
+        if waiter is None:
+            return False
+        if waiter.done():
+            return True
+        error = message.get("error")
+        if error:
+            detail = error.get("message") if isinstance(error, Mapping) else error
+            waiter.set_exception(
+                CodexAppServerError(f"Codex turn/steer failed: {detail}")
+            )
+            return True
+        result = message.get("result")
+        waiter.set_result(dict(result) if isinstance(result, Mapping) else {})
+        return True
+
+    async def steer_active(
+        self,
+        direction: str,
+        *,
+        request_id: str = "",
+    ) -> dict[str, Any] | None:
+        """Append direction to the live Codex turn through native turn/steer."""
+
+        text = str(direction or "").strip()
+        if not text:
+            raise CodexAppServerError("Codex turn/steer requires non-empty input")
+        loop = asyncio.get_running_loop()
+        async with self._active_lock:
+            proc = self._active_proc
+            thread_id = self._active_thread_id
+            turn_id = self._active_turn_id
+            source_request_id = self._active_request_id
+            if proc is None or not thread_id or not turn_id:
+                return None
+            self._control_serial += 1
+            control_id = (
+                f"{request_id or source_request_id}:native-steer:{self._control_serial}"
+            )
+            waiter: asyncio.Future[dict[str, Any]] = loop.create_future()
+            self._pending_control[control_id] = waiter
+
+        try:
+            await self._send(
+                proc,
+                {
+                    "method": "turn/steer",
+                    "id": control_id,
+                    "params": {
+                        "threadId": thread_id,
+                        "input": [{"type": "text", "text": text}],
+                        "expectedTurnId": turn_id,
+                    },
+                },
+            )
+            result = await asyncio.wait_for(
+                asyncio.shield(waiter),
+                timeout=min(
+                    float(self.idle_timeout_sec), _CONTROL_RESPONSE_TIMEOUT_SEC
+                ),
+            )
+        except Exception:
+            async with self._active_lock:
+                self._pending_control.pop(control_id, None)
+            if not waiter.done():
+                waiter.cancel()
+            raise
+
+        accepted_turn_id = str(result.get("turnId") or "")
+        if accepted_turn_id != turn_id:
+            raise CodexAppServerError(
+                "Codex turn/steer did not acknowledge the expected active turn"
+            )
+        direction_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        return {
+            "kind": "codex_app_server_native_steer",
+            "method": "turn/steer",
+            "status": "accepted",
+            "source_request_id": source_request_id,
+            "provider_thread_id": thread_id,
+            "provider_turn_id": turn_id,
+            "accepted_turn_id": accepted_turn_id,
+            "direction_digest": direction_digest,
+            "evidence_ref": (
+                f"codex-app-server:{thread_id}:{turn_id}:"
+                f"steer:{direction_digest[:16]}"
+            ),
+        }
 
     async def _read(
         self,
@@ -840,12 +974,20 @@ class CodexAppServerToolBridge:
                 turn_id = str(turn.get("id") or "")
                 if not turn_id:
                     raise CodexAppServerError("Codex turn/start returned no turn id")
+                await self._publish_active_turn(
+                    proc=proc,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    request_id=request_id,
+                )
 
                 while True:
                     message = await self._read(
                         proc,
                         on_activity=broadcast_provider_activity,
                     )
+                    if await self._resolve_control_response(message):
+                        continue
                     method = str(message.get("method") or "")
                     params = message.get("params") or {}
 
@@ -965,6 +1107,10 @@ class CodexAppServerToolBridge:
                         completed_turn = params.get("turn") or {}
                         status = str(completed_turn.get("status") or "")
                         error = completed_turn.get("error") or {}
+                        await self._clear_active_turn(
+                            proc,
+                            reason="Codex turn completed before native steer acknowledgement",
+                        )
                         if status == "failed":
                             detail = error.get("message") if isinstance(error, dict) else error
                             raise CodexAppServerError(
@@ -1034,6 +1180,10 @@ class CodexAppServerToolBridge:
             )
         finally:
             if proc is not None:
+                await self._clear_active_turn(
+                    proc,
+                    reason="Codex app-server turn is no longer active",
+                )
                 await self._stop_process(proc, reason=f"codex-api-tool-bridge:{request_id}")
                 if self.on_process_stopped is not None:
                     self.on_process_stopped(proc)

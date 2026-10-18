@@ -22,7 +22,10 @@ import httpx
 from adapters import her_persona
 from orchestrator.flexible_backend_registry import canonical_model_provider
 from adapters.base import BackendResponse, TokenUsage
-from adapters.openrouter_api import ProviderCallObserverError
+from adapters.openrouter_api import (
+    ProviderCallObserverError,
+    ProviderContextObserverError,
+)
 from adapters.stream_events import (
     DELIVERY_ANSWER_PREVIEW,
     DELIVERY_FINAL,
@@ -2922,6 +2925,11 @@ class HashiStageProvider(StageProvider):
         self.on_stream_event = on_stream_event
         self._commentary_port: CommentaryPort | None = None
         self._turn_services: Any | None = None
+        self._provider_context_observer: (
+            Callable[[Mapping[str, Any]], Any] | None
+        ) = None
+        self._provider_context_recovery: dict[str, Any] = {}
+        self._provider_context_recovery_consumed = False
         self.silent = silent
         self.retry_policy = retry_policy or DEFAULT_PROVIDER_RETRY_POLICY
         self.audit_log = audit_log
@@ -2984,6 +2992,82 @@ class HashiStageProvider(StageProvider):
         """Bind request-local HERV3 observability/liveness sidecars."""
 
         self._turn_services = services
+
+    def bind_provider_context(
+        self,
+        *,
+        observer: Callable[[Mapping[str, Any]], Any] | None,
+        recovery: Mapping[str, Any] | None,
+    ) -> None:
+        """Bind private complete-boundary persistence and one-shot replay."""
+
+        self._provider_context_observer = observer
+        self._provider_context_recovery = dict(recovery or {})
+        self._provider_context_recovery_consumed = False
+
+    def _bind_provider_context_observer(
+        self,
+        backend: Any,
+        *,
+        profile: ProviderProfile,
+        request: StageRequest,
+    ) -> None:
+        setter = getattr(backend, "set_provider_context_observer", None)
+        observer = self._provider_context_observer
+        if not callable(setter) or observer is None:
+            return
+
+        def persist(checkpoint: Mapping[str, Any]) -> None:
+            payload = {
+                **dict(checkpoint),
+                "provider": profile.engine,
+                "model": profile.model,
+                "stage": request.stage.value,
+                "invocation_id": request.invocation_id,
+            }
+            result = observer(payload)
+            if inspect.isawaitable(result):
+                raise ProviderContextObserverError(
+                    "provider context observer must commit synchronously"
+                )
+
+        setter(persist)
+
+    def _provider_recovery_messages(
+        self,
+        *,
+        profile: ProviderProfile,
+        request: StageRequest,
+        stage_prompt: str,
+    ) -> list[dict[str, Any]] | None:
+        if self._provider_context_recovery_consumed:
+            return None
+        context = self._provider_context_recovery
+        if not context:
+            return None
+        matches = (
+            str(context.get("format") or "")
+            == "herv3-provider-context-v1"
+            and str(context.get("provider") or "").casefold()
+            == str(profile.engine or "").casefold()
+            and str(context.get("model") or "").casefold()
+            == str(profile.model or "").casefold()
+            and str(context.get("stage") or "").casefold()
+            == request.stage.value.casefold()
+            and str(context.get("boundary") or "")
+            in {"completed_tool_batch", "completed_provider_response"}
+        )
+        raw_messages = context.get("messages")
+        if not matches or not isinstance(raw_messages, list) or not raw_messages:
+            return None
+        if any(not isinstance(item, Mapping) for item in raw_messages):
+            raise ProviderContextObserverError(
+                "private provider recovery contains an invalid message"
+            )
+        continuation = [copy.deepcopy(dict(item)) for item in raw_messages]
+        continuation.append({"role": "user", "content": stage_prompt})
+        self._provider_context_recovery_consumed = True
+        return continuation
 
     def _track_active_backend(self, backend: Any) -> None:
         with self._active_backend_lock:
@@ -4752,6 +4836,11 @@ class HashiStageProvider(StageProvider):
                 role=request.role,
                 plan_id=request.plan_id,
             )
+            self._bind_provider_context_observer(
+                backend,
+                profile=profile,
+                request=request,
+            )
             prompt_request = request
             if request.stage in {Stage.PLANNING, Stage.REPLANNING} and (
                 "available_execution_tools" not in request.context
@@ -5152,6 +5241,18 @@ class HashiStageProvider(StageProvider):
                 parameter.kind is inspect.Parameter.VAR_KEYWORD
                 for parameter in parameters.values()
             )
+            if provider_request_content is None and (
+                "continuation_messages" in parameters or accepts_extra_keywords
+            ):
+                continuation_messages = self._provider_recovery_messages(
+                    profile=profile,
+                    request=request,
+                    stage_prompt=stage_prompt,
+                )
+                if continuation_messages is not None:
+                    generation_kwargs["continuation_messages"] = (
+                        continuation_messages
+                    )
             if int(request.fallback_level or 0) > 0:
                 if (
                     "provider_call_limit" in parameters
@@ -5671,6 +5772,16 @@ class HashiStageProvider(StageProvider):
                     )
                 ),
             )
+        except ProviderContextObserverError as exc:
+            raise StageInvocationError(
+                str(exc),
+                retryable=False,
+                code=ProviderFailureCode.AUDIT_PERSISTENCE_FAILURE,
+                human_description=(
+                    "The complete provider continuation could not be saved "
+                    "durably, so HASHI stopped before another model call."
+                ),
+            ) from exc
         except ProviderCallObserverError as exc:
             raise self._accounting_observer_failure(exc) from exc
         except StageInvocationError as exc:
