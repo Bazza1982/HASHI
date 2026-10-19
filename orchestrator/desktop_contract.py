@@ -63,9 +63,25 @@ def frame_interval_seconds(profile, *, idle: bool) -> float:
 
 
 def view_options(value) -> dict:
-    v = fields(value, {"display_id", "small", "crop"}, {"display_id"})
-    if not isinstance(v["display_id"], str) or not 1 <= len(v["display_id"]) <= 128:
+    v = fields(value, {"display_id", "display_ids", "small", "crop"})
+    single, multiple = "display_id" in v, "display_ids" in v
+    if single == multiple:
         raise DesktopError("desktop_invalid_display")
+    if single:
+        if not isinstance(v["display_id"], str) or not 1 <= len(v["display_id"]) <= 128:
+            raise DesktopError("desktop_invalid_display")
+        selection = {"display_id": v["display_id"]}
+    else:
+        display_ids = v["display_ids"]
+        if not isinstance(display_ids, list) or not 1 <= len(display_ids) <= 16:
+            raise DesktopError("desktop_invalid_display")
+        if any(not isinstance(display_id, str) or not 1 <= len(display_id) <= 128 for display_id in display_ids):
+            raise DesktopError("desktop_invalid_display")
+        if len(set(display_ids)) != len(display_ids):
+            raise DesktopError("desktop_invalid_display")
+        # Selection order is presentation-only. Canonicalizing it keeps one
+        # stable view revision for the same set of physical displays.
+        selection = {"display_ids": sorted(display_ids)}
     if "small" in v and not isinstance(v["small"], bool):
         raise DesktopError("desktop_invalid_size")
     crop = v.get("crop") or {"x": 0, "y": 0, "width": 1, "height": 1}
@@ -73,7 +89,7 @@ def view_options(value) -> dict:
     crop = {k: unit(n) for k, n in crop.items()}
     if crop["width"] < .05 or crop["height"] < .05 or crop["x"] + crop["width"] > 1.000001 or crop["y"] + crop["height"] > 1.000001:
         raise DesktopError("desktop_invalid_crop")
-    return {"display_id": v["display_id"], "small": v.get("small", False), "crop": crop}
+    return {**selection, "small": v.get("small", False), "crop": crop}
 
 
 def validate_input(value) -> dict:
