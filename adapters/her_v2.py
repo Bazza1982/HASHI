@@ -1138,8 +1138,6 @@ class HERv2Adapter(BaseBackend):
             revoked_resource_ids=[str(item) for item in revoked_resources],
         )
         self._fixed_transport_audit[str(request_id)] = dict(audit)
-        while len(self._fixed_transport_audit) > 512:
-            self._fixed_transport_audit.pop(next(iter(self._fixed_transport_audit)))
         return encoded, audit
 
     def _fixed_session_binding(
@@ -2443,9 +2441,6 @@ class HERv2Adapter(BaseBackend):
                 "text_sha256": "sha256:"
                 + hashlib.sha256(result.text.encode("utf-8")).hexdigest(),
             }
-            while len(self._pending_delivery_receipts) > 512:
-                oldest = next(iter(self._pending_delivery_receipts))
-                self._pending_delivery_receipts.pop(oldest, None)
         technical_error = result.terminal_state is TerminalState.ERROR
         stopped = result.terminal_state is TerminalState.STOPPED
         error = result.error
@@ -2686,9 +2681,6 @@ class HERv2Adapter(BaseBackend):
         )
         self._pending_delivery_receipts.pop(identifier, None)
         self._recorded_delivery_ids.add(identifier)
-        if len(self._recorded_delivery_ids) > 1024:
-            self._recorded_delivery_ids.clear()
-            self._recorded_delivery_ids.add(identifier)
         return True
 
     def record_maintenance_provider_requests(
@@ -2775,10 +2767,6 @@ class HERv2Adapter(BaseBackend):
                 "HASHI conversation did not durably retain the HER accounting binding"
             )
         self._maintenance_accounting_sessions[request_id] = self._session_id
-        while len(self._maintenance_accounting_sessions) > 512:
-            self._maintenance_accounting_sessions.pop(
-                next(iter(self._maintenance_accounting_sessions))
-            )
         return self.can_record_maintenance_provider_requests()
 
     def can_record_maintenance_provider_requests(self) -> bool:

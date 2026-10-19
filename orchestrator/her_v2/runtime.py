@@ -30,7 +30,6 @@ from .checkpoint import (
     ReplanDirective,
 )
 from .commentary import (
-    MAX_NEUTRAL_COMMENTARY_CHARS,
     CommentaryPort,
     CommentaryValidationError,
     NeutralCommentary,
@@ -2651,7 +2650,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         checkpoint_id: str,
     ) -> None:
         change_fact = (
-            outcome.change_reason[:1_000].strip()
+            outcome.change_reason.strip()
             if outcome.plan_changed
             else "plan is unchanged"
         )
@@ -2663,9 +2662,7 @@ class HERv2Runtime(RuntimeInvocationMixin, RuntimeSupportMixin):
         deterministic_prefix = (
             f"Progress is {outcome.completion_percent}%. {change_sentence} Next: "
         )
-        next_fact = outcome.next_step[
-            : max(1, MAX_NEUTRAL_COMMENTARY_CHARS - len(deterministic_prefix))
-        ].strip()
+        next_fact = outcome.next_step.strip()
         deterministic = f"{deterministic_prefix}{next_fact}"
         candidate = str(outcome.commentary or "").strip()
         plan_status_fact = (

@@ -55,7 +55,6 @@ from orchestrator.her_v2.cognitive_control import (
 )
 from orchestrator.her_v2.commentary import (
     CommentaryPort,
-    MAX_PACKAGED_COMMENTARY_CHARS,
     NeutralCommentary,
     PackagedCommentary,
     PersonaPackager,
@@ -76,7 +75,6 @@ from orchestrator.her_v2.models import (
     ToolReceiptStatus,
 )
 from orchestrator.her_v2.presentation import (
-    MAX_FINAL_STYLE_TEXT_CHARS,
     FinalStyleRenderer,
     FinalStyleRequest,
     FinalStyleResult,
@@ -361,11 +359,11 @@ def _backend_response_error(
     details['provider_wire_evidence_refs'] = list(dict.fromkeys(
         str(ref) for call in calls if isinstance(call, Mapping)
         for ref in call.get('provider_wire_evidence_refs', []) if ref
-    ))[-64:]
+    ))
     details['provider_response_ids'] = list(dict.fromkeys(
         str(call['provider_response_id']) for call in calls
         if isinstance(call, Mapping) and call.get('provider_response_id')
-    ))[-64:]
+    ))
     for key in (
         "provider_http_failure",
         "provider_protocol",
@@ -2396,8 +2394,6 @@ class Herv3ProviderContinuationContract:
             "reasoning_effort",
             "temperature",
             "top_p",
-            "max_tokens",
-            "max_output_tokens",
             "response_format",
         )
         return cls(
@@ -2459,9 +2455,11 @@ class _Herv3ProviderFallbackPort:
     """Consume one resolved user-consented fallback decision for HERV3.
 
     The port is the consumer boundary: it evaluates the PAO-owned policy with
-    authoritative capability facts and, when the decision allows it, issues
-    exactly one additional paid call on the authorised target.  It never
-    infers consent from a configured key, executable, or catalogue entry.
+    authoritative capability facts and, when the decision allows it, hands the
+    active continuation to the authorised target.  The consent budget governs
+    that route handover, not the target's normal retry and tool-continuation
+    loop.  It never infers consent from a configured key, executable, or
+    catalogue entry.
     """
 
     def __init__(
@@ -2621,31 +2619,7 @@ class _Herv3ProviderFallbackPort:
                         or "none"
                     ).casefold()
                     continuation = getattr(backend, "continue_generation", None)
-                    continuation_parameters = (
-                        inspect.signature(continuation).parameters
-                        if callable(continuation)
-                        else {}
-                    )
-                    continuation_accepts_call_limit = bool(
-                        "provider_call_limit" in continuation_parameters
-                        or any(
-                            parameter.kind is inspect.Parameter.VAR_KEYWORD
-                            for parameter in continuation_parameters.values()
-                        )
-                    )
                     generation = getattr(backend, "generate_response", None)
-                    generation_parameters = (
-                        inspect.signature(generation).parameters
-                        if callable(generation)
-                        else {}
-                    )
-                    generation_accepts_call_limit = bool(
-                        "provider_call_limit" in generation_parameters
-                        or any(
-                            parameter.kind is inspect.Parameter.VAR_KEYWORD
-                            for parameter in generation_parameters.values()
-                        )
-                    )
                     tools_ok = bool(
                         not needs_tools
                         or (
@@ -2664,12 +2638,11 @@ class _Herv3ProviderFallbackPort:
                         (
                             self.purpose == "stage"
                             and route.provider != "hashi-api"
-                            and generation_accepts_call_limit
+                            and callable(generation)
                         )
                         or (
                             route.provider != "hashi-api"
                             and callable(continuation)
-                            and continuation_accepts_call_limit
                             and continuation_mode
                             not in {"", "none", "absent", "unsupported"}
                         )
@@ -2865,20 +2838,16 @@ class _Herv3ProviderFallbackPort:
                     code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
                 )
             total_limit = int(kwargs.get("additional_calls_limit") or 0)
-
-            def debit_physical_call() -> None:
-                self.provider._consume_fallback_budget(
-                    budget_key,
-                    limit=total_limit,
-                    route_key=route_key,
-                )
+            self.provider._consume_fallback_budget(
+                budget_key,
+                limit=total_limit,
+                route_key=route_key,
+            )
 
             return await backend.continue_generation(
                 messages,
                 request_id,
                 on_stream_event=on_stream_event,
-                provider_call_limit=1,
-                before_provider_call=debit_physical_call,
             )
         finally:
             self.provider._untrack_active_backend(backend)
@@ -2973,8 +2942,8 @@ class HashiStageProvider(StageProvider):
         # profile.engine / profile.model / stage are still known.
         self.usage_line_items: list[PerCallUsageLineItem] = []
         self._observed_provider_request_ids: set[str] = set()
-        # One explicit additional-paid-call budget per request key; the
-        # authoritative policy still owns the configured limit.
+        # One explicit user-consented route-handover budget per request key;
+        # it never limits the selected Provider's healthy continuation loop.
         self._provider_fallback_calls: dict[str, int] = {}
         self._provider_fallback_routes: dict[str, set[str]] = {}
 
@@ -3109,7 +3078,7 @@ class HashiStageProvider(StageProvider):
             current = int(self._provider_fallback_calls.get(str(key), 0))
             if limit is not None and current >= max(0, int(limit)):
                 raise StageInvocationError(
-                    "fallback Provider-call budget is exhausted",
+                    "fallback route-handover budget is exhausted",
                     retryable=False,
                     code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
                 )
@@ -3118,10 +3087,6 @@ class HashiStageProvider(StageProvider):
             if route_key:
                 self._provider_fallback_routes.setdefault(str(key), set()).add(
                     str(route_key)
-                )
-            while len(self._provider_fallback_calls) > 256:
-                self._provider_fallback_calls.pop(
-                    next(iter(self._provider_fallback_calls))
                 )
             return value
 
@@ -3135,10 +3100,6 @@ class HashiStageProvider(StageProvider):
         with self._active_backend_lock:
             routes = self._provider_fallback_routes.setdefault(str(key), set())
             routes.add(str(route_key))
-            while len(self._provider_fallback_routes) > 256:
-                self._provider_fallback_routes.pop(
-                    next(iter(self._provider_fallback_routes))
-                )
 
     def _bind_provider_fallback_port(
         self,
@@ -5651,26 +5612,6 @@ class HashiStageProvider(StageProvider):
                     generation_kwargs["continuation_messages"] = (
                         continuation_messages
                     )
-            if int(request.fallback_level or 0) > 0:
-                if (
-                    "provider_call_limit" in parameters
-                    or accepts_extra_keywords
-                ):
-                    # A selected fallback route owns exactly one physical
-                    # Provider request. The runtime may select another
-                    # authorised route later, but this target cannot open a
-                    # hidden retry chain outside the user's total budget.
-                    generation_kwargs["provider_call_limit"] = 1
-                elif str(profile.engine or "").strip().casefold() not in {
-                    "codex",
-                    "codex-cli",
-                    "codex-app-server",
-                }:
-                    raise StageInvocationError(
-                        "fallback target cannot enforce the Provider-call budget",
-                        retryable=False,
-                        code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
-                    )
             if provider_request_content is not None:
                 if "request_content" not in parameters and not any(
                     parameter.kind is inspect.Parameter.VAR_KEYWORD
@@ -6258,7 +6199,6 @@ class HashiStageProvider(StageProvider):
             system_prompt=system_prompt,
             request_id=request_id,
             message_label="commentary",
-            max_chars=MAX_PACKAGED_COMMENTARY_CHARS,
         )
 
     async def package_final_style(
@@ -6293,7 +6233,6 @@ class HashiStageProvider(StageProvider):
             system_prompt=render_final_style_system_prompt(),
             request_id=request_id,
             message_label="final style",
-            max_chars=MAX_FINAL_STYLE_TEXT_CHARS + 512,
             phase="final_style",
             role="final_style_renderer",
             audit_stage="final_style_presentation",
@@ -6308,7 +6247,6 @@ class HashiStageProvider(StageProvider):
         system_prompt: str,
         request_id: str,
         message_label: str,
-        max_chars: int,
         phase: str = "persona",
         role: str = "persona_packager",
         audit_stage: str = "persona_presentation",
@@ -6359,7 +6297,6 @@ class HashiStageProvider(StageProvider):
                     system_prompt=system_prompt,
                     request_id=request_id,
                     message_label=message_label,
-                    max_chars=max_chars,
                     attempt=attempt,
                     activity=tracker,
                     phase=phase,
@@ -6491,7 +6428,6 @@ class HashiStageProvider(StageProvider):
         system_prompt: str,
         request_id: str,
         message_label: str,
-        max_chars: int,
         attempt: int,
         activity: ProviderActivityTracker,
         phase: str,
@@ -6595,15 +6531,6 @@ class HashiStageProvider(StageProvider):
                     f"Persona provider returned empty {message_label} text",
                     code=ProviderFailureCode.PROVIDER_EMPTY_RESPONSE,
                     human_description="The Persona provider returned no usable text.",
-                )
-            if len(text) > max_chars:
-                raise StageInvocationError(
-                    f"Persona provider returned oversized {message_label} text",
-                    retryable=False,
-                    code=ProviderFailureCode.PROVIDER_BAD_REQUEST,
-                    human_description=(
-                        "The Persona provider returned a response beyond the safe size limit."
-                    ),
                 )
             return text
         except asyncio.CancelledError:
@@ -6733,8 +6660,6 @@ class _ConfiguredFinalStyleRenderer(FinalStyleRenderer):
             text = value.get("text")
             if not isinstance(text, str) or not text.strip():
                 raise ValueError("final style rewrite must contain text")
-            if len(text.strip()) > MAX_FINAL_STYLE_TEXT_CHARS:
-                raise ValueError("final style rewrite exceeds the bounded size")
             return "rewrite", text.strip()
         raise ValueError("invalid final style decision contract")
 

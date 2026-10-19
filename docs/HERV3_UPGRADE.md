@@ -1,5 +1,33 @@
 # HERV3 upgrade: JEV experiment and simplified routing
 
+## 2026-10-19 long-running execution invariant
+
+HERV3 foreground work has no HASHI total token, message, Turn, model-call,
+tool-call, elapsed-time, output, continuation-history, receipt, WIP, or task-state
+ceiling. Long work ends only through normal completion, explicit cancellation,
+a genuine failure, or a scoped safety boundary that is not a total-work budget.
+This invariant applies equally at every privacy level; privacy classification
+changes inspection and routing, never the permitted size of the model/tool loop.
+
+Durable continuation is lossless rather than merely assigned a larger constant.
+Provider messages use an ordered segmented store with per-item and aggregate
+integrity verification. Receipts, task state, WIP, checkpoint evidence and
+completed Session history retain every item. Large Privacy Level 2 inspection
+is internally paged through the detector without rejecting the request because
+of aggregate text size. Per-tool cursors and source paging may bound one
+response frame, but they keep a continuation route to all authorised source
+data and do not cap the Engine Turn.
+
+The retained finite boundaries are semantically separate: explicit
+cancellation; meaningful-progress idle detection; provider transport
+inactivity/protocol guards; an explicitly requested timeout for one Tool call;
+official external Provider media/body limits; retry/replay safety after a
+failure; and small rolling observation windows used only to detect cycles or
+rate-limit commentary. None expires, truncates, or counts down healthy total
+work. The source repair is recorded in
+[the October 19 repair decision](repairs/HERV3_LONG_RUNNING_LIMIT_REMOVAL_20261019.md).
+Source verification, Worker adoption and live acceptance remain separate.
+
 The [Ollama context pilot](HERV3_OLLAMA_CONTEXT_PILOT.md) began on 2026-10-15
 as an Agent6-only `feature-ollama` experiment and is explicitly approved for
 main promotion on 2026-10-18. It remains an instance opt-in: exact configured
@@ -82,16 +110,18 @@ The model owns reasoning, planning, adaptation and verification inside one conti
 model/tool conversation. HASHI continues to own PCM, Session continuity, tools,
 permissions, recovery, audit, user commentary and learning.
 
-Prior WIP Journal evidence remains bounded, quoted context for a new turn when
+Prior WIP Journal evidence remains complete, quoted context for a new turn when
 canonical recovery is absent. It no longer sends a proactive recovery card
-before that turn: the current user request is processed first, and recovery
+before that turn: the current user request is processed first, and all recovery
 facts are available to the model without claiming authority to replay effects.
 
-HASHI3 source now bounds ordinary text Tool results before they re-enter the
-model loop (including structured text content); native image blocks remain
-media, not truncated text. File reads and directory listings also have local
-read/enumeration limits. For OpenAI-compatible Provider calls with a declared
-target capacity, a clearly oversized serialized text request is rejected
+Individual Tool response frames may be paged before they re-enter the model
+loop (including structured text content); native image blocks remain media.
+File reads, searches and directory listings expose offsets or cursors so the
+model can retrieve all authorised source data across as many calls as needed;
+these frame sizes are not HERV3 execution ceilings. For OpenAI-compatible
+Provider calls with a declared target capacity, a clearly oversized serialized
+text request is rejected
 before HTTP with the existing typed capacity code. Unknown capacities and
 native-media accounting still depend on Provider rejection; the preflight
 does not promise that every request will fit. A capacity rejection after tool
@@ -455,12 +485,15 @@ evidence only; adoption and live verification have not happened.
   same-model Provider continuation; the HER stage layer consumes it for the
   pre-effect HERV3/Codex CLI switch.  See
   [model fallback policy](HASHI_MODEL_FALLBACK_POLICY.md).
-- Each fallback target is capped at one physical Provider request.  Completed
-  Tool IDs reuse their durable result binding and changed/concurrent repeats
-  fail closed.  The target inherits the source request's privacy, Tool,
-  invocation, reasoning, parameter, and stream-inactivity contract.  ASK
-  confirmation, both source directions, route ordering, revision-safe saves,
-  and configured finite cost estimates are wired through the same policy.
+- A consent/cost entry authorises one fallback route handover; it does not cap
+  the selected target at one physical Provider request. Once selected, the
+  target runs the normal unbounded HERV3 model/tool continuation and ordinary
+  scoped transport recovery. Completed Tool IDs reuse their durable result
+  binding and changed/concurrent repeats fail closed. The target inherits the
+  source request's privacy, Tool, invocation, reasoning, parameter, and
+  stream-inactivity contract. ASK confirmation, both source directions, route
+  ordering, revision-safe saves, and configured finite cost estimates are
+  wired through the same policy.
 - Terminal public failure reporting separates same-target retries, the
   interaction recovery used/limit, the Turn-wide cumulative count, and the
   fallback disposition, and says "already retried, but still failed" in the

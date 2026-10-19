@@ -1,5 +1,16 @@
 # HASHI Agent FYI
 
+October 19 HERV3 long work: foreground execution has no HASHI total token,
+message, Turn, model-call, Tool-call, elapsed-time, output, continuation,
+receipt, WIP or task-state ceiling. Privacy Level 2 changes inspection, not loop
+size. Continuation/state/evidence are lossless; large privacy inspection and
+durable Provider context are paged/segmented rather than truncated. Retain only
+explicit cancellation, progress-idle and transport/protocol guards, explicit
+single-Tool timeout, external Provider limits and replay safety. Source/offline
+verification do not prove Worker adoption or live acceptance. See
+[repair](repairs/HERV3_LONG_RUNNING_LIMIT_REMOVAL_20261019.md) and
+[HERV3](HERV3_UPGRADE.md#2026-10-19-long-running-execution-invariant).
+
 October 19 Agent Move: staging is the single mutable-state qualification gate.
 Confirmation records forward-only intent; later Memory+, workspace, config,
 credential or schedule changes cannot invalidate the accepted package. Runtime
@@ -130,7 +141,7 @@ exclude Engine/Phone copies. `/bg` freezes admission; schedules get no implicit
 chat; `/delay` and interactive `/loop` retain context.
 
 HASHI3 Telegram is healthy only after a bounded poll; normal startup preserves
-pending updates. HERV3 may quote bounded WIP, never premature recovery cards.
+pending updates. HERV3 retains and may quote complete WIP, never premature recovery cards.
 Source changes need separate Worker adoption/live checks.
 
 ## Engine, tools, and recovery

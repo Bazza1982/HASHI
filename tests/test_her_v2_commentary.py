@@ -20,7 +20,9 @@ from orchestrator.her_v2.commentary import (
 from orchestrator.her_v2.config import ProviderProfile
 from orchestrator.her_v2.models import Stage, StageResponse
 from orchestrator.her_v2.presentation import (
-    MAX_RENDERED_REQUIRED_MESSAGE_CHARS,
+    FinalStyleRequest,
+    FinalStyleResult,
+    RenderedRequiredMessage,
     RequiredUserMessage,
 )
 from orchestrator.her_v2.turn_services import TurnServices
@@ -786,7 +788,7 @@ async def test_required_fallback_never_drops_a_large_validated_clarification():
         request_id="request",
         logger=logging.getLogger("test.her-v2-required-persona-large-fallback"),
     )
-    clarification = "Q" * (MAX_RENDERED_REQUIRED_MESSAGE_CHARS + 1)
+    clarification = "Q" * 200_000
     message = RequiredUserMessage(
         event_id="turn:clarification",
         turn_id="turn",
@@ -799,3 +801,51 @@ async def test_required_fallback_never_drops_a_large_validated_clarification():
     assert rendered.fallback is True
     assert rendered.text.endswith(clarification)
     assert provider.calls == []
+
+
+def test_herv3_presentation_models_do_not_impose_text_ceiling():
+    text = "x" * 200_000
+
+    neutral = NeutralCommentary(
+        event_id="turn:commentary:long",
+        turn_id="turn",
+        stage=Stage.EXECUTION,
+        attempt=1,
+        text=text,
+    )
+    draft = DraftResponseCommentary(
+        event_id="turn:draft:long",
+        turn_id="turn",
+        response=text,
+    )
+    packaged = PackagedCommentary(
+        source_event_id="turn:commentary:long",
+        stage=Stage.EXECUTION,
+        text=text,
+        provenance="test",
+    )
+    style_request = FinalStyleRequest(
+        event_id="turn:style:long",
+        turn_id="turn",
+        draft_text=text,
+        current_request="Keep the full result.",
+    )
+    style_result = FinalStyleResult(
+        source_event_id="turn:style:long",
+        decision="rewrite",
+        text=text,
+        provenance="test",
+    )
+    rendered = RenderedRequiredMessage(
+        source_event_id="turn:clarification:long",
+        kind="clarification",
+        text=text,
+        provenance="test",
+    )
+
+    assert neutral.text == text
+    assert draft.response == text
+    assert packaged.text == text
+    assert style_request.draft_text == text
+    assert style_result.text == text
+    assert rendered.text == text

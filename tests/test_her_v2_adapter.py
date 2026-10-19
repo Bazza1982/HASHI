@@ -2749,7 +2749,7 @@ async def test_stage_provider_passes_only_the_typed_her_stream_guard():
 
 
 @pytest.mark.asyncio
-async def test_stage_fallback_target_receives_one_physical_call_limit():
+async def test_stage_fallback_target_has_no_physical_call_limit():
     manager = _FakeManager()
     provider = HashiStageProvider(backend_manager=manager)
     request = _stage_request(
@@ -2774,7 +2774,7 @@ async def test_stage_fallback_target_receives_one_physical_call_limit():
         request,
     )
 
-    assert manager.backends[0].provider_call_limit == 1
+    assert manager.backends[0].provider_call_limit is None
 
 
 class _ControlledForegroundToolBackend(_FakeBackend):

@@ -59,11 +59,9 @@ class HerBackendSessionCoordinator:
         self,
         state_root: Path,
         *,
-        history_limit: int = 8,
         execution_owner: Mapping[str, Any] | None = None,
     ):
         self.store = HerSessionStore(Path(state_root) / "fixed_sessions.sqlite3")
-        self.history_limit = max(1, int(history_limit))
         raw_owner = dict(execution_owner or {})
         self.execution_owner = {
             "owner_id": str(raw_owner.get("owner_id") or ""),
@@ -594,9 +592,7 @@ class HerBackendSessionCoordinator:
             if isinstance(item, Mapping)
         ]
         materialized = ""
-        history = self.store.recent_completed_turns(
-            session_id, limit=self.history_limit
-        )
+        history = self.store.recent_completed_turns(session_id)
         pcm_sections = [
             dict(value)
             for value in (session.get("pcm") or {}).values()

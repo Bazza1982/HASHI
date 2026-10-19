@@ -38,8 +38,10 @@ checked, never storing credentials, model catalogues, or resolved secrets):
   independent permission to use HERV3 or Codex CLI as a target;
 - per-existing-privacy-policy restrictions that can only narrow the global
   policy;
-- a maximum number of additional paid calls (default 1 once automatic
-  fallback is enabled);
+- a maximum number of additional paid fallback route handovers (the persisted
+  compatibility field still says `additional_calls`; default 1 once automatic
+  fallback is enabled). This controls consent/cost exposure, not the number of
+  model/tool calls made by the selected HERV3 target;
 - an optional extra-cost ceiling and an explicit `allow_unknown_cost` choice
   (default `false`).
 
@@ -62,15 +64,14 @@ Route kinds:
 6. configured credential/runtime availability;
 7. model, Tool, context, and message-contract compatibility;
 8. checkpoint/current-call safety;
-9. remaining additional-call and cost budget.
+9. remaining fallback-handover and cost budget.
 
 `ask` mode produces a one-time action bound to the exact failed request,
-target, privacy decision, and remaining budget.  It expires; it is not a
-"send the request again" button.  Background/scheduler work cannot wait for an
+target, privacy decision, and remaining route-handover budget. It expires; it
+is not a "send the request again" button. Background/scheduler work cannot wait for an
 answer, so `ask` behaves as blocked and reports that automatic fallback was
-not authorised.  Consuming the additional-call budget invalidates the old
-action, so a duplicate or delayed confirmation cannot issue another paid
-call.
+not authorised. Consuming the handover budget invalidates the old action, so a
+duplicate or delayed confirmation cannot select another paid route.
 
 The interactive Telegram consumer presents that bound action during the
 active request and resumes only after the authorised user accepts it.  The
@@ -87,14 +88,16 @@ conflict instead of overwriting newer policy state.
    user fallback policy; the stage consumer uses the shared
    `FALLBACK_ELIGIBLE_FAILURE_CODES` and the adapter consumer uses the same
    transient-or-typed-timeout test, so a permanent failure (400, auth,
-   configuration, contract) never consults the policy and never spends an
-   additional paid call;
+   configuration, contract) never consults the policy and never spends a paid
+   route-handover entry;
 3. select the first eligible target in the user's order;
-4. consume exactly one additional-call budget entry before issuing the paid
-   call;
-5. cap each selected target at one physical Provider request, so it never
-   receives a hidden fresh retry chain; then continue to the next eligible
-   route only while the user's total additional-call budget remains.
+4. consume exactly one route-handover budget entry before entering the paid
+   fallback target;
+5. let the selected HERV3 target run its normal continuous model/tool loop and
+   scoped same-target transport recovery. Continue to another eligible route
+   only while the user's total handover/cost budget remains. The consent budget
+   never becomes a Turn, Tool, token, time, or physical-provider-call ceiling
+   inside the selected target.
 
 After Tool activity, an allowed HERV3 target continues the exact assembled
 Provider messages and completed Tool results under the existing checkpoint
@@ -113,7 +116,8 @@ typed request contract containing the source privacy level, Tool registry,
 invocation context, reasoning/request parameters, and HERV3 stream-inactivity
 timeout.
 
-The hard enforceable default is the maximum count of additional calls.  A
+The hard enforceable default is the maximum count of additional fallback route
+handovers. A
 known configured ceiling is checked before the call with the best available
 bounded estimate; an unknown price requires `allow_unknown_cost=true` or an
 interactive confirmation.
@@ -132,7 +136,7 @@ The public failure keeps these concepts separate and labelled:
 - invalid-Tool repair count;
 - Turn-wide cumulative local recovery count;
 - the active interaction's recovery used/limit;
-- fallback target-switch count and configured limit;
+- fallback route-handover count and configured consent limit;
 - final fallback disposition: disabled, ask-required, blocked, unavailable,
   attempted-success, or attempted-failed.
 

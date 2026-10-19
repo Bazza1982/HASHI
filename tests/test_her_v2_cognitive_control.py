@@ -43,6 +43,40 @@ def test_task_state_contract_distinguishes_sequential_and_parallel_delta_ids():
     assert "same assistant response should share one ID" in prompt
 
 
+def test_task_state_retains_long_text_and_all_evidence_backed_facts():
+    goal = "G" * 2_000
+    state = HERTaskState(goal=goal)
+
+    for index in range(80):
+        evidence = f"receipt-{index}"
+        claim = f"fact-{index}:" + ("x" * 900)
+        state.observe_evidence([evidence])
+        applied = state.apply_delta(
+            {
+                "delta_id": f"delta-{index}",
+                "add_facts": [
+                    {
+                        "id": f"fact-{index}",
+                        "claim": claim,
+                        "evidence_refs": [evidence],
+                    }
+                ],
+            },
+            source="execution",
+        )
+        assert applied.status == "accepted"
+
+    snapshot = state.snapshot()
+    assert snapshot["goal"] == goal
+    assert len(snapshot["facts"]) == 80
+    assert snapshot["facts"][0]["id"] == "fact-0"
+    assert len(snapshot["facts"][0]["claim"]) > 900
+    assert snapshot["recent_available_evidence_refs"] == [
+        f"receipt-{index}" for index in range(80)
+    ]
+    assert "truncated_counts" not in snapshot
+
+
 def _request(stage: Stage, *, task_state=None) -> StageRequest:
     return StageRequest(
         turn_id="turn-cognitive-1",

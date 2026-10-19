@@ -1032,6 +1032,39 @@ def test_commentary_prefixed_text_tool_intent_requires_native_repair(
     assert inspected.tool_calls == ()
 
 
+
+
+def test_text_tool_repair_retains_the_full_large_rejected_response(tmp_path):
+    adapter = _adapter(tmp_path, model="deepseek-flash")
+    envelope = (
+        "<｜DSML｜ calls>"
+        '<｜DSML｜ invoke name="file_list">'
+        '<｜DSML｜ parameter name="path" string="true">/tmp'
+        "</｜DSML｜ parameter>"
+        "</｜DSML｜ invoke>"
+        "</｜DSML｜ calls>"
+    )
+    raw_text = ("progress evidence " * 2_000) + "\n" + envelope
+    payload = adapter._build_payload(
+        [{"role": "user", "content": "Inspect the directory."}]
+    )
+    result = adapter._apply_text_tool_compatibility(
+        _APIResult(
+            raw_text,
+            None,
+            "stop",
+            provider_response_id="response-long-text-tool",
+        ),
+        payload,
+        actual_model="deepseek-flash",
+        system_fingerprint="",
+    )
+
+    assert len(raw_text) > 16 * 1024
+    assert result.provider_compatibility["status"] == "repair_required"
+    assert result.tool_calls[0]["function"]["arguments"] == (
+        "HASHI rejected DeepSeek textual tool intent:\n" + raw_text
+    )
 def test_stream_gate_delivers_commentary_and_blocks_following_antml():
     gate = DeepSeekToolMarkupStreamGate(enabled=True)
 

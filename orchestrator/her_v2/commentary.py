@@ -19,10 +19,6 @@ from .models import Stage, StageResponse
 from .structured import response_data
 
 
-MAX_NEUTRAL_COMMENTARY_CHARS = 4_000
-MAX_PACKAGED_COMMENTARY_CHARS = 8_000
-MAX_DRAFT_RESPONSE_COMMENTARY_CHARS = 128_000
-
 # Immediate Response and Finalisation already own dedicated user-facing lanes.
 # The legacy Triage wire stage is the HER v2 Strategist. Sub-agents are not
 # user-facing. Tool-enabled Direct and Execution provider commentary enters
@@ -46,7 +42,7 @@ class CommentaryValidationError(ValueError):
 
 @dataclass(frozen=True)
 class NeutralCommentary:
-    """A bounded message supplied by one successful stage.
+    """A message supplied by one successful stage.
 
     The historical type name remains part of the compatibility boundary. The
     pipeline decides whether a stage already applied the presentation Persona
@@ -78,10 +74,6 @@ class NeutralCommentary:
             )
         if not text:
             raise CommentaryValidationError("neutral commentary is empty")
-        if len(text) > MAX_NEUTRAL_COMMENTARY_CHARS:
-            raise CommentaryValidationError(
-                "neutral commentary exceeds the bounded size"
-            )
         required_facts = tuple(
             str(item or "").strip() for item in self.required_facts
         )
@@ -113,10 +105,6 @@ class DraftResponseCommentary:
             )
         if not response:
             raise CommentaryValidationError("draft response commentary is empty")
-        if len(self.text) > MAX_DRAFT_RESPONSE_COMMENTARY_CHARS:
-            raise CommentaryValidationError(
-                "draft response commentary exceeds the bounded size"
-            )
         object.__setattr__(self, "event_id", event_id)
         object.__setattr__(self, "turn_id", turn_id)
         object.__setattr__(self, "response", response)
@@ -152,15 +140,6 @@ class PackagedCommentary:
             )
         if not text:
             raise CommentaryValidationError("packaged commentary is empty")
-        max_chars = (
-            MAX_DRAFT_RESPONSE_COMMENTARY_CHARS
-            if self.draft_response
-            else MAX_PACKAGED_COMMENTARY_CHARS
-        )
-        if len(text) > max_chars:
-            raise CommentaryValidationError(
-                "packaged commentary exceeds the bounded size"
-            )
         if self.draft_response and (
             self.stage is not Stage.EXECUTION
             or not text.startswith("DRAFT RESPONSE\n\n")
@@ -171,7 +150,7 @@ class PackagedCommentary:
         object.__setattr__(self, "source_event_id", source_event_id)
         object.__setattr__(self, "text", text)
         object.__setattr__(self, "provenance", provenance)
-        object.__setattr__(self, "error_type", str(self.error_type or "")[:120])
+        object.__setattr__(self, "error_type", str(self.error_type or ""))
 
 
 class CommentaryPort(Protocol):

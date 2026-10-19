@@ -1,9 +1,8 @@
 """Evidence-aware, provider-neutral working state for one HER v2 Turn.
 
 The projection stores task conclusions and evidence references, never hidden
-chain-of-thought.  Models own the semantics of each delta; runtime only applies
-bounded structural updates, validates evidence references, and exposes a
-stable progress signature for the lifecycle watchdog.
+chain-of-thought.  Models own the semantics of each delta; runtime validates
+structural updates and evidence references without discarding older task state.
 """
 
 from __future__ import annotations
@@ -18,29 +17,18 @@ from typing import Any
 HASHI_TASK_DELTA_ARGUMENT = "_hashi_task_delta"
 TASK_STATE_VERSION = 1
 
-_MAX_GOAL_CHARS = 1200
-_MAX_TEXT_CHARS = 480
-_MAX_ID_CHARS = 120
-_MAX_STATE_ITEMS = 64
-_MAX_PROMPT_ITEMS = 12
-_MAX_STAGE_HISTORY = 16
-
-
-def _bounded_text(value: Any, *, limit: int = _MAX_TEXT_CHARS) -> str:
-    text = " ".join(str(value or "").split())
-    if len(text) <= limit:
-        return text
-    return text[: max(1, limit - 1)].rstrip() + "…"
+def _text(value: Any) -> str:
+    return " ".join(str(value or "").split())
 
 
 def _stable_id(prefix: str, value: Any) -> str:
-    normalized = _bounded_text(value, limit=2000).casefold()
+    normalized = _text(value).casefold()
     digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
     return f"{prefix}:{digest}"
 
 
 def _item_id(value: Any) -> str:
-    return _bounded_text(value, limit=_MAX_ID_CHARS)
+    return _text(value)
 
 
 def _sequence(value: Any) -> tuple[Any, ...]:
@@ -53,7 +41,7 @@ def _string_items(value: Any) -> tuple[str, ...]:
     return tuple(
         dict.fromkeys(
             item
-            for item in (_bounded_text(raw, limit=600) for raw in _sequence(value))
+            for item in (_text(raw) for raw in _sequence(value))
             if item
         )
     )
@@ -70,14 +58,12 @@ def _digest(value: Any) -> str:
     return "sha256:" + hashlib.sha256(rendered.encode("utf-8")).hexdigest()
 
 
-def _bounded_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
-    """Keep an optional working model small without interpreting its semantics."""
+def _copied_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Detach model-owned state without applying a semantic or size ceiling."""
 
     rendered = json.dumps(dict(value), ensure_ascii=False, sort_keys=True, default=str)
-    if len(rendered) <= 4000:
-        parsed = json.loads(rendered)
-        return parsed if isinstance(parsed, dict) else {}
-    return {"summary": _bounded_text(rendered, limit=3800), "truncated": True}
+    parsed = json.loads(rendered)
+    return parsed if isinstance(parsed, dict) else {}
 
 
 @dataclass(frozen=True)
@@ -105,11 +91,11 @@ class TaskDeltaApplication:
 
 
 class HERTaskState:
-    """One bounded TaskState shared by every stage in a HER v2 Turn."""
+    """One lossless TaskState shared by every stage in a HER Turn."""
 
     def __init__(self, *, goal: str) -> None:
         self._lock = threading.RLock()
-        self._goal = _bounded_text(goal, limit=_MAX_GOAL_CHARS)
+        self._goal = _text(goal)
         self._version = 0
         self._meaningful_revision = 0
         self._model_delta_count = 0
@@ -155,17 +141,10 @@ class HERTaskState:
         with self._lock:
             for ref in _string_items(evidence_refs):
                 self._available_evidence_refs[ref] = None
-            self._trim(self._available_evidence_refs, _MAX_STATE_ITEMS * 4)
 
     @staticmethod
-    def _trim(items: dict[str, Any], limit: int = _MAX_STATE_ITEMS) -> None:
-        while len(items) > limit:
-            items.pop(next(iter(items)))
-
-    @staticmethod
-    def _recent(items: Mapping[str, Any], limit: int = _MAX_PROMPT_ITEMS) -> list[Any]:
-        values = list(items.values())
-        return [dict(item) for item in values[-limit:]]
+    def _all(items: Mapping[str, Any]) -> list[Any]:
+        return [dict(item) for item in items.values()]
 
     @staticmethod
     def _refs_from_row(row: Mapping[str, Any]) -> tuple[str, ...]:
@@ -187,7 +166,6 @@ class HERTaskState:
         if previous == row:
             return False
         items[key] = row
-        HERTaskState._trim(items)
         return True
 
     def apply_delta(
@@ -235,7 +213,7 @@ class HERTaskState:
                 if not isinstance(raw_row, Mapping):
                     warnings.append("INVALID_QUESTION_ROW")
                     continue
-                question = _bounded_text(raw_row.get("question") or raw_row.get("text"))
+                question = _text(raw_row.get("question") or raw_row.get("text"))
                 identifier = _item_id(raw_row.get("id"))
                 if not identifier or not question:
                     warnings.append("QUESTION_REQUIRES_ID_AND_TEXT")
@@ -260,7 +238,7 @@ class HERTaskState:
                     warnings.append("INVALID_CRITERION_ROW")
                     continue
                 identifier = _item_id(raw_row.get("id"))
-                description = _bounded_text(
+                description = _text(
                     raw_row.get("criterion")
                     or raw_row.get("description")
                     or raw_row.get("text")
@@ -291,7 +269,7 @@ class HERTaskState:
                 row = {
                     "id": identifier,
                     "criterion": description
-                    or _bounded_text(previous.get("criterion")),
+                    or _text(previous.get("criterion")),
                     "status": status,
                     "evidence_refs": list(combined_refs),
                 }
@@ -305,7 +283,7 @@ class HERTaskState:
                     warnings.append("INVALID_FACT_ROW")
                     continue
                 identifier = _item_id(raw_row.get("id"))
-                claim = _bounded_text(raw_row.get("claim") or raw_row.get("fact"))
+                claim = _text(raw_row.get("claim") or raw_row.get("fact"))
                 valid, invalid = self._validated_refs(raw_row, known)
                 accepted_refs.update(valid)
                 rejected_refs.update(invalid)
@@ -364,7 +342,7 @@ class HERTaskState:
                     identifier = _item_id(raw_row.get("id"))
                     description = ""
                     for key in text_keys:
-                        description = _bounded_text(raw_row.get(key))
+                        description = _text(raw_row.get(key))
                         if description:
                             break
                     valid, invalid = self._validated_refs(raw_row, known)
@@ -400,8 +378,8 @@ class HERTaskState:
                         "target_id": _item_id(
                             raw_focus.get("target_id") or raw_focus.get("target")
                         ),
-                        "intent": _bounded_text(raw_focus.get("intent")),
-                        "expected_change": _bounded_text(
+                        "intent": _text(raw_focus.get("intent")),
+                        "expected_change": _text(
                             raw_focus.get("expected_change")
                         ),
                     }
@@ -423,13 +401,12 @@ class HERTaskState:
 
             working_model = raw.get("working_model")
             if isinstance(working_model, Mapping):
-                bounded = _bounded_mapping(working_model)
-                if bounded != self._working_model:
-                    self._working_model = bounded
+                copied = _copied_mapping(working_model)
+                if copied != self._working_model:
+                    self._working_model = copied
                     changed = True
 
             self._applied_delta_ids[delta_id] = None
-            self._trim(self._applied_delta_ids, _MAX_STATE_ITEMS * 8)
             self._model_delta_count += 1
             meaningful = self._progress_payload() != progress_before
             if changed:
@@ -459,10 +436,10 @@ class HERTaskState:
         with self._lock:
             focus = {
                 "target_id": _item_id(target_id),
-                "intent": _bounded_text(direction),
-                "expected_change": _bounded_text(expected_change),
-                "stop_condition": _bounded_text(stop_condition),
-                "source": _bounded_text(source, limit=160),
+                "intent": _text(direction),
+                "expected_change": _text(expected_change),
+                "stop_condition": _text(stop_condition),
+                "source": _text(source),
             }
             if focus != self._focus:
                 self._focus = focus
@@ -477,10 +454,10 @@ class HERTaskState:
     ) -> None:
         """Project only validated stage outputs into the shared working state."""
 
-        stage_name = _bounded_text(stage, limit=80).casefold() or "unknown"
+        stage_name = _text(stage).casefold() or "unknown"
         data = dict(output) if isinstance(output, Mapping) else {}
         with self._lock:
-            resolved_goal = _bounded_text(data.get("real_goal"), limit=_MAX_GOAL_CHARS)
+            resolved_goal = _text(data.get("real_goal"))
             changed = False
             if resolved_goal and resolved_goal != self._goal:
                 self._goal = resolved_goal
@@ -519,7 +496,7 @@ class HERTaskState:
                 for ref in _string_items(cited_evidence_refs)
                 if ref in self._available_evidence_refs
             )
-            conclusion = _bounded_text(
+            conclusion = _text(
                 data.get("summary") or data.get("reason") or data.get("result")
             )
             if conclusion and cited:
@@ -537,7 +514,7 @@ class HERTaskState:
                 if row_changed:
                     self._meaningful_revision += 1
 
-            output_digest = _digest(data if data else _bounded_text(output, limit=2000))
+            output_digest = _digest(data if data else _text(output))
             self._last_stage = stage_name
             self._stage_history.append(
                 {
@@ -546,7 +523,6 @@ class HERTaskState:
                     "cited_evidence_refs": list(cited),
                 }
             )
-            self._stage_history = self._stage_history[-_MAX_STAGE_HISTORY:]
             if changed:
                 self._version += 1
 
@@ -600,7 +576,6 @@ class HERTaskState:
 
         snapshot = self.snapshot()
         snapshot.pop("stage_history", None)
-        snapshot.pop("truncated_counts", None)
         return snapshot
 
     def snapshot(self) -> dict[str, Any]:
@@ -612,27 +587,20 @@ class HERTaskState:
                 "meaningful_revision": self._meaningful_revision,
                 "model_delta_count": self._model_delta_count,
                 "goal": self._goal,
-                "criteria": self._recent(self._criteria),
-                "facts": self._recent(self._facts),
-                "open_questions": self._recent(self._questions),
+                "criteria": self._all(self._criteria),
+                "facts": self._all(self._facts),
+                "open_questions": self._all(self._questions),
                 "focus": dict(self._focus) if self._focus else None,
-                "discarded_paths": self._recent(self._discarded_paths, 8),
-                "blockers": self._recent(self._blockers, 8),
+                "discarded_paths": self._all(self._discarded_paths),
+                "blockers": self._all(self._blockers),
                 "working_model": (
                     dict(self._working_model) if self._working_model else None
                 ),
-                "recent_available_evidence_refs": available[-12:],
+                "recent_available_evidence_refs": available,
                 "last_stage": self._last_stage or None,
-                "stage_history": [dict(item) for item in self._stage_history[-8:]],
+                "stage_history": [dict(item) for item in self._stage_history],
                 "progress_signature": _digest(self._progress_payload()),
                 "stagnation_baseline_ready": self.stagnation_baseline_ready(),
-                "truncated_counts": {
-                    "criteria": max(0, len(self._criteria) - _MAX_PROMPT_ITEMS),
-                    "facts": max(0, len(self._facts) - _MAX_PROMPT_ITEMS),
-                    "open_questions": max(0, len(self._questions) - _MAX_PROMPT_ITEMS),
-                    "discarded_paths": max(0, len(self._discarded_paths) - 8),
-                    "blockers": max(0, len(self._blockers) - 8),
-                },
             }
 
 

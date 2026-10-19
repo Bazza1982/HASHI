@@ -121,9 +121,6 @@ class ExecutionLedger:
         if not value or value in self.log_refs:
             return
         self.log_refs.append(value)
-        # The ledger is a compact control record, not a second audit database.
-        if len(self.log_refs) > 32:
-            self.log_refs[:] = self.log_refs[-32:]
         self._touch()
 
     @property
