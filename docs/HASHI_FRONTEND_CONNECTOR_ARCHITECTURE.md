@@ -1140,6 +1140,21 @@ handler returns a localized unsupported notice. The TUI compatibility route
 passes its normalized Connector identity to the handler and retains terminal
 execution; a handler must not mistake that call for a native Telegram update.
 
+### Telegram and FC command parity and outcome persistence (2026-10-19)
+
+Telegram native command and callback adapters share the unified FC admission and
+outcome owner (`frontend_command_admission`). Transport-level checks (authorization,
+enterprise channel bounds, stale update freshness) are strictly transport gates;
+they do not own command semantics.
+
+Policy-disabled commands, connector-local command rejections, handler failures,
+and unknown commands produce canonical failed `frontend.command_result` events
+under durable reservations. Transport-level callback wrappers inspect handler
+result mappings (`ok: False`, `error_code`) and complete reservations accurately
+instead of hardcoding outer success. Completed and pending replays do not
+re-execute handlers, and unknown outcomes remain fail-closed without automatic
+retry.
+
 ### Manual desktop candidate (2026-09-30)
 
 The opt-in, client-neutral manual desktop ingress and Windows worker projection are

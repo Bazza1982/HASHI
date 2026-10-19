@@ -421,6 +421,7 @@
     "menu.wol.none": "No Wake-on-LAN targets are configured.",
     "menu.wol.action.send": "send a Wake-on-LAN packet",
     "command.disabled": "/{command} is disabled for this agent.",
+    "command.unknown": "/{command} is not recognized.",
     "help.title": "Hashi command centre",
     "help.commands_available": "{count} commands available",
     "help.disabled": "DISABLED FOR THIS AGENT",

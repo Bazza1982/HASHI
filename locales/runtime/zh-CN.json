@@ -421,6 +421,7 @@
     "menu.wol.none": "尚未配置网络唤醒目标。",
     "menu.wol.action.send": "发送网络唤醒数据包",
     "command.disabled": "此代理已禁用 /{command}。",
+    "command.unknown": "未识别命令：/{command}。",
     "help.title": "HASHI 命令中心",
     "help.commands_available": "共有 {count} 个可用命令",
     "help.disabled": "此代理已禁用",

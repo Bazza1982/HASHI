@@ -650,3 +650,234 @@ async def test_try_execute_slash_command_text_normalizes_bot_suffix(tmp_path):
     assert result["command"] == "help"
     rows = _read_jsonl(default_audit_path(tmp_path))
     assert rows[0]["command_name"] == "help"
+
+
+@pytest.mark.asyncio
+async def test_telegram_command_handler_failure_outcome_persisted_as_failed(tmp_path, monkeypatch):
+    from orchestrator import runtime_session
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    class _TelegramRuntime:
+        name = "nana"
+        workspace_dir = tmp_path
+        global_config = SimpleNamespace(authorized_id=42, instance_id="HASHI1")
+
+        def _is_authorized_user(self, user_id):
+            return user_id == 42
+
+        def _record_active_chat(self, _update):
+            return None
+
+        def _is_command_allowed(self, _command):
+            return True
+
+        async def _reply_text(self, update, text, **kwargs):
+            pass
+
+    async def allow_channel(self, _update, *, source_channel):
+        return True
+
+    monkeypatch.setattr(FlexibleAgentRuntime, "_telegram_channel_allowed", allow_channel)
+    runtime = _TelegramRuntime()
+
+    async def failing_handler(_update, _context):
+        return {"ok": False, "error_code": "deliberate_rejection"}
+
+    message = SimpleNamespace(
+        message_id=401, text="/status", date=datetime.now(timezone.utc)
+    )
+    update = SimpleNamespace(
+        update_id=700401,
+        effective_user=SimpleNamespace(id=42),
+        effective_chat=SimpleNamespace(id=99),
+        effective_message=message,
+        message=message,
+        callback_query=None,
+    )
+    wrapped = FlexibleAgentRuntime._wrap_cmd(runtime, "status", failing_handler)
+    await wrapped(update, SimpleNamespace(args=[]))
+
+    store = runtime_session.ensure_store(runtime)
+    session = runtime_session.current_session_for_update(runtime, update)
+    owner = runtime_session.owner_id(runtime)
+    events = store.events(session["session_id"], owner_id=owner)
+    cmd_events = [e for e in events if e["kind"] == "frontend.command_result"]
+    assert len(cmd_events) == 1
+    # Red test: old implementation always marked frontend.command_result as 'completed'
+    # even when handler returned ok: False
+    assert cmd_events[0]["status"] == "failed"
+    assert cmd_events[0]["detail"]["result"]["ok"] is False
+    assert cmd_events[0]["detail"]["result"]["error_code"] == "deliberate_rejection"
+
+
+@pytest.mark.asyncio
+async def test_telegram_command_policy_disabled_has_canonical_failed_result(tmp_path, monkeypatch):
+    from orchestrator import runtime_session
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    replies = []
+
+    class _TelegramRuntime:
+        name = "nana"
+        workspace_dir = tmp_path
+        global_config = SimpleNamespace(authorized_id=42, instance_id="HASHI1")
+
+        def _is_authorized_user(self, user_id):
+            return user_id == 42
+
+        def _record_active_chat(self, _update):
+            return None
+
+        def _is_command_allowed(self, cmd):
+            return cmd != "reboot"
+
+        async def _reply_text(self, update, text, **kwargs):
+            replies.append(text)
+
+    async def allow_channel(self, _update, *, source_channel):
+        return True
+
+    monkeypatch.setattr(FlexibleAgentRuntime, "_telegram_channel_allowed", allow_channel)
+    runtime = _TelegramRuntime()
+    calls = []
+
+    async def reboot_handler(_update, _context):
+        calls.append("executed")
+
+    message = SimpleNamespace(
+        message_id=402, text="/reboot", date=datetime.now(timezone.utc)
+    )
+    update = SimpleNamespace(
+        update_id=700402,
+        effective_user=SimpleNamespace(id=42),
+        effective_chat=SimpleNamespace(id=99),
+        effective_message=message,
+        message=message,
+        callback_query=None,
+    )
+    wrapped = FlexibleAgentRuntime._wrap_cmd(runtime, "reboot", reboot_handler)
+    await wrapped(update, SimpleNamespace(args=[]))
+
+    assert calls == []
+    # Red test: old implementation returned early without reserving or persisting
+    # a durable failed frontend.command_result event for policy-disabled commands
+    store = runtime_session.ensure_store(runtime)
+    session = runtime_session.current_session_for_update(runtime, update)
+    owner = runtime_session.owner_id(runtime)
+    events = store.events(session["session_id"], owner_id=owner)
+    cmd_events = [e for e in events if e["kind"] == "frontend.command_result"]
+    assert len(cmd_events) == 1
+    assert cmd_events[0]["status"] == "failed"
+    assert cmd_events[0]["detail"]["result"]["ok"] is False
+    assert cmd_events[0]["detail"]["result"]["error_code"] == "command_disabled"
+    assert len(replies) == 1
+
+
+@pytest.mark.asyncio
+async def test_telegram_callback_failure_outcome_persisted_as_failed(tmp_path, monkeypatch):
+    from orchestrator import runtime_session
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    class _TelegramRuntime:
+        name = "nana"
+        workspace_dir = tmp_path
+        global_config = SimpleNamespace(authorized_id=42, instance_id="HASHI1")
+
+        def _is_authorized_user(self, user_id):
+            return user_id == 42
+
+        def _is_command_allowed(self, _cmd):
+            return True
+
+    async def allow_channel(self, _update, *, source_channel):
+        return True
+
+    monkeypatch.setattr(FlexibleAgentRuntime, "_telegram_channel_allowed", allow_channel)
+    runtime = _TelegramRuntime()
+
+    async def failing_callback(_update, _context):
+        return {"ok": False, "error_code": "callback_denied"}
+
+    query = SimpleNamespace(
+        id="cb-403",
+        data="fallback:option1",
+        from_user=SimpleNamespace(id=42),
+        message=SimpleNamespace(chat=SimpleNamespace(id=99), chat_id=99),
+    )
+    update = SimpleNamespace(
+        update_id=700403,
+        callback_query=query,
+        effective_user=SimpleNamespace(id=42),
+        effective_chat=SimpleNamespace(id=99),
+    )
+    wrapped = FlexibleAgentRuntime._wrap_callback(runtime, "callback_fallback", failing_callback)
+    await wrapped(update, SimpleNamespace())
+
+    store = runtime_session.ensure_store(runtime)
+    session = runtime_session.current_session_for_update(runtime, update)
+    owner = runtime_session.owner_id(runtime)
+    events = store.events(session["session_id"], owner_id=owner)
+    cmd_events = [e for e in events if e["kind"] == "frontend.command_result"]
+    assert len(cmd_events) == 1
+    # Red test: old implementation always completed ticket with ok: True
+    assert cmd_events[0]["status"] == "failed"
+    assert cmd_events[0]["detail"]["result"]["ok"] is False
+    assert cmd_events[0]["detail"]["result"]["error_code"] == "callback_denied"
+
+
+@pytest.mark.asyncio
+async def test_telegram_connector_local_command_persists_canonical_failed_result(tmp_path, monkeypatch):
+    from orchestrator import runtime_session, ui_language
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    replies = []
+
+    class _TelegramRuntime:
+        name = "nana"
+        workspace_dir = tmp_path
+        global_config = SimpleNamespace(authorized_id=42, instance_id="HASHI1")
+
+        def _is_authorized_user(self, user_id):
+            return user_id == 42
+
+        def _record_active_chat(self, _update):
+            return None
+
+        def _is_command_allowed(self, _cmd):
+            return True
+
+        async def _reply_text(self, update, text, **kwargs):
+            replies.append(text)
+
+    async def allow_channel(self, _update, *, source_channel):
+        return True
+
+    monkeypatch.setattr(FlexibleAgentRuntime, "_telegram_channel_allowed", allow_channel)
+    runtime = _TelegramRuntime()
+
+    message = SimpleNamespace(
+        message_id=404, text="/logo", date=datetime.now(timezone.utc)
+    )
+    update = SimpleNamespace(
+        update_id=700404,
+        effective_user=SimpleNamespace(id=42),
+        effective_chat=SimpleNamespace(id=99),
+        effective_message=message,
+        message=message,
+        callback_query=None,
+    )
+    wrapped = FlexibleAgentRuntime._wrap_cmd(runtime, "logo", FlexibleAgentRuntime.cmd_logo.__get__(runtime))
+    await wrapped(update, SimpleNamespace(args=[]))
+
+    store = runtime_session.ensure_store(runtime)
+    session = runtime_session.current_session_for_update(runtime, update)
+    owner = runtime_session.owner_id(runtime)
+    events = store.events(session["session_id"], owner_id=owner)
+    cmd_events = [e for e in events if e["kind"] == "frontend.command_result"]
+    assert len(cmd_events) == 1
+    # Red test: old implementation marked event as completed with ok: True
+    assert cmd_events[0]["status"] == "failed"
+    assert cmd_events[0]["detail"]["result"]["ok"] is False
+    assert cmd_events[0]["detail"]["result"]["error_code"] == "connector_local_command"
+    assert len(replies) == 1
+    assert replies[0] == ui_language.tr("runtime.logo_terminal_only")

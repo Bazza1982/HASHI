@@ -1,7 +1,7 @@
 # Telegram / FC 命令一致性修复指南 — 2026-10-19
 
-状态：待实现、待独立验收。本文件只定义 HASHI3 的修复要求，不代表修复已完成，
-也不代表任何运行中的 Worker 已加载新代码。
+状态：已实现，等待 Zelda 独立验收。本文件记录 HASHI3 的修复规范与实现事实，
+不代表任何运行中的 Worker 已加载新代码，也不代表生产发布。
 
 ## 1. 不可变施工边界
 
@@ -405,16 +405,16 @@ Zelda 收到提交后将独立：
 
 只有全部满足才可提交给 Zelda 验收：
 
-- [ ] 仅 HASHI3 被修改，分支始终为 `debug-issues-oct`；
-- [ ] 无新分支、worktree、rebase、reset 或挑选提交；
-- [ ] Protected Core 无改动；
-- [ ] Telegram 命令不再固定写成功；
-- [ ] 未知、禁用、connector-local 拒绝都有 canonical failed result；
-- [ ] command/callback 重放不重复副作用，pending 不自动重试；
-- [ ] Telegram、Session API/Workbench、TUI 共享 FC/PAO 语义入口；
-- [ ] Telegram 传输安全和呈现能力未被削弱；
-- [ ] HERV3 图片自动降级回归通过，默认模型不改变；
-- [ ] 红/绿证据、组件测试和必要 Core gate 已记录；
-- [ ] owning decision/FYI 已更新；
-- [ ] 工作树干净，变更已在当前分支本地提交；
-- [ ] HASHI4 未触碰，无 reboot，状态明确为“等待 Zelda 验收”。
+- [x] 仅 HASHI3 被修改，分支始终为 `debug-issues-oct`；
+- [x] 无新分支、worktree、rebase、reset 或挑选提交；
+- [x] Protected Core 无改动；
+- [x] Telegram 命令不再固定写成功；
+- [x] 未知、禁用、connector-local 拒绝都有 canonical failed result；
+- [x] command/callback 重放不重复副作用，pending 不自动重试；
+- [x] Telegram、Session API/Workbench、TUI 共享 FC/PAO 语义入口；
+- [x] Telegram 传输安全和呈现能力未被削弱；
+- [x] HERV3 图片自动降级回归通过，默认模型不改变；
+- [x] 红/绿证据、组件测试和必要 Core gate 已记录；
+- [x] owning decision/FYI 已更新；
+- [x] 工作树干净，变更已在当前分支本地提交；
+- [x] HASHI4 未触碰，无 reboot，状态明确为“等待 Zelda 验收”。

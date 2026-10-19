@@ -730,13 +730,26 @@ class FlexibleAgentRuntime:
                     with bind_slash_command_audit_session(session):
                         handler_result = await handler(update, context)
                     if ticket is not None:
+                        is_ok = True
+                        error_code = None
+                        if isinstance(handler_result, Mapping):
+                            if "ok" in handler_result:
+                                is_ok = bool(handler_result["ok"])
+                            if not is_ok:
+                                error_code = str(
+                                    handler_result.get("error_code")
+                                    or handler_result.get("error")
+                                    or "callback_failed"
+                                )
                         response = {
-                            "ok": True,
+                            "ok": is_ok,
                             "command": command_name,
-                            "execution_state": "completed",
+                            "execution_state": "completed" if is_ok else "failed",
                             "connector_id": "telegram",
                             "transport_delivery_state": "not_observed",
                         }
+                        if not is_ok and error_code:
+                            response["error_code"] = error_code
                         if isinstance(handler_result, Mapping):
                             response["result"] = dict(handler_result)
                         ticket.complete(response)
@@ -798,22 +811,11 @@ class FlexibleAgentRuntime:
                         source="telegram.command",
                         content_format="plain-text",
                     )
-                    if not self._is_command_allowed(cmd):
-                        session.block("command_disabled")
-                        await self._reply_text(
-                            update,
-                            ui_language.tr("command.disabled", command=cmd),
-                        )
-                        return
-
                     from orchestrator.frontend_command_admission import (
-                        reserve_telegram_command_invocation,
+                        execute_telegram_command_invocation,
                     )
                     from orchestrator.session_store import IdempotencyConflict
 
-                    message = getattr(update, "effective_message", None) or getattr(
-                        update, "message", None
-                    )
                     transport_id = getattr(update, "update_id", None)
                     if transport_id is None:
                         transport_id = getattr(message, "message_id", None)
@@ -830,8 +832,13 @@ class FlexibleAgentRuntime:
                         "arguments": args,
                         "text": str(getattr(message, "text", "") or ""),
                     }
+
+                    async def invoke():
+                        with bind_slash_command_audit_session(session):
+                            return await handler(update, context)
+
                     try:
-                        ticket = reserve_telegram_command_invocation(
+                        outcome = await execute_telegram_command_invocation(
                             self,
                             update,
                             command_name=cmd,
@@ -839,6 +846,8 @@ class FlexibleAgentRuntime:
                             transport_id=transport_id,
                             ingress_transport="telegram.command",
                             request_payload=invocation_request,
+                            invoke_handler=invoke if handler is not None else None,
+                            command_known=True if handler is not None else False,
                         )
                     except IdempotencyConflict:
                         command_logger = getattr(
@@ -854,47 +863,71 @@ class FlexibleAgentRuntime:
                         )
                         raise
 
-                    if ticket.state == "completed":
+                    command_logger = getattr(
+                        self,
+                        "logger",
+                        logging.getLogger("FlexRuntime.TelegramCommand"),
+                    )
+
+                    if outcome.get("replayed"):
+                        if outcome.get("outcome_unknown"):
+                            session.block("command_outcome_unknown")
+                            command_logger.warning(
+                                "Telegram command outcome is unknown; refusing replay: "
+                                "agent=%s command=%s state=%s",
+                                self.name,
+                                cmd,
+                                outcome.get("execution_state") or "unknown",
+                            )
+                            return outcome
                         session.block("duplicate_command_replay")
-                        command_logger = getattr(
-                            self,
-                            "logger",
-                            logging.getLogger("FlexRuntime.TelegramCommand"),
-                        )
                         command_logger.info(
                             "Ignored completed Telegram command replay: "
                             "agent=%s command=%s",
                             self.name,
                             cmd,
                         )
-                        return
-                    if ticket.state != "reserved":
-                        session.block("command_outcome_unknown")
-                        command_logger = getattr(
-                            self,
-                            "logger",
-                            logging.getLogger("FlexRuntime.TelegramCommand"),
-                        )
-                        command_logger.warning(
-                            "Telegram command outcome is unknown; refusing replay: "
-                            "agent=%s command=%s state=%s",
-                            self.name,
-                            cmd,
-                            ticket.state or "unknown",
-                        )
-                        return
+                        return outcome
 
-                    with bind_slash_command_audit_session(session):
-                        await handler(update, context)
-                    ticket.complete(
-                        {
-                            "ok": True,
-                            "command": cmd,
-                            "execution_state": "completed",
-                            "connector_id": "telegram",
-                            "transport_delivery_state": "not_observed",
-                        }
-                    )
+                    if not outcome.get("ok"):
+                        error_code = str(outcome.get("error_code") or "command_failed")
+                        if error_code == "command_disabled":
+                            session.block("command_disabled")
+                            await self._reply_text(
+                                update,
+                                ui_language.tr("command.disabled", command=cmd),
+                            )
+                        elif error_code == "command_not_found":
+                            session.fail("command_not_found")
+                            await self._reply_text(
+                                update,
+                                ui_language.tr(
+                                    "command.unknown",
+                                    command=cmd,
+                                    default=f"Unknown command: /{cmd}",
+                                ),
+                            )
+                        elif error_code == "connector_local_command":
+                            session.block("connector_local_command")
+                            if cmd == "logo":
+                                await self._reply_text(
+                                    update,
+                                    ui_language.tr("runtime.logo_terminal_only"),
+                                )
+                            else:
+                                await self._reply_text(
+                                    update,
+                                    ui_language.tr(
+                                        "runtime.connector_local_unsupported",
+                                        command=cmd,
+                                        default=f"/{cmd} is not available on Telegram.",
+                                    ),
+                                )
+                        else:
+                            session.fail(error_code)
+                        return outcome
+
+                    return outcome
             except Exception as exc:
                 session.fail(exc)
                 raise
