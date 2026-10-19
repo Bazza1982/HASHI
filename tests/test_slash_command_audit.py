@@ -776,7 +776,21 @@ async def test_telegram_command_policy_disabled_has_canonical_failed_result(tmp_
 @pytest.mark.asyncio
 async def test_telegram_callback_failure_outcome_persisted_as_failed(tmp_path, monkeypatch):
     from orchestrator import runtime_session
+    from orchestrator import frontend_connector_registry
     from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    adapter_calls = []
+    original_adapter = frontend_connector_registry.get_compatibility_adapter
+
+    def tracked_adapter(adapter_id):
+        adapter_calls.append(adapter_id)
+        return original_adapter(adapter_id)
+
+    monkeypatch.setattr(
+        frontend_connector_registry,
+        "get_compatibility_adapter",
+        tracked_adapter,
+    )
 
     class _TelegramRuntime:
         name = "nana"
@@ -823,6 +837,7 @@ async def test_telegram_callback_failure_outcome_persisted_as_failed(tmp_path, m
     assert cmd_events[0]["status"] == "failed"
     assert cmd_events[0]["detail"]["result"]["ok"] is False
     assert cmd_events[0]["detail"]["result"]["error_code"] == "callback_denied"
+    assert adapter_calls == ["telegram.native_callback"]
 
 
 @pytest.mark.asyncio

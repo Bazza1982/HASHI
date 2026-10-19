@@ -669,9 +669,27 @@ class FlexibleAgentRuntime:
                     ).strip().casefold()
                     if surface == "telegram":
                         from orchestrator.frontend_connector_registry import (
+                            get_compatibility_adapter,
+                            require_connector_operation,
                             require_connector_presentation_override,
                         )
 
+                        adapter = get_compatibility_adapter(
+                            "telegram.native_callback"
+                        )
+                        if (
+                            adapter["connector_id"] != "telegram"
+                            or adapter["direction"] != "ingress"
+                            or adapter["operation"] != "action"
+                            or adapter["route"] != "standard_fc"
+                        ):
+                            raise ValueError(
+                                "Telegram callback adapter is not a standard "
+                                "FC action route"
+                            )
+                        require_connector_operation(
+                            "telegram", "ingress", "action"
+                        )
                         # Command/action identity and side effects are standard
                         # FC operations.  Telegram may still edit the existing
                         # inline card in place as an explicitly registered

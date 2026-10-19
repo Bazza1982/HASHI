@@ -223,13 +223,14 @@ def reserve_telegram_command_invocation(
 async def execute_frontend_command_invocation(
     runtime: Any,
     *,
+    compatibility_adapter_id: str,
     connector_id: str,
     session_id: str,
     owner_id: str,
     client_id: str,
     request_id: str,
     context_generation: int,
-    actor: int | str,
+    actor: int,
     command_name: str,
     arguments: list[str],
     payload: Mapping[str, Any],
@@ -242,13 +243,33 @@ async def execute_frontend_command_invocation(
     from orchestrator.command_interaction_bridge import (
         build_frontend_command_invocation,
     )
+    from orchestrator.frontend_compatibility import (
+        normalize_compatibility_operation,
+    )
     from orchestrator.frontend_connector_registry import (
         get_connector_customization,
     )
     from orchestrator.slash_command_audit import redact_args
 
-    normalized_cmd = str(command_name or "").strip().lstrip("/").lower()
-    redacted_arguments = redact_args(normalized_cmd, list(arguments or []))
+    normalized = normalize_compatibility_operation(
+        compatibility_adapter_id,
+        {
+            "kind": "command",
+            "name": command_name,
+            "arguments": list(arguments or []),
+        },
+    )
+    adapter = normalized["adapter"]
+    if (
+        adapter["connector_id"] != connector_id
+        or adapter["direction"] != "ingress"
+        or adapter["route"] != "standard_fc"
+    ):
+        raise ValueError("frontend command adapter is not a standard ingress route")
+    operation = normalized["operation"]
+    normalized_cmd = operation["name"]
+    normalized_arguments = list(operation["arguments"])
+    redacted_arguments = redact_args(normalized_cmd, normalized_arguments)
 
     meta = dict(metadata or {})
     meta.setdefault("connector_id", connector_id)
@@ -260,15 +281,6 @@ async def execute_frontend_command_invocation(
     )
     meta.setdefault("session_surface", meta.get("session_surface") or connector_id)
     meta.setdefault("connection_binding", meta.get("connection_binding") or "default")
-
-    actor_id = actor if isinstance(actor, int) else 0
-    invocation = build_frontend_command_invocation(
-        {"client_id": client_id, "request_id": request_id},
-        meta,
-        actor=actor_id,
-        command_name=normalized_cmd,
-        arguments=redacted_arguments,
-    )
 
     # 1. Check connector-local customization
     customization = get_connector_customization(
@@ -304,6 +316,17 @@ async def execute_frontend_command_invocation(
         is_allowed = getattr(runtime, "_is_command_allowed", None)
         if callable(is_allowed) and not is_allowed(normalized_cmd):
             rejection_code = "command_disabled"
+
+    if type(actor) is not int:
+        raise ValueError("frontend command actor is invalid")
+    invocation = build_frontend_command_invocation(
+        {"client_id": client_id, "request_id": request_id},
+        meta,
+        actor=actor,
+        command_name=normalized_cmd,
+        arguments=redacted_arguments,
+        decision="denied" if rejection_code is not None else "allowed",
+    )
 
     # Single-layer reservation before any effects
     ticket = reserve_frontend_command_invocation(
@@ -471,6 +494,7 @@ async def execute_telegram_command_invocation(
 
     return await execute_frontend_command_invocation(
         runtime,
+        compatibility_adapter_id="telegram.native_command",
         connector_id="telegram",
         session_id=str(session["session_id"]),
         owner_id=resolved_owner,
