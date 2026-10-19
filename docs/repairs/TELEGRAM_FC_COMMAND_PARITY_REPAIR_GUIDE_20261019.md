@@ -1,7 +1,7 @@
 # Telegram / FC 命令一致性修复指南 — 2026-10-19
 
-状态：已实现，等待 Zelda 独立验收。本文件记录 HASHI3 的修复规范与实现事实，
-不代表任何运行中的 Worker 已加载新代码，也不代表生产发布。
+状态：Zelda 已完成 HASHI3 源码与离线独立验收。运行中的 Worker 尚未加载本次
+提交，真实 Telegram、Session API/Workbench 验收及任何生产发布均未执行。
 
 ## 1. 不可变施工边界
 
@@ -417,4 +417,31 @@ Zelda 收到提交后将独立：
 - [x] 红/绿证据、组件测试和必要 Core gate 已记录；
 - [x] owning decision/FYI 已更新；
 - [x] 工作树干净，变更已在当前分支本地提交；
-- [x] HASHI4 未触碰，无 reboot，状态明确为“等待 Zelda 验收”。
+- [x] HASHI4 未触碰，无 reboot；源码与离线验收完成，运行加载和真实前端验收待
+  另行明确授权。
+
+## 12. Zelda 独立验收记录 — 2026-10-19
+
+结论：HASHI3 的源码与离线验收通过；这不是运行加载或真实前端验收结论。
+
+独立审查发现原实现仍有三项缺口：Telegram 原生命令没有实际消费已注册的
+`telegram.native_command` adapter，原生 callback 没有验证
+`telegram.native_callback` adapter，被准入层拒绝的命令仍把授权决定记录为
+`allowed`。修正提交 `9f5e810e` 将两类原生入口绑定到登记的 FC adapter，并把拒绝
+决定持久化为 `denied`。
+
+红/绿证据：
+
+- 新增命令 admission 测试在修正前为 2 failed / 4 passed，准确暴露 adapter 未被
+  消费和拒绝决定错误；修正后为 6 passed。
+- callback adapter 精确节点在修正前失败，修正后为 1 passed。
+- 命令重点集为 95 passed；FC/PAO 组件集为 206 passed、4 subtests passed。
+- 图片自动降级强制回归为 50 passed。
+- 改动文件 Ruff 检查通过，`git diff --check` 与 Protected Core 检查通过。
+- 全仓门在提交修正后为 861 passed、1 skipped；唯一 skip 沿用仓库既有条件，未被
+  报成通过。提交前同一门只触发 3 个“Function 源码尚未提交”的资格围栏，提交后
+  已全部转绿，没有业务断言失败。
+
+验收边界：未执行 hot reboot、服务重启、真实 Telegram 或 Session API/Workbench
+操作；HASHI4 未读取施工文件、未修改、未同步。后续运行验收必须取得当时明确授权，
+并分别记录 Worker 加载、真实前端结果与用户实测。
