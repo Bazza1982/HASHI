@@ -9,6 +9,8 @@ from adapters.base import BackendResponse
 from adapters.her_v2 import HERv2Adapter
 from adapters.her_v2_provider import HashiStageProvider, _MediaRoutingToolRegistry
 from adapters.stream_events import KIND_TEXT_DELTA, KIND_TOOL_START, StreamEvent
+from orchestrator import runtime_media
+from orchestrator.config_json import new_config_json, write_config_json
 from orchestrator.her_v2.config import ProviderProfile
 from orchestrator.her_v2.interfaces import ProviderFailureCode, StageInvocationError
 from orchestrator.her_v2.models import (
@@ -1208,6 +1210,139 @@ def test_her_rejection_names_only_models_matching_selected_reason(monkeypatch):
     assert result["reason"] == "model_capability_unknown"
     assert result["code"] == "MODEL_CAPABILITY_UNKNOWN"
     assert result["model"] == "unknown-model"
+
+
+def test_her_ingress_admits_same_provider_visual_fallback(monkeypatch):
+    profiles = (
+        ProviderProfile("direct", "deepseek-api", "deepseek-v4-pro"),
+    )
+    manager = SimpleNamespace(
+        get_her_v3_provider_options=lambda: [
+            {
+                "engine": "deepseek-api",
+                "models": ["deepseek-v4-pro", "deepseek-flash"],
+                "available": True,
+            }
+        ],
+        _select_backend_cfg=lambda engine, target_model=None: {
+            "engine": engine,
+            "model": target_model,
+        },
+    )
+    adapter = object.__new__(HERv2Adapter)
+    adapter._v2_config = SimpleNamespace(all_provider_profiles=lambda: profiles)
+    adapter._backend_manager = lambda: manager
+    adapter._model_capability_cache_path = lambda: None
+    adapter._compute_services_config_path = lambda: None
+
+    def capability_for(_engine, model, **_kwargs):
+        visual = model == "deepseek-flash"
+        return InputCapability(
+            provider="deepseek-api",
+            model=model,
+            input_modalities=(
+                frozenset({"text", "image"}) if visual else frozenset({"text"})
+            ),
+            input_transports={"image": ("data_url",)} if visual else {},
+            modality_status={
+                "image": "supported" if visual else "unsupported",
+                "text": "supported",
+            },
+            source="explicit_config",
+        )
+
+    monkeypatch.setattr("adapters.her_v2.resolve_input_capability", capability_for)
+
+    result = adapter.media_input_diagnostic("image")
+
+    assert result["accepted"] is True
+    assert result["reason"] == "same_provider_visual_fallback_available"
+    assert result["model"] == "deepseek-flash"
+    assert result["fallback_type"] == "same_provider_visual_model"
+    bridge = runtime_media._backend_media_acceptance(
+        SimpleNamespace(
+            config=SimpleNamespace(
+                engine="her-v2",
+                model="deepseek-v4-pro",
+            ),
+            capabilities=SimpleNamespace(
+                supports_files=True,
+                input_modalities=frozenset({"text"}),
+            ),
+            resolve_input_capability=lambda: capability_for(
+                "deepseek-api",
+                "deepseek-v4-pro",
+            ),
+            media_input_diagnostic=adapter.media_input_diagnostic,
+        ),
+        "photo",
+        "photo.jpg",
+    )
+    assert bridge.accepted is True
+    assert bridge.modality == "image"
+
+
+def test_her_ingress_admits_configured_lan_visual_fallback(
+    monkeypatch,
+    tmp_path,
+):
+    profiles = (
+        ProviderProfile("direct", "text-only-api", "text-only-model"),
+    )
+    manager = SimpleNamespace(
+        get_her_v3_provider_options=lambda: [
+            {
+                "engine": "text-only-api",
+                "models": ["text-only-model"],
+                "available": True,
+            }
+        ],
+        _select_backend_cfg=lambda engine, target_model=None: {
+            "engine": engine,
+            "model": target_model,
+        },
+    )
+    config_path = tmp_path / "compute_services.json"
+    write_config_json(
+        config_path,
+        new_config_json(
+            config_path,
+            {
+                "version": 1,
+                "nodes": [
+                    {
+                        "id": "lan-vision",
+                        "location": "lan",
+                        "base_url": "http://192.168.1.50:19446",
+                        "manifest_path": "/.well-known/hashi-compute",
+                        "enabled": True,
+                    }
+                ],
+            },
+        ),
+    )
+    adapter = object.__new__(HERv2Adapter)
+    adapter._v2_config = SimpleNamespace(all_provider_profiles=lambda: profiles)
+    adapter._backend_manager = lambda: manager
+    adapter._model_capability_cache_path = lambda: None
+    adapter._compute_services_config_path = lambda: config_path
+    monkeypatch.setattr(
+        "adapters.her_v2.resolve_input_capability",
+        lambda _engine, model, **_kwargs: InputCapability(
+            provider="text-only-api",
+            model=model,
+            input_modalities=frozenset({"text"}),
+            input_transports={},
+            modality_status={"image": "unsupported", "text": "supported"},
+            source="explicit_config",
+        ),
+    )
+
+    result = adapter.media_input_diagnostic("image")
+
+    assert result["accepted"] is True
+    assert result["reason"] == "lan_compute_vision_fallback_configured"
+    assert result["fallback_type"] == "lan_compute_vision"
 
 
 @pytest.mark.asyncio

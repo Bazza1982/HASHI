@@ -69,6 +69,10 @@ from orchestrator.her_v2.v3_config import normalise_v3_config
 from orchestrator import final_style_policy
 from orchestrator.privacy_levels import require_herv3_provider_compatibility
 from orchestrator.her_v2.wip_journal import WIPJournal
+from orchestrator.her_v2.visual_fallback import (
+    configured_same_provider_models,
+    lan_vision_configured,
+)
 from orchestrator.multimodal_contract import (
     media_failure_code,
     native_media_failure_reason,
@@ -532,14 +536,20 @@ class HERv2Adapter(BaseBackend):
 
         manager = self._backend_manager()
         select_backend = getattr(manager, "_select_backend_cfg", None)
-        rejected: list[tuple[str, str]] = []
-        for profile in resolved.all_provider_profiles():
+        profiles = tuple(resolved.all_provider_profiles())
+
+        def capability_for(
+            profile: ProviderProfile,
+            *,
+            model: str | None = None,
+        ):
+            target_model = str(model or profile.model)
             capability_config: dict[str, Any] = {}
             if callable(select_backend):
                 try:
                     configured = select_backend(
                         profile.engine,
-                        target_model=profile.model,
+                        target_model=target_model,
                     )
                 except (TypeError, ValueError):
                     configured = None
@@ -549,12 +559,16 @@ class HERv2Adapter(BaseBackend):
                         capability_config.update(dict(nested_extra))
                     capability_config.update(dict(configured))
             capability_config.update(dict(profile.options))
-            capability = resolve_input_capability(
+            return resolve_input_capability(
                 profile.engine,
-                profile.model,
+                target_model,
                 config=capability_config,
                 capability_cache_path=self._model_capability_cache_path(),
             )
+
+        rejected: list[tuple[str, str]] = []
+        for profile in profiles:
+            capability = capability_for(profile)
             transports = capability.input_transports.get(
                 normalized_modality,
                 (),
@@ -578,6 +592,52 @@ class HERv2Adapter(BaseBackend):
                     ),
                 )
             )
+
+        if normalized_modality == "image":
+            checked_candidates: set[tuple[str, str]] = set()
+            for profile in profiles:
+                for candidate_model in configured_same_provider_models(
+                    manager,
+                    profile,
+                ):
+                    candidate_key = (profile.engine, candidate_model)
+                    if (
+                        candidate_model == profile.model
+                        or candidate_key in checked_candidates
+                    ):
+                        continue
+                    checked_candidates.add(candidate_key)
+                    capability = capability_for(
+                        profile,
+                        model=candidate_model,
+                    )
+                    transports = capability.input_transports.get("image", ())
+                    if any(
+                        capability.supports("image", transport)
+                        for transport in transports
+                    ):
+                        return {
+                            "accepted": True,
+                            "reason": "same_provider_visual_fallback_available",
+                            "code": "",
+                            "model": candidate_model,
+                            "fallback_type": "same_provider_visual_model",
+                            "provider": profile.engine,
+                            "failed_model": profile.model,
+                        }
+            try:
+                compute_config_path = self._compute_services_config_path()
+            except (AttributeError, OSError, TypeError, ValueError):
+                compute_config_path = None
+            if lan_vision_configured(compute_config_path):
+                return {
+                    "accepted": True,
+                    "reason": "lan_compute_vision_fallback_configured",
+                    "code": "",
+                    "model": "HASHI Compute",
+                    "fallback_type": "lan_compute_vision",
+                }
+
         priorities = (
             "model_capability_unknown",
             "adapter_transport_unimplemented",

@@ -109,6 +109,10 @@ from orchestrator.her_v2.task_state import (
     TaskDeltaApplication,
     task_state_contract,
 )
+from orchestrator.her_v2.visual_fallback import (
+    configured_same_provider_models,
+    lan_vision_configured,
+)
 from orchestrator.multimodal_contract import (
     MultimodalContractError,
     attachment_manifest,
@@ -4028,32 +4032,7 @@ class HashiStageProvider(StageProvider):
     def _configured_same_provider_models(self, profile: ProviderProfile) -> tuple[str, ...]:
         """Return only this Agent's ordered, available models for one Provider."""
 
-        options: list[Mapping[str, Any]] = []
-        for getter_name in (
-            "get_her_v3_provider_options",
-            "get_her_v2_provider_options",
-        ):
-            getter = getattr(self.backend_manager, getter_name, None)
-            if not callable(getter):
-                continue
-            try:
-                options = [item for item in getter() if isinstance(item, Mapping)]
-            except Exception:
-                options = []
-            if options:
-                break
-        selected_engine = canonical_model_provider(profile.engine)
-        for option in options:
-            option_engine = canonical_model_provider(str(option.get("engine") or ""))
-            if option_engine != selected_engine or option.get("available") is False:
-                continue
-            result: list[str] = []
-            for raw in option.get("models") or ():
-                model = str(raw or "").strip()
-                if model and model not in result:
-                    result.append(model)
-            return tuple(result)
-        return ()
+        return configured_same_provider_models(self.backend_manager, profile)
 
     @staticmethod
     def _backend_input_capability(backend: Any):
@@ -4073,7 +4052,7 @@ class HashiStageProvider(StageProvider):
     def _lan_vision_projector(self):
         if self._compute_vision_projector is not None:
             return self._compute_vision_projector
-        if self.compute_services_config_path is None:
+        if not lan_vision_configured(self.compute_services_config_path):
             return None
         from orchestrator.compute_vision import LanComputeVisionProjector
 

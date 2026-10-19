@@ -1,10 +1,12 @@
 # HERV3 Visual Fallback Decision — 2026-10-18
 
-Status: approved, implemented and hot-loaded in HASHI3 on `debug-issues-oct`.
-The same-Provider path passed real Workbench image acceptance. The LAN projector
-passed a real service canary; the full all-text-Provider route remains explicitly
-unverified because that temporary Provider failed its independent tool-isolation
-preflight before model execution. No HASHI4/production adoption is claimed.
+Status: approved and implemented on HASHI3 `debug-issues-oct`. The original
+same-Provider path was hot-loaded and passed real Workbench image acceptance.
+The 2026-10-19 cross-frontend admission correction is source-validated but not
+yet hot-loaded. The LAN projector passed a real service canary; the full
+all-text-Provider route remains explicitly unverified because that temporary
+Provider failed its independent tool-isolation preflight before model execution.
+No HASHI4/production adoption is claimed.
 
 ## Ownership and boundary
 
@@ -48,6 +50,14 @@ Message. The manifest carries that server-staged path, media type, size and
 digest so HERV3 can validate the exact current-Run grant and choose the visual
 route before any Model Provider call.
 
+A Frontend Connector must not reject an HERV3 image merely because the selected
+stage model is text-only. HERV3's public media diagnostic must project the same
+Agent-scoped same-Provider candidate order and configured LAN fallback used by
+Provider invocation. Only when the selected model, same-Provider candidates,
+and configured LAN route are all unavailable may the connector render a typed
+modality rejection. Telegram, Backend API, Workbench and future connectors do
+not own separate model-fallback policies.
+
 ## Warning and privacy contract
 
 The fallback emits one required `fallback_warning` per request. It names the
@@ -78,7 +88,11 @@ persisted to PCM, the catalogue, model settings or logs.
 Tests cover native routing, ordered same-Provider selection, unchanged default
 model, one required warning, one physical Model Provider call, LAN raw-image
 removal, LAN projection caching, typed failure preservation, manifest privacy
-boundary validation and configured-origin URL construction.
+boundary validation and configured-origin URL construction. The cross-frontend
+regression additionally records red/green evidence that HERV3 ingress admits a
+text-only selected model when either an allowed same-Provider visual model or
+an enabled LAN compute node is available; Telegram's media bridge consumes that
+same diagnostic instead of stopping before canonical admission.
 
 ## HASHI3 live evidence — 2026-10-19
 

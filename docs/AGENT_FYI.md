@@ -22,11 +22,14 @@ October 18 visual fallback: image requests first use the selected model, then an
 allowed visual model from the same Model Provider, then LAN HASHI Compute Vision.
 The switch is request-only and warned once; it never changes the Agent default or
 silently crosses to another cloud Provider. On the LAN route, raw images are
-removed before the selected cloud model receives derived text. Source on HASHI3
-`debug-issues-oct` is hot-loaded: real Workbench Pro-to-Flash fallback passed,
-including its required warning and unchanged default. The real LAN projector
-also passed; full all-text-Provider-to-LAN frontend acceptance remains pending
-because the temporary Provider failed its separate tool-isolation preflight. See
+removed before the selected cloud model receives derived text. Telegram exposed
+an older connector preflight that saw only the selected text model and stopped
+before HERV3 fallback. The shared HERV3 media diagnostic now derives the same
+same-Provider model order and LAN availability as invocation, so every FC can
+admit the same canonical image request. This correction is source-validated on
+HASHI3 `debug-issues-oct` but not yet hot-loaded. Earlier real Workbench
+Pro-to-Flash and LAN projector checks remain valid; full
+all-text-Provider-to-LAN frontend acceptance remains pending. See
 [decision](repairs/HERV3_VISUAL_FALLBACK_20261018.md).
 
 October 18: Ollama native context, binary reasoning and main promotion:
