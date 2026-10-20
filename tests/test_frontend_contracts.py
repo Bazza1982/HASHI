@@ -94,7 +94,30 @@ def test_registry_maps_legacy_names_to_connector_neutral_ids():
     assert canonical_connector_id("workbench", ingress_transport="api_chat") == "backend_api"
     registry = connector_registry_snapshot()
     identifiers = {item["id"] for item in registry["connectors"]}
-    assert {"telegram", "tui", "backend_api", "session_api", "hchat", "remote", "exchange"} <= identifiers
+    assert {
+        "telegram", "tui", "backend_api", "session_api", "hchat", "remote",
+        "exchange", "agentpresence",
+    } <= identifiers
+    agentpresence = next(
+        item for item in registry["connectors"] if item["id"] == "agentpresence"
+    )
+    assert agentpresence["ingress"] == []
+    assert agentpresence["egress"] == [
+        "message",
+        "state",
+        "notification",
+        "media",
+    ]
+    assert agentpresence["owner_mirror"] is True
+    assert agentpresence["delivery_content_modes"] == ["media"]
+    adapter_ids = {
+        item["id"] for item in registry["compatibility_adapters"]
+    }
+    assert {
+        "agentpresence.call_state",
+        "agentpresence.notification",
+        "agentpresence.voice_mirror",
+    } <= adapter_ids
     assert all("workbench" not in item["id"] for item in registry["connectors"])
 
 

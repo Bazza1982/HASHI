@@ -22,7 +22,10 @@ from orchestrator.frontend_contracts import (
     normalize_frontend_ingress_envelope,
     normalize_frontend_request,
 )
-from orchestrator.frontend_delivery import freeze_run_delivery_route
+from orchestrator.frontend_delivery import (
+    configured_owner_mirror_destinations,
+    freeze_run_delivery_route,
+)
 from orchestrator.runtime_session import ensure_store, owner_id
 from orchestrator.session_store import (
     IdempotencyConflict,
@@ -666,6 +669,10 @@ def admit_frontend_ingress(
             default=False,
         ),
         whatsapp_channel_key=whatsapp_channel,
+        additional_mirrors=configured_owner_mirror_destinations(
+            request_metadata=delivery_metadata,
+            state_root=state_root,
+        ),
     )
 
     request_id = normalized_env["message"]["request_id"]

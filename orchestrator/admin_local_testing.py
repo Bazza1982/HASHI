@@ -263,7 +263,7 @@ async def try_execute_slash_command_text(
             session_metadata=session_metadata,
         )
     command_name, args = parse_slash_command_text(text)
-    if command_name in {"telegram", "whatsapp", "agentpresence"}:
+    if command_name in {"telegram", "whatsapp"}:
         return await _execute_connector_mirror_command(
             runtime,
             command_name,
@@ -370,9 +370,7 @@ async def _execute_connector_mirror_command(
             with ui_language.language_scope(runtime, actor_id=owner_id):
                 if connector_id == "telegram":
                     return runtime_menu_views.telegram_menu_text(enabled=mirror)
-                if connector_id == "whatsapp":
-                    return runtime_menu_views.whatsapp_menu_text(enabled=mirror)
-                return f"AgentPresence mirror: {'ON' if mirror else 'OFF'}"
+                return runtime_menu_views.whatsapp_menu_text(enabled=mirror)
 
         try:
             requested = workbench_telegram_state.parse_mirror_arg(args)

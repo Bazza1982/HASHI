@@ -102,6 +102,7 @@ class Call:
     vision_launches: list = field(default_factory=list)
     video_policy: dict = field(default_factory=dict)
     billing: MediaBilling = field(default_factory=MediaBilling)
+    frontend_subscribers: tuple[str, ...] = ()
 
 
 class CallService:
@@ -214,7 +215,7 @@ class CallService:
                 admission_in_flight=call.turn.get("phase") == "submitting",
                 call_duration_ms=elapsed_ms(self.clock, call.started),
             )
-            self._companion_notify(call, "ended")
+            self._emit_frontend_event(call, "call.ended", reason=reason)
         # Once identity is known, stop exactly this Call-owned PAO Run. During
         # admission its identity is still uncertain, so _run requests the same
         # targeted cancellation immediately after admission resolves.
@@ -470,41 +471,39 @@ class CallService:
             emit("service_closed", generation=self.generation, pending_tasks=0)
         self.calls.clear()
 
-    def _companion_notify(self, call, kind: str) -> None:
-        """Fail-open, fire-and-forget notification to the desktop companion.
-
-        The companion is an optional local egress sink; its absence or any
-        failure must never affect call admission or teardown.
-        """
+    def _frontend_subscribers(self, owner, binding) -> tuple[str, ...]:
+        resolver = getattr(self.ports, "frontend_subscribers", None)
+        if not callable(resolver):
+            return ()
         try:
-            from orchestrator import agent_presence_notify
+            return tuple(
+                dict.fromkeys(
+                    str(item).strip().casefold()
+                    for item in resolver(owner, binding)
+                    if str(item).strip()
+                )
+            )
+        except Exception:
+            return ()
+
+    def _emit_frontend_event(self, call, kind: str, **payload) -> None:
+        """Publish through the Call port; no Connector is named by this owner."""
+
+        emitter = getattr(self.ports, "emit_frontend_event", None)
+        if not callable(emitter) or not call.frontend_subscribers:
+            return
+        try:
+            result = emitter(
+                call.owner,
+                call.binding,
+                kind,
+                subscribers=call.frontend_subscribers,
+                payload=payload,
+            )
+            if inspect.iscoroutine(result):
+                asyncio.create_task(result)
         except Exception:
             return
-        bridge_home = None
-        try:
-            api = getattr(self.ports, "api", None)
-            global_config = getattr(api, "global_config", None)
-            bridge_home = getattr(global_config, "bridge_home", None)
-        except Exception:
-            bridge_home = None
-        owner = str(getattr(call, "owner", "") or "")
-        if not owner:
-            return
-
-        def _run() -> None:
-            try:
-                if kind == "started":
-                    agent_presence_notify.call_started(bridge_home, owner)
-                else:
-                    agent_presence_notify.call_ended(bridge_home, owner)
-            except Exception:
-                pass
-
-        try:
-            asyncio.get_running_loop()
-            asyncio.create_task(asyncio.to_thread(_run))
-        except RuntimeError:
-            _run()
 
     def _view(self, call):
         turn = {
@@ -949,6 +948,7 @@ class CallService:
                 started=self.clock(),
                 allow_cloud=True,
                 locale=call_locale(body.get("locale")),
+                frontend_subscribers=self._frontend_subscribers(owner, binding),
             )
             call.video_policy = context["video_policy"]
             video_requested = body.get("video_requested", False)
@@ -964,7 +964,7 @@ class CallService:
             # No awaits between busy check and reservation (one event-loop owner).
             self.calls[call_id] = call
             emit("call_started", **self._facts(call), phase=call.phase)
-            self._companion_notify(call, "started")
+            self._emit_frontend_event(call, "call.started")
             opening = getattr(self.ports, "opening", None)
             if callable(opening):
                 call.turn = {
@@ -1951,6 +1951,12 @@ class CallService:
                     segment=index,
                     cached=True,
                     response_bytes=_speech_asset_bytes(result),
+                )
+                self._emit_frontend_event(
+                    call,
+                    "call.speech",
+                    segment=index,
+                    asset=result,
                 )
                 for old in sorted(call.speech_cache)[:-2]:
                     call.speech_cache.pop(old, None)

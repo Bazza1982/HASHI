@@ -411,6 +411,61 @@ def test_whatsapp_switch_is_central_and_independent(tmp_path, no_transport_dispa
     assert _run_command(runtime, "/telegram")["telegram_mirror"] is True
 
 
+def test_agentpresence_switch_defaults_off_and_is_owner_scoped(
+    tmp_path, no_transport_dispatch
+):
+    from orchestrator.command_registry import load_runtime_commands
+    from orchestrator.connector_delivery_preferences import get_connector_preference
+
+    runtime = _fake_runtime(tmp_path)
+    initial = _run_command(runtime, "/agentpresence")
+    assert initial["ok"] is True
+    assert initial["messages"]
+    assert (
+        get_connector_preference(
+            tmp_path, "owner-a", "agentpresence", "mirror", default=False
+        )
+        is False
+    )
+    changed = _run_command(runtime, "/agentpresence on")
+    assert changed["ok"] is True
+    assert (
+        get_connector_preference(
+            tmp_path, "owner-a", "agentpresence", "mirror", default=False
+        )
+        is True
+    )
+    assert _run_command(runtime, "/agentpresence", owner="owner-b")["ok"] is True
+    assert (
+        get_connector_preference(
+            tmp_path, "owner-b", "agentpresence", "mirror", default=False
+        )
+        is False
+    )
+    english = asyncio.run(
+        alt.try_execute_slash_command_text(
+            runtime,
+            "/agentpresence",
+            source_channel="remote",
+            session_metadata={"owner_id": "owner-a", "ui_locale": "en"},
+        )
+    )
+    chinese = asyncio.run(
+        alt.try_execute_slash_command_text(
+            runtime,
+            "/agentpresence",
+            source_channel="api_chat",
+            session_metadata={"owner_id": "owner-a", "ui_locale": "zh-CN"},
+        )
+    )
+    assert "AGENTPRESENCE MIRROR" in english["messages"][0]["text"]
+    assert "智能体在场镜像" in chinese["messages"][0]["text"]
+    command = next(
+        item for item in load_runtime_commands() if item.name == "agentpresence"
+    )
+    assert command.callback.__module__ == "orchestrator.commands.agentpresence"
+
+
 @pytest.mark.asyncio
 async def test_native_telegram_switch_uses_same_default_owner(tmp_path):
     from orchestrator.commands.telegram import telegram_command, whatsapp_command

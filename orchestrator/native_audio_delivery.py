@@ -128,6 +128,17 @@ async def dispatch_persisted_audio_event(
     if not isinstance(target, Mapping):
         return False, False
 
+    from orchestrator.frontend_optional_egress import (
+        schedule_persisted_frontend_media_event,
+    )
+
+    schedule_persisted_frontend_media_event(
+        runtime,
+        target=target,
+        owner_id=owner_id,
+        source_event_id=str(source_event_id),
+    )
+
     from orchestrator.frontend_connector_registry import endpoint_id_for
 
     endpoint_id = endpoint_id_for(

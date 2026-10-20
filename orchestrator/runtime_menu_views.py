@@ -1349,6 +1349,26 @@ def whatsapp_menu_text(*, enabled: bool) -> str:
     )
 
 
+def agentpresence_menu_text(*, enabled: bool, notice: str | None = None) -> str:
+    facts = [
+        _fact("common.scope", html.escape(_tr("menu.agentpresence.scope")))
+    ]
+    if notice:
+        facts.insert(0, f"✅ {html.escape(str(notice))}")
+    return setting_card(
+        "🖥️",
+        _tr("menu.agentpresence.title"),
+        current=f"<b>{status_label(enabled)}</b>",
+        facts=facts,
+        consequence=(
+            _tr("menu.agentpresence.enabled")
+            if enabled
+            else _tr("menu.agentpresence.disabled")
+        ),
+        action=_tr("menu.agentpresence.action"),
+    )
+
+
 def telegram_keyboard(*, enabled: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [

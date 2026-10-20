@@ -383,56 +383,6 @@ def _record_standard_telegram_receipt(
     )
 
 
-_AP_VOICE_MAX_BYTES = 25 * 1024 * 1024
-
-
-def _mirror_voice_to_companion(
-    runtime: Any,
-    *,
-    owner_id: str,
-    audio_bytes: bytes,
-    mime_type: str,
-    request_id: str,
-) -> None:
-    """Mirror one delivered voice asset to the local desktop companion.
-
-    Fire-and-forget and fail-open: the companion is an optional local sink and
-    must never delay or break Telegram delivery.
-    """
-    try:
-        from orchestrator import agent_presence_notify
-    except Exception:
-        return
-    bridge_home = getattr(
-        getattr(runtime, "global_config", None), "bridge_home", None
-    )
-    logger = getattr(runtime, "telegram_logger", None) or getattr(
-        runtime, "error_logger", None
-    )
-
-    def _run() -> None:
-        try:
-            delivered = agent_presence_notify.voice_bytes(
-                bridge_home, owner_id, audio_bytes, mime_type
-            )
-        except Exception:
-            return
-        if not delivered and logger is not None:
-            try:
-                logger.debug(
-                    "agent-presence voice mirror skipped for request_id=%s",
-                    request_id,
-                )
-            except Exception:
-                pass
-
-    try:
-        asyncio.get_running_loop()
-        asyncio.create_task(asyncio.to_thread(_run))
-    except RuntimeError:
-        _run()
-
-
 async def _send_standard_event_media_to_telegram(
     runtime: Any,
     *,
@@ -548,22 +498,6 @@ async def _send_standard_event_media_to_telegram(
             with upload_path.open("rb") as handle:
                 kwargs[field] = handle
                 sent_message = await method(**kwargs)
-            if normalized_role in {"voice", "voice_message"}:
-                try:
-                    if upload_path.stat().st_size <= _AP_VOICE_MAX_BYTES:
-                        _mirror_voice_to_companion(
-                            runtime,
-                            owner_id=owner_id,
-                            audio_bytes=upload_path.read_bytes(),
-                            mime_type=(
-                                "audio/ogg"
-                                if derivative is not None
-                                else mime_type
-                            ),
-                            request_id=request_id,
-                        )
-                except OSError:
-                    pass
         finally:
             if derivative is not None:
                 derivative.unlink(missing_ok=True)

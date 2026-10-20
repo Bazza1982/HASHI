@@ -264,6 +264,26 @@ admission, so switching later does not replay or redirect it. Automatic
 WhatsApp mirrors require exactly one configured allowed personal number; the
 transport's ordinary replies still use their original chat endpoint.
 
+AgentPresence is an optional local desktop-companion egress Connector. Its
+owner-scoped `/agentpresence on|off` preference defaults off and is shared by
+existing and future Agents through the connector-neutral preference store. The
+public command is discovered from the shared RuntimeCommand registry; it is not
+a Telegram command implementation or a Backend/API special case. All
+command-capable Connectors may invoke it through their existing command adapter.
+
+When enabled, PAO freezes AgentPresence as an optional media destination at Run
+admission. Canonical reply voice then receives its own outbox task and receipt;
+Telegram, Workbench and other destination delivery succeed or fail independently.
+The Workbench-only `/call` owner separately emits connector-neutral, ephemeral
+call-start, call-end and synthesized-speech events through its Call port. The
+AgentPresence adapter may subscribe to those events, but enabling it neither
+exposes `/call` on another Connector nor makes Workbench its transport.
+
+The companion authenticates with its local token; missing tokens, an absent
+companion, timeouts and rejected requests fail open and never change call or any
+other Connector's delivery outcome. AgentPresence owns no ingress, Session,
+Message, Run, Event, call or voice authority, and output audio is capped at 25 MB.
+
 TUI queue/typing state is an ephemeral Connector projection fenced by instance
 generation, Agent, Session, Run and request identity. Durable Run status and
 matching transcript metadata may advance or clear it; errors, terminal states,

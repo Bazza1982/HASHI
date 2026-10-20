@@ -414,7 +414,10 @@ def publish_frontend_message(
             channel_key=str(channel_key),
             explicit_session_id=explicit_session_id,
         )
-    from orchestrator.frontend_delivery import freeze_run_delivery_route
+    from orchestrator.frontend_delivery import (
+        configured_owner_mirror_destinations,
+        freeze_run_delivery_route,
+    )
 
     delivery_route = freeze_run_delivery_route(
         message_source_id=normalized_surface,
@@ -422,6 +425,10 @@ def publish_frontend_message(
         session_channel_key=str(channel_key),
         chat_id=str(channel_key),
         telegram_requested=normalized_surface == "telegram",
+        additional_mirrors=configured_owner_mirror_destinations(
+            request_metadata={"owner_id": resolved_owner},
+            state_root=getattr(runtime.global_config, "bridge_home", None),
+        ),
     )
     message = store.append_presentation_message(
         session_id=session["session_id"],
@@ -540,7 +547,10 @@ def publish_frontend_media_notification(
         owner_id=resolved_owner,
         attachment_id=str(attachment["attachment_id"]),
     )
-    from orchestrator.frontend_delivery import freeze_run_delivery_route
+    from orchestrator.frontend_delivery import (
+        configured_owner_mirror_destinations,
+        freeze_run_delivery_route,
+    )
     from orchestrator.frontend_projection import (
         build_frontend_presentation_context,
     )
@@ -551,6 +561,10 @@ def publish_frontend_media_notification(
         session_channel_key=str(channel_key),
         chat_id=str(channel_key),
         telegram_requested=normalized_surface == "telegram",
+        additional_mirrors=configured_owner_mirror_destinations(
+            request_metadata={"owner_id": resolved_owner},
+            state_root=getattr(runtime.global_config, "bridge_home", None),
+        ),
     )
     message = store.append_presentation_message(
         session_id=str(session["session_id"]),
@@ -585,13 +599,27 @@ def publish_frontend_media_notification(
         outbox=True,
         delivery_route=route,
     )
-    return {
+    publication = {
         **message,
         "owner_id": resolved_owner,
         "surface": normalized_surface,
         "channel_key": str(channel_key),
         "attachment_id": str(attachment["attachment_id"]),
     }
+    from orchestrator.frontend_optional_egress import (
+        schedule_persisted_frontend_media_event,
+    )
+
+    schedule_persisted_frontend_media_event(
+        runtime,
+        target={
+            "session_id": str(message["session_id"]),
+            "event_id": str(message["delivery_event_id"]),
+        },
+        owner_id=resolved_owner,
+        source_event_id=str(message["delivery_event_id"]),
+    )
+    return publication
 
 
 def publish_frontend_media_notification_for_update(

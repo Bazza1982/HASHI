@@ -59,6 +59,9 @@ class Ports:
         self.level = 1
         self.valid = True
         self.finished = True
+        self.frontend_subscribers_value = ()
+        self.frontend_events = []
+        self.frontend_error = None
 
     def validate(self, owner, binding):
         if not self.valid or owner != "owner":
@@ -69,6 +72,24 @@ class Ports:
 
     def phone_busy(self, owner):
         return self.phone
+
+    def frontend_subscribers(self, owner, binding):
+        return self.frontend_subscribers_value
+
+    def emit_frontend_event(
+        self, owner, binding, kind, *, subscribers=(), payload=None
+    ):
+        self.frontend_events.append(
+            {
+                "owner": owner,
+                "binding": dict(binding),
+                "kind": kind,
+                "subscribers": tuple(subscribers),
+                "payload": dict(payload or {}),
+            }
+        )
+        if self.frontend_error is not None:
+            raise self.frontend_error
 
     async def admit(
         self, owner, binding, turn, text, observation, captured_at, frames=()
@@ -890,7 +911,8 @@ async def test_uncertain_or_mixed_cloud_evidence_retains_a_short_spoken_word(
 
 
 async def test_verified_media_providers_follow_the_turn_and_speech_result(tmp_path):
-    service, _ports, adapters, base, _clock = setup(tmp_path)
+    service, ports, adapters, base, _clock = setup(tmp_path)
+    ports.frontend_subscribers_value = ("optional-sink",)
     adapters.stt_receipt = {
         "gateway": "OpenRouter",
         "actual_provider": "Groq",
@@ -923,6 +945,12 @@ async def test_verified_media_providers_follow_the_turn_and_speech_result(tmp_pa
     assert (await service.invoke("owner", speech))["provider_receipt"] == (
         adapters.tts_receipt
     )
+    assert [event["kind"] for event in ports.frontend_events] == [
+        "call.started",
+        "call.speech",
+    ]
+    assert ports.frontend_events[-1]["payload"]["segment"] == 0
+    assert ports.frontend_events[-1]["payload"]["asset"]["media_type"] == "audio/wav"
     await service.close()
 
 
@@ -1429,3 +1457,33 @@ async def test_unknown_fields_never_reach_adapters(tmp_path):
                 "owner", {**base, "operation": "context", field: "injected"}
             )
     assert not adapters.stt
+
+
+async def test_call_emits_connector_neutral_frontend_events_fail_open(tmp_path):
+    service, ports, _adapters, base, _clock = setup(tmp_path)
+    ports.frontend_subscribers_value = ("optional-sink",)
+
+    binding, _body, started = await start(service, base)
+    assert started["phase"] == "active"
+    assert ports.frontend_events == [
+        {
+            "owner": "owner",
+            "binding": {
+                "agent_id": "agent-a",
+                "session_id": "sess-a",
+                "context_generation": 1,
+                "client_id": "client-1",
+                "call_id": "call-1",
+            },
+            "kind": "call.started",
+            "subscribers": ("optional-sink",),
+            "payload": {},
+        }
+    ]
+
+    ports.frontend_error = OSError("optional sink disappeared")
+    ended = await service.invoke("owner", {**binding, "operation": "end"})
+    assert ended["phase"] == "ended"
+    assert ports.frontend_events[-1]["kind"] == "call.ended"
+    assert ports.frontend_events[-1]["payload"]["reason"] == "explicit_end"
+    await service.close()

@@ -1182,6 +1182,7 @@ class FlexibleAgentRuntime:
         )
         from orchestrator.frontend_delivery import (
             RUN_DELIVERY_ROUTE_METADATA_KEY,
+            configured_owner_mirror_destinations,
             configured_whatsapp_mirror_channel,
             freeze_run_delivery_route,
             normalize_run_delivery_route,
@@ -1373,6 +1374,10 @@ class FlexibleAgentRuntime:
             connector_id="whatsapp",
             default=False,
         )
+        owner_mirror_destinations = configured_owner_mirror_destinations(
+            request_metadata={**metadata, "owner_id": resolved_owner},
+            state_root=getattr(self.global_config, "bridge_home", None),
+        )
         if source_fact["id"] == "whatsapp" and telegram_requested:
             chat_id = int(getattr(self.global_config, "authorized_id", 0) or 0)
         delivery_route = freeze_run_delivery_route(
@@ -1385,6 +1390,7 @@ class FlexibleAgentRuntime:
             whatsapp_channel_key=whatsapp_channel,
             primary_channel_key=primary_channel_key,
             terminal_exchange=bool(metadata.get("system_exchange_terminal")),
+            additional_mirrors=owner_mirror_destinations,
         )
         parent_run_id = str(metadata.get("parent_run_id") or "").strip()
         parent_request_id = str(
@@ -1441,6 +1447,7 @@ class FlexibleAgentRuntime:
                             terminal_exchange=bool(
                                 metadata.get("system_exchange_terminal")
                             ),
+                            additional_mirrors=owner_mirror_destinations,
                         )
         metadata[RUN_DELIVERY_ROUTE_METADATA_KEY] = delivery_route
         # The legacy execution flag is now only a derived instruction to the
