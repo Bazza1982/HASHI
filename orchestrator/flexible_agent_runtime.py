@@ -377,6 +377,8 @@ class FlexibleAgentRuntime:
             ffmpeg_cmd="ffmpeg",
             secrets=self.secrets,
             native_capabilities=list(config.allowed_backends or ()),
+            catalog_path=Path(self.global_config.project_root) / "voice_catalog.json",
+            project_root=Path(self.global_config.project_root),
         )
         self.phone_manager = PhoneManager(self.workspace_dir)
         self._authorized_telegram_ids = resolve_authorized_telegram_ids(self.config.extra, self.global_config.authorized_id)
@@ -4061,8 +4063,21 @@ class FlexibleAgentRuntime:
         return InlineKeyboardMarkup(rows)
 
     def _voice_keyboard(self, view: str = "main") -> InlineKeyboardMarkup:
-        if view == "voices":
+        if view == "voices" or view.startswith("voices:"):
+            try:
+                requested_page = int(view.partition(":")[2] or "0")
+            except ValueError:
+                requested_page = 0
             active_alias = self.voice_manager.get_active_preset_alias()
+            available = [
+                (alias, preset)
+                for alias, preset, availability in self.voice_manager.get_voice_presets()
+                if availability == "ready"
+            ]
+            page_size = 12
+            total_pages = max(1, (len(available) + page_size - 1) // page_size)
+            page = min(max(0, requested_page), total_pages - 1)
+            visible = available[page * page_size : (page + 1) * page_size]
             rows = [
                 [
                     InlineKeyboardButton(
@@ -4073,9 +4088,25 @@ class FlexibleAgentRuntime:
                         callback_data=f"voice:use:{alias}",
                     )
                 ]
-                for alias, _preset, availability in self.voice_manager.get_voice_presets()
-                if availability == "ready"
+                for alias, _preset in visible
             ]
+            navigation = []
+            if page:
+                navigation.append(
+                    InlineKeyboardButton(
+                        ui_language.tr("voice.tts.previous"),
+                        callback_data=f"voice:page:{page - 1}",
+                    )
+                )
+            if page + 1 < total_pages:
+                navigation.append(
+                    InlineKeyboardButton(
+                        ui_language.tr("voice.tts.next"),
+                        callback_data=f"voice:page:{page + 1}",
+                    )
+                )
+            if navigation:
+                rows.append(navigation)
             rows.append(
                 [
                     InlineKeyboardButton(
@@ -4739,6 +4770,18 @@ class FlexibleAgentRuntime:
             )
             await query.answer()
             return
+        if action == "page":
+            try:
+                page = max(0, int(value))
+            except ValueError:
+                page = 0
+            await query.edit_message_text(
+                self.voice_manager.voice_choice_menu_text(),
+                reply_markup=self._voice_keyboard(f"voices:{page}"),
+                parse_mode="HTML",
+            )
+            await query.answer()
+            return
         if action == "back":
             await query.edit_message_text(
                 self.voice_manager.voice_menu_text(),
@@ -4768,7 +4811,16 @@ class FlexibleAgentRuntime:
                 )
             elif action == "use":
                 message = self.voice_manager.apply_voice_preset(value)
-                render_view = "voices"
+                aliases = [
+                    alias
+                    for alias, _preset, availability in self.voice_manager.get_voice_presets()
+                    if availability == "ready"
+                ]
+                try:
+                    page = aliases.index(value) // 12
+                except ValueError:
+                    page = 0
+                render_view = f"voices:{page}"
                 preview_preset = value
         except Exception as e:
             await query.answer(str(e), show_alert=True)
@@ -4795,7 +4847,7 @@ class FlexibleAgentRuntime:
             )
         text = (
             self.voice_manager.voice_choice_menu_text()
-            if render_view == "voices"
+            if render_view.startswith("voices")
             else self.voice_manager.voice_menu_text()
         )
         await query.edit_message_text(

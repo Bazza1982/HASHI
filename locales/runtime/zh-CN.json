@@ -1455,6 +1455,8 @@
     "voice.tts.title": "默认 TTS 语音",
     "voice.tts.choose": "🗣️ 选择默认 TTS 语音",
     "voice.tts.back": "← 返回语音菜单",
+    "voice.tts.previous": "← 上一页",
+    "voice.tts.next": "下一页 →",
     "voice.tts.language_rule": "所选语音支持当前文字语言时，优先使用所选语音。",
     "voice.tts.english_rule": "所有语音都兼容英语，也会保留符合当地习惯的口音。",
     "voice.tts.temporary_rule": "当另一种语言占文字的 90% 以上时，HASHI 会临时改用同一服务内兼容的语音，不改写此默认设置。",

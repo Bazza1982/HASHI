@@ -239,5 +239,7 @@ exp/barry/aonsw_data_analysis/
 
 # Instance-only call target URLs and per-Agent choices.
 call_profiles.json
+# Instance-only TTS services and voice menu entries.
+voice_catalog.json
 # Instance-only local/LAN/internet compute nodes and credential references.
 compute_services.json

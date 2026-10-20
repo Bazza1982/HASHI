@@ -189,8 +189,10 @@ Agent deletion/cleanup receipts.
 three, oldest first. Skip cost/command/progress. Telegram needs a receipt;
 Workbench/TUI play locally; reboot receipts never prove playback.
 
-`/voice` logs omit secrets. Exact local/LAN Compute TTS references store no
-endpoint or implicit fallback. See
+`/voice` logs omit secrets. Its validated shipped and instance catalogue owns
+services, voices, menu labels, and fallbacks; Agent state stores no endpoint or
+credential. Compatible local, LAN, and cloud TTS services are configuration,
+not vendor modules. See [catalogue](HASHI_VOICE_TTS_CATALOG.md),
 [routing](repairs/TTS_LANGUAGE_ROUTING_DECISION_20261015.md) and
 [fallback](repairs/VOICE_PROVIDER_FALLBACK_REPAIR_20261014.md).
 

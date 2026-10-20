@@ -1455,6 +1455,8 @@
     "voice.tts.title": "Default TTS voice",
     "voice.tts.choose": "🗣️ Choose default TTS voice",
     "voice.tts.back": "← Back to Voice",
+    "voice.tts.previous": "← Previous",
+    "voice.tts.next": "Next →",
     "voice.tts.language_rule": "The selected voice is used whenever it supports the detected text language.",
     "voice.tts.english_rule": "English is compatible with every voice, including local accents.",
     "voice.tts.temporary_rule": "For strongly different text (90% or more), HASHI temporarily uses a compatible voice from the same provider without changing this default.",

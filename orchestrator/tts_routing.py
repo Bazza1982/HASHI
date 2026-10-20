@@ -89,66 +89,6 @@ class TTSRoute:
         }
 
 
-_PROVIDER_PROFILES: dict[str, dict[str, Any]] = {
-    # These future provider entries make the downgrade policy explicit before
-    # those paid engines are registered as ordinary HASHI TTS providers.
-    "openai": {
-        "cost": "paid",
-        "locality": "network",
-        "style_support": "supported",
-        "fallbacks": ("edge", "windows", "macos", "piper", "kokoro"),
-    },
-    "gemini": {
-        "cost": "paid",
-        "locality": "network",
-        "style_support": "supported",
-        "fallbacks": ("edge", "windows", "macos", "piper", "kokoro"),
-    },
-    "elevenlabs": {
-        "cost": "paid",
-        "locality": "network",
-        "style_support": "supported",
-        "fallbacks": ("edge", "windows", "macos", "piper", "kokoro"),
-    },
-    "edge": {
-        "cost": "free",
-        "locality": "network",
-        "style_support": "unsupported",
-        "fallbacks": ("windows", "macos", "piper", "kokoro"),
-    },
-    "windows": {
-        "cost": "free",
-        "locality": "local",
-        "style_support": "unsupported",
-        "fallbacks": (),
-    },
-    "macos": {
-        "cost": "free",
-        "locality": "local",
-        "style_support": "unsupported",
-        "fallbacks": (),
-    },
-    "piper": {
-        "cost": "free",
-        "locality": "local",
-        "style_support": "unsupported",
-        "fallbacks": (),
-    },
-    "kokoro": {
-        "cost": "free",
-        "locality": "local",
-        "style_support": "unsupported",
-        "fallbacks": (),
-    },
-    "coqui": {
-        "cost": "free",
-        "locality": "local",
-        "style_support": "unknown",
-        "fallbacks": (),
-    },
-}
-
-
 def normalize_language(value: object) -> str | None:
     raw = str(value or "").strip().casefold().replace("_", "-")
     if not raw:
@@ -275,9 +215,12 @@ def assess_text_language(
     )
 
 
-def provider_profile(provider: object) -> dict[str, Any]:
+def provider_profile(
+    provider: object,
+    provider_profiles: Mapping[str, Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
     name = str(provider or "").strip().casefold()
-    profile = _PROVIDER_PROFILES.get(name)
+    profile = (provider_profiles or {}).get(name)
     if profile is not None:
         return {"provider": name, **profile}
     return {
@@ -292,12 +235,13 @@ def provider_profile(provider: object) -> dict[str, Any]:
 def fallback_providers(
     provider: object,
     available_providers: set[str] | frozenset[str] | tuple[str, ...] | list[str],
+    provider_profiles: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> tuple[str, ...]:
     name = str(provider or "").strip().casefold()
     available = {str(item).strip().casefold() for item in available_providers}
     return tuple(
         candidate
-        for candidate in provider_profile(name)["fallbacks"]
+        for candidate in provider_profile(name, provider_profiles)["fallbacks"]
         if candidate in available and candidate != name
     )
 
@@ -345,6 +289,7 @@ def voice_language_profile(
     voice_name: object,
     presets: Mapping[str, Mapping[str, Any]],
     profiles: Mapping[str, Mapping[str, Any]],
+    provider_profiles: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> VoiceLanguageProfile:
     provider_name = str(provider or "").strip().casefold()
     selected_voice = str(voice_name or "").strip() or None
@@ -368,7 +313,9 @@ def voice_language_profile(
         native_languages=(language,) if language else (),
         english_compatible=True,
         other_languages_unsupported=strict,
-        style_support=str(provider_profile(provider_name)["style_support"]),
+        style_support=str(
+            provider_profile(provider_name, provider_profiles)["style_support"]
+        ),
         source=source,
     )
 
@@ -427,6 +374,7 @@ def resolve_tts_route(
     source_language: object,
     presets: Mapping[str, Mapping[str, Any]],
     profiles: Mapping[str, Mapping[str, Any]],
+    provider_profiles: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> TTSRoute:
     provider_name = str(provider or "").strip().casefold()
     selected_voice = str(voice_name or "").strip() or None
@@ -437,6 +385,7 @@ def resolve_tts_route(
         voice_name=selected_voice,
         presets=presets,
         profiles=profiles,
+        provider_profiles=provider_profiles,
     )
     preferred_language = (
         selected_capability.native_languages[0]

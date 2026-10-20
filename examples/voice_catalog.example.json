@@ -1,0 +1,72 @@
+{
+  "version": 1,
+  "services": [
+    {
+      "id": "lan-kokoro",
+      "adapter": "openai_compatible",
+      "label": "LAN Kokoro",
+      "menu_label": "LAN Kokoro",
+      "location": "lan",
+      "base_url": "http://192.168.1.50:8000/v1",
+      "model": "kokoro-82m",
+      "audio_format": "wav",
+      "style_support": "unsupported",
+      "fallbacks": [
+        "edge"
+      ]
+    },
+    {
+      "id": "cloud-speech",
+      "adapter": "openai_compatible",
+      "label": "Cloud speech gateway",
+      "menu_label": "Cloud speech",
+      "location": "cloud",
+      "base_url": "https://speech-gateway.example.com/v1",
+      "model": "multilingual-v2",
+      "audio_format": "mp3",
+      "credential_ref": "secrets://cloud_tts_api_key",
+      "style_support": "unknown",
+      "fallbacks": [
+        "lan-kokoro",
+        "edge"
+      ],
+      "timeout_seconds": 25,
+      "max_response_bytes": 16777216
+    }
+  ],
+  "voices": [
+    {
+      "id": "lan_amy",
+      "service": "lan-kokoro",
+      "voice_name": "af_amy",
+      "label": "Amy",
+      "display_names": {
+        "en": "Amy",
+        "zh-CN": "艾米"
+      },
+      "language": "English",
+      "language_labels": {
+        "en": "English (US)",
+        "zh-CN": "美式英语"
+      },
+      "locale": "en-US",
+      "gender": "female"
+    },
+    {
+      "id": "cloud_rachel",
+      "service": "cloud-speech",
+      "voice_name": "rachel",
+      "label": "Rachel",
+      "language": "English",
+      "language_labels": {
+        "en": "English (US)",
+        "zh-CN": "美式英语"
+      },
+      "locale": "en-US",
+      "gender": "female",
+      "provider_options": {
+        "speed": 1.0
+      }
+    }
+  ]
+}

@@ -31,7 +31,7 @@ def test_build_edge_provider_does_not_import_optional_dependency(monkeypatch):
     assert provider.provider_name == "edge"
 
 
-def test_voice_generation_contains_edge_provider_and_isolated_worker():
+def test_voice_generation_contains_configured_providers_catalogue_and_isolated_worker():
     from orchestrator.function_generation import build_source_manifest
 
     root = Path(__file__).resolve().parents[1]
@@ -40,6 +40,14 @@ def test_voice_generation_contains_edge_provider_and_isolated_worker():
         code_root=root,
     )
 
-    assert "orchestrator.tts_providers.edge" in manifest.module_names
-    assert "orchestrator.voice_synthesis_runtime" in manifest.module_names
-    assert "orchestrator.voice_synthesis_worker" in manifest.module_names
+    assert {
+        "orchestrator.openai_compatible_speech",
+        "orchestrator.tts_providers.edge",
+        "orchestrator.tts_providers.openai_compatible",
+        "orchestrator.voice_catalog",
+        "orchestrator.voice_synthesis_runtime",
+        "orchestrator.voice_synthesis_worker",
+    } <= set(manifest.module_names)
+    assert "orchestrator/voice_catalog.default.json" in {
+        asset.relative_path for asset in manifest.assets
+    }
