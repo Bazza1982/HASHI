@@ -290,6 +290,63 @@ def test_hashi_compute_manifest_projects_vision_without_trusting_advertised_orig
     )
 
 
+def test_hashi_compute_manifest_keeps_unavailable_unknown_model_non_authorizing():
+    payload = _hashi_compute_manifest()
+    payload["models"].append(
+        {
+            "id": "zimage",
+            "service_id": "image",
+            "available": False,
+            "availability": "backend_or_model_unavailable",
+            "modalities": {
+                "input": {"text": "unknown", "image": "unknown", "audio": "unknown"},
+                "output": {"text": "unknown", "image": "unknown", "audio": "unknown"},
+            },
+            "interfaces": [
+                {
+                    "path": "/v1/image/generations",
+                    "method": "POST",
+                    "request_encoding": "application/json",
+                    "streaming": {"support": "unsupported", "modes": []},
+                }
+            ],
+            "image": {
+                "support": "unknown",
+                "max_count": None,
+                "max_bytes_each": None,
+                "formats": None,
+            },
+            "audio": {"input_formats": None, "output_formats": None},
+            "features": {
+                "tools": {"support": "unknown"},
+                "thinking": {"support": "unknown"},
+            },
+            "context": {
+                "model_max_tokens": None,
+                "served_context_tokens": None,
+            },
+            "runtime": {
+                "readiness": "unavailable",
+                "busy": None,
+                "at_capacity": None,
+                "in_flight": None,
+            },
+        }
+    )
+
+    snapshot = parse_compute_manifest(_lan_node(), payload)
+    unavailable = snapshot.offering("image", "zimage")
+
+    assert unavailable.enabled is False
+    assert unavailable.status == "unavailable"
+    assert unavailable.input_modalities == frozenset()
+    assert unavailable.output_modalities == frozenset()
+    with pytest.raises(ComputeServiceError, match="service_unavailable"):
+        snapshot.catalogue().resolve(
+            ComputeReference("studio-gpu", "image", "zimage")
+        )
+
+
 def test_hashi_compute_manifest_cannot_change_configured_privacy_boundary():
     payload = _hashi_compute_manifest()
     payload["privacy"]["client_access_location"] = "internet"
@@ -793,4 +850,65 @@ async def test_invocation_client_posts_only_to_resolved_configured_origin():
             resolved,
             "openai.chat.completions",
             {"model": "minicpm-v-4.6", "messages": []},
+        )
+
+
+@pytest.mark.asyncio
+async def test_binary_invocation_keeps_audio_on_the_resolved_configured_origin(
+    monkeypatch,
+):
+    snapshot = parse_compute_manifest(_lan_node(), _formal_manifest())
+    resolved = snapshot.catalogue().resolve(
+        ComputeReference("studio-gpu", "advanced-voice", "minicpm-o-4.5-zh-female")
+    )
+    wav = b"RIFF\x24\x00\x00\x00WAVEfmt "
+    factory = _FakeSessionFactory(
+        _FakeResponse(wav, content_type="audio/wav")
+    )
+
+    payload, content_type = await ComputeServiceClient(
+        session_factory=factory
+    ).invoke_bytes(
+        resolved,
+        "openai.audio.speech",
+        {
+            "model": "minicpm-o-4.5-zh-female",
+            "input": "hello",
+            "voice": "zf_001",
+            "response_format": "wav",
+        },
+    )
+
+    assert payload == wav
+    assert content_type == "audio/wav"
+    assert factory.receipt["url"] == "http://192.168.1.50:19446/v1/audio/speech"
+    assert factory.receipt["allow_redirects"] is False
+    assert factory.receipt["session"]["trust_env"] is False
+
+    monkeypatch.setattr(
+        "orchestrator.compute_services.MAX_AUDIO_RESPONSE_BYTES",
+        len(wav) - 1,
+    )
+    oversized = _FakeSessionFactory(
+        _FakeResponse(wav, content_type="audio/wav")
+    )
+    with pytest.raises(
+        ComputeServiceError,
+        match="compute_invocation_response_too_large",
+    ):
+        await ComputeServiceClient(session_factory=oversized).invoke_bytes(
+            resolved,
+            "openai.audio.speech",
+            {"model": "minicpm-o-4.5-zh-female", "input": "hello"},
+        )
+
+    wrong_type = _FakeSessionFactory(_FakeResponse({}, content_type="application/json"))
+    with pytest.raises(
+        ComputeServiceError,
+        match="compute_invocation_content_type_invalid",
+    ):
+        await ComputeServiceClient(session_factory=wrong_type).invoke_bytes(
+            resolved,
+            "openai.audio.speech",
+            {"model": "minicpm-o-4.5-zh-female", "input": "hello"},
         )

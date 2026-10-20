@@ -189,18 +189,16 @@ Agent deletion/cleanup receipts.
 three, oldest first. Skip cost/command/progress. Telegram needs a receipt;
 Workbench/TUI play locally; reboot receipts never prove playback.
 
-TTS logs omit secrets. `/voice` selects labelled voice/preview; >=90%
-unsupported text switches within provider (English exempt). Workbench uses its
-display locale, others `/language`. Visible fallback is paid/network to
-free/local only; Windows Edge may use named SAPI. `/call` is unchanged. See
-[routing](repairs/TTS_LANGUAGE_ROUTING_DECISION_20261015.md). AgentPresence is
-a default-off, owner-scoped, fail-open local FC output. Its shared command,
-durable voice outbox and Workbench-only Call event subscription remain separate
-from Telegram and from one another. Call start/end drive the away/return
-animation while Call audio stays with its initiating frontend; only non-call
-voice replies use AgentPresence's phone-reply playback. See
-[FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md) and
+`/voice` logs omit secrets. Exact local/LAN Compute TTS references store no
+endpoint or implicit fallback. See
+[routing](repairs/TTS_LANGUAGE_ROUTING_DECISION_20261015.md) and
 [fallback](repairs/VOICE_PROVIDER_FALLBACK_REPAIR_20261014.md).
+
+AgentPresence is default-off, owner-scoped and fail-open. Its command, voice
+outbox, Telegram, and Workbench Call subscription are independent. Call
+start/end drive away/return; only the initiating frontend plays Call audio.
+Non-call `/voice` uses phone-reply playback. See
+[FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md).
 
 Deploys add Edge/Kokoro/SAPI without changing settings; the 957 MB portable keeps
 Edge/SAPI/Piper, omits Kokoro/Torch. See

@@ -37,6 +37,7 @@ COMPUTE_CONFIG_VERSION = 1
 DEFAULT_COMPUTE_MANIFEST_PATH = "/.well-known/hashi-compute"
 MAX_MANIFEST_BYTES = 2 * 1024 * 1024
 MAX_INFERENCE_RESPONSE_BYTES = 4 * 1024 * 1024
+MAX_AUDIO_RESPONSE_BYTES = 32 * 1024 * 1024
 MAX_NODES = 64
 MAX_SERVICES = 256
 MAX_MODELS_PER_SERVICE = 512
@@ -971,7 +972,9 @@ def _status(value: Any, *, default: str = "unknown") -> str:
     return normalized
 
 
-def _hashi_compute_modalities(value: Any) -> frozenset[str]:
+def _hashi_compute_modalities(
+    value: Any, *, allow_unknown: bool = False
+) -> frozenset[str]:
     if not isinstance(value, Mapping):
         raise ComputeServiceError("manifest_capabilities_invalid")
     supported: set[str] = set()
@@ -980,15 +983,21 @@ def _hashi_compute_modalities(value: Any) -> frozenset[str]:
         status = _status(raw_status)
         if status == "supported":
             supported.add(name)
+        elif status == "unknown" and allow_unknown:
+            continue
         elif status != "unsupported":
             raise ComputeServiceError("manifest_capabilities_invalid")
     return frozenset(supported)
 
 
-def _hashi_compute_feature(value: Any) -> bool:
+def _hashi_compute_feature(
+    value: Any, *, allow_unknown: bool = False
+) -> bool | None:
     if not isinstance(value, Mapping):
         raise ComputeServiceError("manifest_capabilities_invalid")
     support = _status(value.get("support"))
+    if support == "unknown" and allow_unknown:
+        return None
     if support not in {"supported", "unsupported"}:
         raise ComputeServiceError("manifest_capabilities_invalid")
     return support == "supported"
@@ -1160,9 +1169,13 @@ def _parse_hashi_compute_manifest(
         modalities = model.get("modalities")
         if not isinstance(modalities, Mapping):
             raise ComputeServiceError("manifest_capabilities_incomplete")
-        inputs = _hashi_compute_modalities(modalities.get("input"))
-        outputs = _hashi_compute_modalities(modalities.get("output"))
-        if not inputs or not outputs:
+        inputs = _hashi_compute_modalities(
+            modalities.get("input"), allow_unknown=not available
+        )
+        outputs = _hashi_compute_modalities(
+            modalities.get("output"), allow_unknown=not available
+        )
+        if available and (not inputs or not outputs):
             raise ComputeServiceError("manifest_capabilities_invalid")
 
         image_raw = model.get("image")
@@ -1187,7 +1200,9 @@ def _parse_hashi_compute_manifest(
                     code="manifest_capabilities_invalid",
                 ),
             )
-        elif image_support == "unsupported":
+        elif image_support == "unsupported" or (
+            not available and image_support == "unknown"
+        ):
             image_limits = ComputeImageLimits()
         else:
             raise ComputeServiceError("manifest_capabilities_invalid")
@@ -1216,8 +1231,12 @@ def _parse_hashi_compute_manifest(
         features = model.get("features")
         if not isinstance(features, Mapping):
             raise ComputeServiceError("manifest_capabilities_incomplete")
-        tools = _hashi_compute_feature(features.get("tools"))
-        thinking = _hashi_compute_feature(features.get("thinking"))
+        tools = _hashi_compute_feature(
+            features.get("tools"), allow_unknown=not available
+        )
+        thinking = _hashi_compute_feature(
+            features.get("thinking"), allow_unknown=not available
+        )
         context_raw = model.get("context")
         if not isinstance(context_raw, Mapping):
             raise ComputeServiceError("manifest_capabilities_incomplete")
@@ -1665,6 +1684,70 @@ class ComputeServiceClient:
         except (aiohttp.ClientError, OSError, TimeoutError) as exc:
             raise ComputeServiceError("compute_node_unreachable") from exc
 
+    async def invoke_bytes(
+        self,
+        resolved: ResolvedComputeService,
+        protocol: str,
+        payload: Mapping[str, Any],
+    ) -> tuple[bytes, str]:
+        """POST JSON to one resolved interface and return bounded audio bytes."""
+
+        if not isinstance(resolved, ResolvedComputeService) or not isinstance(
+            payload, Mapping
+        ):
+            raise ComputeServiceError("compute_invocation_invalid")
+        interface = resolved.offering.interface(protocol)
+        if interface.method != "POST":
+            raise ComputeServiceError("compute_interface_method_invalid")
+        node = resolved.snapshot.node
+        headers = {
+            **self._headers(node),
+            "Accept": "audio/*, application/octet-stream",
+            "Content-Type": "application/json",
+        }
+        try:
+            async with self.session_factory(
+                timeout=aiohttp.ClientTimeout(total=node.timeout_seconds),
+                trust_env=False,
+            ) as session:
+                async with session.post(
+                    resolved.interface_url(protocol),
+                    headers=headers,
+                    json=dict(payload),
+                    allow_redirects=False,
+                ) as response:
+                    if response.status != 200:
+                        raise ComputeServiceError("compute_invocation_rejected")
+                    media_type = response.headers.get("Content-Type", "").split(";", 1)[
+                        0
+                    ].casefold()
+                    if not (
+                        media_type.startswith("audio/")
+                        or media_type == "application/octet-stream"
+                    ):
+                        raise ComputeServiceError(
+                            "compute_invocation_content_type_invalid"
+                        )
+                    chunks: list[bytes] = []
+                    total = 0
+                    async for chunk in response.content.iter_chunked(16384):
+                        total += len(chunk)
+                        if total > MAX_AUDIO_RESPONSE_BYTES:
+                            raise ComputeServiceError(
+                                "compute_invocation_response_too_large"
+                            )
+                        chunks.append(chunk)
+            result = b"".join(chunks)
+            if not result:
+                raise ComputeServiceError("compute_invocation_response_invalid")
+            return result, media_type
+        except asyncio.CancelledError:
+            raise
+        except ComputeServiceError:
+            raise
+        except (aiohttp.ClientError, OSError, TimeoutError) as exc:
+            raise ComputeServiceError("compute_node_unreachable") from exc
+
     async def probe_health(
         self,
         node: ComputeNode,
@@ -1756,6 +1839,7 @@ __all__ = [
     "DEFAULT_COMPUTE_MANIFEST_PATH",
     "COMPUTE_MANIFEST_SCHEMA",
     "COMPUTE_MANIFEST_VERSION",
+    "MAX_AUDIO_RESPONSE_BYTES",
     "MAX_INFERENCE_RESPONSE_BYTES",
     "HASHI_COMPUTE_MANIFEST_FORMAT",
     "HASHI_COMPUTE_MANIFEST_VERSION",

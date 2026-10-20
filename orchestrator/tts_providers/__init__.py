@@ -3,11 +3,13 @@ import sys
 
 from orchestrator.tts_providers.coqui import CoquiProvider
 from orchestrator.tts_providers.edge import EdgeTTSProvider
+from orchestrator.tts_providers.hashi_compute import HashiComputeTTSProvider
 from orchestrator.tts_providers.kokoro import KokoroProvider
 from orchestrator.tts_providers.piper import PiperProvider
 
 PROVIDER_REGISTRY: dict[str, type] = {
     "edge": EdgeTTSProvider,
+    "hashi_compute": HashiComputeTTSProvider,
     "piper": PiperProvider,
     "kokoro": KokoroProvider,
     "coqui": CoquiProvider,

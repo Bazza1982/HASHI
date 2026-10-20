@@ -71,6 +71,7 @@ def _provider_label(provider_name: str) -> str:
         "piper": "Piper TTS",
         "kokoro": "Kokoro TTS",
         "coqui": "Coqui TTS",
+        "hashi_compute": "Hashi Compute TTS",
     }.get(str(provider_name or "").strip().casefold(), f"{provider_name or 'TTS'} provider")
 
 
@@ -668,6 +669,16 @@ class VoiceManager:
             )
         if name == "coqui":
             return f"not installed in Python {sys.version_info.major}.{sys.version_info.minor}"
+        if name == "hashi_compute":
+            try:
+                from orchestrator.compute_services import ComputeServicesConfig
+
+                _doc, nodes = ComputeServicesConfig(
+                    self.PROJECT_ROOT / "compute_services.json"
+                ).read()
+            except Exception:
+                return "not configured"
+            return "configured" if any(node.enabled for node in nodes) else "disabled"
         return "unknown"
 
     def _preset_payload(self, alias: str) -> dict | None:
@@ -1064,6 +1075,7 @@ class VoiceManager:
         "piper": "Piper",
         "kokoro": "Kokoro",
         "coqui": "Coqui",
+        "hashi_compute": "Hashi Compute",
     }
 
     def voice_preset_menu_label(self, alias: str, *, locale: str | None = None) -> str:
@@ -1668,6 +1680,7 @@ class VoiceManager:
             f"- piper: local Piper CLI/model [{self._provider_status('piper')}]\n"
             f"- kokoro: Kokoro Python package [{self._provider_status('kokoro')}]\n"
             f"- coqui: Coqui TTS Python package [{self._provider_status('coqui')}]\n"
+            f"- hashi_compute: exact configured local/LAN service [{self._provider_status('hashi_compute')}]\n"
         )
 
     def apply_voice_preset(self, alias: str) -> str:

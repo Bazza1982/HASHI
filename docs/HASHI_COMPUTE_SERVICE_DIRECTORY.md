@@ -138,6 +138,12 @@ configured public node origin. Compatibility is visible as
 neither is represented as compliance with the separate normative
 `hashi.compute.capabilities` schema.
 
+An explicitly unavailable compatibility model may report `unknown` modality,
+image, tool, or thinking support. The directory retains that model only as a
+disabled, non-authorizing observation instead of rejecting otherwise healthy
+services from the same manifest. An available model remains subject to the
+strict capability checks above.
+
 ## Resolution and availability
 
 A durable consumer selection is the structured tuple `node_id`, `service_id`,
@@ -165,6 +171,21 @@ selections are migrated deliberately. This change does not rewrite saved
 profiles, create a Workbench page, start a polling daemon, or adopt a running
 Worker by itself. Each consumer migration must preserve its own persistence,
 failure, and live-acceptance tests.
+
+### Ordinary `/voice` TTS consumer
+
+The `hashi_compute` TTS provider stores an exact directory reference in the
+Agent's revisioned voice state and resolves it again for every synthesis. It
+accepts only configured local/LAN text-to-audio services exposing
+`openai.audio.speech`; it does not copy a service URL into Agent state or
+silently select another model, node, or cloud provider.
+
+Speech responses are requested as bounded WAV bytes from the configured node
+origin with redirects and environment proxies disabled. HASHI validates the
+media type and WAV signature, then uses the instance-owned media executable to
+produce the ordinary OGG voice asset. A directory, service, voice, response, or
+conversion failure is explicit and does not become a successful voice reply.
+Runtime adoption and device playback remain separate acceptance facts.
 
 ### HERV3 visual fallback consumer
 
