@@ -196,7 +196,9 @@ free/local only; Windows Edge may use named SAPI. `/call` is unchanged. See
 [routing](repairs/TTS_LANGUAGE_ROUTING_DECISION_20261015.md). AgentPresence is
 a default-off, owner-scoped, fail-open local FC output. Its shared command,
 durable voice outbox and Workbench-only Call event subscription remain separate
-from Telegram and from one another. See
+from Telegram and from one another. Call start/end drive the away/return
+animation while Call audio stays with its initiating frontend; only non-call
+voice replies use AgentPresence's phone-reply playback. See
 [FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md) and
 [fallback](repairs/VOICE_PROVIDER_FALLBACK_REPAIR_20261014.md).
 

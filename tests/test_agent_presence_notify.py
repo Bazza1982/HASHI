@@ -103,7 +103,7 @@ def test_missing_companion_or_token_is_fail_open(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_standard_adapter_uses_frozen_route_and_typed_call_events(
+async def test_standard_adapter_keeps_call_audio_with_call_frontend(
     tmp_path, monkeypatch
 ):
     monkeypatch.setattr(agent_presence_notify, "_token", lambda: "local-token")
@@ -122,6 +122,7 @@ async def test_standard_adapter_uses_frozen_route_and_typed_call_events(
 
     binding = {"call_id": "call-1", "session_id": "ses-1"}
     started, _ = _call_event(binding, "call.started", {})
+    ended, _ = _call_event(binding, "call.ended", {"reason": "hangup"})
     speech, resolved_media = _call_event(
         binding,
         "call.speech",
@@ -151,12 +152,11 @@ async def test_standard_adapter_uses_frozen_route_and_typed_call_events(
     assert (await adapter.dispatch(started, endpoint_id=endpoint_id))[
         "status"
     ] == "accepted"
-    assert (await adapter.dispatch(speech, endpoint_id=endpoint_id))[
-        "status"
-    ] == "accepted"
+    assert (await adapter.dispatch(speech, endpoint_id=endpoint_id))["status"] == "skipped"
+    assert (await adapter.dispatch(ended, endpoint_id=endpoint_id))["status"] == "accepted"
     assert posted == [
         ("/v1/call/incoming", {}, "application/json"),
-        ("/v1/voice/speak", b"wav-bytes", "audio/wav"),
+        ("/v1/call/ended", {}, "application/json"),
     ]
 
     disabled = agent_presence_notify.AgentPresenceConnectorAdapter(

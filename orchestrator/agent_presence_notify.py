@@ -184,6 +184,13 @@ class AgentPresenceConnectorAdapter:
             accepted = await asyncio.to_thread(_post_json, "/v1/call/ended", {})
             return _receipt(event, endpoint_id, "accepted" if accepted else "unknown")
 
+        # The active call Connector owns call audio.  AgentPresence consumes
+        # only the call lifecycle so its away/hold animation cannot be
+        # displaced by the ordinary phone-reply animation, and one machine
+        # never plays the same synthesized turn through two local frontends.
+        if str(event.get("presentation_channel") or "").strip().casefold() == "call":
+            return _receipt(event, endpoint_id, "skipped")
+
         media_refs = [
             block
             for block in event.get("content_blocks") or ()

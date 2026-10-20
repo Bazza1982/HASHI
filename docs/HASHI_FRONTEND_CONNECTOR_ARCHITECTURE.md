@@ -276,8 +276,14 @@ admission. Canonical reply voice then receives its own outbox task and receipt;
 Telegram, Workbench and other destination delivery succeed or fail independently.
 The Workbench-only `/call` owner separately emits connector-neutral, ephemeral
 call-start, call-end and synthesized-speech events through its Call port. The
-AgentPresence adapter may subscribe to those events, but enabling it neither
-exposes `/call` on another Connector nor makes Workbench its transport.
+AgentPresence adapter consumes call start/end as one visual lifecycle: the
+companion answers and leaves its workspace, stays away for the whole call, then
+returns only after call end. It deliberately skips call speech because the
+initiating Call frontend is the sole local playback owner. Durable non-call
+voice replies still use the companion's phone-reply animation and audio path.
+This prevents duplicate automatic playback and echo when both frontends run on
+one machine. Enabling AgentPresence neither exposes `/call` on another
+Connector nor makes Workbench its transport.
 
 The companion authenticates with its local token; missing tokens, an absent
 companion, timeouts and rejected requests fail open and never change call or any
