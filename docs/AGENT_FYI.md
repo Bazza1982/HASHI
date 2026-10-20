@@ -1,74 +1,25 @@
 # HASHI Agent FYI
 
-October 20 PAO Run finalization: classify deliverability after stripping
-recognized internal control envelopes. A success containing only Memory Plus
-state is terminally failed and completes visible request activity; raw non-empty
-provider text can no longer leave a Run stuck in `running`. Typed audio remains
-deliverable. Approved and source-validated on HASHI3 `debug-issues-oct`;
-Function adoption and live acceptance are recorded separately.
+Current decisions, with full rationale in the linked owners:
 
-October 19 HERV3 long work: foreground execution has no HASHI total token,
-message, Turn, model-call, Tool-call, elapsed-time, output, continuation,
-receipt, WIP or task-state ceiling. Privacy Level 2 changes inspection, not loop
-size. Continuation/state/evidence are lossless; large privacy inspection and
-durable Provider context are paged/segmented rather than truncated. Retain only
-explicit cancellation, progress-idle and transport/protocol guards, explicit
-single-Tool timeout, external Provider limits and replay safety. Source/offline
-verification do not prove Worker adoption or live acceptance. See
-[repair](repairs/HERV3_LONG_RUNNING_LIMIT_REMOVAL_20261019.md) and
-[HERV3](HERV3_UPGRADE.md#2026-10-19-long-running-execution-invariant).
-
-October 19 Agent Move: staging is the single mutable-state qualification gate.
-Confirmation records forward-only intent; later Memory+, workspace, config,
-credential or schedule changes cannot invalidate the accepted package. Runtime
-and cleanup failures retry forward without target rollback or source restore;
-cancel is available only before confirmation. See
-[Agent Move](HASHI_AGENT_MOVE_V1.md#forward-only-move-decision-2026-10-19).
-
-October 18 visual fallback: image requests first use the selected model, then an
-allowed visual model from the same Model Provider, then LAN HASHI Compute Vision.
-The switch is request-only and warned once; it never changes the Agent default or
-silently crosses to another cloud Provider. On the LAN route, raw images are
-removed before the selected cloud model receives derived text. Telegram exposed
-an older connector preflight that saw only the selected text model and stopped
-before HERV3 fallback. The shared HERV3 media diagnostic now derives the same
-same-Provider model order and LAN availability as invocation, so every FC can
-admit the same canonical image request. This correction is source-validated on
-HASHI3 `debug-issues-oct` but not yet hot-loaded. Earlier real Workbench
-Pro-to-Flash and LAN projector checks remain valid; full
-all-text-Provider-to-LAN frontend acceptance remains pending. See
-[decision](repairs/HERV3_VISUAL_FALLBACK_20261018.md).
-
-October 18: Ollama native context, binary reasoning and main promotion:
-[status/limits](HERV3_OLLAMA_CONTEXT_PILOT.md). Public Provider identities now
-match live metadata; legacy IDs remain accepted. See [HERV3](HERV3_UPGRADE.md).
-
-October 17 Compute: local/LAN/internet model services resolve through PAO's
-Function-layer Compute Service Directory. Register from a v1 manifest and persist
-structured node/service/model references. Capability, privacy, health,
-concurrency, busy and interface checks fail closed; no silent LAN-to-internet
-fallback. Hashi Compute stays truthful and limits unknown until advertised.
-Voice samples use the remote interface; consumers migrate separately and no
-Workbench page was added. See [Compute](HASHI_COMPUTE_SERVICE_DIRECTORY.md).
-
-October 17 Call experiment: capture targets 2 fps; MiniCPM-V uses latest-frame
-narration. Each turn freezes 10 seconds and samples at most 10 raw frames for a
-qualified primary vision model. Frames are input-only, never PAO-persisted, and
-cleared camera-off. See [Call](HASHI_CALL_INTERACTION_2026-10-04.md) and
-[experiment](repairs/CALL_LIVE_FRAME_BRIDGE_EXPERIMENT_20261017.md).
-
-October 16: HERV3/DeepSeek Tool screenshots become tool text plus user
-`image_url`, not Base64 text. Enforce serialized provider limits, not the
-smaller `media_read` budget. See [repair](repairs/DEEPSEEK_TOOL_SCREENSHOT_MULTIMODAL_20261016.md).
-
-October 16: `/call` LAN targets allow only literal RFC 1918 IPv4; block DNS,
-loopback, link-local/public addresses and redirects. Selection is per owner/
-Agent. See [Call](HASHI_CALL_INTERACTION_2026-10-04.md).
-
-October 13 Call: prepare camera during ringback; without a first frame use voice.
-Preview is not Agent vision. Only stopped ingress or confirmed initial failure
-disables it; comments stay rare/relevant. See
-[Call](HASHI_CALL_INTERACTION_2026-10-04.md).
+- PAO strips internal control envelopes before judging deliverability. A result
+  containing only Memory+ state fails terminally; typed audio remains deliverable.
+- HERV3 has no artificial whole-run size/time/call ceiling. Preserve complete
+  state and evidence; only explicit cancellation, safety, transport, Provider and
+  single-Tool limits remain. See [HERV3](HERV3_UPGRADE.md#2026-10-19-long-running-execution-invariant).
+- Agent Move qualifies mutable state at staging, becomes forward-only after
+  confirmation, and never rolls the target back. See [Move](HASHI_AGENT_MOVE_V1.md#forward-only-move-decision-2026-10-19).
+- Image fallback is selected model, same-Provider visual model, then LAN Compute;
+  it is request-only, visible, and sends derived text rather than raw LAN images
+  back to cloud. Every FC uses the same HERV3 admission facts. See
+  [visual fallback](repairs/HERV3_VISUAL_FALLBACK_20261018.md).
+- Compute services resolve through PAO's fail-closed Function directory; no
+  silent LAN-to-internet fallback. See [Compute](HASHI_COMPUTE_SERVICE_DIRECTORY.md).
+- Call frames are input-only and cleared camera-off; LAN targets must be literal
+  private IPv4 with no redirects. Preview is not Agent vision. See
+  [Call](HASHI_CALL_INTERACTION_2026-10-04.md).
+- Tool screenshots use provider-native image input, never Base64 text. Ollama
+  behavior and public Provider identities follow [HERV3](HERV3_UPGRADE.md).
 
 ## Authority and ownership
 
