@@ -103,6 +103,63 @@ def _adapter(tmp_path, *, global_config=None, model="deepseek-v4-pro"):
     return adapter
 
 
+@pytest.mark.asyncio
+async def test_deepseek_rejects_terminal_response_while_run_question_is_pending(
+    tmp_path,
+):
+    adapter = _adapter(tmp_path)
+
+    class QuestionGuardRegistry(_DummyToolRegistry):
+        def __init__(self):
+            super().__init__()
+            self.waits = 0
+
+        async def wait_before_terminal_response(self):
+            self.waits += 1
+            if self.waits > 1:
+                return None
+            return {
+                "type": "hashi.run_question.resolution",
+                "questions": [
+                    {
+                        "question_id": "que-1",
+                        "state": "consumed",
+                        "answer": {
+                            "option_id": "yes",
+                            "text": "",
+                            "author": "authenticated_user",
+                            "grants_permissions": False,
+                        },
+                    }
+                ],
+            }
+
+    registry = QuestionGuardRegistry()
+    adapter.tool_registry = registry
+    adapter._call_api_once = AsyncMock(
+        side_effect=[
+            _APIResult("premature", None, "stop", 10, 2),
+            _APIResult("answered result", None, "stop", 10, 2),
+        ]
+    )
+
+    response = await adapter.generate_response("Choose first", "request-question")
+
+    assert response.is_success is True
+    assert response.text == "answered result"
+    assert registry.waits == 2
+    assert adapter._call_api_once.call_count == 2
+    second_payload = adapter._call_api_once.call_args_list[1].args[0]
+    resolution_messages = [
+        message
+        for message in second_payload["messages"]
+        if "HASHI_RUN_QUESTION_RESOLUTION" in str(message.get("content") or "")
+    ]
+    assert len(resolution_messages) == 1
+    assert resolution_messages[0]["role"] == "user"
+    assert "authenticated_user" in resolution_messages[0]["content"]
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

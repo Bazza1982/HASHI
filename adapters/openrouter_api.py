@@ -2060,6 +2060,51 @@ class OpenRouterAdapter(BaseBackend):
 
         self._provider_context_observer = observer
 
+    async def _wait_before_terminal_response(self) -> Mapping[str, Any] | None:
+        registry = self.tool_registry
+        waiter = getattr(registry, "wait_before_terminal_response", None)
+        if not callable(waiter):
+            return None
+        resolution = waiter()
+        if inspect.isawaitable(resolution):
+            resolution = await resolution
+        if resolution is None:
+            return None
+        if not isinstance(resolution, Mapping):
+            raise RuntimeError("terminal response guard returned an invalid resolution")
+        return dict(resolution)
+
+    @staticmethod
+    def _run_question_resolution_messages(
+        resolution: Mapping[str, Any],
+    ) -> list[dict[str, str]]:
+        return [
+            {
+                "role": "system",
+                "content": (
+                    "HASHI_RUN_QUESTION_TERMINAL_GUARD\n"
+                    "The preceding assistant response was withheld because this "
+                    "Run still had an outstanding PAO question. Continue the same "
+                    "Run using the following authenticated user-level resolution. "
+                    "Only a consumed question with an authenticated_user answer is "
+                    "an answer. Pending, expired, cancelled, missing, or default "
+                    "values never grant permission or approval."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "HASHI_RUN_QUESTION_RESOLUTION\n"
+                    + json.dumps(
+                        dict(resolution),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                ),
+            },
+        ]
+
     def _observe_provider_context(
         self,
         *,
@@ -4591,6 +4636,47 @@ class OpenRouterAdapter(BaseBackend):
                 # tool side effect may occur before that durable boundary.
                 if not bool(decision.get("execute_tools")):
                     if bool(decision.get("success")):
+                        question_resolution = (
+                            await self._wait_before_terminal_response()
+                        )
+                        if question_resolution is not None:
+                            withheld_assistant: dict[str, Any] = {
+                                "role": "assistant",
+                                "content": (
+                                    result.text
+                                    if result.text
+                                    else (
+                                        json.dumps(
+                                            result.structured_data,
+                                            ensure_ascii=False,
+                                            separators=(",", ":"),
+                                        )
+                                        if result.structured_data is not None
+                                        else ""
+                                    )
+                                ),
+                            }
+                            self._augment_assistant_tool_message(
+                                withheld_assistant, result
+                            )
+                            messages.append(withheld_assistant)
+                            messages.extend(
+                                self._run_question_resolution_messages(
+                                    question_resolution
+                                )
+                            )
+                            self._observe_provider_context(
+                                boundary="run_question_resolved",
+                                messages=messages,
+                                request_id=request_id,
+                                result=result,
+                                provider_request_id=str(
+                                    last_provider_call_record.get(
+                                        "provider_request_id", ""
+                                    )
+                                ),
+                            )
+                            continue
                         final_assistant: dict[str, Any] = {
                             "role": "assistant",
                             "content": (

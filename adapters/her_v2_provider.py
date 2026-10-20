@@ -1617,6 +1617,8 @@ class _CognitiveControlToolRegistry:
         self._model = str(model or "")
         self._turn_services = turn_services
         self._audit_serial = 0
+        self._pending_run_questions: dict[str, dict[str, Any]] = {}
+        self._run_question_poll_serial = 0
         self.task_state = (
             request.task_state
             if isinstance(request.task_state, HERTaskState)
@@ -1865,6 +1867,147 @@ class _CognitiveControlToolRegistry:
         )
         return application
 
+    @staticmethod
+    def _run_question_from_output(output: Any) -> dict[str, Any] | None:
+        raw = str(output or "").split("HASHI_EVIDENCE_RECEIPT:", 1)[0].strip()
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(payload, Mapping) or payload.get("ok") is not True:
+            return None
+        question = payload.get("question")
+        if not isinstance(question, Mapping):
+            return None
+        question_id = str(question.get("question_id") or "").strip()
+        state = str(question.get("state") or "").strip().casefold()
+        if not question_id or state not in {
+            "pending",
+            "answered",
+            "consumed",
+            "expired",
+            "cancelled",
+        }:
+            return None
+        return {
+            "question_id": question_id,
+            "state": state,
+            "answer": copy.deepcopy(question.get("answer")),
+            "expires_at": question.get("expires_at"),
+        }
+
+    def _observe_run_question_result(self, name: str, result: Any) -> dict[str, Any] | None:
+        if name not in {"ask_user", "get_user_answer"} or bool(
+            getattr(result, "is_error", False)
+        ):
+            return None
+        question = self._run_question_from_output(getattr(result, "output", ""))
+        if question is None:
+            return None
+        question_id = question["question_id"]
+        if question["state"] in {"pending", "answered"}:
+            self._pending_run_questions[question_id] = question
+        else:
+            self._pending_run_questions.pop(question_id, None)
+        return question
+
+    async def _poll_run_question(
+        self,
+        question_id: str,
+        *,
+        wait_seconds: int,
+    ) -> tuple[bool, dict[str, Any] | None]:
+        self._run_question_poll_serial += 1
+        executor = getattr(self.base, "execute", None)
+        if not callable(executor):
+            return False, None
+        result = await executor(
+            "get_user_answer",
+            {"question_id": question_id, "wait_seconds": wait_seconds},
+            (
+                f"hashi-run-question-guard:{question_id}:"
+                f"{self._run_question_poll_serial}"
+            ),
+        )
+        question = self._observe_run_question_result("get_user_answer", result)
+        return question is not None, question
+
+    async def wait_before_terminal_response(self) -> dict[str, Any] | None:
+        """Keep the owning Run alive until every issued PAO question resolves.
+
+        This is a platform guard, not another model tool round. It long-polls one
+        outstanding question at a time and therefore creates no provider traffic
+        while the user is deciding.
+        """
+
+        if not self._pending_run_questions:
+            return None
+        started_ids = tuple(self._pending_run_questions)
+        self._audit(
+            "run_question_wait_started",
+            {"question_ids": list(started_ids)},
+        )
+        resolved: list[dict[str, Any]] = []
+        round_robin = 0
+        error_streak = 0
+        for question_id in tuple(self._pending_run_questions):
+            _valid, question = await self._poll_run_question(
+                question_id,
+                wait_seconds=0,
+            )
+            if question is not None and question["state"] not in {
+                "pending",
+                "answered",
+            }:
+                resolved.append(question)
+
+        while self._pending_run_questions:
+            question_ids = tuple(self._pending_run_questions)
+            question_id = question_ids[round_robin % len(question_ids)]
+            round_robin += 1
+            valid, question = await self._poll_run_question(
+                question_id,
+                wait_seconds=30,
+            )
+            if question is not None and question["state"] not in {
+                "pending",
+                "answered",
+            }:
+                resolved.append(question)
+
+            if valid:
+                error_streak = 0
+                continue
+            error_streak += 1
+            delay = min(30, 2 ** min(error_streak - 1, 4))
+            self._audit(
+                "run_question_wait_retry",
+                {
+                    "question_ids": list(self._pending_run_questions),
+                    "delay_seconds": delay,
+                    "error_streak": error_streak,
+                },
+            )
+            await asyncio.sleep(delay)
+
+        payload = {
+            "type": "hashi.run_question.resolution",
+            "questions": resolved,
+        }
+        self._audit(
+            "run_question_wait_completed",
+            {
+                "questions": [
+                    {
+                        "question_id": item["question_id"],
+                        "state": item["state"],
+                    }
+                    for item in resolved
+                ]
+            },
+        )
+        return payload
+
     def _process_tool_result(
         self,
         *,
@@ -1874,6 +2017,7 @@ class _CognitiveControlToolRegistry:
         result: Any,
         delta_application: TaskDeltaApplication,
     ):
+        self._observe_run_question_result(name, result)
         details = dict(getattr(result, "details", None) or {})
         evidence_ref = str(details.get("evidence_ref") or "").strip()
         if evidence_ref:

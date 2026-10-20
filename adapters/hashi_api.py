@@ -1402,6 +1402,41 @@ class HashiApiAdapter(OpenRouterAdapter):
                     active_forensic_path = None
 
                 if not bool(decision.get("execute_tools")):
+                    if bool(decision.get("success")):
+                        question_resolution = (
+                            await self._wait_before_terminal_response()
+                        )
+                        if question_resolution is not None:
+                            withheld_assistant: dict[str, Any] = {
+                                "role": "assistant",
+                                "content": (
+                                    result.text
+                                    if result.text
+                                    else (
+                                        json.dumps(
+                                            result.structured_data,
+                                            ensure_ascii=False,
+                                            separators=(",", ":"),
+                                        )
+                                        if result.structured_data is not None
+                                        else ""
+                                    )
+                                ),
+                            }
+                            messages.append(withheld_assistant)
+                            resolution_messages = (
+                                self._run_question_resolution_messages(
+                                    question_resolution
+                                )
+                            )
+                            messages.extend(resolution_messages)
+                            # The Gateway's external-tool continuation accepts
+                            # only tool-result deltas. A resolved PAO question is
+                            # an authenticated user-level continuation, so replay
+                            # the complete local conversation in a fresh request.
+                            gateway_session_id = None
+                            outbound_messages = messages
+                            continue
                     terminal_decision = dict(decision)
                     break
 

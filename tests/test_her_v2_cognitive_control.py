@@ -151,8 +151,117 @@ class _Registry:
         )
 
 
+class _RunQuestionRegistry(_Registry):
+    def __init__(self, terminal_state="consumed"):
+        super().__init__(("ask_user", "get_user_answer"))
+        self.answer_polls = 0
+        self.terminal_state = terminal_state
+
+    async def execute(self, name, arguments, tool_call_id=""):
+        self.calls.append((name, arguments, tool_call_id))
+        if name == "ask_user":
+            state = "pending"
+            answer = None
+        else:
+            self.answer_polls += 1
+            state = "pending" if self.answer_polls == 1 else self.terminal_state
+            answer = (
+                None
+                if state != "consumed"
+                else {
+                    "option_id": "follow",
+                    "text": "",
+                    "author": "authenticated_user",
+                    "grants_permissions": False,
+                }
+            )
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            output=json.dumps(
+                {
+                    "ok": True,
+                    "question": {
+                        "question_id": "que-1",
+                        "state": state,
+                        "answer": answer,
+                        "expires_at": "2026-10-20T04:00:00Z",
+                    },
+                }
+            )
+            + "\n\nHASHI_EVIDENCE_RECEIPT: question-receipt",
+        )
+
+
 def _tool_names(definitions):
     return [item["function"]["name"] for item in definitions]
+
+
+@pytest.mark.asyncio
+async def test_pending_run_question_blocks_terminal_response_until_answer_consumed():
+    base = _RunQuestionRegistry()
+    registry = _CognitiveControlToolRegistry(base, _request(Stage.EXECUTION))
+
+    created = await registry.execute(
+        "ask_user",
+        {
+            "question": "Which option?",
+            "options": [{"id": "follow", "label": "Follow"}],
+        },
+        "ask-1",
+    )
+    assert '"state": "pending"' in created.output
+
+    resolution = await registry.wait_before_terminal_response()
+
+    assert resolution == {
+        "type": "hashi.run_question.resolution",
+        "questions": [
+            {
+                "question_id": "que-1",
+                "state": "consumed",
+                "answer": {
+                    "option_id": "follow",
+                    "text": "",
+                    "author": "authenticated_user",
+                    "grants_permissions": False,
+                },
+                "expires_at": "2026-10-20T04:00:00Z",
+            }
+        ],
+    }
+    assert [call[0] for call in base.calls] == [
+        "ask_user",
+        "get_user_answer",
+        "get_user_answer",
+    ]
+    assert base.calls[1][1]["wait_seconds"] == 0
+    assert base.calls[2][1]["wait_seconds"] == 30
+    assert await registry.wait_before_terminal_response() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_state", ["expired", "cancelled"])
+async def test_closed_run_question_releases_guard_without_inventing_answer(
+    terminal_state,
+):
+    base = _RunQuestionRegistry(terminal_state=terminal_state)
+    registry = _CognitiveControlToolRegistry(base, _request(Stage.EXECUTION))
+    await registry.execute(
+        "ask_user",
+        {"question": "Still needed?", "allow_free_text": True},
+        "ask-closed",
+    )
+
+    resolution = await registry.wait_before_terminal_response()
+
+    assert resolution["questions"] == [
+        {
+            "question_id": "que-1",
+            "state": terminal_state,
+            "answer": None,
+            "expires_at": "2026-10-20T04:00:00Z",
+        }
+    ]
 
 
 def test_semantic_result_ignores_receipts_timestamps_and_repeat_warning():
