@@ -214,6 +214,7 @@ class CallService:
                 admission_in_flight=call.turn.get("phase") == "submitting",
                 call_duration_ms=elapsed_ms(self.clock, call.started),
             )
+            self._companion_notify(call, "ended")
         # Once identity is known, stop exactly this Call-owned PAO Run. During
         # admission its identity is still uncertain, so _run requests the same
         # targeted cancellation immediately after admission resolves.
@@ -468,6 +469,42 @@ class CallService:
         else:
             emit("service_closed", generation=self.generation, pending_tasks=0)
         self.calls.clear()
+
+    def _companion_notify(self, call, kind: str) -> None:
+        """Fail-open, fire-and-forget notification to the desktop companion.
+
+        The companion is an optional local egress sink; its absence or any
+        failure must never affect call admission or teardown.
+        """
+        try:
+            from orchestrator import agent_presence_notify
+        except Exception:
+            return
+        bridge_home = None
+        try:
+            api = getattr(self.ports, "api", None)
+            global_config = getattr(api, "global_config", None)
+            bridge_home = getattr(global_config, "bridge_home", None)
+        except Exception:
+            bridge_home = None
+        owner = str(getattr(call, "owner", "") or "")
+        if not owner:
+            return
+
+        def _run() -> None:
+            try:
+                if kind == "started":
+                    agent_presence_notify.call_started(bridge_home, owner)
+                else:
+                    agent_presence_notify.call_ended(bridge_home, owner)
+            except Exception:
+                pass
+
+        try:
+            asyncio.get_running_loop()
+            asyncio.create_task(asyncio.to_thread(_run))
+        except RuntimeError:
+            _run()
 
     def _view(self, call):
         turn = {
@@ -927,6 +964,7 @@ class CallService:
             # No awaits between busy check and reservation (one event-loop owner).
             self.calls[call_id] = call
             emit("call_started", **self._facts(call), phase=call.phase)
+            self._companion_notify(call, "started")
             opening = getattr(self.ports, "opening", None)
             if callable(opening):
                 call.turn = {

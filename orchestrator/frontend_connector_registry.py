@@ -448,6 +448,27 @@ _COMPATIBILITY_ADAPTERS: tuple[dict[str, str], ...] = (
         "operation": "command",
         "route": "standard_fc",
     },
+    {
+        "id": "agentpresence.call_state",
+        "connector_id": "agentpresence",
+        "direction": "egress",
+        "operation": "state",
+        "route": "standard_fc",
+    },
+    {
+        "id": "agentpresence.notification",
+        "connector_id": "agentpresence",
+        "direction": "egress",
+        "operation": "notification",
+        "route": "standard_fc",
+    },
+    {
+        "id": "agentpresence.voice_mirror",
+        "connector_id": "agentpresence",
+        "direction": "egress",
+        "operation": "media",
+        "route": "standard_fc",
+    },
 )
 
 _TERMINAL_LOCAL_COMMAND_CUSTOMIZATIONS: tuple[dict[str, str], ...] = (
@@ -558,6 +579,14 @@ _CONNECTORS: tuple[dict[str, Any], ...] = (
         "egress": ["text", "media", "voice", "command_result", "status", "card", "receipt"],
         "canonical_feed": "persistent_session_events",
         "customizations": _TERMINAL_LOCAL_COMMAND_CUSTOMIZATIONS,
+    },
+    {
+        "id": "agentpresence",
+        "class": "desktop_companion",
+        "ingress": [],
+        "egress": ["state", "notification", "media"],
+        "canonical_feed": "persistent_session_events",
+        "customizations": (),
     },
 )
 
