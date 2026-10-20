@@ -1,5 +1,12 @@
 # HASHI Agent FYI
 
+October 20 PAO Run finalization: classify deliverability after stripping
+recognized internal control envelopes. A success containing only Memory Plus
+state is terminally failed and completes visible request activity; raw non-empty
+provider text can no longer leave a Run stuck in `running`. Typed audio remains
+deliverable. Approved and source-validated on HASHI3 `debug-issues-oct`;
+Function adoption and live acceptance are recorded separately.
+
 October 19 HERV3 long work: foreground execution has no HASHI total token,
 message, Turn, model-call, Tool-call, elapsed-time, output, continuation,
 receipt, WIP or task-state ceiling. Privacy Level 2 changes inspection, not loop

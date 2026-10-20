@@ -56,14 +56,31 @@ SESSION_SCOPE_ISOLATED_RESUME = "isolated_resume"
 
 
 def response_has_deliverable_content(response: Any) -> bool:
+    """Return whether a successful response has user-deliverable content.
+
+    Provider-level declarations may reject delivery, but a positive declaration
+    cannot make an internal Memory Plus control envelope user-visible. Text is
+    therefore classified only after the control block is removed.
+    """
     declared = getattr(response, "has_deliverable_content", None)
-    if isinstance(declared, bool):
-        return declared
-    if str(getattr(response, "text", "") or "").strip():
-        return True
+    if declared is False:
+        return False
+
+    response_text = str(getattr(response, "text", "") or "")
+    if response_text.strip():
+        extracted = extract_memory_plus_update_details(response_text)
+        if extracted.visible_text.strip():
+            return True
+
     from orchestrator.native_audio_delivery import audio_parts
 
-    return bool(audio_parts(getattr(response, "content", ())))
+    if audio_parts(getattr(response, "content", ())):
+        return True
+
+    # Preserve provider-neutral typed content declarations when there was no
+    # raw text to classify. With raw text present, only visible text or typed
+    # audio above can make the response deliverable.
+    return declared is True and not response_text.strip()
 
 
 def observe_terminal_response(runtime, item, response) -> None:
