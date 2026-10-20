@@ -168,6 +168,11 @@ class CallService:
             targets.get(kind) is not None and available(targets[kind])
             for kind in ("stt", "tts")
         )
+        if not result["call_ready"]:
+            # The default route may prefer /call, but clients must never enter
+            # an unavailable media surface. Preserve the established safe
+            # fallback until the selected STT and TTS targets are usable.
+            result["route"] = "phone"
         vision = targets.get("vision")
         result["camera_available"] = bool(
             result["call_ready"] and vision and available(vision)

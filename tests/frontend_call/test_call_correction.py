@@ -18,24 +18,24 @@ def test_video_policy_has_a_human_readable_readiness_window(tmp_path):
     assert policy["max_observations_per_minute"] == 120
 
 
-def test_call_readiness_and_camera_do_not_depend_on_legacy_selection(tmp_path):
+def test_call_readiness_defaults_to_call_and_keeps_explicit_phone(tmp_path):
     service, *_ = setup(tmp_path)
     config = service.config
-    assert config.route("owner", "agent-a")["route"] == "phone"
+    assert config.route("owner", "agent-a")["route"] == "call"
     context = config.context("owner", "agent-a")
     config.save("owner", "agent-a", context["revision"], context["profile"])
-    assert config.route("owner", "agent-a")["route"] == "phone"
+    assert config.route("owner", "agent-a")["route"] == "call"
     context = config.context("owner", "agent-a")
     context["profile"]["vision"] = {"target_id": "eyes", "options": {}}
     config.save("owner", "agent-a", context["revision"], context["profile"])
     readiness = config.route("owner", "agent-a")
     assert readiness["call_ready"] is True and readiness["camera_available"] is True
     context = config.context("owner", "agent-a")
-    config.select_route("owner", "agent-a", context["revision"], "call")
-    assert type(config)(config.path).route("owner", "agent-a")["route"] == "call"
-    assert config.route("owner", "other")["route"] == "phone"
+    config.select_route("owner", "agent-a", context["revision"], "phone")
+    assert type(config)(config.path).route("owner", "agent-a")["route"] == "phone"
+    assert config.route("owner", "other")["route"] == "call"
     with pytest.raises(CallError, match="configuration_changed"):
-        config.select_route("owner", "agent-a", context["revision"], "phone")
+        config.select_route("owner", "agent-a", context["revision"], "call")
 
 
 async def test_direct_call_starts_without_switching_configuration_and_camera_is_manual(
@@ -49,7 +49,7 @@ async def test_direct_call_starts_without_switching_configuration_and_camera_is_
     )
     before = service.config.path.read_bytes()
     info = await service.invoke("owner", {**base, "operation": "context"})
-    assert info["route"] == "phone" and info["call_ready"] is True
+    assert info["route"] == "call" and info["call_ready"] is True
     body = {
         **base,
         "operation": "start",
