@@ -21,11 +21,6 @@ from .models import ReplanningOutcome, ToolEvidenceReceipt
 
 CHECKPOINT_RESULT_THRESHOLD = 10
 CHECKPOINT_ELAPSED_THRESHOLD_S = 300.0
-MAX_CHECKPOINT_RECEIPT_SUMMARIES = 64
-MAX_CHECKPOINT_ARGUMENT_KEYS = 32
-MAX_CHECKPOINT_METADATA_CHARS = 256
-MAX_REPLAN_RESULT_EXCERPT_CHARS = 4_000
-
 MonotonicClock = Callable[[], float]
 ReplanEvaluator = Callable[["CheckpointSnapshot"], Awaitable["ReplanDirective"]]
 CheckpointObserver = Callable[[str, Mapping[str, Any]], None]
@@ -45,12 +40,8 @@ def _canonical_sha256(value: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _bounded_text(value: Any) -> str:
-    return str("" if value is None else value)[:MAX_CHECKPOINT_METADATA_CHARS]
-
-
-def _bounded_result_excerpt(value: Any) -> str:
-    return str("" if value is None else value)[:MAX_REPLAN_RESULT_EXCERPT_CHARS]
+def _text(value: Any) -> str:
+    return str("" if value is None else value)
 
 
 @dataclass(frozen=True)
@@ -522,9 +513,7 @@ class CompulsoryReplanCoordinator:
             trigger_reasons=self.due_reasons(),
             completed_result_count=self._window_result_count,
             elapsed_s=round(self.elapsed_s(), 6),
-            receipt_summaries=tuple(
-                self._window_receipt_summaries[-MAX_CHECKPOINT_RECEIPT_SUMMARIES:]
-            ),
+            receipt_summaries=tuple(self._window_receipt_summaries),
             receipt_set_sha256=receipt_set_sha256,
             boundary_kind=boundary_kind,
             prospective_action=(dict(prospective) if prospective is not None else None),
@@ -546,22 +535,22 @@ class CompulsoryReplanCoordinator:
         self._receipts[identity] = receipt
         self._window_result_count += 1
         summary: dict[str, Any] = {
-            "evidence_ref": _bounded_text(receipt.evidence_ref),
-            "invocation_id": _bounded_text(receipt.invocation_id),
+            "evidence_ref": _text(receipt.evidence_ref),
+            "invocation_id": _text(receipt.invocation_id),
             "attempt": receipt.attempt,
-            "tool_call_id": _bounded_text(receipt.tool_call_id),
-            "tool_name": _bounded_text(receipt.tool_name),
+            "tool_call_id": _text(receipt.tool_call_id),
+            "tool_name": _text(receipt.tool_name),
             "status": receipt.status.value,
             "read_only": receipt.read_only,
             "completed": receipt.completed,
-            "output_sha256": _bounded_text(receipt.output_sha256),
-            "result_excerpt": _bounded_result_excerpt(result_summary),
+            "output_sha256": _text(receipt.output_sha256),
+            "result_excerpt": _text(result_summary),
         }
         control_disposition = str(
             receipt.details.get("control_disposition") or ""
         ).strip()
         if control_disposition:
-            summary["control_disposition"] = _bounded_text(control_disposition)
+            summary["control_disposition"] = _text(control_disposition)
         self._window_receipt_summaries.append(summary)
 
     @staticmethod
@@ -583,10 +572,8 @@ class CompulsoryReplanCoordinator:
         tool_call_id: str,
     ) -> Mapping[str, Any]:
         return {
-            "tool_name": _bounded_text(tool_name),
-            "tool_call_id": _bounded_text(tool_call_id),
-            "argument_keys": sorted(_bounded_text(key) for key in arguments)[
-                :MAX_CHECKPOINT_ARGUMENT_KEYS
-            ],
+            "tool_name": _text(tool_name),
+            "tool_call_id": _text(tool_call_id),
+            "argument_keys": sorted(_text(key) for key in arguments),
             "arguments_sha256": _canonical_sha256(arguments),
         }

@@ -103,6 +103,63 @@ def _adapter(tmp_path, *, global_config=None, model="deepseek-v4-pro"):
     return adapter
 
 
+@pytest.mark.asyncio
+async def test_deepseek_rejects_terminal_response_while_run_question_is_pending(
+    tmp_path,
+):
+    adapter = _adapter(tmp_path)
+
+    class QuestionGuardRegistry(_DummyToolRegistry):
+        def __init__(self):
+            super().__init__()
+            self.waits = 0
+
+        async def wait_before_terminal_response(self):
+            self.waits += 1
+            if self.waits > 1:
+                return None
+            return {
+                "type": "hashi.run_question.resolution",
+                "questions": [
+                    {
+                        "question_id": "que-1",
+                        "state": "consumed",
+                        "answer": {
+                            "option_id": "yes",
+                            "text": "",
+                            "author": "authenticated_user",
+                            "grants_permissions": False,
+                        },
+                    }
+                ],
+            }
+
+    registry = QuestionGuardRegistry()
+    adapter.tool_registry = registry
+    adapter._call_api_once = AsyncMock(
+        side_effect=[
+            _APIResult("premature", None, "stop", 10, 2),
+            _APIResult("answered result", None, "stop", 10, 2),
+        ]
+    )
+
+    response = await adapter.generate_response("Choose first", "request-question")
+
+    assert response.is_success is True
+    assert response.text == "answered result"
+    assert registry.waits == 2
+    assert adapter._call_api_once.call_count == 2
+    second_payload = adapter._call_api_once.call_args_list[1].args[0]
+    resolution_messages = [
+        message
+        for message in second_payload["messages"]
+        if "HASHI_RUN_QUESTION_RESOLUTION" in str(message.get("content") or "")
+    ]
+    assert len(resolution_messages) == 1
+    assert resolution_messages[0]["role"] == "user"
+    assert "authenticated_user" in resolution_messages[0]["content"]
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -1032,6 +1089,39 @@ def test_commentary_prefixed_text_tool_intent_requires_native_repair(
     assert inspected.tool_calls == ()
 
 
+
+
+def test_text_tool_repair_retains_the_full_large_rejected_response(tmp_path):
+    adapter = _adapter(tmp_path, model="deepseek-flash")
+    envelope = (
+        "<｜DSML｜ calls>"
+        '<｜DSML｜ invoke name="file_list">'
+        '<｜DSML｜ parameter name="path" string="true">/tmp'
+        "</｜DSML｜ parameter>"
+        "</｜DSML｜ invoke>"
+        "</｜DSML｜ calls>"
+    )
+    raw_text = ("progress evidence " * 2_000) + "\n" + envelope
+    payload = adapter._build_payload(
+        [{"role": "user", "content": "Inspect the directory."}]
+    )
+    result = adapter._apply_text_tool_compatibility(
+        _APIResult(
+            raw_text,
+            None,
+            "stop",
+            provider_response_id="response-long-text-tool",
+        ),
+        payload,
+        actual_model="deepseek-flash",
+        system_fingerprint="",
+    )
+
+    assert len(raw_text) > 16 * 1024
+    assert result.provider_compatibility["status"] == "repair_required"
+    assert result.tool_calls[0]["function"]["arguments"] == (
+        "HASHI rejected DeepSeek textual tool intent:\n" + raw_text
+    )
 def test_stream_gate_delivers_commentary_and_blocks_following_antml():
     gate = DeepSeekToolMarkupStreamGate(enabled=True)
 

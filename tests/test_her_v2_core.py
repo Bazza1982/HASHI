@@ -87,7 +87,7 @@ def test_triage_classification_is_immutable_and_plan_replacement_is_replan_only(
     assert ledger.plan_id == "plan-v2"
 
 
-def test_ledger_snapshot_is_minimal_and_caps_log_references():
+def test_ledger_snapshot_is_minimal_and_retains_all_log_references():
     ledger = ExecutionLedger("turn-1", "request:1", "goal:1")
     for number in range(40):
         ledger.add_log_ref(f"log:{number}")
@@ -103,7 +103,8 @@ def test_ledger_snapshot_is_minimal_and_caps_log_references():
         "log_refs",
         "terminal_reason",
     }
-    assert len(ledger.log_refs) == 32
+    assert len(ledger.log_refs) == 40
+    assert ledger.log_refs[0] == "log:0"
     assert "prompt" not in ledger.to_dict()
     assert "reasoning" not in ledger.to_dict()
 
@@ -531,6 +532,12 @@ def test_structured_parser_accepts_only_an_explicit_json_object():
         extract_json_object(
             'Result follows: {"classification":"DIRECT_RESPONSE"}.'
         )
+
+
+def test_structured_parser_does_not_truncate_a_large_complete_object():
+    payload = {"classification": "DIRECT_RESPONSE", "evidence": "x" * 250_000}
+
+    assert extract_json_object(json.dumps(payload)) == payload
 
 
 class _MemoryWriter:

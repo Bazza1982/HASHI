@@ -1,35 +1,25 @@
 # HASHI Agent FYI
 
-October 18: Ollama native context, binary reasoning and main promotion:
-[status/limits](HERV3_OLLAMA_CONTEXT_PILOT.md). Public Provider identities now
-match live metadata; legacy IDs remain accepted. See [HERV3](HERV3_UPGRADE.md).
+Current decisions, with full rationale in the linked owners:
 
-October 17 Compute: local/LAN/internet model services resolve through PAO's
-Function-layer Compute Service Directory. Register from a v1 manifest and persist
-structured node/service/model references. Capability, privacy, health,
-concurrency, busy and interface checks fail closed; no silent LAN-to-internet
-fallback. Hashi Compute stays truthful and limits unknown until advertised.
-Voice samples use the remote interface; consumers migrate separately and no
-Workbench page was added. See [Compute](HASHI_COMPUTE_SERVICE_DIRECTORY.md).
-
-October 17 Call experiment: capture targets 2 fps; MiniCPM-V uses latest-frame
-narration. Each turn freezes 10 seconds and samples at most 10 raw frames for a
-qualified primary vision model. Frames are input-only, never PAO-persisted, and
-cleared camera-off. See [Call](HASHI_CALL_INTERACTION_2026-10-04.md) and
-[experiment](repairs/CALL_LIVE_FRAME_BRIDGE_EXPERIMENT_20261017.md).
-
-October 16: HERV3/DeepSeek Tool screenshots become tool text plus user
-`image_url`, not Base64 text. Enforce serialized provider limits, not the
-smaller `media_read` budget. See [repair](repairs/DEEPSEEK_TOOL_SCREENSHOT_MULTIMODAL_20261016.md).
-
-October 16: `/call` LAN targets allow only literal RFC 1918 IPv4; block DNS,
-loopback, link-local/public addresses and redirects. Selection is per owner/
-Agent. See [Call](HASHI_CALL_INTERACTION_2026-10-04.md).
-
-October 13 Call: prepare camera during ringback; without a first frame use voice.
-Preview is not Agent vision. Only stopped ingress or confirmed initial failure
-disables it; comments stay rare/relevant. See
-[Call](HASHI_CALL_INTERACTION_2026-10-04.md).
+- PAO strips internal control envelopes before judging deliverability. A result
+  containing only Memory+ state fails terminally; typed audio remains deliverable.
+- HERV3 has no artificial whole-run size/time/call ceiling. Preserve complete
+  state and evidence; only explicit cancellation, safety, transport, Provider and
+  single-Tool limits remain. See [HERV3](HERV3_UPGRADE.md#2026-10-19-long-running-execution-invariant).
+- Agent Move qualifies mutable state at staging, becomes forward-only after
+  confirmation, and never rolls the target back. See [Move](HASHI_AGENT_MOVE_V1.md#forward-only-move-decision-2026-10-19).
+- Image fallback is selected model, same-Provider visual model, then LAN Compute;
+  it is request-only, visible, and sends derived text rather than raw LAN images
+  back to cloud. Every FC uses the same HERV3 admission facts. See
+  [visual fallback](repairs/HERV3_VISUAL_FALLBACK_20261018.md).
+- Compute services resolve through PAO's fail-closed Function directory; no
+  silent LAN-to-internet fallback. See [Compute](HASHI_COMPUTE_SERVICE_DIRECTORY.md).
+- Call frames are input-only and cleared camera-off; LAN targets must be literal
+  private IPv4 with no redirects. Preview is not Agent vision. See
+  [Call](HASHI_CALL_INTERACTION_2026-10-04.md).
+- Tool screenshots use provider-native image input, never Base64 text. Ollama
+  behavior and public Provider identities follow [HERV3](HERV3_UPGRADE.md).
 
 ## Authority and ownership
 
@@ -112,7 +102,7 @@ exclude Engine/Phone copies. `/bg` freezes admission; schedules get no implicit
 chat; `/delay` and interactive `/loop` retain context.
 
 HASHI3 Telegram is healthy only after a bounded poll; normal startup preserves
-pending updates. HERV3 may quote bounded WIP, never premature recovery cards.
+pending updates. HERV3 retains and may quote complete WIP, never premature recovery cards.
 Source changes need separate Worker adoption/live checks.
 
 ## Engine, tools, and recovery
@@ -165,7 +155,10 @@ before outer cleanup. See [stop contract](HASHI_AGENT_STOP_FENCE_DECISION.md).
 Media bind one draft/instance/Agent/Run; Remote sends managed bytes and grants
 HERV3 no wider authority. Safe Voice requires typed confirm/discard and
 idempotency; discard stale media. `/voice` uses validated Function/local media;
-Workbench gets Session audio, Telegram its renderer.
+Workbench gets Session audio, Telegram its renderer. Workbench keeps
+`voice_message` audio durable but hides its generic attachment/player and any
+transport-only bubble; ordinary audio remains visible. Its Safe Voice
+confirmation card sizes to content.
 
 Phone binds to the owner's foreground Conversation until hang-up. Actions get
 bounded original PCM/Conversation/job evidence, excluding scheduled prompts;

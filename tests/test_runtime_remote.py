@@ -340,7 +340,7 @@ async def test_handle_move_callback_other_agent_uses_worker_preflight(
 
 
 @pytest.mark.asyncio
-async def test_handle_move_callback_failure_keeps_recovery_actions(
+async def test_handle_move_callback_forward_failure_offers_only_retry(
     tmp_path, monkeypatch
 ):
     runtime = _runtime(tmp_path)
@@ -359,6 +359,9 @@ async def test_handle_move_callback_failure_keeps_recovery_actions(
         lambda *args, **kwargs: {
             "agent_id": "zelda",
             "target_instance": "HASHI2",
+            "operation": "move",
+            "status": "committing_target",
+            "forward_only": True,
         },
     )
     update = SimpleNamespace(callback_query=_Query("move:commit:12345678-abcd"))
@@ -372,10 +375,7 @@ async def test_handle_move_callback_failure_keeps_recovery_actions(
         for row in last["reply_markup"].inline_keyboard
         for button in row
     ]
-    assert callbacks == [
-        "move:commit:12345678-abcd",
-        "move:abort:12345678-abcd",
-    ]
+    assert callbacks == ["move:commit:12345678-abcd"]
 
 
 @pytest.mark.asyncio
@@ -432,7 +432,15 @@ async def test_handle_move_callback_rechecks_agent_busy_before_cutover(
     assert selected._agent_move_quiesced is False
     runtime.orchestrator.submit_agent_move.assert_not_awaited()
     assert "busy" in update.callback_query.edits[-1]["text"]
-    assert update.callback_query.edits[-1]["reply_markup"] is not None
+    callbacks = [
+        button.callback_data
+        for row in update.callback_query.edits[-1]["reply_markup"].inline_keyboard
+        for button in row
+    ]
+    assert callbacks == [
+        "move:commit:12345678-abcd",
+        "move:abort:12345678-abcd",
+    ]
 
 
 @pytest.mark.asyncio

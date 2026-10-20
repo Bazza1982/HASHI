@@ -99,7 +99,6 @@ HASHI_MODEL_CAPACITY_PROFILES = {
 }
 
 _TEXT_TOOL_REPAIR_MARKER = "HASHI_DEEPSEEK_TEXT_TOOL_REPAIR"
-_TEXT_TOOL_REPAIR_CONTEXT_CHARACTERS = 16 * 1024
 
 
 def _tool_output_text(output: Any) -> str:
@@ -440,13 +439,13 @@ class DeepSeekAdapter(OpenRouterAdapter):
                     ),
                     # Deliberately invalid: this enters the existing all-batch
                     # repair path and cannot cross the execution boundary. A
-                    # bounded copy gives DeepSeek enough private conversation
+                    # full copy gives DeepSeek the private conversation
                     # context to reproduce arguments it derived itself; the
                     # fixed non-JSON prefix keeps even JSON-looking prose from
                     # becoming executable.
                     "arguments": (
                         "HASHI rejected DeepSeek textual tool intent:\n"
-                        + raw_text[:_TEXT_TOOL_REPAIR_CONTEXT_CHARACTERS]
+                        + raw_text
                     ),
                 },
             }

@@ -12,8 +12,6 @@ from typing import Protocol
 
 
 REQUIRED_MESSAGE_KINDS = frozenset({"clarification"})
-MAX_RENDERED_REQUIRED_MESSAGE_CHARS = 128_000
-MAX_FINAL_STYLE_TEXT_CHARS = 128_000
 PRESENTATION_AUTHORITIES = frozenset(
     {"permanent_system", "global_system", "local_system", "persona"}
 )
@@ -81,18 +79,11 @@ class RenderedRequiredMessage:
             raise RequiredMessageValidationError(
                 "rendered required message is empty"
             )
-        if (
-            len(text) > MAX_RENDERED_REQUIRED_MESSAGE_CHARS
-            and not bool(self.fallback)
-        ):
-            raise RequiredMessageValidationError(
-                "rendered required message exceeds the bounded size"
-            )
         object.__setattr__(self, "source_event_id", source_event_id)
         object.__setattr__(self, "kind", kind)
         object.__setattr__(self, "text", text)
         object.__setattr__(self, "provenance", provenance)
-        object.__setattr__(self, "error_type", str(self.error_type or "")[:120])
+        object.__setattr__(self, "error_type", str(self.error_type or ""))
 
 
 class RequiredPersonaRenderer(Protocol):
@@ -152,10 +143,6 @@ class FinalStyleRequest:
             )
         if not draft_text:
             raise RequiredMessageValidationError("final style draft is empty")
-        if len(draft_text) > MAX_FINAL_STYLE_TEXT_CHARS:
-            raise RequiredMessageValidationError(
-                "final style draft exceeds the bounded size"
-            )
         requirements = tuple(self.requirements or ())
         if any(not isinstance(item, PresentationRequirement) for item in requirements):
             raise RequiredMessageValidationError(
@@ -194,15 +181,11 @@ class FinalStyleResult:
             )
         if not text:
             raise RequiredMessageValidationError("final style result is empty")
-        if len(text) > MAX_FINAL_STYLE_TEXT_CHARS:
-            raise RequiredMessageValidationError(
-                "final style result exceeds the bounded size"
-            )
         object.__setattr__(self, "source_event_id", source_event_id)
         object.__setattr__(self, "decision", decision)
         object.__setattr__(self, "text", text)
         object.__setattr__(self, "provenance", provenance)
-        object.__setattr__(self, "error_type", str(self.error_type or "")[:120])
+        object.__setattr__(self, "error_type", str(self.error_type or ""))
 
 
 class FinalStyleRenderer(Protocol):

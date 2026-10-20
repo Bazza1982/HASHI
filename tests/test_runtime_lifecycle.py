@@ -413,3 +413,85 @@ async def test_shutdown_gives_telegram_updater_request_timeout_headroom(monkeypa
     ]
     assert shutdown_states == [True]
     assert runtime.error_logger.messages == []
+
+
+@pytest.mark.asyncio
+async def test_control_only_success_finishes_durable_run_and_activity(
+    tmp_path, monkeypatch
+):
+    from types import MethodType
+    from unittest.mock import AsyncMock
+
+    from adapters.base import BackendResponse
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+    from orchestrator.request_activity import RequestActivityStore
+    from orchestrator.session_store import SessionStore
+    from tests.test_runtime_pipeline import _item, _runtime
+
+    runtime = _runtime()
+    database = tmp_path / "sessions.sqlite3"
+    runtime.session_store = SessionStore(database, instance_id="HASHI1")
+    session = runtime.session_store.create_session(
+        owner_id="owner", agent_id=runtime.name, title="control-only"
+    )
+    accepted = runtime.session_store.accept_run(
+        session_id=session["session_id"],
+        owner_id="owner",
+        agent_id=runtime.name,
+        request_id="req-control-only",
+        text="Finish the task",
+        source="session-api",
+        idempotency_key="control-only",
+    )
+    fencing_token = runtime.session_store.mark_request_running(
+        accepted.request_id,
+        worker_id="test-worker",
+    )
+    item = _item(
+        request_id=accepted.request_id,
+        session_id=session["session_id"],
+        run_id=accepted.run_id,
+        owner_id="owner",
+        source="session-api",
+        session_surface="workbench",
+        session_channel_key="default",
+        silent=True,
+        fencing_token=fencing_token,
+    )
+    runtime.request_activity = RequestActivityStore()
+    runtime.request_activity.start(item.request_id)
+    runtime._request_listeners = {}
+    runtime._pending_request_results = {}
+    runtime._notify_request_listeners = MethodType(
+        FlexibleAgentRuntime._notify_request_listeners, runtime
+    )
+    monkeypatch.setattr(
+        "orchestrator.runtime_media.finish_native_voice_transcript_path", AsyncMock()
+    )
+    monkeypatch.setattr(
+        "orchestrator.runtime_debug_reporting.schedule_terminal_diagnostic",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "orchestrator.runtime_debug_reporting.schedule_failure_report",
+        lambda *args, **kwargs: None,
+    )
+    response = BackendResponse(
+        text='<memory_plus_update>{"write":false}</memory_plus_update>',
+        duration_ms=1,
+    )
+
+    assert runtime_lifecycle.runtime_pipeline.response_has_deliverable_content(
+        response
+    ) is False
+    await runtime_lifecycle.runtime_pipeline.handle_empty_success_response(
+        runtime, item
+    )
+
+    run = runtime.session_store.get_run(accepted.run_id)
+    activity = runtime.request_activity.poll(item.request_id)
+    assert run["state"] == "failed"
+    assert activity["terminal"] is True
+    assert activity["state"] == "failed"
+    restored = SessionStore(database, instance_id="HASHI1")
+    assert restored.get_run(accepted.run_id)["state"] == "failed"

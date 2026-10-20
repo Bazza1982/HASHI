@@ -31,9 +31,12 @@ from orchestrator.config_json import (
 
 COMPUTE_MANIFEST_SCHEMA = "hashi.compute.capabilities"
 COMPUTE_MANIFEST_VERSION = 1
+HASHI_COMPUTE_MANIFEST_FORMAT = "hashi-compute.manifest"
+HASHI_COMPUTE_MANIFEST_VERSION = 1
 COMPUTE_CONFIG_VERSION = 1
 DEFAULT_COMPUTE_MANIFEST_PATH = "/.well-known/hashi-compute"
 MAX_MANIFEST_BYTES = 2 * 1024 * 1024
+MAX_INFERENCE_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_NODES = 64
 MAX_SERVICES = 256
 MAX_MODELS_PER_SERVICE = 512
@@ -968,6 +971,307 @@ def _status(value: Any, *, default: str = "unknown") -> str:
     return normalized
 
 
+def _hashi_compute_modalities(value: Any) -> frozenset[str]:
+    if not isinstance(value, Mapping):
+        raise ComputeServiceError("manifest_capabilities_invalid")
+    supported: set[str] = set()
+    for raw_name, raw_status in value.items():
+        name = _identifier(raw_name, code="manifest_capabilities_invalid")
+        status = _status(raw_status)
+        if status == "supported":
+            supported.add(name)
+        elif status != "unsupported":
+            raise ComputeServiceError("manifest_capabilities_invalid")
+    return frozenset(supported)
+
+
+def _hashi_compute_feature(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        raise ComputeServiceError("manifest_capabilities_invalid")
+    support = _status(value.get("support"))
+    if support not in {"supported", "unsupported"}:
+        raise ComputeServiceError("manifest_capabilities_invalid")
+    return support == "supported"
+
+
+def _hashi_compute_interfaces(value: Any) -> tuple[ComputeInterface, ...]:
+    if not isinstance(value, list) or not value:
+        raise ComputeServiceError("manifest_interface_invalid")
+    interfaces: list[ComputeInterface] = []
+    seen_protocols: set[str] = set()
+    for index, raw in enumerate(value):
+        if not isinstance(raw, Mapping):
+            raise ComputeServiceError("manifest_interface_invalid")
+        path = _validate_path(
+            raw.get("path"),
+            code="manifest_interface_invalid",
+            allow_templates=True,
+        )
+        protocol = _legacy_protocol(path)
+        if protocol in seen_protocols:
+            raise ComputeServiceError("manifest_interface_duplicate")
+        method_raw = raw.get("method")
+        if not isinstance(method_raw, str):
+            raise ComputeServiceError("manifest_interface_invalid")
+        method = method_raw.strip().upper()
+        if method not in {"GET", "POST"}:
+            raise ComputeServiceError("manifest_interface_invalid")
+        streaming_raw = raw.get("streaming")
+        if not isinstance(streaming_raw, Mapping):
+            raise ComputeServiceError("manifest_interface_invalid")
+        support = _status(streaming_raw.get("support"))
+        modes = streaming_raw.get("modes")
+        if not isinstance(modes, list):
+            raise ComputeServiceError("manifest_interface_invalid")
+        streaming = tuple(
+            _identifier(item, code="manifest_interface_invalid") for item in modes
+        )
+        if support == "unsupported":
+            streaming = ("none",)
+        elif support != "supported":
+            raise ComputeServiceError("manifest_interface_invalid")
+        interfaces.append(
+            ComputeInterface(
+                id=f"interface-{index + 1}",
+                protocol=protocol,
+                method=method,
+                path=path,
+                streaming=streaming,
+            )
+        )
+        seen_protocols.add(protocol)
+    return tuple(interfaces)
+
+
+def _hashi_compute_capacity(value: Any) -> ComputeCapacity:
+    if not isinstance(value, Mapping):
+        return ComputeCapacity()
+    maximum_raw = value.get("inference_parallelism")
+    maximum = (
+        maximum_raw
+        if type(maximum_raw) is int and maximum_raw > 0
+        else None
+    )
+    in_flight_raw = value.get("in_flight")
+    in_flight = (
+        in_flight_raw
+        if type(in_flight_raw) is int and in_flight_raw >= 0
+        else None
+    )
+    raw_busy = value.get("busy")
+    raw_capacity = value.get("at_capacity")
+    busy = (
+        bool(raw_busy is True or raw_capacity is True)
+        if type(raw_busy) is bool or type(raw_capacity) is bool
+        else None
+    )
+    if maximum is not None and in_flight is not None and in_flight >= maximum:
+        busy = True
+    return ComputeCapacity(maximum, in_flight, busy)
+
+
+def _parse_hashi_compute_manifest(
+    node: ComputeNode,
+    payload: Mapping[str, Any],
+) -> ComputeNodeSnapshot:
+    if payload.get("version") != HASHI_COMPUTE_MANIFEST_VERSION:
+        raise ComputeServiceError("manifest_schema_unsupported")
+    service = payload.get("service")
+    privacy_raw = payload.get("privacy")
+    if not isinstance(service, Mapping) or not isinstance(privacy_raw, Mapping):
+        raise ComputeServiceError("manifest_capabilities_incomplete")
+    privacy = str(privacy_raw.get("client_access_location") or "").strip().casefold()
+    if privacy != node.location:
+        raise ComputeServiceError("manifest_location_mismatch")
+    name = _plain_text(service.get("name"), maximum=100, code="manifest_invalid")
+    version = _plain_text(
+        service.get("version"),
+        maximum=100,
+        code="manifest_capabilities_incomplete",
+    )
+    revision_raw = service.get("configuration_revision")
+    if isinstance(revision_raw, bool) or not isinstance(revision_raw, (str, int)):
+        raise ComputeServiceError("manifest_capabilities_incomplete")
+    revision = str(revision_raw).strip()
+    if not revision or len(revision) > 100:
+        raise ComputeServiceError("manifest_invalid")
+
+    health_raw = payload.get("health")
+    if not isinstance(health_raw, Mapping):
+        raise ComputeServiceError("manifest_capabilities_incomplete")
+    advertised_health_paths = {
+        _validate_path(value, code="manifest_health_invalid")
+        for value in health_raw.values()
+        if isinstance(value, str) and value.strip()
+    }
+    if node.health_path and node.health_path not in advertised_health_paths:
+        raise ComputeServiceError("manifest_health_mismatch")
+    health_path = node.health_path or next(iter(sorted(advertised_health_paths)), None)
+
+    gateway = payload.get("gateway")
+    if not isinstance(gateway, Mapping):
+        raise ComputeServiceError("manifest_capabilities_incomplete")
+    maximum_raw = gateway.get("max_in_flight")
+    in_flight_raw = gateway.get("in_flight")
+    capacity = ComputeCapacity(
+        max_concurrency=(
+            maximum_raw
+            if type(maximum_raw) is int and maximum_raw > 0
+            else None
+        ),
+        in_flight=(
+            in_flight_raw
+            if type(in_flight_raw) is int and in_flight_raw >= 0
+            else None
+        ),
+        busy=bool(
+            gateway.get("busy") is True or gateway.get("at_capacity") is True
+        ),
+    )
+
+    models = payload.get("models")
+    if not isinstance(models, list) or not 1 <= len(models) <= MAX_SERVICES * MAX_MODELS_PER_SERVICE:
+        raise ComputeServiceError("manifest_services_invalid")
+    offerings: list[ComputeOffering] = []
+    for model in models:
+        if not isinstance(model, Mapping):
+            raise ComputeServiceError("manifest_model_invalid")
+        model_id = _plain_text(
+            model.get("id"), maximum=200, code="manifest_model_invalid"
+        )
+        service_id = _identifier(
+            model.get("service_id"), code="manifest_service_invalid"
+        )
+        available = model.get("available")
+        if type(available) is not bool:
+            raise ComputeServiceError("manifest_model_invalid")
+        runtime = model.get("runtime")
+        if not isinstance(runtime, Mapping):
+            raise ComputeServiceError("manifest_capabilities_incomplete")
+        readiness = _status(runtime.get("readiness"))
+        model_capacity = _hashi_compute_capacity(runtime)
+        status = (
+            "unavailable"
+            if not available
+            else "busy"
+            if model_capacity.saturated
+            else readiness
+        )
+        modalities = model.get("modalities")
+        if not isinstance(modalities, Mapping):
+            raise ComputeServiceError("manifest_capabilities_incomplete")
+        inputs = _hashi_compute_modalities(modalities.get("input"))
+        outputs = _hashi_compute_modalities(modalities.get("output"))
+        if not inputs or not outputs:
+            raise ComputeServiceError("manifest_capabilities_invalid")
+
+        image_raw = model.get("image")
+        if not isinstance(image_raw, Mapping):
+            raise ComputeServiceError("manifest_capabilities_incomplete")
+        image_support = _status(image_raw.get("support"))
+        if image_support == "supported":
+            image_limits = ComputeImageLimits(
+                max_count=_positive_int(
+                    image_raw.get("max_count"),
+                    allow_none=False,
+                    code="manifest_capabilities_invalid",
+                ),
+                max_bytes=_positive_int(
+                    image_raw.get("max_bytes_each"),
+                    allow_none=False,
+                    code="manifest_capabilities_invalid",
+                ),
+                max_total_bytes=None,
+                formats=_formats(
+                    image_raw.get("formats"),
+                    code="manifest_capabilities_invalid",
+                ),
+            )
+        elif image_support == "unsupported":
+            image_limits = ComputeImageLimits()
+        else:
+            raise ComputeServiceError("manifest_capabilities_invalid")
+
+        audio_raw = model.get("audio")
+        if not isinstance(audio_raw, Mapping):
+            raise ComputeServiceError("manifest_capabilities_incomplete")
+        audio_formats = ComputeAudioFormats(
+            input_formats=(
+                _formats(
+                    audio_raw.get("input_formats"),
+                    code="manifest_capabilities_invalid",
+                )
+                if isinstance(audio_raw.get("input_formats"), list)
+                else ()
+            ),
+            output_formats=(
+                _formats(
+                    audio_raw.get("output_formats"),
+                    code="manifest_capabilities_invalid",
+                )
+                if isinstance(audio_raw.get("output_formats"), list)
+                else ()
+            ),
+        )
+        features = model.get("features")
+        if not isinstance(features, Mapping):
+            raise ComputeServiceError("manifest_capabilities_incomplete")
+        tools = _hashi_compute_feature(features.get("tools"))
+        thinking = _hashi_compute_feature(features.get("thinking"))
+        context_raw = model.get("context")
+        if not isinstance(context_raw, Mapping):
+            raise ComputeServiceError("manifest_capabilities_incomplete")
+        context_length = next(
+            (
+                value
+                for value in (
+                    context_raw.get("served_context_tokens"),
+                    context_raw.get("model_max_tokens"),
+                )
+                if type(value) is int and value > 0
+            ),
+            None,
+        )
+        offerings.append(
+            ComputeOffering(
+                service_id=service_id,
+                kind=service_id,
+                model_id=model_id,
+                selected=True,
+                enabled=available,
+                status=status,
+                input_modalities=inputs,
+                output_modalities=outputs,
+                interfaces=_hashi_compute_interfaces(model.get("interfaces")),
+                image=image_limits,
+                audio=audio_formats,
+                tools=tools,
+                thinking=thinking,
+                context_length=context_length,
+                capacity=model_capacity,
+            )
+        )
+    keys = [(item.service_id, item.model_id) for item in offerings]
+    if len(keys) != len(set(keys)):
+        raise ComputeServiceError("manifest_offering_duplicate")
+    healthy = any(
+        item.enabled and item.status in _AVAILABLE_STATUSES | {"busy"}
+        for item in offerings
+    )
+    return ComputeNodeSnapshot(
+        node=node,
+        schema_version=HASHI_COMPUTE_MANIFEST_VERSION,
+        source_format="hashi_compute_manifest",
+        name=name,
+        service_version=version,
+        config_revision=revision,
+        privacy_location=privacy,
+        health=ComputeHealth("ready" if healthy else "unknown", health_path),
+        capacity=capacity,
+        offerings=tuple(offerings),
+    )
+
+
 def _parse_service(
     raw: Any,
     *,
@@ -1061,6 +1365,11 @@ def parse_compute_manifest(
     if not isinstance(node, ComputeNode) or not isinstance(payload, Mapping):
         raise ComputeServiceError("manifest_invalid")
     node.validated()
+    declared_format = payload.get("format")
+    if declared_format == HASHI_COMPUTE_MANIFEST_FORMAT:
+        return _parse_hashi_compute_manifest(node, payload)
+    if declared_format is not None:
+        raise ComputeServiceError("manifest_schema_unsupported")
     declared_schema = payload.get("schema")
     formal = declared_schema is not None
     if formal and (
@@ -1208,7 +1517,7 @@ class ComputeServicesConfig:
 
 
 class ComputeServiceClient:
-    """Bounded, no-redirect reader for one configured compute node."""
+    """Bounded, no-redirect client for one configured compute node."""
 
     def __init__(
         self,
@@ -1289,6 +1598,72 @@ class ComputeServiceClient:
             node,
             await self._get_json(node, node.manifest_path),
         )
+
+    async def invoke_json(
+        self,
+        resolved: ResolvedComputeService,
+        protocol: str,
+        payload: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        """POST JSON only to an interface resolved from the configured node origin."""
+
+        if not isinstance(resolved, ResolvedComputeService) or not isinstance(
+            payload, Mapping
+        ):
+            raise ComputeServiceError("compute_invocation_invalid")
+        interface = resolved.offering.interface(protocol)
+        if interface.method != "POST":
+            raise ComputeServiceError("compute_interface_method_invalid")
+        node = resolved.snapshot.node
+        headers = {
+            **self._headers(node),
+            "Content-Type": "application/json",
+        }
+        try:
+            async with self.session_factory(
+                timeout=aiohttp.ClientTimeout(total=node.timeout_seconds),
+                trust_env=False,
+            ) as session:
+                async with session.post(
+                    resolved.interface_url(protocol),
+                    headers=headers,
+                    json=dict(payload),
+                    allow_redirects=False,
+                ) as response:
+                    if response.status != 200:
+                        raise ComputeServiceError("compute_invocation_rejected")
+                    media_type = response.headers.get("Content-Type", "").split(";", 1)[
+                        0
+                    ]
+                    if media_type.casefold() not in {
+                        "application/json",
+                        "application/problem+json",
+                    }:
+                        raise ComputeServiceError(
+                            "compute_invocation_content_type_invalid"
+                        )
+                    chunks: list[bytes] = []
+                    total = 0
+                    async for chunk in response.content.iter_chunked(16384):
+                        total += len(chunk)
+                        if total > MAX_INFERENCE_RESPONSE_BYTES:
+                            raise ComputeServiceError(
+                                "compute_invocation_response_too_large"
+                            )
+                        chunks.append(chunk)
+            try:
+                result = json.loads(b"".join(chunks).decode("utf-8-sig"))
+            except (UnicodeError, json.JSONDecodeError) as exc:
+                raise ComputeServiceError("compute_invocation_response_invalid") from exc
+            if not isinstance(result, Mapping):
+                raise ComputeServiceError("compute_invocation_response_invalid")
+            return result
+        except asyncio.CancelledError:
+            raise
+        except ComputeServiceError:
+            raise
+        except (aiohttp.ClientError, OSError, TimeoutError) as exc:
+            raise ComputeServiceError("compute_node_unreachable") from exc
 
     async def probe_health(
         self,
@@ -1381,6 +1756,9 @@ __all__ = [
     "DEFAULT_COMPUTE_MANIFEST_PATH",
     "COMPUTE_MANIFEST_SCHEMA",
     "COMPUTE_MANIFEST_VERSION",
+    "MAX_INFERENCE_RESPONSE_BYTES",
+    "HASHI_COMPUTE_MANIFEST_FORMAT",
+    "HASHI_COMPUTE_MANIFEST_VERSION",
     "ComputeAudioFormats",
     "ComputeCapacity",
     "ComputeCatalogue",

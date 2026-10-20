@@ -128,20 +128,35 @@ async def _dispatch_dynamic_runtime_command(runtime, update, context) -> bool:
     command_name, args = _split_runtime_command_text(getattr(message, "text", "") or "")
     if not command_name:
         return False
-    command = runtime_command_map().get(command_name)
-    if command is None:
-        return False
-
-    logger.info("Dispatching runtime command via dynamic fallback: /%s", command_name)
     setattr(context, "args", args)
+    command = runtime_command_map().get(command_name)
+    if command is not None:
+        logger.info("Dispatching runtime command via dynamic fallback: /%s", command_name)
 
-    async def callback(inner_update, inner_context):
-        await command.callback(runtime, inner_update, inner_context)
+        async def callback(inner_update, inner_context):
+            return await command.callback(runtime, inner_update, inner_context)
 
-    handler = callback
+        handler = callback
+        if hasattr(runtime, "_wrap_cmd"):
+            handler = runtime._wrap_cmd(command_name, callback)
+        await handler(update, context)
+        return True
+
+    logger.info("Handling unknown runtime command via fallback: /%s", command_name)
     if hasattr(runtime, "_wrap_cmd"):
-        handler = runtime._wrap_cmd(command_name, callback)
-    await handler(update, context)
+        handler = runtime._wrap_cmd(command_name, None)
+        await handler(update, context)
+    else:
+        reply = getattr(runtime, "_reply_text", None)
+        if callable(reply):
+            await reply(
+                update,
+                ui_language.tr(
+                    "command.unknown",
+                    command=command_name,
+                    default=f"Unknown command: /{command_name}",
+                ),
+            )
     return True
 
 

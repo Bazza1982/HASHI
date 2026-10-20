@@ -211,7 +211,9 @@ class CallConfig:
                 }
             except Exception as exc:
                 raise CallError("call_configuration_invalid", 503) from exc
-        route = doc.get("routes", {}).get(digest([owner, agent]), "phone")
+        # New and future (owner, agent) pairs default to the /call entrance;
+        # explicitly saved "phone" selections remain authoritative.
+        route = doc.get("routes", {}).get(digest([owner, agent]), "call")
         if route not in ("phone", "call"):
             raise CallError("call_configuration_invalid", 503)
         ready = doc.get("enabled") is True

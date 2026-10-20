@@ -430,7 +430,7 @@ async def test_pre_call_fallback_failure_does_not_report_a_paid_call(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_real_fallback_target_cannot_open_hidden_retry_chain(
+async def test_real_fallback_target_keeps_its_normal_continuation_loop(
     monkeypatch, tmp_path
 ):
     target = _adapter(
@@ -490,9 +490,9 @@ async def test_real_fallback_target_cannot_open_hidden_retry_chain(
     )
 
     assert response.is_success is False
-    assert len(physical_calls) == 1
+    assert len(physical_calls) == 4
     assert provider._fallback_budget_used("req-paid-cap") == 1
-    assert len(response.stream_metadata["meter"]["provider_calls"]) == 1
+    assert len(response.stream_metadata["meter"]["provider_calls"]) == 4
 
 
 def test_herv3_failure_report_says_retry_already_failed():
@@ -593,7 +593,6 @@ def test_continuation_contract_preserves_request_semantics():
         "target_only": True,
         "reasoning_effort": "high",
         "temperature": 0.2,
-        "max_output_tokens": 2048,
     }
     assert target._herv3_privacy_scope is True
 

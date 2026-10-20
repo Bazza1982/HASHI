@@ -2598,6 +2598,45 @@ async def test_non_deliverable_her_activity_persists_without_presentation():
 
 
 @pytest.mark.asyncio
+async def test_required_workbench_fallback_warning_accepts_activity_receipt():
+    from orchestrator.request_activity import RequestActivityStore
+
+    runtime = _runtime()
+    runtime.config.active_backend = "her-v2"
+    runtime.backend_manager.current_backend.effort = "high"
+    runtime.request_activity = RequestActivityStore()
+    runtime.request_activity.start("req-1")
+
+    async def reject_transport(*_args, **_kwargs):
+        raise AssertionError("Workbench activity must own this notice")
+
+    runtime._send_text = reject_transport
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime,
+        _item(session_surface="workbench", deliver_to_telegram=False),
+        audit_active=False,
+        audit_collector=None,
+    )
+    delivered = await feedback.on_stream_event(
+        StreamEvent(
+            kind="fallback_warning",
+            summary="The image request is temporarily using a visual model.",
+            event_id="req-1:visual-fallback:warning",
+            delivery_class=DELIVERY_USER_COMMENTARY,
+            origin="her_v2:visual_fallback",
+            phase="direct",
+            required=True,
+        )
+    )
+
+    assert delivered is True
+    projected = runtime.request_activity.poll("req-1")["events"][-1]
+    assert projected["event_id"] == "req-1:visual-fallback:warning"
+    assert projected["presentation_channel"] == "commentary"
+    assert projected["presentation_enabled"] is True
+
+
+@pytest.mark.asyncio
 async def test_required_her_control_is_visible_with_all_optional_channels_off():
     runtime = _runtime()
     runtime.config.active_backend = "her-v2"
@@ -3455,6 +3494,26 @@ async def test_setup_interactive_feedback_creates_audit_stream_for_silent_item()
     assert feedback.placeholder is None
     assert feedback.stream_callback[0] == "stream"
     assert runtime.stream_callbacks == [{"audit_collector": "audit"}]
+
+
+def test_response_deliverability_uses_visible_text_after_memory_plus_strip():
+    from adapters.base import BackendResponse
+
+    control_only = BackendResponse(
+        text='<memory_plus_update>{"write":false}</memory_plus_update>',
+        duration_ms=1,
+    )
+    visible_and_control = BackendResponse(
+        text=(
+            "Finished successfully.\n"
+            '<memory_plus_update>{"write":false}</memory_plus_update>'
+        ),
+        duration_ms=1,
+    )
+
+    assert control_only.has_deliverable_content is True
+    assert runtime_pipeline.response_has_deliverable_content(control_only) is False
+    assert runtime_pipeline.response_has_deliverable_content(visible_and_control) is True
 
 
 @pytest.mark.asyncio

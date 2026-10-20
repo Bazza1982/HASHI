@@ -142,6 +142,87 @@ def _formal_manifest(*, busy=False):
     }
 
 
+def _hashi_compute_manifest():
+    return {
+        "format": "hashi-compute.manifest",
+        "version": 1,
+        "service": {
+            "name": "Hashi Compute",
+            "version": "0.5.0",
+            "base_url": "http://untrusted.example/v1",
+            "configuration_revision": 44,
+        },
+        "gateway": {
+            "max_in_flight": 16,
+            "in_flight": 0,
+            "busy": False,
+            "at_capacity": False,
+        },
+        "health": {"lightweight": "/health"},
+        "privacy": {"client_access_location": "lan"},
+        "models": [
+            {
+                "id": "minicpm-v-4.6",
+                "service_id": "vision",
+                "available": True,
+                "availability": "available",
+                "modalities": {
+                    "input": {
+                        "text": "supported",
+                        "image": "supported",
+                        "audio": "unsupported",
+                    },
+                    "output": {
+                        "text": "supported",
+                        "image": "unsupported",
+                        "audio": "unsupported",
+                    },
+                },
+                "interfaces": [
+                    {
+                        "path": "/v1/chat/completions",
+                        "method": "POST",
+                        "request_encoding": "application/json",
+                        "streaming": {
+                            "support": "unsupported",
+                            "modes": [],
+                        },
+                    }
+                ],
+                "image": {
+                    "support": "supported",
+                    "max_count": 1,
+                    "max_bytes_each": 2097152,
+                    "max_pixels_each": 8000000,
+                    "formats": ["jpeg", "png"],
+                    "transports": ["data_uri_base64"],
+                    "remote_url_fetch": False,
+                },
+                "audio": {"input_formats": [], "output_formats": []},
+                "features": {
+                    "tools": {"support": "unsupported"},
+                    "thinking": {"support": "unsupported"},
+                },
+                "context": {
+                    "model_max_tokens": None,
+                    "served_context_tokens": None,
+                    "max_input_chars": 8000,
+                    "max_output_tokens": 512,
+                },
+                "runtime": {
+                    "readiness": "ready",
+                    "busy": False,
+                    "at_capacity": False,
+                    "in_flight": 0,
+                    "pending": 0,
+                    "max_pending_requests": 4,
+                    "inference_parallelism": 1,
+                },
+            }
+        ],
+    }
+
+
 def test_formal_manifest_projects_every_required_machine_capability():
     snapshot = parse_compute_manifest(_lan_node(), _formal_manifest())
 
@@ -183,6 +264,38 @@ def test_formal_manifest_projects_every_required_machine_capability():
         )
         == "http://192.168.1.50:19446/v1/voices/%E4%B8%AD%E6%96%87%20%E5%A5%B3%E5%A3%B0/sample"
     )
+
+
+def test_hashi_compute_manifest_projects_vision_without_trusting_advertised_origin():
+    snapshot = parse_compute_manifest(_lan_node(health_path="/health"), _hashi_compute_manifest())
+
+    assert snapshot.schema_version == 1
+    assert snapshot.source_format == "hashi_compute_manifest"
+    assert snapshot.service_version == "0.5.0"
+    assert snapshot.config_revision == "44"
+    assert snapshot.privacy_location == "lan"
+    assert snapshot.health.status == "ready"
+    vision = snapshot.offering("vision", "minicpm-v-4.6")
+    assert vision.input_modalities == frozenset({"text", "image"})
+    assert vision.output_modalities == frozenset({"text"})
+    assert vision.image.max_count == 1
+    assert vision.image.max_bytes == 2097152
+    assert vision.image.max_total_bytes is None
+    assert vision.image.formats == ("jpeg", "png")
+    assert vision.tools is False
+    assert vision.thinking is False
+    assert (
+        vision.interface_url(snapshot.node, "openai.chat.completions")
+        == "http://192.168.1.50:19446/v1/chat/completions"
+    )
+
+
+def test_hashi_compute_manifest_cannot_change_configured_privacy_boundary():
+    payload = _hashi_compute_manifest()
+    payload["privacy"]["client_access_location"] = "internet"
+
+    with pytest.raises(ComputeServiceError, match="manifest_location_mismatch"):
+        parse_compute_manifest(_lan_node(), payload)
 
 
 def test_formal_manifest_fixture_matches_published_json_schema():
@@ -584,6 +697,13 @@ class _FakeSession:
         return False
 
     def get(self, url, **kwargs):
+        self.receipt["method"] = "GET"
+        self.receipt["url"] = url
+        self.receipt.update(kwargs)
+        return self.response
+
+    def post(self, url, **kwargs):
+        self.receipt["method"] = "POST"
         self.receipt["url"] = url
         self.receipt.update(kwargs)
         return self.response
@@ -627,4 +747,50 @@ async def test_manifest_client_is_bounded_and_never_follows_redirects():
     with pytest.raises(ComputeServiceError, match="manifest_invalid"):
         await ComputeServiceClient(session_factory=malformed).fetch_manifest(
             _lan_node()
+        )
+
+
+@pytest.mark.asyncio
+async def test_invocation_client_posts_only_to_resolved_configured_origin():
+    snapshot = parse_compute_manifest(_lan_node(), _hashi_compute_manifest())
+    resolved = snapshot.catalogue().resolve(
+        ComputeReference("studio-gpu", "vision", "minicpm-v-4.6")
+    )
+    response = {"choices": [{"message": {"content": "A red bird."}}]}
+    factory = _FakeSessionFactory(_FakeResponse(response))
+
+    result = await ComputeServiceClient(session_factory=factory).invoke_json(
+        resolved,
+        "openai.chat.completions",
+        {"model": "minicpm-v-4.6", "messages": []},
+    )
+
+    assert result == response
+    assert factory.receipt["method"] == "POST"
+    assert factory.receipt["url"] == (
+        "http://192.168.1.50:19446/v1/chat/completions"
+    )
+    assert factory.receipt["allow_redirects"] is False
+    assert factory.receipt["session"]["trust_env"] is False
+    assert factory.receipt["json"]["model"] == "minicpm-v-4.6"
+
+    redirect = _FakeSessionFactory(_FakeResponse({}, status=302))
+    with pytest.raises(ComputeServiceError, match="compute_invocation_rejected"):
+        await ComputeServiceClient(session_factory=redirect).invoke_json(
+            resolved,
+            "openai.chat.completions",
+            {"model": "minicpm-v-4.6", "messages": []},
+        )
+
+    oversized = _FakeSessionFactory(
+        _FakeResponse(b"x" * (4 * 1024 * 1024 + 1))
+    )
+    with pytest.raises(
+        ComputeServiceError,
+        match="compute_invocation_response_too_large",
+    ):
+        await ComputeServiceClient(session_factory=oversized).invoke_json(
+            resolved,
+            "openai.chat.completions",
+            {"model": "minicpm-v-4.6", "messages": []},
         )

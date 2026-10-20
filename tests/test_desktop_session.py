@@ -181,6 +181,57 @@ def test_coordinates_crop_and_replay_are_fenced(desktop):
     assert n.calls[-1]['kind']=='up'
 
 
+def test_multi_display_view_is_one_continuous_desktop_for_dragging(desktop):
+    c, n, _ = desktop
+    c.handle('desktop_view', {'display_ids': ['monitor-2', 'monitor-1']}, 'owner-a', 'session-a')
+    frame = c.frame('', 'session-a')
+    meta = frame['meta']
+    assert meta['display_ids'] == ['monitor-1', 'monitor-2']
+    assert meta['rect'] == {'x': -1920, 'y': 0, 'width': 3840, 'height': 1080}
+    assert (meta['width'], meta['height']) == (1600, 450)
+    assert [region['id'] for region in meta['display_regions']] == ['monitor-1', 'monitor-2']
+
+    control(c)
+    c.input(event(c, x=.25, y=.5), 'owner-a', 'session-a', 'lease-a')
+    c.input(event(c, seq=2, kind='move', x=.75, y=.5), 'owner-a', 'session-a', 'lease-a')
+    c.input({'seq': 3, 'kind': 'up', 'button': 'left'}, 'owner-a', 'session-a', 'lease-a')
+    assert [(call['kind'], call.get('px')) for call in n.calls] == [
+        ('down', -960), ('move', 959), ('up', None),
+    ]
+
+
+def test_multi_display_gap_is_visible_but_cannot_receive_input(desktop):
+    c, n, _ = desktop
+    original = n.displays
+    def offset_secondary():
+        rows, revision = original()
+        rows[1] = {**rows[1], 'y': 540}
+        return rows, revision
+    n.displays = offset_secondary
+    c.handle('desktop_view', {'display_ids': ['monitor-1', 'monitor-2']}, 'owner-a', 'session-a')
+    frame = c.frame('', 'session-a')
+    assert frame['meta']['rect'] == {'x': -1920, 'y': 0, 'width': 3840, 'height': 1620}
+    control(c)
+
+    ignored = c.input(event(c, x=.75, y=.1), 'owner-a', 'session-a', 'lease-a')
+    assert ignored == {'seq': 1, 'injected': False, 'ignored': True}
+    assert n.calls == []
+    accepted = c.input(event(c, seq=2, x=.75, y=.5), 'owner-a', 'session-a', 'lease-a')
+    assert accepted == {'seq': 2, 'injected': True}
+    assert n.calls[-1]['px'] == 959 and n.calls[-1]['py'] == 810
+
+
+@pytest.mark.parametrize('options', [
+    {'display_ids': []},
+    {'display_ids': ['monitor-1', 'monitor-1']},
+    {'display_id': 'monitor-1', 'display_ids': ['monitor-2']},
+])
+def test_multi_display_selection_must_be_nonempty_unique_and_unambiguous(desktop, options):
+    c, _, _ = desktop
+    with pytest.raises(DesktopError, match='invalid_display'):
+        c.handle('desktop_view', options, 'owner-a', 'session-a')
+
+
 def test_human_control_holds_real_cross_process_lock(desktop,tmp_path):
     c,n,t=desktop
     control(c)

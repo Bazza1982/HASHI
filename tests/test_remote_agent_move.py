@@ -493,7 +493,14 @@ def test_streamed_move_authenticates_before_staging_and_cleans_failed_upload(tmp
     source = _root(tmp_path, "source", "HASHI1", with_agent=True)
     target = _root(tmp_path, "target", "HASHI2", with_agent=False)
     package_path = tmp_path / "stream.hashi-agent"
-    create_agent_move_package(source, "zelda", package_path, source_instance="HASHI1")
+    create_agent_move_package(
+        source,
+        "zelda",
+        package_path,
+        source_instance="HASHI1",
+        include_agent_secrets=True,
+        secret_passphrase=TOKEN,
+    )
     digest = hashlib.sha256(package_path.read_bytes()).hexdigest()
     encrypted = tmp_path / "wire.enc"
     encrypt_package_file(package_path, encrypted, shared_token=TOKEN,
@@ -520,7 +527,14 @@ def test_streaming_client_uses_file_body_and_verifies_receiver_proof(tmp_path, m
     source = _root(tmp_path, "source", "HASHI1", with_agent=True)
     target = _root(tmp_path, "target", "HASHI2", with_agent=False)
     path = tmp_path / "stream.hashi-agent"
-    create_agent_move_package(source, "zelda", path, source_instance="HASHI1")
+    create_agent_move_package(
+        source,
+        "zelda",
+        path,
+        source_instance="HASHI1",
+        include_agent_secrets=True,
+        secret_passphrase=TOKEN,
+    )
     client = _client(target)
 
     class Response:

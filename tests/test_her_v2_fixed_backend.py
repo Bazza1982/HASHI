@@ -144,6 +144,42 @@ def test_fixed_session_persists_across_coordinator_replacement(tmp_path):
     assert "I will remember blue" in next_turn.materialized_prompt
 
 
+def test_fixed_session_retains_all_completed_turns_and_full_settled_text(tmp_path):
+    coordinator = HerBackendSessionCoordinator(tmp_path / "state")
+    first_message = "FIRST-USER-" + ("u" * 13_000)
+    first_answer = "FIRST-ASSISTANT-" + ("a" * 13_000)
+    last_accepted = None
+
+    for index in range(12):
+        message = first_message if index == 0 else f"question-{index}"
+        answer = first_answer if index == 0 else f"answer-{index}"
+        transport, _audit = _prepare(
+            coordinator,
+            request_id=f"turn-{index}",
+            message=message,
+        )
+        accepted = coordinator.accept(transport)
+        if index == 11:
+            last_accepted = accepted
+            assert len(accepted.pcm_input["history"]) == 11
+            assert first_message in accepted.materialized_prompt
+            assert first_answer in accepted.materialized_prompt
+        coordinator.complete(accepted, assistant_text=answer)
+
+    assert last_accepted is not None
+    completed = coordinator.store.recent_completed_turns("her-session-1")
+    assert len(completed) == 12
+    assert completed[0]["user_message"] == first_message
+    assert completed[0]["assistant_text"] == first_answer
+
+    settled = coordinator.store.settled_checkpoint("her-session-1")
+    assert settled is not None
+    exchanges = settled["payload"]["recent_settled_exchanges"]
+    assert len(exchanges) == 12
+    assert exchanges[0]["user"] == first_message
+    assert exchanges[0]["assistant"] == first_answer
+
+
 def test_fixed_session_rejects_cross_conversation_binding(tmp_path):
     coordinator = HerBackendSessionCoordinator(tmp_path / "state")
     transport, _audit = _prepare(

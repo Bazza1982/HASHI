@@ -110,6 +110,32 @@ async def test_detector_failure_and_unreadable_media_block_before_network(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_level_two_inspects_large_payload_incrementally_without_task_ceiling():
+    observed_windows = []
+
+    async def detector(texts: list[str]) -> list[list[dict]]:
+        observed_windows.extend(texts)
+        return await _synthetic_detector(texts)
+
+    gate = OutboundPrivacyGate(detector=detector)
+    private_text = ("ordinary evidence " * 40_000) + "Jordan Lee"
+
+    protected = await gate.sanitize(
+        {
+            "model": "deepseek-flash",
+            "messages": [{"role": "user", "content": private_text}],
+        },
+        request_id="req-large-private-task",
+    )
+
+    rendered = protected["messages"][0]["content"]
+    assert "Jordan Lee" not in rendered
+    assert "[PERSON_1]" in rendered
+    assert len(observed_windows) > 1
+    assert max(map(len, observed_windows)) < len(private_text)
+
+
+@pytest.mark.asyncio
 async def test_tool_result_is_masked_on_second_deepseek_call(tmp_path):
     class Registry:
         def get_tool_definitions(self, tiers=None):

@@ -21,11 +21,9 @@ from orchestrator.agent_incarnation import ensure_agent_lifecycle_id
 
 from .package import (
     AgentMoveError,
-    archive_snapshot_fingerprint,
     create_agent_move_package,
     normalize_agent_id,
     package_sha256,
-    read_agent_move_package,
     utc_now_iso,
 )
 from .remote_client import connect_agent_move_receiver
@@ -462,10 +460,6 @@ def _prepare_outbound_transfer(
                 "exclusion_reasons": exclusion_summary,
                 "schedule_count": _schedule_count(package.schedules),
                 "encrypted_agent_secrets": "secrets/agent.enc" in package.names,
-                "source_snapshot_fingerprint": archive_snapshot_fingerprint(
-                    package,
-                    secret_passphrase=token,
-                ),
                 "target_rebind_required": list(
                     package.access_requirements.get("target_rebind_required") or []
                 ),
@@ -601,8 +595,6 @@ def _confirm_outbound_move_locked(
             str(state["agent_id"]),
             package_id,
         )
-        if not already_disabled:
-            _assert_source_snapshot_current(root, directory, state, client)
         state["status"] = "disabling_source"
         _atomic_json(directory / "state.json", state)
         if not already_disabled:
@@ -709,16 +701,22 @@ def _confirm_new_outbound_move_locked(
         raise AgentMoveError(
             f"outbound move is not ready (status={state.get('status')!r})"
         )
-    client = _connect_for_state(root, instances, state)
-    quiesced = False
+    if not state.get("commit_intent_at"):
+        state.update(
+            {
+                "commit_intent_at": utc_now_iso(),
+                "forward_only": True,
+            }
+        )
+        _atomic_json(directory / "state.json", state)
     try:
+        client = _connect_for_state(root, instances, state)
         begin_source_quiesce(
             root,
             str(state["agent_id"]),
             str(state["package_id"]),
             target_instance=str(state["target_instance"]),
         )
-        quiesced = True
         if state.get("status") in {"staged_remote", "committing_target", "cutover_failed"}:
             state["status"] = "committing_target"
             _atomic_json(directory / "state.json", state)
@@ -733,7 +731,6 @@ def _confirm_new_outbound_move_locked(
             str(state["package_id"]),
         )
         if not already_disabled:
-            _assert_source_snapshot_current(root, directory, state, client)
             state["status"] = "disabling_source"
             _atomic_json(directory / "state.json", state)
             deactivate_source_agent(
@@ -756,18 +753,36 @@ def _confirm_new_outbound_move_locked(
         )
         _atomic_json(directory / "state.json", state)
         end_source_quiesce(root, str(state["agent_id"]), str(state["package_id"]))
-        quiesced = False
         return _public_outbound(state)
     except Exception as exc:
-        _rollback_new_move_cutover(
-            root,
-            client,
-            directory,
-            state,
-            exc,
-            quiesced=quiesced,
+        source_disabled = bool(
+            state.get("source_disabled")
+            or source_disabled_for_move(
+                root,
+                str(state.get("agent_id") or ""),
+                str(state.get("package_id") or ""),
+            )
         )
-        raise  # pragma: no cover - helper always raises
+        state.update(
+            {
+                "status": (
+                    "source_disabled_target_committed"
+                    if source_disabled
+                    else "committing_target"
+                ),
+                "last_error": str(exc),
+                "source_disabled": source_disabled,
+                "target_active": False,
+                "forward_only": True,
+                "continuation_required": True,
+                "source_connector_stop_required": source_disabled,
+                "reboot_required": source_disabled,
+            }
+        )
+        _atomic_json(directory / "state.json", state)
+        raise AgentMoveError(
+            f"Agent move is committed to finish forward; retry pending: {exc}"
+        ) from exc
 
 
 def _confirm_outbound_clone_locked(
@@ -969,7 +984,6 @@ def continue_outbound_move(
 
         client = _connect_for_state(root, instances, state)
         target_finalized = False
-        target_start_attempted = False
         try:
             state["status"] = "activating_target"
             _atomic_json(directory / "state.json", state)
@@ -978,7 +992,6 @@ def continue_outbound_move(
                 state["remote_status"] = remote.get("status")
                 state["target_active"] = True
                 _atomic_json(directory / "state.json", state)
-            target_start_attempted = True
             client.start(package_id)
             remote = client.finalize(package_id)
             target_finalized = remote.get("status") == "completed"
@@ -1036,65 +1049,29 @@ def continue_outbound_move(
                     "retry continuation"
                 ) from exc
 
-            rollback_errors: list[str] = []
-            target_stop_confirmed = True
-            if (
-                target_start_attempted
-                or state.get("target_active")
-                or target_status.get("status") == "activated_pending_reboot"
-            ):
-                try:
-                    client.stop(package_id)
-                except Exception as stop_exc:  # noqa: BLE001
-                    target_stop_confirmed = False
-                    rollback_errors.append(f"target stop failed: {stop_exc}")
-            target_rolled_back = False
-            if target_stop_confirmed:
-                try:
-                    client.rollback(package_id)
-                    target_rolled_back = True
-                except Exception as rollback_exc:  # noqa: BLE001
-                    rollback_errors.append(f"target rollback failed: {rollback_exc}")
-            source_restored = False
-            if target_rolled_back and target_stop_confirmed:
-                try:
-                    restore_source_agent(root, package_id)
-                    source_restored = True
-                    if source_agent not in _local_running_agents(root):
-                        _local_workbench_lifecycle(root, source_agent, "start")
-                        if source_agent not in _local_running_agents(root):
-                            raise AgentMoveError(
-                                "source Agent registry was restored but its Worker "
-                                "did not come online"
-                            )
-                except Exception as restore_exc:  # noqa: BLE001
-                    rollback_errors.append(f"source restore failed: {restore_exc}")
-            else:
-                rollback_errors.append(
-                    "source remains disabled because target rollback was not confirmed"
-                )
             state.update(
                 {
-                    "status": "cutover_failed",
+                    "status": "activating_target",
                     "last_error": str(exc),
-                    "rollback_errors": rollback_errors,
-                    "source_disabled": not source_restored,
-                    "target_active": False if target_rolled_back else None,
-                    "rollback_completed": (
-                        target_rolled_back and source_restored and not rollback_errors
+                    "source_disabled": True,
+                    "target_active": bool(
+                        state.get("target_active")
+                        or target_status.get("status")
+                        in {
+                            "activated_pending_reboot",
+                            "target_cleanup_pending",
+                            "completed",
+                        }
                     ),
-                    "reboot_required": bool(
-                        rollback_errors or not source_restored
-                    ),
+                    "forward_only": True,
+                    "continuation_required": True,
+                    "reboot_required": False,
                 }
             )
             _atomic_json(directory / "state.json", state)
-            suffix = (
-                f"; rollback warning: {'; '.join(rollback_errors)}"
-                if rollback_errors
-                else ""
-            )
-            raise AgentMoveError(f"Agent move activation failed: {exc}{suffix}") from exc
+            raise AgentMoveError(
+                f"Agent move is committed and pending forward retry: {exc}"
+            ) from exc
 
 
 def _finish_source_cleanup(
@@ -1138,76 +1115,10 @@ def _finish_source_cleanup(
             "continuation_required": False,
         }
     )
-    for key in ("last_error", "rollback_errors", "source_snapshot_fingerprint"):
+    for key in ("last_error", "rollback_errors"):
         state.pop(key, None)
     _atomic_json(directory / "state.json", state)
     return _public_outbound(state)
-
-
-def _rollback_new_move_cutover(
-    root: Path,
-    client: Any,
-    directory: Path,
-    state: dict[str, Any],
-    exc: Exception,
-    *,
-    quiesced: bool,
-) -> None:
-    rollback_errors: list[str] = []
-    target_rolled_back = False
-    try:
-        client.rollback(str(state["package_id"]))
-        target_rolled_back = True
-    except Exception as rollback_exc:  # noqa: BLE001
-        rollback_errors.append(f"target rollback failed: {rollback_exc}")
-    source_disabled = bool(
-        state.get("source_disabled")
-        or source_disabled_for_move(
-            root,
-            str(state.get("agent_id") or ""),
-            str(state.get("package_id") or ""),
-        )
-    )
-    source_restored = not source_disabled
-    if source_disabled and target_rolled_back:
-        try:
-            restore_source_agent(root, str(state["package_id"]))
-            source_restored = True
-        except Exception as restore_exc:  # noqa: BLE001
-            rollback_errors.append(f"source restore failed: {restore_exc}")
-    elif source_disabled:
-        rollback_errors.append(
-            "source remains disabled because target rollback was not confirmed"
-        )
-    if quiesced and source_restored:
-        try:
-            end_source_quiesce(
-                root,
-                str(state["agent_id"]),
-                str(state["package_id"]),
-            )
-        except Exception as quiesce_exc:  # noqa: BLE001
-            rollback_errors.append(f"source quiesce cleanup failed: {quiesce_exc}")
-    state.update(
-        {
-            "status": "cutover_failed",
-            "last_error": str(exc),
-            "rollback_errors": rollback_errors,
-            "source_disabled": not source_restored,
-            "target_active": False if target_rolled_back else None,
-            "rollback_completed": (
-                target_rolled_back and source_restored and not rollback_errors
-            ),
-            "reboot_required": bool(rollback_errors or not source_restored),
-        }
-    )
-    _atomic_json(directory / "state.json", state)
-    suffix = (
-        f"; rollback warning: {'; '.join(rollback_errors)}"
-        if rollback_errors
-        else ""
-    )
-    raise AgentMoveError(f"Agent move cutover failed: {exc}{suffix}") from exc
 
 
 def cancel_outbound_move(
@@ -1228,6 +1139,15 @@ def _cancel_outbound_move_locked(
     directory, state = _load_outbound(root, package_id)
     if state.get("status") == "cancelled":
         return _public_outbound(state)
+    if _state_operation(state) == "move" and (
+        state.get("forward_only")
+        or state.get("commit_intent_at")
+        or state.get("status") != "staged_remote"
+    ):
+        raise AgentMoveError(
+            "Agent move has committed forward intent and must continue forward; "
+            "move it back only after this transfer completes"
+        )
     if state.get("status") not in {
         "staged_remote",
         "committing_target",
@@ -1612,47 +1532,6 @@ def _receiver_package_limit(client: Any) -> int:
     if limit <= 0:
         raise AgentMoveError("target receiver did not report a usable package limit")
     return limit
-
-
-def _assert_source_snapshot_current(
-    root: Path,
-    directory: Path,
-    state: Mapping[str, Any],
-    client: Any,
-) -> None:
-    token = load_shared_token(root)
-    if not token:
-        raise AgentMoveError(
-            "HASHI Remote shared-token pairing disappeared before cutover"
-        )
-    agent_id = str(state.get("agent_id") or "")
-    original_path = directory / f"{agent_id}.hashi-agent"
-    original = read_agent_move_package(original_path, verify=True)
-    expected = str(state.get("source_snapshot_fingerprint") or "") or (
-        archive_snapshot_fingerprint(original, secret_passphrase=token)
-    )
-    with tempfile.TemporaryDirectory(prefix="hashi-agent-move-freshness-") as name:
-        current_path = Path(name) / f"{agent_id}.hashi-agent"
-        current = create_agent_move_package(
-            root,
-            agent_id,
-            current_path,
-            source_instance=str(state.get("source_instance") or ""),
-            include_agent_secrets=True,
-            secret_passphrase=token,
-            max_package_bytes=_receiver_package_limit(client),
-            operation=str(original.manifest.get("operation") or "move"),
-            include_telegram_secret=True,
-            schema_version=int(original.manifest.get("schema_version") or 1),
-            transfer_mode=original.manifest.get("transfer_mode"),
-            history_mode=original.manifest.get("history_mode"),
-        )
-        actual = archive_snapshot_fingerprint(current, secret_passphrase=token)
-    if actual != expected:
-        raise AgentMoveError(
-            "source Agent durable state changed after staging; prepare a fresh move "
-            "so no newer memory or configuration is lost"
-        )
 
 
 def _assert_no_active_outbound(root: Path, agent_id: str) -> None:

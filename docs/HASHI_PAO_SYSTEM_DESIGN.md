@@ -138,6 +138,13 @@ PAO is the sole owner of:
 An Engine may own its internal Engine Session but must not become a second
 owner of the enclosing Conversation Session.
 
+A successful Engine response is deliverable only after PAO removes recognized
+internal control envelopes. A response containing only a recognized Memory Plus
+control envelope is not a user result: PAO must settle the Run and visible
+request activity through a durable terminal failure before any Frontend
+projection. It must never leave the Run in `running` merely because the raw
+provider text was non-empty. Typed audio remains independently deliverable.
+
 #### Delayed ingress confirmation (implemented 2026-10-16)
 
 PAO owns the durable confirmation ledger for network messages that fail the

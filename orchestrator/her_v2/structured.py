@@ -25,8 +25,6 @@ from .models import (
 ParsedT = TypeVar("ParsedT")
 MappingParser = Callable[[Mapping[str, Any]], ParsedT]
 
-_MAX_SOURCE_CHARS = 200_000
-_MAX_JSON_CANDIDATES = 8
 _JSON_OBJECT_FENCE = re.compile(
     r"```(?:json)?\s*(\{.*\})\s*```",
     flags=re.IGNORECASE | re.DOTALL,
@@ -112,7 +110,7 @@ def _append_mapping(
     seen: set[str],
     value: Any,
 ) -> None:
-    if not isinstance(value, Mapping) or len(items) >= _MAX_JSON_CANDIDATES:
+    if not isinstance(value, Mapping):
         return
     key = _mapping_key(value)
     if key in seen:
@@ -138,9 +136,6 @@ def _extract_json_objects(
     value = str(text or "").strip()
     if not value:
         return ()
-    if len(value) > _MAX_SOURCE_CHARS:
-        value = value[:_MAX_SOURCE_CHARS]
-
     items: list[Mapping[str, Any]] = []
     seen: set[str] = set()
 
@@ -163,7 +158,7 @@ def _extract_json_objects(
 
 
 def extract_json_objects(text: str) -> tuple[Mapping[str, Any], ...]:
-    """Extract bounded strict-JSON object candidates without guessing meaning."""
+    """Extract strict-JSON object candidates without guessing meaning."""
 
     return _extract_json_objects(text, strict=True)
 

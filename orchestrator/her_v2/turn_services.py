@@ -16,7 +16,6 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from .commentary import (
-    MAX_NEUTRAL_COMMENTARY_CHARS,
     CommentaryPort,
     DraftResponseCommentary,
     NeutralCommentary,
@@ -111,8 +110,8 @@ class TurnServices(CommentaryPort):
         self._companion_task: asyncio.Task | None = None
         self._forward_lock = asyncio.Lock()
         self._pending_commentary: deque[NeutralCommentary] = deque()
-        self._commentary_fingerprints: deque[str] = deque(maxlen=128)
-        self._commentary_event_ids: deque[str] = deque(maxlen=128)
+        self._commentary_fingerprints: set[str] = set()
+        self._commentary_event_ids: set[str] = set()
         self._pending_commentary_task: asyncio.Task | None = None
         self._closed = False
         self._initial_ack_sent = False
@@ -320,12 +319,9 @@ class TurnServices(CommentaryPort):
                     or fingerprint in self._commentary_fingerprints
                 ):
                     return False
-                self._commentary_event_ids.append(commentary.event_id)
-                self._commentary_fingerprints.append(fingerprint)
+                self._commentary_event_ids.add(commentary.event_id)
+                self._commentary_fingerprints.add(fingerprint)
                 self._pending_commentary.append(commentary)
-                # Keep the newest complete updates, never cut a fact mid-text.
-                while len("\n\n".join(item.text for item in self._pending_commentary)) > MAX_NEUTRAL_COMMENTARY_CHARS:
-                    self._pending_commentary.popleft()
                 self._initial_ack_sent = True
             now = self.clock()
             if (

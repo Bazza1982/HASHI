@@ -425,6 +425,107 @@ def test_steered_turn_is_recoverable_once_while_cancelled_turn_is_not(tmp_path):
     ) is None
 
 
+def test_provider_context_checkpoint_is_segmented_without_count_or_size_ceiling(
+    tmp_path,
+):
+    coordinator = HerBackendSessionCoordinator(tmp_path / "state")
+    turn = _accept(coordinator, "turn-long-context", "Keep working for as long as needed")
+    large_result = "evidence:" + ("x" * 33_000)
+    messages = []
+    for index in range(260):
+        call_id = f"call-{index}"
+        messages.extend(
+            [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": call_id,
+                            "type": "function",
+                            "function": {"name": "file_read", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": large_result,
+                },
+            ]
+        )
+
+    checkpoint = coordinator.record_provider_context_checkpoint(
+        turn,
+        {
+            "provider": "deepseek-api",
+            "model": "deepseek-flash",
+            "stage": "execution",
+            "boundary": "completed_tool_batch",
+            "messages": messages,
+            "provider_request_id": "provider-long-context",
+            "invocation_id": "turn-long-context:execution:1",
+        },
+    )
+
+    assert checkpoint["message_count"] == 520
+    restored = coordinator.store.provider_context_for_turn(
+        turn.session_id, turn.turn_id
+    )
+    assert restored["messages"] == messages
+    with sqlite3.connect(coordinator.store.path) as connection:
+        metadata_size = connection.execute(
+            """
+            SELECT length(provider_context_json)
+            FROM her_active_turn_recovery
+            WHERE session_id = ? AND turn_id = ?
+            """,
+            (turn.session_id, turn.turn_id),
+        ).fetchone()[0]
+        item_count = connection.execute(
+            """
+            SELECT count(*) FROM her_provider_context_items
+            WHERE session_id = ? AND turn_id = ? AND item_kind = 'message'
+            """,
+            (turn.session_id, turn.turn_id),
+        ).fetchone()[0]
+    assert metadata_size < 2_000
+    assert item_count == len(messages)
+
+
+def test_active_recovery_retains_every_completed_tool_receipt(tmp_path):
+    coordinator = HerBackendSessionCoordinator(tmp_path / "state")
+    turn = _accept(coordinator, "turn-many-tools", "Perform a long investigation")
+
+    for index in range(300):
+        call_id = f"read-{index}"
+        coordinator.store.record_runtime_event(
+            session_id=turn.session_id,
+            turn_id=turn.turn_id,
+            record=_runtime_event(
+                turn.turn_id,
+                f"{turn.turn_id}:tool:{call_id}:receipt",
+                "tool_receipt",
+                tool_call_id=call_id,
+                receipt={
+                    "tool_call_id": call_id,
+                    "tool_name": "file_read",
+                    "status": "success",
+                    "read_only": True,
+                    "completed": True,
+                    "output_sha256": f"sha256:{index:064x}",
+                },
+            ),
+        )
+
+    recovery = coordinator.store.active_turn_recovery(
+        turn.session_id, turn.turn_id
+    )
+    assert len(recovery["tool_receipts"]) == 300
+    assert recovery["tool_receipts"][0]["tool_call_id"] == "read-0"
+    assert recovery["tool_receipts"][-1]["tool_call_id"] == "read-299"
+
+
 def test_candidate_worker_does_not_reconcile_a_live_owner_turn(tmp_path):
     root = tmp_path / "state"
     production = HerBackendSessionCoordinator(
@@ -882,10 +983,10 @@ def test_recovery_projection_never_truncates_unresolved_side_effects():
     effects.insert(0, {"tool_call_id": "oldest-pending", "state": "pending"})
     effects.insert(1, {"tool_call_id": "oldest-unknown", "state": "unknown"})
 
-    bounded = HerSessionStore._bounded_side_effects(effects, limit=32)
+    retained = HerSessionStore._recovery_side_effects(effects)
 
-    assert len(bounded) == 32
-    assert {row["tool_call_id"] for row in bounded} >= {
+    assert len(retained) == 302
+    assert {row["tool_call_id"] for row in retained} >= {
         "oldest-pending",
         "oldest-unknown",
     }
@@ -918,10 +1019,11 @@ def test_recovery_projection_never_truncates_unresolved_receipts():
         }
     ]
 
-    bounded = HerSessionStore._bounded_tool_receipts(receipts, effects, limit=32)
+    retained = HerSessionStore._recovery_tool_receipts(receipts, effects)
 
-    assert len(bounded) == 32
-    assert bounded[0]["operation_id"] == "oldest-unknown-operation"
+    assert len(retained) == 301
+    assert retained[0]["operation_id"] == "oldest-unknown-operation"
+    assert retained[-1]["operation_id"] == "operation-299"
 
 
 def test_legacy_active_turn_without_projection_fails_closed(tmp_path):
