@@ -2,6 +2,7 @@ from __future__ import annotations
 
 # ruff: noqa: E402 - dependency stubs must be installed before runtime imports.
 
+import asyncio
 import json
 import sys
 import types
@@ -338,6 +339,134 @@ async def test_send_voice_reply_reports_telegram_timeout_as_unknown(
         event_id=event["event_id"],
     )
     assert [item["status"] for item in receipts] == ["unknown"]
+
+
+@pytest.mark.asyncio
+async def test_tui_speech_publishes_same_asset_to_enabled_owner_mirror(
+    tmp_path, monkeypatch
+):
+    from orchestrator import agent_presence_notify
+    from orchestrator.connector_delivery_preferences import set_connector_preference
+    from orchestrator.session_store import SessionStore
+
+    payload = b"OggS" + b"\0" * 32
+    ogg_path = tmp_path / "reply.ogg"
+    ogg_path.write_bytes(payload)
+
+    class TestVoiceManager:
+        async def synthesize_reply(self, *args, **kwargs):
+            return VoiceAsset(
+                provider="test",
+                text="hello",
+                spoken_text="hello",
+                wav_path=None,
+                ogg_path=ogg_path,
+                voice_name="test-voice",
+                language="en",
+            )
+
+        @staticmethod
+        def get_voice_profile_id():
+            return "test-profile"
+
+    runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
+    runtime.name = "zelda"
+    runtime.voice_manager = TestVoiceManager()
+    runtime.global_config = SimpleNamespace(
+        authorized_id=123,
+        instance_id="HASHI3",
+        project_root=tmp_path,
+        bridge_home=tmp_path,
+    )
+    runtime.session_store = SessionStore(
+        tmp_path / "sessions.sqlite3", instance_id="HASHI3"
+    )
+    runtime.logger = SimpleNamespace(warning=lambda *args: None)
+    runtime.error_logger = SimpleNamespace(error=lambda *args: None)
+    set_connector_preference(
+        tmp_path, "user:123", "agentpresence", "mirror", True
+    )
+
+    posted = []
+    monkeypatch.setattr(agent_presence_notify, "_token", lambda: "local-token")
+
+    def post(path, *, data=None, content_type=""):
+        posted.append((path, data, content_type))
+        return True
+
+    monkeypatch.setattr(agent_presence_notify, "_post", post)
+
+    result = await runtime.synthesize_tui_speech(
+        "hello", "workbench-voice-reply-1", "en"
+    )
+    for _ in range(100):
+        if posted:
+            break
+        await asyncio.sleep(0.01)
+
+    assert posted == [("/v1/voice/speak", payload, "audio/ogg")]
+    assert result["content_b64"]
+    assert result["size_bytes"] == len(payload)
+    visible_sessions = runtime.session_store.list_sessions(
+        owner_id="user:123", agent_id="zelda"
+    )
+    all_sessions = runtime.session_store.list_sessions(
+        owner_id="user:123", agent_id="zelda", include_internal=True
+    )
+    assert len(visible_sessions) == 1
+    assert runtime.session_store.messages(
+        visible_sessions[0]["session_id"], owner_id="user:123"
+    ) == []
+    activity = next(
+        session for session in all_sessions if session["session_kind"] == "agent_activity"
+    )
+    assert len(
+        runtime.session_store.messages(
+            activity["session_id"], owner_id="user:123"
+        )
+    ) == 1
+
+
+@pytest.mark.asyncio
+async def test_tui_speech_survives_optional_owner_mirror_publication_failure(
+    tmp_path, monkeypatch
+):
+    payload = b"OggS" + b"\0" * 32
+    ogg_path = tmp_path / "reply.ogg"
+    ogg_path.write_bytes(payload)
+
+    class TestVoiceManager:
+        async def synthesize_reply(self, *args, **kwargs):
+            return VoiceAsset(
+                provider="test",
+                text="hello",
+                spoken_text="hello",
+                wav_path=None,
+                ogg_path=ogg_path,
+            )
+
+        @staticmethod
+        def get_voice_profile_id():
+            return "test-profile"
+
+    warnings = []
+    runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
+    runtime.name = "zelda"
+    runtime.voice_manager = TestVoiceManager()
+    runtime.logger = SimpleNamespace(warning=lambda *args: warnings.append(args))
+    monkeypatch.setattr(
+        runtime_session,
+        "publish_owner_mirror_media_notification",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("offline")),
+    )
+
+    result = await runtime.synthesize_tui_speech(
+        "hello", "workbench-voice-reply-2", "en"
+    )
+
+    assert result["content_b64"]
+    assert result["size_bytes"] == len(payload)
+    assert len(warnings) == 1
 
 
 @pytest.mark.asyncio

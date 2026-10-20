@@ -28,7 +28,15 @@ ordinary `openai_compatible` service declaration.
   adapters remain implementation adapters; remote service instances are data.
 - `/call` remains a separate Workbench capability with its own profiles and
   state. It shares only the OpenAI-compatible speech wire validator.
-- AgentPresence, Telegram, and Workbench delivery paths are unchanged.
+- Workbench `/voice` and `/say` return the generated Ogg asset to Workbench and,
+  when an owner enables a registry-declared mirror, commit those same bytes to
+  an independent FC media outbox in the Agent's hidden activity Session. This
+  does not create a second Conversation row or couple speech to Telegram or a
+  named optional frontend. `/call` keeps its separate lifecycle path.
+- Optional mirror publication and delivery are fail-open: setup failure cannot
+  prevent Workbench from receiving the generated speech asset. Workbench's
+  ordinary reply player remains non-autoplay, so an enabled local presentation
+  frontend is the sole automatic speaker on the same machine.
 - A catalogue edit does not reboot Core or prove that a running Worker adopted
   it. Adoption and live audio playback are separate facts.
 
@@ -95,6 +103,7 @@ voice value, and declared per-voice options.
 Focused tests cover catalogue merge and schema rejection, configuration-only
 service creation, menu selection and pagination, missing credentials,
 no-redirect/no-proxy HTTP requests, bounded audio validation, routing and
-fallbacks, and `/call` wire compatibility. Core protection and the applicable
-offline product suite remain release gates. A real endpoint test proves only
-that endpoint; a Worker reboot and device playback are separate live checks.
+fallbacks, owner-mirror byte identity and failure isolation, and `/call` wire
+compatibility. Core protection and the applicable offline product suite remain
+release gates. A real endpoint test proves only that endpoint; a Worker reboot
+and device playback are separate live checks.

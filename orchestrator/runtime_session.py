@@ -622,6 +622,60 @@ def publish_frontend_media_notification(
     return publication
 
 
+def publish_owner_mirror_media_notification(
+    runtime: Any,
+    *,
+    filename: str,
+    media_type: str,
+    payload: bytes,
+    sha256: str,
+    caption: str,
+    publication_id: str,
+    semantic_role: str = "",
+    presentation_role: str = "",
+    explicit_owner_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Publish media only to enabled registry-declared owner mirrors.
+
+    The durable event lives in the Agent's internal activity Session so an
+    optional mirror cannot create a duplicate row in the active conversation.
+    Its route has no primary destination; configured owner mirrors are frozen
+    by ``publish_frontend_media_notification`` before any Connector I/O.
+    """
+
+    resolved_owner = owner_id(runtime, explicit_owner_id)
+    from orchestrator.frontend_delivery import (
+        configured_owner_mirror_destinations,
+    )
+
+    destinations = configured_owner_mirror_destinations(
+        request_metadata={"owner_id": resolved_owner},
+        state_root=getattr(runtime.global_config, "bridge_home", None),
+    )
+    if not destinations:
+        return None
+    store = ensure_store(runtime)
+    session = store.ensure_agent_activity_session(
+        owner_id=resolved_owner,
+        agent_id=runtime.name,
+    )
+    return publish_frontend_media_notification(
+        runtime,
+        filename=filename,
+        media_type=media_type,
+        payload=payload,
+        sha256=sha256,
+        caption=caption,
+        publication_id=publication_id,
+        surface="hashi.internal",
+        channel_key="owner-mirror-media",
+        semantic_role=semantic_role,
+        presentation_role=presentation_role,
+        explicit_owner_id=resolved_owner,
+        explicit_session_id=str(session["session_id"]),
+    )
+
+
 def publish_frontend_media_notification_for_update(
     runtime: Any,
     update: Any,

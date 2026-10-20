@@ -9704,7 +9704,7 @@ class WorkbenchApiServer:
         return web.json_response({"ok": True, **state})
 
     async def handle_tui_speech(self, request):
-        """Generate a TUI-only audio asset without a Connector delivery side effect."""
+        """Generate Workbench audio plus any enabled owner-mirror presentation."""
 
         try:
             payload = await request.json()

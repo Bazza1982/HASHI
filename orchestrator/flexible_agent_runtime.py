@@ -3123,9 +3123,10 @@ class FlexibleAgentRuntime:
             raise ValueError("speech text is required")
         if len(spoken) > 20_000:
             raise ValueError("speech text is too long")
+        resolved_request_id = str(request_id or f"tui-say-{uuid4().hex}")
         asset = await self.voice_manager.synthesize_reply(
             self.name,
-            str(request_id or f"tui-say-{uuid4().hex}"),
+            resolved_request_id,
             spoken,
             force=True,
             source_language=source_language or ui_language.preferred_locale(self),
@@ -3141,10 +3142,34 @@ class FlexibleAgentRuntime:
             raise RuntimeError("the TTS provider returned malformed Ogg audio")
         if len(content) > 3 * 1024 * 1024:
             raise RuntimeError("the generated speech asset exceeds the TUI limit")
+        content_sha256 = hashlib.sha256(content).hexdigest()
+        publication_key = hashlib.sha256(
+            f"{resolved_request_id}\n{content_sha256}".encode("utf-8")
+        ).hexdigest()
+        try:
+            runtime_session.publish_owner_mirror_media_notification(
+                self,
+                filename=f"voice-reply-{content_sha256[:16]}.ogg",
+                media_type="audio/ogg",
+                payload=content,
+                sha256=content_sha256,
+                caption="",
+                publication_id=f"tui-speech:{publication_key}",
+                semantic_role="voice_message",
+                presentation_role="voice",
+            )
+        except Exception as exc:
+            warning = getattr(getattr(self, "logger", None), "warning", None)
+            if callable(warning):
+                warning(
+                    "Optional owner-mirror speech delivery failed safely for %s (%s)",
+                    resolved_request_id,
+                    type(exc).__name__,
+                )
         return {
             "content_b64": base64.b64encode(content).decode("ascii"),
             "size_bytes": len(content),
-            "sha256": hashlib.sha256(content).hexdigest(),
+            "sha256": content_sha256,
             "media_type": "audio/ogg",
             "profile": self.voice_manager.get_voice_profile_id(),
             "provider": asset.provider,

@@ -199,7 +199,10 @@ not vendor modules. See [catalogue](HASHI_VOICE_TTS_CATALOG.md),
 AgentPresence is default-off, owner-scoped and fail-open. Its command, voice
 outbox, Telegram, and Workbench Call subscription are independent. Call
 start/end drive away/return; only the initiating frontend plays Call audio.
-Non-call `/voice` uses phone-reply playback. See
+Workbench non-call `/voice` and `/say` publish the exact generated audio through
+the generic owner-mirror outbox without adding another Conversation row; its
+ordinary local player does not autoplay, while AgentPresence uses phone-reply
+playback. See
 [FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md).
 
 Deploys add Edge/Kokoro/SAPI without changing settings; the 957 MB portable keeps
