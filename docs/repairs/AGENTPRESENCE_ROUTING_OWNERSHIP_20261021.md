@@ -98,5 +98,9 @@ primary Conversation. Focused red evidence showed the old route accepting a
 caller owner and failing to resolve AP Safe Voice against a distinct primary
 Conversation. The corrected tests require HASHI-owned owner/Session/generation
 metadata for both text and voice while retaining AP-only confirmation authority.
-Offline validation and runtime adoption are recorded separately below when
-completed; earlier restart authority is not carried forward.
+Implementation commit `db22e461` passed the two focused red/green regressions,
+then the complete related component scope at 11 passed. The post-commit HASHI3
+Core gate passed 862 tests with one skip, including real Function-generation
+qualification. Protected Core remained unchanged. Runtime adoption was not
+performed because this correction did not receive new `/reboot max` authority;
+earlier restart authority is not carried forward.
