@@ -7,22 +7,21 @@
 
 执行者开始前必须逐项确认：
 
-- 唯一施工仓库：`C:\Users\thene\projects\HASHI3`。
+- 唯一施工仓库：HASHI3 的现有 checkout。
 - 必须保持现有分支 `debug-issues-oct`；不得新建、切换或删除分支，不得创建额外
   worktree，不得 detached HEAD 提交。
 - 当前分支必须包含视觉降级基线 `f5f85001`。不得通过 reset、rebase、强制覆盖或
   挑选提交来改写现有成果。
-- 不得读写部署目标 `C:\Users\thene\projects\HASHI4`，不得同步、发布或重启
-  HASHI4。
+- 不得读写生产部署目标 HASHI4，不得同步、发布或重启 HASHI4。
 - 本轮不执行 `/reboot`、`/restart`、服务重启或生产发布。实现者完成源码、测试和
   本地提交后必须停下，等待 Zelda 独立验收。
 - 发现未知未提交改动、分支不符或与其他写入者冲突时，立即停下并报告；不得 stash、
   clean、reset 或覆盖他人成果。
 
-开始检查：
+开始检查（从 HASHI3 checkout 的父目录执行）：
 
 ```powershell
-Set-Location C:\Users\thene\projects\HASHI3
+Set-Location .\HASHI3
 git branch --show-current
 git status --short --branch
 git merge-base --is-ancestor f5f85001 HEAD
