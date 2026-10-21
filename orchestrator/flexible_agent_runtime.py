@@ -1532,6 +1532,10 @@ class FlexibleAgentRuntime:
                 idempotency_key=idempotency_key,
             )
         )
+        if normalized_request_content is not None:
+            from orchestrator.multimodal_contract import attachment_manifest
+
+            manifest = attachment_manifest(normalized_request_content)
         if accepted is not None and accepted.replayed:
             self.message_logger.info(
                 "Reused idempotent Session run %s for %s", accepted.run_id, accepted.request_id

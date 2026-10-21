@@ -73,6 +73,13 @@ PAO owns Conversations/Messages/Runs; Engines own Sessions/Turns. Provider and
 frontend history are rebuildable. Preserve order; stage attachments atomically
 per Message/Run and never leak failed/cancelled assets.
 
+At Run acceptance, committed non-voice input attachments move into the target
+Agent's Git-ignored `.attachments/{session}/{message}/` home subtree. Persist
+and execute with that canonical path; remove central staging after commit.
+Later ordinary file reads inherit only that Agent's home scope, and Session
+retention cleanup removes the private bytes. Safe Voice keeps its separate
+managed-audio lifecycle.
+
 Incremental deliverables bind exact files/stable publication IDs. Persistence,
 receipts and UI visibility differ; uncertain delivery never auto-retries and
 final attachments stay final-only. See [FC](HASHI_FRONTEND_CONNECTOR_ARCHITECTURE.md#64-incremental-assistant-deliverables).

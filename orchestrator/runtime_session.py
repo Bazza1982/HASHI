@@ -306,6 +306,7 @@ def accept_request(
             if isinstance(metadata.get("_run_delivery_route"), Mapping)
             else None
         ),
+        agent_workspace=getattr(runtime, "workspace_dir", None),
     )
     return session, accepted, resolved_owner, surface, channel_key
 
