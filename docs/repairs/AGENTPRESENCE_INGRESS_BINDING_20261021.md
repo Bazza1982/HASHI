@@ -35,13 +35,20 @@ Presence for adoption on 2026-10-21. This is not Core migration authorization.
 
 ## Validation record
 
-- Source validation: 57 relevant HASHI3 tests passed; Agent Presence release
-  build, HASHI ingress console tests, call-animation state tests, Python
-  compilation, JSON/i18n parsing, diff checks, and the Protected Core guard
-  passed before the implementation commits.
-- AP package validation: source release build passed; publish and running API
-  checks remain pending at the implementation commit.
-- Running HASHI3/AP adoption: pending; must be recorded separately after the
-  committed generations are loaded.
+- Implementation commits: HASHI3 `e35ddff9`, AP `5cc2bee`; the live command
+  adapter correction is HASHI3 `0f6a87ab`.
+- Source validation: the initial 57 relevant HASHI3 tests passed. After live
+  validation exposed the missing AP command adapter, the regression suite was
+  expanded and 79 relevant tests passed. Agent Presence release build, HASHI
+  ingress console tests, call-animation state tests, Python compilation,
+  JSON/i18n parsing, diff checks, and the Protected Core guard also passed.
+- AP package validation: publish, package self-check, and language audit passed.
+  Running API reported version `1.1.0`, `ready=true`, and the `audio_capture`,
+  `ptt_ingress`, and `hashi_outbound` capabilities.
+- Running adoption: AP was restarted and retained `agent1@HASHI3` through a
+  second restart. HASHI3 `/reboot max` adopted generation
+  `sha256:483d7b47931c697addfecb52b96797316ee41981cdfc97b3a96fd4eed887115e`
+  with 13/13 Agents ready and zero failures. An authenticated AP command reached
+  `agent1` with HTTP 200; a wrong instance returned 409 and a wrong token 401.
 - User microphone/UI acceptance: not automated; no ambient audio is captured
   for this engineering validation.
